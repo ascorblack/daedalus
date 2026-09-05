@@ -1,0 +1,28 @@
+# secrets and local state — never committed
+.env
+.env.*
+*.pem
+secrets/
+state/
+workspaces/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# node
+node_modules/
+miniapp/dist/
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/
