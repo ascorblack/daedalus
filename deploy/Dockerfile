@@ -31,6 +31,7 @@ WORKDIR /srv/daedalus
 ENV DAEDALUS_BOT_REPO=/srv/daedalus \
     DAEDALUS_CORE_REPO=/srv/protocore-exp \
     DAEDALUS_STATE=/srv/state \
+    DAEDALUS_WORKSPACES=/srv/workspaces \
     DAEDALUS_SUPERVISOR_SOCKET=/run/daedalus/supervisor.sock
 
 ENTRYPOINT ["python3", "/opt/launcher/supervisor.py"]

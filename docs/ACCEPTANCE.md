@@ -9,3 +9,7 @@ Live checks of the build units, newest first.
 | 2026-09-06 | 3 sessions | AskUser pause → answer → resume completed in the terminal runner |
 | 2026-09-06 | 6 self-develop | worktree → PR #1 → approve → squash merge on GitHub; worktree and branch cleaned up |
 | 2026-09-06 | 9 mini app | production build succeeds; API serves /app and rejects unauthenticated calls |
+| 2026-09-06 | 4 supervisor | integration test: good commit applied via rebuild; syntax-broken commit rolled back by preflight; rollback to earlier known-good; Docker image builds |
+| 2026-09-06 | 5 telegram | unit tests with constructed updates: owner filter, direct session, fragment/file merge window, /new topic binding, AskUser keyboard → answer |
+| 2026-09-06 | 9 mini app | served publicly behind the host reverse proxy over HTTPS; API returns 401 without initData/token |
+

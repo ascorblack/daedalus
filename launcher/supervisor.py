@@ -32,6 +32,7 @@ from typing import Any
 BOT_REPO = Path(os.environ.get("DAEDALUS_BOT_REPO", "/srv/daedalus"))
 CORE_REPO = Path(os.environ.get("DAEDALUS_CORE_REPO", "/srv/protocore-exp"))
 STATE = Path(os.environ.get("DAEDALUS_STATE", "/srv/state"))
+WORKSPACES = Path(os.environ.get("DAEDALUS_WORKSPACES", "/srv/workspaces"))
 SOCKET = Path(os.environ.get("DAEDALUS_SUPERVISOR_SOCKET", "/run/daedalus/supervisor.sock"))
 BOT_CMD = os.environ.get("DAEDALUS_BOT_CMD", "uv run --frozen python -m daedalus serve")
 COMPOSE_FILE = os.environ.get("DAEDALUS_COMPOSE_FILE", "")
@@ -57,10 +58,26 @@ def log(message: str) -> None:
         pass
 
 
+def bot_env() -> dict[str, str]:
+    """Environment the bot (and its preflight) runs with: paths owned by the supervisor."""
+    env = dict(os.environ)
+    env.pop("VIRTUAL_ENV", None)
+    env.update(
+        {
+            "BOT_REPO_DIR": str(BOT_REPO),
+            "CORE_REPO_DIR": str(CORE_REPO),
+            "STATE_DIR": str(STATE),
+            "WORKSPACES_DIR": str(WORKSPACES),
+            "SUPERVISOR_SOCKET": str(SOCKET),
+        }
+    )
+    return env
+
+
 def run(cmd: list[str], *, cwd: Path | None = None, timeout: int = 1800) -> tuple[int, str]:
     try:
         proc = subprocess.run(
-            cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True, timeout=timeout
+            cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True, timeout=timeout, env=bot_env()
         )
     except subprocess.TimeoutExpired:
         return 124, f"timed out after {timeout}s: {' '.join(cmd)}"
@@ -125,13 +142,8 @@ class Supervisor:
     # -- child lifecycle ------------------------------------------------------------
 
     async def start_child(self) -> None:
-        env = dict(os.environ)
-        env.setdefault("BOT_REPO_DIR", str(BOT_REPO))
-        env.setdefault("CORE_REPO_DIR", str(CORE_REPO))
-        env.setdefault("STATE_DIR", str(STATE))
-        env.setdefault("SUPERVISOR_SOCKET", str(SOCKET))
         self.child = await asyncio.create_subprocess_exec(
-            "bash", "-lc", BOT_CMD, cwd=str(BOT_REPO), env=env, start_new_session=True
+            "bash", "-lc", BOT_CMD, cwd=str(BOT_REPO), env=bot_env(), start_new_session=True
         )
         log(f"bot started pid={self.child.pid} bot={head(BOT_REPO)[:10]} core={head(CORE_REPO)[:10]}")
 
