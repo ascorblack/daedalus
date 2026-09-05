@@ -116,7 +116,7 @@ follow-up, отправленный во время работы, попадае
 - запускает `python -m daedalus`, перезапускает при падении с backoff;
 - unix socket `/run/daedalus.sock` с командами `rebuild`, `rollback <n>`, `panic`, `status`;
 - `rebuild`: сообщает боту «сохрани снапшоты» → `git fetch && git checkout origin/main` в
-  `/srv/daedalus` и `/srv/protocore-exp-exp` → если изменились `Dockerfile`/`pyproject`/`uv.lock` —
+  `/srv/daedalus` и `/srv/protocore-exp` → если изменились `Dockerfile`/`pyproject`/`uv.lock` —
   `docker build` + пересоздание контейнера через docker API хоста (socket смонтирован
   **только** в супервизор-контейнер, не в контейнер агента) — иначе `uv sync` + preflight
   (`compileall`, `import daedalus`, парсинг конфига, `pytest tests/smoke`) → exec;
@@ -160,7 +160,7 @@ aiogram 3, long polling через local Bot API server. Модули:
 
 ## 6. Self-develop через PR
 
-`selfdev/git.py`: агент работает в ветке `agent/<slug>` в `/srv/daedalus` или `/srv/protocore-exp-exp`;
+`selfdev/git.py`: агент работает в ветке `agent/<slug>` в `/srv/daedalus` или `/srv/protocore-exp`;
 `self.propose(title, body)` → push ветки, `gh pr create` → карточка одобрения в General.
 Режим `self_change.approval = manual | auto` (auto: merge сразу после зелёных проверок PR).
 Одобрение → `gh pr merge --squash` → `self.rebuild` → супервизор (§4). Ядро обновляется

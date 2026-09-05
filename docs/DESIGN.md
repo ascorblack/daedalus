@@ -68,7 +68,7 @@ docker: ubuntu:24.04 + uv + python 3.12 + git + node (для Mini App) + инс�
 │   ├── skills/               SKILL.md-каталог
 │   ├── GOVERNANCE.md         «конституция» — путь закрыт для записи тулами
 │   └── tests/
-├── /srv/protocore-exp-exp/          git-клон protocore-community (mutable, pip -e)
+├── /srv/protocore-exp/          git-клон protocore-community (mutable, pip -e)
 ├── /srv/workspaces/<session>/ рабочие каталоги сессий
 └── /srv/state/               sqlite (sessions, runs, events), blobs, snapshots, last-good
 ```
@@ -88,7 +88,7 @@ docker: ubuntu:24.04 + uv + python 3.12 + git + node (для Mini App) + инс�
 ## 4. Self-develop: Pull Request → merge → rebuild
 
 1. Задача от оператора («добавь тул для X», «обнови ядро до апстрима»).
-2. Агент правит `/srv/daedalus` или `/srv/protocore-exp-exp` в ветке, гоняет тесты, коммитит и
+2. Агент правит `/srv/daedalus` или `/srv/protocore-exp` в ветке, гоняет тесты, коммитит и
    **открывает PR** через `gh` (PAT только на два репо, см. `GITHUB-ACCESS.md`).
 3. Бот шлёт в General-топик описание изменений + ссылку на PR с кнопками
    **Одобрить / Отказать / Отказать с причиной** (причина уходит агенту как follow-up).
