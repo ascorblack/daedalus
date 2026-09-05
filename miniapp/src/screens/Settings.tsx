@@ -12,7 +12,8 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
 
   async function save(patch: Partial<Settings>) {
     try {
-      setS(await api.put<Settings>("/api/settings", patch));
+      const next = await api.put<Settings>("/api/settings", patch);
+      setS({ ...next, providers_available: next.providers_available ?? s?.providers_available ?? [] });
       toast("saved");
     } catch (e) {
       toast((e as Error).message);
@@ -27,10 +28,10 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         </div>
         <label className="field">Provider</label>
         <select className="field" value={s.model.provider} onChange={(e) => save({ model: { ...s.model, provider: e.target.value } })}>
-          {s.providers_available.map((p) => (
+          {(s.providers_available ?? []).map((p) => (
             <option key={p}>{p}</option>
           ))}
-          {!s.providers_available.includes(s.model.provider) && <option>{s.model.provider}</option>}
+          {!(s.providers_available ?? []).includes(s.model.provider) && <option>{s.model.provider}</option>}
         </select>
         <label className="field">Model name</label>
         <input className="field" defaultValue={s.model.name} onBlur={(e) => e.target.value !== s.model.name && save({ model: { ...s.model, name: e.target.value } })} />

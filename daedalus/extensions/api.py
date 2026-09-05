@@ -411,12 +411,15 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     # -- settings -------------------------------------------------------------------
 
-    @api.get("/api/settings")
-    async def get_settings(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+    def _settings_view() -> dict[str, Any]:
         data = app.config.model_dump(mode="json")
         data["providers_available"] = list(manager.providers.available())
         data["usd_per_day"] = settings.usd_per_day
         return data
+
+    @api.get("/api/settings")
+    async def get_settings(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return _settings_view()
 
     @api.put("/api/settings")
     async def put_settings(body: SettingsBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -434,7 +437,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         await manager.providers.close_retired()
         if app.front is not None:
             app.front.config = new_config
-        return new_config.model_dump(mode="json")
+        return _settings_view()
 
     # -- static mini app ------------------------------------------------------------
 
