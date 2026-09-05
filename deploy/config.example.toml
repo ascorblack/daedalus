@@ -1,0 +1,73 @@
+answer_language = "auto"
+
+[model]
+provider = "deepseek"
+name = "deepseek-v4-flash"
+thinking = true
+reasoning_effort = "medium"
+chain = [
+    "deepseek",
+    "openrouter",
+]
+max_tokens = 8192
+temperature = 0.3
+
+[providers.deepseek]
+kind = "deepseek"
+base_url = "https://api.deepseek.com"
+default_model = "deepseek-v4-flash"
+supports_images = false
+supports_thinking = true
+timeout_seconds = 600.0
+
+[providers.deepseek.pricing]
+
+[providers.openrouter]
+kind = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+default_model = "deepseek/deepseek-v4-flash"
+supports_images = true
+supports_thinking = true
+timeout_seconds = 600.0
+
+[providers.openrouter.pricing]
+
+[providers.vllm]
+kind = "vllm"
+base_url = ""
+default_model = ""
+supports_images = false
+supports_thinking = false
+timeout_seconds = 600.0
+
+[providers.vllm.pricing]
+
+[self_change]
+approval = "manual"
+auto_rebuild = true
+
+[limits]
+usd_per_day = 20.0
+tokens_per_task = 5000000
+max_iterations = 200
+tool_timeout_seconds = 900.0
+
+[balance]
+enabled = true
+poll_seconds = 60
+thresholds_usd = [
+    5.0,
+    2.0,
+    0.5,
+]
+
+[scheduler]
+topic_mode = "per_task"
+catch_up_missed = true
+
+[telegram]
+forum_chat_id = 0
+general_topic_id = 0
+status_edit_interval_seconds = 1.0
+inbound_merge_window_seconds = 1.5
+verbosity = 1
