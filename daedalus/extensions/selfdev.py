@@ -190,7 +190,9 @@ class SelfDevelopment:
                 [InlineKeyboardButton(text="✍️ Reject with reason", callback_data=f"cp:{proposal_id}:reason")],
             ]
         )
-        msg = await front.bot.send_message(outbox.chat_id, text, message_thread_id=outbox.thread_id, reply_markup=keyboard)
+        from daedalus.transport.telegram.front import tg_call
+
+        msg = await tg_call(front.bot.send_message, outbox.chat_id, text, message_thread_id=outbox.thread_id, reply_markup=keyboard)
         await self.app.db.execute("UPDATE change_proposals SET message_id = ? WHERE id = ?", (msg.message_id, proposal_id))
 
     async def decide(self, proposal_id: str, decision: str, *, reason: str = "") -> str:

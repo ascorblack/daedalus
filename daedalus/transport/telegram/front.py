@@ -17,7 +17,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     CallbackQuery,
@@ -71,6 +71,19 @@ class InboundBuffer:
     task: asyncio.Task[None] | None = None
 
 
+async def tg_call(fn: Callable[..., Awaitable[Any]], *args: Any, attempts: int = 4, **kwargs: Any) -> Any:
+    """Call a Bot API method, waiting out flood-control pauses instead of failing."""
+    for attempt in range(attempts):
+        try:
+            return await fn(*args, **kwargs)
+        except TelegramRetryAfter as exc:
+            if attempt == attempts - 1:
+                raise
+            logger.warning("telegram flood control: waiting %ss", exc.retry_after)
+            await asyncio.sleep(exc.retry_after + 0.5)
+    raise RuntimeError("unreachable")
+
+
 class TelegramOutbox(Outbox):
     def __init__(self, bot: Bot, chat_id: int, thread_id: int | None) -> None:
         self.bot = bot
@@ -80,7 +93,8 @@ class TelegramOutbox(Outbox):
     async def send_text(self, text: str, *, markdown: bool = True) -> int:
         if markdown:
             try:
-                msg = await self.bot.send_message(
+                msg = await tg_call(
+                    self.bot.send_message,
                     self.chat_id,
                     markdown_to_html(text),
                     message_thread_id=self.thread_id,
@@ -90,22 +104,21 @@ class TelegramOutbox(Outbox):
                 return msg.message_id
             except TelegramBadRequest:
                 pass
-        msg = await self.bot.send_message(
-            self.chat_id, text, message_thread_id=self.thread_id, parse_mode=None
-        )
+        msg = await tg_call(self.bot.send_message, self.chat_id, text, message_thread_id=self.thread_id, parse_mode=None)
         return msg.message_id
 
     async def edit_text(self, message_id: int, text: str) -> None:
         try:
-            await self.bot.edit_message_text(
-                text, chat_id=self.chat_id, message_id=message_id, parse_mode=None
-            )
+            await self.bot.edit_message_text(text, chat_id=self.chat_id, message_id=message_id, parse_mode=None)
         except TelegramBadRequest as exc:
             if "message is not modified" not in str(exc):
                 raise
+        except TelegramRetryAfter:
+            pass  # a status edit can be skipped; the next one carries the newer state
 
     async def send_document(self, path: Path, caption: str | None = None) -> int:
-        msg = await self.bot.send_document(
+        msg = await tg_call(
+            self.bot.send_document,
             self.chat_id,
             FSInputFile(path),
             caption=(caption or "")[:1000] or None,
@@ -115,7 +128,8 @@ class TelegramOutbox(Outbox):
         return msg.message_id
 
     async def send_photo(self, path: Path, caption: str | None = None) -> int:
-        msg = await self.bot.send_photo(
+        msg = await tg_call(
+            self.bot.send_photo,
             self.chat_id,
             FSInputFile(path),
             caption=(caption or "")[:1000] or None,
@@ -606,7 +620,9 @@ class TelegramFront:
             text += "\n" + "\n".join(details)
         if len(state["questions"]) > 1:
             text += f"\n({index + 1}/{len(state['questions'])})"
-        msg = await self.bot.send_message(outbox.chat_id, text, message_thread_id=outbox.thread_id, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        msg = await tg_call(
+            self.bot.send_message, outbox.chat_id, text, message_thread_id=outbox.thread_id, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+        )
         state["message_ids"].append(msg.message_id)
 
     async def on_callback(self, query: CallbackQuery) -> None:
