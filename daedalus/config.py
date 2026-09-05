@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import tomli_w
 from pydantic import BaseModel, Field
@@ -100,8 +100,8 @@ class ProviderConfig(BaseModel):
     supports_images: bool = False
     supports_thinking: bool = False
     timeout_seconds: float = 600.0
-    pricing: dict[str, dict[str, float]] = Field(default_factory=dict)
-    """Per-model USD per 1M tokens: ``{"model": {"input": .., "output": .., "cache_hit": ..}}``.
+    pricing: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    """Per-model USD per 1M tokens: ``{"model": {"input", "output", "cache_hit"[, "*_off_peak", "off_peak_utc"]}}``.
     Empty means the cost is reported as unknown; the usage itself is always recorded."""
 
 
@@ -169,6 +169,12 @@ class RuntimeConfig(BaseModel):
                 base_url="https://api.deepseek.com",
                 default_model="deepseek-v4-flash",
                 supports_thinking=True,
+                pricing={
+                    # Published list prices (USD per 1M tokens); off-peak window is 16:30-00:30 UTC.
+                    "deepseek-v4-flash": {"input": 0.44, "cache_hit": 0.014, "output": 1.32, "input_off_peak": 0.22, "cache_hit_off_peak": 0.007, "output_off_peak": 0.66, "off_peak_utc": "16:30-00:30"},
+                    "deepseek-v4-flash-vision-exp": {"input": 0.44, "cache_hit": 0.014, "output": 1.32, "input_off_peak": 0.22, "cache_hit_off_peak": 0.007, "output_off_peak": 0.66, "off_peak_utc": "16:30-00:30"},
+                    "deepseek-v4-pro": {"input": 1.32, "cache_hit": 0.044, "output": 3.96, "input_off_peak": 0.66, "cache_hit_off_peak": 0.022, "output_off_peak": 1.98, "off_peak_utc": "16:30-00:30"},
+                },
             ),
             "openrouter": ProviderConfig(
                 kind="openrouter",

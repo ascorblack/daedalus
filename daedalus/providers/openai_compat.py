@@ -47,18 +47,38 @@ _CONTEXT_ERROR_MARKERS = (
 
 @dataclass(slots=True)
 class ModelPricing:
-    """USD per one million tokens."""
+    """USD per one million tokens; optional off-peak rates apply inside ``off_peak_utc`` (HH:MM-HH:MM)."""
 
     input: float = 0.0
     output: float = 0.0
     cache_hit: float = 0.0
+    input_off_peak: float | None = None
+    output_off_peak: float | None = None
+    cache_hit_off_peak: float | None = None
+    off_peak_utc: str = ""
+
+    def _off_peak_now(self) -> bool:
+        if not self.off_peak_utc or "-" not in self.off_peak_utc:
+            return False
+        from datetime import UTC, datetime
+
+        start_s, end_s = self.off_peak_utc.split("-", 1)
+        now = datetime.now(UTC)
+        minutes = now.hour * 60 + now.minute
+        start = int(start_s[:2]) * 60 + int(start_s[3:5])
+        end = int(end_s[:2]) * 60 + int(end_s[3:5])
+        return start <= minutes < end if start <= end else minutes >= start or minutes < end
 
     def cost(self, usage: dict[str, Any]) -> float:
         cache_hit = int(usage.get("cache_read_tokens") or 0)
         prompt = int(usage.get("input_tokens") or 0)
         fresh = max(prompt - cache_hit, 0)
         output = int(usage.get("output_tokens") or 0)
-        return (fresh * self.input + cache_hit * self.cache_hit + output * self.output) / 1_000_000
+        off = self._off_peak_now()
+        p_in = self.input_off_peak if off and self.input_off_peak is not None else self.input
+        p_out = self.output_off_peak if off and self.output_off_peak is not None else self.output
+        p_hit = self.cache_hit_off_peak if off and self.cache_hit_off_peak is not None else self.cache_hit
+        return (fresh * p_in + cache_hit * p_hit + output * p_out) / 1_000_000
 
 
 @dataclass(slots=True)

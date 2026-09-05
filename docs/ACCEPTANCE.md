@@ -16,4 +16,5 @@ Live checks of the build units, newest first.
 | 2026-09-06 | review | independent review (2 critical, 11 high, 17 medium, 14 low): all critical/high and most medium fixed; see daedalus-private notes; suite 32 green |
 | 2026-09-06 | 4 docker | compose stack up on the host: bot + local Bot API server + rebuilder; supervisor rebuild through its socket: fetch → preflight → restart, outcome recorded |
 | 2026-09-06 | 9 mini app | browser e2e (Playwright) on the production stack: settings edits, new session with exec, follow-up, files browser, all tabs |
+| 2026-09-06 | e2e | full Telegram pass from the owner's account (user-bot): bind, topics, CSV+bash, file back, follow-up mid-run, AskUser keyboard, photo→inbox, ImageView, MCP enable+tool, schedule → cron topic → reply, /usage /sessions /close — 21/21 |
 
