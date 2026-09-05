@@ -613,6 +613,16 @@ class TelegramFront:
         if not self._is_owner(query.from_user.id):
             await query.answer()
             return
+        try:
+            await self._dispatch_callback(query)
+        except Exception:  # noqa: BLE001 — a failed button must not kill polling or lose the answer
+            logger.exception("callback handling failed")
+            try:
+                await query.answer("Something went wrong; try again.")
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _dispatch_callback(self, query: CallbackQuery) -> None:
         data = (query.data or "").split(":")
         if not data:
             return
@@ -671,7 +681,7 @@ class TelegramFront:
                     new_rows.append(new_row)
                 try:
                     await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=new_rows))
-                except TelegramBadRequest:
+                except Exception:  # noqa: BLE001
                     pass
             return
         answer["selected"] = [label]
@@ -687,8 +697,8 @@ class TelegramFront:
                 answered = state["answers"][state["index"]]
                 summary = ", ".join(answered["selected"]) or (answered["custom"] or "")
                 await query.message.edit_text(f"{query.message.text}\n→ {summary}", reply_markup=None)
-            except TelegramBadRequest:
-                pass
+            except Exception:  # noqa: BLE001 — cosmetic edit; flood limits must never block the answer
+                logger.warning("could not freeze the question message", exc_info=True)
         state["index"] += 1
         if state["index"] < len(state["questions"]):
             outbox = await self.outbox_for_session(session_id)
