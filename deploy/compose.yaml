@@ -1,0 +1,54 @@
+# docker compose -f deploy/compose.yaml --env-file .env up -d
+#
+# Volumes:
+#   ./..                  -> /srv/daedalus      the bot repository (this checkout)
+#   ../protocore-exp      -> /srv/protocore-exp the core repository
+#   daedalus-state        -> /srv/state         database, blobs, secrets, known-good history
+#   daedalus-workspaces   -> /srv/workspaces    per-session working directories
+#   telegram-bot-api-data -> /var/lib/telegram-bot-api  files the local Bot API server stores
+services:
+  daedalus:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: daedalus:local
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      TELEGRAM_API_BASE: http://telegram-bot-api:8081
+      TELEGRAM_LOCAL_MODE: "true"
+      STATE_DIR: /srv/state
+      WORKSPACES_DIR: /srv/workspaces
+      BOT_REPO_DIR: /srv/daedalus
+      CORE_REPO_DIR: /srv/protocore-exp
+      SUPERVISOR_SOCKET: /run/daedalus/supervisor.sock
+      DAEDALUS_COMPOSE_FILE: ${DAEDALUS_COMPOSE_FILE:-}
+      DAEDALUS_COMPOSE_PROJECT_DIR: ${DAEDALUS_COMPOSE_PROJECT_DIR:-}
+      API_PORT: "8765"
+    volumes:
+      - ..:/srv/daedalus
+      - ../../protocore-exp:/srv/protocore-exp
+      - daedalus-state:/srv/state
+      - daedalus-workspaces:/srv/workspaces
+      - telegram-bot-api-data:/var/lib/telegram-bot-api
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "127.0.0.1:8765:8765"
+    depends_on:
+      - telegram-bot-api
+
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: "true"
+    volumes:
+      - telegram-bot-api-data:/var/lib/telegram-bot-api
+
+volumes:
+  daedalus-state:
+  daedalus-workspaces:
+  telegram-bot-api-data:

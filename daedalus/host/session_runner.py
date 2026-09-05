@@ -123,6 +123,8 @@ class SessionManager:
         self._finished: list[RunFinished] = []
         self.service_hooks: dict[str, Any] = {}
         """Callbacks the transport layer installs: send_file, spawn_session, schedule, self_*."""
+        self.shutting_down = False
+        self.budget_flag = settings.state_dir / "BUDGET_EXCEEDED"
 
     # -- lifecycle ------------------------------------------------------------------
 
@@ -138,12 +140,19 @@ class SessionManager:
         logger.warning("tools registered: %s", ", ".join(sorted(t.name for t in self.tools.list_all())))
 
     async def close(self) -> None:
-        for state in list(self._states.values()):
-            if state.task and not state.task.done():
-                if state.engine is not None:
-                    state.engine.stop()
-                state.task.cancel()
+        """Shut down keeping every active run resumable (snapshots stay in place)."""
+        self.shutting_down = True
+        tasks = [s.task for s in self._states.values() if s.task and not s.task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self.providers.aclose()
+
+    def budget_exceeded(self) -> str | None:
+        if self.budget_flag.exists():
+            return self.budget_flag.read_text(encoding="utf-8").strip()
+        return None
 
     def add_sink(self, sink: EventSink) -> None:
         self._sinks.append(sink)
@@ -265,6 +274,9 @@ class SessionManager:
         if state.pending is not None:
             # Free-text reply to a pending question counts as a custom answer.
             return await self.answer(session_id, [{"custom": body}])
+        exceeded = self.budget_exceeded()
+        if exceeded and not state.running:
+            raise RuntimeError(f"daily budget exceeded ({exceeded}); runs resume tomorrow or after /budget reset")
         if state.running:
             kind = "steer" if steer else "follow_up"
             await self.live.enqueue(session_id, kind, new_queued_prompt(kind, body).to_dict())  # type: ignore[arg-type]
@@ -446,7 +458,7 @@ class SessionManager:
             elif engine.state is LoopState.CANCELLED:
                 status = "cancelled"
         except asyncio.CancelledError:
-            status = "cancelled"
+            status = "interrupted" if self.shutting_down else "cancelled"
             raise
         except Exception as exc:  # noqa: BLE001 — surfaced to the operator, never swallowed
             logger.exception("run %s crashed", run_id)
@@ -458,7 +470,9 @@ class SessionManager:
         finally:
             await self.sessions.replace_messages(session_id, TENANT, list(engine.history))
             try:
-                if status == "awaiting":
+                if status == "interrupted":
+                    pass  # snapshot stays; resume_unfinished() continues the run after restart
+                elif status == "awaiting":
                     await self.runs.update_status(run_id, TENANT, RunStatus.paused)
                 else:
                     run_status = {

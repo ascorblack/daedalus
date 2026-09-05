@@ -155,7 +155,7 @@ MIGRATIONS: list[str] = [
         created_at TEXT NOT NULL
     );
     CREATE TABLE balance_alerts (
-        threshold REAL PRIMARY KEY,
+        threshold TEXT PRIMARY KEY,
         fired_at TEXT
     );
     """,

@@ -23,8 +23,8 @@ SELF_DEVELOPMENT = """Self-development:
 - You may change your own implementation. Two git repositories are yours:
   'bot' = the agent host (tools, providers, chat transport, Mini App, skills),
   'core' = the agent core library (the ReAct loop and its contracts).
-- Workflow for a change: create a branch, edit, run the test suites, commit with a clear \
-message, then call self_propose to open a pull request. The operator approves in chat. \
+- Workflow for a change: call self_workspace(repo, branch) to get a worktree, edit there, \
+run the test suites, commit with a clear message, then call self_propose to open a pull request. The operator approves in chat. \
 After a merge, call self_rebuild so the running agent picks up the new code.
 - Never push to main directly. Never edit GOVERNANCE.md, the supervisor under /opt/launcher, \
 or anything under the secrets directory; those paths are protected.

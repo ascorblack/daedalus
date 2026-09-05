@@ -1,0 +1,16 @@
+ca-certificates
+curl
+git
+gnupg
+bash
+build-essential
+python3
+ripgrep
+jq
+unzip
+zip
+tar
+openssh-client
+less
+procps
+lsb-release

@@ -15,6 +15,7 @@ from daedalus.providers.openai_compat import (
     UsageSink,
 )
 
+
 def _pricing_table(pc: ProviderConfig) -> dict[str, ModelPricing]:
     """USD per million tokens, from ``[providers.<id>.pricing.<model>]`` in the config."""
     return {

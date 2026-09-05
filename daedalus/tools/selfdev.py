@@ -1,4 +1,4 @@
-"""Self-development tools: propose a change, rebuild, roll back."""
+"""Self-development tools: worktree, propose a change, rebuild, roll back."""
 
 from __future__ import annotations
 
@@ -10,30 +10,56 @@ from daedalus.tools._common import error, ok, services_for
 
 
 @tool(
-    name="self_propose",
+    name="self_workspace",
     description=(
-        "Open a pull request from the current branch of one of your own repositories "
-        "('bot' = this agent's code, 'core' = the agent core). Commit your work first. "
-        "The owner reviews the change in chat; on approval it is merged and, if "
-        "configured, the agent rebuilds itself."
+        "Create a git worktree for editing one of your own repositories ('bot' = this "
+        "agent's host code, 'core' = the agent core library). Returns the directory to "
+        "work in, on a fresh branch agent/<branch> based on origin/main. Edit, test and "
+        "commit there; never edit the running checkout directly."
     ),
 )
-async def self_propose(context: ToolContext, repo: str, title: str, summary: str) -> ToolResult:
+async def self_workspace(context: ToolContext, repo: str, branch: str) -> ToolResult:
+    services = services_for(context)
+    hook = services.extra.get("manager").service_hooks.get("self_workspace") if services.extra.get("manager") else None
+    if hook is None:
+        return error(context, "self-development is not available in this session")
+    if repo not in ("bot", "core"):
+        return error(context, "repo must be 'bot' or 'core'")
+    try:
+        return ok(context, await hook(repo=repo, branch=branch))
+    except Exception as exc:  # noqa: BLE001
+        return error(context, f"could not create the worktree: {exc}")
+
+
+@tool(
+    name="self_propose",
+    description=(
+        "Open a pull request from a worktree branch of one of your repositories ('bot' or "
+        "'core'). Commit your work first and run the tests. The owner reviews the change in "
+        "chat; on approval it is merged and, if configured, the agent rebuilds itself. "
+        "branch defaults to the most recently used worktree of that repo."
+    ),
+)
+async def self_propose(
+    context: ToolContext, repo: str, title: str, summary: str, branch: str | None = None
+) -> ToolResult:
     services = services_for(context)
     if services.self_propose is None:
         return error(context, "self-development is not available in this session")
     if repo not in ("bot", "core"):
         return error(context, "repo must be 'bot' or 'core'")
-    result = await services.self_propose(repo=repo, title=title, summary=summary, session_id=context.session_id)
+    result = await services.self_propose(
+        repo=repo, title=title, summary=summary, session_id=context.session_id, branch=branch
+    )
     return ok(context, result)
 
 
 @tool(
     name="self_rebuild",
     description=(
-        "Ask the supervisor to pull the merged main branches, rebuild if dependencies or "
-        "the Dockerfile changed, run preflight checks and restart the agent. Active "
-        "sessions are snapshotted and resumed afterwards. Call it after a merge."
+        "Ask the supervisor to pull the merged main branches, rebuild if the Dockerfile "
+        "changed, run preflight checks and restart the agent. Active sessions are "
+        "snapshotted and resumed afterwards. Call it after a merge."
     ),
 )
 async def self_rebuild(context: ToolContext, reason: str) -> ToolResult:
@@ -51,9 +77,12 @@ async def self_rollback(context: ToolContext, steps_back: int = 0, reason: str =
     services = services_for(context)
     if services.self_rollback is None:
         return error(context, "rollback is not available in this session")
-    return ok(context, await services.self_rollback(steps_back=steps_back, reason=reason, session_id=context.session_id))
+    return ok(
+        context,
+        await services.self_rollback(steps_back=steps_back, reason=reason, session_id=context.session_id),
+    )
 
 
-TOOLS = [self_propose, self_rebuild, self_rollback]
+TOOLS = [self_workspace, self_propose, self_rebuild, self_rollback]
 
 __all__ = ["TOOLS"]
