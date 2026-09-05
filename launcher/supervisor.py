@@ -64,6 +64,14 @@ def bot_env() -> dict[str, str]:
     """Environment the bot (and its preflight) runs with: paths owned by the supervisor."""
     env = dict(os.environ)
     env.pop("VIRTUAL_ENV", None)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    token = env.get("GITHUB_TOKEN")
+    if token:
+        # Private repositories: git authenticates with the fine-grained token, never with a stored password.
+        env["GH_TOKEN"] = token
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = "credential.helper"
+        env["GIT_CONFIG_VALUE_0"] = "!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f"
     env.update(
         {
             "BOT_REPO_DIR": str(BOT_REPO),
