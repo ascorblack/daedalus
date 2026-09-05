@@ -531,12 +531,19 @@ class TelegramFront:
             return
         if not text:
             text = "Files attached." if len(buffer.attachments) > 1 else "File attached."
+        was_running = state.running and state.pending is None
         try:
             await self.manager.submit(state.session.id, text, buffer.attachments)
         except Exception as exc:  # noqa: BLE001
             logger.exception("submit failed")
             outbox = TelegramOutbox(self.bot, key[0], key[1] or None)
             await outbox.send_text(f"⚠️ could not start: {exc}", markdown=False)
+            return
+        if was_running:
+            renderer = self._renderers.get(state.session.id)
+            if renderer is not None:
+                renderer.view.narration.append("↪ follow-up queued for the next step")
+                renderer._mark()
 
     async def _download(self, message: Message, state: SessionState) -> Attachment | None:
         file_id: str | None = None

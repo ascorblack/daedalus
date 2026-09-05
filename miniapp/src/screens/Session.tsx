@@ -23,6 +23,16 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
     load();
   }, [load]);
 
+  // Belt and braces: while a run is active, re-read the transcript even if the event stream stalls.
+  useEffect(() => {
+    if (!detail || (detail.status !== "running" && detail.status !== "waiting")) {
+      setLive({ text: "", thinking: "", tool: null, tools: [] }); // the transcript now holds everything
+      return;
+    }
+    const id = setInterval(load, 3000);
+    return () => clearInterval(id);
+  }, [detail, load]);
+
   // Live events while the screen is open; the transcript is re-read from the server on each open.
   useEffect(() => {
     const url = api.streamUrl(id);

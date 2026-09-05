@@ -45,7 +45,11 @@ export function App() {
 
   useEffect(() => {
     const tg = telegram();
-    if (!tg) return;
+    if (!tg?.initData) {
+      const dark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+      document.documentElement.dataset.scheme = dark ? "dark" : "light";
+      return;
+    }
     tg.ready();
     tg.expand();
     const apply = () => {
