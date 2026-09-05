@@ -29,6 +29,13 @@ class FakeOutbox:
     async def delete(self, message_id: int) -> None:
         return None
 
+    drafts_ok = True
+    drafts: list[tuple[int, str]] = []
+
+    async def send_draft(self, draft_id: int, text: str) -> bool:
+        self.drafts.append((draft_id, text))
+        return self.drafts_ok
+
 
 def _evt(t: EventType, **payload):  # type: ignore[no-untyped-def]
     return TurnEvent(type=t, run_id="r1", payload=payload)
@@ -78,3 +85,36 @@ def test_markdown_to_html_basics() -> None:
     assert "<b>Title</b>" in html and "<b>bold</b>" in html and "<code>code</code>" in html
     assert '<a href="https://e.com">x</a>' in html
     assert '<pre><code class="language-sh">echo &lt;hi&gt;</code></pre>' in html
+
+
+async def test_streaming_sends_drafts_then_the_final_message(tmp_path: Path) -> None:
+    import asyncio
+
+    outbox = FakeOutbox()
+    outbox.drafts = []
+    renderer = RunRenderer(outbox, RunView(run_id="r1", model="m"), edit_interval=0.0, streaming=True, draft_interval=0.01)
+    await renderer.handle(_evt(EventType.MESSAGE_START))
+    await renderer.handle(_evt(EventType.CONTENT_BLOCK_DELTA, delta={"type": "text_delta", "text": "Hello, "}))
+    await asyncio.sleep(0.05)
+    await renderer.handle(_evt(EventType.CONTENT_BLOCK_DELTA, delta={"type": "text_delta", "text": "world"}))
+    await asyncio.sleep(0.05)
+    await renderer.handle(_evt(EventType.MESSAGE_STOP, stop_reason="end_turn"))
+    await renderer.finish("completed", workspace=tmp_path)
+    assert [t for _, t in outbox.drafts] == ["Hello,", "Hello, world"]
+    assert len({d for d, _ in outbox.drafts}) == 1  # one draft id per answer keeps the animation
+    assert [t for t, md in outbox.sent if md] == ["Hello, world"]
+
+
+async def test_streaming_disables_itself_when_drafts_are_refused(tmp_path: Path) -> None:
+    import asyncio
+
+    outbox = FakeOutbox()
+    outbox.drafts = []
+    outbox.drafts_ok = False
+    renderer = RunRenderer(outbox, RunView(run_id="r1", model="m"), edit_interval=0.0, streaming=True, draft_interval=0.01)
+    await renderer.handle(_evt(EventType.MESSAGE_START))
+    await renderer.handle(_evt(EventType.CONTENT_BLOCK_DELTA, delta={"type": "text_delta", "text": "x"}))
+    await asyncio.sleep(0.05)
+    await renderer.handle(_evt(EventType.CONTENT_BLOCK_DELTA, delta={"type": "text_delta", "text": "y"}))
+    await asyncio.sleep(0.05)
+    assert len(outbox.drafts) == 1 and renderer.streaming is False

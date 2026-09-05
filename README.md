@@ -14,6 +14,9 @@ core; the copy it runs on is [protocore-exp](https://github.com/ascorblack/proto
   parallel; `/new <title>` opens another.
 - **Follow-ups at any time.** Messages sent while the agent works are queued into the run.
   Questions from the agent arrive as inline buttons.
+- **Streaming replies.** In the private chat the answer streams as a live draft
+  (`sendMessageDraft`, with a Stop button) while it is generated; in forum topics, where
+  Telegram does not offer drafts, a status message shows tools and tokens instead.
 - **Mini App.** A Telegram Mini App (and plain browser page) with the roster of sessions,
   live transcripts, change proposals with diffs, scheduled tasks, usage and settings.
 - **Self-development.** The agent edits its host code or its core in a git worktree, opens a

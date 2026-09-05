@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -47,6 +48,8 @@ class Outbox(Protocol):
     async def edit_text(self, message_id: int, text: str) -> None: ...
     async def send_document(self, path: Path, caption: str | None = None) -> int: ...
     async def delete(self, message_id: int) -> None: ...
+    async def send_draft(self, draft_id: int, text: str) -> bool: ...
+    """Show ``text`` as a live draft; returns False when drafts are not possible here."""
 
 
 @dataclass(slots=True)
@@ -69,6 +72,8 @@ class RunView:
     last_rendered: str = ""
     progress_line: str = ""
     final_sent: bool = False
+    draft_id: int = 0
+    draft_sent: str = ""
 
 
 class RunRenderer:
@@ -81,12 +86,17 @@ class RunRenderer:
         *,
         edit_interval: float = 1.0,
         cost_lookup: Callable[[str], Awaitable[float | None]] | None = None,
+        streaming: bool = False,
+        draft_interval: float = 0.35,
     ) -> None:
         self.outbox = outbox
         self.view = view
         self.edit_interval = edit_interval
         self.cost_lookup = cost_lookup
+        self.streaming = streaming
+        self.draft_interval = draft_interval
         self._flush_task: asyncio.Task[None] | None = None
+        self._draft_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
     # -- events ---------------------------------------------------------------------
@@ -97,10 +107,13 @@ class RunRenderer:
         t = event.type
         if t is EventType.MESSAGE_START:
             v.text_buffer = ""
+            v.draft_id = random.randint(1, 2**31 - 1)
+            v.draft_sent = ""
         elif t is EventType.CONTENT_BLOCK_DELTA:
             delta = p.get("delta") or {}
             if delta.get("type") == "text_delta":
                 v.text_buffer += delta.get("text") or ""
+                self._mark_draft()
         elif t is EventType.TOOL_USE_START:
             name = str(p.get("tool_name") or "")
             v.tool_names[str(p.get("tool_call_id"))] = name
@@ -143,6 +156,31 @@ class RunRenderer:
         elif t is EventType.MODEL_CHANGED:
             v.model = str(p.get("model_name") or p.get("to") or v.model)
             self._mark()
+
+    def _mark_draft(self) -> None:
+        if not self.streaming:
+            return
+        if self._draft_task is None or self._draft_task.done():
+            self._draft_task = asyncio.create_task(self._draft_soon())
+
+    async def _draft_soon(self) -> None:
+        await asyncio.sleep(self.draft_interval)
+        await self.push_draft()
+
+    async def push_draft(self) -> None:
+        """Send the accumulated answer text as a live draft (plain text, capped at the message limit)."""
+        v = self.view
+        text = v.text_buffer.strip()[:4000]
+        if not self.streaming or not text or text == v.draft_sent or not v.draft_id:
+            return
+        try:
+            ok = await self.outbox.send_draft(v.draft_id, text)
+        except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
+            self.streaming = False  # this chat cannot show drafts; fall back to the final message only
+            return
+        v.draft_sent = text
 
     async def progress(self, line: str) -> None:
         self.view.progress_line = line

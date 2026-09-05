@@ -144,6 +144,19 @@ class TelegramOutbox(Outbox):
         except TelegramBadRequest:
             pass
 
+    async def send_draft(self, draft_id: int, text: str) -> bool:
+        """Live draft (Bot API 9.5+). Telegram allows it in private chats only."""
+        if self.chat_id < 0:
+            return False
+        try:
+            await self.bot.send_message_draft(self.chat_id, draft_id, message_thread_id=self.thread_id, text=text, parse_mode=None, can_stop=True)
+            return True
+        except TelegramRetryAfter:
+            return True  # skip this frame; the next one carries more text
+        except TelegramBadRequest as exc:
+            logger.warning("drafts unavailable in chat %s: %s", self.chat_id, exc)
+            return False
+
 
 class TelegramFront:
     """Wires a :class:`SessionManager` to Telegram."""
@@ -307,6 +320,7 @@ class TelegramFront:
         r.message.register(self.cmd_operator, Command("rebuild", "rollback", "panic", "schedules", "verbosity", "approval", "balance", "schedule"))
         r.message.register(self.on_message, F.text | F.caption | F.document | F.photo | F.audio | F.video | F.voice)
         r.callback_query.register(self.on_callback)
+        r.stopped_message_generation.register(self.on_generation_stopped)
 
     async def cmd_start(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
@@ -625,6 +639,14 @@ class TelegramFront:
         )
         state["message_ids"].append(msg.message_id)
 
+    async def on_generation_stopped(self, event: Any) -> None:
+        """The operator pressed Stop on a streaming draft: cancel that session's run."""
+        chat_id = event.chat.id
+        thread_id = getattr(event, "message_thread_id", None) or 0
+        binding = await self.binding_for_topic(chat_id, thread_id)
+        if binding is not None:
+            await self.manager.stop(binding.session_id)
+
     async def on_callback(self, query: CallbackQuery) -> None:
         if not self._is_owner(query.from_user.id):
             await query.answer()
@@ -762,6 +784,8 @@ class TelegramFront:
             RunView(run_id=run_id, model=model, verbosity=self.config.telegram.verbosity),
             edit_interval=self.config.telegram.status_edit_interval_seconds,
             cost_lookup=cost_lookup,
+            streaming=self.config.telegram.streaming and outbox.chat_id > 0,
+            draft_interval=self.config.telegram.draft_interval_seconds,
         )
         self._renderers[session_id] = renderer
         return renderer

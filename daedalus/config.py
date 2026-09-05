@@ -158,6 +158,9 @@ class TelegramConfig(BaseModel):
     inbound_merge_window_seconds: float = 1.5
     verbosity: int = 1
     """0 = final answers only, 1 = tool summaries, 2 = everything."""
+    streaming: bool = True
+    """Stream the answer as a live draft (sendMessageDraft) while it is generated; private chats only."""
+    draft_interval_seconds: float = 0.35
 
 
 class RuntimeConfig(BaseModel):
