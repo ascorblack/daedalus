@@ -41,19 +41,16 @@ logger = logging.getLogger(__name__)
 HELP = """<b>Daedalus</b>
 Each forum topic is one agent session with its own workspace. Write in a topic to talk to that session; files you send land in its workspace.
 
+/bind — (in a supergroup with topics) make it the session hub
 /new &lt;title&gt; — new session (new topic)
-/stop — stop the current run
-/close — close this session's topic
-/sessions — list sessions
-/model [provider/]&lt;name&gt; — switch model (this session, or default in General)
-/thinking on|off|low|medium|high — thinking mode
-/status — what is running
-/usage — spend for today and this session
-/schedules — scheduled tasks
-/rebuild — pull merged code and restart
-/rollback [n] — return to a known-good revision
-/panic — kill everything now
-/settings — current configuration
+/stop — stop the current run · /close — close this session's topic
+/sessions · /status — what exists, what is running
+/model [provider/]&lt;name&gt; · /thinking on|off|low|medium|high — model settings (default in General, per session in a topic)
+/usage · /balance — spend and provider balances
+/schedules · /schedule run|on|off|delete &lt;id&gt; — scheduled tasks
+/approval manual|auto · /verbosity 0|1|2 — self-change approval, chat detail
+/rebuild · /rollback [n] · /panic — supervisor operations
+/settings · /app — configuration, Mini App link
 """
 
 
