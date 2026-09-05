@@ -12,4 +12,4 @@ Live checks of the build units, newest first.
 | 2026-09-06 | 4 supervisor | integration test: good commit applied via rebuild; syntax-broken commit rolled back by preflight; rollback to earlier known-good; Docker image builds |
 | 2026-09-06 | 5 telegram | unit tests with constructed updates: owner filter, direct session, fragment/file merge window, /new topic binding, AskUser keyboard → answer |
 | 2026-09-06 | 9 mini app | served publicly behind the host reverse proxy over HTTPS; API returns 401 without initData/token |
-
+| 2026-09-06 | 7 scheduler | one-shot task created through the public API fired on time in its own session and workspace, wrote SUMMARY.md (stored as last_summary), then disabled itself |

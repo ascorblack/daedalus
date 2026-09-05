@@ -114,16 +114,20 @@ def record_good() -> None:
 
 
 def preflight(repo: Path) -> tuple[bool, str]:
-    """Import, config and smoke tests in the tree that is about to run."""
-    steps = [
-        ["uv", "sync", "--frozen", "--extra", "dev"],
-        ["uv", "run", "--frozen", "python", "-m", "compileall", "-q", "daedalus"],
-        ["uv", "run", "--frozen", "python", "-m", "daedalus", "check"],
-        ["uv", "run", "--frozen", "python", "-m", "pytest", "-q", "-x", "tests/smoke"],
+    """Dependencies, Mini App build, import, config and smoke tests in the tree about to run."""
+    steps: list[tuple[list[str], Path]] = [
+        (["uv", "sync", "--frozen", "--extra", "dev"], repo),
+        (["uv", "run", "--frozen", "python", "-m", "compileall", "-q", "daedalus"], repo),
+        (["uv", "run", "--frozen", "python", "-m", "daedalus", "check"], repo),
+        (["uv", "run", "--frozen", "python", "-m", "pytest", "-q", "-x", "tests/smoke"], repo),
     ]
+    miniapp = repo / "miniapp"
+    if (miniapp / "package.json").exists() and shutil.which("npm"):
+        steps.insert(1, (["npm", "ci", "--no-audit", "--no-fund"], miniapp))
+        steps.insert(2, (["npm", "run", "build"], miniapp))
     transcript: list[str] = []
-    for step in steps:
-        code, out = run(step, cwd=repo, timeout=1200)
+    for step, cwd in steps:
+        code, out = run(step, cwd=cwd, timeout=1200)
         transcript.append(f"$ {' '.join(step)}\n{out}")
         if code != 0:
             return False, "\n".join(transcript)
