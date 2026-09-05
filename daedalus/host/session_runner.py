@@ -1,0 +1,563 @@
+"""Sessions and runs: one ``QueryEngine`` per session, one asyncio task per run."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import shutil
+import uuid
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from protocore.contracts.types import (
+    ImageRefBlock,
+    Message,
+    MessageRole,
+    Run,
+    RunStatus,
+    Session,
+    TextBlock,
+    ToolResultBlock,
+)
+from protocore.runtime.events.envelope import TurnEvent
+from protocore.runtime.events.types import EventType
+from protocore.runtime.live_control import new_queued_prompt
+from protocore.runtime.loop_state import LoopState
+from protocore.runtime.query import query
+from protocore.runtime.query_engine import QueryEngine
+from protocore.tests_support.adapters import InMemoryHookManager, InMemoryToolRegistry
+from protocore.tools.ask_user import AskUserTool
+from protocore.tools.memory import build_memory_tools
+
+from daedalus.config import RuntimeConfig, Settings
+from daedalus.host.engine_factory import TENANT, EngineDeps, build_engine
+from daedalus.host.services import SessionServices, locator
+from daedalus.host.skills import DirectorySkillStore
+from daedalus.providers.chain import build_chain
+from daedalus.providers.registry import ProviderRegistry
+from daedalus.stores.blobs import FileBlobStore
+from daedalus.stores.database import Database
+from daedalus.stores.persistent import PersistentMemory, PersistentWorkspace
+from daedalus.stores.sqlite import (
+    LiveControlStore,
+    SqliteEventStream,
+    SqliteRunStore,
+    SqliteSessionStore,
+    SqliteUsageSink,
+)
+from daedalus.tools import discover_tools
+
+logger = logging.getLogger(__name__)
+
+EventSink = Callable[[str, TurnEvent], Awaitable[None]]
+RunFinished = Callable[[str, str, str], Awaitable[None]]  # session_id, run_id, status
+
+
+@dataclass(slots=True)
+class Attachment:
+    path: Path
+    mime_type: str = "application/octet-stream"
+    caption: str | None = None
+
+
+@dataclass(slots=True)
+class PendingQuestion:
+    session_id: str
+    run_id: str
+    tool_call_id: str
+    kind: str
+    payload: dict[str, Any]
+
+
+@dataclass(slots=True)
+class SessionState:
+    session: Session
+    workspace: Path
+    engine: QueryEngine | None = None
+    task: asyncio.Task[None] | None = None
+    run_id: str | None = None
+    pending: PendingQuestion | None = None
+    services: SessionServices | None = None
+    context_window: int = 128_000
+    extra_notes: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def running(self) -> bool:
+        return self.task is not None and not self.task.done()
+
+
+class SessionManager:
+    def __init__(
+        self,
+        settings: Settings,
+        config: RuntimeConfig,
+        *,
+        db: Database,
+        governance_path: Path | None = None,
+    ) -> None:
+        self.settings = settings
+        self.config = config
+        self.db = db
+        self.sessions = SqliteSessionStore(db)
+        self.runs = SqliteRunStore(db)
+        self.events = SqliteEventStream(db)
+        self.usage = SqliteUsageSink(db)
+        self.live = LiveControlStore(db)
+        self.blobs = FileBlobStore(settings.blobs_dir)
+        self.memory = PersistentMemory(db)
+        self.workspace_units = PersistentWorkspace(db)
+        self.skills = DirectorySkillStore(settings.skills_dir)
+        self.hooks = InMemoryHookManager()
+        self.tools = InMemoryToolRegistry()
+        self.providers = ProviderRegistry(
+            settings, config, usage_sink=self.usage, image_loader=self._load_image
+        )
+        self.governance_path = governance_path or (settings.bot_repo_dir / "GOVERNANCE.md")
+        self._states: dict[str, SessionState] = {}
+        self._sinks: list[EventSink] = []
+        self._finished: list[RunFinished] = []
+        self.service_hooks: dict[str, Any] = {}
+        """Callbacks the transport layer installs: send_file, spawn_session, schedule, self_*."""
+
+    # -- lifecycle ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        await self.memory.load()
+        await self.workspace_units.load()
+        for tool in discover_tools():
+            self.tools.register(tool)
+        for tool in build_memory_tools(self.memory):
+            self.tools.register(tool)
+        self.tools.register(AskUserTool())
+        locator.default = None
+        logger.warning("tools registered: %s", ", ".join(sorted(t.name for t in self.tools.list_all())))
+
+    async def close(self) -> None:
+        for state in list(self._states.values()):
+            if state.task and not state.task.done():
+                if state.engine is not None:
+                    state.engine.stop()
+                state.task.cancel()
+        await self.providers.aclose()
+
+    def add_sink(self, sink: EventSink) -> None:
+        self._sinks.append(sink)
+
+    def on_finished(self, callback: RunFinished) -> None:
+        self._finished.append(callback)
+
+    def reload_config(self, config: RuntimeConfig) -> None:
+        self.config = config
+        self.providers.reload(config)
+
+    async def _load_image(self, ref: str) -> tuple[bytes, str]:
+        data = await self.blobs.get(TENANT, ref)
+        meta = await self.blobs.head(TENANT, ref)
+        return data, meta.content_type
+
+    # -- sessions -------------------------------------------------------------------
+
+    def workspace_for(self, session_id: str) -> Path:
+        return self.settings.workspaces_dir / session_id
+
+    async def create_session(
+        self,
+        title: str,
+        *,
+        session_id: str | None = None,
+        workspace: Path | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> SessionState:
+        sid = session_id or uuid.uuid4().hex[:12]
+        workspace = workspace or self.workspace_for(sid)
+        (workspace / "inbox").mkdir(parents=True, exist_ok=True)
+        session = Session(id=sid, tenant_id=TENANT, title=title, metadata=dict(metadata or {}))
+        await self.sessions.create(session)
+        state = SessionState(session=session, workspace=workspace, metadata=dict(metadata or {}))
+        self._states[sid] = state
+        self._register_services(state)
+        return state
+
+    async def get_state(self, session_id: str) -> SessionState | None:
+        state = self._states.get(session_id)
+        if state is not None:
+            return state
+        try:
+            session = await self.sessions.get(session_id, TENANT)
+        except Exception:
+            return None
+        workspace = Path(session.metadata.get("workspace") or self.workspace_for(session_id))
+        (workspace / "inbox").mkdir(parents=True, exist_ok=True)
+        state = SessionState(session=session, workspace=workspace, metadata=dict(session.metadata))
+        self._states[session_id] = state
+        self._register_services(state)
+        return state
+
+    async def list_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = await self.sessions.list_sessions(TENANT, limit=limit)
+        out: list[dict[str, Any]] = []
+        for session in rows:
+            state = self._states.get(session.id)
+            status = "idle"
+            if state is not None:
+                if state.running:
+                    status = "running"
+                elif state.pending is not None:
+                    status = "waiting"
+                elif state.engine is not None and state.engine.state is LoopState.FAILED:
+                    status = "failed"
+            out.append(
+                {
+                    "id": session.id,
+                    "title": session.title,
+                    "status": status,
+                    "created_at": session.created_at.isoformat(),
+                    "last_message_at": session.last_message_at.isoformat(),
+                    "run_id": state.run_id if state else None,
+                    "metadata": session.metadata,
+                }
+            )
+        return out
+
+    def _register_services(self, state: SessionState) -> None:
+        hooks = self.service_hooks
+        services = SessionServices(
+            session_id=state.session.id,
+            workspace_dir=state.workspace,
+            protected_paths=(
+                self.governance_path,
+                Path("/opt/launcher"),
+                self.settings.secrets_dir,
+            ),
+            tool_timeout_seconds=self.config.limits.tool_timeout_seconds,
+            send_file=_bind(hooks.get("send_file"), state.session.id),
+            spawn_session=_bind(hooks.get("spawn_session"), state.session.id),
+            schedule=hooks.get("schedule"),
+            self_propose=hooks.get("self_propose"),
+            self_rebuild=hooks.get("self_rebuild"),
+            self_rollback=hooks.get("self_rollback"),
+            progress=_bind(hooks.get("progress"), state.session.id),
+            extra={"skill_store": self.skills, "manager": self},
+        )
+        state.services = services
+        locator.register(services)
+
+    # -- input --------------------------------------------------------------------
+
+    async def submit(
+        self,
+        session_id: str,
+        text: str,
+        attachments: Sequence[Attachment] = (),
+        *,
+        steer: bool = False,
+    ) -> str:
+        """Deliver operator input. Starts a run, or queues a follow-up when one is active."""
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        body, image_refs = await self._ingest_attachments(state, text, attachments)
+        if state.pending is not None:
+            # Free-text reply to a pending question counts as a custom answer.
+            return await self.answer(session_id, [{"custom": body}])
+        if state.running:
+            kind = "steer" if steer else "follow_up"
+            await self.live.enqueue(session_id, kind, new_queued_prompt(kind, body).to_dict())  # type: ignore[arg-type]
+            return state.run_id or ""
+        blocks: list[Any] = [TextBlock(text=body)]
+        blocks.extend(ImageRefBlock(blob_ref=ref, mime_type=mime) for ref, mime in image_refs)
+        message = Message(role=MessageRole.user, content_blocks=blocks)
+        return await self._start_run(state, message)
+
+    async def _ingest_attachments(
+        self, state: SessionState, text: str, attachments: Sequence[Attachment]
+    ) -> tuple[str, list[tuple[str, str]]]:
+        if not attachments:
+            return text, []
+        inbox = state.workspace / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = []
+        image_refs: list[tuple[str, str]] = []
+        for attachment in attachments:
+            target = inbox / attachment.path.name
+            if attachment.path.resolve() != target.resolve():
+                counter = 1
+                while target.exists():
+                    target = inbox / f"{attachment.path.stem}-{counter}{attachment.path.suffix}"
+                    counter += 1
+                shutil.copy2(attachment.path, target)
+            lines.append(f"- {target} ({attachment.mime_type}, {target.stat().st_size} bytes)")
+            if attachment.mime_type.startswith("image/"):
+                meta = await self.blobs.put(TENANT, target.read_bytes(), content_type=attachment.mime_type)
+                image_refs.append((meta.ref, attachment.mime_type))
+        body = (text.strip() + "\n\n" if text.strip() else "") + "Attached files:\n" + "\n".join(lines)
+        return body, image_refs
+
+    async def answer(self, session_id: str, answers: list[dict[str, Any]]) -> str:
+        """Resume a run paused on AskUser with the operator's answers."""
+        state = await self.get_state(session_id)
+        if state is None or state.pending is None or state.engine is None:
+            raise RuntimeError("no pending question for this session")
+        pending = state.pending
+        questions = [q.get("question", "") for q in pending.payload.get("questions", [])]
+        shaped = []
+        for index, answer in enumerate(answers):
+            shaped.append(
+                {
+                    "question": answer.get("question") or (questions[index] if index < len(questions) else ""),
+                    "selected": list(answer.get("selected") or []),
+                    "custom": answer.get("custom"),
+                }
+            )
+        result = json.dumps({"answers": shaped, "source": "user"}, ensure_ascii=False)
+        state.engine.history.append(
+            Message(
+                role=MessageRole.tool,
+                content_blocks=[ToolResultBlock(tool_call_id=pending.tool_call_id, content=result)],
+            )
+        )
+        state.engine.clear_pending_approval(pending.tool_call_id)
+        state.engine.transition_to(LoopState.RUNNING)
+        state.pending = None
+        await self.db.execute("DELETE FROM pending_questions WHERE session_id = ?", (session_id,))
+        return await self._start_run(state, None, continue_turn=True)
+
+    async def stop(self, session_id: str) -> bool:
+        state = self._states.get(session_id)
+        if state is None or not state.running or state.engine is None:
+            return False
+        state.engine.stop()
+        return True
+
+    async def set_model(
+        self,
+        session_id: str,
+        *,
+        model_name: str | None = None,
+        thinking: bool | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        await self.live.set_model(
+            session_id, model_name=model_name, thinking_enabled=thinking, reasoning_effort=reasoning_effort
+        )
+        state = self._states.get(session_id)
+        if state is not None and state.engine is not None and state.running:
+            state.engine.apply_live_controls(
+                model_name=model_name, thinking_enabled=thinking, reasoning_effort=reasoning_effort
+            )
+
+    # -- runs -----------------------------------------------------------------------
+
+    async def _build_engine(self, state: SessionState, run_id: str) -> QueryEngine:
+        overrides = await self.live.load(state.session.id)
+        rungs = self.providers.rungs_for(self.config)
+        deps = EngineDeps(
+            tool_registry=self.tools,
+            event_stream=self.events,
+            blob_store=self.blobs,
+            skill_store=self.skills,
+            hook_manager=self.hooks,
+            bot_repo=self.settings.bot_repo_dir,
+            core_repo=self.settings.core_repo_dir,
+            governance_path=self.governance_path,
+        )
+        engine = build_engine(
+            deps=deps,
+            config=self.config,
+            run_id=run_id,
+            session_id=state.session.id,
+            session_title=state.session.title,
+            workspace=state.workspace,
+            rungs=rungs,
+            provider_chain=build_chain(rungs),
+            model_name=overrides.get("model_name") or state.metadata.get("model"),
+            thinking=overrides.get("thinking_enabled"),
+            reasoning_effort=overrides.get("reasoning_effort"),
+            context_window=state.context_window,
+            extra_notes=state.extra_notes,
+        )
+        self._attach_hooks(engine, state)
+        return engine
+
+    def _attach_hooks(self, engine: QueryEngine, state: SessionState) -> None:
+        session_id = state.session.id
+
+        async def reload_live_control(eng: QueryEngine) -> None:
+            data = await self.live.load(session_id)
+            eng._steer_queue = list(data["steer"])  # type: ignore[attr-defined]
+            eng._follow_up_queue = list(data["follow_up"])  # type: ignore[attr-defined]
+
+        async def persist_live_control(eng: QueryEngine) -> None:
+            await self.live.save_queues(
+                session_id,
+                list(getattr(eng, "_steer_queue", []) or []),
+                list(getattr(eng, "_follow_up_queue", []) or []),
+            )
+
+        def persist_session_history(eng: QueryEngine) -> None:
+            asyncio.get_running_loop().create_task(
+                self.sessions.replace_messages(session_id, TENANT, list(eng.history))
+            )
+
+        engine.reload_live_control = reload_live_control  # type: ignore[attr-defined]
+        engine.persist_live_control = persist_live_control  # type: ignore[attr-defined]
+        engine.persist_session_history = persist_session_history  # type: ignore[attr-defined]
+
+    async def _start_run(
+        self, state: SessionState, message: Message | None, *, continue_turn: bool = False
+    ) -> str:
+        if state.engine is None or not continue_turn:
+            run_id = uuid.uuid4().hex[:12]
+            engine = await self._build_engine(state, run_id)
+            if state.engine is not None:
+                engine.history = list(state.engine.history)
+            else:
+                engine.history = list(await self.sessions.list_messages(state.session.id, TENANT, limit=10_000))
+            state.engine = engine
+        else:
+            run_id = state.run_id or uuid.uuid4().hex[:12]
+            engine = state.engine
+        state.run_id = run_id
+        if not continue_turn:
+            await self.runs.create(Run(id=run_id, tenant_id=TENANT, session_id=state.session.id, status=RunStatus.running))
+        state.task = asyncio.create_task(self._drive(state, engine, message, continue_turn), name=f"run:{run_id}")
+        state.task.add_done_callback(_log_task_failure)
+        return run_id
+
+    async def _drive(
+        self, state: SessionState, engine: QueryEngine, message: Message | None, continue_turn: bool
+    ) -> None:
+        session_id = state.session.id
+        run_id = engine.config.run_id
+        status = "completed"
+        try:
+            iterator = query(engine) if continue_turn else engine.run(message)
+            async for event in iterator:
+                await self._dispatch_event(state, event)
+            if engine.state is LoopState.AWAITING and state.pending is not None:
+                status = "awaiting"
+            elif engine.state is LoopState.FAILED:
+                status = "failed"
+            elif engine.state is LoopState.CANCELLED:
+                status = "cancelled"
+        except asyncio.CancelledError:
+            status = "cancelled"
+            raise
+        except Exception as exc:  # noqa: BLE001 — surfaced to the operator, never swallowed
+            logger.exception("run %s crashed", run_id)
+            status = "failed"
+            await self._dispatch_event(
+                state,
+                TurnEvent(type=EventType.ERROR, run_id=run_id, payload={"message": f"{type(exc).__name__}: {exc}"}),
+            )
+        finally:
+            await self.sessions.replace_messages(session_id, TENANT, list(engine.history))
+            try:
+                if status == "awaiting":
+                    await self.runs.update_status(run_id, TENANT, RunStatus.paused)
+                else:
+                    run_status = {
+                        "completed": RunStatus.completed,
+                        "failed": RunStatus.error,
+                        "cancelled": RunStatus.cancelled,
+                    }.get(status, RunStatus.completed)
+                    await self.runs.update_status(run_id, TENANT, run_status)
+                    await self.events.delete_snapshot(run_id)
+                    self.events.close_run(run_id)
+            except Exception:  # noqa: BLE001
+                logger.exception("run %s bookkeeping failed", run_id)
+            for callback in self._finished:
+                try:
+                    await callback(session_id, run_id, status)
+                except Exception:  # noqa: BLE001
+                    logger.exception("run-finished callback failed")
+
+    async def _dispatch_event(self, state: SessionState, event: TurnEvent) -> None:
+        if event.type is EventType.TOOL_CALL_PENDING and event.payload.get("kind") == "ask_user":
+            pending = PendingQuestion(
+                session_id=state.session.id,
+                run_id=event.run_id,
+                tool_call_id=str(event.payload.get("tool_call_id")),
+                kind="ask_user",
+                payload=dict(event.payload.get("ask_user_payload") or {}),
+            )
+            state.pending = pending
+            await self.db.execute(
+                "INSERT OR REPLACE INTO pending_questions(session_id, run_id, tool_call_id, kind, payload, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (pending.session_id, pending.run_id, pending.tool_call_id, pending.kind, json.dumps(pending.payload), datetime.now(UTC).isoformat()),
+            )
+        durable = event.to_event()
+        durable.payload.setdefault("tenant_id", TENANT)
+        durable.payload.setdefault("event_type", event.type.value)
+        await self.events.emit(durable)
+        for sink in self._sinks:
+            try:
+                await sink(state.session.id, event)
+            except Exception:  # noqa: BLE001
+                logger.exception("event sink failed")
+
+    # -- recovery -------------------------------------------------------------------
+
+    async def resume_unfinished(self) -> list[str]:
+        """Continue runs that were mid-flight when the process last stopped."""
+        resumed: list[str] = []
+        for entry in await self.events.unfinished_snapshots():
+            session_id = entry["session_id"] or entry["snapshot"].get("session_id")
+            state = await self.get_state(session_id)
+            if state is None:
+                await self.events.delete_snapshot(entry["run_id"])
+                continue
+            try:
+                engine = await self._build_engine(state, entry["run_id"])
+                await engine.resume_from_snapshot(entry["snapshot"])
+            except Exception:  # noqa: BLE001
+                logger.exception("could not resume run %s", entry["run_id"])
+                await self.events.delete_snapshot(entry["run_id"])
+                continue
+            state.engine = engine
+            state.run_id = entry["run_id"]
+            if engine.state is LoopState.AWAITING:
+                row = await self.db.fetchone("SELECT * FROM pending_questions WHERE session_id = ?", (session_id,))
+                if row is not None:
+                    state.pending = PendingQuestion(
+                        session_id=session_id,
+                        run_id=row["run_id"],
+                        tool_call_id=row["tool_call_id"],
+                        kind=row["kind"],
+                        payload=json.loads(row["payload"]),
+                    )
+                continue
+            if not engine.history:
+                await self.events.delete_snapshot(entry["run_id"])
+                continue
+            engine.transition_to(LoopState.RUNNING)
+            state.task = asyncio.create_task(self._drive(state, engine, None, True), name=f"resume:{entry['run_id']}")
+            resumed.append(entry["run_id"])
+        return resumed
+
+
+def _log_task_failure(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("run task %s failed: %r", task.get_name(), exc, exc_info=exc)
+
+
+def _bind(fn: Callable[..., Awaitable[Any]] | None, session_id: str) -> Callable[..., Awaitable[Any]] | None:
+    if fn is None:
+        return None
+
+    async def bound(*args: Any, **kwargs: Any) -> Any:
+        return await fn(session_id, *args, **kwargs)
+
+    return bound
+
+
+__all__ = ["Attachment", "PendingQuestion", "SessionManager", "SessionState"]
