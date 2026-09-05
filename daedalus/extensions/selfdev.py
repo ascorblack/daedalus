@@ -187,9 +187,11 @@ class SelfDevelopment:
         cwd = worktree if worktree.exists() else spec.checkout
         if decision == "approve":
             try:
-                await self.gh("pr", "merge", str(row["pr_number"]), "--squash", "--delete-branch", cwd=cwd)
+                # Merge from the main checkout: gh would otherwise try to switch the worktree's branch.
+                await self.gh("pr", "merge", str(row["pr_number"]), "--squash", cwd=spec.checkout)
             except GitError as exc:
                 return f"merge failed: {exc}"
+            await self._cleanup_branch(spec, row["branch"], worktree)
             await self.app.db.execute(
                 "UPDATE change_proposals SET status = 'merged', decided_at = ?, reason = ? WHERE id = ?",
                 (datetime.now(UTC).isoformat(), reason, proposal_id),
@@ -212,6 +214,19 @@ class SelfDevelopment:
             f"Your change proposal '{row['title']}' was rejected." + (f" Reason: {reason}" if reason else "") + " Revise it or ask for clarification.",
         )
         return f"rejected PR #{row['pr_number']}" + (f": {reason}" if reason else "")
+
+    async def _cleanup_branch(self, spec: RepoSpec, branch: str, worktree: Path) -> None:
+        """Remove the merged branch's worktree and its remote ref; failures are not fatal."""
+        try:
+            if worktree.exists():
+                await self.git(spec, "worktree", "remove", "--force", str(worktree))
+            await self.git(spec, "branch", "-D", branch)
+        except GitError as exc:
+            logger.warning("worktree cleanup: %s", exc)
+        try:
+            await self.git(spec, "push", "origin", "--delete", branch)
+        except GitError as exc:
+            logger.warning("remote branch cleanup: %s", exc)
 
     async def _notify_session(self, session_id: str | None, text: str) -> None:
         if not session_id or self.app.manager is None:

@@ -1,0 +1,105 @@
+import { useCallback, useEffect, useState } from "react";
+import { api, Proposal } from "../api";
+import { Pill, timeAgo } from "../components";
+
+export function ProposalsScreen({ toast }: { toast: (t: string) => void }) {
+  const [items, setItems] = useState<Proposal[] | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [diff, setDiff] = useState<string>("");
+  const [reason, setReason] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      setItems(await api.get<Proposal[]>("/api/proposals"));
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }, [toast]);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function show(id: string) {
+    setOpen(id);
+    setDiff("loading…");
+    try {
+      setDiff((await api.get<{ diff: string }>(`/api/proposals/${id}/diff`)).diff);
+    } catch (e) {
+      setDiff(`could not load the diff: ${(e as Error).message}`);
+    }
+  }
+
+  async function decide(id: string, decision: "approve" | "reject") {
+    try {
+      const r = await api.post<{ result: string }>(`/api/proposals/${id}/decide`, { decision, reason });
+      toast(r.result);
+      setReason("");
+      load();
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
+  if (items === null) return <div className="empty">Loading…</div>;
+  if (items.length === 0) return <div className="empty">No change proposals yet. The agent opens one when you ask it to change itself.</div>;
+  return (
+    <>
+      {items.map((p) => (
+        <div key={p.id} className="card">
+          <div className="row">
+            <div className="grow">
+              <div className="title">{p.title}</div>
+              <div className="sub">
+                {p.repo} · {p.branch} · {timeAgo(p.created_at)}
+                {p.pr_url && (
+                  <>
+                    {" · "}
+                    <a href={p.pr_url} target="_blank" rel="noreferrer">
+                      PR #{p.pr_number}
+                    </a>
+                  </>
+                )}
+              </div>
+            </div>
+            <Pill status={p.status === "merged" ? "done" : p.status === "pending" ? "waiting" : "failed"} />
+          </div>
+          <div style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>{p.summary}</div>
+          {p.reason && <div className="sub">reason: {p.reason}</div>}
+          <div className="btnrow">
+            <button className="btn small" onClick={() => (open === p.id ? setOpen(null) : show(p.id))}>
+              {open === p.id ? "hide diff" : "diff"}
+            </button>
+            {p.status === "pending" && (
+              <>
+                <button className="btn small primary" onClick={() => decide(p.id, "approve")}>
+                  Approve
+                </button>
+                <button className="btn small danger" onClick={() => decide(p.id, "reject")}>
+                  Reject
+                </button>
+              </>
+            )}
+          </div>
+          {p.status === "pending" && <input className="field" style={{ marginTop: 8 }} placeholder="reason (optional, sent to the agent on rejection)" value={reason} onChange={(e) => setReason(e.target.value)} />}
+          {open === p.id && <Diff text={diff} />}
+        </div>
+      ))}
+    </>
+  );
+}
+
+function Diff({ text }: { text: string }) {
+  return (
+    <pre className="diff">
+      {text.split("\n").map((line, i) => {
+        const cls = line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : line.startsWith("@@") ? "hunk" : "";
+        return (
+          <span key={i} className={cls}>
+            {line}
+            {"\n"}
+          </span>
+        );
+      })}
+    </pre>
+  );
+}
