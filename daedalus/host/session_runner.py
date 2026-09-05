@@ -550,8 +550,10 @@ class SessionManager:
             if not engine.history:
                 await self.events.delete_snapshot(entry["run_id"])
                 continue
-            engine.transition_to(LoopState.RUNNING)
+            if engine.state is not LoopState.RUNNING:
+                engine.transition_to(LoopState.RUNNING)
             state.task = asyncio.create_task(self._drive(state, engine, None, True), name=f"resume:{entry['run_id']}")
+            state.task.add_done_callback(_log_task_failure)
             resumed.append(entry["run_id"])
         return resumed
 
