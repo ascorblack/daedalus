@@ -14,3 +14,6 @@ Live checks of the build units, newest first.
 | 2026-09-06 | 9 mini app | served publicly behind the host reverse proxy over HTTPS; API returns 401 without initData/token |
 | 2026-09-06 | 7 scheduler | one-shot task created through the public API fired on time in its own session and workspace, wrote SUMMARY.md (stored as last_summary), then disabled itself |
 | 2026-09-06 | review | independent review (2 critical, 11 high, 17 medium, 14 low): all critical/high and most medium fixed; see daedalus-private notes; suite 32 green |
+| 2026-09-06 | 4 docker | compose stack up on the host: bot + local Bot API server + rebuilder; supervisor rebuild through its socket: fetch → preflight → restart, outcome recorded |
+| 2026-09-06 | 9 mini app | browser e2e (Playwright) on the production stack: settings edits, new session with exec, follow-up, files browser, all tabs |
+
