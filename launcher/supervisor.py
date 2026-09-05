@@ -207,6 +207,11 @@ class Supervisor:
             log(f"bot exited code={code} after {uptime:.0f}s")
             if not self.want_running:
                 break
+            if self.lock.locked():
+                # A rebuild or rollback stopped the child on purpose; it restarts the bot itself.
+                await self.restart_requested.wait()
+                self.restart_requested.clear()
+                continue
             if uptime > 120:
                 self.backoff = 2.0
             else:
