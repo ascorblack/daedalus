@@ -10,7 +10,7 @@ from daedalus.tools._common import error, ok, services_for
 
 
 @tool(
-    name="send_file",
+    name="SendFile",
     description=(
         "Send a file from the workspace (or any path) to the user in the current chat "
         "topic, with an optional caption. Use it for reports, archives, images and any "
@@ -29,7 +29,7 @@ async def send_file(context: ToolContext, path: str, caption: str | None = None)
 
 
 @tool(
-    name="spawn_task",
+    name="SpawnTask",
     description=(
         "Start a new, independent agent session (a new chat topic with its own workspace) "
         "for a separate task. Returns the new session id. Attach files by absolute path to "

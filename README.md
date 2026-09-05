@@ -25,6 +25,12 @@ core; the copy it runs on is [protocore-exp](https://github.com/ascorblack/proto
   alert you in chat; a daily cap is enforced by the supervisor.
 - **Any OpenAI-compatible model.** DeepSeek by default (thinking mode configurable), OpenRouter
   and self-hosted vLLM out of the box, with a fallback chain.
+- **Eyes on demand.** `ImageView` sends an image to a small vision model (OpenRouter,
+  `qwen/qwen3.7-flash` by default) and returns what the agent asked about it, so the main
+  model's context never carries raw pixels.
+- **MCP servers per session.** Configure servers under `[mcp.servers.<name>]`; every session
+  starts with them off. The agent enables one with `McpEnable`, you toggle them in the Mini
+  App; their tools appear as `Mcp_<Server>_<tool>`.
 
 ## Run it
 
@@ -79,7 +85,8 @@ uv run pytest -q                                 # tests
 daedalus/
   host/         sessions, engine wiring, prompts, skills store
   providers/    OpenAI-compatible adapter, fallback chain, registry
-  tools/        one tool per module (exec, read, write, edit, find, search, web, files, self_*, schedule_*)
+  tools/        one tool per module, PascalCase names: Exec, Read, Write, Edit, Find, Search, WebFetch,
+                WebSearch, ImageView, SendFile, SpawnTask, Self*, Schedule*, Mcp*
   stores/       SQLite stores, blob store, durable memory
   transport/    Telegram (aiogram 3)
   extensions/   self-development, scheduler, balance monitor, HTTP API
@@ -97,7 +104,21 @@ The agent's changes land through pull requests in this repository and in `protoc
 Secrets and machine facts live in `.env` (see `deploy/env.example`). Everything the operator
 may change at runtime lives in `config.toml` on the state volume and is edited through the bot
 commands and the Mini App: model and thinking, fallback chain, approval mode, spend limits,
-balance thresholds, scheduler behaviour, per-model pricing for cost estimates.
+balance thresholds, scheduler behaviour, per-model pricing for cost estimates, the vision model,
+and MCP servers:
+
+```toml
+[mcp.servers.filesystem]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/srv/workspaces"]
+description = "read and write files under the workspaces directory"
+
+[mcp.servers.remote]
+transport = "http"
+url = "https://example.com/mcp"
+headers = { Authorization = "Bearer ..." }
+```
 
 ## License
 

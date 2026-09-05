@@ -10,7 +10,7 @@ from daedalus.tools._common import error, ok, services_for
 
 
 @tool(
-    name="self_workspace",
+    name="SelfWorkspace",
     description=(
         "Create a git worktree for editing one of your own repositories ('bot' = this "
         "agent's host code, 'core' = the agent core library). Returns the directory to "
@@ -32,7 +32,7 @@ async def self_workspace(context: ToolContext, repo: str, branch: str) -> ToolRe
 
 
 @tool(
-    name="self_propose",
+    name="SelfPropose",
     description=(
         "Open a pull request from a worktree branch of one of your repositories ('bot' or "
         "'core'). Commit your work first and run the tests. The owner reviews the change in "
@@ -55,7 +55,7 @@ async def self_propose(
 
 
 @tool(
-    name="self_rebuild",
+    name="SelfRebuild",
     description=(
         "Ask the supervisor to pull the merged main branches, rebuild if the Dockerfile "
         "changed, run preflight checks and restart the agent. Active sessions are "
@@ -70,7 +70,7 @@ async def self_rebuild(context: ToolContext, reason: str) -> ToolResult:
 
 
 @tool(
-    name="self_rollback",
+    name="SelfRollback",
     description="Roll the agent back to a previous known-good revision (0 = the last one).",
 )
 async def self_rollback(context: ToolContext, steps_back: int = 0, reason: str = "") -> ToolResult:

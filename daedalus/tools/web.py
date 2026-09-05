@@ -31,7 +31,7 @@ def html_to_text(raw: str) -> str:
 
 
 @tool(
-    name="web_fetch",
+    name="WebFetch",
     description="Fetch a URL and return its content as plain text (HTML is converted).",
 )
 async def web_fetch(context: ToolContext, url: str, max_chars: int = 40000) -> ToolResult:
@@ -59,7 +59,7 @@ _RESULT_RE = re.compile(
 )
 
 
-@tool(name="web_search", description="Search the web and return the top results with snippets.")
+@tool(name="WebSearch", description="Search the web and return the top results with snippets.")
 async def web_search(context: ToolContext, query: str, limit: int = 8) -> ToolResult:
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, headers={"user-agent": _UA}) as client:

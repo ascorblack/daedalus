@@ -22,20 +22,23 @@ from protocore.runtime.events.types import EventType
 from daedalus.transport.telegram.markdown import DOCUMENT_THRESHOLD, split_message
 
 _TOOL_ICONS = {
-    "exec": "⚙️",
-    "read": "📖",
-    "write": "✏️",
-    "edit": "✏️",
-    "find": "🔎",
-    "search": "🔎",
-    "web_fetch": "🌐",
-    "web_search": "🌐",
-    "send_file": "📎",
+    "Exec": "⚙️",
+    "Read": "📖",
+    "Write": "✏️",
+    "Edit": "✏️",
+    "Find": "🔎",
+    "Search": "🔎",
+    "WebFetch": "🌐",
+    "WebSearch": "🌐",
+    "SendFile": "📎",
+    "ImageView": "🖼",
     "AskUser": "❓",
     "Remember": "🧠",
     "Recall": "🧠",
-    "self_propose": "🛠",
-    "self_rebuild": "🔄",
+    "SelfPropose": "🛠",
+    "SelfRebuild": "🔄",
+    "McpEnable": "🔌",
+    "McpDisable": "🔌",
 }
 
 
@@ -108,7 +111,7 @@ class RunRenderer:
             name = v.tool_names.get(str(p.get("tool_call_id")), "?")
             args = p.get("final_input") or {}
             v.tools.append(f"{_TOOL_ICONS.get(name, '•')} {name} {_args_summary(name, args)}")
-            if name in ("write", "edit") and args.get("path"):
+            if name in ("Write", "Edit") and args.get("path"):
                 v.changed_files.add(str(args["path"]))
             self._mark()
         elif t is EventType.TOOL_RESULT:
@@ -251,7 +254,7 @@ class RunRenderer:
 
 
 def _args_summary(name: str, args: dict[str, Any]) -> str:
-    if name == "exec":
+    if name == "Exec":
         return str(args.get("command", ""))[:120]
     for key in ("path", "pattern", "url", "query", "skill", "title", "name"):
         if key in args:

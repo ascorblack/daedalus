@@ -10,7 +10,7 @@ from daedalus.tools._common import error, ok, services_for
 
 
 @tool(
-    name="schedule_create",
+    name="ScheduleCreate",
     description=(
         "Create a scheduled task. Give either cron (5-field crontab expression, UTC) for a "
         "recurring task, or run_at (ISO 8601 datetime, UTC) for a one-shot. The prompt is "
@@ -50,7 +50,7 @@ async def schedule_create(
     return ok(context, f"scheduled {created['id']} '{name}', next run at {created.get('next_run_at')}", schedule_id=created["id"])
 
 
-@tool(name="schedule_list", description="List scheduled tasks with their next run time.")
+@tool(name="ScheduleList", description="List scheduled tasks with their next run time.")
 async def schedule_list(context: ToolContext) -> ToolResult:
     services = services_for(context)
     if services.schedule is None:
@@ -66,7 +66,7 @@ async def schedule_list(context: ToolContext) -> ToolResult:
     return ok(context, "\n".join(lines))
 
 
-@tool(name="schedule_delete", description="Delete a scheduled task by id.")
+@tool(name="ScheduleDelete", description="Delete a scheduled task by id.")
 async def schedule_delete(context: ToolContext, schedule_id: str) -> ToolResult:
     services = services_for(context)
     if services.schedule is None:

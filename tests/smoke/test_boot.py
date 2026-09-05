@@ -28,7 +28,7 @@ async def test_manager_starts_and_registers_tools(settings: Settings, db: Databa
     manager = SessionManager(settings, RuntimeConfig(), db=db)
     await manager.start()
     names = {t.name for t in manager.tools.list_all()}
-    for required in ("exec", "read", "write", "edit", "find", "search", "AskUser", "send_file", "self_propose", "schedule_create", "Skill"):
+    for required in ("Exec", "Read", "Write", "Edit", "Find", "Search", "AskUser", "SendFile", "SelfPropose", "ScheduleCreate", "Skill"):
         assert required in names
     skills = await manager.skills.list("daedalus")
     assert {s.name for s in skills} >= {"self-develop", "telegram-output", "scheduling"}

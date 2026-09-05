@@ -9,8 +9,7 @@ chain = [
     "deepseek",
     "openrouter",
 ]
-max_tokens = 8192
-temperature = 0.3
+context_window = 128000
 
 [providers.deepseek]
 kind = "deepseek"
@@ -42,13 +41,17 @@ timeout_seconds = 600.0
 
 [providers.vllm.pricing]
 
+[vision]
+provider = "openrouter"
+model = "qwen/qwen3.7-flash"
+
+[mcp.servers]
+
 [self_change]
 approval = "manual"
 auto_rebuild = true
 
 [limits]
-usd_per_day = 20.0
-tokens_per_task = 5000000
 max_iterations = 200
 tool_timeout_seconds = 900.0
 

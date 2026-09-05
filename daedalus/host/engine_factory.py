@@ -63,6 +63,7 @@ def build_engine(
     reasoning_effort: str | None = None,
     context_window: int = 128_000,
     extra_notes: str = "",
+    blocked_tools: set[str] | None = None,
 ) -> QueryEngine:
     primary_provider, primary_model = rungs[0]
     model = model_name or primary_model
@@ -90,7 +91,7 @@ def build_engine(
         root_run_id=run_id,
         model_name=model,
         system_prompt_sections=tuple(s for s in sections if s),
-        tool_visibility_policy=ToolVisibilityPolicy(pinned=set(all_tools)),
+        tool_visibility_policy=ToolVisibilityPolicy(pinned=set(all_tools) - set(blocked_tools or ()), blocked=set(blocked_tools or ())),
         rc=runtime_constants(config, context_window=context_window),
         thinking_enabled=config.model.thinking if thinking is None else thinking,
         reasoning_effort=reasoning_effort or config.model.reasoning_effort,

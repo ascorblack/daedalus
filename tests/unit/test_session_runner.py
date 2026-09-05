@@ -91,7 +91,7 @@ async def _wait_finished(manager: SessionManager) -> list[tuple[str, str, str]]:
 
 
 async def test_run_executes_tool_and_persists_history(settings: Settings, db: Database) -> None:
-    provider = ScriptedProvider([{"tool": "exec", "args": {"command": "echo hello-from-tool"}}, {"text": "done"}])
+    provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "echo hello-from-tool"}}, {"text": "done"}])
     manager = await _manager(settings, db, provider)
     events: list[TurnEvent] = []
 
@@ -115,7 +115,7 @@ async def test_run_executes_tool_and_persists_history(settings: Settings, db: Da
 
 
 async def test_follow_up_is_queued_while_running_and_placed_next_step(settings: Settings, db: Database) -> None:
-    provider = ScriptedProvider([{"tool": "exec", "args": {"command": "sleep 1"}}, {"text": "first done"}, {"text": "second"}])
+    provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "sleep 1"}}, {"text": "first done"}, {"text": "second"}])
     manager = await _manager(settings, db, provider)
     state = await manager.create_session("t")
     waiter = asyncio.create_task(_wait_finished(manager))
@@ -132,7 +132,7 @@ async def test_follow_up_is_queued_while_running_and_placed_next_step(settings: 
 
 
 async def test_shutdown_keeps_snapshot_and_resume_continues(settings: Settings, db: Database) -> None:
-    provider = ScriptedProvider([{"tool": "exec", "args": {"command": "sleep 5"}}, {"text": "after restart"}])
+    provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "sleep 5"}}, {"text": "after restart"}])
     manager = await _manager(settings, db, provider)
     state = await manager.create_session("t")
     await manager.submit(state.session.id, "long job")
@@ -143,7 +143,7 @@ async def test_shutdown_keeps_snapshot_and_resume_continues(settings: Settings, 
     unfinished = await manager.events.unfinished_snapshots()
     assert unfinished and unfinished[0]["session_id"] == state.session.id
 
-    provider2 = ScriptedProvider([{"tool": "exec", "args": {"command": "echo resumed"}}, {"text": "after restart"}])
+    provider2 = ScriptedProvider([{"tool": "Exec", "args": {"command": "echo resumed"}}, {"text": "after restart"}])
     manager2 = await _manager(settings, db, provider2)
     waiter = asyncio.create_task(_wait_finished(manager2))
     resumed = await manager2.resume_unfinished()

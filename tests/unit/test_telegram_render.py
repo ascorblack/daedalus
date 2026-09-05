@@ -38,7 +38,7 @@ async def test_renderer_sends_final_answer_and_freezes_status(tmp_path: Path) ->
     outbox = FakeOutbox()
     renderer = RunRenderer(outbox, RunView(run_id="r1", model="m"), edit_interval=0.0)
     await renderer.handle(_evt(EventType.MESSAGE_START))
-    await renderer.handle(_evt(EventType.TOOL_USE_START, tool_call_id="c1", tool_name="exec"))
+    await renderer.handle(_evt(EventType.TOOL_USE_START, tool_call_id="c1", tool_name="Exec"))
     await renderer.handle(_evt(EventType.TOOL_USE_STOP, tool_call_id="c1", final_input={"command": "ls"}))
     await renderer.handle(_evt(EventType.TOOL_RESULT, tool_call_id="c1", content="a\nb"))
     await renderer.handle(_evt(EventType.MESSAGE_STOP, stop_reason="tool_use", tokens_used={"total": 10}))
@@ -50,7 +50,7 @@ async def test_renderer_sends_final_answer_and_freezes_status(tmp_path: Path) ->
     finals = [t for t, md in outbox.sent if md]
     assert finals == ["All **done**"]
     status_texts = [t for t, md in outbox.sent if not md] + [t for _, t in outbox.edits]
-    assert any("exec ls" in t for t in status_texts)
+    assert any("Exec ls" in t for t in status_texts)
     assert outbox.edits[-1][1].startswith("✅ completed")
 
 

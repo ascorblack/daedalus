@@ -105,6 +105,29 @@ class ProviderConfig(BaseModel):
     Empty means the cost is reported as unknown; the usage itself is always recorded."""
 
 
+class VisionConfig(BaseModel):
+    """Model used by the ImageView tool (cheap, fast, image-capable)."""
+
+    provider: str = "openrouter"
+    model: str = "qwen/qwen3.7-flash"
+
+
+class McpServerConfig(BaseModel):
+    transport: Literal["stdio", "http"] = "stdio"
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    url: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+    description: str = ""
+    timeout_seconds: float = 120.0
+
+
+class McpConfig(BaseModel):
+    servers: dict[str, McpServerConfig] = Field(default_factory=dict)
+    """Configured servers; every session starts with all of them switched off."""
+
+
 class SelfChangeConfig(BaseModel):
     approval: ApprovalMode = "manual"
     auto_rebuild: bool = True
@@ -157,6 +180,8 @@ class RuntimeConfig(BaseModel):
             "vllm": ProviderConfig(kind="vllm", base_url="", default_model=""),
         }
     )
+    vision: VisionConfig = Field(default_factory=VisionConfig)
+    mcp: McpConfig = Field(default_factory=McpConfig)
     self_change: SelfChangeConfig = Field(default_factory=SelfChangeConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     balance: BalanceConfig = Field(default_factory=BalanceConfig)
@@ -186,6 +211,8 @@ __all__ = [
     "ApprovalMode",
     "BalanceConfig",
     "LimitsConfig",
+    "McpConfig",
+    "McpServerConfig",
     "ModelConfig",
     "ProviderConfig",
     "ReasoningEffort",
@@ -194,4 +221,5 @@ __all__ = [
     "SelfChangeConfig",
     "Settings",
     "TelegramConfig",
+    "VisionConfig",
 ]

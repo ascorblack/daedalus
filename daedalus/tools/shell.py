@@ -14,7 +14,7 @@ from daedalus.tools._common import clip, error, ok, services_for
 
 
 @tool(
-    name="exec",
+    name="Exec",
     description=(
         "Run a shell command with bash. The working directory defaults to the session "
         "workspace. Output (stdout and stderr, interleaved) is returned; very long output "

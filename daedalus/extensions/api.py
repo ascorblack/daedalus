@@ -84,6 +84,8 @@ class ScheduleBody(BaseModel):
 
 class SettingsBody(BaseModel):
     model: dict[str, Any] | None = None
+    vision: dict[str, Any] | None = None
+    mcp: dict[str, Any] | None = None
     self_change: dict[str, Any] | None = None
     limits: dict[str, Any] | None = None
     """Only max_iterations and tool_timeout_seconds; the spend cap is the supervisor's."""
@@ -260,6 +262,25 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             reasoning_effort=body.get("reasoning_effort"),
         )
         return {"ok": True}
+
+    # -- MCP per session --------------------------------------------------------------
+
+    @api.get("/api/sessions/{session_id}/mcp")
+    async def session_mcp(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        return {"enabled": manager.mcp_enabled(state), "servers": manager.mcp.status()}
+
+    @api.put("/api/sessions/{session_id}/mcp")
+    async def set_session_mcp(session_id: str, body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            enabled = await manager.set_mcp(session_id, str(body["server"]), bool(body.get("enabled", True)))
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return {"enabled": enabled, "servers": manager.mcp.status()}
 
     # -- workspace files ------------------------------------------------------------
 

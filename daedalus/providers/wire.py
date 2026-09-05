@@ -101,29 +101,31 @@ async def messages_to_wire(
                 entry["content"] = ""
             wire.append(entry)
             continue
-        # user
-        parts: list[dict[str, Any]] = []
-        has_image = False
+        # user: one text block; images ride in ``metadata["image_refs"]`` (the core allows a single block)
+        refs: list[tuple[str, str]] = []
+        texts: list[str] = []
         for block in message.content_blocks:
             if isinstance(block, TextBlock):
-                parts.append({"type": "text", "text": block.text})
+                texts.append(block.text)
             elif isinstance(block, ImageRefBlock):
-                if supports_images and image_loader is not None:
-                    data, mime = await image_loader(block.blob_ref)
-                    b64 = base64.b64encode(data).decode("ascii")
-                    parts.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime or block.mime_type};base64,{b64}"},
-                        }
-                    )
-                    has_image = True
-                else:
-                    parts.append({"type": "text", "text": f"[image attached: {block.blob_ref}]"})
+                refs.append((block.blob_ref, block.mime_type))
+        for ref in message.metadata.get("image_refs") or []:
+            if isinstance(ref, dict) and ref.get("ref"):
+                refs.append((str(ref["ref"]), str(ref.get("mime") or "image/png")))
+        content: list[dict[str, Any]] = [{"type": "text", "text": t} for t in texts]
+        has_image = False
+        for blob_ref, mime_hint in refs:
+            if supports_images and image_loader is not None:
+                data, mime = await image_loader(blob_ref)
+                b64 = base64.b64encode(data).decode("ascii")
+                content.append({"type": "image_url", "image_url": {"url": f"data:{mime or mime_hint};base64,{b64}"}})
+                has_image = True
+            else:
+                content.append({"type": "text", "text": f"[image attached: {blob_ref}]"})
         if has_image:
-            wire.append({"role": "user", "content": parts})
+            wire.append({"role": "user", "content": content})
         else:
-            wire.append({"role": "user", "content": "\n".join(p["text"] for p in parts)})
+            wire.append({"role": "user", "content": "\n".join(p["text"] for p in content)})
     return wire
 
 

@@ -13,8 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from protocore.contracts.tool_registry import ToolVisibilityPolicy
 from protocore.contracts.types import (
-    ImageRefBlock,
     Message,
     MessageRole,
     Run,
@@ -37,6 +37,7 @@ from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.engine_factory import TENANT, EngineDeps, build_engine
 from daedalus.host.services import SessionServices, locator
 from daedalus.host.skills import DirectorySkillStore
+from daedalus.mcp.manager import McpManager, blocked_for
 from daedalus.providers.chain import build_chain
 from daedalus.providers.registry import ProviderRegistry
 from daedalus.stores.blobs import FileBlobStore
@@ -117,6 +118,7 @@ class SessionManager:
         self.providers = ProviderRegistry(
             settings, config, usage_sink=self.usage, image_loader=self._load_image
         )
+        self.mcp = McpManager(config.mcp.servers, self.tools)
         self.governance_path = governance_path or (settings.bot_repo_dir / "GOVERNANCE.md")
         self._states: dict[str, SessionState] = {}
         self._sinks: list[EventSink] = []
@@ -137,6 +139,7 @@ class SessionManager:
         for tool in build_memory_tools(self.memory):
             self.tools.register(tool)
         self.tools.register(AskUserTool())
+        self.service_hooks.setdefault("mcp", self.mcp_service)
         locator.default = None
         logger.warning("tools registered: %s", ", ".join(sorted(t.name for t in self.tools.list_all())))
 
@@ -148,6 +151,7 @@ class SessionManager:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self.mcp.close()
         await self.providers.aclose()
 
     def budget_exceeded(self) -> str | None:
@@ -168,6 +172,65 @@ class SessionManager:
     def reload_config(self, config: RuntimeConfig) -> None:
         self.config = config
         self.providers.reload(config)
+        self.mcp.reload(config.mcp.servers)
+
+    def _vision(self) -> tuple[Any, str, FileBlobStore, str] | None:
+        try:
+            provider = self.providers.get(self.config.vision.provider)
+        except KeyError:
+            return None
+        return provider, self.config.vision.model, self.blobs, TENANT
+
+    # -- MCP per session --------------------------------------------------------------
+
+    def mcp_enabled(self, state: SessionState) -> list[str]:
+        return [s for s in state.metadata.get("mcp_enabled", []) if s in self.mcp.available()]
+
+    async def set_mcp(self, session_id: str, server: str, enabled: bool) -> list[str]:
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        current = self.mcp_enabled(state)
+        if enabled:
+            await self.mcp.ensure(server)
+            if server not in current:
+                current.append(server)
+        else:
+            current = [s for s in current if s != server]
+        state.metadata["mcp_enabled"] = current
+        state.session.metadata["mcp_enabled"] = current
+        await self.sessions.update_metadata(session_id, state.session.metadata)
+        if state.engine is not None:
+            blocked = blocked_for(self.mcp, current)
+            from dataclasses import replace
+
+            state.engine.config = replace(
+                state.engine.config,
+                tool_visibility_policy=ToolVisibilityPolicy(
+                    pinned={t.name for t in self.tools.list_all()} - blocked, blocked=blocked
+                ),
+            )
+        return current
+
+    async def mcp_service(self, op: str, *, session_id: str, server: str | None = None) -> str:
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        if op == "list":
+            enabled = set(self.mcp_enabled(state))
+            lines = []
+            for item in self.mcp.status():
+                mark = "on " if item["name"] in enabled else "off"
+                tools = ", ".join(item["tools"]) if item["tools"] else ("connected, no tools" if item["connected"] else "not connected yet")
+                err = f" (error: {item['error']})" if item["error"] else ""
+                lines.append(f"[{mark}] {item['name']} — {item['description'] or 'no description'}: {tools}{err}")
+            return "\n".join(lines) or "no MCP servers are configured"
+        assert server is not None
+        current = await self.set_mcp(session_id, server, enabled=(op == "enable"))
+        if op == "enable":
+            names = sorted(self.mcp.tool_names(server))
+            return f"enabled {server}; tools available from your next step: {', '.join(names) or '(none)'}"
+        return f"disabled {server}; enabled now: {', '.join(current) or 'none'}"
 
     async def _load_image(self, ref: str) -> tuple[bytes, str]:
         data = await self.blobs.get(TENANT, ref)
@@ -256,7 +319,7 @@ class SessionManager:
             self_rebuild=hooks.get("self_rebuild"),
             self_rollback=hooks.get("self_rollback"),
             progress=_bind(hooks.get("progress"), state.session.id),
-            extra={"skill_store": self.skills, "manager": self},
+            extra={"skill_store": self.skills, "manager": self, "vision": self._vision()},
         )
         state.services = services
         locator.register(services)
@@ -296,9 +359,11 @@ class SessionManager:
             kind = "steer" if steer else "follow_up"
             await self.live.enqueue(session_id, kind, new_queued_prompt(kind, body).to_dict())  # type: ignore[arg-type]
             return state.run_id or ""
-        blocks: list[Any] = [TextBlock(text=body)]
-        blocks.extend(ImageRefBlock(blob_ref=ref, mime_type=mime) for ref, mime in image_refs)
-        message = Message(role=MessageRole.user, content_blocks=blocks)
+        message = Message(
+            role=MessageRole.user,
+            content_blocks=[TextBlock(text=body)],
+            metadata={"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {},
+        )
         return await self._start_run(state, message)
 
     async def _ingest_attachments(
@@ -409,6 +474,7 @@ class SessionManager:
             reasoning_effort=overrides.get("reasoning_effort"),
             context_window=state.context_window,
             extra_notes=state.extra_notes,
+            blocked_tools=blocked_for(self.mcp, self.mcp_enabled(state)),
         )
         self._attach_hooks(engine, state)
         return engine

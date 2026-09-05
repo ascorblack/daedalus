@@ -215,7 +215,7 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
         async def cmd_schedules(message, command) -> None:  # type: ignore[no-untyped-def]
             items = await scheduler.list()
             if not items:
-                await message.answer("No scheduled tasks. The agent creates them with schedule_create.")
+                await message.answer("No scheduled tasks. The agent creates them with ScheduleCreate.")
                 return
             lines = [
                 f"{'✓' if s['enabled'] else '✗'} {s['id']} {s['name']} — {('cron ' + s['cron']) if s['cron'] else 'once'} · next {s['next_run_at'] or '-'}"

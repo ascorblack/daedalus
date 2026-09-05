@@ -9,6 +9,7 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
   const [live, setLive] = useState<LiveState>({ text: "", thinking: "", tool: null, tools: [] });
   const [draft, setDraft] = useState("");
   const [showFiles, setShowFiles] = useState(false);
+  const [showMcp, setShowMcp] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -121,12 +122,17 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
             stop
           </button>
         )}
-        <button className="btn small" onClick={() => setShowFiles((v) => !v)}>
+        <button className="btn small" onClick={() => { setShowMcp(false); setShowFiles((v) => !v); }}>
           {showFiles ? "chat" : "files"}
+        </button>
+        <button className="btn small" onClick={() => { setShowFiles(false); setShowMcp((v) => !v); }}>
+          {showMcp ? "chat" : "mcp"}
         </button>
       </div>
       <div className="screen">
-        {showFiles && detail ? (
+        {showMcp && detail ? (
+          <McpPanel sessionId={id} toast={toast} />
+        ) : showFiles && detail ? (
           <Files sessionId={id} />
         ) : (
           <div className="timeline">
@@ -143,7 +149,7 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
             <div ref={bottom} />
           </div>
         )}
-        {!showFiles && (
+        {!showFiles && !showMcp && (
           <div className="composer">
             <textarea
               value={draft}
@@ -271,6 +277,53 @@ function Files({ sessionId }: { sessionId: string }) {
         ))}
       {data.kind === "file" && <pre className="diff">{data.content}</pre>}
       {data.kind === "binary" && <div className="empty">binary file, {fmtInt(data.size)} bytes</div>}
+    </>
+  );
+}
+
+
+type McpServer = { name: string; description: string; connected: boolean; error: string | null; tools: string[] };
+
+function McpPanel({ sessionId, toast }: { sessionId: string; toast: (t: string) => void }) {
+  const [data, setData] = useState<{ enabled: string[]; servers: McpServer[] } | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const load = useCallback(() => {
+    api.get<{ enabled: string[]; servers: McpServer[] }>(`/api/sessions/${sessionId}/mcp`).then(setData).catch((e) => toast((e as Error).message));
+  }, [sessionId, toast]);
+  useEffect(load, [load]);
+  async function toggle(server: string, enabled: boolean) {
+    setBusy(server);
+    try {
+      setData(await api.put(`/api/sessions/${sessionId}/mcp`, { server, enabled }));
+      toast(`${server}: ${enabled ? "enabled" : "disabled"}`);
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+  if (!data) return <div className="empty">…</div>;
+  if (data.servers.length === 0) return <div className="empty">No MCP servers configured. Add them under [mcp.servers.&lt;name&gt;] in config.toml.</div>;
+  return (
+    <>
+      <div className="sub" style={{ marginBottom: 8 }}>MCP servers for this session (off by default; the agent can toggle them too)</div>
+      {data.servers.map((s) => {
+        const on = data.enabled.includes(s.name);
+        return (
+          <div key={s.name} className="card">
+            <div className="row">
+              <div className="grow">
+                <div className="title">{s.name}</div>
+                <div className="sub">{s.description || "no description"}{s.error && ` · error: ${s.error}`}</div>
+                {s.tools.length > 0 && <div className="sub">{s.tools.join(", ")}</div>}
+              </div>
+              <button className={`btn small ${on ? "primary" : ""}`} disabled={busy === s.name} onClick={() => toggle(s.name, !on)}>
+                {on ? "on" : "off"}
+              </button>
+            </div>
+          </div>
+        );
+      })}
     </>
   );
 }

@@ -17,7 +17,7 @@ _MAX_LINE_CHARS = 2000
 
 
 @tool(
-    name="read",
+    name="Read",
     description=(
         "Read a text file. Returns numbered lines. Use offset (1-based line) and limit to page "
         "through large files. Relative paths resolve against the session workspace."
@@ -51,7 +51,7 @@ async def read_file(
 
 
 @tool(
-    name="write",
+    name="Write",
     description="Create or overwrite a text file with the given content. Parent directories are created.",
 )
 async def write_file(context: ToolContext, path: str, content: str) -> ToolResult:
@@ -65,7 +65,7 @@ async def write_file(context: ToolContext, path: str, content: str) -> ToolResul
 
 
 @tool(
-    name="edit",
+    name="Edit",
     description=(
         "Replace an exact substring in a text file. old_string must match exactly once unless "
         "replace_all is true. Preserve indentation precisely."
@@ -92,7 +92,7 @@ async def edit_file(
 
 
 @tool(
-    name="find",
+    name="Find",
     description="Find files by glob pattern (e.g. '**/*.py') under a directory (default: workspace).",
 )
 async def find_files(
@@ -117,7 +117,7 @@ async def find_files(
 
 
 @tool(
-    name="search",
+    name="Search",
     description=(
         "Search file contents with ripgrep (regex). Returns 'path:line: text' lines. "
         "Use glob to restrict file types, e.g. '*.py'."
