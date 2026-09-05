@@ -286,6 +286,12 @@ class SessionManager:
         exceeded = self.budget_exceeded()
         if exceeded and not state.running:
             raise RuntimeError(f"daily budget exceeded ({exceeded}); runs resume tomorrow or after /budget reset")
+        if state.running and state.engine is not None and state.engine.is_terminal and state.task is not None:
+            # The loop has settled and the task is only doing bookkeeping: let it finish and start a new turn.
+            try:
+                await asyncio.shield(state.task)
+            except Exception:  # noqa: BLE001
+                pass
         if state.running:
             kind = "steer" if steer else "follow_up"
             await self.live.enqueue(session_id, kind, new_queued_prompt(kind, body).to_dict())  # type: ignore[arg-type]
@@ -503,6 +509,19 @@ class SessionManager:
                     await callback(session_id, run_id, status)
                 except Exception:  # noqa: BLE001
                     logger.exception("run-finished callback failed")
+            if status == "completed":
+                await self._drain_leftover_follow_ups(state)
+
+    async def _drain_leftover_follow_ups(self, state: SessionState) -> None:
+        """Input that arrived while the run was settling starts the next turn instead of rotting in the queue."""
+        queued = await self.live.load(state.session.id)
+        texts = [str(item.get("text") or "").strip() for item in queued["follow_up"] + queued["steer"]]
+        texts = [t for t in texts if t]
+        if not texts:
+            return
+        await self.live.save_queues(state.session.id, [], [])
+        message = Message(role=MessageRole.user, content_blocks=[TextBlock(text="\n\n".join(texts))])
+        await self._start_run(state, message)
 
     async def _dispatch_event(self, state: SessionState, event: TurnEvent) -> None:
         if event.type is EventType.TOOL_CALL_PENDING and event.payload.get("kind") == "ask_user":

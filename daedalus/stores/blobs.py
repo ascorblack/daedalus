@@ -38,6 +38,7 @@ class FileBlobStore(IBlobStore):
             data_path.write_bytes(content)
         meta = BlobMetadata(
             ref=ref,
+            sha256=ref,
             tenant_id=tenant_id,
             content_type=content_type,
             size_bytes=len(content),
