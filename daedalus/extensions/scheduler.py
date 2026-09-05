@@ -14,8 +14,6 @@ from typing import TYPE_CHECKING, Any
 from croniter import croniter
 from protocore.contracts.types import MessageRole, TextBlock
 
-from daedalus.host.session_runner import Attachment
-
 if TYPE_CHECKING:
     from daedalus.app import Application
 
@@ -55,9 +53,10 @@ class Scheduler:
             next_run = croniter(cron, _now()).get_next(datetime)
             recurring = 1
         else:
-            assert run_at
+            if not run_at:
+                raise ValueError("give either cron or run_at")
             try:
-                next_run = datetime.fromisoformat(run_at)
+                next_run = datetime.fromisoformat(run_at.replace("Z", "+00:00"))
             except ValueError as exc:
                 raise ValueError(f"invalid run_at: {run_at!r} (use ISO 8601)") from exc
             if next_run.tzinfo is None:
@@ -163,20 +162,24 @@ class Scheduler:
         prompt += "\n\nWhen finished, write SUMMARY.md in the workspace root describing what was done and anything the next run should know."
         self._active[schedule["id"]] = state.session.id
         await self.app.db.execute("UPDATE schedules SET last_run_at = ? WHERE id = ?", (_now().isoformat(), schedule["id"]))
-        await manager.submit(state.session.id, prompt, [Attachment(path=Path(f)) for f in files if Path(f).is_file() and Path(f).parent == workspace / "inbox"][:0])
+        # The next occurrence is fixed before dispatch so a restart cannot fire the same slot twice.
+        await self._advance(schedule, ran=True)
+        # Attached files already live in the task workspace inbox; the prompt lists their paths.
+        await manager.submit(state.session.id, prompt, [])
         return state.session.id
 
     async def on_run_finished(self, session_id: str, run_id: str, status: str) -> None:
         for schedule_id, sid in list(self._active.items()):
-            if sid != session_id or status == "awaiting":
+            if sid != session_id:
                 continue
+            if status == "awaiting":
+                continue  # the operator still has to answer; the summary is collected when the run ends
             self._active.pop(schedule_id, None)
             row = await self.app.db.fetchone("SELECT * FROM schedules WHERE id = ?", (schedule_id,))
             if row is None:
                 continue
             summary = await self._collect_summary(dict(row), session_id)
             await self.app.db.execute("UPDATE schedules SET last_summary = ? WHERE id = ?", (summary, schedule_id))
-            await self._advance(dict(row), ran=True)
 
     async def _collect_summary(self, schedule: dict[str, Any], session_id: str) -> str:
         summary_file = Path(schedule["workspace"]) / "SUMMARY.md"

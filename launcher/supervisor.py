@@ -35,12 +35,14 @@ STATE = Path(os.environ.get("DAEDALUS_STATE", "/srv/state"))
 WORKSPACES = Path(os.environ.get("DAEDALUS_WORKSPACES", "/srv/workspaces"))
 SOCKET = Path(os.environ.get("DAEDALUS_SUPERVISOR_SOCKET", "/run/daedalus/supervisor.sock"))
 BOT_CMD = os.environ.get("DAEDALUS_BOT_CMD", "uv run --frozen python -m daedalus serve")
-COMPOSE_FILE = os.environ.get("DAEDALUS_COMPOSE_FILE", "")
-COMPOSE_PROJECT_DIR = os.environ.get("DAEDALUS_COMPOSE_PROJECT_DIR", "")
-COMPOSE_SERVICE = os.environ.get("DAEDALUS_COMPOSE_SERVICE", "daedalus")
+REBUILD_TRIGGER_DIR = Path(os.environ.get("DAEDALUS_REBUILD_TRIGGER_DIR", "/run/daedalus-rebuild"))
+"""Shared with the rebuilder sidecar (the only container that holds the docker socket)."""
+USD_PER_DAY = float(os.environ.get("USD_PER_DAY", "0") or 0)
+"""Daily spend cap, from the supervisor's own environment — never from a file the bot can edit."""
 GOOD_DIR = STATE / "good"
 HISTORY = GOOD_DIR / "history.json"
 FAILED = GOOD_DIR / "FAILED"
+LAST_REBUILD = GOOD_DIR / "LAST_REBUILD"
 LIMIT_FLAG = STATE / "BUDGET_EXCEEDED"
 LOG = STATE / "supervisor.log"
 
@@ -142,6 +144,7 @@ class Supervisor:
         self.backoff = 2.0
         self.lock = asyncio.Lock()
         self.last_result = "startup"
+        self.health_task: asyncio.Task[None] | None = None
 
     # -- child lifecycle ------------------------------------------------------------
 
@@ -169,10 +172,18 @@ class Supervisor:
                 pass
             await child.wait()
 
+    async def _record_good_when_healthy(self, child: asyncio.subprocess.Process) -> None:
+        await asyncio.sleep(120)
+        if child.returncode is None:
+            record_good()
+
     async def run_loop(self) -> None:
         while self.want_running:
             await self.start_child()
             assert self.child is not None
+            if self.health_task is not None:
+                self.health_task.cancel()
+            self.health_task = asyncio.create_task(self._record_good_when_healthy(self.child))
             started = time.monotonic()
             waiter = asyncio.create_task(self.child.wait())
             restart = asyncio.create_task(self.restart_requested.wait())
@@ -190,7 +201,6 @@ class Supervisor:
                 break
             if uptime > 120:
                 self.backoff = 2.0
-                record_good()
             else:
                 self.backoff = min(self.backoff * 2, 120.0)
             await asyncio.sleep(self.backoff)
@@ -198,35 +208,53 @@ class Supervisor:
     # -- operations -----------------------------------------------------------------
 
     async def rebuild(self, reason: str) -> str:
+        """Acknowledge at once; the work runs in the background and reports through LAST_REBUILD."""
+        if self.lock.locked():
+            return "a rebuild or rollback is already in progress"
+        asyncio.create_task(self._rebuild(reason))
+        return "rebuild started: the bot stops, main is pulled and preflighted, then it restarts (rolled back on failure)"
+
+    async def _rebuild(self, reason: str) -> None:
         async with self.lock:
             log(f"rebuild requested: {reason}")
             previous = {"bot": head(BOT_REPO), "core": head(CORE_REPO)}
-            for repo in (BOT_REPO, CORE_REPO):
-                code, out = git(repo, "fetch", "--prune", "origin")
-                if code != 0:
-                    return f"fetch failed in {repo}: {out[-500:]}"
-                code, out = git(repo, "reset", "--hard", "origin/main")
-                if code != 0:
-                    return f"checkout failed in {repo}: {out[-500:]}"
-            changed = self._changed_files(previous["bot"], head(BOT_REPO))
-            if any(path in changed for path in REBUILD_TRIGGER_FILES):
-                message = self._rebuild_image()
-                if message is not None:
-                    return message
-            ok, transcript = await asyncio.to_thread(preflight, BOT_REPO)
-            if not ok:
-                log("preflight failed; rolling back")
-                self._checkout(previous["bot"], previous["core"])
-                FAILED.parent.mkdir(parents=True, exist_ok=True)
-                FAILED.write_text(
-                    f"rebuild ({reason}) failed preflight at {datetime.now(UTC).isoformat()}\n"
-                    f"target bot={head(BOT_REPO)[:10]} rolled back to {previous['bot'][:10]}\n\n{transcript[-6000:]}"
-                )
+            await self.stop_child()
+            outcome = "unknown"
+            try:
+                for repo in (BOT_REPO, CORE_REPO):
+                    code, out = git(repo, "fetch", "--prune", "origin")
+                    if code != 0:
+                        outcome = f"fetch failed in {repo}: {out[-500:]}"
+                        return
+                    code, out = git(repo, "reset", "--hard", "origin/main")
+                    if code != 0:
+                        outcome = f"checkout failed in {repo}: {out[-500:]}"
+                        self._checkout(previous["bot"], previous["core"])
+                        return
+                changed = self._changed_files(previous["bot"], head(BOT_REPO))
+                if any(path in changed for path in REBUILD_TRIGGER_FILES):
+                    if self._request_image_rebuild():
+                        outcome = "image rebuild requested; the container will be replaced by the rebuilder"
+                        return
+                    log("image rebuild needed but no rebuilder is configured; continuing in place")
+                ok, transcript = await asyncio.to_thread(preflight, BOT_REPO)
+                if not ok:
+                    log("preflight failed; rolling back")
+                    self._checkout(previous["bot"], previous["core"])
+                    FAILED.parent.mkdir(parents=True, exist_ok=True)
+                    FAILED.write_text(
+                        f"rebuild ({reason}) failed preflight at {datetime.now(UTC).isoformat()}\n"
+                        f"rolled back to bot={previous['bot'][:10]} core={previous['core'][:10]}\n\n{transcript[-6000:]}"
+                    )
+                    outcome = "preflight failed; rolled back"
+                    return
+                FAILED.unlink(missing_ok=True)
+                outcome = f"rebuilt: bot {previous['bot'][:10]}→{head(BOT_REPO)[:10]}, core {previous['core'][:10]}→{head(CORE_REPO)[:10]}"
+            finally:
+                log(f"rebuild outcome: {outcome}")
+                LAST_REBUILD.parent.mkdir(parents=True, exist_ok=True)
+                LAST_REBUILD.write_text(f"{datetime.now(UTC).isoformat()} {reason}: {outcome}\n")
                 self.restart_requested.set()
-                return "preflight failed; rolled back to the previous revision (details posted on restart)"
-            FAILED.unlink(missing_ok=True)
-            self.restart_requested.set()
-            return f"rebuilt: bot {previous['bot'][:10]}→{head(BOT_REPO)[:10]}, core {previous['core'][:10]}→{head(CORE_REPO)[:10]}; restarting"
 
     def _changed_files(self, old: str, new: str) -> set[str]:
         if old == new or "unknown" in (old, new):
@@ -234,40 +262,28 @@ class Supervisor:
         code, out = git(BOT_REPO, "diff", "--name-only", old, new)
         return set(out.split()) if code == 0 else set(REBUILD_TRIGGER_FILES)
 
-    def _rebuild_image(self) -> str | None:
-        """Ask the Docker daemon to rebuild and replace this container.
-
-        The work runs in a throw-away helper container so it survives this one
-        being replaced half-way through.
-        """
-        if not COMPOSE_FILE or not shutil.which("docker"):
-            log("image rebuild needed but docker/compose is not configured; continuing in place")
-            return None
-        cmd = [
-            "docker", "run", "-d", "--rm",
-            "-v", "/var/run/docker.sock:/var/run/docker.sock",
-            "-v", f"{COMPOSE_PROJECT_DIR}:{COMPOSE_PROJECT_DIR}",
-            "-w", COMPOSE_PROJECT_DIR,
-            "docker:cli",
-            "sh", "-c",
-            f"docker compose -f {COMPOSE_FILE} up -d --build {COMPOSE_SERVICE}",
-        ]
-        code, out = run(cmd, timeout=120)
-        if code != 0:
-            return f"could not start the image rebuild helper: {out[-500:]}"
-        log("image rebuild helper started; this container will be replaced")
-        return "image rebuild started; the container will be replaced when the build finishes"
+    def _request_image_rebuild(self) -> bool:
+        """Hand the image rebuild to the rebuilder sidecar through the shared trigger directory."""
+        if not REBUILD_TRIGGER_DIR.is_dir():
+            return False
+        (REBUILD_TRIGGER_DIR / "rebuild").write_text(datetime.now(UTC).isoformat() + "\n")
+        log("image rebuild requested from the rebuilder sidecar; this container will be replaced")
+        return True
 
     def _checkout(self, bot_sha: str, core_sha: str) -> None:
         git(BOT_REPO, "reset", "--hard", bot_sha)
         git(CORE_REPO, "reset", "--hard", core_sha)
 
     async def rollback(self, steps_back: int) -> str:
+        if self.lock.locked():
+            return "a rebuild or rollback is already in progress"
         async with self.lock:
+            await self.stop_child()
             history = load_history()
             current = {"bot": head(BOT_REPO), "core": head(CORE_REPO)}
             candidates = [h for h in history if h["bot"] != current["bot"] or h["core"] != current["core"]]
             if not candidates:
+                self.restart_requested.set()
                 return "no earlier known-good revision recorded"
             index = max(0, len(candidates) - 1 - steps_back)
             target = candidates[index]
@@ -275,6 +291,7 @@ class Supervisor:
             ok, transcript = await asyncio.to_thread(preflight, BOT_REPO)
             if not ok:
                 self._checkout(current["bot"], current["core"])
+                self.restart_requested.set()
                 return f"rollback target failed preflight; staying on the current revision\n{transcript[-800:]}"
             self.restart_requested.set()
             return f"rolled back to bot={target['bot'][:10]} core={target['core'][:10]} (from {target['at']}); restarting"
@@ -286,7 +303,7 @@ class Supervisor:
                 os.killpg(child.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        run(["pkill", "-9", "-u", str(os.getuid()), "-f", "daedalus"], timeout=10)
+        run(["pkill", "-9", "-f", "python[0-9.]* -m daedalus"], timeout=10)
         log("PANIC: process tree killed")
         return "killed everything; the bot restarts in a few seconds"
 
@@ -298,6 +315,8 @@ class Supervisor:
             "child_running": bool(self.child and self.child.returncode is None),
             "known_good": load_history()[-3:],
             "failed": FAILED.read_text()[:2000] if FAILED.exists() else None,
+            "last_rebuild": LAST_REBUILD.read_text()[-500:] if LAST_REBUILD.exists() else None,
+            "usd_per_day": USD_PER_DAY,
             "budget_exceeded": LIMIT_FLAG.exists(),
         }
 
@@ -340,32 +359,20 @@ class Supervisor:
 
     async def budget_loop(self) -> None:
         db_path = STATE / "daedalus.sqlite"
-        config_path = STATE / "config.toml"
         while True:
             await asyncio.sleep(60)
             try:
-                cap = _read_daily_cap(config_path)
+                cap = USD_PER_DAY
                 if cap <= 0 or not db_path.exists():
                     continue
                 spent = _spent_today(db_path)
                 if spent > cap and not LIMIT_FLAG.exists():
                     LIMIT_FLAG.write_text(f"{spent:.4f} > {cap:.2f} at {datetime.now(UTC).isoformat()}\n")
-                    log(f"daily budget exceeded: ${spent:.4f} > ${cap:.2f}; restarting bot in read-only mode")
-                    self.restart_requested.set()
+                    log(f"daily budget exceeded: ${spent:.4f} > ${cap:.2f}; new runs are refused by the bot")
                 elif spent <= cap and LIMIT_FLAG.exists():
                     LIMIT_FLAG.unlink()
             except Exception as exc:  # noqa: BLE001
                 log(f"budget check failed: {exc}")
-
-
-def _read_daily_cap(config_path: Path) -> float:
-    if not config_path.exists():
-        return 0.0
-    import tomllib
-
-    with config_path.open("rb") as fh:
-        data = tomllib.load(fh)
-    return float((data.get("limits") or {}).get("usd_per_day") or 0.0)
 
 
 def _spent_today(db_path: Path) -> float:

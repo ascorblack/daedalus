@@ -177,3 +177,31 @@ async def test_ask_user_pause_and_answer(settings: Settings, db: Database, answe
     tool_msg = [m for m in provider.requests[-1].messages if m.role is MessageRole.tool][-1]
     assert "Blue" in tool_msg.content_blocks[0].content  # type: ignore[union-attr]
     await manager.close()
+
+
+async def test_waiting_session_survives_restart(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider(
+        [{"tool": "AskUser", "args": {"questions": [{"question": "Go?", "options": [{"label": "Yes"}]}]}}, {"text": "went"}]
+    )
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("t")
+    waiter = asyncio.create_task(_wait_finished(manager))
+    await manager.submit(state.session.id, "ask")
+    assert (await waiter)[0][2] == "awaiting"
+    await manager.close()
+
+    manager2 = await _manager(settings, db, ScriptedProvider([{"text": "went"}]))
+    restored: list[str] = []
+
+    async def on_restored(session_id: str, pending) -> None:  # type: ignore[no-untyped-def]
+        restored.append(session_id)
+
+    manager2.on_pending_restored(on_restored)
+    assert await manager2.resume_unfinished() == []
+    assert restored == [state.session.id]
+    state2 = await manager2.get_state(state.session.id)
+    assert state2 is not None and state2.pending is not None
+    waiter2 = asyncio.create_task(_wait_finished(manager2))
+    await manager2.answer(state.session.id, [{"selected": ["Yes"]}])
+    assert (await waiter2)[-1][2] == "completed"
+    await manager2.close()

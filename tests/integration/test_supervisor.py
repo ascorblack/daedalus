@@ -78,8 +78,9 @@ async def test_rebuild_applies_good_commit_and_rolls_back_bad_one(scratch: dict[
     _git("add", "-A", cwd=work)
     _git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "good change", cwd=work)
     _git("push", "-q", "origin", "HEAD:main", cwd=work)
-    result = await supervisor.rebuild("good change")
-    assert result.startswith("rebuilt"), result
+    await supervisor._rebuild("good change")
+    result = sup.LAST_REBUILD.read_text()
+    assert "rebuilt:" in result, result
     assert supervisor.restart_requested.is_set()
     assert sup.head(scratch["bot"]) != base
     good_sha = sup.head(scratch["bot"])
@@ -91,7 +92,8 @@ async def test_rebuild_applies_good_commit_and_rolls_back_bad_one(scratch: dict[
     _git("add", "-A", cwd=work)
     _git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "broken", cwd=work)
     _git("push", "-q", "origin", "HEAD:main", cwd=work)
-    result = await supervisor.rebuild("broken change")
+    await supervisor._rebuild("broken change")
+    result = sup.LAST_REBUILD.read_text()
     assert "preflight failed" in result, result
     assert sup.head(scratch["bot"]) == good_sha
     assert sup.FAILED.exists() and "compileall" in sup.FAILED.read_text()

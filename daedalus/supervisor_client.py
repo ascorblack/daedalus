@@ -12,7 +12,7 @@ class SupervisorUnavailable(RuntimeError):
     pass
 
 
-async def call(socket_path: Path, op: str, **params: Any) -> Any:
+async def call(socket_path: Path, op: str, *, timeout: float = 120.0, **params: Any) -> Any:
     if not socket_path.exists():
         raise SupervisorUnavailable(f"supervisor socket {socket_path} does not exist")
     try:
@@ -21,7 +21,11 @@ async def call(socket_path: Path, op: str, **params: Any) -> Any:
         raise SupervisorUnavailable(str(exc)) from exc
     writer.write((json.dumps({"op": op, **params}) + "\n").encode("utf-8"))
     await writer.drain()
-    raw = await reader.readline()
+    try:
+        raw = await asyncio.wait_for(reader.readline(), timeout=timeout)
+    except TimeoutError as exc:
+        writer.close()
+        raise RuntimeError(f"supervisor did not answer within {timeout:.0f}s") from exc
     writer.close()
     response = json.loads(raw.decode("utf-8") or "{}")
     if not response.get("ok"):

@@ -43,6 +43,7 @@ class ProviderRegistry:
         self._usage_sink = usage_sink
         self._image_loader = image_loader
         self._providers: dict[str, OpenAICompatibleProvider] = {}
+        self._retired: list[OpenAICompatibleProvider] = []
         self.reload(config)
 
     def reload(self, config: RuntimeConfig) -> None:
@@ -55,6 +56,8 @@ class ProviderRegistry:
             if existing is not None and existing.endpoint == endpoint:
                 fresh[provider_id] = existing
                 continue
+            if existing is not None:
+                self._retired.append(existing)
             fresh[provider_id] = OpenAICompatibleProvider(
                 endpoint,
                 client=httpx.AsyncClient(
@@ -63,7 +66,14 @@ class ProviderRegistry:
                 usage_sink=self._usage_sink,
                 image_loader=self._image_loader,
             )
+        self._retired.extend(p for pid, p in self._providers.items() if pid not in fresh)
         self._providers = fresh
+
+    async def close_retired(self) -> None:
+        """Close adapters replaced by :meth:`reload` (their in-flight requests keep their client alive)."""
+        retired, self._retired = self._retired, []
+        for provider in retired:
+            await provider.aclose()
 
     def _endpoint(self, provider_id: str, pc: ProviderConfig) -> ProviderEndpoint | None:
         api_key = ""
@@ -126,6 +136,7 @@ class ProviderRegistry:
         return rungs
 
     async def aclose(self) -> None:
+        await self.close_retired()
         for provider in self._providers.values():
             await provider.aclose()
 

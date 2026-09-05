@@ -280,6 +280,8 @@ class OpenAICompatibleProvider(ILLMProvider):
             forced = extra.get("forced_tool_choice")
             if forced:
                 body["tool_choice"] = {"type": "function", "function": {"name": forced}}
+            elif isinstance(extra.get("tool_choice"), dict):
+                body["tool_choice"] = extra["tool_choice"]
         thinking = bool(extra.get("enable_thinking", False))
         effort = str(extra.get("reasoning_effort") or "medium")
         self._apply_thinking(body, thinking=thinking, effort=effort)

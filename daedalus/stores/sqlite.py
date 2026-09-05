@@ -84,11 +84,12 @@ class SqliteSessionStore(ISessionStore):
         await self._db.execute("UPDATE sessions SET title = ? WHERE id = ?", (title, session_id))
 
     async def replace_messages(self, session_id: str, tenant_id: str, messages: Sequence[Message]) -> None:
-        await self._db.execute("DELETE FROM session_messages WHERE session_id = ?", (session_id,))
-        await self._db.executemany(
-            "INSERT INTO session_messages(session_id, tenant_id, message) VALUES (?, ?, ?)",
-            [(session_id, tenant_id, m.model_dump_json()) for m in messages],
-        )
+        rows = [(session_id, tenant_id, m.model_dump_json()) for m in messages]
+        async with self._db.transaction() as conn:
+            await conn.execute("DELETE FROM session_messages WHERE session_id = ?", (session_id,))
+            await conn.executemany(
+                "INSERT INTO session_messages(session_id, tenant_id, message) VALUES (?, ?, ?)", rows
+            )
 
 
 def _row_to_session(row: Any) -> Session:
@@ -244,7 +245,9 @@ class SqliteEventStream(IEventStream):
                     return
                 yield event
         finally:
-            self._subscribers.get(run_id, []).remove(queue)
+            subscribers = self._subscribers.get(run_id, [])
+            if queue in subscribers:
+                subscribers.remove(queue)
 
     async def trim(self, run_id: str, tenant_id: str, *, max_len: int) -> None:
         await self._db.execute(
@@ -275,7 +278,7 @@ class SqliteEventStream(IEventStream):
     async def unfinished_snapshots(self) -> list[dict[str, Any]]:
         rows = await self._db.fetchall(
             "SELECT run_id, session_id, state, snapshot FROM snapshots"
-            " WHERE state IN ('running', 'compacting', 'pending')"
+            " WHERE state IN ('running', 'compacting', 'pending', 'awaiting')"
         )
         return [
             {
@@ -356,10 +359,18 @@ class LiveControlStore:
         )
 
     async def enqueue(self, session_id: str, kind: str, item: dict[str, Any]) -> None:
-        state = await self.load(session_id)
-        key = "steer" if kind == "steer" else "follow_up"
-        state[key].append(item)
-        await self.save_queues(session_id, state["steer"], state["follow_up"])
+        column = "steer_queue" if kind == "steer" else "follow_up_queue"
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute("SELECT steer_queue, follow_up_queue FROM live_control WHERE session_id = ?", (session_id,))
+            row = await cursor.fetchone()
+            await cursor.close()
+            current = json.loads(row[column] or "[]") if row else []
+            current.append(item)
+            await conn.execute(
+                f"INSERT INTO live_control(session_id, {column}, updated_at) VALUES (?, ?, ?)"
+                f" ON CONFLICT(session_id) DO UPDATE SET {column} = excluded.{column}, updated_at = excluded.updated_at",
+                (session_id, json.dumps(current), _now()),
+            )
 
     async def set_model(
         self,

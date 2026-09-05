@@ -210,6 +210,30 @@ class Database:
         async with self._lock:
             await self.conn.execute(sql, tuple(params))
 
+    class _Transaction:
+        """Holds the connection lock across BEGIN … COMMIT so multi-statement writes are atomic."""
+
+        def __init__(self, db: Database) -> None:
+            self.db = db
+
+        async def __aenter__(self) -> aiosqlite.Connection:
+            await self.db._lock.acquire()
+            try:
+                await self.db.conn.execute("BEGIN IMMEDIATE")
+            except Exception:
+                self.db._lock.release()
+                raise
+            return self.db.conn
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            try:
+                await self.db.conn.execute("ROLLBACK" if exc_type else "COMMIT")
+            finally:
+                self.db._lock.release()
+
+    def transaction(self) -> Database._Transaction:
+        return Database._Transaction(self)
+
     async def executemany(self, sql: str, rows: Iterable[Sequence[Any]]) -> None:
         async with self._lock:
             await self.conn.executemany(sql, [tuple(r) for r in rows])

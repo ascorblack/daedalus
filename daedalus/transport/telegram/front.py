@@ -170,6 +170,7 @@ class TelegramFront:
         self._register_handlers()
         manager.add_sink(self._on_event)
         manager.on_finished(self._on_finished)
+        manager.on_pending_restored(self._on_pending_restored)
         manager.service_hooks.update(
             {
                 "send_file": self._service_send_file,
@@ -233,11 +234,11 @@ class TelegramFront:
         return TelegramOutbox(self.bot, binding.chat_id, binding.thread_id)
 
     async def create_session_topic(
-        self, title: str, *, metadata: dict[str, Any] | None = None, chat_id: int | None = None
+        self, title: str, *, metadata: dict[str, Any] | None = None, chat_id: int | None = None, topic: bool = True
     ) -> tuple[SessionState, TopicBinding]:
         """Create a session and, when a forum is bound, its topic."""
         state = await self.manager.create_session(title, metadata=metadata)
-        forum = chat_id or self.config.telegram.forum_chat_id
+        forum = (chat_id or self.config.telegram.forum_chat_id) if topic else 0
         if forum:
             topic = await self.bot.create_forum_topic(forum, title[:128])
             binding = await self._bind(forum, topic.message_thread_id, state.session.id, title)
@@ -259,8 +260,7 @@ class TelegramFront:
         if binding is not None:
             return await self.manager.get_state(binding.session_id)
         if message.chat.type == "private":
-            state, _ = await self.create_session_topic("direct", chat_id=None)
-            await self._bind(chat_id, 0, state.session.id, "direct")
+            state, _ = await self.create_session_topic("direct", topic=False)
             return state
         if message.is_topic_message and thread_id:
             # A topic the operator created by hand: adopt it as a new session.
@@ -459,7 +459,7 @@ class TelegramFront:
             f"model: {c.model.provider}/{c.model.name} thinking={c.model.thinking} effort={c.model.reasoning_effort}\n"
             f"chain: {', '.join(c.model.chain)}\n"
             f"self-change approval: {c.self_change.approval}, auto_rebuild={c.self_change.auto_rebuild}\n"
-            f"limits: ${c.limits.usd_per_day}/day, {c.limits.tokens_per_task:,} tokens/task, {c.limits.max_iterations} iterations\n"
+            f"limits: ${self.settings.usd_per_day}/day (env), {c.limits.max_iterations} iterations, tool timeout {c.limits.tool_timeout_seconds:.0f}s\n"
             f"balance thresholds: {c.balance.thresholds_usd} (every {c.balance.poll_seconds}s)\n"
             f"verbosity: {c.telegram.verbosity}\nforum: {c.telegram.forum_chat_id or 'not bound'}"
         )
@@ -510,11 +510,11 @@ class TelegramFront:
         if await self._maybe_custom_answer(message, state):
             return
         key = (message.chat.id, message.message_thread_id or 0)
-        buffer = self._buffers.setdefault(key, InboundBuffer())
         text = message.text or message.caption or ""
+        attachment = await self._download(message, state)  # may take a while for big files
+        buffer = self._buffers.setdefault(key, InboundBuffer())
         if text:
             buffer.text.append(text)
-        attachment = await self._download(message, state)
         if attachment is not None:
             buffer.attachments.append(attachment)
         if buffer.task is not None:
@@ -557,7 +557,7 @@ class TelegramFront:
             return None
         inbox = state.workspace / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
-        target = inbox / (name or file_id)
+        target = inbox / (Path(name).name if name else file_id)
         try:
             tg_file = await self.bot.get_file(file_id)
             if self.settings.telegram_local_mode and tg_file.file_path and Path(tg_file.file_path).is_absolute():
@@ -622,6 +622,9 @@ class TelegramFront:
         await query.answer()
 
     async def _on_answer(self, query: CallbackQuery, data: list[str]) -> None:
+        if len(data) != 4 or not data[2].isdigit() or not (data[3].isdigit() or data[3] in ("done", "custom")):
+            await query.answer("stale button")
+            return
         _, session_id, index_s, choice = data
         state = self._question_state.get(session_id)
         if state is None:
@@ -688,8 +691,15 @@ class TelegramFront:
             if outbox is not None:
                 await self._send_question(session_id, outbox)
             return
+        try:
+            await self.manager.answer(session_id, state["answers"])
+        except RuntimeError as exc:
+            outbox = await self.outbox_for_session(session_id)
+            if outbox is not None:
+                await outbox.send_text(f"⚠️ could not deliver the answer: {exc}. Answer again in a moment.", markdown=False)
+            state["index"] = max(0, len(state["questions"]) - 1)
+            return
         self._question_state.pop(session_id, None)
-        await self.manager.answer(session_id, state["answers"])
 
     async def _maybe_custom_answer(self, message: Message, state: SessionState) -> bool:
         qs = self._question_state.get(state.session.id)
@@ -734,6 +744,13 @@ class TelegramFront:
         if event.type is EventType.TOOL_CALL_PENDING and event.payload.get("kind") == "ask_user":
             await renderer.flush()
             await self._ask(session_id, dict(event.payload.get("ask_user_payload") or {}))
+
+    async def _on_pending_restored(self, session_id: str, pending: Any) -> None:
+        """After a restart, post the open question again with a fresh keyboard."""
+        outbox = await self.outbox_for_session(session_id)
+        if outbox is not None:
+            await outbox.send_text("↩️ Restarted while waiting for your answer; here is the question again.", markdown=False)
+        await self._ask(session_id, dict(pending.payload))
 
     async def _on_finished(self, session_id: str, run_id: str, status: str) -> None:
         renderer = self._renderers.get(session_id)

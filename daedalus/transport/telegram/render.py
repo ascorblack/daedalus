@@ -225,7 +225,13 @@ class RunRenderer:
                 await self.outbox.send_document(out, caption=final[:900])
             else:
                 for chunk in split_message(final):
-                    await self.outbox.send_text(chunk)
+                    try:
+                        await self.outbox.send_text(chunk)
+                    except Exception:  # noqa: BLE001 — one bad chunk must not truncate the answer
+                        try:
+                            await self.outbox.send_text(chunk, markdown=False)
+                        except Exception:  # noqa: BLE001
+                            continue
         elif not final and status == "completed" and not v.tools:
             await self.outbox.send_text("(the agent finished without a reply)", markdown=False)
         summary = self.render_status()

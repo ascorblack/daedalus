@@ -69,6 +69,7 @@ def build_engine(
     all_tools = {t.name for t in deps.tool_registry.list_all()}
     sections = (
         prompts.PERSONA,
+        prompts.language_section(config.answer_language),
         prompts.governance_section(deps.governance_path),
         prompts.SELF_DEVELOPMENT,
         prompts.SCHEDULING,

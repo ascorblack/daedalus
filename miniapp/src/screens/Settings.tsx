@@ -69,8 +69,7 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <div className="section-title" style={{ marginTop: 0 }}>
           Limits & alerts
         </div>
-        <label className="field">USD per day</label>
-        <input className="field" type="number" step="0.5" defaultValue={s.limits.usd_per_day} onBlur={(e) => save({ limits: { ...s.limits, usd_per_day: Number(e.target.value) } })} />
+        <div className="sub">daily cap: ${(s as any).usd_per_day} — set in the environment, enforced by the supervisor</div>
         <label className="field">Max iterations per run</label>
         <input className="field" type="number" defaultValue={s.limits.max_iterations} onBlur={(e) => save({ limits: { ...s.limits, max_iterations: Number(e.target.value) } })} />
         <label className="field">Balance alert thresholds (USD, comma-separated)</label>

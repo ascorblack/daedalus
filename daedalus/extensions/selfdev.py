@@ -36,22 +36,27 @@ class GitError(RuntimeError):
     pass
 
 
+_TOKEN_RE = re.compile(r"(https?://)[^/@\s]+@")
+
+
 async def _run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None, timeout: float = 600) -> str:
+    """Run a git/gh command; returns stdout only, stderr goes into the error message."""
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(cwd) if cwd else None,
         env={**os.environ, **(env or {})},
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stderr=asyncio.subprocess.PIPE,
     )
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError as exc:
         proc.kill()
         raise GitError(f"timed out: {' '.join(cmd)}") from exc
     text = out.decode("utf-8", "replace")
     if proc.returncode != 0:
-        raise GitError(f"{' '.join(cmd[:3])} failed ({proc.returncode}):\n{text[-1500:]}")
+        detail = _TOKEN_RE.sub(r"\1***@", (err.decode("utf-8", "replace") + text)[-1500:])
+        raise GitError(f"{' '.join(cmd[:3])} failed ({proc.returncode}):\n{detail}")
     return text
 
 
@@ -63,7 +68,7 @@ class SelfDevelopment:
             "bot": RepoSpec("bot", s.bot_repo_dir, s.state_dir / "worktrees" / "bot"),
             "core": RepoSpec("core", s.core_repo_dir, s.state_dir / "worktrees" / "core"),
         }
-        self._reason_waits: dict[int, str] = {}  # chat_id -> proposal id awaiting a reason
+        self._reason_waits: dict[tuple[int, int], str] = {}  # (chat_id, thread_id) -> proposal id
 
     # -- git plumbing ---------------------------------------------------------------
 
@@ -91,7 +96,7 @@ class SelfDevelopment:
     async def workspace(self, repo_name: str, branch: str) -> Path:
         """Create (or reuse) a worktree for ``agent/<branch>`` off ``origin/main``."""
         repo = self.repo(repo_name)
-        slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", branch).strip("-") or uuid.uuid4().hex[:8]
+        slug = self.slug_of(branch) or uuid.uuid4().hex[:8]
         full_branch = slug if slug.startswith("agent/") else f"agent/{slug}"
         target = repo.worktrees / slug
         if target.exists():
@@ -107,9 +112,13 @@ class SelfDevelopment:
         await self.git(repo, "config", "user.email", "daedalus@localhost", cwd=target)
         return target
 
+    @staticmethod
+    def slug_of(branch: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9._-]+", "-", branch.removeprefix("agent/")).strip("-")
+
     async def _worktree_for(self, repo: RepoSpec, branch: str | None) -> Path:
         if branch:
-            slug = branch.removeprefix("agent/")
+            slug = self.slug_of(branch)
             path = repo.worktrees / slug
             if path.exists():
                 return path
@@ -134,15 +143,23 @@ class SelfDevelopment:
         await self.git(spec, "push", "-u", "origin", head_branch, "--force-with-lease", cwd=worktree)
         body = summary + "\n\n" + (f"Session: {session_id}" if session_id else "")
         existing = (await self.gh("pr", "list", "--head", head_branch, "--json", "number,url", cwd=worktree)).strip()
-        prs = json.loads(existing or "[]")
+        try:
+            prs = json.loads(existing or "[]")
+        except json.JSONDecodeError as exc:
+            raise GitError(f"unexpected gh output: {existing[:300]}") from exc
         if prs:
             pr_url = prs[0]["url"]
             pr_number = int(prs[0]["number"])
             await self.gh("pr", "edit", str(pr_number), "--title", title, "--body", body, cwd=worktree)
         else:
-            out = await self.gh("pr", "create", "--base", "main", "--head", head_branch, "--title", title, "--body", body, cwd=worktree)
-            pr_url = out.strip().splitlines()[-1]
-            pr_number = int(pr_url.rstrip("/").rsplit("/", 1)[-1])
+            await self.gh("pr", "create", "--base", "main", "--head", head_branch, "--title", title, "--body", body, cwd=worktree)
+            created = (await self.gh("pr", "view", head_branch, "--json", "number,url", cwd=worktree)).strip()
+            try:
+                info = json.loads(created)
+            except json.JSONDecodeError as exc:
+                raise GitError(f"unexpected gh output: {created[:300]}") from exc
+            pr_url = info["url"]
+            pr_number = int(info["number"])
         proposal_id = uuid.uuid4().hex[:10]
         diffstat = (await self.git(spec, "diff", "--stat", "origin/main...HEAD", cwd=worktree)).strip()
         await self.app.db.execute(
@@ -183,7 +200,7 @@ class SelfDevelopment:
         if row["status"] != "pending":
             return f"already {row['status']}"
         spec = self.repo(row["repo"])
-        worktree = spec.worktrees / row["branch"].removeprefix("agent/")
+        worktree = spec.worktrees / self.slug_of(row["branch"])
         cwd = worktree if worktree.exists() else spec.checkout
         if decision == "approve":
             try:
@@ -232,7 +249,7 @@ class SelfDevelopment:
         if not session_id or self.app.manager is None:
             return
         try:
-            await self.app.manager.submit(session_id, text)
+            await self.app.manager.submit(session_id, text, as_answer=False)
         except Exception:  # noqa: BLE001
             logger.exception("could not deliver the decision to session %s", session_id)
 
@@ -265,11 +282,15 @@ class SelfDevelopment:
     # -- telegram wiring ----------------------------------------------------------------
 
     async def on_callback(self, query: CallbackQuery, data: list[str]) -> None:
+        if len(data) != 3:
+            await query.answer("stale button")
+            return
         _, proposal_id, action = data
         if action == "reason":
             await query.answer()
             if query.message is not None:
-                self._reason_waits[query.message.chat.id] = proposal_id
+                thread = query.message.message_thread_id if query.message.is_topic_message else 0
+                self._reason_waits[(query.message.chat.id, thread or 0)] = proposal_id
                 await self.app.front.bot.send_message(  # type: ignore[union-attr]
                     query.message.chat.id,
                     "Why is it rejected? (reply in one message)",
@@ -286,7 +307,8 @@ class SelfDevelopment:
                 pass
 
     async def intercept_message(self, message: Message) -> bool:
-        proposal_id = self._reason_waits.pop(message.chat.id, None)
+        thread = message.message_thread_id if message.is_topic_message else 0
+        proposal_id = self._reason_waits.pop((message.chat.id, thread or 0), None)
         if proposal_id is None:
             return False
         result = await self.decide(proposal_id, "reject", reason=message.text or message.caption or "")

@@ -13,3 +13,4 @@ Live checks of the build units, newest first.
 | 2026-09-06 | 5 telegram | unit tests with constructed updates: owner filter, direct session, fragment/file merge window, /new topic binding, AskUser keyboard → answer |
 | 2026-09-06 | 9 mini app | served publicly behind the host reverse proxy over HTTPS; API returns 401 without initData/token |
 | 2026-09-06 | 7 scheduler | one-shot task created through the public API fired on time in its own session and workspace, wrote SUMMARY.md (stored as last_summary), then disabled itself |
+| 2026-09-06 | review | independent review (2 critical, 11 high, 17 medium, 14 low): all critical/high and most medium fixed; see daedalus-private notes; suite 32 green |

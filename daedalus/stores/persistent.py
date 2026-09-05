@@ -77,11 +77,10 @@ class PersistentWorkspace(InMemoryWorkspace):
 
     async def _sync_all(self) -> None:
         """Rewrite the table from the in-memory state (units are few and small)."""
-        await self._db.execute("DELETE FROM workspace_units")
-        await self._db.executemany(
-            "INSERT INTO workspace_units(key, unit) VALUES (?, ?)",
-            [(self._row_key(k), v.model_dump_json()) for k, v in self._store.items()],
-        )
+        rows = [(self._row_key(k), v.model_dump_json()) for k, v in self._store.items()]
+        async with self._db.transaction() as conn:
+            await conn.execute("DELETE FROM workspace_units")
+            await conn.executemany("INSERT INTO workspace_units(key, unit) VALUES (?, ?)", rows)
 
     async def write(self, *args: Any, **kwargs: Any) -> WorkspaceWriteOutcome:  # type: ignore[override]
         outcome = await super().write(*args, **kwargs)

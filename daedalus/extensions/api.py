@@ -86,6 +86,7 @@ class SettingsBody(BaseModel):
     model: dict[str, Any] | None = None
     self_change: dict[str, Any] | None = None
     limits: dict[str, Any] | None = None
+    """Only max_iterations and tool_timeout_seconds; the spend cap is the supervisor's."""
     balance: dict[str, Any] | None = None
     scheduler: dict[str, Any] | None = None
     telegram: dict[str, Any] | None = None
@@ -137,7 +138,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             if int(user.get("id", 0)) != settings.owner_user_id:
                 raise HTTPException(403, "not the owner")
             return {"user_id": settings.owner_user_id}
-        token = request.headers.get("x-daedalus-token") or request.query_params.get("token")
+        token = request.headers.get("x-daedalus-token")
+        if not token and request.url.path.endswith("/download"):
+            token = request.query_params.get("token")  # browser navigation cannot set headers
         if token and secrets.compare_digest(token, api_token):
             return {"user_id": settings.owner_user_id}
         raise HTTPException(401, "authentication required")
@@ -412,6 +415,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def get_settings(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         data = app.config.model_dump(mode="json")
         data["providers_available"] = list(manager.providers.available())
+        data["usd_per_day"] = settings.usd_per_day
         return data
 
     @api.put("/api/settings")
@@ -427,6 +431,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(400, str(exc)) from exc
         await app.save_config(new_config)
+        await manager.providers.close_retired()
         if app.front is not None:
             app.front.config = new_config
         return new_config.model_dump(mode="json")

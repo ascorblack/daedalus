@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from aiogram.filters import CommandObject
-from aiogram.types import CallbackQuery, Chat, Message, User
+from aiogram.types import CallbackQuery, Message
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.session_runner import SessionManager

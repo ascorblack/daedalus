@@ -49,9 +49,12 @@ class Settings(BaseSettings):
     core_repo_dir: Path = _REPO_ROOT.parent / "protocore-exp"
     supervisor_socket: Path = Path("/run/daedalus/supervisor.sock")
 
-    api_host: str = "0.0.0.0"
+    api_host: str = "127.0.0.1"
     api_port: int = 8765
     miniapp_public_url: str = ""
+
+    usd_per_day: float = 20.0
+    """Daily spend cap. Enforced by the supervisor from its own environment, never from config.toml."""
 
     @property
     def config_path(self) -> Path:
@@ -85,8 +88,7 @@ class ModelConfig(BaseModel):
     reasoning_effort: ReasoningEffort = "medium"
     chain: list[str] = Field(default_factory=lambda: ["deepseek", "openrouter"])
     """Fallback order of provider ids; the first entry is the primary."""
-    max_tokens: int = 8192
-    temperature: float = 0.3
+    context_window: int = 128_000
 
 
 class ProviderConfig(BaseModel):
@@ -110,8 +112,6 @@ class SelfChangeConfig(BaseModel):
 
 
 class LimitsConfig(BaseModel):
-    usd_per_day: float = 20.0
-    tokens_per_task: int = 5_000_000
     max_iterations: int = 200
     tool_timeout_seconds: float = 900.0
 

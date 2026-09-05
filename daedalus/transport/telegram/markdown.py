@@ -47,7 +47,7 @@ def _inline(segment: str) -> str:
     segment = _HEADER_RE.sub(lambda m: f"<b>{m.group(1)}</b>", segment)
     segment = _BOLD_RE.sub(r"<b>\1</b>", segment)
     segment = _ITALIC_RE.sub(r"<i>\1</i>", segment)
-    segment = _LINK_RE.sub(r'<a href="\2">\1</a>', segment)
+    segment = _LINK_RE.sub(lambda m: f'<a href="{m.group(2).replace(chr(34), "%22")}">{m.group(1)}</a>', segment)
     segment = _BULLET_RE.sub(r"\1• ", segment)
     return re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], segment)
 
@@ -69,12 +69,16 @@ def split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
         if len(current) + len(addition) > limit - 8:
             if open_fence is not None:
                 current += "```\n"
-            chunks.append(current)
+            if current.strip():
+                chunks.append(current)
             current = f"```{open_fence}\n" if open_fence is not None else ""
         if len(addition) > limit - 8:
-            for i in range(0, len(addition), limit - 16):
-                piece = addition[i : i + limit - 16]
-                if current:
+            step = limit - 32
+            for i in range(0, len(addition), step):
+                piece = addition[i : i + step]
+                if open_fence is not None:
+                    piece = f"```{open_fence}\n{piece}\n```\n"
+                if current.strip():
                     chunks.append(current)
                     current = ""
                 chunks.append(piece)

@@ -69,7 +69,8 @@ async def exec_command(
     timed_out = False
     try:
         await asyncio.wait_for(_pump(), timeout=limit)
-        await proc.wait()
+        remaining = max(1.0, limit - (time.monotonic() - started))
+        await asyncio.wait_for(proc.wait(), timeout=remaining)
     except TimeoutError:
         timed_out = True
         try:

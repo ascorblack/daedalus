@@ -52,6 +52,10 @@ class Application:
             text = failed.read_text(encoding="utf-8")
             await self.front.notify("❌ The last rebuild failed preflight and was rolled back:\n\n" + text[-3000:], markdown=False)
             failed.rename(failed.with_suffix(".reported"))
+        last = self.settings.state_dir / "good" / "LAST_REBUILD"
+        if last.exists():
+            await self.front.notify("🔄 " + last.read_text(encoding="utf-8").strip()[-1500:], markdown=False)
+            last.rename(last.with_suffix(".reported"))
         exceeded = self.manager.budget_exceeded() if self.manager else None
         if exceeded:
             await self.front.notify(f"💸 Daily budget exceeded ({exceeded}). New runs are refused until tomorrow or /budget reset.", markdown=False)

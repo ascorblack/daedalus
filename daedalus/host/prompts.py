@@ -42,6 +42,12 @@ future run needs when creating the task, because your current workspace is not s
 """
 
 
+def language_section(answer_language: str) -> str:
+    if not answer_language or answer_language == "auto":
+        return ""
+    return f"Always answer the operator in {answer_language}, whatever language they write in.\n"
+
+
 def environment_section(
     *,
     workspace: Path,
@@ -73,4 +79,4 @@ def governance_section(path: Path) -> str:
     return ""
 
 
-__all__ = ["PERSONA", "SCHEDULING", "SELF_DEVELOPMENT", "environment_section", "governance_section"]
+__all__ = ["PERSONA", "SCHEDULING", "SELF_DEVELOPMENT", "environment_section", "governance_section", "language_section"]

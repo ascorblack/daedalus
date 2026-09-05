@@ -121,6 +121,7 @@ class SessionManager:
         self._states: dict[str, SessionState] = {}
         self._sinks: list[EventSink] = []
         self._finished: list[RunFinished] = []
+        self._pending_restored: list[Callable[[str, PendingQuestion], Awaitable[None]]] = []
         self.service_hooks: dict[str, Any] = {}
         """Callbacks the transport layer installs: send_file, spawn_session, schedule, self_*."""
         self.shutting_down = False
@@ -159,6 +160,10 @@ class SessionManager:
 
     def on_finished(self, callback: RunFinished) -> None:
         self._finished.append(callback)
+
+    def on_pending_restored(self, callback: Callable[[str, PendingQuestion], Awaitable[None]]) -> None:
+        """Called after a restart for every session still waiting on a question."""
+        self._pending_restored.append(callback)
 
     def reload_config(self, config: RuntimeConfig) -> None:
         self.config = config
@@ -265,6 +270,7 @@ class SessionManager:
         attachments: Sequence[Attachment] = (),
         *,
         steer: bool = False,
+        as_answer: bool = True,
     ) -> str:
         """Deliver operator input. Starts a run, or queues a follow-up when one is active."""
         state = await self.get_state(session_id)
@@ -272,8 +278,11 @@ class SessionManager:
             raise KeyError(session_id)
         body, image_refs = await self._ingest_attachments(state, text, attachments)
         if state.pending is not None:
-            # Free-text reply to a pending question counts as a custom answer.
-            return await self.answer(session_id, [{"custom": body}])
+            if as_answer:
+                # Free-text reply to a pending question counts as a custom answer.
+                return await self.answer(session_id, [{"custom": body}])
+            await self.live.enqueue(session_id, "follow_up", new_queued_prompt("follow_up", body).to_dict())
+            return state.run_id or ""
         exceeded = self.budget_exceeded()
         if exceeded and not state.running:
             raise RuntimeError(f"daily budget exceeded ({exceeded}); runs resume tomorrow or after /budget reset")
@@ -315,6 +324,8 @@ class SessionManager:
         state = await self.get_state(session_id)
         if state is None or state.pending is None or state.engine is None:
             raise RuntimeError("no pending question for this session")
+        if state.running:
+            raise RuntimeError("the run is still finishing; try again in a moment")
         pending = state.pending
         questions = [q.get("question", "") for q in pending.payload.get("questions", [])]
         shaped = []
@@ -437,6 +448,8 @@ class SessionManager:
         state.run_id = run_id
         if not continue_turn:
             await self.runs.create(Run(id=run_id, tenant_id=TENANT, session_id=state.session.id, status=RunStatus.running))
+        else:
+            await self.runs.update_status(run_id, TENANT, RunStatus.running)
         state.task = asyncio.create_task(self._drive(state, engine, message, continue_turn), name=f"run:{run_id}")
         state.task.add_done_callback(_log_task_failure)
         return run_id
@@ -521,6 +534,9 @@ class SessionManager:
     async def resume_unfinished(self) -> list[str]:
         """Continue runs that were mid-flight when the process last stopped."""
         resumed: list[str] = []
+        if self.budget_exceeded():
+            logger.warning("budget exceeded; unfinished runs stay parked until the cap is lifted")
+            return resumed
         for entry in await self.events.unfinished_snapshots():
             session_id = entry["session_id"] or entry["snapshot"].get("session_id")
             state = await self.get_state(session_id)
@@ -538,14 +554,21 @@ class SessionManager:
             state.run_id = entry["run_id"]
             if engine.state is LoopState.AWAITING:
                 row = await self.db.fetchone("SELECT * FROM pending_questions WHERE session_id = ?", (session_id,))
-                if row is not None:
-                    state.pending = PendingQuestion(
-                        session_id=session_id,
-                        run_id=row["run_id"],
-                        tool_call_id=row["tool_call_id"],
-                        kind=row["kind"],
-                        payload=json.loads(row["payload"]),
-                    )
+                if row is None:
+                    await self.events.delete_snapshot(entry["run_id"])
+                    continue
+                state.pending = PendingQuestion(
+                    session_id=session_id,
+                    run_id=row["run_id"],
+                    tool_call_id=row["tool_call_id"],
+                    kind=row["kind"],
+                    payload=json.loads(row["payload"]),
+                )
+                for callback in self._pending_restored:
+                    try:
+                        await callback(session_id, state.pending)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("pending-restored callback failed")
                 continue
             if not engine.history:
                 await self.events.delete_snapshot(entry["run_id"])

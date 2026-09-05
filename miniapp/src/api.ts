@@ -132,7 +132,8 @@ export type Schedule = {
 export type Settings = {
   model: { provider: string; name: string; thinking: boolean; reasoning_effort: string; chain: string[] };
   self_change: { approval: string; auto_rebuild: boolean };
-  limits: { usd_per_day: number; tokens_per_task: number; max_iterations: number; tool_timeout_seconds: number };
+  limits: { max_iterations: number; tool_timeout_seconds: number };
+  usd_per_day?: number;
   balance: { enabled: boolean; poll_seconds: number; thresholds_usd: number[] };
   scheduler: { topic_mode: string; catch_up_missed: boolean };
   telegram: { verbosity: number };
