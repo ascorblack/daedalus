@@ -20,7 +20,8 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o 
     && apt-get install -y --no-install-recommends gh nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && uv python install 3.12
+    && uv python install 3.12 \
+    && git config --system --add safe.directory '*'
 
 # The supervisor lives outside the repositories the agent can change.
 COPY launcher /opt/launcher
