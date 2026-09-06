@@ -478,8 +478,9 @@ class TelegramFront:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
         orphans = await self.manager.closed_topic_sessions()
+        swept = await self.manager.sweep_orphan_workspaces()
         if not orphans:
-            await message.answer("No sessions with closed topics.")
+            await message.answer("No sessions with closed topics." + (f" Removed {len(swept)} orphan workspace folder(s)." if swept else ""))
             return
         total = sum(o["bytes"] for o in orphans) / 1_048_576
         lines = [f"• {o['title']} ({o['session_id']}) {o['bytes'] / 1_048_576:.1f} MB" for o in orphans[:30]]

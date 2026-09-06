@@ -342,6 +342,20 @@ class SessionManager:
             out.append({"session_id": row["session_id"], "title": row["title"], "chat_id": row["chat_id"], "thread_id": row["thread_id"], "bytes": size})
         return out
 
+    async def sweep_orphan_workspaces(self) -> list[str]:
+        """Delete workspace directories that no session or schedule refers to any more."""
+        rows = await self.db.fetchall("SELECT id FROM sessions")
+        known = {r["id"] for r in rows}
+        sched = await self.db.fetchall("SELECT workspace FROM schedules")
+        known_paths = {Path(r["workspace"]).resolve() for r in sched}
+        removed: list[str] = []
+        for entry in self.settings.workspaces_dir.iterdir():
+            if not entry.is_dir() or entry.name in known or entry.resolve() in known_paths:
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            removed.append(entry.name)
+        return removed
+
     def _register_services(self, state: SessionState) -> None:
         hooks = self.service_hooks
         services = SessionServices(
