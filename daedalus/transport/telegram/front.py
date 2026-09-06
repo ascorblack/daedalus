@@ -149,7 +149,13 @@ class TelegramOutbox(Outbox):
         if self.chat_id < 0:
             return False
         try:
-            await self.bot.send_message_draft(self.chat_id, draft_id, message_thread_id=self.thread_id, text=text, parse_mode=None, can_stop=True)
+            if text:
+                try:
+                    await self.bot.send_message_draft(self.chat_id, draft_id, message_thread_id=self.thread_id, text=markdown_to_html(text), parse_mode=ParseMode.HTML, can_stop=True)
+                except TelegramBadRequest:
+                    await self.bot.send_message_draft(self.chat_id, draft_id, message_thread_id=self.thread_id, text=text, parse_mode=None, can_stop=True)
+            else:
+                await self.bot.send_message_draft(self.chat_id, draft_id, message_thread_id=self.thread_id, text="", parse_mode=None)
             return True
         except TelegramRetryAfter:
             return True  # skip this frame; the next one carries more text

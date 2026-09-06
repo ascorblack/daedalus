@@ -170,7 +170,7 @@ class RunRenderer:
     async def push_draft(self) -> None:
         """Send the accumulated answer text as a live draft (plain text, capped at the message limit)."""
         v = self.view
-        text = v.text_buffer.strip()[:4000]
+        text = v.text_buffer.strip()[:3800]
         if not self.streaming or not text or text == v.draft_sent or not v.draft_id:
             return
         try:
@@ -273,6 +273,13 @@ class RunRenderer:
                             await self.outbox.send_text(chunk, markdown=False)
                         except Exception:  # noqa: BLE001
                             continue
+            if self.streaming and v.draft_id and v.draft_sent:
+                # The real message is in the chat now; drop the live draft so the client stops the dots.
+                try:
+                    await self.outbox.send_draft(v.draft_id, "")
+                except Exception:  # noqa: BLE001
+                    pass
+                v.draft_sent = ""
         elif not final and status == "completed" and not v.tools:
             await self.outbox.send_text("(the agent finished without a reply)", markdown=False)
         summary = self.render_status()

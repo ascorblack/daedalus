@@ -100,7 +100,7 @@ async def test_streaming_sends_drafts_then_the_final_message(tmp_path: Path) -> 
     await asyncio.sleep(0.05)
     await renderer.handle(_evt(EventType.MESSAGE_STOP, stop_reason="end_turn"))
     await renderer.finish("completed", workspace=tmp_path)
-    assert [t for _, t in outbox.drafts] == ["Hello,", "Hello, world"]
+    assert [t for _, t in outbox.drafts] == ["Hello,", "Hello, world", ""]  # the empty draft clears the preview
     assert len({d for d, _ in outbox.drafts}) == 1  # one draft id per answer keeps the animation
     assert [t for t, md in outbox.sent if md] == ["Hello, world"]
 
