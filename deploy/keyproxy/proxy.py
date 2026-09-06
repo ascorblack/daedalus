@@ -144,7 +144,7 @@ async def handle_codex(request: web.Request, rest: str) -> web.StreamResponse:
         models = list(CODEX_FALLBACK_MODELS)
         try:
             usage = await _codex_usage(client, headers)
-            models = usage.get("models") or models
+            models = sorted(set(models) | set(usage.get("models") or []))  # the plan's usage table names only some of them
         except SubscriptionError:
             pass
         return web.json_response({"object": "list", "data": [{"id": m, "object": "model", "owned_by": "openai"} for m in models]})
