@@ -95,7 +95,22 @@ def run(cmd: list[str], *, cwd: Path | None = None, timeout: int = 1800) -> tupl
 
 
 def git(repo: Path, *args: str) -> tuple[int, str]:
-    return run(["git", "-C", str(repo), *args], timeout=600)
+    code, out = run(["git", "-C", str(repo), *args], timeout=600)
+    if args and args[0] in ("reset", "checkout", "fetch"):
+        restore_owner(repo)
+    return code, out
+
+
+def restore_owner(repo: Path) -> None:
+    """Keep the checkout owned by whoever owns its root: the supervisor runs as root on a
+    host-mounted repository, and files it rewrites must stay editable from the host."""
+    try:
+        st = repo.stat()
+    except OSError:
+        return
+    if st.st_uid == os.getuid():
+        return
+    run(["chown", "-R", f"{st.st_uid}:{st.st_gid}", str(repo)], timeout=600)
 
 
 def head(repo: Path) -> str:
