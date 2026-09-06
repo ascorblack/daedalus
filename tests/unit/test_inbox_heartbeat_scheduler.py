@@ -149,3 +149,22 @@ async def test_failed_recurring_task_is_switched_off_after_max_failures(app: Any
     await scheduler.set_enabled(created["id"], True)
     row = await app.db.fetchone("SELECT failure_count, enabled FROM schedules WHERE id = ?", (created["id"],))
     assert row["enabled"] == 1 and row["failure_count"] == 0
+
+
+async def test_stay_silent_is_refused_outside_unattended_runs(app: Any) -> None:
+    from protocore.contracts.tools import ToolContext
+
+    from daedalus.tools.quiet import stay_silent
+
+    manager: SessionManager = app.manager
+    chat = await manager.create_session("chat")
+    task = await manager.create_session("[cron] nightly", metadata={"unattended": True})
+    for state in (chat, task):
+        state.services.extra["manager"] = manager  # type: ignore[union-attr]
+    ctx = ToolContext(tenant_id="daedalus", run_id="r1", session_id=chat.session.id)
+    result = await stay_silent(ctx, note="test")
+    assert result.is_error and "only for unattended" in result.content
+    assert "silent_run" not in chat.services.extra  # type: ignore[union-attr]
+    ctx = ToolContext(tenant_id="daedalus", run_id="r2", session_id=task.session.id)
+    result = await stay_silent(ctx, note="checked")
+    assert not result.is_error and task.services.extra["silent_run"] == "r2"  # type: ignore[union-attr]

@@ -187,3 +187,13 @@ async def test_reactions_and_topic_status_follow_the_run(front: TelegramFront) -
     assert front._topic_name(binding.session_id, "job") == "🏁 job"
     await asyncio.sleep(2.2)
     assert renames[-1] == (-100, 10, "🏁 job")
+
+
+async def test_final_answer_is_masked_and_headline_stripped_before_telegram(tmp_path: Path) -> None:
+    outbox = FakeOutbox()
+    renderer = RunRenderer(outbox, RunView(run_id="r1", model="m"), edit_interval=0.0)
+    await renderer.handle(_evt(EventType.MESSAGE_START))
+    await renderer.handle(_evt(EventType.CONTENT_BLOCK_DELTA, delta={"type": "text_delta", "text": "Token is ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.\n\n⟦ echo | status: completed; next: none | anchors: token ⟧"}))
+    await renderer.finish("completed", workspace=tmp_path)
+    sent = [t for t, _ in outbox.sent if "Token is" in t]
+    assert sent and "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" not in sent[0] and "⟦" not in sent[0]
