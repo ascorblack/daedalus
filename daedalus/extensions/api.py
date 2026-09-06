@@ -33,6 +33,7 @@ from protocore.contracts.types import (
 from pydantic import BaseModel
 
 from daedalus.config import PROVIDER_KINDS, ModelPresetConfig, ProviderConfig
+from daedalus.host.prompts import split_headline
 from daedalus.security import redact
 
 if TYPE_CHECKING:
@@ -315,11 +316,17 @@ def message_view(message: Message) -> dict[str, Any]:
     internal = message.role is MessageRole.user and not is_summary and (
         origin == "core" or (origin != "operator" and _looks_like_core_nudge(body))
     )
+    headline = ""
+    if message.role is MessageRole.assistant:
+        body, headline = split_headline(body)
+    archived = message.metadata.get("daedalus.archived") if isinstance(message.metadata, dict) else None
     return {
         "role": message.role.value,
         "summary": is_summary,
         "internal": internal,
         "compaction": compaction,
+        "archived": archived,
+        "headline": headline,
         "text": body,
         "thinking": "".join(thinking) or (message.reasoning_content or ""),
         "tool_calls": tool_calls,

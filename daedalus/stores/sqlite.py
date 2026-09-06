@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -19,6 +20,9 @@ from protocore.contracts.types import (
     Run,
     RunStatus,
     Session,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
 )
 
 from daedalus.providers.openai_compat import UsageRecord, UsageSink
@@ -27,6 +31,35 @@ from daedalus.stores.database import Database
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def message_text(message: Message) -> str:
+    """Everything searchable in a message: text, thinking is skipped, tool calls as name+args, tool results."""
+    parts: list[str] = []
+    for block in message.content_blocks:
+        if isinstance(block, TextBlock):
+            parts.append(block.text)
+        elif isinstance(block, ToolUseBlock):
+            parts.append(f"{block.name} {block.arguments_json or ''}")
+        elif isinstance(block, ToolResultBlock):
+            parts.append(block.content or "")
+    return "\n".join(p for p in parts if p).strip()
+
+
+_FTS_TOKEN_RE = re.compile(r"[\w][\w'.-]*", re.UNICODE)
+
+
+def fts_query(query: str) -> str:
+    """Turn free text into an FTS5 MATCH expression: every word required, as a prefix.
+
+    Quotes each token so punctuation in identifiers (``config.toml``, ``run-cap``) cannot
+    be read as FTS syntax; an explicitly quoted phrase is passed through as a phrase.
+    """
+    query = query.strip()
+    if query.startswith('"') and query.endswith('"') and len(query) > 2:
+        return '"' + query[1:-1].replace('"', '""') + '"'
+    tokens = _FTS_TOKEN_RE.findall(query)
+    return " ".join(f'"{t.replace(chr(34), "")}"*' for t in tokens if t)
 
 
 class SqliteSessionStore(ISessionStore):
@@ -132,8 +165,71 @@ class SqliteSessionStore(ISessionStore):
         if not fresh:
             return 0
         async with self._db.transaction() as conn:
-            await conn.executemany("INSERT OR IGNORE INTO transcript(session_id, key, message) VALUES (?, ?, ?)", fresh)
+            for session, key, dumped in fresh:
+                cursor = await conn.execute("INSERT OR IGNORE INTO transcript(session_id, key, message) VALUES (?, ?, ?)", (session, key, dumped))
+                if cursor.rowcount:
+                    message = Message.model_validate_json(dumped)
+                    text = message_text(message)
+                    if text:
+                        await conn.execute(
+                            "INSERT INTO transcript_fts(session_id, seq, role, text) VALUES (?, ?, ?, ?)",
+                            (session, cursor.lastrowid, message.role.value, text),
+                        )
         return len(fresh)
+
+    async def backfill_transcript_index(self) -> int:
+        """Index transcript rows written before the full-text table existed; returns how many."""
+        rows = await self._db.fetchall(
+            "SELECT t.seq, t.session_id, t.message FROM transcript t WHERE NOT EXISTS (SELECT 1 FROM transcript_fts f WHERE f.seq = t.seq)"
+        )
+        if not rows:
+            return 0
+        async with self._db.transaction() as conn:
+            for row in rows:
+                message = Message.model_validate_json(row["message"])
+                text = message_text(message)
+                if text:
+                    await conn.execute(
+                        "INSERT INTO transcript_fts(session_id, seq, role, text) VALUES (?, ?, ?, ?)",
+                        (row["session_id"], row["seq"], message.role.value, text),
+                    )
+        return len(rows)
+
+    async def search_transcript(self, query: str, *, session_id: str | None, limit: int = 10) -> list[dict[str, Any]]:
+        """Full-text search; ``session_id=None`` searches every session. Returns seq, role, session, snippet."""
+        match = fts_query(query)
+        if not match:
+            return []
+        if session_id is None:
+            rows = await self._db.fetchall(
+                "SELECT f.seq, f.role, f.session_id, snippet(transcript_fts, 3, '[', ']', ' … ', 24) snippet, s.title"
+                " FROM transcript_fts f LEFT JOIN sessions s ON s.id = f.session_id"
+                " WHERE transcript_fts MATCH ? ORDER BY bm25(transcript_fts) LIMIT ?",
+                (match, limit),
+            )
+        else:
+            rows = await self._db.fetchall(
+                "SELECT f.seq, f.role, f.session_id, snippet(transcript_fts, 3, '[', ']', ' … ', 24) snippet, NULL title"
+                " FROM transcript_fts f WHERE f.session_id = ? AND transcript_fts MATCH ? ORDER BY bm25(transcript_fts) LIMIT ?",
+                (session_id, match, limit),
+            )
+        return [dict(r) for r in rows]
+
+    async def expand_transcript(self, session_id: str, from_seq: int, to_seq: int) -> list[tuple[int, Message]]:
+        rows = await self._db.fetchall(
+            "SELECT seq, message FROM transcript WHERE session_id = ? AND seq BETWEEN ? AND ? ORDER BY seq",
+            (session_id, from_seq, to_seq),
+        )
+        return [(int(r["seq"]), Message.model_validate_json(r["message"])) for r in rows]
+
+    async def transcript_seqs(self, session_id: str, keys: Sequence[str]) -> list[int]:
+        if not keys:
+            return []
+        marks = ",".join("?" for _ in keys)
+        rows = await self._db.fetchall(
+            f"SELECT seq FROM transcript WHERE session_id = ? AND key IN ({marks}) ORDER BY seq", (session_id, *keys)
+        )
+        return [int(r["seq"]) for r in rows]
 
     async def list_transcript(self, session_id: str, *, limit: int = 0) -> list[Message]:
         if limit > 0:

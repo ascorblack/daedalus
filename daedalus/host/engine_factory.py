@@ -95,6 +95,7 @@ def build_engine(
         prompts.language_section(config.answer_language),
         prompts.governance_section(deps.governance_path),
         prompts.SELF_DEVELOPMENT,
+        prompts.HISTORY,
         prompts.SCHEDULING,
         prompts.environment_section(
             workspace=workspace,

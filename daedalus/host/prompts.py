@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -51,11 +52,36 @@ providers package. Adding a skill = a directory with SKILL.md under skills/.
 smoke tests) and rolls back a build that fails them.
 """
 
+HISTORY = """Memory of this conversation:
+- When the history grows, older turns are replaced by summaries. Every turn stays in the \
+transcript: HistorySearch finds turns by words, HistoryExpand(from_seq, to_seq) reads them \
+verbatim. A summary that says "archived turns seq A–B" means HistoryExpand(A, B) returns the \
+originals. Before claiming that something was never discussed or that a detail is unknown, \
+search the transcript.
+- End every final reply to the operator (not tool narration) with one line in this exact form, \
+on its own line: ⟦ task | status: outcome; next: action | anchors: exact identifiers, paths, names ⟧ \
+It is hidden from the operator and becomes the label under which this turn is found later. \
+Distinguish completed / attempted / failed / blocked / decided; never write vague phrases such as \
+"made progress"; anchors are the terms someone would search for.
+"""
+
 SCHEDULING = """Scheduling: you can create recurring or one-shot tasks with ScheduleCreate. \
 A scheduled run happens in a fresh session with its own persistent workspace; write a \
 SUMMARY.md there at the end so the next run knows what happened. Attach any files the \
 future run needs when creating the task, because your current workspace is not shared.
 """
+
+
+HEADLINE_RE = re.compile(r"\s*⟦[^⟦⟧\n]{3,400}⟧\s*$")
+"""The retrieval headline the agent appends to a final reply; hidden from the operator, kept in the transcript."""
+
+
+def split_headline(text: str) -> tuple[str, str]:
+    """Return ``(text without the trailing headline, headline)``; the headline is empty when absent."""
+    match = HEADLINE_RE.search(text)
+    if match is None:
+        return text, ""
+    return text[: match.start()].rstrip(), match.group(0).strip()
 
 
 def rules_section(rules: str) -> str:
@@ -100,4 +126,4 @@ def governance_section(path: Path) -> str:
     return ""
 
 
-__all__ = ["DEFAULT_RULES", "PERSONA", "SCHEDULING", "SELF_DEVELOPMENT", "environment_section", "governance_section", "language_section", "rules_section"]
+__all__ = ["DEFAULT_RULES", "HEADLINE_RE", "HISTORY", "PERSONA", "SCHEDULING", "SELF_DEVELOPMENT", "environment_section", "governance_section", "language_section", "rules_section", "split_headline"]

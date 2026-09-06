@@ -242,6 +242,18 @@ async def test_rename_updates_session_and_topic(settings: Settings, db: Database
     await manager.close()
 
 
+SECTIONED = "## Goal\ng\n## Done\nd\n## Open\no\n## Constraints\nc\n## Next steps\nn\n## Unknowns\nu"
+
+
+def test_summary_sections_are_validated() -> None:
+    from daedalus.host.session_runner import validate_summary_sections
+
+    assert validate_summary_sections(SECTIONED) == ""
+    assert "appears 0 times" in validate_summary_sections("## Goal\nx")
+    assert "appears 2 times" in validate_summary_sections(SECTIONED + "\n## Done\nagain")
+    assert validate_summary_sections("## Done\nd\n## Goal\ng\n## Open\no\n## Constraints\nc\n## Next steps\nn\n## Unknowns\nu") == "sections are out of order"
+
+
 def test_transcript_for_summary_clips_tool_results() -> None:
     from protocore.contracts.types import Message, MessageRole, TextBlock, ToolResultBlock, ToolUseBlock
 
@@ -271,14 +283,19 @@ async def test_compact_replaces_history_with_summary_and_keeps_a_backup(settings
         from protocore.contracts.types import Message, MessageRole, StopReason, TextBlock
 
         assert "hello there" in request.messages[0].content_blocks[0].text
-        return LLMResponse(message=Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="**Summary** of the chat")]), stop_reason=StopReason.end_turn)
+        calls.append(1)
+        text = "## Goal\nx\n## Done\ny" if len(calls) == 1 else SECTIONED
+        return LLMResponse(message=Message(role=MessageRole.assistant, content_blocks=[TextBlock(text=text)]), stop_reason=StopReason.end_turn)
 
+    calls: list[int] = []
     provider.complete_text = fake_complete  # type: ignore[attr-defined]
     summary = await manager.compact(state.session.id)
-    assert summary.startswith("**Summary**")
+    assert len(calls) == 2, "a summary missing sections is rejected and asked for again"
+    assert summary.startswith("## Goal") and "## Recent operator messages (verbatim)" in summary and "hello there" in summary
     messages = await manager.sessions.list_messages(state.session.id, "daedalus", limit=100)
     assert len(messages) == 1 and messages[0].metadata.get("protocore.compaction_summary") is True
     assert "<compacted-turn" in messages[0].content_blocks[0].text
+    assert "archived turns seq" in messages[0].content_blocks[0].text and messages[0].metadata["daedalus.archived"]["from_seq"] >= 1
     backups = list(state.workspace.glob(".history-*.jsonl"))
     assert len(backups) == 1 and "hello there" in backups[0].read_text()
     assert state.engine is not None and len(state.engine.history) == 1 and state.engine.last_observed_prompt_tokens == 0

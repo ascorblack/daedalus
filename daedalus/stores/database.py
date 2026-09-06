@@ -176,6 +176,12 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE live_control ADD COLUMN preset TEXT;
     """,
+    # full-text index over the transcript: what the agent searches when older turns were compacted away
+    """
+    CREATE VIRTUAL TABLE transcript_fts USING fts5(
+        session_id UNINDEXED, seq UNINDEXED, role UNINDEXED, text, tokenize = 'unicode61 remove_diacritics 2'
+    );
+    """,
 ]
 
 

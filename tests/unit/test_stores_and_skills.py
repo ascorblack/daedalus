@@ -122,3 +122,36 @@ async def test_transcript_survives_history_rewrites(db) -> None:  # type: ignore
     texts = [m.content_blocks[0].text for m in await store.list_transcript("s1")]  # type: ignore[union-attr]
     assert texts == ["the task", "done", "<compacted-turn>x</compacted-turn>"]
     assert len(await store.list_transcript("s1", limit=2)) == 2
+
+
+async def test_transcript_search_and_expand(db) -> None:  # type: ignore[no-untyped-def]
+    from protocore.contracts.types import Message, MessageRole, TextBlock, ToolResultBlock
+
+    from daedalus.stores.sqlite import SqliteSessionStore, fts_query
+
+    store = SqliteSessionStore(db)
+    msgs = [
+        Message(role=MessageRole.user, content_blocks=[TextBlock(text="please deploy config.toml to the staging box")]),
+        Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="Deployed; the port is 8765 ⟦ deploy | status: completed; next: none | anchors: config.toml, 8765 ⟧")]),
+        Message(role=MessageRole.tool, content_blocks=[ToolResultBlock(tool_call_id="c1", content="exit_code=0 rsync finished")]),
+    ]
+    added = await store.append_transcript("s1", msgs)
+    assert added == 3
+    hits = await store.search_transcript("config.toml", session_id="s1")
+    assert hits and hits[0]["role"] == "user" and "config.toml" in hits[0]["snippet"]
+    assert await store.search_transcript("rsync", session_id="other") == []
+    everywhere = await store.search_transcript("rsync", session_id=None)
+    assert everywhere and everywhere[0]["session_id"] == "s1"
+    rows = await store.expand_transcript("s1", hits[0]["seq"], hits[0]["seq"] + 1)
+    assert [m.role.value for _, m in rows] == ["user", "assistant"]
+    assert fts_query('"exact phrase"') == '"exact phrase"'
+    assert fts_query("run-cap config.toml") == '"run-cap"* "config.toml"*'
+    assert await store.backfill_transcript_index() == 0
+
+
+def test_headline_split() -> None:
+    from daedalus.host.prompts import split_headline
+
+    body, head = split_headline("All done.\n\n⟦ deploy | status: completed; next: none | anchors: x ⟧")
+    assert body == "All done." and head.startswith("⟦ deploy")
+    assert split_headline("no headline here") == ("no headline here", "")

@@ -23,6 +23,7 @@ from typing import Any, Protocol
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
+from daedalus.host.prompts import split_headline
 from daedalus.security.redact import redact
 from daedalus.transport.telegram.markdown import DOCUMENT_THRESHOLD, split_message
 
@@ -230,7 +231,7 @@ class RunRenderer:
     async def push_draft(self) -> None:
         """Send the accumulated answer text as a live draft (plain text, capped at the message limit)."""
         v = self.view
-        text = v.text_buffer.strip()[:3800]
+        text = split_headline(v.text_buffer.strip())[0][:3800]
         if not self.streaming or not text or text == v.draft_sent or not v.draft_id:
             return
         try:
@@ -373,7 +374,7 @@ class RunRenderer:
         """
         v = self.view
         v.state = status
-        final = v.text_buffer.strip()
+        final, _headline = split_headline(v.text_buffer.strip())
         v.text_buffer = ""
         if self._tick_task is not None:
             self._tick_task.cancel()

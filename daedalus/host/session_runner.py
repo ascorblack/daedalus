@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -96,6 +97,8 @@ class SessionState:
     metadata: dict[str, Any] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """Serialises run starts against history rewrites (compaction)."""
+    history_keys: list[str] = field(default_factory=list)
+    """Transcript keys of the working history at the last persist, to see what a compaction removed."""
 
     @property
     def running(self) -> bool:
@@ -155,6 +158,9 @@ class SessionManager:
         self.tools.register(AskUserTool())
         self.service_hooks.setdefault("mcp", self.mcp_service)
         locator.default = None
+        indexed = await self.sessions.backfill_transcript_index()
+        if indexed:
+            logger.warning("transcript search index: %d older turns indexed", indexed)
         logger.warning("tools registered: %s", ", ".join(sorted(t.name for t in self.tools.list_all())))
 
     async def close(self) -> None:
@@ -464,18 +470,30 @@ class SessionManager:
         prompt = COMPACT_PROMPT.format(language=language) + (
             f"\n\nThe operator asks to focus on: {instructions.strip()}" if instructions.strip() else ""
         )
-        request = LLMRequest(
-            model=model,
-            messages=[Message(role=MessageRole.user, content_blocks=[TextBlock(text=prompt + "\n\n" + transcript_for_summary(history))])],
-            max_tokens=6000,
-            temperature=0.2,
-            extra={"enable_thinking": False},
-            observability=LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, run_id=state.run_id, call_purpose="compaction", call_category="compaction"),
-        )
-        response = await provider.complete_text(request)
-        summary = "".join(b.text for b in response.message.content_blocks if isinstance(b, TextBlock)).strip()
+        transcript_text = transcript_for_summary(history)
+        observability = LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, run_id=state.run_id, call_purpose="compaction", call_category="compaction")
+        summary = ""
+        problem = ""
+        for attempt in range(2):
+            reminder = f"\n\nYour previous attempt was rejected: {problem}. Produce every section, each exactly once, in the given order." if problem else ""
+            request = LLMRequest(
+                model=model,
+                messages=[Message(role=MessageRole.user, content_blocks=[TextBlock(text=prompt + reminder + "\n\n" + transcript_text)])],
+                max_tokens=6000,
+                temperature=0.2,
+                extra={"enable_thinking": False},
+                observability=observability,
+            )
+            response = await provider.complete_text(request)
+            candidate = "".join(b.text for b in response.message.content_blocks if isinstance(b, TextBlock)).strip()
+            problem = validate_summary_sections(candidate)
+            if not problem:
+                summary = candidate
+                break
+            logger.warning("compaction summary rejected (attempt %d): %s", attempt + 1, problem)
         if not summary:
-            raise RuntimeError("the model returned an empty summary")
+            raise RuntimeError(f"the model did not produce a well-formed summary: {problem}")
+        summary = self.redactor.redact(summary) + verbatim_tail(history)
         if state.running or state.pending is not None:  # a run resumed from a snapshot meanwhile
             raise RuntimeError("the session became busy during compaction; nothing was changed")
         backup = state.workspace / f".history-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.jsonl"
@@ -483,12 +501,16 @@ class SessionManager:
             backup.write_text("\n".join(m.model_dump_json() for m in history) + "\n", encoding="utf-8")
         except OSError:
             logger.warning("could not write the history backup %s", backup, exc_info=True)
+        await self.sessions.append_transcript(session_id, history, from_history=True)
+        seqs = await self.sessions.transcript_seqs(session_id, [self.sessions.transcript_key(m) for m in history])
+        archive_note = f"\n\n[archived turns seq {seqs[0]}–{seqs[-1]}: HistoryExpand({seqs[0]}, {seqs[-1]}) returns them verbatim]" if seqs else ""
         message = Message(
             role=MessageRole.user,
-            content_blocks=[TextBlock(text=f"<compacted-turn id='manual'>{summary}</compacted-turn>")],
+            content_blocks=[TextBlock(text=f"<compacted-turn id='manual'>{summary}{archive_note}</compacted-turn>")],
             metadata={
                 COMPACTION_SUMMARY_METADATA_KEY: True,
                 "daedalus.compaction": {"reason": "manual", "messages": len(history), "at": datetime.now(UTC).isoformat()},
+                **({"daedalus.archived": {"from_seq": seqs[0], "to_seq": seqs[-1]}} if seqs else {}),
             },
         )
         if state.engine is not None:
@@ -499,7 +521,7 @@ class SessionManager:
             # measurement described the history that no longer exists.
             engine.last_observed_prompt_tokens = 0
             engine.compaction_state = CompactionState()
-        await self.sessions.append_transcript(session_id, history, from_history=True)
+        state.history_keys = [self.sessions.transcript_key(message)]
         await self.sessions.replace_messages(session_id, TENANT, [message])
         await self.sessions.append_transcript(session_id, [message])
         return summary
@@ -750,13 +772,38 @@ class SessionManager:
 
         def persist_session_history(eng: QueryEngine) -> None:
             history = list(eng.history)
-            loop = asyncio.get_running_loop()
-            loop.create_task(self.sessions.replace_messages(session_id, TENANT, history))
-            loop.create_task(self.sessions.append_transcript(session_id, history, from_history=True))
+            previous = state.history_keys
+            state.history_keys = [self.sessions.transcript_key(m) for m in history]
+            task = asyncio.get_running_loop().create_task(self._persist_history(state, history, previous))
+            task.add_done_callback(_log_task_failure)
 
         engine.reload_live_control = reload_live_control  # type: ignore[attr-defined]
         engine.persist_live_control = persist_live_control  # type: ignore[attr-defined]
         engine.persist_session_history = persist_session_history  # type: ignore[attr-defined]
+
+    async def _persist_history(self, state: SessionState, history: list[Message], previous_keys: list[str]) -> None:
+        """Persist the working history and the transcript, then label fresh summaries with what they replaced.
+
+        A compaction summary the core just produced is tagged with the transcript seq range of
+        the turns it stands for, in its metadata (for the Mini App) and in its text (so the
+        model knows what HistoryExpand would return).
+        """
+        session_id = state.session.id
+        await self.sessions.append_transcript(session_id, history, from_history=True)
+        current = {self.sessions.transcript_key(m) for m in history}
+        removed = [k for k in previous_keys if k not in current]
+        fresh = [i for i, m in enumerate(history) if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in m.metadata]
+        if removed and fresh and state.engine is not None:
+            seqs = await self.sessions.transcript_seqs(session_id, removed)
+            if seqs:
+                note = f"[archived turns seq {seqs[0]}–{seqs[-1]}: HistoryExpand({seqs[0]}, {seqs[-1]}) returns them verbatim]"
+                for index in fresh:
+                    annotated = annotate_summary(history[index], note, seqs[0], seqs[-1])
+                    history[index] = annotated
+                    live = state.engine.history
+                    if index < len(live) and live[index].metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in live[index].metadata:
+                        live[index] = annotated
+        await self.sessions.replace_messages(session_id, TENANT, history)
 
     async def _start_run(
         self, state: SessionState, message: Message | None, *, continue_turn: bool = False
@@ -814,8 +861,8 @@ class SessionManager:
                 TurnEvent(type=EventType.ERROR, run_id=run_id, payload={"message": f"{type(exc).__name__}: {exc}"}),
             )
         finally:
-            await self.sessions.replace_messages(session_id, TENANT, list(engine.history))
-            await self.sessions.append_transcript(session_id, list(engine.history), from_history=True)
+            await self._persist_history(state, list(engine.history), state.history_keys)
+            state.history_keys = [self.sessions.transcript_key(m) for m in engine.history]
             try:
                 if status == "interrupted":
                     pass  # snapshot stays; resume_unfinished() continues the run after restart
@@ -990,11 +1037,67 @@ class SessionManager:
         return resumed
 
 
+SUMMARY_SECTIONS = ("Goal", "Done", "Open", "Constraints", "Next steps", "Unknowns")
+
 COMPACT_PROMPT = """Summarise the conversation transcript below so that an agent can continue the work \
-in a fresh context. Write the summary in {language}. Include: the goal and what was asked; \
-what has been done, with concrete results (paths, commands, numbers, decisions); what is still open; \
-constraints and preferences the operator stated; and the exact next steps. Be precise and compact \
-(Markdown, at most ~600 words). Do not add commentary."""
+in a fresh context. Write the summary in {language}, as Markdown with exactly these six sections, \
+each once, in this order, as level-2 headings: ## Goal · ## Done · ## Open · ## Constraints · \
+## Next steps · ## Unknowns.
+Goal: what was asked and why. Done: what was accomplished, with concrete results (paths, commands, \
+numbers, decisions) — every identifier verbatim, never rounded or guessed. Open: what is still in \
+progress or untouched. Constraints: preferences and rules the operator stated. Next steps: the exact \
+actions to take next. Unknowns: what the transcript does not show. The absence of a tool result or \
+confirmation means the outcome is UNKNOWN, not that it did not happen or that it succeeded; put such \
+items under Unknowns rather than asserting them. Never include credentials or tokens. At most \
+~700 words. No commentary outside the sections."""
+
+VERBATIM_TAIL_MESSAGES = 3
+
+
+def validate_summary_sections(summary: str) -> str:
+    """The reason a summary is rejected, or an empty string when every section appears once, in order."""
+    positions: list[int] = []
+    for name in SUMMARY_SECTIONS:
+        pattern = re.compile(rf"^##\s+{re.escape(name)}\s*$", re.MULTILINE | re.IGNORECASE)
+        found = pattern.findall(summary)
+        if len(found) != 1:
+            return f"section '## {name}' appears {len(found)} times (expected once)"
+        positions.append(pattern.search(summary).start())  # type: ignore[union-attr]
+    if positions != sorted(positions):
+        return "sections are out of order"
+    return ""
+
+
+def verbatim_tail(history: Sequence[Message], count: int = VERBATIM_TAIL_MESSAGES) -> str:
+    """The operator's last messages, appended by code so the summary can never lose their wording."""
+    operator = [
+        m for m in history
+        if m.role is MessageRole.user and m.metadata.get("daedalus.origin") == "operator" and not m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)
+    ]
+    tail = operator[-count:]
+    if not tail:
+        return ""
+    lines = ["", "", "## Recent operator messages (verbatim)"]
+    for m in tail:
+        text = "".join(b.text for b in m.content_blocks if isinstance(b, TextBlock)).strip()
+        lines.append(f"- [{m.created_at.strftime('%Y-%m-%d %H:%M')}] {text[:1500]}")
+    return "\n".join(lines)
+
+
+def annotate_summary(message: Message, note: str, from_seq: int, to_seq: int) -> Message:
+    """Append the archived-range note inside a summary's wrapper and record the range in its metadata."""
+    blocks = list(message.content_blocks)
+    for i, block in enumerate(blocks):
+        if isinstance(block, TextBlock):
+            text = block.text
+            if text.rstrip().endswith("</compacted-turn>"):
+                cut = text.rstrip()[: -len("</compacted-turn>")]
+                text = f"{cut.rstrip()}\n\n{note}</compacted-turn>"
+            else:
+                text = f"{text.rstrip()}\n\n{note}"
+            blocks[i] = block.model_copy(update={"text": text})
+            break
+    return message.model_copy(update={"content_blocks": blocks, "metadata": {**message.metadata, "daedalus.archived": {"from_seq": from_seq, "to_seq": to_seq}}})
 
 
 def operator_language(history: Sequence[Message]) -> str:
@@ -1065,4 +1168,4 @@ def _bind(fn: Callable[..., Awaitable[Any]] | None, session_id: str) -> Callable
     return bound
 
 
-__all__ = ["Attachment", "PendingQuestion", "SessionManager", "SessionState", "transcript_for_summary"]
+__all__ = ["Attachment", "PendingQuestion", "SessionManager", "SessionState", "annotate_summary", "transcript_for_summary", "validate_summary_sections", "verbatim_tail"]
