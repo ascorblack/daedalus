@@ -468,6 +468,13 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
           <div className="sub">
             {busy ? <span className="live-dot" /> : null}
             {detail?.model} · {fmtInt(detail?.usage.i)}↑ {fmtInt(detail?.usage.o)}↓ · {fmtUsd(detail?.usage.usd)}
+            {detail?.context && detail.context.tokens > 0 && (
+              <span title={`context in use: ${detail.context.tokens.toLocaleString()} of ${detail.context.window.toLocaleString()} tokens · ${detail.context.messages} messages (${detail.context.summaries} summaries, ${detail.context.operator_turns} yours)`}>
+                {" · ctx "}
+                {fmtInt(detail.context.tokens)}
+                {detail.context.window > 0 && `/${fmtInt(detail.context.window)} (${Math.round((100 * detail.context.tokens) / detail.context.window)}%)`}
+              </span>
+            )}
           </div>
         </div>
         <button className="iconbtn" onClick={() => setMenu((m) => !m)} aria-label="menu">
@@ -493,6 +500,12 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
                   <option key={m} value={m}>{m}</option>
                 ))}
               </select>
+              {detail.context && (
+                <div className="sub" style={{ marginBottom: 8 }}>
+                  Context now: <b>{detail.context.tokens.toLocaleString()}</b>
+                  {detail.context.window > 0 && ` / ${detail.context.window.toLocaleString()} tokens (${Math.round((100 * detail.context.tokens) / detail.context.window)}%)`} · {detail.context.messages} messages in the working history: {detail.context.summaries} summaries, {detail.context.operator_turns} yours. The header's ↑↓ figures are lifetime totals.
+                </div>
+              )}
               <label className="field">Brief (standing instructions in this session's system prompt{detail.spawned_by ? `; set by session ${detail.spawned_by}` : ""})</label>
               <textarea
                 className="field"
@@ -849,8 +862,12 @@ function ActivityList({ items, compact }: { items: Activity[]; compact: boolean 
       continue;
     }
     if (it.kind === "summary") {
-      out.push(<SummaryRow key={i} text={it.text} reason={it.reason} />);
-      i++;
+      let j = i;
+      while (j < items.length && items[j].kind === "summary") j++;
+      const group = items.slice(i, j) as SummaryItem[];
+      if (group.length > 1) out.push(<SummaryGroup key={i} group={group} />);
+      else out.push(<SummaryRow key={i} text={it.text} reason={it.reason} />);
+      i = j;
       continue;
     }
     // Group consecutive tools of one family (Read/Read/Read → "Read 3 files").
@@ -900,6 +917,21 @@ function groupVerb(name: string, running: boolean): string {
   };
   const [a, b] = map[name] ?? ["Calling", "Called"];
   return running ? a : b;
+}
+
+function SummaryGroup({ group }: { group: SummaryItem[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="act-wrap">
+      <div className="act" onClick={() => setOpen((o) => !o)}>
+        <Icon name="compact" />
+        <span className="verb">Context compacted</span>
+        <span className="detail">{group.length} older turns folded into summaries</span>
+        <span className={`chev ${open ? "down" : ""}`}>›</span>
+      </div>
+      {open && group.map((s, k) => <SummaryRow key={k} text={s.text} reason={s.reason} />)}
+    </div>
+  );
 }
 
 function SummaryRow({ text, reason }: { text: string; reason: string }) {

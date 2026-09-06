@@ -1290,6 +1290,27 @@ class SessionManager:
         row = await self.db.fetchone(f"SELECT sum(cost_usd) usd, sum(cost_usd IS NULL) unmetered FROM usage_events{where}", tuple(params))
         return (float(row["usd"] or 0.0), int(row["unmetered"] or 0)) if row else (0.0, 0)
 
+    async def context_status(self, state: SessionState) -> dict[str, Any]:
+        """What the model actually sees right now: the last prompt size against the window, and what the history is made of.
+
+        The prompt size is the provider's own count from the latest call (the engine keeps it
+        while a run is live; the usage log has it between runs), so it includes the system
+        prompt and tool schemas, not only the history.
+        """
+        tokens = int(state.engine.last_observed_prompt_tokens) if state.engine is not None else 0
+        if not tokens:
+            row = await self.db.fetchone("SELECT input_tokens FROM usage_events WHERE session_id = ? AND purpose = 'stream' ORDER BY seq DESC LIMIT 1", (state.session.id,))
+            tokens = int(row["input_tokens"] or 0) if row else 0
+        try:
+            _, preset = self.resolve_model(await self.live.load(state.session.id))
+            window = int(state.context_window or preset.context_window or 0)
+        except Exception:  # noqa: BLE001 — no usable model is reported elsewhere
+            window = int(state.context_window or 0)
+        history = list(state.engine.history) if state.engine is not None else list(await self.sessions.list_messages(state.session.id, TENANT, limit=10_000))
+        summaries = sum(1 for m in history if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY))
+        operator = sum(1 for m in history if m.role is MessageRole.user and m.metadata.get("daedalus.origin") not in (None, "core") and not m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY))
+        return {"tokens": tokens, "window": window, "messages": len(history), "summaries": summaries, "operator_turns": operator}
+
     @staticmethod
     def notes_for(state: SessionState) -> str:
         """What the system prompt says about this session beyond the environment: the brief it was created with."""

@@ -514,7 +514,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cache_read_tokens) ch, sum(cost_usd) usd FROM usage_events WHERE session_id = ?",
             (session_id,),
         )
+        context = await manager.context_status(state)
         return {
+            "context": context,
             "id": session_id,
             "title": state.session.title,
             "status": status,

@@ -103,6 +103,7 @@ export type SessionDetail = {
   usd_cap?: number | null;
   brief?: string;
   spawned_by?: string | null;
+  context?: { tokens: number; window: number; messages: number; summaries: number; operator_turns: number };
   usage: { c?: number; i?: number; o?: number; ch?: number; usd?: number | null };
 };
 
