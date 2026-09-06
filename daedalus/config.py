@@ -249,6 +249,12 @@ class LimitsConfig(BaseModel):
     usd_per_run: float = Field(default=5.0, ge=0)
     """Spend cap for one run; the run is stopped after the model call that crosses it. 0 = no cap.
     Calls without a known price (self-hosted models) cannot count towards it."""
+    usd_total: float = Field(default=0.0, ge=0)
+    """Cap on priced spend across every session and provider since ``total_since``; 0 = none."""
+    usd_total_per_provider: dict[str, float] = Field(default_factory=dict)
+    """The same kind of cap per provider id (e.g. ``{"deepseek": 20}``); 0 or absent = none."""
+    total_since: str = ""
+    """ISO timestamp the total counters start from (Settings → reset); empty = every recorded call."""
 
 
 class BalanceConfig(BaseModel):

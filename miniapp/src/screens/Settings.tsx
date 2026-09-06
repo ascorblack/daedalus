@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, HeartbeatStatus, Preset, ProviderConf, Settings } from "../api";
 import { timeAgo } from "../components";
 
@@ -318,6 +318,39 @@ function AddProviderRow({ kinds, onAdd, toast }: { kinds: string[]; onAdd: (id: 
         </button>
       </div>
     </div>
+  );
+}
+
+type SpendView = { since: string; total: { spent_usd: number; unmetered: number; cap_usd: number }; per_provider: Record<string, { spent_usd: number; unmetered: number; cap_usd: number }> };
+
+function TotalCaps({ s, save }: { s: Settings; save: (patch: any) => Promise<void> }) {
+  const [spend, setSpend] = useState<SpendView | null>(null);
+  const load = useCallback(() => {
+    api.get<SpendView>("/api/limits/spend").then(setSpend).catch(() => setSpend(null));
+  }, []);
+  useEffect(load, [load, s.limits.total_since, s.limits.usd_total, s.limits.usd_total_per_provider]);
+  const providers = Object.keys(s.providers ?? {});
+  const caps = s.limits.usd_total_per_provider ?? {};
+  return (
+    <>
+      <label className="field">Total spend cap, all sessions and providers (USD, 0 = none)</label>
+      <div className="composer-row">
+        <input className="field" type="number" step="1" min={0} defaultValue={s.limits.usd_total} onBlur={(e) => { const v = Number(e.target.value); if (!Number.isNaN(v) && v !== s.limits.usd_total) save({ limits: { usd_total: v } }); }} />
+        <span className="sub" style={{ whiteSpace: "nowrap" }}>spent {spend ? `$${spend.total.spent_usd.toFixed(2)}` : "…"}</span>
+      </div>
+      <label className="field">Per-provider total caps (USD, 0 = none)</label>
+      {providers.map((pid) => (
+        <div key={pid} className="composer-row" style={{ marginBottom: 6 }}>
+          <span style={{ minWidth: 90 }}>{pid}</span>
+          <input className="field" type="number" step="1" min={0} defaultValue={caps[pid] ?? 0} onBlur={(e) => { const v = Number(e.target.value); if (!Number.isNaN(v) && v !== (caps[pid] ?? 0)) save({ limits: { usd_total_per_provider: { [pid]: v } } }); }} />
+          <span className="sub" style={{ whiteSpace: "nowrap" }}>spent {spend?.per_provider[pid] ? `$${spend.per_provider[pid].spent_usd.toFixed(2)}` : "$0.00"}</span>
+        </div>
+      ))}
+      <div className="row" style={{ alignItems: "center", gap: 10 }}>
+        <span className="sub">counting since {s.limits.total_since ? new Date(s.limits.total_since).toLocaleString() : "the beginning"}</span>
+        <button className="btn small" onClick={async () => { await api.post("/api/limits/reset-total"); load(); }}>reset counters</button>
+      </div>
+    </>
   );
 }
 
@@ -765,6 +798,7 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <input className="field" type="number" defaultValue={s.limits.max_iterations} onBlur={(e) => save({ limits: { ...s.limits, max_iterations: Number(e.target.value) } })} />
         <label className="field">Spend cap per run (USD, 0 = none; calls without a known price do not count)</label>
         <input className="field" type="number" step="0.5" defaultValue={s.limits.usd_per_run} onBlur={(e) => save({ limits: { ...s.limits, usd_per_run: Number(e.target.value) } })} />
+        <TotalCaps s={s} save={save} />
         <label className="field">Balance alert thresholds (USD, comma-separated)</label>
         <input className="field" defaultValue={s.balance.thresholds_usd.join(", ")} onBlur={(e) => save({ balance: { ...s.balance, thresholds_usd: e.target.value.split(",").map(Number).filter((n) => !Number.isNaN(n)) } })} />
         <label className="field">Balance poll interval (seconds)</label>

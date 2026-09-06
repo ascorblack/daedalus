@@ -154,6 +154,11 @@ class PeerBody(BaseModel):
     session_id: str
 
 
+class SessionCapBody(BaseModel):
+    usd_cap: float | None = None
+    """None removes the session's own cap; the global limits still apply."""
+
+
 class ModeBody(BaseModel):
     mode: str | None = None
     """A configured mode name; null or "" = default behaviour."""
@@ -509,6 +514,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "pending": state.pending.payload if state.pending else None,
             "model": await session_model_label(state),
             "mode": state.metadata.get("mode") or "",
+            "usd_cap": state.metadata.get("usd_cap"),
             "verifications": dict(await app.db.fetchone("SELECT count(*) total, sum(passed) passed FROM verifications WHERE session_id = ?", (session_id,)) or {}),
             "messages": [message_view(m) for m in source],
             "usage": dict(usage) if usage else {},
@@ -672,6 +678,40 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such session") from None
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+
+    @api.post("/api/sessions/{session_id}/cap")
+    async def set_session_cap(session_id: str, body: SessionCapBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            cap = await manager.set_session_cap(session_id, body.usd_cap)
+        except KeyError:
+            raise HTTPException(404, "no such session") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        spent, _ = await manager.spend(session_id=session_id)
+        return {"usd_cap": cap, "spent_usd": round(spent, 4)}
+
+    @api.get("/api/limits/spend")
+    async def limits_spend(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Priced spend per provider and in total since ``limits.total_since``, next to the caps."""
+        limits = app.config.limits
+        since = limits.total_since or None
+        rows = await app.db.fetchall(
+            "SELECT provider_id, sum(cost_usd) usd, sum(cost_usd IS NULL) unmetered FROM usage_events" + (" WHERE at >= ?" if since else "") + " GROUP BY provider_id",
+            (since,) if since else (),
+        )
+        per_provider = {r["provider_id"]: {"spent_usd": round(float(r["usd"] or 0.0), 4), "unmetered": int(r["unmetered"] or 0), "cap_usd": float(limits.usd_total_per_provider.get(r["provider_id"], 0) or 0)} for r in rows}
+        for pid, cap in limits.usd_total_per_provider.items():
+            per_provider.setdefault(pid, {"spent_usd": 0.0, "unmetered": 0, "cap_usd": float(cap or 0)})
+        total, unmetered = await manager.spend(since=since)
+        return {"since": limits.total_since, "total": {"spent_usd": round(total, 4), "unmetered": unmetered, "cap_usd": limits.usd_total}, "per_provider": per_provider}
+
+    @api.post("/api/limits/reset-total")
+    async def limits_reset_total(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Start the total counters afresh from now; past usage stays recorded, it just no longer counts."""
+        raw = app.config.model_dump(mode="json")
+        raw.setdefault("limits", {})["total_since"] = datetime.now(UTC).isoformat()
+        await app.save_config(type(app.config).model_validate(raw))
+        return {"total_since": app.config.limits.total_since}
 
     @api.get("/api/modes")
     async def modes(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

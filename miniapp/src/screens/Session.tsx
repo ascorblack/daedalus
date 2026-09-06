@@ -437,25 +437,63 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
         <button className="iconbtn" onClick={() => setMenu((m) => !m)} aria-label="menu">
           <Icon name="more" />
         </button>
-        {menu && (
-          <div className="menu" onClick={() => setMenu(false)}>
-            <button onClick={() => setView(view === "files" ? "chat" : "files")}>{view === "files" ? "Back to chat" : "Files"}</button>
-            <button onClick={() => setView(view === "mcp" ? "chat" : "mcp")}>{view === "mcp" ? "Back to chat" : "MCP servers"}</button>
-            <button onClick={() => setEditingTitle(detail?.title ?? "")}>Rename</button>
-            <button onClick={compact}>Compact history</button>
-            <div className="sub" style={{ padding: "6px 10px 2px" }}>mode: {detail?.mode || "default"}</div>
-            {["default", ...modes].map((m) => (
-              <button key={m} onClick={() => setMode(m)}>
-                {(detail?.mode || "default") === m ? "• " : ""}
-                {m}
-              </button>
-            ))}
-            <button className="danger" onClick={remove}>
-              Delete session
-            </button>
-          </div>
-        )}
       </div>
+
+      {menu && detail && (
+        <div className="sheet-backdrop" onClick={() => setMenu(false)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="grip" />
+            <h3>Session settings</h3>
+            <div className="sheet-body">
+              <label className="field">Title</label>
+              <input className="field" defaultValue={detail.title} onBlur={(e) => rename(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
+              <label className="field">Model</label>
+              <button className="menu-item" onClick={() => { setMenu(false); openPicker(); }}>
+                {detail.model || "global default"} <span className="sub">change</span>
+              </button>
+              <label className="field">Mode</label>
+              <select className="field" value={detail.mode || "default"} onChange={(e) => setMode(e.target.value)}>
+                {["default", ...modes].map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+              <label className="field">Spend cap for this session (USD, all its runs; empty = global limits only)</label>
+              <div className="composer-row">
+                <input
+                  className="field"
+                  type="number"
+                  step="0.5"
+                  min={0}
+                  placeholder="none"
+                  defaultValue={detail.usd_cap ?? ""}
+                  onBlur={async (e) => {
+                    const raw = e.target.value.trim();
+                    const cap = raw === "" ? null : Number(raw);
+                    if (cap !== null && Number.isNaN(cap)) return;
+                    if (cap === (detail.usd_cap ?? null)) return;
+                    try {
+                      await api.post(`/api/sessions/${id}/cap`, { usd_cap: cap });
+                      toast(cap === null ? "session cap removed" : `session cap: $${cap}`);
+                      load();
+                    } catch (err) {
+                      toast((err as Error).message);
+                    }
+                  }}
+                />
+                <span className="sub" style={{ whiteSpace: "nowrap" }}>spent {fmtUsd(detail.usage.usd)}</span>
+              </div>
+              <div className="btnrow" style={{ marginTop: 12 }}>
+                <button className="btn small" onClick={() => { setMenu(false); setView(view === "files" ? "chat" : "files"); }}>{view === "files" ? "Back to chat" : "Files"}</button>
+                <button className="btn small" onClick={() => { setMenu(false); setView(view === "mcp" ? "chat" : "mcp"); }}>{view === "mcp" ? "Back to chat" : "MCP servers"}</button>
+                <button className="btn small" onClick={compact}>Compact history</button>
+              </div>
+              <div className="btnrow">
+                <button className="btn small danger" onClick={remove}>Delete session</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
         {view === "mcp" && detail && <McpPanel sessionId={id} toast={toast} />}

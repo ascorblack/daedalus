@@ -823,6 +823,16 @@ class SessionManager:
         exceeded = self.budget_exceeded()
         if exceeded and not state.running:
             raise RuntimeError(f"daily budget exceeded ({exceeded}); runs resume tomorrow or after /budget reset")
+        if not state.running:
+            provider_id: str | None = None
+            try:
+                rungs, _ = self.resolve_model(await self.live.load(session_id))
+                provider_id = rungs[0][0].endpoint.id if rungs else None
+            except Exception:  # noqa: BLE001 — a model problem surfaces when the run starts, not here
+                provider_id = None
+            breach = await self.cap_breach(state, provider_id)
+            if breach is not None:
+                raise RuntimeError(breach[1])
         if state.running and state.engine is not None and state.engine.is_terminal and state.task is not None:
             # The loop has settled and the task is only doing bookkeeping: let it finish and start a new turn.
             try:
@@ -1220,7 +1230,7 @@ class SessionManager:
             except Exception:  # noqa: BLE001
                 logger.exception("event sink failed")
         if event.type is EventType.MESSAGE_STOP:
-            await self._enforce_run_cap(state, event.run_id)
+            await self._enforce_caps(state, event.run_id)
 
     def _redact_event(self, state: SessionState, event: TurnEvent) -> None:
         """Mask secrets the core's hook did not see: failure results, error text, tool arguments.
@@ -1262,26 +1272,91 @@ class SessionManager:
                 engine.history[index] = message.model_copy(update={"content_blocks": blocks})
                 return
 
-    async def _enforce_run_cap(self, state: SessionState, run_id: str) -> None:
-        """Stop a run whose priced spend crossed ``limits.usd_per_run``; unpriced calls cannot count."""
+    async def spend(self, *, run_id: str | None = None, session_id: str | None = None, provider_id: str | None = None, since: str | None = None) -> tuple[float, int]:
+        """Priced spend in USD (and the number of unpriced calls) over the given slice of usage events."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (("run_id", run_id), ("session_id", session_id), ("provider_id", provider_id)):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if since:
+            clauses.append("at >= ?")
+            params.append(since)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        row = await self.db.fetchone(f"SELECT sum(cost_usd) usd, sum(cost_usd IS NULL) unmetered FROM usage_events{where}", tuple(params))
+        return (float(row["usd"] or 0.0), int(row["unmetered"] or 0)) if row else (0.0, 0)
+
+    @staticmethod
+    def session_cap(state: SessionState) -> float | None:
+        """This session's own spend cap (all of its runs), or None when it follows the global limits only."""
+        raw = state.metadata.get("usd_cap")
+        return float(raw) if raw is not None else None
+
+    async def set_session_cap(self, session_id: str, cap: float | None) -> float | None:
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        if cap is not None and cap < 0:
+            raise ValueError("a session cap cannot be negative")
+        for meta in (state.metadata, state.session.metadata):
+            if cap is None:
+                meta.pop("usd_cap", None)
+            else:
+                meta["usd_cap"] = float(cap)
+        await self.sessions.update_metadata(session_id, state.session.metadata)
+        return cap
+
+    async def cap_breach(self, state: SessionState, provider_id: str | None) -> tuple[str, str] | None:
+        """``(kind, note)`` when the session, its provider or everything together has spent its cap.
+
+        Three caps stack above the per-run one: the session's own (session settings), the
+        provider's total across every session (``limits.usd_total_per_provider``) and the grand
+        total (``limits.usd_total``); the last two count from ``limits.total_since``.
+        """
+        limits = self.config.limits
+        since = limits.total_since or None
+        session_cap = self.session_cap(state)
+        if session_cap is not None:
+            spent, _ = await self.spend(session_id=state.session.id)
+            if spent >= session_cap:
+                return "session_cap", f"session cap reached: ${spent:.2f} spent of ${session_cap:.2f}; raise it in the session settings to continue"
+        provider_cap = float(limits.usd_total_per_provider.get(provider_id or "", 0) or 0)
+        if provider_id and provider_cap > 0:
+            spent, _ = await self.spend(provider_id=provider_id, since=since)
+            if spent >= provider_cap:
+                return "provider_cap", f"total cap for provider {provider_id!r} reached: ${spent:.2f} spent of ${provider_cap:.2f} (limits.usd_total_per_provider); raise it or reset the counter in Settings → Limits"
+        if limits.usd_total > 0:
+            spent, _ = await self.spend(since=since)
+            if spent >= limits.usd_total:
+                return "total_cap", f"total spend cap reached: ${spent:.2f} spent of ${limits.usd_total:.2f} (limits.usd_total); raise it or reset the counter in Settings → Limits"
+        return None
+
+    async def _enforce_caps(self, state: SessionState, run_id: str) -> None:
+        """Stop a run that crossed a spend cap: its own, the session's, its provider's or the total."""
+        if state.engine is None or not state.running or run_id in self._capped_runs:
+            return
         mode = self.mode_for(state)
         mode_cap = mode.usd_per_run if mode is not None else None
-        cap = mode_cap if mode_cap is not None else self.config.limits.usd_per_run
-        if (cap <= 0 and mode_cap is None) or state.engine is None or not state.running or run_id in self._capped_runs:
-            return
-        row = await self.db.fetchone(
-            "SELECT sum(cost_usd) usd, sum(cost_usd IS NULL) unmetered FROM usage_events WHERE run_id = ?", (run_id,)
-        )
-        spent = float(row["usd"] or 0.0) if row else 0.0
-        if spent < cap:
+        run_cap = mode_cap if mode_cap is not None else self.config.limits.usd_per_run
+        spent, unmetered = await self.spend(run_id=run_id)
+        note: str | None = None
+        kind = "run_cap"
+        if (run_cap > 0 or mode_cap is not None) and spent >= run_cap:
+            note = f"💸 per-run cap reached: ${spent:.2f} spent of ${run_cap:.2f} (limits.usd_per_run); stopping this run. Send a message to continue in a new run."
+            if unmetered:
+                note += f" {unmetered} call(s) had no known price and are not counted."
+        else:
+            last = await self.db.fetchone("SELECT provider_id FROM usage_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1", (run_id,))
+            breach = await self.cap_breach(state, last["provider_id"] if last else None)
+            if breach is not None:
+                kind, note = breach[0], f"💸 {breach[1]}; stopping this run."
+        if note is None:
             return
         self._capped_runs.add(run_id)
-        note = f"💸 per-run cap reached: ${spent:.2f} spent of ${cap:.2f} (limits.usd_per_run); stopping this run. Send a message to continue in a new run."
-        if row and row["unmetered"]:
-            note += f" {int(row['unmetered'])} call(s) had no known price and are not counted."
-        logger.warning("run %s stopped at the per-run cap: $%.4f >= $%.2f", run_id, spent, cap)
+        logger.warning("run %s stopped (%s): %s", run_id, kind, note)
         state.engine.stop()
-        await self._dispatch_event(state, TurnEvent(type=EventType.ERROR, run_id=run_id, payload={"message": note, "kind": "run_cap"}))
+        await self._dispatch_event(state, TurnEvent(type=EventType.ERROR, run_id=run_id, payload={"message": note, "kind": kind}))
 
     # -- recovery -------------------------------------------------------------------
 

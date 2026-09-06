@@ -100,6 +100,7 @@ export type SessionDetail = {
   model: string;
   messages: MessageView[];
   mode?: string;
+  usd_cap?: number | null;
   usage: { c?: number; i?: number; o?: number; ch?: number; usd?: number | null };
 };
 
@@ -190,7 +191,7 @@ export type Settings = {
     exec: { max_output_chars: number };
   };
   self_change: { approval: string; auto_rebuild: boolean };
-  limits: { max_iterations: number; tool_timeout_seconds: number; usd_per_run: number };
+  limits: { max_iterations: number; tool_timeout_seconds: number; usd_per_run: number; usd_total: number; usd_total_per_provider: Record<string, number>; total_since: string };
   usd_per_day?: number;
   balance: { enabled: boolean; poll_seconds: number; thresholds_usd: number[] };
   scheduler: { topic_mode: string; catch_up_missed: boolean };
