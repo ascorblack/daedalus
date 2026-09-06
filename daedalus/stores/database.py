@@ -229,6 +229,48 @@ MIGRATIONS: list[str] = [
     ALTER TABLE schedules ADD COLUMN active_run_id TEXT;
     ALTER TABLE lazy_notes ADD COLUMN promote_attempts INTEGER NOT NULL DEFAULT 0;
     """,
+    # workspace checkpoints, verification receipts, learning records
+    """
+    CREATE TABLE checkpoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        seq INTEGER,
+        run_id TEXT,
+        kind TEXT NOT NULL,
+        sha TEXT NOT NULL,
+        at TEXT NOT NULL
+    );
+    CREATE INDEX checkpoints_session ON checkpoints(session_id, seq);
+    CREATE TABLE verifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        run_id TEXT,
+        criterion TEXT NOT NULL,
+        command TEXT NOT NULL,
+        cwd TEXT,
+        exit_code INTEGER NOT NULL,
+        passed INTEGER NOT NULL,
+        output_digest TEXT NOT NULL,
+        output_head TEXT,
+        duration_ms INTEGER,
+        at TEXT NOT NULL
+    );
+    CREATE INDEX verifications_session ON verifications(session_id, at);
+    CREATE TABLE learning_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        at TEXT NOT NULL,
+        ask TEXT,
+        outcome TEXT NOT NULL,
+        headline TEXT,
+        tools TEXT NOT NULL DEFAULT '{}',
+        failures TEXT NOT NULL DEFAULT '[]',
+        iterations INTEGER,
+        cost_usd REAL,
+        duration_s REAL
+    );
+    """,
 ]
 
 

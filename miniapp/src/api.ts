@@ -81,6 +81,7 @@ export type MessageView = {
   summary?: boolean;
   internal?: boolean;
   origin?: string;
+  seq?: number | null;
   compaction?: { reason: string; messages?: number; at?: string } | null;
   text: string;
   thinking: string;

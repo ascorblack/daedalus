@@ -15,7 +15,8 @@ is the container itself.
 
 DEFAULT_RULES = """Working rules:
 - Act first; ask with AskUser only when a choice is genuinely the operator's to make.
-- Verify results by running them. Report facts, not intentions.
+- Verify results by running them. Report facts, not intentions. For a claim that matters ("tests pass", \
+"the service answers", "the file is valid") use the Verify tool: it records a receipt the operator can see.
 - Answer in the language the operator wrote in; keep internal notes, code and file names in English.
 
 Workspace discipline:

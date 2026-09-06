@@ -146,6 +146,26 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
   const stick = useRef(true);
   const userScrolling = useRef(false);
 
+  const turnAction = useCallback(
+    async (kind: "revert" | "fork", seq: number) => {
+      try {
+        if (kind === "revert") {
+          if (!window.confirm("Undo this turn and everything after it? The working history is cut and the workspace files go back to that point. The transcript keeps everything.")) return;
+          const r = await api.post<{ dropped: number; workspace_restored: boolean }>(`/api/sessions/${id}/revert`, { seq });
+          toast(`reverted: ${r.dropped} message(s) removed${r.workspace_restored ? ", workspace restored" : ""}`);
+        } else {
+          const r = await api.post<{ id: string; title: string; messages: number }>(`/api/sessions/${id}/fork`, { seq });
+          toast(`forked into "${r.title}" (${r.messages} messages) — open it from the Bots tab`);
+        }
+        load();
+      } catch (e) {
+        toast((e as Error).message);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [id, toast],
+  );
+
   const load = useCallback(async () => {
     try {
       setDetail(await api.get<SessionDetail>(`/api/sessions/${id}`));
@@ -424,7 +444,7 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
           <div className="timeline">
             {turns.map((t, i) => (
               <Safe key={t.key}>
-                <TurnView turn={t} live={busy && i === turns.length - 1} />
+                <TurnView turn={t} live={busy && i === turns.length - 1} onTurnAction={turnAction} />
               </Safe>
             ))}
             {detail?.pending && <QuestionCard sessionId={id} questions={detail.pending.questions} onDone={load} toast={toast} />}
@@ -553,7 +573,7 @@ function stepCount(items: Activity[]): number {
   return items.filter((a) => a.kind === "tool").length;
 }
 
-function TurnView({ turn, live }: { turn: Turn; live: boolean }) {
+function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork", seq: number) => void }) {
   const [open, setOpen] = useState(live);
   const wasLive = useRef(live);
   useEffect(() => {
@@ -574,6 +594,16 @@ function TurnView({ turn, live }: { turn: Turn; live: boolean }) {
         </div>
       )}
       {turn.user && <div className="msg user" dangerouslySetInnerHTML={{ __html: renderMarkdown(turn.user.text) }} />}
+      {turn.user && turn.user.seq && onTurnAction && !live && (
+        <div className="turn-actions">
+          <button className="btn small" onClick={() => onTurnAction("revert", turn.user!.seq!)} title="undo this turn and everything after it (files too)">
+            ↶ revert here
+          </button>
+          <button className="btn small" onClick={() => onTurnAction("fork", turn.user!.seq!)} title="start a new session from this point">
+            ⑂ fork
+          </button>
+        </div>
+      )}
       {hasWork && (
         <button className="thinking-head" onClick={() => setOpen((o) => !o)}>
           <span className={`dots ${live ? "on" : ""}`}>

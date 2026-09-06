@@ -275,3 +275,4 @@ input.field, select.field, textarea.field {
 
 .tab-badge { position:absolute; top:-6px; right:-14px; min-width:16px; height:16px; padding:0 4px; border-radius:999px; background:var(--bad); color:#fff; font-size:10px; line-height:16px; text-align:center; font-weight:700; }
 .card.unread { border-color: color-mix(in srgb, var(--info) 45%, var(--line)); }
+.turn-actions { display:flex; justify-content:flex-end; gap:6px; margin:-2px 0 8px; opacity:0.75; }

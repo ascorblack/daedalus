@@ -116,6 +116,15 @@ class RenameBody(BaseModel):
     title: str
 
 
+class RevertBody(BaseModel):
+    seq: int
+
+
+class ForkBody(BaseModel):
+    seq: int
+    title: str | None = None
+
+
 class CompactBody(BaseModel):
     instructions: str = ""
 
@@ -347,6 +356,7 @@ def message_view(message: Message) -> dict[str, Any]:
         "summary": is_summary,
         "internal": internal,
         "origin": origin or ("operator" if message.role is MessageRole.user and not internal else ""),
+        "seq": message.metadata.get("daedalus.seq") if isinstance(message.metadata, dict) else None,
         "compaction": compaction,
         "archived": archived,
         "headline": headline,
@@ -432,6 +442,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "workspace": str(state.workspace),
             "pending": state.pending.payload if state.pending else None,
             "model": await session_model_label(state),
+            "verifications": dict(await app.db.fetchone("SELECT count(*) total, sum(passed) passed FROM verifications WHERE session_id = ?", (session_id,)) or {}),
             "messages": [message_view(m) for m in source],
             "usage": dict(usage) if usage else {},
         }
@@ -552,6 +563,41 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"id": session_id, "title": body.title.strip()[:128]}
+
+    @api.post("/api/sessions/{session_id}/revert")
+    async def revert_session(session_id: str, body: RevertBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            return await manager.revert(session_id, body.seq)
+        except KeyError:
+            raise HTTPException(404, "no such session") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/api/sessions/{session_id}/fork")
+    async def fork_session(session_id: str, body: ForkBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        source = await manager.get_state(session_id)
+        if source is None:
+            raise HTTPException(404, "no such session")
+        title = (body.title or f"{source.session.title} (fork @{body.seq})")[:128]
+        front = app.front
+        try:
+            if front is not None:
+                target, _binding = await front.create_session_topic(title, metadata={"forked_from": {"session_id": session_id, "seq": body.seq}})
+            else:
+                target = await manager.create_session(title, metadata={"forked_from": {"session_id": session_id, "seq": body.seq}})
+        except TelegramBusy as exc:
+            raise HTTPException(429, str(exc)) from exc
+        except TelegramRefused as exc:
+            raise HTTPException(502, str(exc)) from exc
+        result = await manager.fork_into(session_id, body.seq, target)
+        return {"id": target.session.id, "title": title, **result}
+
+    @api.get("/api/sessions/{session_id}/verifications")
+    async def session_verifications(session_id: str, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        rows = await app.db.fetchall("SELECT id, run_id, criterion, command, exit_code, passed, output_digest, duration_ms, at FROM verifications WHERE session_id = ? ORDER BY id DESC LIMIT 100", (session_id,))
+        return [dict(r) for r in rows]
 
     @api.post("/api/sessions/{session_id}/compact")
     async def compact_session(session_id: str, body: CompactBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

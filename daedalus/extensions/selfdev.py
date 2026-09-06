@@ -9,7 +9,7 @@ import os
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -141,7 +141,8 @@ class SelfDevelopment:
         if ahead == "0":
             raise GitError("the branch has no commits beyond origin/main")
         await self.git(spec, "push", "-u", "origin", head_branch, "--force-with-lease", cwd=worktree)
-        body = summary + "\n\n" + (f"Session: {session_id}" if session_id else "")
+        receipts = await self.receipts_for(session_id) if session_id else ""
+        body = summary + "\n\n" + (f"Session: {session_id}" if session_id else "") + receipts
         existing = (await self.gh("pr", "list", "--head", head_branch, "--json", "number,url", cwd=worktree)).strip()
         try:
             prs = json.loads(existing or "[]")
@@ -170,8 +171,19 @@ class SelfDevelopment:
         if self.app.config.self_change.approval == "auto":
             result = await self.decide(proposal_id, "approve", reason="auto-approval mode")
             return f"PR #{pr_number} {pr_url} — {result}"
-        await self._send_card(proposal_id, repo, title, summary, pr_url, diffstat)
+        await self._send_card(proposal_id, repo, title, summary + receipts, pr_url, diffstat)
         return f"PR #{pr_number} opened: {pr_url}. Waiting for the operator's decision in chat."
+
+    async def receipts_for(self, session_id: str, *, hours: int = 24) -> str:
+        """Verification receipts the proposing session recorded recently, as evidence on the card."""
+        since = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+        rows = await self.app.db.fetchall(
+            "SELECT id, criterion, command, exit_code, passed FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 12", (session_id, since)
+        )
+        if not rows:
+            return "\n\nVerification receipts: none — nothing in this proposal was checked with Verify."
+        lines = [f"- {'✅' if r['passed'] else '❌'} {r['criterion']} — `{r['command'][:80]}` (exit {r['exit_code']}, receipt v{r['id']})" for r in rows]
+        return "\n\nVerification receipts:\n" + "\n".join(lines)
 
     async def _send_card(self, proposal_id: str, repo: str, title: str, summary: str, pr_url: str, diffstat: str) -> None:
         front = self.app.front

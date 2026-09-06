@@ -21,6 +21,7 @@ EXTENSIONS = (
     "daedalus.extensions.selfdev",
     "daedalus.extensions.scheduler",
     "daedalus.extensions.heartbeat",
+    "daedalus.extensions.learning",
     "daedalus.extensions.balance",
     "daedalus.extensions.api",
 )

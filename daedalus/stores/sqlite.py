@@ -268,14 +268,23 @@ class SqliteSessionStore(ISessionStore):
         return sorted(out)
 
     async def list_transcript(self, session_id: str, *, limit: int = 0) -> list[Message]:
+        """Transcript rows as messages; each carries its row number in ``metadata["daedalus.seq"]``."""
         if limit > 0:
             rows = await self._db.fetchall(
-                "SELECT message FROM (SELECT seq, message FROM transcript WHERE session_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq",
+                "SELECT seq, message FROM (SELECT seq, message FROM transcript WHERE session_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq",
                 (session_id, limit),
             )
         else:
-            rows = await self._db.fetchall("SELECT message FROM transcript WHERE session_id = ? ORDER BY seq", (session_id,))
-        return [Message.model_validate_json(r["message"]) for r in rows]
+            rows = await self._db.fetchall("SELECT seq, message FROM transcript WHERE session_id = ? ORDER BY seq", (session_id,))
+        out = []
+        for r in rows:
+            message = Message.model_validate_json(r["message"])
+            out.append(message.model_copy(update={"metadata": {**message.metadata, "daedalus.seq": int(r["seq"])}}))
+        return out
+
+    async def transcript_row(self, session_id: str, seq: int) -> tuple[str, Message] | None:
+        row = await self._db.fetchone("SELECT key, message FROM transcript WHERE session_id = ? AND seq = ?", (session_id, seq))
+        return (row["key"], Message.model_validate_json(row["message"])) if row else None
 
     async def replace_messages(self, session_id: str, tenant_id: str, messages: Sequence[Message]) -> None:
         rows = [(session_id, tenant_id, m.model_dump_json()) for m in messages]

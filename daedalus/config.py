@@ -260,6 +260,8 @@ class OpsConfig(BaseModel):
     doctor_workspaces_warn_gb: float = Field(default=20.0, ge=0)
     doctor_stale_snapshot_hours: int = Field(default=24, ge=1)
     doctor_probe_timeout_seconds: float = Field(default=6.0, ge=1)
+    checkpoint_max_gb: float = Field(default=2.0, ge=0)
+    """Workspaces larger than this are not snapshotted (revert then restores the history only)."""
 
 
 class HeartbeatConfig(BaseModel):

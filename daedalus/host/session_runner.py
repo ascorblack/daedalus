@@ -40,6 +40,7 @@ from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
 
 from daedalus.config import RuntimeConfig, Settings
+from daedalus.host.checkpoints import CheckpointError, Checkpoints, workspace_size
 from daedalus.host.engine_factory import TENANT, EngineDeps, build_engine
 from daedalus.host.hooks import DaedalusHookManager
 from daedalus.host.services import SessionServices, locator
@@ -555,6 +556,104 @@ class SessionManager:
         await self.sessions.append_transcript(session_id, [message])
         return summary
 
+    # -- checkpoints, revert, fork ------------------------------------------------------
+
+    async def checkpoint(self, state: SessionState, *, kind: str, seq: int | None = None, run_id: str | None = None) -> str | None:
+        """Snapshot the workspace (bounded by ``ops.checkpoint_max_gb``); returns the commit id or None."""
+        limit = self.config.ops.checkpoint_max_gb
+        try:
+            if limit and await asyncio.to_thread(workspace_size, state.workspace) > limit * 1e9:
+                return None
+            sha = await Checkpoints(state.workspace).snapshot(f"{kind} seq={seq} run={run_id}")
+        except (CheckpointError, OSError) as exc:
+            logger.warning("checkpoint failed for %s: %s", state.session.id, exc)
+            return None
+        await self.db.execute(
+            "INSERT INTO checkpoints(session_id, seq, run_id, kind, sha, at) VALUES (?, ?, ?, ?, ?, ?)",
+            (state.session.id, seq, run_id, kind, sha, datetime.now(UTC).isoformat()),
+        )
+        return sha
+
+    async def checkpoint_before(self, session_id: str, seq: int) -> str | None:
+        """The snapshot taken right before the operator turn at transcript ``seq``."""
+        row = await self.db.fetchone("SELECT sha FROM checkpoints WHERE session_id = ? AND kind = 'before' AND seq = ? ORDER BY id DESC LIMIT 1", (session_id, seq))
+        return row["sha"] if row else None
+
+    async def revert(self, session_id: str, seq: int) -> dict[str, Any]:
+        """Undo everything from the operator turn at transcript ``seq`` on: history and workspace.
+
+        The turn must still be in the working history (not compacted away); the transcript
+        keeps the undone turns and a marker says where the history now ends.
+        """
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        async with state.lock:
+            if state.running or state.pending is not None:
+                raise RuntimeError("the session is busy; stop the run (or answer the question) first")
+            pending = [t for t in state.persist_tasks if not t.done()]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            row = await self.sessions.transcript_row(session_id, seq)
+            if row is None:
+                raise ValueError(f"no transcript turn {seq}")
+            key, target = row
+            if target.role is not MessageRole.user or target.metadata.get("daedalus.origin") not in (None, "operator"):
+                raise ValueError("revert points at an operator message")
+            history = list(state.engine.history) if state.engine is not None else list(await self.sessions.list_messages(session_id, TENANT, limit=10_000))
+            keys = [self.sessions.transcript_key(m) for m in history]
+            if key not in keys:
+                raise ValueError("that turn is no longer in the working history (compacted); fork from it instead")
+            cut = keys.index(key)
+            kept = history[:cut]
+            dropped = len(history) - cut
+            sha = await self.checkpoint_before(session_id, seq)
+            restored = False
+            if sha:
+                try:
+                    await Checkpoints(state.workspace).restore(sha)
+                    restored = True
+                except CheckpointError as exc:
+                    logger.warning("workspace restore failed: %s", exc)
+            state.persist_gen += 1
+            if state.engine is not None:
+                state.engine.history = kept
+                state.engine.last_observed_prompt_tokens = 0
+                state.engine.compaction_state = CompactionState()
+            state.history_keys = [self.sessions.transcript_key(m) for m in kept]
+            await self.sessions.replace_messages(session_id, TENANT, kept)
+            marker = Message(
+                role=MessageRole.user,
+                content_blocks=[TextBlock(text=f"[reverted to before seq {seq}: {dropped} message(s) left the working history{'; workspace restored' if restored else ''}]")],
+                metadata={"daedalus.origin": "revert", "daedalus.revert": {"seq": seq, "dropped": dropped, "workspace_restored": restored}},
+            )
+            await self.sessions.append_transcript(session_id, [marker])
+            return {"dropped": dropped, "workspace_restored": restored, "kept": len(kept)}
+
+    async def fork_into(self, source_id: str, seq: int, target: SessionState) -> dict[str, Any]:
+        """Give ``target`` the source's history before transcript ``seq`` and a copy of its workspace as of then."""
+        source = await self.get_state(source_id)
+        if source is None:
+            raise KeyError(source_id)
+        rows = await self.sessions.list_transcript(source_id)
+        before = [m for m in rows if int(m.metadata.get("daedalus.seq", 0)) < seq and m.metadata.get("daedalus.origin") != "revert"]
+        history = [m.model_copy(update={"metadata": {k: v for k, v in m.metadata.items() if k != "daedalus.seq"}}) for m in before]
+        await self.sessions.replace_messages(target.session.id, TENANT, history)
+        await self.sessions.append_transcript(target.session.id, history)
+        target.history_keys = [self.sessions.transcript_key(m) for m in history]
+        copied = False
+        if source.workspace.exists():
+            await asyncio.to_thread(shutil.copytree, source.workspace, target.workspace, dirs_exist_ok=True)
+            copied = True
+            sha = await self.checkpoint_before(source_id, seq)
+            if sha:
+                try:
+                    await Checkpoints(target.workspace).restore(sha)
+                except CheckpointError as exc:
+                    logger.warning("fork workspace restore failed: %s", exc)
+        await self.sessions.update_metadata(target.session.id, {**target.session.metadata, "forked_from": {"session_id": source_id, "seq": seq}})
+        return {"messages": len(history), "workspace_copied": copied}
+
     async def closed_topic_sessions(self) -> list[dict[str, Any]]:
         """Sessions whose topic is closed but whose data is still on disk."""
         rows = await self.db.fetchall(
@@ -695,6 +794,8 @@ class SessionManager:
             metadata={"daedalus.origin": origin, **({"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {})},
         )
         await self.sessions.append_transcript(session_id, [message])
+        seqs = await self.sessions.transcript_seqs(session_id, [self.sessions.transcript_key(message)])
+        await self.checkpoint(state, kind="before", seq=seqs[0] if seqs else None)
         run_id = await self._start_run(state, message)
         for started in self.run_started_hooks:
             try:
@@ -970,6 +1071,8 @@ class SessionManager:
                     self.events.close_run(run_id)
             except Exception:  # noqa: BLE001
                 logger.exception("run %s bookkeeping failed", run_id)
+            if status in ("completed", "failed", "cancelled"):
+                await self.checkpoint(state, kind="after", run_id=run_id)
             for callback in self._finished:
                 try:
                     await callback(session_id, run_id, status)
