@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -277,6 +278,28 @@ async def test_concurrent_access_token_refreshes_once(tmp_path: Path) -> None:
         assert client.store.get("tokens")["refresh_token"] == "rt-1"
     finally:
         await http.aclose()
+
+
+async def test_needs_refresh_tracks_expiry(tmp_path: Path) -> None:
+    """needs_refresh() reports expired/missing/about-to-expire tokens so the MCP
+    connection can refresh *before* an opaque 401 kills a call."""
+    client, _ = _make_client(tmp_path)
+    t = int(time.time())
+    # Missing token -> needs refresh.
+    client.store.set("tokens", {})
+    assert client.needs_refresh()
+    # Valid, far from expiry -> no.
+    client.store.set("tokens", {"access_token": "a", "refresh_token": "r", "expires_at": t + 3600})
+    assert not client.needs_refresh()
+    # Expired -> yes.
+    client.store.set("tokens", {"access_token": "a", "refresh_token": "r", "expires_at": t - 10})
+    assert client.needs_refresh()
+    # Within the skew margin -> yes.
+    client.store.set("tokens", {"access_token": "a", "refresh_token": "r", "expires_at": t + 20})
+    assert client.needs_refresh()
+    # Garbage expiry -> yes (treat as unknown).
+    client.store.set("tokens", {"access_token": "a", "refresh_token": "r", "expires_at": "never"})
+    assert client.needs_refresh()
 
 
 async def test_config_roundtrip(tmp_path: Path) -> None:

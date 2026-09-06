@@ -177,6 +177,10 @@ class McpConnection:
         return McpToolProxy(self, remote.name, definition)
 
     async def call(self, tool: str, arguments: dict[str, Any]) -> Any:
+        # An expired access token makes every call fail with a 401 that the remote may
+        # report opaquely. Refresh and reconnect up front rather than after the fact.
+        if self.oauth is not None and self.oauth.needs_refresh():
+            await self._refresh_and_reconnect()
         for attempt in (1, 2):
             if self.session is None:
                 if attempt == 2:

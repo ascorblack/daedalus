@@ -325,6 +325,24 @@ class MCPOAuthClient:
         tokens = self.store.get("tokens") or {}
         return {key: tokens.get(key) for key in _TOKEN_KEYS}
 
+    def needs_refresh(self, *, margin_seconds: int = 30) -> bool:
+        """True if the stored access token is missing, expired, or about to expire.
+
+        Used by the MCP connection to refresh and reconnect *before* an expired token
+        makes a call fail with a 401 that a remote may report opaquely (e.g. as a bare
+        "server returned an error response") rather than as a recognizable auth error.
+        """
+        tokens = self._tokens()
+        if not tokens.get("access_token"):
+            return True
+        expires_at = tokens.get("expires_at")
+        if not expires_at:
+            return True
+        try:
+            return int(expires_at) - margin_seconds <= time.time()
+        except (TypeError, ValueError):
+            return True
+
     async def access_token(self) -> str:
         """Return a usable access token, refreshing first when needed."""
         tokens = self._tokens()
