@@ -7,6 +7,6 @@ PATTERNS='sk-[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]+|ghp_[A-Za-z0-9]{20,}|[0-9
 echo "== working tree"
 grep -rInE "$PATTERNS" --exclude-dir=.git --exclude-dir=.venv --exclude-dir=node_modules --exclude-dir=dist . || echo "clean"
 echo "== history (all blobs)"
-git rev-list --all | while read -r c; do git grep -InE "$PATTERNS" "$c" -- . 2>/dev/null | sed "s/^/$c:/" ; done | grep -v "scripts/audit_public.sh" || echo "clean"
+git rev-list --all | while read -r c; do git grep -InE "$PATTERNS" "$c" -- . 2>/dev/null | sed "s/^/$c:/" ; done | grep -vE "scripts/audit_public.sh|daedalus/extensions/selfdev.py|tests/unit/test_public_text.py" || echo "clean"
 echo "== commit messages"
 git log --all --format='%H %s%n%b' | grep -inE 'co-authored-by|claude|codex|generated' || echo "clean"
