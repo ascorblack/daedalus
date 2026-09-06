@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_REDIRECT_URI = "http://127.0.0.1:8931/callback"
 _TOKEN_GRACE_SECONDS = 60.0
+_REFRESH_MARGIN_SECONDS = 30
+"""A token this close to its (already grace-adjusted) expiry is renewed ahead of use, by every check alike."""
 
 _TOKEN_KEYS = ("access_token", "refresh_token", "expires_at", "scope")
 
@@ -325,28 +327,30 @@ class MCPOAuthClient:
         tokens = self.store.get("tokens") or {}
         return {key: tokens.get(key) for key in _TOKEN_KEYS}
 
-    def needs_refresh(self, *, margin_seconds: int = 30) -> bool:
-        """True if the stored access token is missing, expired, or about to expire.
+    @staticmethod
+    def _usable(tokens: dict[str, Any]) -> bool:
+        """An access token that will still be valid after the refresh margin."""
+        if not tokens.get("access_token") or not tokens.get("expires_at"):
+            return False
+        try:
+            return int(tokens["expires_at"]) - _REFRESH_MARGIN_SECONDS > time.time()
+        except (TypeError, ValueError):
+            return False
 
-        Used by the MCP connection to refresh and reconnect *before* an expired token
-        makes a call fail with a 401 that a remote may report opaquely (e.g. as a bare
-        "server returned an error response") rather than as a recognizable auth error.
+    def needs_refresh(self) -> bool:
+        """True when the stored access token is missing, expired or about to expire and a refresh token exists.
+
+        The MCP connection asks before a call, so an expiring token is renewed ahead of a 401
+        that a remote may report opaquely. A server that was never linked (no refresh token)
+        is not a refresh case: its calls fail the ordinary way with the link instruction.
         """
         tokens = self._tokens()
-        if not tokens.get("access_token"):
-            return True
-        expires_at = tokens.get("expires_at")
-        if not expires_at:
-            return True
-        try:
-            return int(expires_at) - margin_seconds <= time.time()
-        except (TypeError, ValueError):
-            return True
+        return bool(tokens.get("refresh_token")) and not self._usable(tokens)
 
     async def access_token(self) -> str:
         """Return a usable access token, refreshing first when needed."""
         tokens = self._tokens()
-        if tokens.get("access_token") and tokens.get("expires_at") and int(tokens["expires_at"]) > time.time():
+        if self._usable(tokens):
             return str(tokens["access_token"])
         if tokens.get("refresh_token"):
             await self.refresh()
@@ -361,8 +365,9 @@ class MCPOAuthClient:
         async with self._refresh_lock:
             tokens = self._tokens()
             # Another caller may have refreshed while we waited for the lock; if the
-            # stored token is already usable there is nothing left to do.
-            if tokens.get("access_token") and tokens.get("expires_at") and int(tokens["expires_at"]) > time.time():
+            # stored token is already usable there is nothing left to do. The same margin
+            # as needs_refresh(), or a token inside the margin would be checked and never renewed.
+            if self._usable(tokens):
                 return
             refresh_token = tokens.get("refresh_token")
             if not refresh_token:

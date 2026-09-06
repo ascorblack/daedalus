@@ -283,20 +283,27 @@ async def test_concurrent_access_token_refreshes_once(tmp_path: Path) -> None:
 async def test_needs_refresh_tracks_expiry(tmp_path: Path) -> None:
     """needs_refresh() reports expired/missing/about-to-expire tokens so the MCP
     connection can refresh *before* an opaque 401 kills a call."""
-    client, _ = _make_client(tmp_path)
+    client, http = _make_client(tmp_path)
     t = int(time.time())
-    # Missing token -> needs refresh.
+    # Never linked (no refresh token): not a refresh case — the call fails with the link instruction instead.
     client.store.set("tokens", {})
-    assert client.needs_refresh()
+    assert not client.needs_refresh()
     # Valid, far from expiry -> no.
     client.store.set("tokens", {"access_token": "a", "refresh_token": "r", "expires_at": t + 3600})
     assert not client.needs_refresh()
     # Expired -> yes.
     client.store.set("tokens", {"access_token": "a", "refresh_token": "r", "expires_at": t - 10})
     assert client.needs_refresh()
-    # Within the skew margin -> yes.
-    client.store.set("tokens", {"access_token": "a", "refresh_token": "r", "expires_at": t + 20})
+    # Within the skew margin -> yes, and refresh() agrees: it renews instead of deciding the token is still fine.
+    client.store.set("tokens", {"access_token": "a", "refresh_token": "rt-old", "expires_at": t + 20})
     assert client.needs_refresh()
+    try:
+        await client.refresh()
+        stored = client.store.get("tokens")
+        assert stored["access_token"] != "a" and stored["expires_at"] > t + 3000
+        assert not client.needs_refresh()
+    finally:
+        await http.aclose()
     # Garbage expiry -> yes (treat as unknown).
     client.store.set("tokens", {"access_token": "a", "refresh_token": "r", "expires_at": "never"})
     assert client.needs_refresh()

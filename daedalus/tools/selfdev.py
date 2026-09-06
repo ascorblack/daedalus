@@ -35,9 +35,11 @@ async def self_workspace(context: ToolContext, repo: str, branch: str) -> ToolRe
     name="SelfPropose",
     description=(
         "Open a pull request from a worktree branch of one of your repositories ('bot' or "
-        "'core'). Commit your work first and run the tests. The owner reviews the change in "
-        "chat; on approval it is merged and, if configured, the agent rebuilds itself. "
-        "branch defaults to the most recently used worktree of that repo."
+        "'core'). Commit your work first and run the tests with Verify so the receipts are on "
+        "the card. The owner reviews the change in chat; on approval it is merged and, if "
+        "configured, the agent rebuilds itself. branch defaults to the most recently used "
+        "worktree of that repo. The summary describes the change and what you checked — no "
+        "session ids, no operator details, nothing about the machine it runs on."
     ),
 )
 async def self_propose(

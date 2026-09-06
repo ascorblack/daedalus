@@ -12,8 +12,16 @@ description: How to change your own code (host or core) safely: worktree, tests,
    - `daedalus/transport/telegram/` — chat surface. `daedalus/extensions/` — scheduler, self-dev, API.
    - `skills/<id>/SKILL.md` — skills (front matter: name, description).
    - `tests/unit`, `tests/smoke` — smoke tests are the supervisor's preflight gate; keep them fast.
-3. Run the gates in the worktree: `uv sync --extra dev && uv run pytest -q` (host) or
-   `uv run pytest -q` (core, ~3k tests; run the subset you touched first).
+3. Run the gates in the worktree **through Verify**, so the receipts land on the proposal card:
+   `Verify("unit suite passes", "uv sync --extra dev && uv run pytest -q", cwd=<worktree>)` (host) or
+   `uv run pytest -q` (core, ~3k tests; run the subset you touched first, then the whole suite).
+   A proposal whose card says "nothing was checked with Verify" is asking the operator to trust prose.
+   Before proposing, walk this checklist and say in the summary what you found:
+   - every reader of a field or threshold you changed (`grep` the name across the repo) agrees with
+     the new rule — a check added in one place and an older check elsewhere must not disagree;
+   - the new path behaves when the object is missing, not linked, expired, or restarted mid-way;
+   - a fast path you add does not repeat work already done by the slow path it precedes;
+   - the full suite and `ruff check` pass, not only the tests you wrote.
 4. Commit with a message that describes the change on its own terms. The repositories are public:
    no session or run ids, no trailers or co-author lines, no model or tool names as authors, and
    nothing about the operator (addresses, hostnames, paths, accounts, workloads, circumstances) in
