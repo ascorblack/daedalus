@@ -112,7 +112,6 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
   const [view, setView] = useState<"chat" | "files" | "mcp">("chat");
   const [menu, setMenu] = useState(false);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
-  const [sheet, setSheet] = useState<Turn | null>(null);
   const [tick, setTick] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -375,7 +374,7 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
           <div className="timeline">
             {turns.map((t, i) => (
               <Safe key={t.key}>
-                <TurnView turn={t} live={busy && i === turns.length - 1} onThoughts={() => setSheet(t)} />
+                <TurnView turn={t} live={busy && i === turns.length - 1} />
               </Safe>
             ))}
             {detail?.pending && <QuestionCard sessionId={id} questions={detail.pending.questions} onDone={load} toast={toast} />}
@@ -432,7 +431,6 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
           </div>
         </div>
       )}
-      {sheet && <ThoughtsSheet turn={sheet} onClose={() => setSheet(null)} />}
     </div>
   );
 }
@@ -462,27 +460,45 @@ function fmtDuration(ms: number): string {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
-function TurnView({ turn, live, onThoughts }: { turn: Turn; live: boolean; onThoughts: () => void }) {
+function stepCount(items: Activity[]): number {
+  return items.filter((a) => a.kind === "tool").length;
+}
+
+function TurnView({ turn, live }: { turn: Turn; live: boolean }) {
+  const [open, setOpen] = useState(live);
+  const wasLive = useRef(live);
+  useEffect(() => {
+    // Expanded while the agent works; folds away once the turn is over.
+    if (wasLive.current && !live) setOpen(false);
+    if (live) setOpen(true);
+    wasLive.current = live;
+  }, [live]);
   if (turn.summary) return <SummaryBlock message={turn.summary} />;
   const hasWork = turn.activity.length > 0 || live;
   const elapsed = (live ? Date.now() : turn.endedAt) - turn.startedAt;
+  const steps = stepCount(turn.activity);
   return (
     <div className="turn">
       {turn.user && <div className="msg user" dangerouslySetInnerHTML={{ __html: renderMarkdown(turn.user.text) }} />}
       {hasWork && (
-        <button className="thinking-head" onClick={onThoughts}>
+        <button className="thinking-head" onClick={() => setOpen((o) => !o)}>
           <span className={`dots ${live ? "on" : ""}`}>
             <i />
             <i />
             <i />
           </span>
           {live ? "Thinking for" : "Thought for"} {fmtDuration(elapsed)}
-          <span className="chev">›</span>
+          {steps > 0 && <span className="steps">· {steps} step{steps === 1 ? "" : "s"}</span>}
+          <span className={`chev ${open ? "down" : ""}`}>›</span>
         </button>
       )}
-      <ActivityList items={turn.activity} compact />
+      {open && (
+        <div className="activity">
+          <ActivityList items={turn.activity} compact={false} />
+          {live && !turn.answer && turn.pendingTools === 0 && turn.activity.length > 0 && <div className="working">working…</div>}
+        </div>
+      )}
       {turn.answer && <div className={`answer ${live ? "streaming" : ""}`} dangerouslySetInnerHTML={{ __html: renderMarkdown(turn.answer) }} />}
-      {live && !turn.answer && turn.pendingTools === 0 && turn.activity.length > 0 && <div className="working">working…</div>}
     </div>
   );
 }
@@ -557,7 +573,7 @@ function ActivityList({ items, compact }: { items: Activity[]; compact: boolean 
       continue;
     }
     if (it.kind === "thinking") {
-      if (!compact) out.push(<div key={i} className="thought">{it.text}</div>);
+      if (!compact) out.push(<ThoughtBlock key={i} text={it.text} />);
       i++;
       continue;
     }
@@ -566,23 +582,32 @@ function ActivityList({ items, compact }: { items: Activity[]; compact: boolean 
     let j = i;
     while (j < items.length && items[j].kind === "tool" && (items[j] as ToolItem).name === family) j++;
     const group = items.slice(i, j) as ToolItem[];
-    if (group.length > 1) {
-      const d = describe(group[group.length - 1]);
-      const any = group.some((g) => g.running);
-      out.push(
-        <div key={i} className="group">
-          <div className="row head">
-            <Icon name={d.icon} /> {groupVerb(family, any)} {group.length} {d.noun}s
-          </div>
-          {group.map((g) => (
-            <ToolRow key={g.id} item={g} nested />
-          ))}
-        </div>,
-      );
-    } else out.push(<ToolRow key={it.id} item={it} />);
+    if (group.length > 1) out.push(<ToolGroup key={i} family={family} group={group} />);
+    else out.push(<ToolRow key={it.id} item={it} />);
     i = j;
   }
   return <>{out}</>;
+}
+
+function ToolGroup({ family, group }: { family: string; group: ToolItem[] }) {
+  const running = group.some((g) => g.running);
+  const [open, setOpen] = useState(running);
+  useEffect(() => {
+    if (running) setOpen(true);
+  }, [running]);
+  const d = describe(group[group.length - 1]);
+  return (
+    <div className="group">
+      <div className={`row head ${running ? "running" : ""}`} onClick={() => setOpen((o) => !o)}>
+        <Icon name={d.icon} />
+        <span className="verb">
+          {groupVerb(family, running)} {group.length} {d.noun}s
+        </span>
+        <span className={`chev ${open ? "down" : ""}`}>›</span>
+      </div>
+      {open && group.map((g) => <ToolRow key={g.id} item={g} nested />)}
+    </div>
+  );
 }
 
 function groupVerb(name: string, running: boolean): string {
@@ -601,6 +626,21 @@ function groupVerb(name: string, running: boolean): string {
   return running ? a : b;
 }
 
+function ThoughtBlock({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="row-wrap">
+      <div className="row" onClick={() => setOpen((o) => !o)}>
+        <Icon name="bulb" />
+        <span className="verb">Reasoning</span>
+        <span className="detail">{text.replace(/\s+/g, " ").slice(0, 80)}</span>
+        <span className={`chev ${open ? "down" : ""}`}>›</span>
+      </div>
+      {open && <div className="thought">{text}</div>}
+    </div>
+  );
+}
+
 function ToolRow({ item, nested }: { item: ToolItem; nested?: boolean }) {
   const [open, setOpen] = useState(false);
   const d = describe(item);
@@ -611,6 +651,7 @@ function ToolRow({ item, nested }: { item: ToolItem; nested?: boolean }) {
         <Icon name={d.icon} />
         <span className="verb">{d.verb}</span>
         {d.detail && <span className="detail">{d.detail}</span>}
+        <span className={`chev ${expanded ? "down" : ""}`}>›</span>
       </div>
       {expanded && <ToolCard item={item} />}
     </div>
@@ -638,21 +679,6 @@ function langOf(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   const map: Record<string, string> = { py: "python", ts: "typescript", tsx: "tsx", js: "javascript", md: "markdown", sh: "bash", json: "json", toml: "toml", yaml: "yaml", yml: "yaml", html: "html", css: "css" };
   return map[ext] ?? ext;
-}
-
-function ThoughtsSheet({ turn, onClose }: { turn: Turn; onClose: () => void }) {
-  return (
-    <div className="sheet-backdrop" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()}>
-        <div className="grip" />
-        <h3>Thoughts</h3>
-        <div className="sheet-body">
-          <ActivityList items={turn.activity} compact={false} />
-          {turn.activity.length === 0 && <div className="empty">Nothing yet.</div>}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 // ── icons ─────────────────────────────────────────────────────────────────────────────────

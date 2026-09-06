@@ -1,8 +1,9 @@
 :root {
-  --bg: var(--tg-theme-bg-color, #0f0f10);
-  --bg-2: var(--tg-theme-secondary-bg-color, #17181a);
-  --card: #1c1d20;
-  --card-2: #232428;
+  /* Backgrounds are ours, not the client theme's: desktop Telegram paints a blue-grey we do not want. */
+  --bg: #000000;
+  --bg-2: #0e0e0f;
+  --card: #161617;
+  --card-2: #212123;
   --line: rgba(255, 255, 255, 0.08);
   --fg: var(--tg-theme-text-color, #ececec);
   --muted: var(--tg-theme-hint-color, #8b8d93);
@@ -17,6 +18,8 @@
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 :root[data-scheme="light"] {
+  --bg: #ffffff;
+  --bg-2: #f6f6f7;
   --card: #ffffff;
   --card-2: #f2f3f5;
   --line: rgba(0, 0, 0, 0.08);
@@ -122,7 +125,11 @@ a { color: var(--info); text-decoration: none; }
 .msg.user p + p { margin-top:6px; }
 
 .thinking-head { align-self:flex-start; display:flex; align-items:center; gap:10px; background:none; border:0; color:var(--muted); font-size:15px; padding:4px 0; cursor:pointer; }
-.thinking-head .chev, .summary-head .chev { color:var(--muted); margin-left:2px; }
+.thinking-head .chev, .summary-head .chev, .row .chev { color:var(--muted); margin-left:2px; display:inline-block; transition:transform .15s; }
+.chev.down { transform:rotate(90deg); }
+.thinking-head .steps { color:var(--muted); font-size:13px; }
+.activity { display:flex; flex-direction:column; padding-left:2px; border-left:2px solid var(--line); margin-left:8px; padding-left:12px; }
+.row .chev { margin-left:auto; flex:none; }
 .dots { display:inline-grid; grid-template-columns:repeat(3, 4px); gap:3px; width:18px; }
 .dots i { width:4px; height:4px; border-radius:50%; background:var(--muted); opacity:.55; }
 .dots.on i { animation:dotpulse 1.2s ease-in-out infinite; }
@@ -144,7 +151,7 @@ a { color: var(--info); text-decoration: none; }
 .note::before { content:"•"; flex:none; width:18px; text-align:center; color:var(--muted); }
 .note > * { min-width:0; flex:1; }
 .note p { margin:0; }
-.thought { white-space:pre-wrap; color:var(--muted); font-size:14px; line-height:1.45; padding:6px 0 6px 28px; border-left:0; font-style:italic; }
+.thought { white-space:pre-wrap; color:var(--muted); font-size:13.5px; line-height:1.45; padding:4px 0 8px 28px; font-style:italic; max-height:360px; overflow:auto; }
 .working { color:var(--muted); font-size:14px; padding-left:28px; }
 
 .toolcard { margin:4px 0 8px 28px; display:flex; flex-direction:column; gap:6px; }
@@ -186,12 +193,6 @@ a { color: var(--info); text-decoration: none; }
 .summary-head .chev { margin-left:auto; }
 .summary-body { padding:4px 0 10px; font-size:14.5px; line-height:1.5; }
 
-.sheet-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:20; display:flex; align-items:flex-end; }
-.sheet { width:100%; max-height:82%; background:var(--bg-2); border-radius:22px 22px 0 0; padding:8px 16px calc(16px + env(safe-area-inset-bottom)); display:flex; flex-direction:column; }
-.sheet .grip { width:44px; height:4px; border-radius:2px; background:var(--line); margin:4px auto 10px; }
-.sheet h3 { margin:0 0 10px; text-align:center; font-size:18px; }
-.sheet-body { overflow-y:auto; min-height:0; }
-.sheet-body .row-wrap { margin-left:0; }
 
 .composer { flex:none; padding:6px 10px calc(10px + env(safe-area-inset-bottom)); background:var(--bg); }
 .composer-box { background:var(--card); border:1px solid var(--line); border-radius:24px; padding:10px 10px 8px 14px; }
