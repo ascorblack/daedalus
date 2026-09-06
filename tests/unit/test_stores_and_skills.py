@@ -92,3 +92,15 @@ def test_init_data_validation() -> None:
         validate_init_data(_init_data("123:abc", 42), "other")
     with pytest.raises(ValueError):
         validate_init_data(_init_data("123:abc", 42, age=100_000), "123:abc")
+
+
+def test_config_with_optional_sections_round_trips_through_toml(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from daedalus.config import McpServerConfig, RuntimeConfig
+
+    config = RuntimeConfig()
+    config.mcp.servers["board"] = McpServerConfig(transport="http", url="https://example.test/mcp")
+    path = tmp_path / "config.toml"
+    config.save(path)  # an unset optional block must not break serialisation
+    loaded = RuntimeConfig.load(path)
+    assert loaded.mcp.servers["board"].url == "https://example.test/mcp"
+    assert loaded.mcp.servers["board"].oauth is None
