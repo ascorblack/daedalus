@@ -179,7 +179,16 @@ class McpConnection:
     async def call(self, tool: str, arguments: dict[str, Any]) -> Any:
         for attempt in (1, 2):
             if self.session is None:
-                raise RuntimeError(f"MCP server {self.name} is not connected")
+                if attempt == 2:
+                    raise RuntimeError(f"MCP server {self.name} is not connected")
+                # The transport dropped (server restart, idle reset, prior stop):
+                # reconnect once transparently instead of failing every call.
+                try:
+                    await asyncio.wait_for(self.start(), timeout=10)
+                except (TimeoutError, asyncio.CancelledError):
+                    raise RuntimeError(f"MCP server {self.name}: reconnect timed out") from None
+                if self.session is None:
+                    raise RuntimeError(f"MCP server {self.name} is not connected: {self.error or 'connection failed'}")
             try:
                 return await asyncio.wait_for(self.session.call_tool(tool, arguments), timeout=self.config.timeout_seconds)
             except (TimeoutError, asyncio.CancelledError):

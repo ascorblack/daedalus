@@ -990,6 +990,21 @@ class SessionManager:
         )
         mode_name = str(state.metadata.get("mode") or "")
         mode = self.config.modes.get(mode_name) if mode_name else None
+        enabled = self.mcp_enabled(state)
+        if enabled:
+            # Re-establish connections for servers this session left enabled (e.g. after a
+            # host restart or a dropped transport) so their tools are visible again instead
+            # of silently missing until the agent re-runs McpEnable. Bounded: a dead or
+            # slow server must never block the run.
+            for server in enabled:
+                try:
+                    await asyncio.wait_for(self.mcp.ensure(server), timeout=5)
+                except TimeoutError:
+                    logger.warning("MCP warm-up for %s timed out; tools may be unavailable this run", server)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    logger.warning("MCP warm-up for %s failed; tools may be unavailable this run", server, exc_info=True)
         engine = build_engine(
             deps=deps,
             config=self.config,
@@ -1006,7 +1021,7 @@ class SessionManager:
             context_window=state.context_window or preset.context_window,
             max_output_tokens=preset.max_output_tokens,
             extra_notes=state.extra_notes,
-            blocked_tools=blocked_for(self.mcp, self.mcp_enabled(state)),
+            blocked_tools=blocked_for(self.mcp, enabled),
         )
         self._attach_hooks(engine, state)
         return engine

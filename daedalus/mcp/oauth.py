@@ -13,12 +13,15 @@ mode 0600. Nothing is written to chat, logs or tool arguments.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import logging
+import os
 import re
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -76,10 +79,22 @@ class OAuthTokenStore:
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
-        tmp.chmod(0o600)
-        tmp.replace(self.path)
+        # Write atomically and fsync before the rename so a crash cannot leave a
+        # truncated token file (a lost refresh token means a manual re-link).
+        data = json.dumps(self._data, indent=2).encode("utf-8")
+        fd, tmp_name = tempfile.mkstemp(dir=self.path.parent, prefix=self.path.name, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, self.path)
+        finally:
+            try:
+                os.unlink(tmp_name)
+            except OSError:  # pragma: no cover — the temp file was already renamed
+                pass
         try:
             self.path.chmod(0o600)
         except OSError:  # pragma: no cover — filesystems without chmod
@@ -131,6 +146,7 @@ class MCPOAuthClient:
         self.store = OAuthTokenStore(token_path)
         self.http = http
         self._discovery: OAuthDiscovery | None = None
+        self._refresh_lock = asyncio.Lock()
 
     # -- metadata ------------------------------------------------------------------
 
@@ -289,12 +305,17 @@ class MCPOAuthClient:
 
     # -- tokens ---------------------------------------------------------------------
 
-    def _save_tokens(self, tokens: dict[str, Any]) -> None:
+    def _save_tokens(self, tokens: dict[str, Any], *, preserve_refresh: bool = False) -> None:
         expires_in = tokens.get("expires_in")
         expires_at = int(time.time()) + int(expires_in) - int(_TOKEN_GRACE_SECONDS) if expires_in else None
+        refresh_token = tokens.get("refresh_token")
+        if refresh_token is None and preserve_refresh:
+            # RFC 6749 §5.1: a refresh response may omit refresh_token, meaning the
+            # previously issued one stays valid. Keep it instead of wiping the link.
+            refresh_token = self._tokens().get("refresh_token")
         saved = {
             "access_token": tokens.get("access_token"),
-            "refresh_token": tokens.get("refresh_token"),
+            "refresh_token": refresh_token,
             "expires_at": expires_at,
             "scope": tokens.get("scope", self.scope_string),
         }
@@ -319,27 +340,32 @@ class MCPOAuthClient:
         )
 
     async def refresh(self) -> None:
-        tokens = self._tokens()
-        refresh_token = tokens.get("refresh_token")
-        if not refresh_token:
-            raise NeedsAuthorization(f"{self.server}: no refresh token; link again with McpOAuthBegin.")
-        doc = await self.discovery()
-        client_id = await self.register_client()
-        form = {
-            "grant_type": "refresh_token",
-            "refresh_token": str(refresh_token),
-            "client_id": client_id,
-        }
-        if self.scope_string:
-            form["scope"] = self.scope_string
-        try:
-            response = await self.http.post(doc.token_endpoint, data=form)
-        except httpx.HTTPError as exc:
-            raise OAuthError(f"{self.server}: refresh request failed: {exc}") from exc
-        if response.status_code != 200:
-            self.store.set("tokens", {})  # a rejected refresh token is dead; force a fresh link
-            raise OAuthError(f"{self.server}: token refresh failed ({response.status_code}): {_brief(response.text)}")
-        self._save_tokens(response.json())
+        async with self._refresh_lock:
+            tokens = self._tokens()
+            # Another caller may have refreshed while we waited for the lock; if the
+            # stored token is already usable there is nothing left to do.
+            if tokens.get("access_token") and tokens.get("expires_at") and int(tokens["expires_at"]) > time.time():
+                return
+            refresh_token = tokens.get("refresh_token")
+            if not refresh_token:
+                raise NeedsAuthorization(f"{self.server}: no refresh token; link again with McpOAuthBegin.")
+            doc = await self.discovery()
+            client_id = await self.register_client()
+            form = {
+                "grant_type": "refresh_token",
+                "refresh_token": str(refresh_token),
+                "client_id": client_id,
+            }
+            if self.scope_string:
+                form["scope"] = self.scope_string
+            try:
+                response = await self.http.post(doc.token_endpoint, data=form)
+            except httpx.HTTPError as exc:
+                raise OAuthError(f"{self.server}: refresh request failed: {exc}") from exc
+            if response.status_code != 200:
+                self.store.set("tokens", {})  # a rejected refresh token is dead; force a fresh link
+                raise OAuthError(f"{self.server}: token refresh failed ({response.status_code}): {_brief(response.text)}")
+            self._save_tokens(response.json(), preserve_refresh=True)
 
     def linked(self) -> bool:
         tokens = self._tokens()

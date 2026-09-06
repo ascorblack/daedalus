@@ -33,6 +33,21 @@ async def test_manager_connects_and_registers_proxies() -> None:
     await manager.close()
 
 
+async def test_call_reconnects_after_transport_drop() -> None:
+    """A dropped transport (server restart / idle reset) must not break every call."""
+    registry = InMemoryToolRegistry()
+    manager = McpManager(_config(), registry)
+    await manager.ensure("echo")
+    tool = registry.get(mcp_tool_name("echo", "add"))
+    connection = manager._connections["echo"]
+    await connection.stop()  # transport dies, as on an idle reset
+    assert connection.session is None
+    result = await tool.invoke(ToolContext(tenant_id="t", run_id="r", session_id="s", metadata={"tool_call_id": "c2"}), {"a": 4, "b": 5})
+    assert result.content.strip() == "9" and not result.is_error
+    assert connection.session is not None  # the call reconnected transparently
+    await manager.close()
+
+
 async def test_session_toggle_changes_visibility(settings: Settings, db: Database) -> None:
     config = RuntimeConfig()
     config.mcp.servers = _config()

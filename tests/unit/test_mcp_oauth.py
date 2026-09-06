@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -184,6 +185,96 @@ async def test_rejected_refresh_forces_relink(tmp_path: Path) -> None:
         with pytest.raises(OAuthError):
             await client.access_token()
         assert client.linked() is False
+    finally:
+        await http.aclose()
+
+
+async def test_refresh_without_rotation_keeps_stored_refresh_token(tmp_path: Path) -> None:
+    """RFC 6749 §5.1: a refresh response may omit refresh_token; the old one stays valid."""
+    client, _ = _make_client(tmp_path)
+    calls = {"refresh": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("/.well-known/oauth-authorization-server"):
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": ISSUER,
+                    "authorization_endpoint": f"{ISSUER}/oauth/authorize",
+                    "token_endpoint": f"{ISSUER}/oauth/token",
+                    "registration_endpoint": f"{ISSUER}/oauth/register",
+                    "code_challenge_methods_supported": ["S256"],
+                },
+            )
+        if url.endswith("/oauth/register"):
+            return httpx.Response(201, json={"client_id": "test-client"})
+        if url.endswith("/oauth/token"):
+            calls["refresh"] += 1
+            form = dict(httpx.QueryParams(request.content.decode()))
+            assert form["grant_type"] == "refresh_token"
+            assert form["refresh_token"] == "rt-stable"
+            return httpx.Response(200, json={"access_token": "at-2", "token_type": "Bearer", "expires_in": 3600})
+        return httpx.Response(404, text="not found")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=ISSUER)
+    client.http = http
+    try:
+        client.store.set("tokens", {"access_token": None, "refresh_token": "rt-stable", "expires_at": 1})
+        assert await client.access_token() == "at-2"
+        stored = client.store.get("tokens")
+        assert stored["access_token"] == "at-2"
+        assert stored["refresh_token"] == "rt-stable"  # not wiped by the bare response
+        assert client.linked()
+        # And the link still works on the next expiry.
+        client.store.set("tokens", {**stored, "expires_at": 1})
+        assert await client.access_token() == "at-2"
+        assert calls["refresh"] == 2
+    finally:
+        await http.aclose()
+
+
+async def test_concurrent_access_token_refreshes_once(tmp_path: Path) -> None:
+    """Two callers racing an expired token must trigger a single refresh."""
+    client, _ = _make_client(tmp_path)
+    calls = {"refresh": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("/.well-known/oauth-authorization-server"):
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": ISSUER,
+                    "authorization_endpoint": f"{ISSUER}/oauth/authorize",
+                    "token_endpoint": f"{ISSUER}/oauth/token",
+                    "registration_endpoint": f"{ISSUER}/oauth/register",
+                    "code_challenge_methods_supported": ["S256"],
+                },
+            )
+        if url.endswith("/oauth/register"):
+            return httpx.Response(201, json={"client_id": "test-client"})
+        if url.endswith("/oauth/token"):
+            calls["refresh"] += 1
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": f"at-{calls['refresh']}",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "refresh_token": f"rt-{calls['refresh']}",
+                },
+            )
+        return httpx.Response(404, text="not found")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=ISSUER)
+    client.http = http
+    try:
+        client.store.set("tokens", {"access_token": None, "refresh_token": "rt-stable", "expires_at": 1})
+        first, second = await asyncio.gather(client.access_token(), client.access_token())
+        assert first == "at-1" and second == "at-1"
+        assert calls["refresh"] == 1
+        assert client.store.get("tokens")["refresh_token"] == "rt-1"
     finally:
         await http.aclose()
 
