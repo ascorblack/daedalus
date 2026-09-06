@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, Preset, ProviderConf, Settings } from "../api";
+import { api, HeartbeatStatus, Preset, ProviderConf, Settings } from "../api";
+import { timeAgo } from "../components";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "vllm", "openai_compat"];
 
@@ -395,10 +396,122 @@ function ToolsTab({ s, save }: { s: Settings; save: (patch: any) => Promise<void
   );
 }
 
+function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void }) {
+  const [hb, setHb] = useState<HeartbeatStatus | null>(null);
+  const [text, setText] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const load = () =>
+    api
+      .get<HeartbeatStatus>("/api/heartbeat")
+      .then((r) => {
+        setHb(r);
+        if (!dirty) setText(r.text);
+      })
+      .catch((e) => toast((e as Error).message));
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  if (!hb) return <div className="empty">Loading…</div>;
+
+  async function put(patch: Record<string, unknown>) {
+    try {
+      const r = await api.put<HeartbeatStatus>("/api/heartbeat", patch);
+      setHb(r);
+      if ("text" in patch) {
+        setDirty(false);
+        setText(r.text);
+      }
+      toast("saved");
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
+  async function runNow() {
+    try {
+      const r = await api.post<{ session_id: string }>("/api/heartbeat/run");
+      toast(`heartbeat started in ${r.session_id}`);
+      load();
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
+  const presets = Object.keys(s.presets ?? {});
+  return (
+    <>
+      <div className="card">
+        <div className="section-title" style={{ marginTop: 0 }}>
+          Heartbeat
+        </div>
+        <div className="sub">
+          A periodic unattended check. The file below is its prompt; empty = nothing runs. The agent reports only what needs you and stays silent
+          otherwise (the inbox records every check).
+        </div>
+        <div className="btnrow">
+          <button className={`btn small ${hb.enabled ? "primary" : ""}`} onClick={() => put({ enabled: !hb.enabled })}>
+            {hb.enabled ? "on" : "off"}
+          </button>
+          <button className="btn small" onClick={runNow} disabled={!text.trim() || hb.running}>
+            run now
+          </button>
+          <span className="sub" style={{ alignSelf: "center" }}>
+            {hb.armed ? "armed" : hb.enabled ? "on, but the file is empty" : "off"} · today {hb.runs_today}/{hb.max_runs_per_day} · last{" "}
+            {hb.last_run ? timeAgo(hb.last_run) : "never"}
+            {hb.running ? " · running" : ""}
+          </span>
+        </div>
+        <label className="field">Every N minutes</label>
+        <input className="field" type="number" defaultValue={hb.interval_minutes} onBlur={(e) => put({ interval_minutes: Number(e.target.value) })} />
+        <label className="field">Active hours (UTC, HH:MM-HH:MM)</label>
+        <input className="field" defaultValue={hb.active_hours} onBlur={(e) => put({ active_hours: e.target.value })} />
+        <label className="field">Max runs per day</label>
+        <input className="field" type="number" defaultValue={hb.max_runs_per_day} onBlur={(e) => put({ max_runs_per_day: Number(e.target.value) })} />
+        <label className="field">Model preset (empty = default)</label>
+        <select className="field" value={hb.preset} onChange={(e) => put({ preset: e.target.value })}>
+          <option value="">default</option>
+          {presets.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="card">
+        <div className="section-title" style={{ marginTop: 0 }}>
+          HEARTBEAT.md
+        </div>
+        <textarea
+          className="field"
+          rows={12}
+          value={text}
+          placeholder={hb.template}
+          onChange={(e) => {
+            setText(e.target.value);
+            setDirty(true);
+          }}
+        />
+        <div className="btnrow">
+          <button className="btn primary" disabled={!dirty} onClick={() => put({ text })}>
+            Save
+          </button>
+          <button className="btn small" onClick={() => { setText(hb.template ?? ""); setDirty(true); }}>
+            insert template
+          </button>
+          <button className="btn small" onClick={() => { setText(""); setDirty(true); }}>
+            clear (switches off)
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
   const [s, setS] = useState<Settings | null>(null);
   const [status, setStatus] = useState<any>(null);
-  const [tab, setTab] = useState<"general" | "tools">("general");
+  const [tab, setTab] = useState<"general" | "tools" | "heartbeat">("general");
   useEffect(() => {
     api.get<Settings>("/api/settings").then(setS).catch((e) => toast((e as Error).message));
     api.get("/api/status").then(setStatus).catch(() => setStatus(null));
@@ -472,8 +585,10 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
       <div className="segmented">
         <button className={tab === "general" ? "on" : ""} onClick={() => setTab("general")}>General</button>
         <button className={tab === "tools" ? "on" : ""} onClick={() => setTab("tools")}>Tools</button>
+        <button className={tab === "heartbeat" ? "on" : ""} onClick={() => setTab("heartbeat")}>Heartbeat</button>
       </div>
       {tab === "tools" && <ToolsTab s={s} save={save} />}
+      {tab === "heartbeat" && <HeartbeatTab s={s} toast={toast} />}
       {tab === "general" && (
       <>
       <div className="card">

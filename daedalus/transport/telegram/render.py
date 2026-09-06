@@ -365,17 +365,23 @@ class RunRenderer:
             lines.append("files: " + ", ".join(sorted(v.changed_files))[:300])
         return "\n".join(lines)[:4000]
 
-    async def finish(self, status: str, *, workspace: Path) -> None:
+    async def finish(self, status: str, *, workspace: Path, quiet: bool = False) -> None:
         """Send the final answer and freeze the status message.
 
         Delivery degrades in steps and never ends in silence: rich Markdown, then plain
         text per chunk, then the whole answer as a file, and as a last resort an explicit
         note that Telegram refused it (the text is still in the workspace and the Mini App).
+        ``quiet`` (an unattended run that called StaySilent) keeps the final reply out of
+        the chat; the status message records that the run chose silence.
         """
         v = self.view
         v.state = status
         final, _headline = split_headline(v.text_buffer.strip())
         v.text_buffer = ""
+        if quiet:
+            v.final_sent = True
+            v.narration.append("🤫 quiet run: nothing needed the operator's attention")
+            final = ""
         if self._tick_task is not None:
             self._tick_task.cancel()
         cost: float | None = None

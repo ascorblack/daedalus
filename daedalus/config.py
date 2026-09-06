@@ -237,6 +237,24 @@ class BalanceConfig(BaseModel):
 class SchedulerConfig(BaseModel):
     topic_mode: ScheduleTopicMode = "per_task"
     catch_up_missed: bool = True
+    max_failures: int = Field(default=3, ge=1)
+    """A recurring task that failed this many times in a row is switched off (an inbox entry says so)."""
+    question_timeout_minutes: int = Field(default=120, ge=1)
+    """An unattended run (schedule, heartbeat) that asks a question waits this long, then continues on its own judgement."""
+    lazy_ttl_hours: int = Field(default=24, ge=1)
+    """A lazy reminder not yet seen by the operator after this long becomes an agent task."""
+
+
+class HeartbeatConfig(BaseModel):
+    """A periodic unattended check driven by the HEARTBEAT.md file on the state volume."""
+
+    enabled: bool = False
+    interval_minutes: int = Field(default=60, ge=5)
+    active_hours: str = "08:00-23:00"
+    """UTC window ``HH:MM-HH:MM`` in which heartbeats run; may wrap past midnight."""
+    preset: str = ""
+    """Model preset for heartbeat runs; empty = the default preset."""
+    max_runs_per_day: int = Field(default=24, ge=1)
 
 
 class TelegramConfig(BaseModel):
@@ -296,6 +314,7 @@ class RuntimeConfig(BaseModel):
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     balance: BalanceConfig = Field(default_factory=BalanceConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     answer_language: str = "auto"
     """"auto" answers in the language of the request; otherwise a language name."""
@@ -463,5 +482,6 @@ __all__ = [
     "ToolsConfig",
     "WebToolsConfig",
     "ExecToolsConfig",
+    "HeartbeatConfig",
     "VisionConfig",
 ]

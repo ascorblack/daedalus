@@ -89,6 +89,22 @@ class ScheduleBody(BaseModel):
     cron: str | None = None
     run_at: str | None = None
     model: str | None = None
+    kind: str = "agent"
+    target_session: str | None = None
+
+
+class InboxReadBody(BaseModel):
+    ids: list[int] | None = None
+    """Omitted = mark everything read."""
+
+
+class HeartbeatBody(BaseModel):
+    text: str | None = None
+    enabled: bool | None = None
+    interval_minutes: int | None = None
+    active_hours: str | None = None
+    preset: str | None = None
+    max_runs_per_day: int | None = None
 
 
 class RenameBody(BaseModel):
@@ -669,13 +685,82 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def status(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         selfdev = app.extensions.get("selfdev")
         supervisor = await selfdev.supervisor_status() if selfdev is not None else None  # type: ignore[attr-defined]
+        inbox = app.extensions.get("inbox")
+        heartbeat = app.extensions.get("heartbeat")
         return {
             "model": app.config.model.model_dump(),
             "providers": list(manager.providers.available()),
             "supervisor": supervisor,
             "budget_exceeded": manager.budget_exceeded(),
             "sessions": await manager.list_sessions(limit=50),
+            "inbox_unread": await inbox.unread_count() if inbox is not None else 0,  # type: ignore[attr-defined]
+            "heartbeat": heartbeat.status() if heartbeat is not None else None,  # type: ignore[attr-defined]
         }
+
+    # -- inbox --------------------------------------------------------------------------
+
+    @api.get("/api/inbox")
+    async def inbox_list(unread: int = 0, limit: int = 100, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        inbox = app.extensions.get("inbox")
+        if inbox is None:
+            return {"entries": [], "unread": 0}
+        return {"entries": await inbox.list(limit=limit, unread_only=bool(unread)), "unread": await inbox.unread_count()}  # type: ignore[attr-defined]
+
+    @api.post("/api/inbox/read")
+    async def inbox_read(body: InboxReadBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        inbox = app.extensions.get("inbox")
+        if inbox is None:
+            raise HTTPException(503, "inbox is not installed")
+        return {"marked": await inbox.mark_read(body.ids), "unread": await inbox.unread_count()}  # type: ignore[attr-defined]
+
+    @api.delete("/api/inbox/{entry_id}")
+    async def inbox_delete(entry_id: int, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        inbox = app.extensions.get("inbox")
+        if inbox is None:
+            raise HTTPException(503, "inbox is not installed")
+        await inbox.delete(entry_id)  # type: ignore[attr-defined]
+        return {"deleted": entry_id}
+
+    # -- heartbeat ------------------------------------------------------------------------
+
+    @api.get("/api/heartbeat")
+    async def heartbeat_get(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        heartbeat = app.extensions.get("heartbeat")
+        if heartbeat is None:
+            raise HTTPException(503, "heartbeat is not installed")
+        from daedalus.extensions.heartbeat import TEMPLATE
+
+        return {**heartbeat.status(), "template": TEMPLATE}  # type: ignore[attr-defined]
+
+    @api.put("/api/heartbeat")
+    async def heartbeat_put(body: HeartbeatBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        heartbeat = app.extensions.get("heartbeat")
+        if heartbeat is None:
+            raise HTTPException(503, "heartbeat is not installed")
+        if body.text is not None:
+            heartbeat.write(body.text)  # type: ignore[attr-defined]
+        patch = {k: v for k, v in body.model_dump().items() if k != "text" and v is not None}
+        if patch:
+            current = app.config.model_dump(mode="json")
+            current["heartbeat"] = {**current.get("heartbeat", {}), **patch}
+            try:
+                new_config = type(app.config).model_validate(current)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(400, str(exc)) from exc
+            await app.save_config(new_config)
+            if app.front is not None:
+                app.front.config = new_config
+        return heartbeat.status()  # type: ignore[attr-defined]
+
+    @api.post("/api/heartbeat/run")
+    async def heartbeat_run(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        heartbeat = app.extensions.get("heartbeat")
+        if heartbeat is None:
+            raise HTTPException(503, "heartbeat is not installed")
+        try:
+            return {"session_id": await heartbeat.fire(manual=True)}  # type: ignore[attr-defined]
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     # -- proposals ------------------------------------------------------------------
 
@@ -721,7 +806,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if scheduler is None:
             raise HTTPException(503, "scheduler is not installed")
         try:
-            return await scheduler.create(name=body.name, prompt=body.prompt, cron=body.cron, run_at=body.run_at, model=body.model)  # type: ignore[attr-defined]
+            return await scheduler.create(name=body.name, prompt=body.prompt, cron=body.cron, run_at=body.run_at, model=body.model, kind=body.kind, target_session=body.target_session)  # type: ignore[attr-defined]
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 

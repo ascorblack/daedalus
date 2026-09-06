@@ -131,6 +131,26 @@ export type Schedule = {
   next_run_at: string | null;
   last_run_at: string | null;
   last_summary: string | null;
+  kind: "agent" | "message" | "lazy";
+  target_session: string | null;
+  failure_count: number;
+  last_error: string | null;
+};
+
+export type HeartbeatStatus = {
+  enabled: boolean;
+  armed: boolean;
+  interval_minutes: number;
+  active_hours: string;
+  preset: string;
+  max_runs_per_day: number;
+  last_run: string | null;
+  runs_today: number;
+  session_id: string | null;
+  running: boolean;
+  file: string;
+  text: string;
+  template?: string;
 };
 
 export type ProviderConf = {

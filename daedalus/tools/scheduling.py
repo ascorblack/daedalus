@@ -17,7 +17,12 @@ from daedalus.tools._common import error, ok, services_for
         "what the future agent session will be asked to do; files from the current "
         "workspace can be attached and are copied into the task's own persistent workspace. "
         "A recurring task keeps one workspace across runs and receives the previous run's "
-        "summary."
+        "summary. kind chooses what happens when it fires: 'agent' (default) runs the prompt "
+        "as a task in a fresh session; 'message' just delivers the prompt text to the operator "
+        "as a reminder, with no model call — use it for plain alarms ('take the pills', "
+        "'call X at 15:00'); 'lazy' is a silent note that is shown together with the "
+        "operator's next message in this session ('when I next write, remind me to…') and "
+        "becomes an agent task if the operator stays away for a day."
     ),
 )
 async def schedule_create(
@@ -28,6 +33,7 @@ async def schedule_create(
     run_at: str | None = None,
     files: list[str] | None = None,
     model: str | None = None,
+    kind: str = "agent",
 ) -> ToolResult:
     services = services_for(context)
     if services.schedule is None:
@@ -44,10 +50,11 @@ async def schedule_create(
             files=[str(services.resolve(f)) for f in files or []],
             model=model,
             created_by_session=context.session_id,
+            kind=kind,
         )
     except ValueError as exc:
         return error(context, str(exc))
-    return ok(context, f"scheduled {created['id']} '{name}', next run at {created.get('next_run_at')}", schedule_id=created["id"])
+    return ok(context, f"scheduled {created['id']} '{name}' ({created.get('kind', kind)}), next at {created.get('next_run_at')}", schedule_id=created["id"])
 
 
 @tool(name="ScheduleList", description="List scheduled tasks with their next run time.")
@@ -59,8 +66,9 @@ async def schedule_list(context: ToolContext) -> ToolResult:
     if not items:
         return ok(context, "(no scheduled tasks)")
     lines = [
-        f"- {s['id']} '{s['name']}' {'cron ' + s['cron'] if s.get('cron') else 'once at ' + str(s.get('run_at'))}"
+        f"- {s['id']} [{s.get('kind') or 'agent'}] '{s['name']}' {'cron ' + s['cron'] if s.get('cron') else 'once at ' + str(s.get('run_at'))}"
         f" next={s.get('next_run_at')} enabled={bool(s.get('enabled', 1))}"
+        + (f" failures={s['failure_count']}" if s.get("failure_count") else "")
         for s in items
     ]
     return ok(context, "\n".join(lines))

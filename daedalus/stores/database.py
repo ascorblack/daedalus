@@ -182,6 +182,34 @@ MIGRATIONS: list[str] = [
         session_id UNINDEXED, seq UNINDEXED, role UNINDEXED, text, tokenize = 'unicode61 remove_diacritics 2'
     );
     """,
+    # inbox: what happened while the operator was away; schedule kinds, failure accounting; lazy reminders
+    """
+    CREATE TABLE inbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        severity TEXT NOT NULL DEFAULT 'info',
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        session_id TEXT,
+        run_id TEXT,
+        read INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX inbox_unread ON inbox(read, at);
+    ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent';
+    ALTER TABLE schedules ADD COLUMN target_session TEXT;
+    ALTER TABLE schedules ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE schedules ADD COLUMN last_error TEXT;
+    CREATE TABLE lazy_notes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        schedule_id TEXT,
+        session_id TEXT NOT NULL,
+        text TEXT NOT NULL,
+        fired_at TEXT NOT NULL,
+        delivered_at TEXT,
+        promoted_at TEXT
+    );
+    """,
 ]
 
 

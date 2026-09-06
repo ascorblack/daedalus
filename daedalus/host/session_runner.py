@@ -141,6 +141,8 @@ class SessionManager:
         self._pending_restored: list[Callable[[str, PendingQuestion], Awaitable[None]]] = []
         self.service_hooks: dict[str, Any] = {}
         """Callbacks the transport layer installs: send_file, spawn_session, schedule, self_*."""
+        self.prompt_hooks: list[Callable[[str, str], Awaitable[str]]] = []
+        """``(session_id, text) -> text`` applied to the operator's message before a run starts (fired reminders ride along)."""
         self.shutting_down = False
         self.budget_flag = settings.state_dir / "BUDGET_EXCEEDED"
         self._capped_runs: set[str] = set()
@@ -321,6 +323,10 @@ class SessionManager:
 
     def workspace_for(self, session_id: str) -> Path:
         return self.settings.workspaces_dir / session_id
+
+    def locator_services(self, session_id: str) -> SessionServices | None:
+        state = self._states.get(session_id)
+        return state.services if state is not None else None
 
     async def create_session(
         self,
@@ -594,6 +600,12 @@ class SessionManager:
         if state is None:
             raise KeyError(session_id)
         body, image_refs = await self._ingest_attachments(state, text, attachments)
+        if state.pending is None:
+            for hook in self.prompt_hooks:
+                try:
+                    body = await hook(session_id, body)
+                except Exception:  # noqa: BLE001
+                    logger.exception("prompt hook failed")
         if state.pending is not None:
             if as_answer:
                 # Free-text reply to a pending question counts as a custom answer.

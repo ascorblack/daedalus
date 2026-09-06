@@ -17,8 +17,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 EXTENSIONS = (
+    "daedalus.extensions.inbox",
     "daedalus.extensions.selfdev",
     "daedalus.extensions.scheduler",
+    "daedalus.extensions.heartbeat",
     "daedalus.extensions.balance",
     "daedalus.extensions.api",
 )

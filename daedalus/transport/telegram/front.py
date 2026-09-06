@@ -54,6 +54,7 @@ Each forum topic is one agent session with its own workspace. Write in a topic t
 /model [provider/]&lt;name&gt;|default · /thinking on|off|low|medium|high — model settings (default in General, per session in a topic)
 /usage · /balance — spend and provider balances
 /schedules · /schedule run|on|off|delete &lt;id&gt; — scheduled tasks
+/inbox [all|clear] · /heartbeat [on|off|run] · /doctor — what happened while you were away, the periodic check, health
 /approval manual|auto · /verbosity 0|1|2 — self-change approval, chat detail
 /rebuild · /rollback [n] · /panic — supervisor operations
 /prompt — show the editable working rules (edit them in the Mini App → Settings)
@@ -440,7 +441,7 @@ class TelegramFront:
         r.message.register(self.cmd_usage, Command("usage"))
         r.message.register(self.cmd_settings, Command("settings"))
         r.message.register(self.cmd_bind, Command("bind"))
-        r.message.register(self.cmd_operator, Command("rebuild", "rollback", "panic", "schedules", "verbosity", "approval", "balance", "schedule"))
+        r.message.register(self.cmd_operator, Command("rebuild", "rollback", "panic", "schedules", "verbosity", "approval", "balance", "schedule", "inbox", "heartbeat", "doctor"))
         r.message.register(
             self.on_message,
             F.text | F.caption | F.document | F.photo | F.audio | F.video | F.voice | F.video_note | F.animation | F.sticker | F.location | F.contact | F.poll,
@@ -1360,7 +1361,9 @@ class TelegramFront:
             renderer.view.state = "awaiting"
             await renderer.flush()
             return
-        await renderer.finish(status, workspace=state.workspace if state else Path("/tmp"))
+        services = state.services if state is not None else None
+        quiet = services is not None and services.extra.get("silent_run") == run_id
+        await renderer.finish(status, workspace=state.workspace if state else Path("/tmp"), quiet=quiet)
         self._renderers.pop(session_id, None)
 
     # -- services for tools ---------------------------------------------------------

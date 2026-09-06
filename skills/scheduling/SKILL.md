@@ -13,3 +13,11 @@ description: Creating recurring or one-shot tasks that run later in their own se
   in its prompt. Tell the future session to keep `SUMMARY.md` short and factual.
 - `ScheduleList()` / `ScheduleDelete(id)` to inspect and remove. The operator sees the same
   list with /schedules.
+- Three kinds (`kind=`): `agent` (default) runs the prompt as a task; `message` delivers the text
+  as a plain reminder with no model call — right for alarms and "call X at 15:00"; `lazy` shows the
+  note together with the operator's next message in this session ("when I next write, remind me…")
+  and turns into an agent task if the operator stays away for a day. Pick the cheapest kind that
+  does the job: a reminder must not cost a model run.
+- Unattended runs (schedules, heartbeat): when a check finds nothing that needs attention, call
+  `StaySilent(note)` — silence is the correct outcome, "nothing new" messages are noise. A recurring
+  task that fails several times in a row is switched off; the operator sees why in the inbox.

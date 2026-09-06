@@ -1,14 +1,15 @@
 import { Component, type ReactNode, useEffect, useState } from "react";
-import { telegram } from "./api";
+import { api, telegram } from "./api";
 import { useToast } from "./components";
 import { SessionsScreen } from "./screens/Sessions";
+import { InboxScreen } from "./screens/Inbox";
 import { SessionScreen } from "./screens/Session";
 import { ProposalsScreen } from "./screens/Proposals";
 import { SchedulesScreen } from "./screens/Schedules";
 import { UsageScreen } from "./screens/Usage";
 import { SettingsScreen } from "./screens/Settings";
 
-type Tab = "sessions" | "proposals" | "schedules" | "usage" | "settings";
+type Tab = "sessions" | "inbox" | "proposals" | "schedules" | "usage" | "settings";
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
@@ -32,6 +33,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 
 const TABS: { id: Tab; label: string; glyph: string }[] = [
   { id: "sessions", label: "Bots", glyph: "◉" },
+  { id: "inbox", label: "Inbox", glyph: "▣" },
   { id: "proposals", label: "Changes", glyph: "⑂" },
   { id: "schedules", label: "Cron", glyph: "◷" },
   { id: "usage", label: "Usage", glyph: "▤" },
@@ -42,6 +44,18 @@ export function App() {
   const [tab, setTab] = useState<Tab>("sessions");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [toast, showToast] = useToast();
+  const [unread, setUnread] = useState(0);
+
+  useEffect(() => {
+    const poll = () =>
+      api
+        .get<{ inbox_unread?: number }>("/api/status")
+        .then((st) => setUnread(st.inbox_unread ?? 0))
+        .catch(() => undefined);
+    poll();
+    const id = setInterval(poll, 20000);
+    return () => clearInterval(id);
+  }, [tab]);
 
   useEffect(() => {
     const tg = telegram();
@@ -77,6 +91,7 @@ export function App() {
           <div className="screen">
             <ErrorBoundary key={tab}>
               {tab === "sessions" && <SessionsScreen onOpen={setSessionId} toast={showToast} />}
+              {tab === "inbox" && <InboxScreen onOpen={setSessionId} toast={showToast} onUnread={setUnread} />}
               {tab === "proposals" && <ProposalsScreen toast={showToast} />}
               {tab === "schedules" && <SchedulesScreen toast={showToast} onOpen={setSessionId} />}
               {tab === "usage" && <UsageScreen />}
@@ -86,7 +101,10 @@ export function App() {
           <nav className="tabbar">
             {TABS.map((t) => (
               <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
-                <span className="glyph">{t.glyph}</span>
+                <span className="glyph" style={{ position: "relative" }}>
+                  {t.glyph}
+                  {t.id === "inbox" && unread > 0 && <span className="tab-badge">{unread > 99 ? "99+" : unread}</span>}
+                </span>
                 {t.label}
               </button>
             ))}

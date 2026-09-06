@@ -272,3 +272,6 @@ input.field, select.field, textarea.field {
 .models-menu-list { max-height:260px; overflow-y:auto; display:flex; flex-direction:column; }
 .models-menu-item { text-align:left; background:none; border:0; color:var(--fg); padding:8px 10px; border-radius:8px; font-size:14px; cursor:pointer; font-family:var(--mono); }
 .models-menu-item:hover, .models-menu-item.on { background:var(--card-2); }
+
+.tab-badge { position:absolute; top:-6px; right:-14px; min-width:16px; height:16px; padding:0 4px; border-radius:999px; background:var(--bad); color:#fff; font-size:10px; line-height:16px; text-align:center; font-weight:700; }
+.card.unread { border-color: color-mix(in srgb, var(--info) 45%, var(--line)); }
