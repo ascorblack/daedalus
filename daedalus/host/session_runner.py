@@ -414,10 +414,14 @@ class SessionManager:
         )
         if not history:
             raise RuntimeError("nothing to compact")
-        rungs = self.providers.rungs_for(self.config)
+        overrides = await self.live.load(session_id)
+        if overrides.get("provider"):
+            rungs = self.providers.rungs_for_session(self.config, overrides["provider"], overrides.get("model_name"))
+        else:
+            rungs = self.providers.rungs_for(self.config)
         if not rungs:
             raise RuntimeError("no model provider is configured")
-        provider, model = rungs[0]
+        provider, model = rungs[0]  # the session's own model summarises its own history
         language = self.config.answer_language if self.config.answer_language != "auto" else operator_language(history)
         prompt = COMPACT_PROMPT.format(language=language) + (
             f"\n\nThe operator asks to focus on: {instructions.strip()}" if instructions.strip() else ""
