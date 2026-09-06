@@ -411,7 +411,9 @@ class SessionManager:
             except Exception:  # noqa: BLE001
                 pass
         if state.running:
-            kind = "steer" if steer else "follow_up"
+            # A message sent while the agent works is a steer: the core places it before the
+            # next model call (after the current tool batch). follow_up would wait for the end.
+            kind = "follow_up" if not steer and state.metadata.get("queue_mode") == "follow_up" else "steer"
             await self.live.enqueue(session_id, kind, new_queued_prompt(kind, body).to_dict())  # type: ignore[arg-type]
             return state.run_id or ""
         message = Message(

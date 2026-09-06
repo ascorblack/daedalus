@@ -41,6 +41,9 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int) -> Any:
         max_iterations=config.limits.max_iterations,
         tool_timeout_seconds=int(config.limits.tool_timeout_seconds),
         steer_follow_up_enabled=True,
+        steer_default_mode="all",
+        follow_up_default_mode="all",
+        mid_session_controls_enabled=True,
         memory_enabled=True,
         # Advertise every registered tool; the registry would otherwise clip the list.
         tool_retrieval_top_k=200,

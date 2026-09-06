@@ -124,7 +124,7 @@ async def test_follow_up_is_queued_while_running_and_placed_next_step(settings: 
     assert state.running
     await manager.submit(state.session.id, "and also this")
     queued = await manager.live.load(state.session.id)
-    assert queued["follow_up"] and queued["follow_up"][0]["text"] == "and also this"
+    assert queued["steer"] and queued["steer"][0]["text"] == "and also this"
     await waiter
     texts = [b.text for m in provider.requests[-1].messages for b in m.content_blocks if isinstance(b, TextBlock)]
     assert any("and also this" in t for t in texts)
