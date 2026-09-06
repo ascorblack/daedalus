@@ -187,11 +187,29 @@ class SessionManager:
                 state.services.max_tool_output_chars = config.tools.exec.max_output_chars
 
     def _vision(self) -> tuple[Any, str, FileBlobStore, str] | None:
+        found = self.config.vision_preset()
+        if found is None:
+            return None
+        _, preset = found
         try:
-            provider = self.providers.get(self.config.vision.provider)
+            provider = self.providers.get(preset.provider)
         except KeyError:
             return None
-        return provider, self.config.vision.model, self.blobs, TENANT
+        return provider, preset.model, self.blobs, TENANT
+
+    def resolve_model(self, overrides: dict[str, Any]) -> tuple[list[tuple[Any, str]], Any]:
+        """Rungs and the effective preset for a session, from its live overrides.
+
+        A chosen preset wins; a manual provider/model pair runs with the default preset's
+        thinking and window settings; otherwise the global default preset applies.
+        """
+        if overrides.get("preset") and overrides["preset"] in self.config.presets:
+            pid = overrides["preset"]
+            return self.providers.rungs_for(self.config, pid), self.config.presets[pid]
+        _, default = self.config.preset()
+        if overrides.get("provider") and overrides.get("model_name"):
+            return self.providers.rungs_for_pair(self.config, overrides["provider"], overrides["model_name"]), default
+        return self.providers.rungs_for(self.config), default
 
     # -- MCP per session --------------------------------------------------------------
 
@@ -418,13 +436,7 @@ class SessionManager:
         )
         if not history:
             raise RuntimeError("nothing to compact")
-        overrides = await self.live.load(session_id)
-        if overrides.get("provider"):
-            rungs = self.providers.rungs_for_session(self.config, overrides["provider"], overrides.get("model_name"))
-        else:
-            rungs = self.providers.rungs_for(self.config)
-        if not rungs:
-            raise RuntimeError("no model provider is configured")
+        rungs, _ = self.resolve_model(await self.live.load(session_id))
         provider, model = rungs[0]  # the session's own model summarises its own history
         language = self.config.answer_language if self.config.answer_language != "auto" else operator_language(history)
         prompt = COMPACT_PROMPT.format(language=language) + (
@@ -643,6 +655,7 @@ class SessionManager:
         *,
         model_name: str | None = None,
         provider: str | None = None,
+        preset: str | None = None,
         thinking: bool | None = None,
         reasoning_effort: str | None = None,
         clear: bool = False,
@@ -650,10 +663,12 @@ class SessionManager:
         if clear:
             await self.live.clear_overrides(session_id)
             return
+        if preset is not None and preset not in self.config.presets:
+            raise ValueError(f"no such model preset {preset!r}")
         if provider is not None and provider not in self.providers.available():
             raise ValueError(f"unknown or unusable provider {provider!r}")
         await self.live.set_model(
-            session_id, model_name=model_name, provider=provider, thinking_enabled=thinking, reasoning_effort=reasoning_effort
+            session_id, model_name=model_name, provider=provider, preset=preset, thinking_enabled=thinking, reasoning_effort=reasoning_effort
         )
         state = self._states.get(session_id)
         if state is not None and state.engine is not None and state.running:
@@ -665,10 +680,7 @@ class SessionManager:
 
     async def _build_engine(self, state: SessionState, run_id: str) -> QueryEngine:
         overrides = await self.live.load(state.session.id)
-        if overrides.get("provider"):
-            rungs = self.providers.rungs_for_session(self.config, overrides["provider"], overrides.get("model_name"))
-        else:
-            rungs = self.providers.rungs_for(self.config)
+        rungs, preset = self.resolve_model(overrides)
         deps = EngineDeps(
             tool_registry=self.tools,
             event_stream=self.events,
@@ -688,10 +700,11 @@ class SessionManager:
             workspace=state.workspace,
             rungs=rungs,
             provider_chain=build_chain(rungs),
-            model_name=(rungs[0][1] if overrides.get("provider") else overrides.get("model_name") or state.metadata.get("model")),
-            thinking=overrides.get("thinking_enabled"),
-            reasoning_effort=overrides.get("reasoning_effort"),
-            context_window=state.context_window or self.config.model.context_window,
+            model_name=rungs[0][1],
+            thinking=preset.thinking if overrides.get("thinking_enabled") is None else bool(overrides["thinking_enabled"]),
+            reasoning_effort=overrides.get("reasoning_effort") or preset.reasoning_effort,
+            context_window=state.context_window or preset.context_window,
+            max_output_tokens=preset.max_output_tokens,
             extra_notes=state.extra_notes,
             blocked_tools=blocked_for(self.mcp, self.mcp_enabled(state)),
         )

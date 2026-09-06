@@ -19,9 +19,9 @@ def test_every_module_imports() -> None:
 
 def test_config_roundtrip(settings: Settings) -> None:
     config = RuntimeConfig.load(settings.config_path)
-    config.model.name = "x"
+    config.presets["deepseek.deepseek-v4-flash"].label = "x"
     config.save(settings.config_path)
-    assert RuntimeConfig.load(settings.config_path).model.name == "x"
+    assert RuntimeConfig.load(settings.config_path).presets["deepseek.deepseek-v4-flash"].label == "x"
 
 
 async def test_manager_starts_and_registers_tools(settings: Settings, db: Database) -> None:

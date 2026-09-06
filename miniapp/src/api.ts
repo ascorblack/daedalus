@@ -136,24 +136,30 @@ export type Schedule = {
 export type ProviderConf = {
   kind: string;
   base_url: string;
-  default_model: string;
-  supports_images: boolean;
-  supports_thinking: boolean;
   timeout_seconds: number;
   api_key?: string; // always "" from the API — stored keys are masked
   api_key_set?: boolean;
   pricing?: Record<string, unknown>;
 };
 
-export type Preset = { provider: string; model: string; label: string };
+export type Preset = {
+  provider: string;
+  model: string;
+  label: string;
+  thinking: boolean;
+  reasoning_effort: string;
+  images: boolean;
+  context_window: number;
+  max_output_tokens: number;
+};
 
 export type Settings = {
-  model: { provider: string; name: string; preset: string; thinking: boolean; reasoning_effort: string; chain: string[]; context_window: number; max_output_tokens: number };
+  model: { preset: string; chain: string[] };
   presets: Record<string, Preset>;
   providers: Record<string, ProviderConf>;
   provider_kinds?: string[];
   prompt: { rules: string; default_rules?: string };
-  vision: { provider: string; model: string; max_output_tokens: number };
+  vision: { preset: string; max_output_tokens: number };
   tools: {
     web: { fetch_timeout_seconds: number; search_timeout_seconds: number; proxy: string; user_agent: string; fetch_max_chars: number; search_url: string; search_region: string; search_results: number };
     exec: { max_output_chars: number };

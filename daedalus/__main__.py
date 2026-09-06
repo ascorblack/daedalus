@@ -43,10 +43,9 @@ async def cmd_check(args: argparse.Namespace) -> int:
         print(f"config: {settings.config_path}")
         print(f"repos: bot={settings.bot_repo_dir} core={settings.core_repo_dir}")
         print(f"providers: {', '.join(manager.providers.available()) or '(none configured)'}")
-        print(
-            f"model: {config.model.provider}/{config.model.name}"
-            f" thinking={config.model.thinking} effort={config.model.reasoning_effort}"
-        )
+        pid, preset = config.preset()
+        print(f"model: {pid} = {preset.provider}/{preset.model} thinking={preset.thinking} effort={preset.reasoning_effort}")
+        print(f"presets: {', '.join(config.presets)}"),
         print(f"tools ({len(tools)}): {', '.join(tools)}")
         skills = await manager.skills.list("daedalus")
         print(f"skills ({len(skills)}): {', '.join(s.name for s in skills) or '(none)'}")

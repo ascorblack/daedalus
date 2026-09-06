@@ -172,6 +172,10 @@ MIGRATIONS: list[str] = [
     CREATE INDEX transcript_session ON transcript(session_id, seq);
     ALTER TABLE live_control ADD COLUMN provider TEXT;
     """,
+    # per-session model preset
+    """
+    ALTER TABLE live_control ADD COLUMN preset TEXT;
+    """,
 ]
 
 

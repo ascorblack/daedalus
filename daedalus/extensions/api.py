@@ -32,7 +32,7 @@ from protocore.contracts.types import (
 )
 from pydantic import BaseModel
 
-from daedalus.config import PROVIDER_KINDS, ProviderConfig
+from daedalus.config import PROVIDER_KINDS, ModelPresetConfig, ProviderConfig
 
 if TYPE_CHECKING:
     from daedalus.app import Application
@@ -117,11 +117,8 @@ class ProviderPatch(BaseModel):
 
     kind: str | None = None
     base_url: str | None = None
-    default_model: str | None = None
     api_key: str | None = None
     """Omitted = keep the stored key; "" or null = clear it; any other value = store it."""
-    supports_images: bool | None = None
-    supports_thinking: bool | None = None
     timeout_seconds: float | None = None
 
 
@@ -136,29 +133,28 @@ class PresetPatch(BaseModel):
     label: str | None = None
     provider: str | None = None
     model: str | None = None
+    thinking: bool | None = None
+    reasoning_effort: str | None = None
+    images: bool | None = None
+    context_window: int | None = None
+    max_output_tokens: int | None = None
 
 
 PRESET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def resolve_model_patch(current: dict[str, Any], patch: dict[str, Any]) -> None:
-    """Merge a ``model`` settings patch in place. A ``preset`` id sets provider+name from the
-    preset; a bare provider/name edit drops a preset binding it no longer matches."""
-    merged = {**current.get("model", {}), **{k: v for k, v in patch.items() if k != "preset"}}
+    """Merge a ``model`` settings patch (default preset id and/or fallback chain) in place."""
     presets = current.get("presets") or {}
+    merged = dict(current.get("model", {}))
     if "preset" in patch:
         preset_id = str(patch.get("preset") or "").strip()
-        if preset_id:
-            preset = presets.get(preset_id)
-            if not preset:
-                raise HTTPException(400, f"no such model preset {preset_id!r}")
-            merged["provider"], merged["name"], merged["preset"] = preset["provider"], preset["model"], preset_id
-        else:
-            merged["preset"] = ""
-    elif merged.get("preset"):
-        preset = presets.get(merged["preset"])
-        if preset is None or preset["provider"] != merged.get("provider") or preset["model"] != merged.get("name"):
-            merged["preset"] = ""
+        if preset_id not in presets:
+            raise HTTPException(400, f"no such model preset {preset_id!r}")
+        merged["preset"] = preset_id
+    if "chain" in patch:
+        chain = [str(c) for c in (patch.get("chain") or []) if str(c) in presets and str(c) != merged.get("preset")]
+        merged["chain"] = chain
     current["model"] = merged
 
 
@@ -334,18 +330,12 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     async def session_model_label(state: Any) -> str:
         overrides = await manager.live.load(state.session.id)
-        if overrides.get("provider"):
-            provider = app.config.providers.get(overrides["provider"])
-            model = overrides.get("model_name") or (provider.default_model if provider else "")
-            for preset in app.config.presets.values():
-                if preset.provider == overrides["provider"] and preset.model == model and preset.label:
-                    return preset.label
-            return f"{overrides['provider']}/{model}" if model else overrides["provider"]
-        if overrides.get("model_name"):
-            return str(overrides["model_name"])
-        if state.engine is not None and state.running:
-            return str(state.engine.effective_model_name)
-        return app.config.model.name
+        if overrides.get("preset") and overrides["preset"] in app.config.presets:
+            return app.config.presets[overrides["preset"]].display(overrides["preset"])
+        if overrides.get("provider") and overrides.get("model_name"):
+            return f"{overrides['provider']}/{overrides['model_name']}"
+        pid, preset = app.config.preset()
+        return preset.display(pid)
 
     @api.get("/api/sessions/{session_id}")
     async def get_session(session_id: str, tail: int = 600, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -513,16 +503,12 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if body.get("context_window"):
             # Per-session window (in memory): smaller than the model's for cheap runs or tests.
             state.context_window = max(8_000, int(body["context_window"]))
-        if body.get("preset"):
-            preset = app.config.presets.get(str(body["preset"]))
-            if preset is None:
-                raise HTTPException(400, f"no such model preset {body['preset']!r}")
-            body = {**body, "provider": preset.provider, "model": preset.model}
         try:
             await manager.set_model(
                 session_id,
                 model_name=body.get("model"),
                 provider=body.get("provider"),
+                preset=body.get("preset") or None,
                 thinking=body.get("thinking"),
                 reasoning_effort=body.get("reasoning_effort"),
                 clear=bool(body.get("clear")),
@@ -753,12 +739,6 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return _settings_view()
 
     def _reference_check(config: RuntimeConfig, provider_id: str) -> str | None:
-        if config.model.provider == provider_id:
-            return "it is the active model provider"
-        if provider_id in config.model.chain:
-            return "it is in the model fallback chain"
-        if config.vision.provider == provider_id:
-            return "it is the vision provider"
         users = [pid for pid, preset in config.presets.items() if preset.provider == provider_id]
         if users:
             return f"model preset(s) {', '.join(users)} use it"
@@ -823,21 +803,19 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.put("/api/presets/{preset_id}")
     async def put_preset(preset_id: str, body: PresetPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """Create or edit a named model choice: label, client (provider id) and model id."""
+        """Create or edit a named model: client, model id, label, thinking, effort, images, window, output cap."""
         if not PRESET_ID_RE.fullmatch(preset_id):
             raise HTTPException(400, "preset id: letters, digits, . _ - (max 64)")
         raw = app.config.model_dump(mode="json")
-        entry = dict(raw.setdefault("presets", {}).get(preset_id) or {"provider": "", "model": "", "label": ""})
+        entry = dict(raw.setdefault("presets", {}).get(preset_id) or ModelPresetConfig().model_dump(mode="json"))
         for key, value in body.model_dump(exclude_unset=True).items():
             if value is not None:
-                entry[key] = str(value).strip()
+                entry[key] = value.strip() if isinstance(value, str) else value
         if entry["provider"] not in raw.get("providers", {}):
             raise HTTPException(400, f"provider {entry['provider']!r} is not a configured client")
         if not entry["model"]:
             raise HTTPException(400, "a preset needs a model id")
         raw["presets"][preset_id] = entry
-        if raw["model"].get("preset") == preset_id:
-            raw["model"]["provider"], raw["model"]["name"] = entry["provider"], entry["model"]
         try:
             new_config = type(app.config).model_validate(raw)
         except Exception as exc:  # noqa: BLE001
@@ -850,8 +828,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such preset")
         if app.config.model.preset == preset_id:
             raise HTTPException(400, "this preset is the global default; pick another default first")
+        if app.config.vision.preset == preset_id:
+            raise HTTPException(400, "this preset is the ImageView model; pick another in Settings → Tools first")
         raw = app.config.model_dump(mode="json")
         del raw["presets"][preset_id]
+        raw["model"]["chain"] = [c for c in raw["model"].get("chain", []) if c != preset_id]
         return await _save_provider_config(type(app.config).model_validate(raw))
 
     # -- static mini app ------------------------------------------------------------

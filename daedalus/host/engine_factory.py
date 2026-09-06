@@ -35,9 +35,9 @@ class EngineDeps:
     governance_path: Path
 
 
-def runtime_constants(config: RuntimeConfig, *, context_window: int) -> Any:
+def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_tokens: int, thinking: bool) -> Any:
     context_window = max(8_000, int(context_window))
-    output_cap = max(1024, min(config.model.max_output_tokens, context_window))
+    output_cap = max(1024, min(max_output_tokens, context_window))
     return default_runtime_constants(
         model_context_window=context_window,
         llm_output_max_tokens_ratio=min(1.0, max(0.01, output_cap / context_window)),
@@ -50,7 +50,7 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int) -> Any:
         memory_enabled=True,
         # Advertise every registered tool; the registry would otherwise clip the list.
         tool_retrieval_top_k=200,
-        agent_thinking_default=config.model.thinking,
+        agent_thinking_default=thinking,
         # Summaries must not be cut mid-JSON: give the summariser room for a full sentence pair.
         compaction_summary_max_output_tokens=1024,
         # Long tasks are the point: no per-run tool-call cap; spend and iterations bound the run.
@@ -70,9 +70,10 @@ def build_engine(
     rungs: list[tuple[OpenAICompatibleProvider, str]],
     provider_chain: IProviderChain | None,
     model_name: str | None = None,
-    thinking: bool | None = None,
-    reasoning_effort: str | None = None,
+    thinking: bool = True,
+    reasoning_effort: str = "medium",
     context_window: int = 128_000,
+    max_output_tokens: int = 32_000,
     extra_notes: str = "",
     blocked_tools: set[str] | None = None,
 ) -> QueryEngine:
@@ -104,9 +105,9 @@ def build_engine(
         model_name=model,
         system_prompt_sections=tuple(s for s in sections if s),
         tool_visibility_policy=ToolVisibilityPolicy(pinned=set(all_tools) - set(blocked_tools or ()), blocked=set(blocked_tools or ())),
-        rc=runtime_constants(config, context_window=context_window),
-        thinking_enabled=config.model.thinking if thinking is None else thinking,
-        reasoning_effort=reasoning_effort or config.model.reasoning_effort,
+        rc=runtime_constants(config, context_window=context_window, max_output_tokens=max_output_tokens, thinking=thinking),
+        thinking_enabled=thinking,
+        reasoning_effort=reasoning_effort,
     )
     engine = QueryEngine(
         config=engine_config,

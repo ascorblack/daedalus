@@ -42,8 +42,9 @@ async def image_view(context: ToolContext, path: str, task: str, detail: str = "
     provider, model, blobs, tenant = vision
     manager = services.extra.get("manager")
     max_out = int(getattr(getattr(getattr(manager, "config", None), "vision", None), "max_output_tokens", 2000))
-    if not getattr(getattr(provider, "endpoint", None), "supports_images", False) or getattr(provider, "_image_loader", None) is None:
-        return error(context, "the configured vision provider cannot receive images; set [vision] to an image-capable endpoint")
+    accepts = getattr(provider, "accepts_images", None)
+    if accepts is None or not accepts(model):
+        return error(context, "the vision preset is not marked as image-capable; enable 'images' on it in Settings → Models")
     meta = await blobs.put(tenant, target.read_bytes(), content_type=mime)
     instruction = (
         "You are the eyes of another AI agent. Look at the image and answer its request precisely. "

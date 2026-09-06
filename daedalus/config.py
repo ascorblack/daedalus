@@ -84,35 +84,41 @@ class Settings(BaseSettings):
         return self.bot_repo_dir / "skills"
 
 
+DEFAULT_PRESET = "deepseek.deepseek-v4-flash"
+
+
 class ModelConfig(BaseModel):
-    provider: str = "deepseek"
-    name: str = "deepseek-v4-flash"
-    preset: str = ""
-    """Id of the model preset the default was chosen from; ``provider``/``name`` mirror it."""
-    thinking: bool = True
-    reasoning_effort: ReasoningEffort = "medium"
-    chain: list[str] = Field(default_factory=lambda: ["deepseek", "openrouter"])
-    """Fallback order of provider ids; the first entry is the primary."""
-    context_window: int = Field(default=128_000, ge=8_000, le=4_000_000)
-    """Tokens of history the run may hold before compaction; set below the model's real window to keep runs cheap."""
-    max_output_tokens: int = Field(default=32_000, ge=1_024, le=1_000_000)
-    """Cap on one model reply (``max_tokens``); thinking tokens count against it."""
+    """Which model preset runs by default, and which ones stand in when it fails."""
+
+    preset: str = DEFAULT_PRESET
+    chain: list[str] = Field(default_factory=lambda: ["openrouter.deepseek-v4-flash"])
+    """Fallback preset ids tried in order after the default one."""
 
 
 class ModelPresetConfig(BaseModel):
-    """A named model choice: which client (provider) serves which model id.
+    """A named model: a client (provider endpoint), a model id and everything about how it is run.
 
-    Presets are what the operator picks, as the global default and per session; the
-    provider entries only describe endpoints.
+    Presets are the unit the operator picks, as the global default and per session; provider
+    entries only describe endpoints (URL, key, timeout, prices).
     """
 
     provider: str = ""
     model: str = ""
     label: str = ""
     """Display label; empty shows ``provider/model``."""
+    thinking: bool = True
+    reasoning_effort: ReasoningEffort = "medium"
+    images: bool = False
+    """The model accepts images (needed for ImageView and for photos sent in chat)."""
+    context_window: int = Field(default=128_000, ge=8_000, le=4_000_000)
+    """Tokens of history a run may hold before compaction; set below the model's real window to keep runs cheap."""
+    max_output_tokens: int = Field(default=32_000, ge=1_024, le=1_000_000)
+    """Cap on one reply (``max_tokens``); thinking tokens count against it."""
 
     def display(self, preset_id: str = "") -> str:
-        return self.label or f"{self.provider}/{self.model}" if self.provider else (self.label or preset_id)
+        if self.label:
+            return self.label
+        return f"{self.provider}/{self.model}" if self.provider else preset_id
 
 
 class ProviderConfig(BaseModel):
@@ -120,13 +126,10 @@ class ProviderConfig(BaseModel):
 
     kind: ProviderKind = "openai_compat"
     base_url: str = ""
-    default_model: str = ""
     api_key: str = ""
     """Optional key for this endpoint, stored in ``config.toml`` on the state volume
     (masked in the Mini App, never echoed back). Empty means "no key" for self-hosted
     endpoints and "use the environment key" for the built-in kinds (deepseek, openrouter, vllm)."""
-    supports_images: bool = False
-    supports_thinking: bool = False
     timeout_seconds: float = 600.0
     pricing: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Per-model USD per 1M tokens overriding the built-in table (``daedalus.providers.pricing``):
@@ -144,8 +147,8 @@ class PromptConfig(BaseModel):
 class VisionConfig(BaseModel):
     """Model used by the ImageView tool (cheap, fast, image-capable)."""
 
-    provider: str = "openrouter"
-    model: str = "qwen/qwen3.7-flash"
+    preset: str = "openrouter.qwen-qwen3.7-flash"
+    """A preset with ``images = true``; empty picks the first image-capable preset."""
     max_output_tokens: int = Field(default=2000, ge=100, le=32_000)
 
 
@@ -248,24 +251,21 @@ class TelegramConfig(BaseModel):
 
 class RuntimeConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
-    presets: dict[str, ModelPresetConfig] = Field(default_factory=dict)
-    """Named model choices keyed by id; seeded from the providers' default models."""
+    presets: dict[str, ModelPresetConfig] = Field(
+        default_factory=lambda: {
+            DEFAULT_PRESET: ModelPresetConfig(provider="deepseek", model="deepseek-v4-flash"),
+            "openrouter.deepseek-v4-flash": ModelPresetConfig(provider="openrouter", model="deepseek/deepseek-v4-flash", images=True),
+            "openrouter.qwen-qwen3.7-flash": ModelPresetConfig(
+                provider="openrouter", model="qwen/qwen3.7-flash", label="Qwen 3.7 Flash (vision)", thinking=False, images=True, max_output_tokens=4_000
+            ),
+        }
+    )
+    """Named models keyed by id; the operator adds more in the Mini App."""
     providers: dict[str, ProviderConfig] = Field(
         default_factory=lambda: {
-            "deepseek": ProviderConfig(
-                kind="deepseek",
-                base_url="https://api.deepseek.com",
-                default_model="deepseek-v4-flash",
-                supports_thinking=True,
-            ),
-            "openrouter": ProviderConfig(
-                kind="openrouter",
-                base_url="https://openrouter.ai/api/v1",
-                default_model="deepseek/deepseek-v4-flash",
-                supports_images=True,
-                supports_thinking=True,
-            ),
-            "vllm": ProviderConfig(kind="vllm", base_url="", default_model=""),
+            "deepseek": ProviderConfig(kind="deepseek", base_url="https://api.deepseek.com"),
+            "openrouter": ProviderConfig(kind="openrouter", base_url="https://openrouter.ai/api/v1"),
+            "vllm": ProviderConfig(kind="vllm", base_url=""),
         }
     )
     prompt: PromptConfig = Field(default_factory=PromptConfig)
@@ -279,6 +279,25 @@ class RuntimeConfig(BaseModel):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     answer_language: str = "auto"
     """"auto" answers in the language of the request; otherwise a language name."""
+
+    def preset(self, preset_id: str | None = None) -> tuple[str, ModelPresetConfig]:
+        """The named preset, or the default one when the id is empty/unknown."""
+        if preset_id and preset_id in self.presets:
+            return preset_id, self.presets[preset_id]
+        if self.model.preset in self.presets:
+            return self.model.preset, self.presets[self.model.preset]
+        if self.presets:
+            first = next(iter(self.presets))
+            return first, self.presets[first]
+        raise RuntimeError("no model presets are configured")
+
+    def vision_preset(self) -> tuple[str, ModelPresetConfig] | None:
+        if self.vision.preset and self.vision.preset in self.presets and self.presets[self.vision.preset].images:
+            return self.vision.preset, self.presets[self.vision.preset]
+        for pid, preset in self.presets.items():
+            if preset.images:
+                return pid, preset
+        return None
 
     @classmethod
     def load(cls, path: Path) -> RuntimeConfig:
@@ -316,24 +335,71 @@ def preset_id_for(provider_id: str, model: str) -> str:
     return f"{provider_id}.{slug}"
 
 
+LEGACY_PROVIDER_KEYS = ("default_model", "supports_images", "supports_thinking")
+LEGACY_MODEL_KEYS = ("provider", "name", "thinking", "reasoning_effort", "context_window", "max_output_tokens")
+
+
 def _seed_presets(raw: dict[str, Any]) -> bool:
-    """Back-fill presets for configs written before they existed: one per provider default
-    model, plus the active ``[model]`` pair, which becomes ``[model].preset``."""
-    if isinstance(raw.get("presets"), dict) and raw["presets"]:
+    """Convert configs written before presets carried the model settings.
+
+    Provider ``default_model``/``supports_*`` and the global ``[model]`` thinking/window
+    fields become presets (one per provider default model, plus the active pair), the
+    chain of provider ids becomes a chain of preset ids, ``[vision]`` points at a preset,
+    and the legacy keys are dropped. Returns True when anything changed.
+    """
+    model = dict(raw.get("model") or {})
+    providers = raw.get("providers") or {}
+    legacy = any(k in model for k in LEGACY_MODEL_KEYS) or any(
+        isinstance(p, dict) and any(k in p for k in LEGACY_PROVIDER_KEYS) for p in providers.values()
+    ) or any(k in (raw.get("vision") or {}) for k in ("provider", "model"))
+    if not legacy:
         return False
-    model = raw.get("model") or {}
-    presets: dict[str, Any] = {}
-    for provider_id, provider in (raw.get("providers") or {}).items():
-        default_model = (provider.get("default_model") or "").strip() if isinstance(provider, dict) else ""
+    presets: dict[str, Any] = {pid: dict(p) for pid, p in (raw.get("presets") or {}).items() if isinstance(p, dict)}
+    base = {
+        "thinking": bool(model.get("thinking", True)),
+        "reasoning_effort": model.get("reasoning_effort") or "medium",
+        "context_window": int(model.get("context_window") or 128_000),
+        "max_output_tokens": int(model.get("max_output_tokens") or 32_000),
+    }
+    by_provider: dict[str, str] = {}
+    for provider_id, provider in providers.items():
+        if not isinstance(provider, dict):
+            continue
+        default_model = str(provider.pop("default_model", "") or "").strip()
+        images = bool(provider.pop("supports_images", False))
+        provider.pop("supports_thinking", None)
         if default_model:
-            presets.setdefault(preset_id_for(provider_id, default_model), {"provider": provider_id, "model": default_model, "label": ""})
+            pid = next((k for k, v in presets.items() if v.get("provider") == provider_id and v.get("model") == default_model), None)
+            if pid is None:
+                pid = preset_id_for(provider_id, default_model)
+                presets[pid] = {"provider": provider_id, "model": default_model, "label": ""}
+            presets[pid].setdefault("images", images)
+            by_provider.setdefault(provider_id, pid)
     active_provider, active_name = model.get("provider") or "", (model.get("name") or "").strip()
+    default_pid = model.get("preset") or ""
     if active_provider and active_name:
-        pid = next((k for k, v in presets.items() if v["provider"] == active_provider and v["model"] == active_name), None)
-        if pid is None:
-            pid = preset_id_for(active_provider, active_name)
-            presets[pid] = {"provider": active_provider, "model": active_name, "label": ""}
-        raw["model"] = {**model, "preset": pid}
+        default_pid = next((k for k, v in presets.items() if v["provider"] == active_provider and v["model"] == active_name), "")
+        if not default_pid:
+            default_pid = preset_id_for(active_provider, active_name)
+            presets[default_pid] = {"provider": active_provider, "model": active_name, "label": ""}
+        by_provider.setdefault(active_provider, default_pid)
+    vision = dict(raw.get("vision") or {})
+    v_provider, v_model = vision.pop("provider", ""), vision.pop("model", "")
+    if v_provider and v_model:
+        vpid = next((k for k, v in presets.items() if v["provider"] == v_provider and v["model"] == v_model), None)
+        if vpid is None:
+            vpid = preset_id_for(v_provider, v_model)
+            presets[vpid] = {"provider": v_provider, "model": v_model, "label": "", "thinking": False}
+        presets[vpid]["images"] = True
+        vision["preset"] = vpid
+    for preset in presets.values():
+        for key, value in base.items():
+            preset.setdefault(key, value)
+        preset.setdefault("images", False)
+    chain = [by_provider[p] for p in (model.get("chain") or []) if isinstance(p, str) and p in by_provider and by_provider[p] != default_pid]
+    chain += [c for c in (model.get("chain") or []) if isinstance(c, str) and c in presets and c not in chain and c != default_pid]
+    raw["model"] = {"preset": default_pid or (next(iter(presets)) if presets else DEFAULT_PRESET), "chain": chain}
+    raw["vision"] = vision
     raw["presets"] = presets
     return True
 
@@ -354,6 +420,7 @@ def _migrate(raw: dict[str, Any]) -> bool:
 
 
 __all__ = [
+    "DEFAULT_PRESET",
     "preset_id_for",
     "ApprovalMode",
     "BalanceConfig",

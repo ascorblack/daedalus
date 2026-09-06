@@ -662,28 +662,29 @@ class TelegramFront:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
         arg = (command.args or "").strip()
+        default_id, default = self.config.preset()
         if not arg:
-            presets = "\n".join(f"  {pid} — {p.display(pid)}" for pid, p in self.config.presets.items()) or "  (none)"
+            lines = [f"  {pid} — {p.display(pid)}{'  (default)' if pid == default_id else ''}" for pid, p in self.config.presets.items()]
             await message.answer(
-                f"default: {self.config.model.provider}/{self.config.model.name}"
-                f"{' (preset ' + self.config.model.preset + ')' if self.config.model.preset else ''}\n"
-                f"presets:\n{presets}\nproviders: {', '.join(self.manager.providers.available())}\n"
-                "usage: /model <preset-id> | [provider/]model-name | default"
+                f"default: {default.display(default_id)}\nmodels:\n" + "\n".join(lines)
+                + "\nusage: /model <preset-id> (in General: sets the default; in a topic: this session) · /model default · /model provider/model-id"
             )
             return
-        preset = self.config.presets.get(arg)
-        if preset is not None:
-            provider, name = preset.provider, preset.model
-        else:
-            provider, _, name = arg.rpartition("/") if "/" in arg and arg.split("/")[0] in self.manager.providers.available() else ("", "", arg)
-        if self._is_general(message):
-            if provider:
-                self.config.model.provider = provider
-            self.config.model.name = name
-            self.config.model.preset = arg if preset is not None else ""
-            await self.save_config(self.config)
-            self.manager.reload_config(self.config)
-            await message.answer(f"Default model: {self.config.model.provider}/{self.config.model.name}")
+        general = self._is_general(message) and message.chat.type != "private"
+        if arg in self.config.presets:
+            if general:
+                self.config.model.preset = arg
+                self.config.model.chain = [c for c in self.config.model.chain if c != arg]
+                await self.save_config(self.config)
+                await message.answer(f"Default model: {self.config.presets[arg].display(arg)}")
+                return
+            state = await self._session_for_message(message)
+            if state is not None:
+                await self.manager.set_model(state.session.id, preset=arg)
+                await message.answer(f"Session model: {self.config.presets[arg].display(arg)} (from the next model call)")
+            return
+        if general:
+            await message.answer("In General, /model takes a preset id (see /model). Create presets in the Mini App → Settings → Models.")
             return
         state = await self._session_for_message(message)
         if state is None:
@@ -692,12 +693,12 @@ class TelegramFront:
             await self.manager.set_model(state.session.id, clear=True)
             await message.answer("Session model: back to the global default")
             return
-        try:
-            await self.manager.set_model(state.session.id, model_name=name, provider=provider or None)
-        except ValueError as exc:
-            await message.answer(f"⚠️ {exc}")
+        provider, _, name = arg.partition("/")
+        if not name or provider not in self.manager.providers.available():
+            await message.answer("usage: /model <preset-id> | provider/model-id | default")
             return
-        await message.answer(f"Session model: {provider + '/' if provider else ''}{name} (from the next model call)")
+        await self.manager.set_model(state.session.id, model_name=name, provider=provider)
+        await message.answer(f"Session model: {provider}/{name} (from the next model call)")
 
     async def cmd_thinking(self, message: Message, command: CommandObject) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
@@ -705,25 +706,26 @@ class TelegramFront:
         arg = (command.args or "").strip().lower()
         thinking: bool | None = None
         effort: str | None = None
+        default_id, default = self.config.preset()
         if arg in ("on", "off"):
             thinking = arg == "on"
         elif arg in ("low", "medium", "high"):
             thinking, effort = True, arg
         else:
-            await message.answer(f"thinking={self.config.model.thinking} effort={self.config.model.reasoning_effort}\nusage: /thinking on|off|low|medium|high")
+            await message.answer(f"{default.display(default_id)}: thinking={default.thinking} effort={default.reasoning_effort}\nusage: /thinking on|off|low|medium|high")
             return
-        if self._is_general(message):
-            self.config.model.thinking = bool(thinking)
+        if self._is_general(message) and message.chat.type != "private":
+            default.thinking = bool(thinking)
             if effort:
-                self.config.model.reasoning_effort = effort  # type: ignore[assignment]
+                default.reasoning_effort = effort  # type: ignore[assignment]
             await self.save_config(self.config)
-            await message.answer(f"Default thinking={self.config.model.thinking} effort={self.config.model.reasoning_effort}")
+            await message.answer(f"{default.display(default_id)}: thinking={default.thinking} effort={default.reasoning_effort}")
             return
         state = await self._session_for_message(message)
         if state is None:
             return
         await self.manager.set_model(state.session.id, thinking=thinking, reasoning_effort=effort)
-        await message.answer(f"Session thinking={thinking} effort={effort or self.config.model.reasoning_effort}")
+        await message.answer(f"Session thinking={thinking} effort={effort or default.reasoning_effort}")
 
     async def cmd_status(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
@@ -761,8 +763,8 @@ class TelegramFront:
             return
         c = self.config
         await message.answer(
-            f"model: {c.model.provider}/{c.model.name} thinking={c.model.thinking} effort={c.model.reasoning_effort}\n"
-            f"chain: {', '.join(c.model.chain)}\n"
+            f"model: {c.preset()[1].display(c.preset()[0])} thinking={c.preset()[1].thinking} effort={c.preset()[1].reasoning_effort}\n"
+            f"fallback: {', '.join(c.model.chain) or 'none'}\n"
             f"self-change approval: {c.self_change.approval}, auto_rebuild={c.self_change.auto_rebuild}\n"
             f"limits: ${self.settings.usd_per_day}/day (env), {c.limits.max_iterations} iterations, tool timeout {c.limits.tool_timeout_seconds:.0f}s\n"
             f"balance thresholds: {c.balance.thresholds_usd} (every {c.balance.poll_seconds}s)\n"
@@ -1062,7 +1064,7 @@ class TelegramFront:
         if outbox is None:
             return None
         state = await self.manager.get_state(session_id)
-        model = state.engine.effective_model_name if state and state.engine else self.config.model.name
+        model = state.engine.effective_model_name if state and state.engine else self.config.preset()[1].model
 
         async def cost_lookup(rid: str) -> float | None:
             row = await self.manager.db.fetchone("SELECT sum(cost_usd) c, count(*) n FROM usage_events WHERE run_id = ?", (rid,))

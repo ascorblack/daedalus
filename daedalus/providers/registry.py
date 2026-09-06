@@ -34,6 +34,12 @@ class ProviderRegistry:
         self._retired: list[OpenAICompatibleProvider] = []
         self.reload(config)
 
+    def _images_for(self, provider_id: str, model: str) -> bool:
+        config = getattr(self, "_config", None)
+        if config is None:
+            return False
+        return any(p.provider == provider_id and p.model == model and p.images for p in config.presets.values())
+
     def reload(self, config: RuntimeConfig) -> None:
         fresh: dict[str, OpenAICompatibleProvider] = {}
         for provider_id, pc in config.providers.items():
@@ -53,7 +59,9 @@ class ProviderRegistry:
                 ),
                 usage_sink=self._usage_sink,
                 image_loader=self._image_loader,
+                images_for=lambda model, pid=provider_id: self._images_for(pid, model),
             )
+        self._config = config
         self._retired.extend(p for pid, p in self._providers.items() if pid not in fresh)
         self._providers = fresh
 
@@ -89,9 +97,6 @@ class ProviderRegistry:
             kind=pc.kind,
             base_url=base_url,
             api_key=api_key,
-            default_model=pc.default_model,
-            supports_images=pc.supports_images,
-            supports_thinking=pc.supports_thinking,
             timeout_seconds=pc.timeout_seconds,
             extra_headers=headers,
             pricing=pricing_table(pc.kind, pc.pricing),
@@ -109,34 +114,30 @@ class ProviderRegistry:
     def available(self) -> Sequence[str]:
         return tuple(sorted(self._providers))
 
-    def rungs_for(self, config: RuntimeConfig) -> list[tuple[OpenAICompatibleProvider, str]]:
-        """Resolve the configured chain into ``(provider, model)`` pairs."""
+    def rungs_for(self, config: RuntimeConfig, preset_id: str | None = None) -> list[tuple[OpenAICompatibleProvider, str]]:
+        """``(adapter, model)`` pairs: the chosen (or default) preset first, then the fallback chain."""
+        first_id, first = config.preset(preset_id)
+        order = [first_id, *[c for c in config.model.chain if c != first_id]]
+        if config.model.preset not in order:
+            order.append(config.model.preset)
         rungs: list[tuple[OpenAICompatibleProvider, str]] = []
-        primary = config.model.provider
-        order = [primary, *[p for p in config.model.chain if p != primary]]
-        for provider_id in order:
-            provider = self._providers.get(provider_id)
-            if provider is None:
+        for pid in order:
+            preset = config.presets.get(pid)
+            provider = self._providers.get(preset.provider) if preset else None
+            if preset is None or provider is None or not preset.model:
                 continue
-            model = config.model.name if provider_id == primary else provider.endpoint.default_model
-            if not model:
-                continue
-            rungs.append((provider, model))
+            rungs.append((provider, preset.model))
         if not rungs:
-            raise RuntimeError(
-                "no usable provider: set an API key for at least one configured provider"
-            )
+            raise RuntimeError("no usable model: every preset points at a client without a URL or key")
         return rungs
 
-    def rungs_for_session(
-        self, config: RuntimeConfig, provider_id: str, model: str | None = None
-    ) -> list[tuple[OpenAICompatibleProvider, str]]:
-        """Like :meth:`rungs_for`, but the session's chosen client goes first; the chain follows as fallback."""
+    def rungs_for_pair(self, config: RuntimeConfig, provider_id: str, model: str) -> list[tuple[OpenAICompatibleProvider, str]]:
+        """An ad-hoc provider/model pair first (a manual ``/model vllm/x``), the chain behind it."""
         target = self._providers.get(provider_id)
-        if target is None:
+        if target is None or not model:
             return self.rungs_for(config)
-        rest = [(p, m) for p, m in self.rungs_for(config) if p.endpoint.id != provider_id]
-        return [(target, model or target.endpoint.default_model or config.model.name), *rest]
+        rest = [(p, m) for p, m in self.rungs_for(config) if not (p.endpoint.id == provider_id and m == model)]
+        return [(target, model), *rest]
 
     async def aclose(self) -> None:
         await self.close_retired()

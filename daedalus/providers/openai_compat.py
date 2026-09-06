@@ -53,9 +53,6 @@ class ProviderEndpoint:
     kind: str
     base_url: str
     api_key: str = ""
-    default_model: str = ""
-    supports_images: bool = False
-    supports_thinking: bool = False
     timeout_seconds: float = 600.0
     extra_headers: dict[str, str] = field(default_factory=dict)
     pricing: dict[str, ModelPricing] = field(default_factory=dict)
@@ -94,8 +91,11 @@ class OpenAICompatibleProvider(ILLMProvider):
         client: httpx.AsyncClient | None = None,
         usage_sink: UsageSink | None = None,
         image_loader: ImageLoader | None = None,
+        images_for: Callable[[str], bool] | None = None,
     ) -> None:
+        """``images_for(model)`` says whether that model takes image parts (a preset setting)."""
         self.endpoint = endpoint
+        self._images_for = images_for or (lambda _model: False)
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(endpoint.timeout_seconds, connect=30.0)
         )
@@ -277,13 +277,13 @@ class OpenAICompatibleProvider(ILLMProvider):
 
     async def _build_body(self, request: LLMRequest, *, stream: bool) -> dict[str, Any]:
         extra = dict(request.extra or {})
-        model = request.model or self.endpoint.default_model
+        model = request.model
         body: dict[str, Any] = {
             "model": model,
             "messages": await messages_to_wire(
                 request.messages,
                 image_loader=self._image_loader,
-                supports_images=self.endpoint.supports_images,
+                supports_images=self.accepts_images(model),
             ),
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
@@ -303,10 +303,11 @@ class OpenAICompatibleProvider(ILLMProvider):
         self._apply_thinking(body, thinking=thinking, effort=effort)
         return body
 
+    def accepts_images(self, model: str) -> bool:
+        return self._image_loader is not None and bool(self._images_for(model))
+
     def _apply_thinking(self, body: dict[str, Any], *, thinking: bool, effort: str) -> None:
         kind = self.endpoint.kind
-        if not self.endpoint.supports_thinking:
-            return
         if kind == "deepseek":
             body["thinking"] = {"type": "enabled" if thinking else "disabled"}
             if thinking:
@@ -398,7 +399,7 @@ class OpenAICompatibleProvider(ILLMProvider):
         normalized: dict[str, Any],
         started: float,
     ) -> float | None:
-        model = request.model or self.endpoint.default_model
+        model = request.model
         cost: float | None = None
         if raw.get("cost") is not None:
             cost = float(raw["cost"])

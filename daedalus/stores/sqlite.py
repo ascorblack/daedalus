@@ -383,12 +383,13 @@ class LiveControlStore:
     async def load(self, session_id: str) -> dict[str, Any]:
         row = await self._db.fetchone("SELECT * FROM live_control WHERE session_id = ?", (session_id,))
         if row is None:
-            return {"steer": [], "follow_up": [], "model_name": None, "provider": None, "thinking_enabled": None, "reasoning_effort": None}
+            return {"steer": [], "follow_up": [], "model_name": None, "provider": None, "preset": None, "thinking_enabled": None, "reasoning_effort": None}
         return {
             "steer": json.loads(row["steer_queue"] or "[]"),
             "follow_up": json.loads(row["follow_up_queue"] or "[]"),
             "model_name": row["model_name"],
             "provider": row["provider"],
+            "preset": row["preset"],
             "thinking_enabled": None if row["thinking_enabled"] is None else bool(row["thinking_enabled"]),
             "reasoning_effort": row["reasoning_effort"],
         }
@@ -421,14 +422,18 @@ class LiveControlStore:
         *,
         model_name: str | None = None,
         provider: str | None = None,
+        preset: str | None = None,
         thinking_enabled: bool | None = None,
         reasoning_effort: str | None = None,
     ) -> None:
         state = await self.load(session_id)
+        if preset is not None or provider is not None or model_name is not None:
+            # A new model choice replaces the previous one wholesale (preset xor manual pair).
+            state.update({"preset": None, "provider": None, "model_name": None})
         await self._db.execute(
-            "INSERT INTO live_control(session_id, steer_queue, follow_up_queue, model_name, provider, thinking_enabled, reasoning_effort, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(session_id) DO UPDATE SET model_name = excluded.model_name, provider = excluded.provider,"
+            "INSERT INTO live_control(session_id, steer_queue, follow_up_queue, model_name, provider, preset, thinking_enabled, reasoning_effort, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(session_id) DO UPDATE SET model_name = excluded.model_name, provider = excluded.provider, preset = excluded.preset,"
             " thinking_enabled = excluded.thinking_enabled, reasoning_effort = excluded.reasoning_effort,"
             " updated_at = excluded.updated_at",
             (
@@ -437,6 +442,7 @@ class LiveControlStore:
                 json.dumps(state["follow_up"]),
                 model_name if model_name is not None else state["model_name"],
                 provider if provider is not None else state["provider"],
+                preset if preset is not None else state["preset"],
                 None if thinking_enabled is None and state["thinking_enabled"] is None else int(
                     thinking_enabled if thinking_enabled is not None else state["thinking_enabled"]
                 ),
@@ -447,7 +453,7 @@ class LiveControlStore:
 
     async def clear_overrides(self, session_id: str) -> None:
         await self._db.execute(
-            "UPDATE live_control SET model_name = NULL, provider = NULL, thinking_enabled = NULL, reasoning_effort = NULL WHERE session_id = ?",
+            "UPDATE live_control SET model_name = NULL, provider = NULL, preset = NULL, thinking_enabled = NULL, reasoning_effort = NULL WHERE session_id = ?",
             (session_id,),
         )
 

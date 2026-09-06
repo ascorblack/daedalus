@@ -15,9 +15,9 @@ from daedalus.providers.registry import ProviderRegistry
 
 
 def test_apply_provider_patch_merges_partials_and_creates_new_entries() -> None:
-    providers: dict[str, Any] = {"vllm": {"kind": "vllm", "base_url": "http://a", "default_model": "m"}}
-    apply_provider_patch(providers, "vllm", {"default_model": "other", "api_key": "secret", "unknown": 1})
-    assert providers["vllm"] == {"kind": "vllm", "base_url": "http://a", "default_model": "other", "api_key": "secret"}
+    providers: dict[str, Any] = {"vllm": {"kind": "vllm", "base_url": "http://a"}}
+    apply_provider_patch(providers, "vllm", {"timeout_seconds": 30, "api_key": "secret", "unknown": 1, "default_model": "legacy"})
+    assert providers["vllm"] == {"kind": "vllm", "base_url": "http://a", "timeout_seconds": 30, "api_key": "secret"}
     # id that does not exist yet starts as a generic openai_compat endpoint
     apply_provider_patch(providers, "local", {"base_url": "http://b"})
     assert providers["local"] == {"kind": "openai_compat", "base_url": "http://b"}
@@ -171,7 +171,7 @@ def test_provider_put_preserves_stored_key_when_omitted() -> None:
     client, app = _client()
     headers = {"X-Daedalus-Token": "tok"}
     assert client.put("/api/providers/vllm", json={"base_url": "http://a/v1", "api_key": "k1"}, headers=headers).status_code == 200
-    r = client.put("/api/providers/vllm", json={"default_model": "Qwen3.6"}, headers=headers)
+    r = client.put("/api/providers/vllm", json={"timeout_seconds": 120}, headers=headers)
     assert r.status_code == 200
     assert app.saved[-1].providers["vllm"].api_key == "k1"
     # explicit "" clears it
@@ -183,10 +183,10 @@ def test_provider_delete_refuses_when_referenced_then_succeeds() -> None:
     client, app = _client()
     headers = {"X-Daedalus-Token": "tok"}
     client.put("/api/providers/me", json={"kind": "vllm", "base_url": "http://a/v1"}, headers=headers)
-    app.config.model.provider = "me"
+    assert client.put("/api/presets/me.m1", json={"provider": "me", "model": "m1"}, headers=headers).status_code == 200
     r = client.delete("/api/providers/me", headers=headers)
-    assert r.status_code == 400 and "active model" in r.text
-    app.config.model.provider = "deepseek"
+    assert r.status_code == 400 and "me.m1" in r.text
+    assert client.delete("/api/presets/me.m1", headers=headers).status_code == 200
     r = client.delete("/api/providers/me", headers=headers)
     assert r.status_code == 200 and "me" not in r.json()["providers"]
 
@@ -280,16 +280,16 @@ def test_presets_are_seeded_and_resolve_the_default(tmp_path) -> None:  # type: 
     from daedalus.config import RuntimeConfig
     from daedalus.extensions.api import resolve_model_patch
 
+    from daedalus.config import ModelPresetConfig
+
     config = RuntimeConfig()
     config.providers["vllm"].base_url = "http://x/v1"
-    config.providers["vllm"].default_model = "Qwen3.6"
+    config.presets["vllm.Qwen3.6"] = ModelPresetConfig(provider="vllm", model="Qwen3.6")
     path = tmp_path / "c.toml"
     config.save(path)
     loaded = RuntimeConfig.load(path)
     assert loaded.model.preset == "deepseek.deepseek-v4-flash"
-    assert loaded.presets["vllm.Qwen3.6"].provider == "vllm"
+    assert loaded.presets["vllm.Qwen3.6"].provider == "vllm" and loaded.presets["vllm.Qwen3.6"].thinking is True
     raw = loaded.model_dump(mode="json")
-    resolve_model_patch(raw, {"preset": "vllm.Qwen3.6"})
-    assert (raw["model"]["provider"], raw["model"]["name"], raw["model"]["preset"]) == ("vllm", "Qwen3.6", "vllm.Qwen3.6")
-    resolve_model_patch(raw, {"name": "other"})
-    assert raw["model"]["preset"] == ""
+    resolve_model_patch(raw, {"preset": "vllm.Qwen3.6", "chain": ["vllm.Qwen3.6", "deepseek.deepseek-v4-flash"]})
+    assert raw["model"] == {"preset": "vllm.Qwen3.6", "chain": ["deepseek.deepseek-v4-flash"]}

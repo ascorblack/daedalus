@@ -40,7 +40,7 @@ def _provider(body: str, status: int = 200, sink: RecordingSink | None = None) -
         captured["json"] = json.loads(request.content)
         return httpx.Response(status, text=body, headers={"content-type": "text/event-stream"})
 
-    endpoint = ProviderEndpoint(id="deepseek", kind="deepseek", base_url="https://x.test", api_key="k", supports_thinking=True)
+    endpoint = ProviderEndpoint(id="deepseek", kind="deepseek", base_url="https://x.test", api_key="k")
     provider = OpenAICompatibleProvider(endpoint, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), usage_sink=sink)
     provider.captured = captured  # type: ignore[attr-defined]
     return provider
@@ -254,18 +254,22 @@ async def test_core_tier2_compaction_runs_through_the_provider() -> None:
     assert history[-1].content_blocks[0].content.startswith("file line")  # type: ignore[union-attr]
 
 
-def test_session_provider_override_puts_that_client_first() -> None:
-    from daedalus.config import RuntimeConfig, Settings
+def test_preset_rungs_put_the_chosen_model_first_then_the_chain() -> None:
+    from daedalus.config import ModelPresetConfig, RuntimeConfig, Settings
     from daedalus.providers.registry import ProviderRegistry
 
     settings = Settings(deepseek_api_key="a", openrouter_api_key="b", vllm_base_url="http://vllm.test/v1")
     config = RuntimeConfig()
-    config.providers["vllm"].default_model = "Qwen3.6"
+    config.presets["vllm.Qwen3.6"] = ModelPresetConfig(provider="vllm", model="Qwen3.6", images=True)
     registry = ProviderRegistry(settings, config)
-    rungs = registry.rungs_for_session(config, "vllm", None)
+    rungs = registry.rungs_for(config, "vllm.Qwen3.6")
     assert rungs[0][0].endpoint.id == "vllm" and rungs[0][1] == "Qwen3.6"
-    assert [p.endpoint.id for p, _ in rungs[1:]] == ["deepseek", "openrouter"]
-    assert registry.rungs_for_session(config, "nope")[0][0].endpoint.id == "deepseek"
+    assert [(p.endpoint.id, m) for p, m in rungs[1:]] == [("openrouter", "deepseek/deepseek-v4-flash"), ("deepseek", "deepseek-v4-flash")]
+    assert registry.rungs_for(config, "nope")[0][0].endpoint.id == "deepseek"  # unknown preset -> default
+    assert registry.rungs_for_pair(config, "vllm", "other")[0][1] == "other"
+    # image capability is a property of the preset, read through the adapter
+    assert rungs[0][0].accepts_images("Qwen3.6") is False  # no image loader wired in this registry
+
 
 
 async def test_core_tier2_keeps_operator_turns_verbatim() -> None:

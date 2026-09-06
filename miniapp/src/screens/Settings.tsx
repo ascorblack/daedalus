@@ -31,28 +31,75 @@ function RulesEditor({ rules, fallback, onSave }: { rules: string; fallback: str
 
 type Patch = (id: string, patch: Record<string, unknown>) => Promise<Settings | undefined>;
 
-function PresetRow({ id, p, isDefault, providers, onDefault, onPatch, onDelete, onLookup }: {
+/** "⟳ /models" button with a floating list over the card instead of inflating it. */
+function ModelsMenu({ load, current, onPick }: { load: () => Promise<string[] | null>; current: string; onPick: (m: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [models, setModels] = useState<string[] | null>(null);
+  const [filter, setFilter] = useState("");
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest?.(".models-menu-wrap")) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  async function toggle() {
+    if (open) return setOpen(false);
+    setOpen(true);
+    setBusy(true);
+    setModels(await load());
+    setBusy(false);
+  }
+  const shown = (models ?? []).filter((m) => m.toLowerCase().includes(filter.toLowerCase()));
+  return (
+    <span className="models-menu-wrap">
+      <button className="btn small" onClick={toggle} disabled={busy}>
+        {busy ? "…" : "⟳ /models"}
+      </button>
+      {open && (
+        <div className="models-menu">
+          <input className="field" autoFocus placeholder="filter" value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <div className="models-menu-list">
+            {busy && <div className="sub" style={{ padding: 8 }}>loading…</div>}
+            {!busy && models === null && <div className="sub" style={{ padding: 8 }}>could not reach the endpoint</div>}
+            {!busy && models !== null && shown.length === 0 && <div className="sub" style={{ padding: 8 }}>no models</div>}
+            {shown.map((m) => (
+              <button key={m} className={`models-menu-item ${m === current ? "on" : ""}`} onClick={() => (setOpen(false), onPick(m))}>
+                {m}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function PresetRow({ id, p, isDefault, inChain, providers, onDefault, onChain, onPatch, onDelete, onLookup }: {
   id: string;
   p: Preset;
   isDefault: boolean;
+  inChain: boolean;
   providers: string[];
   onDefault: () => void;
+  onChain: () => void;
   onPatch: (patch: Partial<Preset>) => void;
   onDelete: () => void;
   onLookup: (provider: string) => Promise<string[] | null>;
 }) {
   const [label, setLabel] = useState(p.label);
   const [model, setModel] = useState(p.model);
-  const [models, setModels] = useState<string[] | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [more, setMore] = useState(false);
   useEffect(() => setLabel(p.label), [p.label]);
   useEffect(() => setModel(p.model), [p.model]);
   return (
     <div className={`preset ${isDefault ? "default" : ""}`}>
       <div className="row" style={{ gap: 8 }}>
-        <button className={`radio ${isDefault ? "on" : ""}`} onClick={onDefault} aria-label="make default" title="global default for new sessions" />
+        <button className={`radio ${isDefault ? "on" : ""}`} onClick={onDefault} aria-label="make default" title="default for new sessions" />
         <input className="field" style={{ flex: 1 }} value={label} placeholder={`${p.provider}/${p.model}`} onChange={(e) => setLabel(e.target.value)} onBlur={() => label.trim() !== p.label && onPatch({ label: label.trim() })} />
-        <span className="sub" style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{id}</span>
+        <button className="btn small" onClick={() => setMore((m) => !m)} title="settings of this model">{more ? "less" : "more"}</button>
         <DeleteButton label="✕" onDelete={onDelete} />
       </div>
       <div className="row" style={{ gap: 8, marginTop: 6 }}>
@@ -63,18 +110,21 @@ function PresetRow({ id, p, isDefault, providers, onDefault, onPatch, onDelete, 
           {!providers.includes(p.provider) && <option>{p.provider}</option>}
         </select>
         <input className="field" style={{ flex: 1 }} value={model} placeholder="model id" onChange={(e) => setModel(e.target.value)} onBlur={() => model.trim() && model.trim() !== p.model && onPatch({ model: model.trim() })} />
-        <button className="btn small" disabled={busy} onClick={async () => { setBusy(true); setModels(await onLookup(p.provider)); setBusy(false); }}>
-          {busy ? "…" : "⟳ /models"}
-        </button>
+        <ModelsMenu load={() => onLookup(p.provider)} current={p.model} onPick={(m) => onPatch({ model: m })} />
       </div>
-      {models && (
-        <div className="btnrow" style={{ marginTop: 6 }}>
-          {models.length === 0 && <span className="sub">the server lists no models</span>}
-          {models.map((m) => (
-            <button key={m} className={`btn small ${m === p.model ? "primary" : ""}`} onClick={() => (setModels(null), onPatch({ model: m }))}>
-              {m}
-            </button>
-          ))}
+      <div className="btnrow" style={{ marginTop: 6 }}>
+        <button className={`btn small ${p.thinking ? "primary" : ""}`} onClick={() => onPatch({ thinking: !p.thinking })}>thinking {p.thinking ? "on" : "off"}</button>
+        {["low", "medium", "high"].map((e) => (
+          <button key={e} className={`btn small ${p.reasoning_effort === e ? "primary" : ""}`} disabled={!p.thinking} onClick={() => onPatch({ reasoning_effort: e })}>{e}</button>
+        ))}
+        <button className={`btn small ${p.images ? "primary" : ""}`} onClick={() => onPatch({ images: !p.images })}>images {p.images ? "on" : "off"}</button>
+        {!isDefault && <button className={`btn small ${inChain ? "primary" : ""}`} onClick={onChain} title="use as a fallback when the default fails">{inChain ? "fallback ✓" : "fallback"}</button>}
+        <span className="sub" style={{ marginLeft: "auto", fontFamily: "var(--mono)", fontSize: 11 }}>{id}</span>
+      </div>
+      {more && (
+        <div className="grid2">
+          <NumField label="Context window (tokens)" value={p.context_window} min={8000} step={1000} onSave={(v) => onPatch({ context_window: v })} hint="history kept before compaction" />
+          <NumField label="Max output per reply" value={p.max_output_tokens} min={1024} step={1000} onSave={(v) => onPatch({ max_output_tokens: v })} hint="max_tokens, thinking included" />
         </div>
       )}
     </div>
@@ -86,7 +136,6 @@ function AddPresetRow({ providers, onAdd, toast }: { providers: string[]; onAdd:
   const [provider, setProvider] = useState(providers[0] ?? "");
   const [model, setModel] = useState("");
   const [label, setLabel] = useState("");
-  const [models, setModels] = useState<string[] | null>(null);
   useEffect(() => { if (!providers.includes(provider)) setProvider(providers[0] ?? ""); }, [providers, provider]);
   if (!open)
     return (
@@ -94,12 +143,12 @@ function AddPresetRow({ providers, onAdd, toast }: { providers: string[]; onAdd:
         ＋ add model
       </button>
     );
-  async function lookup() {
+  async function lookup(): Promise<string[] | null> {
     try {
-      const r = await api.post<{ models: string[] }>("/api/providers/lookup-models", { provider });
-      setModels(r.models);
+      return (await api.post<{ models: string[] }>("/api/providers/lookup-models", { provider })).models;
     } catch (e) {
       toast((e as Error).message);
+      return null;
     }
   }
   function add() {
@@ -108,8 +157,8 @@ function AddPresetRow({ providers, onAdd, toast }: { providers: string[]; onAdd:
       return;
     }
     const id = `${provider}.${model.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "")}`;
-    onAdd(id, { provider, model: model.trim(), label: label.trim() });
-    setOpen(false); setModel(""); setLabel(""); setModels(null);
+    onAdd(id, { provider, model: model.trim(), label: label.trim(), thinking: true, reasoning_effort: "medium", images: false, context_window: 128000, max_output_tokens: 32000 });
+    setOpen(false); setModel(""); setLabel("");
   }
   return (
     <div style={{ marginTop: 10 }}>
@@ -120,15 +169,8 @@ function AddPresetRow({ providers, onAdd, toast }: { providers: string[]; onAdd:
           ))}
         </select>
         <input className="field" style={{ flex: 1 }} value={model} placeholder="model id" onChange={(e) => setModel(e.target.value)} />
-        <button className="btn small" onClick={lookup}>⟳ /models</button>
+        <ModelsMenu load={lookup} current={model} onPick={setModel} />
       </div>
-      {models && (
-        <div className="btnrow" style={{ marginTop: 6 }}>
-          {models.map((m) => (
-            <button key={m} className={`btn small ${m === model ? "primary" : ""}`} onClick={() => setModel(m)}>{m}</button>
-          ))}
-        </div>
-      )}
       <div className="row" style={{ gap: 8, marginTop: 6 }}>
         <input className="field" style={{ flex: 1 }} value={label} placeholder="label (optional), e.g. Qwen fast" onChange={(e) => setLabel(e.target.value)} />
         <button className="btn small primary" onClick={add}>add</button>
@@ -137,7 +179,6 @@ function AddPresetRow({ providers, onAdd, toast }: { providers: string[]; onAdd:
     </div>
   );
 }
-type Lookup = (baseUrl: string, apiKey: string) => Promise<{ base_url: string; models: string[] } | null>;
 
 function DeleteButton({ label, onDelete }: { label: string; onDelete: () => void }) {
   const [confirming, setConfirming] = useState(false);
@@ -157,55 +198,18 @@ function DeleteButton({ label, onDelete }: { label: string; onDelete: () => void
   );
 }
 
-function ProviderBlock({
-  id,
-  p,
-  kinds,
-  available,
-  onPatch,
-  onLookup,
-  onActivate,
-  onRemove,
-}: {
+function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
   id: string;
   p: ProviderConf;
   kinds: string[];
   available: boolean;
   onPatch: Patch;
-  onLookup: Lookup;
-  onActivate: (id: string, model: string) => void;
   onRemove: (id: string) => void;
 }) {
   const [baseUrl, setBaseUrl] = useState(p.base_url);
-  const [model, setModel] = useState(p.default_model);
   const [keyDraft, setKeyDraft] = useState("");
-  const [models, setModels] = useState<string[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   useEffect(() => setBaseUrl(p.base_url), [p.base_url]);
-  useEffect(() => setModel(p.default_model), [p.default_model]);
   useEffect(() => setKeyDraft(""), [p.api_key_set]);
-  useEffect(() => {
-    setModels(null);
-    setError("");
-  }, [p.base_url]);
-
-  async function fetchModels() {
-    const base = baseUrl.trim();
-    if (!base) {
-      setError("enter base_url first");
-      return;
-    }
-    setBusy(true);
-    setError("");
-    setModels(null);
-    const res = await onLookup(base, keyDraft);
-    setBusy(false);
-    if (!res) return;
-    if (res.base_url !== p.base_url) await onPatch(id, { base_url: res.base_url });
-    setModels(res.models);
-  }
-
   return (
     <div style={{ borderTop: "1px solid var(--line, #333)", paddingTop: 8, marginTop: 8 }}>
       <div className="row" style={{ cursor: "default" }}>
@@ -215,6 +219,7 @@ function ProviderBlock({
             <option key={k}>{k}</option>
           ))}
         </select>
+        <span className="sub">{available ? "ready" : "needs URL/key"}</span>
         <DeleteButton label="delete" onDelete={() => onRemove(id)} />
       </div>
       <div className="grid2">
@@ -253,42 +258,6 @@ function ProviderBlock({
             )}
           </div>
         </div>
-      </div>
-      <div className="row" style={{ padding: 0 }}>
-        <input
-          className="field"
-          value={model}
-          placeholder="model id, e.g. Qwen3.6"
-          onChange={(e) => setModel(e.target.value)}
-          onBlur={() => model.trim() !== p.default_model && model.trim() && onPatch(id, { default_model: model.trim() })}
-        />
-        <button className="btn small" disabled={busy} onClick={() => void fetchModels()}>
-          {busy ? "…" : "⟳ from /models"}
-        </button>
-      </div>
-      {error && <div className="sub" style={{ color: "var(--bad)" }}>{error}</div>}
-      {models && (
-        <div className="sub" style={{ marginTop: 6 }}>
-          Models on this endpoint — pick one as its fallback model (the chain uses it), or add it as a model above:
-          <div className="btnrow">
-            {models.map((m) => (
-              <button key={m} className="btn small" onClick={() => (setModels(null), onPatch(id, { default_model: m }))}>
-                {m}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-      <div className="btnrow" style={{ marginTop: 6 }}>
-        <button className={`btn small ${p.supports_thinking ? "primary" : ""}`} onClick={() => onPatch(id, { supports_thinking: !p.supports_thinking })}>
-          thinking {p.supports_thinking ? "on" : "off"}
-        </button>
-        <button className={`btn small ${p.supports_images ? "primary" : ""}`} onClick={() => onPatch(id, { supports_images: !p.supports_images })}>
-          images {p.supports_images ? "on" : "off"}
-        </button>
-        <span className="sub" style={{ marginLeft: "auto" }}>
-          {available ? "available" : "not configured yet"}
-        </span>
       </div>
     </div>
   );
@@ -371,36 +340,25 @@ function TextField({ label, value, placeholder, onSave, hint }: { label: string;
   );
 }
 
-function ToolsTab({ s, save, providerIds, lookup }: { s: Settings; save: (patch: any) => Promise<void>; providerIds: string[]; lookup: (provider: string) => Promise<string[] | null> }) {
-  const [models, setModels] = useState<string[] | null>(null);
+function ToolsTab({ s, save }: { s: Settings; save: (patch: any) => Promise<void> }) {
   const web = s.tools.web;
   return (
     <>
       <div className="card">
         <div className="section-title" style={{ marginTop: 0 }}>ImageView</div>
-        <div className="sub">The agent's eyes: a separate image-capable model answers questions about pictures so the main context never carries pixels.</div>
+        <div className="sub">The agent's eyes: a separate image-capable model answers questions about pictures so the main context never carries pixels. Pick any model marked “images on” in General → Models.</div>
         <div className="grid2">
           <div>
-            <label className="field">Client</label>
-            <select className="field" value={s.vision.provider} onChange={(e) => save({ vision: { provider: e.target.value } })}>
-              {providerIds.map((p) => <option key={p}>{p}</option>)}
-              {!providerIds.includes(s.vision.provider) && <option>{s.vision.provider}</option>}
+            <label className="field">Model</label>
+            <select className="field" value={s.vision.preset} onChange={(e) => save({ vision: { preset: e.target.value } })}>
+              {Object.entries(s.presets ?? {}).filter(([, p]) => p.images).map(([id, p]) => (
+                <option key={id} value={id}>{p.label || `${p.provider}/${p.model}`}</option>
+              ))}
+              {!(s.presets ?? {})[s.vision.preset]?.images && <option value={s.vision.preset}>{s.vision.preset || "(none image-capable)"}</option>}
             </select>
           </div>
           <NumField label="Max output tokens" value={s.vision.max_output_tokens} min={100} step={100} onSave={(v) => save({ vision: { max_output_tokens: v } })} />
         </div>
-        <label className="field">Model id</label>
-        <div className="row" style={{ gap: 8 }}>
-          <input className="field" style={{ flex: 1 }} defaultValue={s.vision.model} onBlur={(e) => e.target.value.trim() !== s.vision.model && save({ vision: { model: e.target.value.trim() } })} />
-          <button className="btn small" onClick={async () => setModels(await lookup(s.vision.provider))}>⟳ /models</button>
-        </div>
-        {models && (
-          <div className="btnrow">
-            {models.length === 0 && <span className="sub">no models listed</span>}
-            {models.map((m) => <button key={m} className={`btn small ${m === s.vision.model ? "primary" : ""}`} onClick={() => (setModels(null), save({ vision: { model: m } }))}>{m}</button>)}
-          </div>
-        )}
-        <div className="sub" style={{ marginTop: 6 }}>The client must accept images (toggle “images” on it in General → Providers); a vLLM serving a vision model works too.</div>
       </div>
 
       <div className="card">
@@ -470,27 +428,6 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
     }
   }
 
-  async function lookupModels(baseUrl: string, apiKey: string) {
-    try {
-      return await api.post<{ base_url: string; models: string[] }>("/api/providers/lookup-models", { base_url: baseUrl, api_key: apiKey || undefined });
-    } catch (e) {
-      toast((e as Error).message);
-      return null;
-    }
-  }
-
-  async function activateModel(id: string, model: string) {
-    const next = await patchProvider(id, { default_model: model });
-    if (!next) return;
-    try {
-      const updated = await api.put<Settings>("/api/settings", { model: { ...next.model, provider: id, name: model } });
-      setS({ ...updated, providers_available: updated.providers_available ?? next.providers_available ?? [] });
-      toast(`${id}/${model} is now the default model`);
-    } catch (e) {
-      toast((e as Error).message);
-    }
-  }
-
   async function patchPreset(id: string, patch: Partial<Preset>) {
     try {
       const next = await api.put<Settings>(`/api/presets/${encodeURIComponent(id)}`, patch);
@@ -536,7 +473,7 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <button className={tab === "general" ? "on" : ""} onClick={() => setTab("general")}>General</button>
         <button className={tab === "tools" ? "on" : ""} onClick={() => setTab("tools")}>Tools</button>
       </div>
-      {tab === "tools" && <ToolsTab s={s} save={save} providerIds={providerIds} lookup={lookupProviderModels} />}
+      {tab === "tools" && <ToolsTab s={s} save={save} />}
       {tab === "general" && (
       <>
       <div className="card">
@@ -549,9 +486,11 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
             key={id}
             id={id}
             p={p}
-            isDefault={s.model.preset === id || (!s.model.preset && s.model.provider === p.provider && s.model.name === p.model)}
+            isDefault={s.model.preset === id}
+            inChain={(s.model.chain ?? []).includes(id)}
             providers={providerIds}
             onDefault={() => save({ model: { preset: id } as any })}
+            onChain={() => save({ model: { chain: (s.model.chain ?? []).includes(id) ? s.model.chain.filter((c) => c !== id) : [...(s.model.chain ?? []), id] } as any })}
             onPatch={(patch) => void patchPreset(id, patch)}
             onDelete={() => void removePreset(id)}
             onLookup={lookupProviderModels}
@@ -559,30 +498,7 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         ))}
         {Object.keys(s.presets ?? {}).length === 0 && <div className="sub" style={{ marginTop: 6 }}>No models yet: add one below.</div>}
         <AddPresetRow providers={providerIds} toast={toast} onAdd={(id, p) => void patchPreset(id, p)} />
-        <label className="field">Thinking</label>
-        <div className="btnrow" style={{ marginTop: 0 }}>
-          <button className={`btn small ${s.model.thinking ? "primary" : ""}`} onClick={() => save({ model: { ...s.model, thinking: !s.model.thinking } })}>
-            {s.model.thinking ? "on" : "off"}
-          </button>
-          {["low", "medium", "high"].map((e) => (
-            <button key={e} className={`btn small ${s.model.reasoning_effort === e ? "primary" : ""}`} onClick={() => save({ model: { ...s.model, reasoning_effort: e } })}>
-              {e}
-            </button>
-          ))}
-        </div>
-        <label className="field">Fallback chain (comma-separated provider ids)</label>
-        <input className="field" defaultValue={s.model.chain.join(", ")} onBlur={(e) => save({ model: { ...s.model, chain: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) } })} />
-        <div className="grid2">
-          <div>
-            <label className="field">Context window (tokens)</label>
-            <input className="field" type="number" step={1000} min={8000} defaultValue={s.model.context_window} onBlur={(e) => Number(e.target.value) >= 8000 && Number(e.target.value) !== s.model.context_window && save({ model: { ...s.model, context_window: Number(e.target.value) } })} />
-          </div>
-          <div>
-            <label className="field">Max output per reply</label>
-            <input className="field" type="number" step={1000} min={1024} defaultValue={s.model.max_output_tokens} onBlur={(e) => Number(e.target.value) >= 1024 && Number(e.target.value) !== s.model.max_output_tokens && save({ model: { ...s.model, max_output_tokens: Number(e.target.value) } })} />
-          </div>
-        </div>
-        <div className="sub" style={{ marginTop: 6 }}>The window bounds how much history a run keeps before compaction (the model itself may allow more); the output cap is the max_tokens of one reply, thinking included.</div>
+        <div className="sub" style={{ marginTop: 10 }}>Fallback order: {(s.model.chain ?? []).length ? s.model.chain.join(" → ") : "none"} (tried after the default when it fails).</div>
       </div>
 
       <div className="card">
@@ -598,8 +514,6 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
             kinds={kinds}
             available={(s.providers_available ?? []).includes(id)}
             onPatch={patchProvider}
-            onLookup={lookupModels}
-            onActivate={(pid, m) => void activateModel(pid, m)}
             onRemove={(pid) => void removeProvider(pid)}
           />
         ))}
