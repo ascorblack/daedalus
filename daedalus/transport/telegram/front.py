@@ -115,7 +115,9 @@ FREE_REACTIONS = frozenset(
 """The emoji a bot may react with (Telegram rejects anything else)."""
 
 RUN_REACTIONS = {"received": "👀", "steered": "✍", "completed": "🔥", "failed": "💔", "cancelled": "🫡", "awaiting": "🤔", "interrupted": "😴", "busy": "🤝"}
-TOPIC_STATUS_PREFIX = {"running": "🟢", "awaiting": "❓", "completed": "✅", "failed": "💥", "cancelled": "⏹", "interrupted": "⏸", "compacting": "🗜"}
+TOPIC_STATUS_PREFIX = {"running": "🟢", "awaiting": "🔴", "completed": "🏁", "failed": "💥", "cancelled": "⏹", "interrupted": "⏸", "compacting": "🗜"}
+"""Telegram silently drops some emoji from the start of a topic name (✅ ❓ ✔️ ☑️ were measured to
+vanish, and a repeat rename then fails with TOPIC_NOT_MODIFIED); every prefix here was verified to survive."""
 TOPIC_RENAME_DEBOUNCE_SECONDS = 2.0
 
 
@@ -527,17 +529,29 @@ class TelegramFront:
             self._topic_status_tasks[session_id] = asyncio.create_task(self._apply_topic_status(session_id))
 
     async def _apply_topic_status(self, session_id: str) -> None:
+        """Rename after a short debounce; a flood pause defers the rename rather than dropping it.
+
+        The end of a run is exactly when the chat is busiest (final status edit, the answer,
+        the reaction), so the completion rename is the one most likely to hit flood control.
+        """
         await asyncio.sleep(TOPIC_RENAME_DEBOUNCE_SECONDS)
         binding = await self.binding_for_session(session_id)
-        if binding is None or not binding.thread_id or flooded(binding.chat_id):
+        if binding is None or not binding.thread_id:
             return
-        try:
-            await tg_call(self.bot.edit_forum_topic, binding.chat_id, binding.thread_id, name=self._topic_name(session_id, binding.title), attempts=1, flood_chat=binding.chat_id)
-        except TelegramBadRequest as exc:
-            if "not modified" not in str(exc).lower():
-                logger.warning("could not mark topic status: %s", exc)
-        except TelegramRetryAfter:
-            pass  # the pause is recorded; the next change renames
+        for _ in range(3):
+            while flooded(binding.chat_id):
+                await asyncio.sleep(1.0)
+            name = self._topic_name(session_id, binding.title)
+            try:
+                await tg_call(self.bot.edit_forum_topic, binding.chat_id, binding.thread_id, name=name, attempts=1, flood_chat=binding.chat_id)
+                logger.debug("topic %s renamed to %r", binding.thread_id, name)
+                return
+            except TelegramBadRequest as exc:
+                if "not modified" not in str(exc).lower():
+                    logger.warning("could not mark topic status: %s", exc)
+                return
+            except TelegramRetryAfter as exc:
+                await asyncio.sleep(float(exc.retry_after) + 0.5)
 
     async def react_to_last(self, session_id: str, kind: str) -> None:
         """Put the run's outcome on the operator's message that started it."""

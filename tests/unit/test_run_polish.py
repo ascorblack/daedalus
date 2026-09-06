@@ -180,6 +180,6 @@ async def test_reactions_and_topic_status_follow_the_run(front: TelegramFront) -
     assert front._topic_name(binding.session_id, "job") == "🟢 job"
     await front._on_finished(binding.session_id, "nope", "completed")
     assert reactions[-1][2][0].emoji == RUN_REACTIONS["completed"]
-    assert front._topic_name(binding.session_id, "job") == "✅ job"
+    assert front._topic_name(binding.session_id, "job") == "🏁 job"
     await asyncio.sleep(2.2)
-    assert renames[-1] == (-100, 10, "✅ job")
+    assert renames[-1] == (-100, 10, "🏁 job")

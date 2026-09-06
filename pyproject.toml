@@ -54,6 +54,9 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["B008", "E501"]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/unit/test_run_polish.py" = ["F811"]  # pytest fixtures imported from a sibling test module
+
 [tool.mypy]
 python_version = "3.12"
 strict = false
