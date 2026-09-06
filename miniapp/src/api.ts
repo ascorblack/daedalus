@@ -58,6 +58,7 @@ export const api = {
   get: <T>(path: string) => call<T>("GET", path),
   post: <T>(path: string, body?: unknown) => call<T>("POST", path, body),
   put: <T>(path: string, body?: unknown) => call<T>("PUT", path, body),
+  patch: <T>(path: string, body?: unknown) => call<T>("PATCH", path, body),
   delete: <T>(path: string) => call<T>("DELETE", path),
   streamUrl: (sessionId: string) => {
     const token = sessionStorage.getItem("daedalus_token");
@@ -77,6 +78,8 @@ export type SessionSummary = {
 
 export type MessageView = {
   role: "system" | "user" | "assistant" | "tool";
+  summary?: boolean;
+  compaction?: { reason: string; messages: number; at: string } | null;
   text: string;
   thinking: string;
   tool_calls: { id: string; name: string; arguments: Record<string, unknown> }[];
@@ -130,7 +133,8 @@ export type Schedule = {
 };
 
 export type Settings = {
-  model: { provider: string; name: string; thinking: boolean; reasoning_effort: string; chain: string[] };
+  model: { provider: string; name: string; thinking: boolean; reasoning_effort: string; chain: string[]; context_window: number; max_output_tokens: number };
+  prompt: { rules: string; default_rules?: string };
   self_change: { approval: string; auto_rebuild: boolean };
   limits: { max_iterations: number; tool_timeout_seconds: number };
   usd_per_day?: number;

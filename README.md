@@ -14,9 +14,10 @@ core; the copy it runs on is [protocore-exp](https://github.com/ascorblack/proto
   parallel; `/new <title>` opens another.
 - **Follow-ups at any time.** Messages sent while the agent works are queued into the run.
   Questions from the agent arrive as inline buttons.
-- **Streaming replies.** In the private chat the answer streams as a live draft
-  (`sendMessageDraft`, with a Stop button) while it is generated; in forum topics, where
-  Telegram does not offer drafts, a status message shows tools and tokens instead.
+- **Rich replies.** Answers go out as Telegram rich messages: Markdown with headings,
+  tables, code blocks, quotes and collapsible blocks renders natively. In the private chat
+  the answer also streams as a live draft (with a Stop button); everywhere a status message
+  shows the run's vitals with the tool log folded into a collapsible block.
 - **Mini App.** A Telegram Mini App (and plain browser page) with the roster of sessions,
   live transcripts, change proposals with diffs, scheduled tasks, usage and settings.
 - **Self-development.** The agent edits its host code or its core in a git worktree, opens a
@@ -74,6 +75,9 @@ uv run pytest -q                                 # tests
 |---|---|
 | `/new <title>` | new session (a new topic when a group is bound) |
 | `/stop`, `/close` | stop the current run; close this session's topic |
+| `/rename <title>` | rename the session and its topic (also from the Mini App header) |
+| `/compact [focus]` | replace the session history with a model-written summary (shown collapsed in the Mini App) |
+| `/prompt` | show the working rules of the system prompt (edit them in the Mini App → Settings) |
 | `/sessions`, `/status` | list sessions; what is running |
 | `/model [provider/]name`, `/thinking on\|off\|low\|medium\|high` | model settings (default in General, per session in a topic) |
 | `/usage`, `/balance` | spend today and per session; provider balances |
@@ -106,9 +110,11 @@ The agent's changes land through pull requests in this repository and in `protoc
 
 Secrets and machine facts live in `.env` (see `deploy/env.example`). Everything the operator
 may change at runtime lives in `config.toml` on the state volume and is edited through the bot
-commands and the Mini App: model and thinking, fallback chain, approval mode, spend limits,
-balance thresholds, scheduler behaviour, per-model pricing for cost estimates, the vision model,
-and MCP servers:
+commands and the Mini App: model and thinking, context window and output cap
+(`[model] context_window`, `max_output_tokens`), the working rules of the system prompt
+(`[prompt] rules`, empty = built-in default), fallback chain, approval mode, spend limits,
+balance thresholds, scheduler behaviour, per-model pricing overrides (DeepSeek list prices with
+their peak/off-peak schedule are built in), the vision model, and MCP servers:
 
 ```toml
 [mcp.servers.filesystem]

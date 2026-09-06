@@ -36,8 +36,10 @@ class EngineDeps:
 
 
 def runtime_constants(config: RuntimeConfig, *, context_window: int) -> Any:
+    output_cap = max(1024, min(config.model.max_output_tokens, context_window))
     return default_runtime_constants(
         model_context_window=context_window,
+        llm_output_max_tokens_ratio=output_cap / context_window,
         max_iterations=config.limits.max_iterations,
         tool_timeout_seconds=int(config.limits.tool_timeout_seconds),
         steer_follow_up_enabled=True,
@@ -73,6 +75,7 @@ def build_engine(
     all_tools = {t.name for t in deps.tool_registry.list_all()}
     sections = (
         prompts.PERSONA,
+        prompts.rules_section(config.prompt.rules),
         prompts.language_section(config.answer_language),
         prompts.governance_section(deps.governance_path),
         prompts.SELF_DEVELOPMENT,

@@ -89,6 +89,9 @@ class ModelConfig(BaseModel):
     chain: list[str] = Field(default_factory=lambda: ["deepseek", "openrouter"])
     """Fallback order of provider ids; the first entry is the primary."""
     context_window: int = 128_000
+    """Tokens of history the run may hold before compaction; set below the model's real window to keep runs cheap."""
+    max_output_tokens: int = 32_000
+    """Cap on one model reply (``max_tokens``); thinking tokens count against it."""
 
 
 class ProviderConfig(BaseModel):
@@ -101,8 +104,16 @@ class ProviderConfig(BaseModel):
     supports_thinking: bool = False
     timeout_seconds: float = 600.0
     pricing: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    """Per-model USD per 1M tokens: ``{"model": {"input", "output", "cache_hit"[, "*_off_peak", "off_peak_utc"]}}``.
-    Empty means the cost is reported as unknown; the usage itself is always recorded."""
+    """Per-model USD per 1M tokens overriding the built-in table (``daedalus.providers.pricing``):
+    ``{"model": {"input", "output", "cache_hit"[, "*_off_peak", "peak_utc", "peak_weekdays_only"]}}``.
+    A model with no price anywhere is recorded with an unknown cost."""
+
+
+class PromptConfig(BaseModel):
+    """Operator-editable part of the system prompt."""
+
+    rules: str = ""
+    """Working rules appended after the persona; empty means the built-in default text."""
 
 
 class VisionConfig(BaseModel):
@@ -172,12 +183,6 @@ class RuntimeConfig(BaseModel):
                 base_url="https://api.deepseek.com",
                 default_model="deepseek-v4-flash",
                 supports_thinking=True,
-                pricing={
-                    # Published list prices (USD per 1M tokens); off-peak window is 16:30-00:30 UTC.
-                    "deepseek-v4-flash": {"input": 0.44, "cache_hit": 0.014, "output": 1.32, "input_off_peak": 0.22, "cache_hit_off_peak": 0.007, "output_off_peak": 0.66, "off_peak_utc": "16:30-00:30"},
-                    "deepseek-v4-flash-vision-exp": {"input": 0.44, "cache_hit": 0.014, "output": 1.32, "input_off_peak": 0.22, "cache_hit_off_peak": 0.007, "output_off_peak": 0.66, "off_peak_utc": "16:30-00:30"},
-                    "deepseek-v4-pro": {"input": 1.32, "cache_hit": 0.044, "output": 3.96, "input_off_peak": 0.66, "cache_hit_off_peak": 0.022, "output_off_peak": 1.98, "off_peak_utc": "16:30-00:30"},
-                },
             ),
             "openrouter": ProviderConfig(
                 kind="openrouter",
@@ -189,6 +194,7 @@ class RuntimeConfig(BaseModel):
             "vllm": ProviderConfig(kind="vllm", base_url="", default_model=""),
         }
     )
+    prompt: PromptConfig = Field(default_factory=PromptConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
     self_change: SelfChangeConfig = Field(default_factory=SelfChangeConfig)
@@ -223,6 +229,7 @@ __all__ = [
     "McpConfig",
     "McpServerConfig",
     "ModelConfig",
+    "PromptConfig",
     "ProviderConfig",
     "ReasoningEffort",
     "RuntimeConfig",

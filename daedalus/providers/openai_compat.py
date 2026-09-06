@@ -30,6 +30,8 @@ from protocore.contracts.llm import (
 )
 from protocore.contracts.types import Message, MessageRole, StopReason, TextBlock
 
+from daedalus.providers.dsml import DsmlGuard
+from daedalus.providers.pricing import ModelPricing
 from daedalus.providers.wire import messages_to_wire, parse_json_arguments, tools_to_wire
 
 ImageLoader = Callable[[str], Awaitable[tuple[bytes, str]]]
@@ -43,42 +45,6 @@ _CONTEXT_ERROR_MARKERS = (
     "prompt is too long",
     "exceeds the model",
 )
-
-
-@dataclass(slots=True)
-class ModelPricing:
-    """USD per one million tokens; optional off-peak rates apply inside ``off_peak_utc`` (HH:MM-HH:MM)."""
-
-    input: float = 0.0
-    output: float = 0.0
-    cache_hit: float = 0.0
-    input_off_peak: float | None = None
-    output_off_peak: float | None = None
-    cache_hit_off_peak: float | None = None
-    off_peak_utc: str = ""
-
-    def _off_peak_now(self) -> bool:
-        if not self.off_peak_utc or "-" not in self.off_peak_utc:
-            return False
-        from datetime import UTC, datetime
-
-        start_s, end_s = self.off_peak_utc.split("-", 1)
-        now = datetime.now(UTC)
-        minutes = now.hour * 60 + now.minute
-        start = int(start_s[:2]) * 60 + int(start_s[3:5])
-        end = int(end_s[:2]) * 60 + int(end_s[3:5])
-        return start <= minutes < end if start <= end else minutes >= start or minutes < end
-
-    def cost(self, usage: dict[str, Any]) -> float:
-        cache_hit = int(usage.get("cache_read_tokens") or 0)
-        prompt = int(usage.get("input_tokens") or 0)
-        fresh = max(prompt - cache_hit, 0)
-        output = int(usage.get("output_tokens") or 0)
-        off = self._off_peak_now()
-        p_in = self.input_off_peak if off and self.input_off_peak is not None else self.input
-        p_out = self.output_off_peak if off and self.output_off_peak is not None else self.output
-        p_hit = self.cache_hit_off_peak if off and self.cache_hit_off_peak is not None else self.cache_hit
-        return (fresh * p_in + cache_hit * p_hit + output * p_out) / 1_000_000
 
 
 @dataclass(slots=True)
@@ -151,6 +117,7 @@ class OpenAICompatibleProvider(ILLMProvider):
         usage_raw: dict[str, Any] | None = None
         open_tools: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
+        guard = DsmlGuard()
         try:
             async with self._client.stream(
                 "POST", self._url("/chat/completions"), json=body, headers=self._headers()
@@ -176,7 +143,9 @@ class OpenAICompatibleProvider(ILLMProvider):
                             yield ProviderDelta(kind=ProviderDeltaKind.thinking, content=reasoning)
                         content = delta.get("content")
                         if content:
-                            yield ProviderDelta(kind=ProviderDeltaKind.text, content=content)
+                            shown = guard.feed(content)
+                            if shown:
+                                yield ProviderDelta(kind=ProviderDeltaKind.text, content=shown)
                         for tc in delta.get("tool_calls") or []:
                             for out in self._tool_call_chunk(open_tools, tc, started):
                                 yield out
@@ -186,6 +155,18 @@ class OpenAICompatibleProvider(ILLMProvider):
             raise LLMTimeoutError(f"{self.endpoint.id}: {exc}") from exc
         except httpx.HTTPError as exc:
             raise LLMProviderError(f"{self.endpoint.id}: transport error: {exc}") from exc
+        rest, recovered = guard.finish()
+        if rest:
+            yield ProviderDelta(kind=ProviderDeltaKind.text, content=rest)
+        for call in recovered:
+            # The model wrote its native tool markup as text: surface it as real calls.
+            index = len(open_tools)
+            call_id = f"call_dsml_{index}_{int(started * 1000)}"
+            open_tools[index] = {"id": call_id, "name": call.name, "args": call.arguments_json, "started": True}
+            yield ProviderDelta(kind=ProviderDeltaKind.tool_use_start, tool_call_id=call_id, tool_name=call.name)
+            yield ProviderDelta(kind=ProviderDeltaKind.tool_use_input, tool_call_id=call_id, tool_input_delta=call.arguments_json)
+        if recovered:
+            finish_reason = "tool_calls"
         resolved_finish = finish_reason or ("tool_calls" if open_tools else "stop")
         for delta_out in self._close_tools(open_tools, resolved_finish):
             yield delta_out

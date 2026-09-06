@@ -12,9 +12,11 @@ from daedalus.tools._common import error, ok, services_for
 @tool(
     name="SendFile",
     description=(
-        "Send a file from the workspace (or any path) to the user in the current chat "
-        "topic, with an optional caption. Use it for reports, archives, images and any "
-        "output that is more than a few lines."
+        "Send a file from the workspace (or any path) to the operator in the current chat, "
+        "with an optional caption. Images (png/jpg) render inline; everything else arrives as a "
+        "document. Use it for reports, archives, generated code and any output longer than a "
+        "screen. Chat replies themselves are Markdown and render natively (headings, tables, "
+        "code blocks, quotes, <details> blocks), so short structured answers need no file."
     ),
 )
 async def send_file(context: ToolContext, path: str, caption: str | None = None) -> ToolResult:

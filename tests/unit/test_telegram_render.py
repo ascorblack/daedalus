@@ -19,7 +19,11 @@ class FakeOutbox:
         self.sent.append((text, markdown))
         return len(self.sent)
 
-    async def edit_text(self, message_id: int, text: str) -> None:
+    async def send_html(self, html: str) -> int:
+        self.sent.append((html, False))
+        return len(self.sent)
+
+    async def edit_text(self, message_id: int, text: str, *, html: bool = False) -> None:
         self.edits.append((message_id, text))
 
     async def send_document(self, path: Path, caption: str | None = None) -> int:
@@ -57,8 +61,8 @@ async def test_renderer_sends_final_answer_and_freezes_status(tmp_path: Path) ->
     finals = [t for t, md in outbox.sent if md]
     assert finals == ["All **done**"]
     status_texts = [t for t, md in outbox.sent if not md] + [t for _, t in outbox.edits]
-    assert any("Exec ls" in t for t in status_texts)
-    assert outbox.edits[-1][1].startswith("✅ completed")
+    assert any("Exec ls" in t and "<details" in t for t in status_texts)
+    assert "✅ completed" in outbox.edits[-1][1]
 
 
 async def test_long_answer_becomes_a_document(tmp_path: Path) -> None:

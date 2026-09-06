@@ -3,38 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
-
 import httpx
 
 from daedalus.config import ProviderConfig, RuntimeConfig, Settings
 from daedalus.providers.openai_compat import (
     ImageLoader,
-    ModelPricing,
     OpenAICompatibleProvider,
     ProviderEndpoint,
     UsageSink,
 )
-
-
-def _pricing_table(pc: ProviderConfig) -> dict[str, ModelPricing]:
-    """USD per million tokens, from ``[providers.<id>.pricing.<model>]`` in the config."""
-    table: dict[str, ModelPricing] = {}
-    for model, entry in pc.pricing.items():
-        table[model] = ModelPricing(
-            input=float(entry.get("input", 0.0)),
-            output=float(entry.get("output", 0.0)),
-            cache_hit=float(entry.get("cache_hit", 0.0)),
-            input_off_peak=_opt(entry.get("input_off_peak")),
-            output_off_peak=_opt(entry.get("output_off_peak")),
-            cache_hit_off_peak=_opt(entry.get("cache_hit_off_peak")),
-            off_peak_utc=str(entry.get("off_peak_utc", "") or ""),
-        )
-    return table
-
-
-def _opt(value: Any) -> float | None:
-    return None if value is None else float(value)
+from daedalus.providers.pricing import pricing_table
 
 
 class ProviderRegistry:
@@ -110,7 +88,7 @@ class ProviderRegistry:
             supports_thinking=pc.supports_thinking,
             timeout_seconds=pc.timeout_seconds,
             extra_headers=headers,
-            pricing=_pricing_table(pc),
+            pricing=pricing_table(pc.kind, pc.pricing),
         )
 
     def get(self, provider_id: str) -> OpenAICompatibleProvider:

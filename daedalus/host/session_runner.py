@@ -13,15 +13,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from protocore.contracts.llm import LLMObservabilityContext, LLMRequest
 from protocore.contracts.tool_registry import ToolVisibilityPolicy
 from protocore.contracts.types import (
+    COMPACTION_SUMMARY_METADATA_KEY,
     Message,
     MessageRole,
     Run,
     RunStatus,
     Session,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
+    ToolUseBlock,
 )
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
@@ -83,7 +87,8 @@ class SessionState:
     run_id: str | None = None
     pending: PendingQuestion | None = None
     services: SessionServices | None = None
-    context_window: int = 128_000
+    context_window: int | None = None
+    """Per-session override; ``None`` follows the configured model window."""
     extra_notes: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -328,6 +333,58 @@ class SessionManager:
             shutil.rmtree(state.workspace, ignore_errors=True)
         return True
 
+    async def rename_session(self, session_id: str, title: str) -> SessionState:
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        title = title.strip()[:128]
+        if not title:
+            raise ValueError("empty title")
+        await self.sessions.update_title(session_id, title)
+        await self.db.execute("UPDATE topics SET title = ? WHERE session_id = ?", (title, session_id))
+        state.session = state.session.model_copy(update={"title": title})
+        return state
+
+    async def compact(self, session_id: str, instructions: str = "") -> str:
+        """Replace the whole history with one model-written summary; returns the summary."""
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        if state.running or state.pending is not None:
+            raise RuntimeError("the session is busy; stop the run (or answer the question) first")
+        history = list(state.engine.history) if state.engine is not None else list(
+            await self.sessions.list_messages(session_id, TENANT, limit=10_000)
+        )
+        if not history:
+            raise RuntimeError("nothing to compact")
+        provider, model = self.providers.rungs_for(self.config)[0]
+        prompt = COMPACT_PROMPT + (f"\n\nThe operator asks to focus on: {instructions.strip()}" if instructions.strip() else "")
+        request = LLMRequest(
+            model=model,
+            messages=[Message(role=MessageRole.user, content_blocks=[TextBlock(text=prompt + "\n\n" + transcript_for_summary(history))])],
+            max_tokens=6000,
+            temperature=0.2,
+            extra={"enable_thinking": False},
+            observability=LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, call_purpose="compaction", call_category="compaction"),
+        )
+        response = await provider.complete_text(request)
+        summary = "".join(b.text for b in response.message.content_blocks if isinstance(b, TextBlock)).strip()
+        if not summary:
+            raise RuntimeError("the model returned an empty summary")
+        message = Message(
+            role=MessageRole.user,
+            content_blocks=[TextBlock(text=f"<compacted-turn id='manual'>{summary}</compacted-turn>")],
+            metadata={
+                COMPACTION_SUMMARY_METADATA_KEY: True,
+                "daedalus.compaction": {"reason": "manual", "messages": len(history), "at": datetime.now(UTC).isoformat()},
+            },
+        )
+        if state.engine is not None:
+            state.engine.history = [message]
+            state.engine.compact_checkpoint = None  # type: ignore[attr-defined]
+        await self.sessions.replace_messages(session_id, TENANT, [message])
+        return summary
+
     async def closed_topic_sessions(self) -> list[dict[str, Any]]:
         """Sessions whose topic is closed but whose data is still on disk."""
         rows = await self.db.fetchall(
@@ -529,7 +586,7 @@ class SessionManager:
             model_name=overrides.get("model_name") or state.metadata.get("model"),
             thinking=overrides.get("thinking_enabled"),
             reasoning_effort=overrides.get("reasoning_effort"),
-            context_window=state.context_window,
+            context_window=state.context_window or self.config.model.context_window,
             extra_notes=state.extra_notes,
             blocked_tools=blocked_for(self.mcp, self.mcp_enabled(state)),
         )
@@ -723,6 +780,36 @@ class SessionManager:
         return resumed
 
 
+COMPACT_PROMPT = """Summarise the conversation transcript below so that an agent can continue the work \
+in a fresh context. Write in the language the operator used. Include: the goal and what was asked; \
+what has been done, with concrete results (paths, commands, numbers, decisions); what is still open; \
+constraints and preferences the operator stated; and the exact next steps. Be precise and compact \
+(Markdown, at most ~600 words). Do not add commentary."""
+
+
+def transcript_for_summary(history: Sequence[Message], *, result_chars: int = 600) -> str:
+    """A compact textual rendering of the history for the summariser."""
+    lines: list[str] = []
+    for message in history:
+        if message.role is MessageRole.system:
+            continue
+        for block in message.content_blocks:
+            if isinstance(block, TextBlock):
+                text = block.text.strip()
+                if text:
+                    lines.append(f"[{message.role.value}] {text[:4000]}")
+            elif isinstance(block, ToolUseBlock):
+                lines.append(f"[tool call] {block.name} {(block.arguments_json or '')[:300]}")
+            elif isinstance(block, ToolResultBlock):
+                body = (block.content or "").strip()
+                if len(body) > result_chars:
+                    body = body[: result_chars // 2] + " … " + body[-result_chars // 2 :]
+                lines.append(f"[tool result{' ERROR' if block.is_error else ''}] {body}")
+            elif isinstance(block, ThinkingBlock):
+                continue
+    return "\n".join(lines)[-200_000:]
+
+
 def _log_task_failure(task: asyncio.Task[None]) -> None:
     if task.cancelled():
         return
@@ -741,4 +828,4 @@ def _bind(fn: Callable[..., Awaitable[Any]] | None, session_id: str) -> Callable
     return bound
 
 
-__all__ = ["Attachment", "PendingQuestion", "SessionManager", "SessionState"]
+__all__ = ["Attachment", "PendingQuestion", "SessionManager", "SessionState", "transcript_for_summary"]

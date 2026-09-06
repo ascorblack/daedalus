@@ -1,12 +1,106 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { api, MessageView, Question, SessionDetail } from "../api";
-import { Avatar, Pill, Status, fmtInt, fmtUsd } from "../components";
-import { renderMarkdown } from "../md";
+import { Status, fmtInt, fmtUsd } from "../components";
+import { codeBlock, renderMarkdown } from "../md";
+
+// ── data shapes ───────────────────────────────────────────────────────────────────────────
 
 type LiveTool = { id: string; name: string; args: string; result?: string; error?: boolean };
-type LiveState = { text: string; thinking: string; tools: LiveTool[] };
-const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [] };
+type LiveState = { text: string; thinking: string; tools: LiveTool[]; startedAt: number | null };
+const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null };
+
+type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean };
+type NoteItem = { kind: "note"; text: string };
+type ThinkItem = { kind: "thinking"; text: string };
+type Activity = ToolItem | NoteItem | ThinkItem;
+
+type Turn = {
+  key: string;
+  user?: MessageView;
+  summary?: MessageView;
+  activity: Activity[];
+  answer: string;
+  startedAt: number;
+  endedAt: number;
+  pendingTools: number;
+};
+
+function parseArgs(raw: string): Record<string, unknown> {
+  try {
+    return JSON.parse(raw || "{}");
+  } catch {
+    return { raw };
+  }
+}
+
+/** Group the flat message list into turns: a user message plus everything the agent did after it. */
+function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Turn[] {
+  const results = new Map<string, { content: string; is_error: boolean }>();
+  for (const m of messages) for (const r of m.tool_results) results.set(r.id, r);
+  const seen = new Set<string>();
+  const turns: Turn[] = [];
+  let current: Turn | null = null;
+  const open = (key: string, at: number): Turn => {
+    const t: Turn = { key, activity: [], answer: "", startedAt: at, endedAt: at, pendingTools: 0 };
+    turns.push(t);
+    return t;
+  };
+  messages.forEach((m, i) => {
+    const at = Date.parse(m.created_at) || Date.now();
+    if (m.role === "tool") return;
+    if (m.summary) {
+      turns.push({ key: `s${i}`, summary: m, activity: [], answer: "", startedAt: at, endedAt: at, pendingTools: 0 });
+      current = null;
+      return;
+    }
+    if (m.role === "user") {
+      current = open(`u${i}`, at);
+      current.user = m;
+      return;
+    }
+    if (m.role === "system") return;
+    if (!current) current = open(`a${i}`, at);
+    current.endedAt = at;
+    if (current.answer) {
+      // Text that turned out not to be final becomes a note.
+      current.activity.push({ kind: "note", text: current.answer });
+      current.answer = "";
+    }
+    if (m.thinking) current.activity.push({ kind: "thinking", text: m.thinking });
+    if (m.text && m.tool_calls.length) current.activity.push({ kind: "note", text: m.text });
+    else if (m.text) current.answer = m.text;
+    for (const c of m.tool_calls) {
+      seen.add(c.id);
+      const r = results.get(c.id);
+      const liveResult = live.tools.find((t) => t.id === c.id);
+      const content = r?.content ?? liveResult?.result;
+      const running = content === undefined;
+      if (running) current.pendingTools++;
+      current.activity.push({ kind: "tool", id: c.id, name: c.name, args: c.arguments, result: content, error: r?.is_error ?? liveResult?.error, running });
+    }
+  });
+  if (busy) {
+    if (!current) current = open("live", live.startedAt ?? Date.now());
+    const t: Turn = current;
+    if (t.answer) {
+      t.activity.push({ kind: "note", text: t.answer });
+      t.answer = "";
+    }
+    if (live.thinking) t.activity.push({ kind: "thinking", text: live.thinking });
+    for (const lt of live.tools) {
+      if (seen.has(lt.id)) continue;
+      const running = lt.result === undefined;
+      if (running) t.pendingTools++;
+      t.activity.push({ kind: "tool", id: lt.id, name: lt.name, args: parseArgs(lt.args), result: lt.result, error: lt.error, running });
+    }
+    if (live.text) t.answer = live.text;
+    t.endedAt = Date.now();
+  }
+  return turns;
+}
+
+// ── screen ────────────────────────────────────────────────────────────────────────────────
 
 export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () => void; toast: (t: string) => void }) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
@@ -15,9 +109,14 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
   const [pending, setPending] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
   const [view, setView] = useState<"chat" | "files" | "mcp">("chat");
+  const [menu, setMenu] = useState(false);
+  const [editingTitle, setEditingTitle] = useState<string | null>(null);
+  const [sheet, setSheet] = useState<Turn | null>(null);
+  const [tick, setTick] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-  const stickToBottom = useRef(true);
+  const stick = useRef(true);
+  const userScrolling = useRef(false);
 
   const load = useCallback(async () => {
     try {
@@ -31,15 +130,22 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
     load();
   }, [load]);
 
-  // While a run is active, re-read the transcript even if the event stream stalls.
+  const status = (detail?.status ?? "idle") as Status;
+  const busy = status === "running" || status === "waiting";
+
+  // While a run is active, re-read the transcript even if the event stream stalls; tick the timer.
   useEffect(() => {
-    if (!detail || (detail.status !== "running" && detail.status !== "waiting")) {
+    if (!busy) {
       setLive(EMPTY_LIVE);
       return;
     }
     const t = setInterval(load, 3000);
-    return () => clearInterval(t);
-  }, [detail, load]);
+    const clock = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => {
+      clearInterval(t);
+      clearInterval(clock);
+    };
+  }, [busy, load]);
 
   // Live events while the screen is open.
   useEffect(() => {
@@ -67,7 +173,7 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
       }
     })().catch(() => undefined);
     function handle(event: string, p: Record<string, any>) {
-      if (event === "message_start") setLive((s) => ({ ...s, text: "", thinking: "" }));
+      if (event === "message_start") setLive((s) => ({ ...s, text: "", thinking: "", startedAt: s.startedAt ?? Date.now() }));
       else if (event === "content_block_delta") {
         const d = p.delta ?? {};
         if (d.type === "text_delta") setLive((s) => ({ ...s, text: s.text + (d.text ?? "") }));
@@ -75,26 +181,56 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
       } else if (event === "tool_use_start") {
         setLive((s) => ({ ...s, tools: [...s.tools, { id: p.tool_call_id, name: p.tool_name, args: "" }] }));
       } else if (event === "tool_use_stop") {
-        setLive((s) => ({ ...s, tools: s.tools.map((t) => (t.id === p.tool_call_id ? { ...t, args: JSON.stringify(p.final_input ?? {}, null, 1) } : t)) }));
+        setLive((s) => ({ ...s, tools: s.tools.map((t) => (t.id === p.tool_call_id ? { ...t, args: JSON.stringify(p.final_input ?? {}) } : t)) }));
       } else if (event === "tool_result") {
         setLive((s) => ({ ...s, tools: s.tools.map((t) => (t.id === p.tool_call_id ? { ...t, result: String(p.content ?? p.output ?? ""), error: !!p.is_error } : t)) }));
-      } else if (event === "message_stop" || event === "state_changed" || event === "tool_call_pending" || event === "run_settled") load();
+      } else if (event === "message_stop") {
+        // The history now carries this message; drop the streamed copy once it is loaded.
+        load().then(() => setLive((s) => ({ ...s, text: "", thinking: "" })));
+      } else if (event === "state_changed" || event === "tool_call_pending" || event === "run_settled" || event === "compaction_completed") load();
     }
     return () => {
       stop = true;
     };
   }, [id, load]);
 
-  // Keep the newest content visible unless the operator scrolled up on purpose.
+  const turns = useMemo(() => buildTurns(detail?.messages ?? [], live, busy), [detail, live, busy]);
+
+  // Follow the newest content only while the reader is at the bottom and not scrolling by hand.
   useEffect(() => {
     const el = scroller.current;
-    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [detail, live]);
+    if (el && stick.current && !userScrolling.current) el.scrollTop = el.scrollHeight;
+  }, [turns]);
+
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    let timer: number | undefined;
+    const startHand = () => {
+      userScrolling.current = true;
+      window.clearTimeout(timer);
+    };
+    const endHand = () => {
+      timer = window.setTimeout(() => {
+        userScrolling.current = false;
+      }, 400);
+    };
+    el.addEventListener("touchstart", startHand, { passive: true });
+    el.addEventListener("touchend", endHand, { passive: true });
+    el.addEventListener("wheel", startHand, { passive: true });
+    el.addEventListener("wheel", endHand, { passive: true });
+    return () => {
+      el.removeEventListener("touchstart", startHand);
+      el.removeEventListener("touchend", endHand);
+      el.removeEventListener("wheel", startHand);
+      el.removeEventListener("wheel", endHand);
+    };
+  }, []);
 
   function onScroll() {
     const el = scroller.current;
     if (!el) return;
-    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
   }
 
   async function send() {
@@ -115,8 +251,7 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
       } else {
         await api.post(`/api/sessions/${id}/messages`, { text });
       }
-      setLive(EMPTY_LIVE);
-      stickToBottom.current = true;
+      stick.current = true;
       load();
     } catch (e) {
       setDraft(text);
@@ -132,50 +267,89 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
     toast("stopping");
   }
 
-  const status = (detail?.status ?? "idle") as Status;
-  const busy = status === "running" || status === "waiting";
+  async function rename(title: string) {
+    setEditingTitle(null);
+    if (!title.trim() || title.trim() === detail?.title) return;
+    try {
+      await api.patch(`/api/sessions/${id}`, { title: title.trim() });
+      load();
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
+  async function compact() {
+    setMenu(false);
+    if (busy) {
+      toast("stop the run first");
+      return;
+    }
+    if (!window.confirm("Replace the whole history with a summary? The agent keeps only the summary.")) return;
+    toast("compacting…");
+    try {
+      await api.post(`/api/sessions/${id}/compact`, { instructions: "" });
+      await load();
+      toast("compacted");
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
+  async function remove() {
+    setMenu(false);
+    if (!window.confirm("Delete this session, its topic and its workspace?")) return;
+    try {
+      await api.delete(`/api/sessions/${id}`);
+      onBack();
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
+  void tick;
   return (
     <div className="chat">
-      <div className="topbar">
-        <button className="btn small" onClick={onBack}>
-          ‹
+      <div className="chat-head">
+        <button className="iconbtn" onClick={onBack} aria-label="back">
+          <Icon name="back" />
         </button>
-        {detail && <Avatar status={status} seed={detail.id} />}
-        <div className="grow">
-          <div className="title">{detail?.title ?? "…"}</div>
+        <div className="grow" style={{ minWidth: 0 }}>
+          {editingTitle !== null ? (
+            <input
+              className="title-edit"
+              autoFocus
+              value={editingTitle}
+              onChange={(e) => setEditingTitle(e.target.value)}
+              onBlur={() => rename(editingTitle)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") rename(editingTitle);
+                if (e.key === "Escape") setEditingTitle(null);
+              }}
+            />
+          ) : (
+            <div className="title" onClick={() => setEditingTitle(detail?.title ?? "")} title="tap to rename">
+              {detail?.title ?? "…"}
+            </div>
+          )}
           <div className="sub">
+            {busy ? <span className="live-dot" /> : null}
             {detail?.model} · {fmtInt(detail?.usage.i)}↑ {fmtInt(detail?.usage.o)}↓ · {fmtUsd(detail?.usage.usd)}
           </div>
         </div>
-        <Pill status={status} />
-      </div>
-      <div className="chat-actions">
-        {status === "running" && (
-          <button className="btn small danger" onClick={stop}>
-            stop
-          </button>
+        <button className="iconbtn" onClick={() => setMenu((m) => !m)} aria-label="menu">
+          <Icon name="more" />
+        </button>
+        {menu && (
+          <div className="menu" onClick={() => setMenu(false)}>
+            <button onClick={() => setView(view === "files" ? "chat" : "files")}>{view === "files" ? "Back to chat" : "Files"}</button>
+            <button onClick={() => setView(view === "mcp" ? "chat" : "mcp")}>{view === "mcp" ? "Back to chat" : "MCP servers"}</button>
+            <button onClick={() => setEditingTitle(detail?.title ?? "")}>Rename</button>
+            <button onClick={compact}>Compact history</button>
+            <button className="danger" onClick={remove}>
+              Delete session
+            </button>
+          </div>
         )}
-        <button className={`btn small ${view === "files" ? "primary" : ""}`} onClick={() => setView(view === "files" ? "chat" : "files")}>
-          files
-        </button>
-        <button className={`btn small ${view === "mcp" ? "primary" : ""}`} onClick={() => setView(view === "mcp" ? "chat" : "mcp")}>
-          mcp
-        </button>
-        <button
-          className="btn small danger"
-          title="delete session"
-          onClick={async () => {
-            if (!window.confirm("Delete this session, its topic and its workspace?")) return;
-            try {
-              await api.delete(`/api/sessions/${id}`);
-              onBack();
-            } catch (e) {
-              toast((e as Error).message);
-            }
-          }}
-        >
-          🗑
-        </button>
       </div>
 
       <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
@@ -183,13 +357,9 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
         {view === "files" && detail && <Files sessionId={id} />}
         {view === "chat" && (
           <div className="timeline">
-            {detail && <Transcript messages={detail.messages} />}
-            {busy && live.thinking && <Thinking text={live.thinking} open />}
-            {live.tools.map((t) => (
-              <ToolBlock key={t.id} name={t.name} args={t.args} result={t.result} error={t.error} running={t.result === undefined} />
+            {turns.map((t, i) => (
+              <TurnView key={t.key} turn={t} live={busy && i === turns.length - 1} onThoughts={() => setSheet(t)} />
             ))}
-            {busy && live.text && <div className="msg assistant" dangerouslySetInnerHTML={{ __html: renderMarkdown(live.text) }} />}
-            {busy && !live.text && live.tools.every((t) => t.result !== undefined) && <div className="streaming">thinking…</div>}
             {detail?.pending && <QuestionCard sessionId={id} questions={detail.pending.questions} onDone={load} toast={toast} />}
           </div>
         )}
@@ -209,104 +379,292 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
               ))}
             </div>
           )}
-          <div className="composer-row">
-            <input ref={fileInput} type="file" multiple hidden onChange={(e) => setPending((p) => [...p, ...Array.from(e.target.files ?? [])])} />
-            <button className="btn" title="attach files" onClick={() => fileInput.current?.click()}>
-              📎
-            </button>
+          <div className="composer-box">
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              placeholder={status === "running" ? "follow-up (queued for the next step)" : "message"}
+              placeholder={status === "running" ? "Steer the agent (applies before its next step)" : "Ask anything"}
               rows={1}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) {
                   e.preventDefault();
                   send();
                 }
               }}
             />
-            <button className="btn primary" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)}>
-              ↑
-            </button>
+            <div className="composer-row">
+              <input ref={fileInput} type="file" multiple hidden onChange={(e) => setPending((p) => [...p, ...Array.from(e.target.files ?? [])])} />
+              <button className="roundbtn" title="attach files" onClick={() => fileInput.current?.click()} aria-label="attach">
+                <Icon name="plus" />
+              </button>
+              <span className="chip">
+                <Icon name="model" /> {shortModel(detail?.model)}
+              </span>
+              <span className="grow" />
+              {status === "running" ? (
+                <button className="roundbtn stop" onClick={stop} aria-label="stop">
+                  <Icon name="stop" />
+                </button>
+              ) : (
+                <button className="roundbtn send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)} aria-label="send">
+                  <Icon name="up" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
+      {sheet && <ThoughtsSheet turn={sheet} onClose={() => setSheet(null)} />}
     </div>
   );
 }
 
-// -- transcript ---------------------------------------------------------------------------
-
-function Transcript({ messages }: { messages: MessageView[] }) {
-  // Pair every tool call with its result so each tool renders as one block.
-  const results = new Map<string, { content: string; is_error: boolean }>();
-  for (const m of messages) for (const r of m.tool_results) results.set(r.id, r);
-  const out: ReactElement[] = [];
-  messages.forEach((m, i) => {
-    if (m.role === "tool") return;
-    if (m.role === "system") {
-      out.push(
-        <div key={i} className="msg system">
-          {m.text.slice(0, 200)}
-        </div>,
-      );
-      return;
-    }
-    if (m.role === "user") {
-      out.push(<div key={i} className="msg user" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }} />);
-      return;
-    }
-    if (m.thinking) out.push(<Thinking key={`${i}-th`} text={m.thinking} />);
-    if (m.text) out.push(<div key={`${i}-tx`} className="msg assistant" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }} />);
-    for (const c of m.tool_calls) {
-      const r = results.get(c.id);
-      out.push(<ToolBlock key={c.id} name={c.name} args={JSON.stringify(c.arguments, null, 1)} result={r?.content} error={r?.is_error} running={false} />);
-    }
-  });
-  return <>{out}</>;
+function shortModel(name?: string): string {
+  if (!name) return "model";
+  return name.split("/").pop()!.replace(/^deepseek-/, "").slice(0, 18);
 }
 
-function Thinking({ text, open = false }: { text: string; open?: boolean }) {
+// ── turns ─────────────────────────────────────────────────────────────────────────────────
+
+function fmtDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${s % 60 ? ` ${s % 60}s` : ""}`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function TurnView({ turn, live, onThoughts }: { turn: Turn; live: boolean; onThoughts: () => void }) {
+  if (turn.summary) return <SummaryBlock message={turn.summary} />;
+  const hasWork = turn.activity.length > 0 || live;
+  const elapsed = (live ? Date.now() : turn.endedAt) - turn.startedAt;
   return (
-    <details className="thinking" open={open}>
-      <summary>💭 thinking · {text.length.toLocaleString()} chars</summary>
-      <div className="thinking-body">{text}</div>
-    </details>
+    <div className="turn">
+      {turn.user && <div className="msg user" dangerouslySetInnerHTML={{ __html: renderMarkdown(turn.user.text) }} />}
+      {hasWork && (
+        <button className="thinking-head" onClick={onThoughts}>
+          <span className={`dots ${live ? "on" : ""}`}>
+            <i />
+            <i />
+            <i />
+          </span>
+          {live ? "Thinking for" : "Thought for"} {fmtDuration(elapsed)}
+          <span className="chev">›</span>
+        </button>
+      )}
+      <ActivityList items={turn.activity} compact />
+      {turn.answer && <div className={`answer ${live ? "streaming" : ""}`} dangerouslySetInnerHTML={{ __html: renderMarkdown(turn.answer) }} />}
+      {live && !turn.answer && turn.pendingTools === 0 && turn.activity.length > 0 && <div className="working">working…</div>}
+    </div>
   );
 }
 
-function argsPreview(args: string): string {
-  try {
-    const a = JSON.parse(args || "{}");
-    const key = ["command", "path", "pattern", "url", "query", "task", "server", "skill", "title", "name"].find((k) => k in a);
-    if (key) return String(a[key]).slice(0, 90);
-    return Object.keys(a).length ? JSON.stringify(a).slice(0, 90) : "";
-  } catch {
-    return args.slice(0, 90);
+function SummaryBlock({ message }: { message: MessageView }) {
+  const [open, setOpen] = useState(false);
+  const meta = message.compaction;
+  return (
+    <div className="summary">
+      <button className="summary-head" onClick={() => setOpen((o) => !o)}>
+        <Icon name="compact" /> Context summary
+        {meta ? ` · ${meta.messages} messages compacted (${meta.reason})` : ""}
+        <span className="chev">{open ? "⌄" : "›"}</span>
+      </button>
+      {open && <div className="summary-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.text) }} />}
+    </div>
+  );
+}
+
+/** Verb + noun for a tool, Grok-style ("Ran command", "Read file", "Editing 2 files"). */
+function describe(t: ToolItem): { verb: string; noun: string; detail: string; icon: IconName } {
+  const a = t.args;
+  const str = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : a[k] === undefined ? "" : JSON.stringify(a[k]));
+  const base = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
+  const r = t.running;
+  switch (t.name) {
+    case "Exec":
+      return { verb: r ? "Running command" : "Ran command", noun: "command", detail: str("command").split("\n")[0], icon: "terminal" };
+    case "Read":
+      return { verb: r ? "Reading file" : "Read file", noun: "file", detail: base(str("path")), icon: "file" };
+    case "Write":
+      return { verb: r ? "Writing file" : "Wrote file", noun: "file", detail: base(str("path")), icon: "pen" };
+    case "Edit":
+      return { verb: r ? "Editing file" : "Edited file", noun: "file", detail: base(str("path")), icon: "pen" };
+    case "Find":
+    case "Search":
+      return { verb: r ? "Searching" : "Searched", noun: "search", detail: str("pattern") || str("query"), icon: "search" };
+    case "WebSearch":
+      return { verb: r ? "Searching the web" : "Searched the web", noun: "search", detail: str("query"), icon: "search" };
+    case "WebFetch":
+      return { verb: "Browsing", noun: "page", detail: str("url").replace(/^https?:\/\//, "").slice(0, 60), icon: "globe" };
+    case "SendFile":
+      return { verb: r ? "Sending file" : "Sent file", noun: "file", detail: base(str("path")), icon: "attach" };
+    case "ImageView":
+      return { verb: r ? "Viewing image" : "Viewed image", noun: "image", detail: base(str("path")), icon: "image" };
+    case "AskUser":
+      return { verb: "Asked you", noun: "question", detail: "", icon: "question" };
+    case "Skill":
+      return { verb: r ? "Loading skill" : "Loaded skill", noun: "skill", detail: str("skill") || str("name"), icon: "skill" };
+    case "SpawnTask":
+      return { verb: "Started task", noun: "task", detail: str("title"), icon: "spawn" };
+    case "Remember":
+    case "Recall":
+    case "Forget":
+      return { verb: t.name === "Recall" ? "Recalled" : t.name === "Forget" ? "Forgot" : "Remembered", noun: "memory", detail: str("query") || str("text").slice(0, 60), icon: "bulb" };
+    default:
+      if (t.name.startsWith("Self")) return { verb: t.name.replace(/^Self/, "Self: "), noun: "step", detail: str("branch") || str("title") || str("repo"), icon: "wrench" };
+      if (t.name.startsWith("Schedule")) return { verb: t.name.replace(/^Schedule/, "Schedule: "), noun: "task", detail: str("name") || str("schedule_id"), icon: "clock" };
+      if (t.name.startsWith("Mcp")) return { verb: t.name.replace(/^Mcp_?/, "MCP "), noun: "call", detail: str("server"), icon: "plug" };
+      return { verb: t.name, noun: "call", detail: Object.keys(a).length ? JSON.stringify(a).slice(0, 60) : "", icon: "dot" };
   }
 }
 
-function ToolBlock({ name, args, result, error, running }: { name: string; args: string; result?: string; error?: boolean; running: boolean }) {
-  const mark = running ? "▶" : error ? "✗" : "✓";
+function ActivityList({ items, compact }: { items: Activity[]; compact: boolean }) {
+  const out: ReactElement[] = [];
+  let i = 0;
+  while (i < items.length) {
+    const it = items[i];
+    if (it.kind === "note") {
+      out.push(<div key={i} className="note" dangerouslySetInnerHTML={{ __html: renderMarkdown(it.text) }} />);
+      i++;
+      continue;
+    }
+    if (it.kind === "thinking") {
+      if (!compact) out.push(<div key={i} className="thought">{it.text}</div>);
+      i++;
+      continue;
+    }
+    // Group consecutive tools of one family (Read/Read/Read → "Read 3 files").
+    const family = it.name;
+    let j = i;
+    while (j < items.length && items[j].kind === "tool" && (items[j] as ToolItem).name === family) j++;
+    const group = items.slice(i, j) as ToolItem[];
+    if (group.length > 1) {
+      const d = describe(group[group.length - 1]);
+      const any = group.some((g) => g.running);
+      out.push(
+        <div key={i} className="group">
+          <div className="row head">
+            <Icon name={d.icon} /> {groupVerb(family, any)} {group.length} {d.noun}s
+          </div>
+          {group.map((g) => (
+            <ToolRow key={g.id} item={g} nested />
+          ))}
+        </div>,
+      );
+    } else out.push(<ToolRow key={it.id} item={it} />);
+    i = j;
+  }
+  return <>{out}</>;
+}
+
+function groupVerb(name: string, running: boolean): string {
+  const map: Record<string, [string, string]> = {
+    Exec: ["Running", "Ran"],
+    Read: ["Reading", "Read"],
+    Write: ["Writing", "Wrote"],
+    Edit: ["Editing", "Edited"],
+    Find: ["Running", "Ran"],
+    Search: ["Running", "Ran"],
+    WebSearch: ["Running", "Ran"],
+    WebFetch: ["Browsing", "Browsed"],
+    SendFile: ["Sending", "Sent"],
+  };
+  const [a, b] = map[name] ?? ["Calling", "Called"];
+  return running ? a : b;
+}
+
+function ToolRow({ item, nested }: { item: ToolItem; nested?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const d = describe(item);
+  const expanded = open || (item.running && item.name === "Exec");
   return (
-    <details className={`tool ${running ? "running" : error ? "error" : ""}`}>
-      <summary>
-        <span className="mark">{mark}</span> <b>{name}</b> <span className="preview">{argsPreview(args)}</span>
-      </summary>
-      <div className="tool-body">
-        <div className="label">arguments</div>
-        <pre>{args || "{}"}</pre>
-        {result !== undefined && (
-          <>
-            <div className="label">result</div>
-            <pre>{result}</pre>
-          </>
-        )}
+    <div className={`row-wrap ${nested ? "nested" : ""}`}>
+      <div className={`row ${item.error ? "error" : ""} ${item.running ? "running" : ""}`} onClick={() => setOpen((o) => !o)}>
+        <Icon name={d.icon} />
+        <span className="verb">{d.verb}</span>
+        {d.detail && <span className="detail">{d.detail}</span>}
       </div>
-    </details>
+      {expanded && <ToolCard item={item} />}
+    </div>
   );
 }
+
+function ToolCard({ item }: { item: ToolItem }) {
+  const a = item.args;
+  const parts: ReactNode[] = [];
+  if (item.name === "Exec") parts.push(<div key="c" dangerouslySetInnerHTML={{ __html: codeBlock(String(a.command ?? ""), "bash") }} />);
+  else if (item.name === "Write") parts.push(<div key="c" dangerouslySetInnerHTML={{ __html: codeBlock(String(a.content ?? "").slice(0, 4000), langOf(String(a.path ?? ""))) }} />);
+  else if (item.name === "Edit")
+    parts.push(
+      <div key="c" className="diff">
+        <pre className="del">{String(a.old_string ?? a.old ?? "")}</pre>
+        <pre className="add">{String(a.new_string ?? a.new ?? "")}</pre>
+      </div>,
+    );
+  else parts.push(<div key="c" dangerouslySetInnerHTML={{ __html: codeBlock(JSON.stringify(a, null, 1), "args") }} />);
+  if (item.result !== undefined) parts.push(<pre key="r" className={`result ${item.error ? "error" : ""}`}>{item.result.slice(0, 6000)}</pre>);
+  return <div className="toolcard">{parts}</div>;
+}
+
+function langOf(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const map: Record<string, string> = { py: "python", ts: "typescript", tsx: "tsx", js: "javascript", md: "markdown", sh: "bash", json: "json", toml: "toml", yaml: "yaml", yml: "yaml", html: "html", css: "css" };
+  return map[ext] ?? ext;
+}
+
+function ThoughtsSheet({ turn, onClose }: { turn: Turn; onClose: () => void }) {
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="grip" />
+        <h3>Thoughts</h3>
+        <div className="sheet-body">
+          <ActivityList items={turn.activity} compact={false} />
+          {turn.activity.length === 0 && <div className="empty">Nothing yet.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── icons ─────────────────────────────────────────────────────────────────────────────────
+
+type IconName = "back" | "more" | "plus" | "up" | "stop" | "model" | "terminal" | "file" | "pen" | "search" | "globe" | "attach" | "image" | "question" | "skill" | "spawn" | "bulb" | "wrench" | "clock" | "plug" | "dot" | "compact";
+
+const PATHS: Record<IconName, string> = {
+  back: "M15 18l-6-6 6-6",
+  more: "M5 12h.01M12 12h.01M19 12h.01",
+  plus: "M12 5v14M5 12h14",
+  up: "M12 19V5M5 12l7-7 7 7",
+  stop: "M7 7h10v10H7z",
+  model: "M4 12l8-8 8 8-8 8-8-8z",
+  terminal: "M4 5h16v14H4zM7 9l3 3-3 3M12 15h5",
+  file: "M6 3h8l4 4v14H6zM14 3v4h4",
+  pen: "M4 20l4-1 11-11-3-3L5 16zM13 6l3 3",
+  search: "M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14zM20 20l-4-4",
+  globe: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18",
+  attach: "M21 12l-8 8a5 5 0 0 1-7-7l9-9a3 3 0 0 1 4 4l-9 9a1 1 0 0 1-2-2l8-8",
+  image: "M4 5h16v14H4zM8 13l3-3 4 4 2-2 3 3",
+  question: "M9 9a3 3 0 1 1 4 3c-1 .5-1 1-1 2M12 17h.01",
+  skill: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
+  spawn: "M12 3v6M12 15v6M3 12h6M15 12h6",
+  bulb: "M9 18h6M10 21h4M12 3a6 6 0 0 0-3 11v1h6v-1a6 6 0 0 0-3-11z",
+  wrench: "M14 4a5 5 0 0 0 6 6l-9 9-3-3 9-9a5 5 0 0 0-3-3z",
+  clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
+  plug: "M9 3v5M15 3v5M6 8h12v4a6 6 0 0 1-12 0zM12 18v3",
+  dot: "M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
+  compact: "M4 7h16M4 12h10M4 17h6",
+};
+
+function Icon({ name }: { name: IconName }) {
+  return (
+    <svg className={`ic ic-${name}`} viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={PATHS[name]} />
+    </svg>
+  );
+}
+
+// ── questions, files, mcp ─────────────────────────────────────────────────────────────────
 
 function QuestionCard({ sessionId, questions, onDone, toast }: { sessionId: string; questions: Question[]; onDone: () => void; toast: (t: string) => void }) {
   const [answers, setAnswers] = useState(questions.map(() => ({ selected: [] as string[], custom: "" })));

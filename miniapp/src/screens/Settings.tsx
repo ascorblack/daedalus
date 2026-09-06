@@ -1,6 +1,32 @@
 import { useEffect, useState } from "react";
 import { api, Settings } from "../api";
 
+function RulesEditor({ rules, fallback, onSave }: { rules: string; fallback: string; onSave: (rules: string) => void }) {
+  const [text, setText] = useState(rules || fallback);
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    setText(rules || fallback);
+    setDirty(false);
+  }, [rules, fallback]);
+  return (
+    <div className="card">
+      <div className="section-title" style={{ marginTop: 0 }}>
+        Working rules (system prompt)
+      </div>
+      <div className="sub">Shared by every session, after the persona and before the governance text. {rules ? "Custom text is in use." : "The built-in default is in use."}</div>
+      <textarea className="field" rows={14} value={text} onChange={(e) => (setText(e.target.value), setDirty(true))} style={{ fontFamily: "var(--mono)", fontSize: 12.5, marginTop: 8 }} />
+      <div className="btnrow">
+        <button className="btn primary" disabled={!dirty} onClick={() => (onSave(text.trim() === fallback.trim() ? "" : text), setDirty(false))}>
+          Save
+        </button>
+        <button className="btn" onClick={() => (setText(fallback), setDirty(true))}>
+          Reset to default
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
   const [s, setS] = useState<Settings | null>(null);
   const [status, setStatus] = useState<any>(null);
@@ -48,7 +74,20 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         </div>
         <label className="field">Fallback chain (comma-separated provider ids)</label>
         <input className="field" defaultValue={s.model.chain.join(", ")} onBlur={(e) => save({ model: { ...s.model, chain: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) } })} />
+        <div className="grid2">
+          <div>
+            <label className="field">Context window (tokens)</label>
+            <input className="field" type="number" step={1000} defaultValue={s.model.context_window} onBlur={(e) => Number(e.target.value) !== s.model.context_window && save({ model: { ...s.model, context_window: Number(e.target.value) } })} />
+          </div>
+          <div>
+            <label className="field">Max output per reply</label>
+            <input className="field" type="number" step={1000} defaultValue={s.model.max_output_tokens} onBlur={(e) => Number(e.target.value) !== s.model.max_output_tokens && save({ model: { ...s.model, max_output_tokens: Number(e.target.value) } })} />
+          </div>
+        </div>
+        <div className="sub" style={{ marginTop: 6 }}>The window bounds how much history a run keeps before compaction (the model itself may allow more); the output cap is the max_tokens of one reply, thinking included.</div>
       </div>
+
+      <RulesEditor rules={s.prompt.rules} fallback={s.prompt.default_rules ?? ""} onSave={(rules) => save({ prompt: { rules } })} />
 
       <div className="card">
         <div className="section-title" style={{ marginTop: 0 }}>

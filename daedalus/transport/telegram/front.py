@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import mimetypes
 import shutil
@@ -25,6 +26,7 @@ from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputRichMessage,
     Message,
     ReplyParameters,
 )
@@ -33,7 +35,7 @@ from protocore.runtime.events.types import EventType
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.session_runner import Attachment, SessionManager, SessionState
-from daedalus.transport.telegram.markdown import markdown_to_html, split_message
+from daedalus.transport.telegram.markdown import markdown_to_html, split_message, strip_tags
 from daedalus.transport.telegram.render import Outbox, RunRenderer, RunView
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,7 @@ Each forum topic is one agent session with its own workspace. Write in a topic t
 /bind — (in a supergroup with topics) make it the session hub
 /new &lt;title&gt; — new session (new topic)
 /stop — stop the current run · /close — close this topic (asks whether to delete the agent and its workspace)
+/rename &lt;title&gt; — rename this session (and its topic) · /compact [focus] — replace the history with a summary
 /delete &lt;id&gt; · /cleanup — delete a session; delete every session whose topic is already closed
 /sessions · /status — what exists, what is running
 /model [provider/]&lt;name&gt; · /thinking on|off|low|medium|high — model settings (default in General, per session in a topic)
@@ -51,6 +54,7 @@ Each forum topic is one agent session with its own workspace. Write in a topic t
 /schedules · /schedule run|on|off|delete &lt;id&gt; — scheduled tasks
 /approval manual|auto · /verbosity 0|1|2 — self-change approval, chat detail
 /rebuild · /rollback [n] · /panic — supervisor operations
+/prompt — show the editable working rules (edit them in the Mini App → Settings)
 /settings · /app — configuration, Mini App link
 """
 
@@ -86,6 +90,13 @@ async def tg_call(fn: Callable[..., Awaitable[Any]], *args: Any, attempts: int =
 
 
 class TelegramOutbox(Outbox):
+    """One chat (or topic) as seen by the renderer.
+
+    Text goes out as a rich message (Telegram renders Markdown natively: tables, headings,
+    code, quotes, collapsible blocks). When the server refuses rich content the same text
+    falls back to HTML entities and finally to plain text.
+    """
+
     def __init__(self, bot: Bot, chat_id: int, thread_id: int | None) -> None:
         self.bot = bot
         self.chat_id = chat_id
@@ -93,6 +104,16 @@ class TelegramOutbox(Outbox):
 
     async def send_text(self, text: str, *, markdown: bool = True) -> int:
         if markdown:
+            try:
+                msg = await tg_call(
+                    self.bot.send_rich_message,
+                    self.chat_id,
+                    InputRichMessage(markdown=text),
+                    message_thread_id=self.thread_id,
+                )
+                return msg.message_id
+            except TelegramBadRequest as exc:
+                logger.warning("rich markdown refused (%s); falling back to HTML", exc)
             try:
                 msg = await tg_call(
                     self.bot.send_message,
@@ -108,8 +129,29 @@ class TelegramOutbox(Outbox):
         msg = await tg_call(self.bot.send_message, self.chat_id, text, message_thread_id=self.thread_id, parse_mode=None)
         return msg.message_id
 
-    async def edit_text(self, message_id: int, text: str) -> None:
+    async def send_html(self, html: str) -> int:
         try:
+            msg = await tg_call(
+                self.bot.send_rich_message, self.chat_id, InputRichMessage(html=html), message_thread_id=self.thread_id
+            )
+            return msg.message_id
+        except TelegramBadRequest as exc:
+            logger.warning("rich html refused (%s); sending plain text", exc)
+        msg = await tg_call(self.bot.send_message, self.chat_id, strip_tags(html), message_thread_id=self.thread_id, parse_mode=None)
+        return msg.message_id
+
+    async def edit_text(self, message_id: int, text: str, *, html: bool = False) -> None:
+        try:
+            if html:
+                try:
+                    await self.bot.edit_message_text(
+                        chat_id=self.chat_id, message_id=message_id, rich_message=InputRichMessage(html=text)
+                    )
+                    return
+                except TelegramBadRequest as exc:
+                    if "message is not modified" in str(exc):
+                        return
+                    text = strip_tags(text)
             await self.bot.edit_message_text(text, chat_id=self.chat_id, message_id=message_id, parse_mode=None)
         except TelegramBadRequest as exc:
             if "message is not modified" not in str(exc):
@@ -152,7 +194,7 @@ class TelegramOutbox(Outbox):
         try:
             if text:
                 try:
-                    await self.bot.send_message_draft(self.chat_id, draft_id, message_thread_id=self.thread_id, text=markdown_to_html(text), parse_mode=ParseMode.HTML, can_stop=True)
+                    await self.bot.send_rich_message_draft(self.chat_id, draft_id, rich_message=InputRichMessage(markdown=text), message_thread_id=self.thread_id, can_stop=True)
                 except TelegramBadRequest:
                     await self.bot.send_message_draft(self.chat_id, draft_id, message_thread_id=self.thread_id, text=text, parse_mode=None, can_stop=True)
             else:
@@ -317,6 +359,9 @@ class TelegramFront:
         r.message.register(self.cmd_new, Command("new"))
         r.message.register(self.cmd_stop, Command("stop"))
         r.message.register(self.cmd_close, Command("close"))
+        r.message.register(self.cmd_rename, Command("rename"))
+        r.message.register(self.cmd_compact, Command("compact"))
+        r.message.register(self.cmd_prompt, Command("prompt"))
         r.message.register(self.cmd_delete, Command("delete"))
         r.message.register(self.cmd_cleanup, Command("cleanup"))
         r.message.register(self.on_topic_closed, F.forum_topic_closed)
@@ -384,6 +429,60 @@ class TelegramFront:
         if binding is None:
             return
         await self._ask_close(binding, message.chat.id, message.message_thread_id)
+
+    async def cmd_rename(self, message: Message, command: CommandObject) -> None:
+        if not self._is_owner(message.from_user.id if message.from_user else None):
+            return
+        title = (command.args or "").strip()
+        state = await self._session_for_message(message)
+        if state is None or (self._is_general(message) and message.chat.type != "private"):
+            await message.answer("Use /rename inside a session topic (or the private chat).")
+            return
+        if not title:
+            await message.answer(f"Current title: {state.session.title}\nusage: /rename <new title>")
+            return
+        await self.rename_session(state.session.id, title)
+        await message.answer(f"Renamed to: {title}")
+
+    async def rename_session(self, session_id: str, title: str) -> None:
+        """Rename the session and, when it has a topic, the topic itself."""
+        state = await self.manager.rename_session(session_id, title)
+        binding = await self.binding_for_session(session_id)
+        if binding is not None and binding.thread_id:
+            try:
+                await tg_call(self.bot.edit_forum_topic, binding.chat_id, binding.thread_id, name=state.session.title[:128])
+            except TelegramBadRequest as exc:
+                logger.warning("could not rename topic: %s", exc)
+
+    async def cmd_compact(self, message: Message, command: CommandObject) -> None:
+        if not self._is_owner(message.from_user.id if message.from_user else None):
+            return
+        state = await self._session_for_message(message)
+        if state is None or (self._is_general(message) and message.chat.type != "private"):
+            await message.answer("Use /compact inside a session topic (or the private chat).")
+            return
+        note = await message.answer("🗜 Compacting the history…")
+        try:
+            summary = await self.manager.compact(state.session.id, command.args or "")
+        except Exception as exc:  # noqa: BLE001
+            await note.edit_text(f"⚠️ compact failed: {exc}")
+            return
+        outbox = TelegramOutbox(self.bot, message.chat.id, message.message_thread_id if message.is_topic_message else None)
+        await note.delete()
+        await outbox.send_html(
+            "<p><b>🗜 History compacted.</b> The session continues from this summary.</p>"
+            f"<details><summary>Summary</summary>{markdown_to_html(summary)}</details>"
+        )
+
+    async def cmd_prompt(self, message: Message) -> None:
+        if not self._is_owner(message.from_user.id if message.from_user else None):
+            return
+        from daedalus.host.prompts import DEFAULT_RULES
+
+        rules = self.config.prompt.rules.strip() or DEFAULT_RULES.strip()
+        origin = "custom (config)" if self.config.prompt.rules.strip() else "built-in default"
+        outbox = TelegramOutbox(self.bot, message.chat.id, message.message_thread_id if message.is_topic_message else None)
+        await outbox.send_html(f"<p><b>Working rules</b> — {origin}. Edit in the Mini App → Settings.</p><pre>{html.escape(rules)}</pre>")
 
     async def _ask_close(self, binding: TopicBinding, chat_id: int, thread_id: int | None) -> None:
         state = await self.manager.get_state(binding.session_id)
@@ -695,7 +794,7 @@ class TelegramFront:
         if was_running:
             renderer = self._renderers.get(state.session.id)
             if renderer is not None:
-                renderer.view.narration.append("↪ follow-up queued for the next step")
+                renderer.view.narration.append(f"↪ steer (applies before the next model call): {text[:160]}")
                 renderer._mark()
 
     async def _download(self, message: Message, state: SessionState) -> Attachment | None:
@@ -929,6 +1028,18 @@ class TelegramFront:
         if renderer is None:
             return
         await renderer.handle(event)
+        if event.type is EventType.COMPACTION_COMPLETED:
+            p = event.payload
+            outbox = await self.outbox_for_session(session_id)
+            if outbox is not None:
+                try:
+                    await outbox.send_html(
+                        f"<p>🗜 <b>Context compacted</b> ({p.get('reason', 'routine')}): "
+                        f"{int(p.get('tokens_before') or 0):,} → {int(p.get('tokens_after') or 0):,} tokens; "
+                        f"{int(p.get('tier2_summarised') or 0)} turn(s) summarised. Older detail is now a summary in the transcript.</p>"
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("could not post the compaction note", exc_info=True)
         if event.type is EventType.TOOL_CALL_PENDING and event.payload.get("kind") == "ask_user":
             await renderer.flush()
             await self._ask(session_id, dict(event.payload.get("ask_user_payload") or {}))

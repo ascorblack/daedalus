@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import mimetypes
+import re
 import secrets
 import time
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from protocore.contracts.types import (
+    COMPACTION_SUMMARY_METADATA_KEY,
     Message,
     TextBlock,
     ThinkingBlock,
@@ -82,8 +84,17 @@ class ScheduleBody(BaseModel):
     model: str | None = None
 
 
+class RenameBody(BaseModel):
+    title: str
+
+
+class CompactBody(BaseModel):
+    instructions: str = ""
+
+
 class SettingsBody(BaseModel):
     model: dict[str, Any] | None = None
+    prompt: dict[str, Any] | None = None
     vision: dict[str, Any] | None = None
     mcp: dict[str, Any] | None = None
     self_change: dict[str, Any] | None = None
@@ -93,6 +104,9 @@ class SettingsBody(BaseModel):
     scheduler: dict[str, Any] | None = None
     telegram: dict[str, Any] | None = None
     answer_language: str | None = None
+
+
+_SUMMARY_WRAP_RE = re.compile(r"</?compacted-turn[^>]*>")
 
 
 def message_view(message: Message) -> dict[str, Any]:
@@ -113,9 +127,16 @@ def message_view(message: Message) -> dict[str, Any]:
             tool_calls.append({"id": block.tool_call_id, "name": block.name, "arguments": args})
         elif isinstance(block, ToolResultBlock):
             tool_results.append({"id": block.tool_call_id, "content": block.content[:4000], "is_error": block.is_error})
+    compaction = message.metadata.get("daedalus.compaction") if isinstance(message.metadata, dict) else None
+    is_summary = bool(message.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)) if isinstance(message.metadata, dict) else False
+    body = "".join(text)
+    if is_summary:
+        body = _SUMMARY_WRAP_RE.sub("", body).strip()
     return {
         "role": message.role.value,
-        "text": "".join(text),
+        "summary": is_summary,
+        "compaction": compaction,
+        "text": body,
         "thinking": "".join(thinking) or (message.reasoning_content or ""),
         "tool_calls": tool_calls,
         "tool_results": tool_results,
@@ -294,6 +315,29 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             except Exception:  # noqa: BLE001
                 pass
         return {"deleted": await manager.delete_session(session_id, delete_workspace=not keep_workspace)}
+
+    @api.patch("/api/sessions/{session_id}")
+    async def rename_session(session_id: str, body: RenameBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            if app.front is not None:
+                await app.front.rename_session(session_id, body.title)
+            else:
+                await manager.rename_session(session_id, body.title)
+        except KeyError as exc:
+            raise HTTPException(404, "no such session") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"id": session_id, "title": body.title.strip()[:128]}
+
+    @api.post("/api/sessions/{session_id}/compact")
+    async def compact_session(session_id: str, body: CompactBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            summary = await manager.compact(session_id, body.instructions)
+        except KeyError as exc:
+            raise HTTPException(404, "no such session") from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"summary": summary}
 
     @api.post("/api/sessions/{session_id}/stop")
     async def stop(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -479,9 +523,12 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     # -- settings -------------------------------------------------------------------
 
     def _settings_view() -> dict[str, Any]:
+        from daedalus.host.prompts import DEFAULT_RULES
+
         data = app.config.model_dump(mode="json")
         data["providers_available"] = list(manager.providers.available())
         data["usd_per_day"] = settings.usd_per_day
+        data["prompt"]["default_rules"] = DEFAULT_RULES.strip()
         return data
 
     @api.get("/api/settings")

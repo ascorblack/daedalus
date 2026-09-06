@@ -9,6 +9,7 @@ so the renderer can be exercised without a bot.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import random
 import time
@@ -45,7 +46,10 @@ _TOOL_ICONS = {
 
 class Outbox(Protocol):
     async def send_text(self, text: str, *, markdown: bool = True) -> int: ...
-    async def edit_text(self, message_id: int, text: str) -> None: ...
+    async def send_html(self, html: str) -> int: ...
+    """Send rich HTML (headings, lists, details, pre); degrades to plain text where unsupported."""
+    async def edit_text(self, message_id: int, text: str, *, html: bool = False) -> None: ...
+    """Edit a message; ``html`` marks rich HTML rather than plain text."""
     async def send_document(self, path: Path, caption: str | None = None) -> int: ...
     async def delete(self, message_id: int) -> None: ...
     async def send_draft(self, draft_id: int, text: str) -> bool: ...
@@ -202,32 +206,66 @@ class RunRenderer:
             v = self.view
             if not v.dirty:
                 return
-            text = self.render_status()
+            text = self.render_status_html()
             v.dirty = False
             if text == v.last_rendered:
                 return
             try:
-                if v.status_message_id is None:
-                    v.status_message_id = await self.outbox.send_text(text, markdown=False)
-                else:
-                    await self.outbox.edit_text(v.status_message_id, text)
+                await self._show_status(text)
                 v.last_rendered = text
             except Exception:  # noqa: BLE001 — a failed edit must never break the run
                 pass
             v.last_edit = time.monotonic()
 
+    async def _show_status(self, html_text: str) -> None:
+        """Create the status message on first use, edit it afterwards (rich HTML)."""
+        v = self.view
+        if v.status_message_id is None:
+            v.status_message_id = await self.outbox.send_html(html_text)
+        else:
+            await self.outbox.edit_text(v.status_message_id, html_text, html=True)
+
     # -- rendering ------------------------------------------------------------------
 
-    def render_status(self) -> str:
+    def _head(self, cost: float | None = None) -> str:
         v = self.view
         elapsed = int(time.monotonic() - v.started)
-        icon = {"running": "⏳", "awaiting": "❓", "completed": "✅", "failed": "❌", "cancelled": "⏹", "compacting": "🗜"}.get(v.state, "⏳")
-        head = f"{icon} {v.state} · {v.model} · {elapsed}s"
+        icon = {"running": "⏳", "awaiting": "❓", "completed": "✅", "failed": "❌", "cancelled": "⏹", "compacting": "🗜", "interrupted": "⏸"}.get(v.state, "⏳")
+        head = f"{icon} {v.state} · {v.model} · {_duration(elapsed)}"
         if v.tokens:
             head += f" · {v.tokens.get('total', 0):,} tok"
             if v.tokens.get("cache_read"):
                 head += f" ({v.tokens['cache_read']:,} cached)"
-        lines = [head]
+        if cost is not None:
+            head += f" · ${cost:.4f}"
+        return head
+
+    def render_status_html(self, cost: float | None = None) -> str:
+        """The status message as rich HTML: one line of vitals, the tool log folded away, the latest note."""
+        v = self.view
+        parts = [f"<p><b>{_esc(self._head(cost))}</b></p>"]
+        if v.current_tool:
+            line = f"▶ {v.current_tool}"
+            if v.progress_line:
+                line += f": {v.progress_line}"
+            parts.append(f"<p>{_esc(line)}</p>")
+        if v.tools:
+            items = "".join(f"<li>{_esc(t)}</li>" for t in v.tools[-40:])
+            if len(v.tools) > 40:
+                items = f"<li>… {len(v.tools) - 40} earlier</li>" + items
+            open_attr = " open" if v.state in ("running", "awaiting", "compacting") and len(v.tools) <= 6 else ""
+            parts.append(f"<details{open_attr}><summary>{len(v.tools)} tool call{'s' if len(v.tools) != 1 else ''}</summary><ul>{items}</ul></details>")
+        if v.narration and v.verbosity >= 1:
+            notes = v.narration[-3:] if v.state in ("running", "awaiting") else v.narration[-1:]
+            parts.append("<blockquote>" + "<br/>".join(_esc(n) for n in notes) + "</blockquote>")
+        if v.changed_files:
+            parts.append("<p>files: " + ", ".join(f"<code>{_esc(f)}</code>" for f in sorted(v.changed_files)[:20]) + "</p>")
+        return "".join(parts)[:12_000]
+
+    def render_status(self) -> str:
+        """Plain-text status (the fallback when rich editing is unavailable, and for tests)."""
+        v = self.view
+        lines = [self._head()]
         if v.current_tool:
             line = f"▶ {v.current_tool}"
             if v.progress_line:
@@ -282,20 +320,30 @@ class RunRenderer:
                 v.draft_sent = ""
         elif not final and status == "completed" and not v.tools:
             await self.outbox.send_text("(the agent finished without a reply)", markdown=False)
-        summary = self.render_status()
-        if cost is not None:
-            summary = summary.replace(" tok", f" tok · ${cost:.4f}", 1) if " tok" in summary else summary + f"\n${cost:.4f}"
+        summary = self.render_status_html(cost)
         v.dirty = False
         if v.status_message_id is not None:
             try:
-                await self.outbox.edit_text(v.status_message_id, summary)
+                await self.outbox.edit_text(v.status_message_id, summary, html=True)
             except Exception:  # noqa: BLE001
                 pass
         elif status != "completed" or v.tools:
             try:
-                await self.outbox.send_text(summary, markdown=False)
+                await self._show_status(summary)
             except Exception:  # noqa: BLE001
                 pass
+
+
+def _esc(text: str) -> str:
+    return html.escape(text, quote=False)
+
+
+def _duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60:02d}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
 
 
 def _args_summary(name: str, args: dict[str, Any]) -> str:

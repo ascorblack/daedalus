@@ -52,6 +52,17 @@ def _inline(segment: str) -> str:
     return re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], segment)
 
 
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def strip_tags(markup: str) -> str:
+    """Rich HTML → readable plain text (line breaks for block tags, entities decoded)."""
+    text = re.sub(r"</(p|li|details|summary|blockquote|h[1-6]|pre|tr)>", "\n", markup)
+    text = re.sub(r"<br\s*/?>", "\n", text)
+    text = _TAG_RE.sub("", text)
+    return html.unescape(re.sub(r"\n{3,}", "\n\n", text)).strip()[:4000]
+
+
 def split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
     """Split Markdown text into chunks under ``limit`` characters.
 
@@ -91,4 +102,4 @@ def split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
     return chunks
 
 
-__all__ = ["DOCUMENT_THRESHOLD", "TELEGRAM_LIMIT", "markdown_to_html", "split_message"]
+__all__ = ["DOCUMENT_THRESHOLD", "TELEGRAM_LIMIT", "markdown_to_html", "split_message", "strip_tags"]

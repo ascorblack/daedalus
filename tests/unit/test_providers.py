@@ -151,3 +151,39 @@ async def test_messages_to_wire_roundtrips_tool_history() -> None:
     assert wire[0] == {"role": "system", "content": "sys"}
     assert wire[2]["tool_calls"][0]["id"] == "c1" and wire[2]["content"] is None
     assert wire[3] == {"role": "tool", "tool_call_id": "c1", "content": "done"}
+
+
+async def test_dsml_markup_in_content_becomes_tool_calls() -> None:
+    markup = (
+        "Continuing.\n\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"t\">\n"
+        "<｜｜DSML｜｜parameter name=\"a\" string=\"true\">hello</｜｜DSML｜｜parameter>\n"
+        "</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>"
+    )
+    body = _sse([_chunk({"content": markup[:30]}), _chunk({"content": markup[30:]}, finish="stop", usage={"prompt_tokens": 1, "completion_tokens": 1})])
+    provider = _provider(body)
+    deltas = [d async for d in provider.stream_with_tools(_request())]
+    kinds = [d.kind for d in deltas]
+    assert ProviderDeltaKind.tool_use_start in kinds and ProviderDeltaKind.tool_use_stop in kinds
+    stop = next(d for d in deltas if d.kind is ProviderDeltaKind.tool_use_stop)
+    assert stop.tool_name == "t" and stop.tool_input_final == {"a": "hello"}
+    text = "".join(d.content or "" for d in deltas if d.kind is ProviderDeltaKind.text)
+    assert "DSML" not in text and text.strip() == "Continuing."
+    assert deltas[-1].finish_reason == "tool_use"
+
+
+def test_builtin_pricing_and_peak_windows() -> None:
+    from datetime import UTC, datetime
+
+    from daedalus.providers.pricing import pricing_table
+
+    table = pricing_table("deepseek", {})
+    price = table["deepseek-v4-flash"]
+    usage = {"input_tokens": 1_000_000, "cache_read_tokens": 0, "output_tokens": 0}
+    peak = datetime(2026, 9, 7, 2, 0, tzinfo=UTC)  # Monday 02:00 UTC
+    off = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
+    weekend = datetime(2026, 9, 6, 2, 0, tzinfo=UTC)  # Sunday
+    assert price.cost(usage, now=peak) == 0.44
+    assert price.cost(usage, now=off) == 0.22
+    assert price.cost(usage, now=weekend) == 0.22
+    override = pricing_table("deepseek", {"deepseek-v4-flash": {"input": 1.0, "output": 2.0, "cache_hit": 0.1}})
+    assert override["deepseek-v4-flash"].cost(usage, now=peak) == 1.0

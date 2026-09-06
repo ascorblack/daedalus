@@ -222,3 +222,34 @@ async def test_delete_session_removes_records_and_workspace(settings: Settings, 
         assert row["c"] == 0, table
     assert await manager.get_state(state.session.id) is None
     await manager.close()
+
+
+async def test_rename_updates_session_and_topic(settings: Settings, db: Database) -> None:
+    manager = await _manager(settings, db, ScriptedProvider([{"text": "hi"}]))
+    state = await manager.create_session("old")
+    await manager.db.execute(
+        "INSERT INTO topics(chat_id, thread_id, session_id, title, created_at) VALUES (?, ?, ?, ?, ?)",
+        (-1, 5, state.session.id, "old", "2026-01-01T00:00:00+00:00"),
+    )
+    renamed = await manager.rename_session(state.session.id, "  new title  ")
+    assert renamed.session.title == "new title"
+    row = await manager.db.fetchone("SELECT title FROM topics WHERE session_id = ?", (state.session.id,))
+    assert row["title"] == "new title"
+    assert (await manager.sessions.get(state.session.id, "daedalus")).title == "new title"
+    await manager.close()
+
+
+def test_transcript_for_summary_clips_tool_results() -> None:
+    from protocore.contracts.types import Message, MessageRole, TextBlock, ToolResultBlock, ToolUseBlock
+
+    from daedalus.host.session_runner import transcript_for_summary
+
+    history = [
+        Message(role=MessageRole.user, content_blocks=[TextBlock(text="do it")]),
+        Message(role=MessageRole.assistant, content_blocks=[ToolUseBlock(tool_call_id="c1", name="Exec", arguments_json='{"command": "ls"}')]),
+        Message(role=MessageRole.tool, content_blocks=[ToolResultBlock(tool_call_id="c1", content="x" * 5000)]),
+        Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="done")]),
+    ]
+    text = transcript_for_summary(history, result_chars=100)
+    assert "[user] do it" in text and "[tool call] Exec" in text and "[assistant] done" in text
+    assert " … " in text and len(text) < 1000
