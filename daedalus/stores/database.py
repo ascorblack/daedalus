@@ -210,6 +210,19 @@ MIGRATIONS: list[str] = [
         promoted_at TEXT
     );
     """,
+    # delivery ledger: a final answer that was generated but never confirmed sent is the one thing a restart can lose
+    """
+    CREATE TABLE deliveries (
+        run_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        text TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 

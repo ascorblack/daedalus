@@ -9,7 +9,7 @@ import re
 import shutil
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -262,8 +262,6 @@ class SessionManager:
         await self.sessions.update_metadata(session_id, state.session.metadata)
         if state.engine is not None:
             blocked = blocked_for(self.mcp, current)
-            from dataclasses import replace
-
             state.engine.config = replace(
                 state.engine.config,
                 tool_visibility_policy=ToolVisibilityPolicy(

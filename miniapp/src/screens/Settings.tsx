@@ -396,6 +396,63 @@ function ToolsTab({ s, save }: { s: Settings; save: (patch: any) => Promise<void
   );
 }
 
+type Check = { name: string; ok: boolean; message: string; severity: string; fix_hint: string; fixable: boolean; fixed: boolean };
+
+function HealthTab({ toast }: { toast: (t: string) => void }) {
+  const [data, setData] = useState<{ checks: Check[]; summary: Record<string, number> } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = async (fix = false) => {
+    setBusy(true);
+    try {
+      setData(await api.get(`/api/doctor?fix=${fix ? 1 : 0}`));
+      if (fix) toast("fixes applied");
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  if (!data) return <div className="empty">{busy ? "Checking…" : "Loading…"}</div>;
+  const mark = (c: Check) => (c.fixed ? "🔧" : c.ok ? "✅" : c.severity === "fail" ? "❌" : "⚠️");
+  const fixable = data.checks.some((c) => !c.ok && c.fixable);
+  return (
+    <>
+      <div className="card">
+        <div className="row">
+          <div className="grow">
+            <b>{data.summary.ok} ok</b> · {data.summary.warn} warnings · {data.summary.fail} failures
+          </div>
+          <button className="btn small" disabled={busy} onClick={() => load(false)}>
+            re-check
+          </button>
+          {fixable && (
+            <button className="btn small primary" disabled={busy} onClick={() => load(true)}>
+              apply safe fixes
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="card">
+        {data.checks.map((c, i) => (
+          <div key={i} className="row" style={{ alignItems: "flex-start", padding: "6px 0", borderTop: i ? "1px solid var(--line)" : undefined }}>
+            <span style={{ flex: "none", width: 22 }}>{mark(c)}</span>
+            <div className="grow" style={{ minWidth: 0 }}>
+              <div>
+                <b>{c.name}</b> <span className="sub">{c.message}</span>
+              </div>
+              {!c.ok && c.fix_hint && <div className="sub">→ {c.fix_hint}</div>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
 function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void }) {
   const [hb, setHb] = useState<HeartbeatStatus | null>(null);
   const [text, setText] = useState("");
@@ -511,7 +568,7 @@ function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void })
 export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
   const [s, setS] = useState<Settings | null>(null);
   const [status, setStatus] = useState<any>(null);
-  const [tab, setTab] = useState<"general" | "tools" | "heartbeat">("general");
+  const [tab, setTab] = useState<"general" | "tools" | "heartbeat" | "health">("general");
   useEffect(() => {
     api.get<Settings>("/api/settings").then(setS).catch((e) => toast((e as Error).message));
     api.get("/api/status").then(setStatus).catch(() => setStatus(null));
@@ -586,7 +643,9 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <button className={tab === "general" ? "on" : ""} onClick={() => setTab("general")}>General</button>
         <button className={tab === "tools" ? "on" : ""} onClick={() => setTab("tools")}>Tools</button>
         <button className={tab === "heartbeat" ? "on" : ""} onClick={() => setTab("heartbeat")}>Heartbeat</button>
+        <button className={tab === "health" ? "on" : ""} onClick={() => setTab("health")}>Health</button>
       </div>
+      {tab === "health" && <HealthTab toast={toast} />}
       {tab === "tools" && <ToolsTab s={s} save={save} />}
       {tab === "heartbeat" && <HeartbeatTab s={s} toast={toast} />}
       {tab === "general" && (

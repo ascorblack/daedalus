@@ -75,7 +75,7 @@ class McpToolProxy(Tool):
 
 def _output_limit(session_id: str) -> int:
     """The session's configured output cap (Exec, Read and MCP results share it)."""
-    from daedalus.host.services import locator
+    from daedalus.host.services import locator  # Lazy: keeps the MCP package importable without the host layer
 
     try:
         return locator.get(session_id).max_tool_output_chars

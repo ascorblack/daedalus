@@ -1,0 +1,119 @@
+"""Architecture invariants, as tests.
+
+A self-modifying agent can dissolve its own layering one accepted change at a time. These
+tests pin the boundaries: which packages may import the Telegram or HTTP frameworks, that
+the launcher and the core know nothing about the host, and that every in-function import
+states why it is not at the top of the module.
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+PKG = ROOT / "daedalus"
+CORE = ROOT.parent / "protocore-exp" / "protocore"
+
+TELEGRAM_ONLY = ("aiogram",)
+HTTP_FRAMEWORK = ("fastapi", "uvicorn", "starlette")
+NO_UPWARD = ("daedalus.transport", "daedalus.extensions", "daedalus.app", *TELEGRAM_ONLY, *HTTP_FRAMEWORK)
+
+
+def _modules(base: Path):  # type: ignore[no-untyped-def]
+    for path in sorted(base.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        yield path, ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
+def _imports(tree: ast.AST):  # type: ignore[no-untyped-def]
+    """Runtime imports only: an ``if TYPE_CHECKING:`` block never executes, so it crosses no boundary."""
+    skip: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
+            skip.update(id(n) for n in ast.walk(node))
+    for node in ast.walk(tree):
+        if id(node) in skip:
+            continue
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                yield alias.name, node
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            yield node.module, node
+
+
+def _violations(base: Path, forbidden: tuple[str, ...], *, allowed_dirs: tuple[str, ...] = ()) -> list[str]:
+    out = []
+    for path, tree in _modules(base):
+        rel = path.relative_to(ROOT).as_posix()
+        if any(rel.startswith(d) for d in allowed_dirs):
+            continue
+        for name, node in _imports(tree):
+            if any(name == f or name.startswith(f + ".") for f in forbidden):
+                out.append(f"{rel}:{node.lineno} imports {name}")
+    return out
+
+
+def test_only_the_telegram_transport_imports_aiogram() -> None:
+    assert _violations(PKG, TELEGRAM_ONLY, allowed_dirs=("daedalus/transport/telegram/",)) == []
+
+
+def test_only_the_api_extension_imports_the_http_framework() -> None:
+    assert _violations(PKG, HTTP_FRAMEWORK, allowed_dirs=("daedalus/extensions/api.py",)) == []
+
+
+def test_lower_layers_do_not_import_upward() -> None:
+    for layer in ("tools", "providers", "stores", "security", "mcp", "host"):
+        assert _violations(PKG / layer, NO_UPWARD) == [], layer
+
+
+def test_redaction_depends_on_nothing_in_the_host() -> None:
+    assert _violations(PKG / "security", ("daedalus",)) == []
+
+
+def test_launcher_knows_nothing_about_the_host_package() -> None:
+    assert _violations(ROOT / "launcher", ("daedalus",)) == []
+
+
+def test_core_never_mentions_the_host() -> None:
+    if not CORE.exists():
+        return
+    hits = [p.relative_to(CORE).as_posix() for p in CORE.rglob("*.py") if "daedalus" in p.read_text(encoding="utf-8", errors="ignore")]
+    assert hits == []
+
+
+def test_environment_is_read_in_one_place() -> None:
+    # config reads settings; shell and selfdev pass the environment on to child processes
+    allowed = {"daedalus/config.py", "daedalus/tools/shell.py", "daedalus/extensions/selfdev.py", "daedalus/__main__.py"}
+    hits = []
+    for path, tree in _modules(PKG):
+        rel = path.relative_to(ROOT).as_posix()
+        if rel in allowed:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in ("environ", "getenv") and isinstance(node.value, ast.Name) and node.value.id == "os":
+                hits.append(f"{rel}:{node.lineno}")
+    assert hits == [], "read settings through daedalus.config.Settings, not os.environ"
+
+
+LAZY_RE = re.compile(r"#\s*Lazy:\s*\S")
+
+
+def test_in_function_imports_state_their_reason() -> None:
+    """An import hidden inside a function is how an import cycle gets papered over; each one says why."""
+    offenders = []
+    for path, tree in list(_modules(PKG)) + list(_modules(ROOT / "launcher")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        rel = path.relative_to(ROOT).as_posix()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            for inner in ast.walk(node):
+                if not isinstance(inner, ast.Import | ast.ImportFrom):
+                    continue
+                span = "\n".join(lines[inner.lineno - 1 : (inner.end_lineno or inner.lineno)])
+                if not LAZY_RE.search(span):
+                    offenders.append(f"{rel}:{inner.lineno}")
+    assert offenders == [], "annotate with '# Lazy: <reason>' or move the import to the top"

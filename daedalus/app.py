@@ -7,6 +7,7 @@ import logging
 import signal
 
 from daedalus.config import RuntimeConfig, Settings
+from daedalus.host.boot_guard import BootGuard
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.transport.telegram.front import TelegramFront
@@ -24,6 +25,7 @@ class Application:
         self.background: list[asyncio.Task[None]] = []
         self.extensions: dict[str, object] = {}
         self.stopping = asyncio.Event()
+        self.guard = BootGuard(settings.state_dir)
 
     async def save_config(self, config: RuntimeConfig) -> None:
         self.config = config
@@ -32,6 +34,7 @@ class Application:
             self.manager.reload_config(config)
 
     async def start(self) -> None:
+        self.guard.on_boot()
         await self.db.open()
         self.manager = SessionManager(self.settings, self.config, db=self.db)
         await self.manager.start()
@@ -40,9 +43,20 @@ class Application:
         self.front = TelegramFront(self.settings, self.config, self.manager, save_config=self.save_config)
         await self._install_extensions()
         await self._report_startup()
+        if self.guard.skip_recovery:
+            note = (
+                f"⚠️ {self.guard.unclean_boots} unclean restarts in a row: boot recovery (resuming runs, re-sending "
+                "answers) is skipped this once so the bot stays up. Unfinished runs stay parked; /doctor shows them."
+            )
+            await self.front.notify(note, markdown=False)
+            inbox = self.extensions.get("inbox")
+            if inbox is not None:
+                await inbox.post("boot_guard", "Boot recovery skipped after repeated crashes", note, severity="error")  # type: ignore[attr-defined]
+            return
         resumed = await self.manager.resume_unfinished()
         if resumed:
             await self.front.notify(f"Resumed {len(resumed)} run(s) after restart.", markdown=False)
+        await self.front.redeliver_pending()
 
     async def _report_startup(self) -> None:
         """Tell the operator about a failed rebuild or an exhausted budget."""
@@ -62,7 +76,9 @@ class Application:
 
     async def _install_extensions(self) -> None:
         """Scheduler, balance monitor, self-development, API — each attaches here."""
-        from daedalus.extensions import install_all
+        from daedalus.extensions import (
+            install_all,  # Lazy: extensions import the Application type; a top-level import would be a cycle
+        )
 
         assert self.manager is not None and self.front is not None
         self.background.extend(await install_all(self))
@@ -89,6 +105,7 @@ class Application:
         if self.manager is not None:
             await self.manager.close()
         await self.db.close()
+        self.guard.on_clean_shutdown()
 
 
 async def serve(settings: Settings) -> int:

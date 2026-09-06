@@ -144,7 +144,7 @@ def preflight(repo: Path) -> tuple[bool, str]:
         (["uv", "sync", "--frozen", "--extra", "dev"], repo),
         (["uv", "run", "--frozen", "python", "-m", "compileall", "-q", "daedalus"], repo),
         (["uv", "run", "--frozen", "python", "-m", "daedalus", "check"], repo),
-        (["uv", "run", "--frozen", "python", "-m", "pytest", "-q", "-x", "tests/smoke"], repo),
+        (["uv", "run", "--frozen", "python", "-m", "pytest", "-q", "-x", "tests/smoke", "tests/unit/test_boundaries.py", "tests/unit/test_redact.py"], repo),
     ]
     miniapp = repo / "miniapp"
     if (miniapp / "package.json").exists() and shutil.which("npm"):

@@ -33,7 +33,10 @@ from protocore.contracts.types import (
 from pydantic import BaseModel
 
 from daedalus.config import PROVIDER_KINDS, ModelPresetConfig, ProviderConfig
-from daedalus.host.prompts import split_headline
+from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
+from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
+from daedalus.host.prompts import DEFAULT_RULES, split_headline
+from daedalus.host.session_runner import Attachment
 from daedalus.security import redact
 
 if TYPE_CHECKING:
@@ -484,8 +487,6 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         _: dict[str, Any] = Depends(auth),
     ) -> dict[str, Any]:
         """Send a message with attachments (or attachments alone) from the Mini App."""
-        from daedalus.host.session_runner import Attachment
-
         state = await manager.get_state(session_id)
         if state is None:
             raise HTTPException(404, "no such session")
@@ -697,6 +698,16 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "heartbeat": heartbeat.status() if heartbeat is not None else None,  # type: ignore[attr-defined]
         }
 
+    # -- doctor -------------------------------------------------------------------------
+
+    def _doctor_context(fix: bool) -> DoctorContext:
+        return DoctorContext(settings=settings, config=app.config, db=app.db, manager=manager, front=app.front, extensions=dict(app.extensions), guard=app.guard, fix=fix)
+
+    @api.get("/api/doctor")
+    async def doctor(fix: int = 0, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        checks = await run_checks(_doctor_context(bool(fix)))
+        return {"checks": [c.as_dict() for c in checks], "summary": summarize(checks)}
+
     # -- inbox --------------------------------------------------------------------------
 
     @api.get("/api/inbox")
@@ -728,9 +739,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         heartbeat = app.extensions.get("heartbeat")
         if heartbeat is None:
             raise HTTPException(503, "heartbeat is not installed")
-        from daedalus.extensions.heartbeat import TEMPLATE
-
-        return {**heartbeat.status(), "template": TEMPLATE}  # type: ignore[attr-defined]
+        return {**heartbeat.status(), "template": HEARTBEAT_TEMPLATE}  # type: ignore[attr-defined]
 
     @api.put("/api/heartbeat")
     async def heartbeat_put(body: HeartbeatBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -828,8 +837,6 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     # -- settings -------------------------------------------------------------------
 
     def _settings_view() -> dict[str, Any]:
-        from daedalus.host.prompts import DEFAULT_RULES
-
         data = app.config.model_dump(mode="json")
         data["providers_available"] = list(manager.providers.available())
         data["usd_per_day"] = settings.usd_per_day
@@ -1004,6 +1011,14 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
             await message.answer(f"Mini App: {url}/app/\nAPI token (for scripts): {token}")
 
         app.front.command_hooks["app"] = cmd_app
+
+        async def cmd_doctor(message, command) -> None:  # type: ignore[no-untyped-def]
+            fix = (command.args or "").strip().lower() == "fix"
+            ctx = DoctorContext(settings=app.settings, config=app.config, db=app.db, manager=app.manager, front=app.front, extensions=dict(app.extensions), guard=app.guard, fix=fix)
+            checks = await run_checks(ctx)
+            await message.answer(render_text(checks)[:4000])
+
+        app.front.command_hooks["doctor"] = cmd_doctor
     return [asyncio.create_task(server.serve(), name="api-server")]
 
 

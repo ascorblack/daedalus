@@ -36,7 +36,9 @@ from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
 from daedalus.config import RuntimeConfig, Settings
+from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import Attachment, SessionManager, SessionState
+from daedalus.stores.sqlite import DeliveryLedger
 from daedalus.transport.telegram.markdown import markdown_to_html, split_message, strip_tags
 from daedalus.transport.telegram.render import Outbox, RunRenderer, RunView
 
@@ -298,6 +300,7 @@ class TelegramFront:
         self._topic_status: dict[str, str] = {}
         self._topic_status_tasks: dict[str, asyncio.Task[None]] = {}
         self._stale_counts: dict[tuple[int, int], int] = {}
+        self.ledger = DeliveryLedger(manager.db)
         self._stale_notices: dict[tuple[int, int], asyncio.Task[None]] = {}
         self.operator_hooks: dict[str, Callable[..., Awaitable[str]]] = {}
         """rebuild / rollback / panic, installed by the application."""
@@ -351,6 +354,19 @@ class TelegramFront:
             return
         for chunk in split_message(text):
             await outbox.send_text(chunk, markdown=markdown)
+
+    async def send_choice(self, outbox: TelegramOutbox, text: str, rows: list[list[tuple[str, str]]]) -> int:
+        """Send a message with inline buttons ``[(label, callback_data), …]`` per row; returns the message id.
+
+        Extensions build their approval keyboards through this so only the transport speaks aiogram.
+        """
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label[:60], callback_data=data) for label, data in row] for row in rows])
+        msg = await tg_call(self.bot.send_message, outbox.chat_id, text, message_thread_id=outbox.thread_id, reply_markup=keyboard, flood_chat=outbox.chat_id)
+        return int(msg.message_id)
+
+    async def send_force_reply(self, chat_id: int, thread_id: int | None, text: str) -> None:
+        """Ask for a one-message free-text reply (the client opens the reply box)."""
+        await tg_call(self.bot.send_message, chat_id, text, message_thread_id=thread_id, reply_markup=ForceReply(selective=True), flood_chat=chat_id)
 
     async def binding_for_session(self, session_id: str) -> TopicBinding | None:
         row = await self.manager.db.fetchone("SELECT * FROM topics WHERE session_id = ?", (session_id,))
@@ -651,8 +667,6 @@ class TelegramFront:
     async def cmd_prompt(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
-        from daedalus.host.prompts import DEFAULT_RULES
-
         rules = self.config.prompt.rules.strip() or DEFAULT_RULES.strip()
         origin = "custom (config)" if self.config.prompt.rules.strip() else "built-in default"
         outbox = TelegramOutbox(self.bot, message.chat.id, message.message_thread_id if message.is_topic_message else None)
@@ -1363,8 +1377,36 @@ class TelegramFront:
             return
         services = state.services if state is not None else None
         quiet = services is not None and services.extra.get("silent_run") == run_id
+        final = split_headline(renderer.view.text_buffer.strip())[0] if not quiet else ""
+        if final:
+            await self.ledger.begin(run_id, session_id, final)
         await renderer.finish(status, workspace=state.workspace if state else Path("/tmp"), quiet=quiet)
+        if final:
+            await self.ledger.settle(run_id, delivered=not renderer.view.delivery_failed, error="delivery failed" if renderer.view.delivery_failed else "")
         self._renderers.pop(session_id, None)
+
+    async def redeliver_pending(self) -> int:
+        """After a restart, re-send answers the previous process generated but never confirmed sent.
+
+        Honest at-least-once: the text is marked as recovered because Telegram may already have it.
+        """
+        rows = await self.ledger.recoverable()
+        sent = 0
+        for row in rows:
+            outbox = await self.outbox_for_session(row["session_id"])
+            if outbox is None:
+                continue
+            await self.ledger.begin(row["run_id"], row["session_id"], row["text"])
+            try:
+                await outbox.send_text("↩️ _recovered reply — the run finished right before a restart; you may already have it_", markdown=True)
+                for chunk in split_message(row["text"]):
+                    await outbox.send_text(chunk)
+                await self.ledger.settle(row["run_id"], delivered=True)
+                sent += 1
+            except Exception as exc:  # noqa: BLE001
+                await self.ledger.settle(row["run_id"], delivered=False, error=f"{type(exc).__name__}: {exc}")
+        await self.ledger.prune()
+        return sent
 
     # -- services for tools ---------------------------------------------------------
 

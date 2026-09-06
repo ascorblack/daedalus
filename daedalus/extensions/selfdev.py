@@ -13,11 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
-
 from daedalus import supervisor_client
 
 if TYPE_CHECKING:
+    from aiogram.types import CallbackQuery, Message
+
     from daedalus.app import Application
 
 logger = logging.getLogger(__name__)
@@ -181,19 +181,15 @@ class SelfDevelopment:
         if outbox is None:
             return
         text = f"🛠 Change proposal ({repo}): {title}\n\n{summary[:1500]}\n\n{diffstat[-800:]}\n\n{pr_url}"
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Approve", callback_data=f"cp:{proposal_id}:approve"),
-                    InlineKeyboardButton(text="❌ Reject", callback_data=f"cp:{proposal_id}:reject"),
-                ],
-                [InlineKeyboardButton(text="✍️ Reject with reason", callback_data=f"cp:{proposal_id}:reason")],
-            ]
+        message_id = await front.send_choice(
+            outbox,
+            text,
+            [
+                [("✅ Approve", f"cp:{proposal_id}:approve"), ("❌ Reject", f"cp:{proposal_id}:reject")],
+                [("✍️ Reject with reason", f"cp:{proposal_id}:reason")],
+            ],
         )
-        from daedalus.transport.telegram.front import tg_call
-
-        msg = await tg_call(front.bot.send_message, outbox.chat_id, text, message_thread_id=outbox.thread_id, reply_markup=keyboard)
-        await self.app.db.execute("UPDATE change_proposals SET message_id = ? WHERE id = ?", (msg.message_id, proposal_id))
+        await self.app.db.execute("UPDATE change_proposals SET message_id = ? WHERE id = ?", (message_id, proposal_id))
 
     async def decide(self, proposal_id: str, decision: str, *, reason: str = "") -> str:
         row = await self.app.db.fetchone("SELECT * FROM change_proposals WHERE id = ?", (proposal_id,))
@@ -293,11 +289,10 @@ class SelfDevelopment:
             if query.message is not None:
                 thread = query.message.message_thread_id if query.message.is_topic_message else 0
                 self._reason_waits[(query.message.chat.id, thread or 0)] = proposal_id
-                await self.app.front.bot.send_message(  # type: ignore[union-attr]
+                await self.app.front.send_force_reply(  # type: ignore[union-attr]
                     query.message.chat.id,
+                    query.message.message_thread_id if query.message.is_topic_message else None,
                     "Why is it rejected? (reply in one message)",
-                    message_thread_id=query.message.message_thread_id if query.message.is_topic_message else None,
-                    reply_markup=ForceReply(selective=True),
                 )
             return
         result = await self.decide(proposal_id, "approve" if action == "approve" else "reject")

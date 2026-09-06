@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from protocore.contracts.events import IEventStream
@@ -581,3 +581,58 @@ __all__ = [
     "SqliteSessionStore",
     "SqliteUsageSink",
 ]
+
+
+class DeliveryLedger:
+    """Rows around the send of a final answer: pending → attempting → delivered | failed.
+
+    Honest at-least-once: a row left ``attempting`` when the process died is re-sent after
+    a restart with a visible "recovered" marker, because Telegram may already have it.
+    Poison rows cannot spin — three attempts, one day of staleness — and the ledger never
+    blocks a send: every method swallows its own errors.
+    """
+
+    MAX_ATTEMPTS = 3
+    MAX_AGE_HOURS = 24
+    KEEP_DAYS = 7
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def begin(self, run_id: str, session_id: str, text: str) -> None:
+        try:
+            await self._db.execute(
+                "INSERT OR REPLACE INTO deliveries(run_id, session_id, text, status, attempts, created_at, updated_at)"
+                " VALUES (?, ?, ?, 'attempting', COALESCE((SELECT attempts FROM deliveries WHERE run_id = ?), 0) + 1, ?, ?)",
+                (run_id, session_id, text[:200_000], run_id, _now(), _now()),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def settle(self, run_id: str, *, delivered: bool, error: str = "") -> None:
+        try:
+            await self._db.execute(
+                "UPDATE deliveries SET status = ?, error = ?, updated_at = ? WHERE run_id = ?",
+                ("delivered" if delivered else "failed", error[:500] or None, _now(), run_id),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def recoverable(self) -> list[dict[str, Any]]:
+        """Rows a restart should re-send: not delivered, under the attempt cap, not stale."""
+        cutoff = (datetime.now(UTC) - timedelta(hours=self.MAX_AGE_HOURS)).isoformat()
+        try:
+            rows = await self._db.fetchall(
+                "SELECT * FROM deliveries WHERE status IN ('pending', 'attempting', 'failed') AND attempts < ? AND created_at >= ? ORDER BY created_at",
+                (self.MAX_ATTEMPTS, cutoff),
+            )
+            return [dict(r) for r in rows]
+        except Exception:  # noqa: BLE001
+            return []
+
+    async def prune(self) -> None:
+        cutoff = (datetime.now(UTC) - timedelta(days=self.KEEP_DAYS)).isoformat()
+        try:
+            await self._db.execute("DELETE FROM deliveries WHERE updated_at < ?", (cutoff,))
+        except Exception:  # noqa: BLE001
+            pass

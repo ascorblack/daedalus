@@ -3,6 +3,7 @@
 ``daedalus serve``  — run the bot (Telegram + API + scheduler).
 ``daedalus check``  — open the state, register tools and providers, exit.
 ``daedalus run``    — run one agent session from the terminal (no Telegram).
+``daedalus doctor`` — check the deployment (config, state, git, providers); ``--fix`` applies safe repairs.
 """
 
 from __future__ import annotations
@@ -28,8 +29,8 @@ def _settings(args: argparse.Namespace) -> Settings:
 
 
 async def cmd_check(args: argparse.Namespace) -> int:
-    from daedalus.host.session_runner import SessionManager
-    from daedalus.stores.database import Database
+    from daedalus.host.session_runner import SessionManager  # Lazy: each subcommand imports only what it runs
+    from daedalus.stores.database import Database  # Lazy: each subcommand imports only what it runs
 
     settings = _settings(args)
     config = RuntimeConfig.load(settings.config_path)
@@ -55,8 +56,34 @@ async def cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_doctor(args: argparse.Namespace) -> int:
+    from daedalus.doctor import (  # Lazy: each subcommand imports only what it runs
+        DoctorContext,
+        render_text,
+        run_checks,
+        summarize,
+    )
+    from daedalus.stores.database import Database  # Lazy: each subcommand imports only what it runs
+
+    settings = _settings(args)
+    config = RuntimeConfig.load(settings.config_path)
+    db = Database(settings.db_path)
+    await db.open()
+    try:
+        checks = await run_checks(DoctorContext(settings=settings, config=config, db=db, fix=args.fix))
+    finally:
+        await db.close()
+    if args.json:
+        import json  # Lazy: only the --json output needs it
+
+        print(json.dumps({"checks": [c.as_dict() for c in checks], "summary": summarize(checks)}, indent=2))
+    else:
+        print(render_text(checks))
+    return 1 if summarize(checks)["fail"] else 0
+
+
 async def cmd_run(args: argparse.Namespace) -> int:
-    from daedalus.host.cli_session import run_terminal_session
+    from daedalus.host.cli_session import run_terminal_session  # Lazy: each subcommand imports only what it runs
 
     settings = _settings(args)
     config = RuntimeConfig.load(settings.config_path)
@@ -64,7 +91,7 @@ async def cmd_run(args: argparse.Namespace) -> int:
 
 
 async def cmd_serve(args: argparse.Namespace) -> int:
-    from daedalus.app import serve
+    from daedalus.app import serve  # Lazy: each subcommand imports only what it runs
 
     settings = _settings(args)
     return await serve(settings)
@@ -77,6 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check", help="validate configuration and registration, then exit")
+    doctor = sub.add_parser("doctor", help="check the deployment: config, state, git, providers")
+    doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--fix", action="store_true", help="apply the safe fixes (stale snapshots, orphan workspaces)")
     run = sub.add_parser("run", help="run one session from the terminal")
     run.add_argument("--prompt", "-p", default=None, help="first message; omit for interactive input")
     run.add_argument("--title", default="terminal")
@@ -93,8 +123,8 @@ class _DiagFilter(logging.Filter):
 
 def _install_task_dump() -> None:
     """SIGUSR1 prints every asyncio task's stack — the way to see what a stuck bot awaits."""
-    import signal
-    import traceback
+    import signal  # Lazy: only the dump handler needs it
+    import traceback  # Lazy: only the dump handler needs it
 
     def dump(signum: int, frame: object) -> None:
         try:
@@ -117,13 +147,16 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    from daedalus.security.redact import install_logging_filter, shared
+    from daedalus.security.redact import (  # Lazy: logging is configured before the package is imported
+        install_logging_filter,
+        shared,
+    )
 
     for handler_ in logging.getLogger().handlers:
         handler_.addFilter(_DiagFilter())
     install_logging_filter(shared())
     _install_task_dump()
-    handler = {"check": cmd_check, "run": cmd_run, "serve": cmd_serve}[args.command]
+    handler = {"check": cmd_check, "run": cmd_run, "serve": cmd_serve, "doctor": cmd_doctor}[args.command]
     return asyncio.run(handler(args))
 
 

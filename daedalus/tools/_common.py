@@ -5,6 +5,7 @@ from __future__ import annotations
 from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 
+from daedalus.config import ToolsConfig
 from daedalus.host.services import SessionServices, locator
 
 
@@ -18,8 +19,6 @@ def services_for(context: ToolContext) -> SessionServices:
 
 def tool_config(context: ToolContext):  # type: ignore[no-untyped-def]
     """The live ``[tools]`` section (read from the running manager, so edits apply at once)."""
-    from daedalus.config import ToolsConfig
-
     manager = services_for(context).extra.get("manager")
     config = getattr(manager, "config", None)
     return getattr(config, "tools", None) or ToolsConfig()
