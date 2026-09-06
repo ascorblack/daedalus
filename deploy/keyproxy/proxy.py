@@ -40,7 +40,7 @@ DEFAULT_UPSTREAMS = {
     "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
 }
 BUDGET_FLAG = Path(os.environ.get("KEYPROXY_BUDGET_FLAG", "/srv/state/BUDGET_EXCEEDED"))
-BUDGET_DB = Path(os.environ.get("KEYPROXY_BUDGET_DB", "/srv/state/daedalus.db"))
+BUDGET_DB = Path(os.environ.get("KEYPROXY_BUDGET_DB", "/srv/state/daedalus.sqlite"))
 BUDGET_USD_PER_DAY = float(os.environ.get("KEYPROXY_USD_PER_DAY", "0") or 0)
 BUDGET_CACHE_SECONDS = 30.0
 BUDGET_EXEMPT_TAILS = (("user", "balance"), ("credits",), ("models",))

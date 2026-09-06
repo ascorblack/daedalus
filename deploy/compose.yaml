@@ -80,7 +80,7 @@ services:
     environment:
       KEYPROXY_PORT: "3200"
       KEYPROXY_BUDGET_FLAG: /srv/state/BUDGET_EXCEEDED
-      KEYPROXY_BUDGET_DB: /srv/state/daedalus.db
+      KEYPROXY_BUDGET_DB: /srv/state/daedalus.sqlite
     volumes:
       - daedalus-state:/srv/state:ro
     networks: [keys]
