@@ -24,6 +24,7 @@ from protocore.contracts.types import ToolDefinition, ToolParameterSchema, ToolR
 
 from daedalus.config import McpServerConfig
 from daedalus.mcp.oauth import MCPOAuthClient, NeedsAuthorization
+from daedalus.tools._common import clip
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,18 @@ class McpToolProxy(Tool):
                 dump = getattr(item, "model_dump", None)
                 parts.append(json.dumps(dump() if dump else str(item), default=str)[:2000])
         content = "\n".join(parts) or "(empty result)"
-        return ToolResult(tool_call_id=call_id, content=content[:60_000], is_error=bool(getattr(result, "is_error", None) or getattr(result, "isError", False)))
+        content = clip(content, _output_limit(context.session_id), note="the MCP tool returned more")
+        return ToolResult(tool_call_id=call_id, content=content, is_error=bool(getattr(result, "is_error", None) or getattr(result, "isError", False)))
+
+
+def _output_limit(session_id: str) -> int:
+    """The session's configured output cap (Exec, Read and MCP results share it)."""
+    from daedalus.host.services import locator
+
+    try:
+        return locator.get(session_id).max_tool_output_chars
+    except RuntimeError:
+        return 60_000
 
 
 def _describe(exc: BaseException) -> str:

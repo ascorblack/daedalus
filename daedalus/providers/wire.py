@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -17,6 +19,8 @@ from protocore.contracts.types import (
     ToolResultBlock,
     ToolUseBlock,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def tools_to_wire(tools: Sequence[ToolDefinition]) -> list[dict[str, Any]]:
@@ -134,15 +138,47 @@ def _text_of(message: Message) -> str:
 
 
 def parse_json_arguments(raw: str) -> dict[str, Any]:
-    """Parse tool-call arguments, tolerating empty strings and trailing junk."""
+    """Parse tool-call arguments, tolerating the ways models get JSON slightly wrong.
+
+    In order: as written; without a code fence; with trailing commas removed; with
+    single-quoted strings; the outermost ``{…}`` slice; and finally with unbalanced
+    braces and quotes closed (a call cut off by the output cap). Every repair is
+    logged so a semantically wrong call can be traced back to its raw text.
+    """
     text = (raw or "").strip()
     if not text:
         return {}
     try:
         value = json.loads(text)
     except json.JSONDecodeError:
-        value = _repair_json(text)
+        value, how = _repair_arguments(text)
+        logger.warning("tool-call arguments repaired (%s): %.200r", how, raw)
     return value if isinstance(value, dict) else {"value": value}
+
+
+_ARGS_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+_TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
+_SINGLE_QUOTED_RE = re.compile(r"'((?:[^'\\]|\\.)*)'")
+
+
+def _repair_arguments(text: str) -> tuple[Any, str]:
+    candidates: list[tuple[str, str]] = []
+    fenced = _ARGS_FENCE_RE.match(text)
+    if fenced:
+        candidates.append(("fence", fenced.group(1)))
+    base = fenced.group(1) if fenced else text
+    candidates.append(("trailing-comma", _TRAILING_COMMA_RE.sub(r"\1", base)))
+    if "'" in base and '"' not in base:
+        candidates.append(("single-quotes", _SINGLE_QUOTED_RE.sub(lambda m: json.dumps(m.group(1)), base)))
+    start, end = base.find("{"), base.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(("brace-slice", _TRAILING_COMMA_RE.sub(r"\1", base[start : end + 1])))
+    for how, candidate in candidates:
+        try:
+            return json.loads(candidate), how
+        except json.JSONDecodeError:
+            continue
+    return _repair_json(base), "truncated"
 
 
 def _repair_json(text: str) -> Any:

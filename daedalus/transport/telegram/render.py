@@ -21,6 +21,7 @@ from typing import Any, Protocol
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
+from daedalus.security.redact import redact
 from daedalus.transport.telegram.markdown import DOCUMENT_THRESHOLD, split_message
 
 _TOOL_ICONS = {
@@ -136,7 +137,7 @@ class RunRenderer:
             if v.verbosity >= 2:
                 content = str(p.get("content") or "")
                 if content:
-                    v.narration.append(f"↳ {content[:300]}")
+                    v.narration.append(f"↳ {redact(content[:300])}")
             self._mark()
         elif t is EventType.MESSAGE_STOP:
             used = p.get("tokens_used") or {}
@@ -350,12 +351,13 @@ def _duration(seconds: int) -> str:
 
 
 def _args_summary(name: str, args: dict[str, Any]) -> str:
+    """One line of arguments for the tool log, with secrets masked before they reach the chat."""
     if name == "Exec":
-        return str(args.get("command", ""))[:120]
+        return redact(str(args.get("command", "")))[:120]
     for key in ("path", "pattern", "url", "query", "skill", "title", "name"):
         if key in args:
-            return str(args[key])[:120]
-    return json.dumps(args, ensure_ascii=False)[:120] if args else ""
+            return redact(str(args[key]))[:120]
+    return redact(json.dumps(args, ensure_ascii=False))[:120] if args else ""
 
 
 __all__ = ["Outbox", "RunRenderer", "RunView"]

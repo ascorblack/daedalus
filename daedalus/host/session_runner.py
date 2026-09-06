@@ -34,17 +34,19 @@ from protocore.runtime.live_control import new_queued_prompt
 from protocore.runtime.loop_state import LoopState
 from protocore.runtime.query import query
 from protocore.runtime.query_engine import QueryEngine
-from protocore.tests_support.adapters import InMemoryHookManager, InMemoryToolRegistry
+from protocore.tests_support.adapters import InMemoryToolRegistry
 from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.engine_factory import TENANT, EngineDeps, build_engine
+from daedalus.host.hooks import DaedalusHookManager
 from daedalus.host.services import SessionServices, locator
 from daedalus.host.skills import DirectorySkillStore
 from daedalus.mcp.manager import McpManager, blocked_for
 from daedalus.providers.chain import build_chain
 from daedalus.providers.registry import ProviderRegistry
+from daedalus.security import redact
 from daedalus.stores.blobs import FileBlobStore
 from daedalus.stores.database import Database
 from daedalus.stores.persistent import PersistentMemory, PersistentWorkspace
@@ -121,7 +123,9 @@ class SessionManager:
         self.memory = PersistentMemory(db)
         self.workspace_units = PersistentWorkspace(db)
         self.skills = DirectorySkillStore(settings.skills_dir)
-        self.hooks = InMemoryHookManager()
+        self.redactor = redact.shared()
+        self._configure_redactor(settings, config)
+        self.hooks = DaedalusHookManager(self.redactor)
         self.tools = InMemoryToolRegistry()
         self.providers = ProviderRegistry(
             settings, config, usage_sink=self.usage, image_loader=self._load_image
@@ -177,8 +181,24 @@ class SessionManager:
         """Called after a restart for every session still waiting on a question."""
         self._pending_restored.append(callback)
 
+    def _configure_redactor(self, settings: Settings, config: RuntimeConfig) -> None:
+        """Every credential this process holds is a value the redactor masks wherever it shows up."""
+        values: list[str] = [
+            settings.telegram_bot_token,
+            settings.deepseek_api_key,
+            settings.openrouter_api_key,
+            settings.vllm_api_key,
+            settings.github_token,
+        ]
+        values.extend(p.api_key for p in config.providers.values())
+        for server in config.mcp.servers.values():
+            values.extend(server.headers.values())
+            values.extend(server.env.values())
+        self.redactor.replace_values(values)
+
     def reload_config(self, config: RuntimeConfig) -> None:
         self.config = config
+        self._configure_redactor(self.settings, config)
         self.providers.reload(config)
         self.mcp.reload(config.mcp.servers)
         for state in self._states.values():

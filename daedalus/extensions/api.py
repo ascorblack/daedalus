@@ -33,6 +33,7 @@ from protocore.contracts.types import (
 from pydantic import BaseModel
 
 from daedalus.config import PROVIDER_KINDS, ModelPresetConfig, ProviderConfig
+from daedalus.security import redact
 
 if TYPE_CHECKING:
     from daedalus.app import Application
@@ -272,9 +273,9 @@ def message_view(message: Message) -> dict[str, Any]:
                 args = json.loads(block.arguments_json or "{}")
             except json.JSONDecodeError:
                 args = {"raw": block.arguments_json}
-            tool_calls.append({"id": block.tool_call_id, "name": block.name, "arguments": args})
+            tool_calls.append({"id": block.tool_call_id, "name": block.name, "arguments": redact.shared().redact_any(args)})
         elif isinstance(block, ToolResultBlock):
-            tool_results.append({"id": block.tool_call_id, "content": block.content[:4000], "is_error": block.is_error})
+            tool_results.append({"id": block.tool_call_id, "content": redact.redact(block.content[:4000]), "is_error": block.is_error})
     compaction = message.metadata.get("daedalus.compaction") if isinstance(message.metadata, dict) else None
     is_summary = bool(message.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)) if isinstance(message.metadata, dict) else False
     body = "".join(text)

@@ -12,10 +12,10 @@ from protocore.runtime.query_engine import QueryEngine, QueryEngineConfig
 from protocore.runtime.runtime_constants import default_runtime_constants
 from protocore.runtime.tool_dispatch import ToolDispatcher
 from protocore.runtime.tool_permission import ToolPermissionGate
-from protocore.tests_support.adapters import InMemoryHookManager
 
 from daedalus.config import RuntimeConfig
 from daedalus.host import prompts
+from daedalus.host.hooks import DaedalusHookManager
 from daedalus.providers.openai_compat import OpenAICompatibleProvider
 from daedalus.stores.blobs import FileBlobStore
 from daedalus.stores.sqlite import SqliteEventStream
@@ -29,7 +29,7 @@ class EngineDeps:
     event_stream: SqliteEventStream
     blob_store: FileBlobStore
     skill_store: Any
-    hook_manager: InMemoryHookManager
+    hook_manager: DaedalusHookManager
     bot_repo: Path
     core_repo: Path
     governance_path: Path
@@ -56,6 +56,11 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
         # Long tasks are the point: no per-run tool-call cap; spend and iterations bound the run.
         leader_tool_call_soft_cap=0,
         compaction_protect_first_user_turn=True,
+        # A reasoning model that returns neither text nor a tool call gets a nudge to
+        # continue instead of ending the run; a repeating text tail is cut and nudged,
+        # and the same tool call with the same arguments is refused after a few repeats.
+        resilience_post_tool_empty_nudge_enabled=True,
+        loop_guard_enabled=True,
     )
 
 

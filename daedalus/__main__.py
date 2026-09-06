@@ -117,8 +117,11 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    from daedalus.security.redact import RedactingFilter, shared
+
     for handler_ in logging.getLogger().handlers:
         handler_.addFilter(_DiagFilter())
+        handler_.addFilter(RedactingFilter(shared()))
     _install_task_dump()
     handler = {"check": cmd_check, "run": cmd_run, "serve": cmd_serve}[args.command]
     return asyncio.run(handler(args))
