@@ -159,6 +159,19 @@ MIGRATIONS: list[str] = [
         fired_at TEXT
     );
     """,
+    # transcript: everything the operator and the agent ever exchanged, for display.
+    # session_messages is the model's working history and shrinks under compaction.
+    """
+    CREATE TABLE transcript (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        message TEXT NOT NULL,
+        UNIQUE (session_id, key)
+    );
+    CREATE INDEX transcript_session ON transcript(session_id, seq);
+    ALTER TABLE live_control ADD COLUMN provider TEXT;
+    """,
 ]
 
 

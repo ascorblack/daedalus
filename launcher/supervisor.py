@@ -151,12 +151,15 @@ def preflight(repo: Path) -> tuple[bool, str]:
         steps.insert(1, (["npm", "ci", "--no-audit", "--no-fund"], miniapp))
         steps.insert(2, (["npm", "run", "build"], miniapp))
     transcript: list[str] = []
-    for step, cwd in steps:
-        code, out = run(step, cwd=cwd, timeout=1200)
-        transcript.append(f"$ {' '.join(step)}\n{out}")
-        if code != 0:
-            return False, "\n".join(transcript)
-    return True, "\n".join(transcript)
+    try:
+        for step, cwd in steps:
+            code, out = run(step, cwd=cwd, timeout=1200)
+            transcript.append(f"$ {' '.join(step)}\n{out}")
+            if code != 0:
+                return False, "\n".join(transcript)
+        return True, "\n".join(transcript)
+    finally:
+        restore_owner(repo)  # npm/uv wrote node_modules, dist and caches as root
 
 
 class Supervisor:

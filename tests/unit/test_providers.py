@@ -252,3 +252,17 @@ async def test_core_tier2_compaction_runs_through_the_provider() -> None:
     assert summaries and "<compacted-turn" in summaries[0].text
     # The most recent turns stay verbatim so the model knows where it stopped.
     assert history[-1].content_blocks[0].content.startswith("file line")  # type: ignore[union-attr]
+
+
+def test_session_provider_override_puts_that_client_first() -> None:
+    from daedalus.config import RuntimeConfig, Settings
+    from daedalus.providers.registry import ProviderRegistry
+
+    settings = Settings(deepseek_api_key="a", openrouter_api_key="b", vllm_base_url="http://vllm.test/v1")
+    config = RuntimeConfig()
+    config.providers["vllm"].default_model = "Qwen3.6"
+    registry = ProviderRegistry(settings, config)
+    rungs = registry.rungs_for_session(config, "vllm", None)
+    assert rungs[0][0].endpoint.id == "vllm" and rungs[0][1] == "Qwen3.6"
+    assert [p.endpoint.id for p, _ in rungs[1:]] == ["deepseek", "openrouter"]
+    assert registry.rungs_for_session(config, "nope")[0][0].endpoint.id == "deepseek"

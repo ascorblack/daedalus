@@ -13,7 +13,8 @@ const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: nu
 type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean };
 type NoteItem = { kind: "note"; text: string };
 type ThinkItem = { kind: "thinking"; text: string };
-type Activity = ToolItem | NoteItem | ThinkItem;
+type SummaryItem = { kind: "summary"; text: string; reason: string };
+type Activity = ToolItem | NoteItem | ThinkItem | SummaryItem;
 
 type Turn = {
   key: string;
@@ -48,10 +49,21 @@ function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Tu
   };
   messages.forEach((m, i) => {
     const at = Date.parse(m.created_at) || Date.now();
-    if (m.role === "tool") return;
+    if (m.role === "tool" || m.internal) return;
     if (m.summary) {
-      turns.push({ key: `s${i}`, summary: m, activity: [], answer: "", startedAt: at, endedAt: at, pendingTools: 0 });
-      current = null;
+      if (m.compaction?.reason === "manual") {
+        // The whole history was replaced: this block is the new beginning.
+        turns.push({ key: `s${i}`, summary: m, activity: [], answer: "", startedAt: at, endedAt: at, pendingTools: 0 });
+        current = null;
+        return;
+      }
+      // Automatic compaction: a step inside the turn, where the summarised work used to be.
+      if (!current) current = open(`a${i}`, at);
+      if (current.answer) {
+        current.activity.push({ kind: "note", text: current.answer });
+        current.answer = "";
+      }
+      current.activity.push({ kind: "summary", text: m.text, reason: m.compaction?.reason ?? "auto" });
       return;
     }
     if (m.role === "user") {
@@ -112,6 +124,8 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
   const [view, setView] = useState<"chat" | "files" | "mcp">("chat");
   const [menu, setMenu] = useState(false);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
+  const [picker, setPicker] = useState<null | { providers: Record<string, { default_model: string }>; available: string[]; global: string }>(null);
+  const [custom, setCustom] = useState("");
   const [tick, setTick] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -310,6 +324,26 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
     }
   }
 
+  async function openPicker() {
+    try {
+      const st = await api.get<any>("/api/settings");
+      setPicker({ providers: st.providers ?? {}, available: st.providers_available ?? [], global: `${st.model.provider}/${st.model.name}` });
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
+  async function chooseModel(body: Record<string, unknown>) {
+    setPicker(null);
+    try {
+      const r = await api.post<{ model: string }>(`/api/sessions/${id}/model`, body);
+      toast(`model: ${r.model}`);
+      load();
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
   async function remove() {
     setMenu(false);
     if (!window.confirm("Delete this session, its topic and its workspace?")) return;
@@ -382,6 +416,39 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
         )}
       </div>
 
+      {picker && (
+        <div className="sheet-backdrop" onClick={() => setPicker(null)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="grip" />
+            <h3>Model for this session</h3>
+            <div className="sheet-body">
+              <button className="menu-item" onClick={() => chooseModel({ clear: true })}>
+                Global default <span className="sub">{picker.global}</span>
+              </button>
+              {picker.available.map((pid) => (
+                <button key={pid} className="menu-item" onClick={() => chooseModel({ provider: pid, model: picker.providers[pid]?.default_model || undefined })}>
+                  {pid} <span className="sub">{picker.providers[pid]?.default_model || "default model"}</span>
+                </button>
+              ))}
+              <div className="sub" style={{ margin: "10px 0 4px" }}>Or a specific model: provider/model-id</div>
+              <div className="composer-row">
+                <input className="field" placeholder="vllm/Qwen3.6" value={custom} onChange={(e) => setCustom(e.target.value)} />
+                <button
+                  className="btn primary"
+                  disabled={!custom.trim()}
+                  onClick={() => {
+                    const [prov, ...rest] = custom.trim().split("/");
+                    const model = rest.join("/");
+                    chooseModel(model ? { provider: prov, model } : { model: prov });
+                  }}
+                >
+                  Use
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       {view === "chat" && (
         <div className="composer">
           {pending.length > 0 && (
@@ -414,9 +481,9 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
               <button className="roundbtn" title="attach files" onClick={() => fileInput.current?.click()} aria-label="attach">
                 <Icon name="plus" />
               </button>
-              <span className="chip">
+              <button className="chip" onClick={openPicker} title="model for this session">
                 <Icon name="model" /> {shortModel(detail?.model)}
-              </span>
+              </button>
               <span className="grow" />
               {status === "running" ? (
                 <button className="roundbtn stop" onClick={stop} aria-label="stop">
@@ -577,6 +644,11 @@ function ActivityList({ items, compact }: { items: Activity[]; compact: boolean 
       i++;
       continue;
     }
+    if (it.kind === "summary") {
+      out.push(<SummaryRow key={i} text={it.text} reason={it.reason} />);
+      i++;
+      continue;
+    }
     // Group consecutive tools of one family (Read/Read/Read → "Read 3 files").
     const family = it.name;
     let j = i;
@@ -598,7 +670,7 @@ function ToolGroup({ family, group }: { family: string; group: ToolItem[] }) {
   const d = describe(group[group.length - 1]);
   return (
     <div className="group">
-      <div className={`row head ${running ? "running" : ""}`} onClick={() => setOpen((o) => !o)}>
+      <div className={`act head ${running ? "running" : ""}`} onClick={() => setOpen((o) => !o)}>
         <Icon name={d.icon} />
         <span className="verb">
           {groupVerb(family, running)} {group.length} {d.noun}s
@@ -626,11 +698,26 @@ function groupVerb(name: string, running: boolean): string {
   return running ? a : b;
 }
 
+function SummaryRow({ text, reason }: { text: string; reason: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="act-wrap">
+      <div className="act" onClick={() => setOpen((o) => !o)}>
+        <Icon name="compact" />
+        <span className="verb">Context compacted</span>
+        <span className="detail">{reason !== "auto" ? `${reason} · ` : ""}{text.replace(/\s+/g, " ").slice(0, 80)}</span>
+        <span className={`chev ${open ? "down" : ""}`}>›</span>
+      </div>
+      {open && <div className="summary-inline" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />}
+    </div>
+  );
+}
+
 function ThoughtBlock({ text }: { text: string }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="row-wrap">
-      <div className="row" onClick={() => setOpen((o) => !o)}>
+    <div className="act-wrap">
+      <div className="act" onClick={() => setOpen((o) => !o)}>
         <Icon name="bulb" />
         <span className="verb">Reasoning</span>
         <span className="detail">{text.replace(/\s+/g, " ").slice(0, 80)}</span>
@@ -646,8 +733,8 @@ function ToolRow({ item, nested }: { item: ToolItem; nested?: boolean }) {
   const d = describe(item);
   const expanded = open || (item.running && item.name === "Exec");
   return (
-    <div className={`row-wrap ${nested ? "nested" : ""}`}>
-      <div className={`row ${item.error ? "error" : ""} ${item.running ? "running" : ""}`} onClick={() => setOpen((o) => !o)}>
+    <div className={`act-wrap ${nested ? "nested" : ""}`}>
+      <div className={`act ${item.error ? "error" : ""} ${item.running ? "running" : ""}`} onClick={() => setOpen((o) => !o)}>
         <Icon name={d.icon} />
         <span className="verb">{d.verb}</span>
         {d.detail && <span className="detail">{d.detail}</span>}

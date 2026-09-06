@@ -104,3 +104,21 @@ def test_config_with_optional_sections_round_trips_through_toml(tmp_path) -> Non
     loaded = RuntimeConfig.load(path)
     assert loaded.mcp.servers["board"].url == "https://example.test/mcp"
     assert loaded.mcp.servers["board"].oauth is None
+
+
+async def test_transcript_survives_history_rewrites(db) -> None:  # type: ignore[no-untyped-def]
+    from protocore.contracts.types import Message, MessageRole, TextBlock
+
+    from daedalus.stores.sqlite import SqliteSessionStore
+
+    store = SqliteSessionStore(db)
+    ask = Message(role=MessageRole.user, content_blocks=[TextBlock(text="the task")])
+    reply = Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="done")])
+    assert await store.append_transcript("s1", [ask, reply]) == 2
+    assert await store.append_transcript("s1", [ask, reply]) == 0  # idempotent
+    summary = Message(role=MessageRole.user, content_blocks=[TextBlock(text="<compacted-turn>x</compacted-turn>")], metadata={"protocore.compaction_summary": True})
+    await store.replace_messages("s1", "t", [summary])  # the model's history shrank
+    await store.append_transcript("s1", [summary])
+    texts = [m.content_blocks[0].text for m in await store.list_transcript("s1")]  # type: ignore[union-attr]
+    assert texts == ["the task", "done", "<compacted-turn>x</compacted-turn>"]
+    assert len(await store.list_transcript("s1", limit=2)) == 2

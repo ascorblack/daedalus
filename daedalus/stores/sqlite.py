@@ -83,6 +83,48 @@ class SqliteSessionStore(ISessionStore):
     async def update_title(self, session_id: str, title: str) -> None:
         await self._db.execute("UPDATE sessions SET title = ? WHERE id = ?", (title, session_id))
 
+    # -- transcript (display history, append-only) ------------------------------
+
+    @staticmethod
+    def transcript_key(message: Message) -> str:
+        """Identity of a message across history rewrites: role + creation time (+ tool call id)."""
+        extra = ""
+        for block in message.content_blocks:
+            call_id = getattr(block, "tool_call_id", None)
+            if call_id:
+                extra = f":{call_id}"
+                break
+        return f"{message.role.value}:{message.created_at.isoformat()}{extra}"
+
+    async def append_transcript(self, session_id: str, messages: Sequence[Message]) -> int:
+        """Append messages not yet in the transcript (by key); returns how many were added."""
+        if not messages:
+            return 0
+        rows = await self._db.fetchall("SELECT key FROM transcript WHERE session_id = ?", (session_id,))
+        known = {r["key"] for r in rows}
+        fresh = []
+        for message in messages:
+            key = self.transcript_key(message)
+            if key in known:
+                continue
+            known.add(key)
+            fresh.append((session_id, key, message.model_dump_json()))
+        if not fresh:
+            return 0
+        async with self._db.transaction() as conn:
+            await conn.executemany("INSERT OR IGNORE INTO transcript(session_id, key, message) VALUES (?, ?, ?)", fresh)
+        return len(fresh)
+
+    async def list_transcript(self, session_id: str, *, limit: int = 0) -> list[Message]:
+        if limit > 0:
+            rows = await self._db.fetchall(
+                "SELECT message FROM (SELECT seq, message FROM transcript WHERE session_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq",
+                (session_id, limit),
+            )
+        else:
+            rows = await self._db.fetchall("SELECT message FROM transcript WHERE session_id = ? ORDER BY seq", (session_id,))
+        return [Message.model_validate_json(r["message"]) for r in rows]
+
     async def replace_messages(self, session_id: str, tenant_id: str, messages: Sequence[Message]) -> None:
         rows = [(session_id, tenant_id, m.model_dump_json()) for m in messages]
         async with self._db.transaction() as conn:
@@ -341,11 +383,12 @@ class LiveControlStore:
     async def load(self, session_id: str) -> dict[str, Any]:
         row = await self._db.fetchone("SELECT * FROM live_control WHERE session_id = ?", (session_id,))
         if row is None:
-            return {"steer": [], "follow_up": [], "model_name": None, "thinking_enabled": None, "reasoning_effort": None}
+            return {"steer": [], "follow_up": [], "model_name": None, "provider": None, "thinking_enabled": None, "reasoning_effort": None}
         return {
             "steer": json.loads(row["steer_queue"] or "[]"),
             "follow_up": json.loads(row["follow_up_queue"] or "[]"),
             "model_name": row["model_name"],
+            "provider": row["provider"],
             "thinking_enabled": None if row["thinking_enabled"] is None else bool(row["thinking_enabled"]),
             "reasoning_effort": row["reasoning_effort"],
         }
@@ -377,14 +420,15 @@ class LiveControlStore:
         session_id: str,
         *,
         model_name: str | None = None,
+        provider: str | None = None,
         thinking_enabled: bool | None = None,
         reasoning_effort: str | None = None,
     ) -> None:
         state = await self.load(session_id)
         await self._db.execute(
-            "INSERT INTO live_control(session_id, steer_queue, follow_up_queue, model_name, thinking_enabled, reasoning_effort, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(session_id) DO UPDATE SET model_name = excluded.model_name,"
+            "INSERT INTO live_control(session_id, steer_queue, follow_up_queue, model_name, provider, thinking_enabled, reasoning_effort, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(session_id) DO UPDATE SET model_name = excluded.model_name, provider = excluded.provider,"
             " thinking_enabled = excluded.thinking_enabled, reasoning_effort = excluded.reasoning_effort,"
             " updated_at = excluded.updated_at",
             (
@@ -392,6 +436,7 @@ class LiveControlStore:
                 json.dumps(state["steer"]),
                 json.dumps(state["follow_up"]),
                 model_name if model_name is not None else state["model_name"],
+                provider if provider is not None else state["provider"],
                 None if thinking_enabled is None and state["thinking_enabled"] is None else int(
                     thinking_enabled if thinking_enabled is not None else state["thinking_enabled"]
                 ),
@@ -402,7 +447,7 @@ class LiveControlStore:
 
     async def clear_overrides(self, session_id: str) -> None:
         await self._db.execute(
-            "UPDATE live_control SET model_name = NULL, thinking_enabled = NULL, reasoning_effort = NULL WHERE session_id = ?",
+            "UPDATE live_control SET model_name = NULL, provider = NULL, thinking_enabled = NULL, reasoning_effort = NULL WHERE session_id = ?",
             (session_id,),
         )
 

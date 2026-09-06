@@ -354,10 +354,7 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <div className="section-title" style={{ marginTop: 0 }}>
           Providers (clients)
         </div>
-        <div className="sub">
-          OpenAI-compatible endpoints the bot can call (DeepSeek, OpenRouter, a self-hosted vLLM…). Changes apply immediately; a provider appears in the Model card once it has a base_url (and, for deepseek/openrouter, a key). base_url is the OpenAI API root, e.g.{" "}
-          <span style={{ fontFamily: "var(--mono)", fontSize: 12.5 }}>http://192.0.2.10:9000/v1</span>; local vLLM needs no key. "⟳ from /models" lists what the server actually serves.
-        </div>
+        <div className="sub">OpenAI-compatible endpoints. base_url is the API root (…/v1); a self-hosted vLLM needs no key.</div>
         {providerIds.map((id) => (
           <ProviderBlock
             key={id}

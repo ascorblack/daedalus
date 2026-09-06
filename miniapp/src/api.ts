@@ -79,7 +79,8 @@ export type SessionSummary = {
 export type MessageView = {
   role: "system" | "user" | "assistant" | "tool";
   summary?: boolean;
-  compaction?: { reason: string; messages: number; at: string } | null;
+  internal?: boolean;
+  compaction?: { reason: string; messages?: number; at?: string } | null;
   text: string;
   thinking: string;
   tool_calls: { id: string; name: string; arguments: Record<string, unknown> }[];

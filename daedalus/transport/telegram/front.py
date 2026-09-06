@@ -49,7 +49,7 @@ Each forum topic is one agent session with its own workspace. Write in a topic t
 /rename &lt;title&gt; — rename this session (and its topic) · /compact [focus] — replace the history with a summary
 /delete &lt;id&gt; · /cleanup — delete a session; delete every session whose topic is already closed
 /sessions · /status — what exists, what is running
-/model [provider/]&lt;name&gt; · /thinking on|off|low|medium|high — model settings (default in General, per session in a topic)
+/model [provider/]&lt;name&gt;|default · /thinking on|off|low|medium|high — model settings (default in General, per session in a topic)
 /usage · /balance — spend and provider balances
 /schedules · /schedule run|on|off|delete &lt;id&gt; — scheduled tasks
 /approval manual|auto · /verbosity 0|1|2 — self-change approval, chat detail
@@ -681,8 +681,16 @@ class TelegramFront:
         state = await self._session_for_message(message)
         if state is None:
             return
-        await self.manager.set_model(state.session.id, model_name=name)
-        await message.answer(f"Session model: {name}")
+        if arg in ("default", "reset"):
+            await self.manager.set_model(state.session.id, clear=True)
+            await message.answer("Session model: back to the global default")
+            return
+        try:
+            await self.manager.set_model(state.session.id, model_name=name, provider=provider or None)
+        except ValueError as exc:
+            await message.answer(f"⚠️ {exc}")
+            return
+        await message.answer(f"Session model: {provider + '/' if provider else ''}{name} (from the next model call)")
 
     async def cmd_thinking(self, message: Message, command: CommandObject) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):

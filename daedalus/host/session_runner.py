@@ -305,6 +305,21 @@ class SessionManager:
         self._register_services(state)
         return state
 
+    async def transcript(self, session_id: str, *, tail: int = 0) -> list[Message]:
+        """Display history: the durable transcript plus whatever the live engine has not persisted yet."""
+        rows = await self.sessions.list_transcript(session_id)
+        if not rows:
+            # Sessions from before the transcript existed: seed it from the working history.
+            history = list(await self.sessions.list_messages(session_id, TENANT, limit=10_000))
+            if history:
+                await self.sessions.append_transcript(session_id, history)
+                rows = history
+        state = self._states.get(session_id)
+        if state is not None and state.engine is not None and state.running:
+            known = {self.sessions.transcript_key(m) for m in rows}
+            rows = rows + [m for m in state.engine.history if self.sessions.transcript_key(m) not in known]
+        return rows[-tail:] if tail > 0 else rows
+
     async def list_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = await self.sessions.list_sessions(TENANT, limit=limit)
         out: list[dict[str, Any]] = []
@@ -350,6 +365,7 @@ class SessionManager:
                 await conn.execute("DELETE FROM snapshots WHERE run_id = ?", (row["id"],))
             await conn.execute("DELETE FROM runs WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM session_messages WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM transcript WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM live_control WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM pending_questions WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM topics WHERE session_id = ?", (session_id,))
@@ -441,7 +457,9 @@ class SessionManager:
             # measurement described the history that no longer exists.
             engine.last_observed_prompt_tokens = 0
             engine.compaction_state = CompactionState()
+        await self.sessions.append_transcript(session_id, history)
         await self.sessions.replace_messages(session_id, TENANT, [message])
+        await self.sessions.append_transcript(session_id, [message])
         return summary
 
     async def closed_topic_sessions(self) -> list[dict[str, Any]]:
@@ -537,6 +555,7 @@ class SessionManager:
             content_blocks=[TextBlock(text=body)],
             metadata={"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {},
         )
+        await self.sessions.append_transcript(session_id, [message])
         return await self._start_run(state, message)
 
     async def _ingest_attachments(
@@ -606,11 +625,18 @@ class SessionManager:
         session_id: str,
         *,
         model_name: str | None = None,
+        provider: str | None = None,
         thinking: bool | None = None,
         reasoning_effort: str | None = None,
+        clear: bool = False,
     ) -> None:
+        if clear:
+            await self.live.clear_overrides(session_id)
+            return
+        if provider is not None and provider not in self.providers.available():
+            raise ValueError(f"unknown or unusable provider {provider!r}")
         await self.live.set_model(
-            session_id, model_name=model_name, thinking_enabled=thinking, reasoning_effort=reasoning_effort
+            session_id, model_name=model_name, provider=provider, thinking_enabled=thinking, reasoning_effort=reasoning_effort
         )
         state = self._states.get(session_id)
         if state is not None and state.engine is not None and state.running:
@@ -622,7 +648,10 @@ class SessionManager:
 
     async def _build_engine(self, state: SessionState, run_id: str) -> QueryEngine:
         overrides = await self.live.load(state.session.id)
-        rungs = self.providers.rungs_for(self.config)
+        if overrides.get("provider"):
+            rungs = self.providers.rungs_for_session(self.config, overrides["provider"], overrides.get("model_name"))
+        else:
+            rungs = self.providers.rungs_for(self.config)
         deps = EngineDeps(
             tool_registry=self.tools,
             event_stream=self.events,
@@ -642,7 +671,7 @@ class SessionManager:
             workspace=state.workspace,
             rungs=rungs,
             provider_chain=build_chain(rungs),
-            model_name=overrides.get("model_name") or state.metadata.get("model"),
+            model_name=(rungs[0][1] if overrides.get("provider") else overrides.get("model_name") or state.metadata.get("model")),
             thinking=overrides.get("thinking_enabled"),
             reasoning_effort=overrides.get("reasoning_effort"),
             context_window=state.context_window or self.config.model.context_window,
@@ -668,9 +697,10 @@ class SessionManager:
             )
 
         def persist_session_history(eng: QueryEngine) -> None:
-            asyncio.get_running_loop().create_task(
-                self.sessions.replace_messages(session_id, TENANT, list(eng.history))
-            )
+            history = list(eng.history)
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.sessions.replace_messages(session_id, TENANT, history))
+            loop.create_task(self.sessions.append_transcript(session_id, history))
 
         engine.reload_live_control = reload_live_control  # type: ignore[attr-defined]
         engine.persist_live_control = persist_live_control  # type: ignore[attr-defined]
@@ -733,6 +763,7 @@ class SessionManager:
             )
         finally:
             await self.sessions.replace_messages(session_id, TENANT, list(engine.history))
+            await self.sessions.append_transcript(session_id, list(engine.history))
             try:
                 if status == "interrupted":
                     pass  # snapshot stays; resume_unfinished() continues the run after restart

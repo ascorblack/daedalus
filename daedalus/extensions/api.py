@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from protocore.contracts.types import (
     COMPACTION_SUMMARY_METADATA_KEY,
     Message,
+    MessageRole,
     TextBlock,
     ThinkingBlock,
     ToolResultBlock,
@@ -235,9 +236,12 @@ def message_view(message: Message) -> dict[str, Any]:
     body = "".join(text)
     if is_summary:
         body = _SUMMARY_WRAP_RE.sub("", body).strip()
+        compaction = compaction or {"reason": "auto"}
+    internal = message.role is MessageRole.user and body.lstrip().startswith("[internal control")
     return {
         "role": message.role.value,
         "summary": is_summary,
+        "internal": internal,
         "compaction": compaction,
         "text": body,
         "thinking": "".join(thinking) or (message.reasoning_content or ""),
@@ -288,14 +292,24 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             await manager.submit(state.session.id, body.prompt)
         return {"id": state.session.id, "title": body.title}
 
+    async def session_model_label(state: Any) -> str:
+        overrides = await manager.live.load(state.session.id)
+        if overrides.get("provider"):
+            provider = app.config.providers.get(overrides["provider"])
+            model = overrides.get("model_name") or (provider.default_model if provider else "")
+            return f"{overrides['provider']}/{model}" if model else overrides["provider"]
+        if overrides.get("model_name"):
+            return str(overrides["model_name"])
+        if state.engine is not None:
+            return str(state.engine.effective_model_name)
+        return app.config.model.name
+
     @api.get("/api/sessions/{session_id}")
-    async def get_session(session_id: str, tail: int = 200, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+    async def get_session(session_id: str, tail: int = 600, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         state = await manager.get_state(session_id)
         if state is None:
             raise HTTPException(404, "no such session")
-        messages = await manager.sessions.list_messages(session_id, "daedalus", limit=10_000)
-        live = state.engine.history if state.engine is not None and state.running else None
-        source = list(live) if live is not None else list(messages)
+        source = await manager.transcript(session_id, tail=tail)
         status = "running" if state.running else "waiting" if state.pending else "idle"
         usage = await app.db.fetchone(
             "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cache_read_tokens) ch, sum(cost_usd) usd FROM usage_events WHERE session_id = ?",
@@ -308,8 +322,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "run_id": state.run_id,
             "workspace": str(state.workspace),
             "pending": state.pending.payload if state.pending else None,
-            "model": state.engine.effective_model_name if state.engine else app.config.model.name,
-            "messages": [message_view(m) for m in source[-tail:]],
+            "model": await session_model_label(state),
+            "messages": [message_view(m) for m in source],
             "usage": dict(usage) if usage else {},
         }
 
@@ -448,13 +462,23 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.post("/api/sessions/{session_id}/model")
     async def set_model(session_id: str, body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        await manager.set_model(
-            session_id,
-            model_name=body.get("model"),
-            thinking=body.get("thinking"),
-            reasoning_effort=body.get("reasoning_effort"),
-        )
-        return {"ok": True}
+        """``{"clear": true}`` returns the session to the global default; otherwise any of
+        ``provider`` (a configured client id), ``model``, ``thinking``, ``reasoning_effort``."""
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        try:
+            await manager.set_model(
+                session_id,
+                model_name=body.get("model"),
+                provider=body.get("provider"),
+                thinking=body.get("thinking"),
+                reasoning_effort=body.get("reasoning_effort"),
+                clear=bool(body.get("clear")),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "model": await session_model_label(state)}
 
     # -- MCP per session --------------------------------------------------------------
 

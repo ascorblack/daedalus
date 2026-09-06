@@ -128,6 +128,16 @@ class ProviderRegistry:
             )
         return rungs
 
+    def rungs_for_session(
+        self, config: RuntimeConfig, provider_id: str, model: str | None = None
+    ) -> list[tuple[OpenAICompatibleProvider, str]]:
+        """Like :meth:`rungs_for`, but the session's chosen client goes first; the chain follows as fallback."""
+        target = self._providers.get(provider_id)
+        if target is None:
+            return self.rungs_for(config)
+        rest = [(p, m) for p, m in self.rungs_for(config) if p.endpoint.id != provider_id]
+        return [(target, model or target.endpoint.default_model or config.model.name), *rest]
+
     async def aclose(self) -> None:
         await self.close_retired()
         for provider in self._providers.values():
