@@ -162,9 +162,9 @@ async def test_stay_silent_is_refused_outside_unattended_runs(app: Any) -> None:
     for state in (chat, task):
         state.services.extra["manager"] = manager  # type: ignore[union-attr]
     ctx = ToolContext(tenant_id="daedalus", run_id="r1", session_id=chat.session.id)
-    result = await stay_silent(ctx, note="test")
+    result = await stay_silent().invoke(ctx, {"note": "test"})
     assert result.is_error and "only for unattended" in result.content
     assert "silent_run" not in chat.services.extra  # type: ignore[union-attr]
     ctx = ToolContext(tenant_id="daedalus", run_id="r2", session_id=task.session.id)
-    result = await stay_silent(ctx, note="checked")
+    result = await stay_silent().invoke(ctx, {"note": "checked"})
     assert not result.is_error and task.services.extra["silent_run"] == "r2"  # type: ignore[union-attr]
