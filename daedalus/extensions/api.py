@@ -602,7 +602,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         rows = await app.db.fetchall(
             "SELECT substr(at, 1, 10) day, provider_id, model, count(*) calls, sum(input_tokens) input_tokens,"
             " sum(output_tokens) output_tokens, sum(cache_read_tokens) cache_read_tokens,"
-            " sum(reasoning_tokens) reasoning_tokens, sum(cost_usd) cost_usd"
+            " sum(reasoning_tokens) reasoning_tokens, sum(cost_usd) cost_usd, sum(cost_usd IS NULL) unmetered"
             " FROM usage_events WHERE at >= ? GROUP BY day, provider_id, model ORDER BY day DESC",
             (since,),
         )
@@ -613,7 +613,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         )
         by_session = await app.db.fetchall(
             "SELECT u.session_id, s.title, count(*) calls, sum(u.input_tokens) input_tokens, sum(u.output_tokens) output_tokens,"
-            " sum(u.cost_usd) cost_usd FROM usage_events u LEFT JOIN sessions s ON s.id = u.session_id"
+            " sum(u.cost_usd) cost_usd, sum(u.cost_usd IS NULL) unmetered FROM usage_events u LEFT JOIN sessions s ON s.id = u.session_id"
             " WHERE u.at >= ? GROUP BY u.session_id ORDER BY cost_usd DESC NULLS LAST, calls DESC LIMIT 20",
             (since,),
         )

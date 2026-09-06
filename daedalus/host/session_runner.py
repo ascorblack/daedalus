@@ -873,6 +873,30 @@ class SessionManager:
                 await sink(state.session.id, event)
             except Exception:  # noqa: BLE001
                 logger.exception("event sink failed")
+        if event.type is EventType.MESSAGE_STOP:
+            await self._enforce_run_cap(state, event.run_id)
+
+    async def _enforce_run_cap(self, state: SessionState, run_id: str) -> None:
+        """Stop a run whose priced spend crossed ``limits.usd_per_run``; unpriced calls cannot count."""
+        cap = self.config.limits.usd_per_run
+        if cap <= 0 or state.engine is None or not state.running:
+            return
+        row = await self.db.fetchone(
+            "SELECT sum(cost_usd) usd, sum(cost_usd IS NULL) unmetered FROM usage_events WHERE run_id = ?", (run_id,)
+        )
+        spent = float(row["usd"] or 0.0) if row else 0.0
+        if spent < cap:
+            return
+        note = f"💸 per-run cap reached: ${spent:.2f} spent of ${cap:.2f} (limits.usd_per_run); stopping this run. Send a message to continue in a new run."
+        if row and row["unmetered"]:
+            note += f" {int(row['unmetered'])} call(s) had no known price and are not counted."
+        logger.warning("run %s stopped at the per-run cap: $%.4f >= $%.2f", run_id, spent, cap)
+        state.engine.stop()
+        for sink in self._sinks:
+            try:
+                await sink(state.session.id, TurnEvent(type=EventType.ERROR, run_id=run_id, payload={"message": note, "kind": "run_cap"}))
+            except Exception:  # noqa: BLE001
+                logger.exception("event sink failed")
 
     # -- recovery -------------------------------------------------------------------
 

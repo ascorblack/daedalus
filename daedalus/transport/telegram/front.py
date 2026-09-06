@@ -7,6 +7,7 @@ import html
 import logging
 import mimetypes
 import shutil
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -28,6 +29,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InputRichMessage,
     Message,
+    ReactionTypeEmoji,
     ReplyParameters,
 )
 from protocore.runtime.events.envelope import TurnEvent
@@ -76,17 +78,45 @@ class InboundBuffer:
     task: asyncio.Task[None] | None = None
 
 
-async def tg_call(fn: Callable[..., Awaitable[Any]], *args: Any, attempts: int = 4, **kwargs: Any) -> Any:
-    """Call a Bot API method, waiting out flood-control pauses instead of failing."""
+_FLOOD_UNTIL: dict[int, float] = {}
+"""Per chat: the monotonic time until which Telegram asked us to stop. Shared by every
+message in the chat, so one flood-controlled edit pauses all the cosmetic edits at once."""
+
+
+def flooded(chat_id: int) -> bool:
+    return time.monotonic() < _FLOOD_UNTIL.get(chat_id, 0.0)
+
+
+def note_flood(chat_id: int, seconds: float) -> None:
+    _FLOOD_UNTIL[chat_id] = max(_FLOOD_UNTIL.get(chat_id, 0.0), time.monotonic() + seconds)
+
+
+async def tg_call(fn: Callable[..., Awaitable[Any]], *args: Any, attempts: int = 4, flood_chat: int | None = None, **kwargs: Any) -> Any:
+    """Call a Bot API method, waiting out flood-control pauses instead of failing.
+
+    ``flood_chat`` records the pause for that chat so optional edits skip it instead of queueing.
+    """
     for attempt in range(attempts):
         try:
             return await fn(*args, **kwargs)
         except TelegramRetryAfter as exc:
+            if flood_chat is not None:
+                note_flood(flood_chat, float(exc.retry_after))
             if attempt == attempts - 1:
                 raise
             logger.warning("telegram flood control: waiting %ss", exc.retry_after)
             await asyncio.sleep(exc.retry_after + 0.5)
     raise RuntimeError("unreachable")
+
+
+FREE_REACTIONS = frozenset(
+    "👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 🤩 🤮 💩 🙏 👌 🕊 🤡 🥱 🥴 😍 🐳 ❤‍🔥 🌚 🌭 💯 🤣 ⚡ 🍌 🏆 💔 🤨 😐 🍓 🍾 💋 🖕 😈 😴 😭 🤓 👻 👨‍💻 👀 🎃 🙈 😇 😨 🤝 ✍ 🤗 🫡 🎅 🎄 ☃ 💅 🤪 🗿 🆒 💘 🙉 🦄 😘 💊 🙊 😎 👾 🤷‍♂ 🤷 🤷‍♀ 😡".split()
+)
+"""The emoji a bot may react with (Telegram rejects anything else)."""
+
+RUN_REACTIONS = {"received": "👀", "steered": "✍", "completed": "🔥", "failed": "💔", "cancelled": "🫡", "awaiting": "🤔", "interrupted": "😴", "busy": "🤝"}
+TOPIC_STATUS_PREFIX = {"running": "🟢", "awaiting": "❓", "completed": "✅", "failed": "💥", "cancelled": "⏹", "interrupted": "⏸", "compacting": "🗜"}
+TOPIC_RENAME_DEBOUNCE_SECONDS = 2.0
 
 
 class TelegramOutbox(Outbox):
@@ -110,6 +140,7 @@ class TelegramOutbox(Outbox):
                     self.chat_id,
                     InputRichMessage(markdown=text),
                     message_thread_id=self.thread_id,
+                    flood_chat=self.chat_id,
                 )
                 return msg.message_id
             except TelegramBadRequest as exc:
@@ -122,25 +153,41 @@ class TelegramOutbox(Outbox):
                     message_thread_id=self.thread_id,
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
+                    flood_chat=self.chat_id,
                 )
                 return msg.message_id
             except TelegramBadRequest:
                 pass
-        msg = await tg_call(self.bot.send_message, self.chat_id, text, message_thread_id=self.thread_id, parse_mode=None)
+        msg = await tg_call(self.bot.send_message, self.chat_id, text, message_thread_id=self.thread_id, parse_mode=None, flood_chat=self.chat_id)
         return msg.message_id
 
     async def send_html(self, html: str) -> int:
         try:
             msg = await tg_call(
-                self.bot.send_rich_message, self.chat_id, InputRichMessage(html=html), message_thread_id=self.thread_id
+                self.bot.send_rich_message, self.chat_id, InputRichMessage(html=html), message_thread_id=self.thread_id, flood_chat=self.chat_id
             )
             return msg.message_id
         except TelegramBadRequest as exc:
             logger.warning("rich html refused (%s); sending plain text", exc)
-        msg = await tg_call(self.bot.send_message, self.chat_id, strip_tags(html), message_thread_id=self.thread_id, parse_mode=None)
+        msg = await tg_call(self.bot.send_message, self.chat_id, strip_tags(html), message_thread_id=self.thread_id, parse_mode=None, flood_chat=self.chat_id)
         return msg.message_id
 
+    async def react(self, message_id: int, emoji: str | None) -> None:
+        """Set (or clear, with ``None``) the bot's reaction on a message; never raises."""
+        if emoji is not None and emoji not in FREE_REACTIONS:
+            return
+        try:
+            await self.bot.set_message_reaction(
+                self.chat_id, message_id, reaction=[ReactionTypeEmoji(emoji=emoji)] if emoji else []
+            )
+        except TelegramRetryAfter as exc:
+            note_flood(self.chat_id, float(exc.retry_after))
+        except Exception:  # noqa: BLE001 — a reaction is decoration
+            logger.debug("reaction failed", exc_info=True)
+
     async def edit_text(self, message_id: int, text: str, *, html: bool = False) -> None:
+        if flooded(self.chat_id):
+            return  # Telegram asked for a pause; a status edit is skipped, the next one carries the newer state
         try:
             if html:
                 try:
@@ -156,8 +203,8 @@ class TelegramOutbox(Outbox):
         except TelegramBadRequest as exc:
             if "message is not modified" not in str(exc):
                 raise
-        except TelegramRetryAfter:
-            pass  # a status edit can be skipped; the next one carries the newer state
+        except TelegramRetryAfter as exc:
+            note_flood(self.chat_id, float(exc.retry_after))
 
     async def send_document(self, path: Path, caption: str | None = None) -> int:
         msg = await tg_call(
@@ -235,6 +282,10 @@ class TelegramFront:
         self._buffers: dict[tuple[int, int], InboundBuffer] = {}
         self._question_state: dict[str, dict[str, Any]] = {}
         self._compact_focus: dict[str, str] = {}
+        self._last_operator_message: dict[str, tuple[int, int]] = {}
+        """Per session: the chat and id of the operator's latest message, for the outcome reaction."""
+        self._topic_status: dict[str, str] = {}
+        self._topic_status_tasks: dict[str, asyncio.Task[None]] = {}
         self.operator_hooks: dict[str, Callable[..., Awaitable[str]]] = {}
         """rebuild / rollback / panic, installed by the application."""
         self.command_hooks: dict[str, Callable[[Message, CommandObject], Awaitable[None]]] = {}
@@ -374,7 +425,11 @@ class TelegramFront:
         r.message.register(self.cmd_settings, Command("settings"))
         r.message.register(self.cmd_bind, Command("bind"))
         r.message.register(self.cmd_operator, Command("rebuild", "rollback", "panic", "schedules", "verbosity", "approval", "balance", "schedule"))
-        r.message.register(self.on_message, F.text | F.caption | F.document | F.photo | F.audio | F.video | F.voice)
+        r.message.register(
+            self.on_message,
+            F.text | F.caption | F.document | F.photo | F.audio | F.video | F.voice | F.video_note | F.animation | F.sticker | F.location | F.contact | F.poll,
+        )
+        r.message.register(self.on_unsupported)
         r.callback_query.register(self.on_callback)
         r.stopped_message_generation.register(self.on_generation_stopped)
 
@@ -451,9 +506,48 @@ class TelegramFront:
         binding = await self.binding_for_session(session_id)
         if binding is not None and binding.thread_id:
             try:
-                await tg_call(self.bot.edit_forum_topic, binding.chat_id, binding.thread_id, name=state.session.title[:128])
+                await tg_call(self.bot.edit_forum_topic, binding.chat_id, binding.thread_id, name=self._topic_name(session_id, state.session.title), flood_chat=binding.chat_id)
             except TelegramBadRequest as exc:
                 logger.warning("could not rename topic: %s", exc)
+
+    # -- ambient status: reactions and topic names ----------------------------------------
+
+    def _topic_name(self, session_id: str, title: str) -> str:
+        prefix = TOPIC_STATUS_PREFIX.get(self._topic_status.get(session_id, "")) if self.config.telegram.topic_status_emoji else None
+        name = f"{prefix} {title}" if prefix else title
+        return name[:128]
+
+    def set_topic_status(self, session_id: str, status: str) -> None:
+        """Show the session's state in its topic name (debounced: one rename per burst of changes)."""
+        if not self.config.telegram.topic_status_emoji or self._topic_status.get(session_id) == status:
+            return
+        self._topic_status[session_id] = status
+        task = self._topic_status_tasks.get(session_id)
+        if task is None or task.done():
+            self._topic_status_tasks[session_id] = asyncio.create_task(self._apply_topic_status(session_id))
+
+    async def _apply_topic_status(self, session_id: str) -> None:
+        await asyncio.sleep(TOPIC_RENAME_DEBOUNCE_SECONDS)
+        binding = await self.binding_for_session(session_id)
+        if binding is None or not binding.thread_id or flooded(binding.chat_id):
+            return
+        try:
+            await tg_call(self.bot.edit_forum_topic, binding.chat_id, binding.thread_id, name=self._topic_name(session_id, binding.title), attempts=1, flood_chat=binding.chat_id)
+        except TelegramBadRequest as exc:
+            if "not modified" not in str(exc).lower():
+                logger.warning("could not mark topic status: %s", exc)
+        except TelegramRetryAfter:
+            pass  # the pause is recorded; the next change renames
+
+    async def react_to_last(self, session_id: str, kind: str) -> None:
+        """Put the run's outcome on the operator's message that started it."""
+        if not self.config.telegram.reactions:
+            return
+        ref = self._last_operator_message.get(session_id)
+        emoji = RUN_REACTIONS.get(kind)
+        if ref is None or emoji is None:
+            return
+        await TelegramOutbox(self.bot, ref[0], None).react(ref[1], emoji)
 
     async def cmd_compact(self, message: Message, command: CommandObject) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
@@ -742,20 +836,23 @@ class TelegramFront:
             return
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         row = await self.manager.db.fetchone(
-            "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cache_read_tokens) ch, sum(cost_usd) usd"
-            " FROM usage_events WHERE at >= ?",
+            "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cache_read_tokens) ch, sum(cost_usd) usd,"
+            " sum(cost_usd IS NULL) unmetered FROM usage_events WHERE at >= ?",
             (today,),
         )
         text = f"today: {row['c'] or 0} calls · in {row['i'] or 0:,} · out {row['o'] or 0:,} · cached {row['ch'] or 0:,}"
-        text += f" · ${row['usd']:.4f}" if row["usd"] is not None else " · cost unknown (no pricing configured)"
+        text += _cost_words(row["usd"], int(row["unmetered"] or 0))
         state = await self._session_for_message(message) if not self._is_general(message) else None
         if state is not None:
             srow = await self.manager.db.fetchone(
-                "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cost_usd) usd FROM usage_events WHERE session_id = ?",
+                "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cost_usd) usd, sum(cost_usd IS NULL) unmetered"
+                " FROM usage_events WHERE session_id = ?",
                 (state.session.id,),
             )
             text += f"\nthis session: {srow['c'] or 0} calls · in {srow['i'] or 0:,} · out {srow['o'] or 0:,}"
-            text += f" · ${srow['usd']:.4f}" if srow["usd"] is not None else ""
+            text += _cost_words(srow["usd"], int(srow["unmetered"] or 0))
+        if self.config.limits.usd_per_run > 0:
+            text += f"\nper-run cap: ${self.config.limits.usd_per_run:.2f} (limits.usd_per_run)"
         await message.answer(text)
 
     async def cmd_settings(self, message: Message) -> None:
@@ -806,18 +903,29 @@ class TelegramFront:
     async def on_message(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
-        if message.text and message.text.startswith("/"):
+        if message.text and message.text.startswith("/") and not self.config.telegram.forward_unknown_commands:
             return
         for interceptor in self.message_interceptors:
             if await interceptor(message):
                 return
+        if self._is_stale(message):
+            age = int((datetime.now(UTC) - message.date).total_seconds() // 60)
+            await message.reply(f"⏳ Ignored: this message arrived {age} min late (sent while the bot was down). Send it again if it still applies.")
+            return
         state = await self._session_for_message(message)
         if state is None:
             return
         if await self._maybe_custom_answer(message, state):
             return
+        oversize = self._oversize(message)
+        if oversize:
+            await message.reply(f"⚠️ {oversize}")
+            return
         key = (message.chat.id, message.message_thread_id or 0)
-        text = message.text or message.caption or ""
+        text = self._text_of(message)
+        self._last_operator_message[state.session.id] = (message.chat.id, message.message_id)
+        if self.config.telegram.reactions:
+            await TelegramOutbox(self.bot, message.chat.id, None).react(message.message_id, RUN_REACTIONS["received"])
         attachment = await self._download(message, state)  # may take a while for big files
         buffer = self._buffers.setdefault(key, InboundBuffer())
         if text:
@@ -826,10 +934,62 @@ class TelegramFront:
             buffer.attachments.append(attachment)
         if buffer.task is not None:
             buffer.task.cancel()
-        buffer.task = asyncio.create_task(self._flush_inbound(key, state))
+        wait = self.config.telegram.inbound_merge_window_seconds
+        if buffer.attachments and not any(buffer.text):
+            # A bare photo is usually followed by the words about it (often a voice note).
+            wait = max(wait, self.config.telegram.photo_caption_wait_seconds)
+        buffer.task = asyncio.create_task(self._flush_inbound(key, state, wait))
 
-    async def _flush_inbound(self, key: tuple[int, int], state: SessionState) -> None:
-        await asyncio.sleep(self.config.telegram.inbound_merge_window_seconds)
+    def _is_stale(self, message: Message) -> bool:
+        limit = self.config.telegram.stale_after_seconds
+        if limit <= 0:
+            return False
+        return (datetime.now(UTC) - message.date).total_seconds() > limit
+
+    def _oversize(self, message: Message) -> str | None:
+        """Refuse a file by its declared size before spending the download."""
+        media = message.document or message.video or message.audio or message.voice or message.video_note or message.animation
+        size = getattr(media, "file_size", None) if media is not None else None
+        limit = self.config.telegram.max_inbound_file_mb
+        if size and size > limit * 1_048_576:
+            return f"file refused: {size / 1_048_576:.0f} MB is over the {limit} MB limit (telegram.max_inbound_file_mb)"
+        return None
+
+    def _text_of(self, message: Message) -> str:
+        """The operator's words plus, for content Telegram cannot hand over as a file, a faithful description."""
+        text = message.text or message.caption or ""
+        if message.sticker is not None:
+            text = f"[sticker {message.sticker.emoji or ''} from set {message.sticker.set_name or '?'}]"
+        elif message.location is not None:
+            text = f"[location: {message.location.latitude}, {message.location.longitude}]" + (f"\n{text}" if text else "")
+        elif message.contact is not None:
+            c = message.contact
+            text = f"[contact: {c.first_name} {c.last_name or ''} {c.phone_number}]".replace("  ", " ")
+        elif message.poll is not None:
+            text = f"[poll: {message.poll.question}: " + "; ".join(o.text for o in message.poll.options) + "]"
+        reply = message.reply_to_message
+        if reply is not None and reply.forum_topic_created is None:
+            quoted = (reply.text or reply.caption or "").strip()
+            if quoted:
+                who = "the agent" if (reply.from_user and reply.from_user.is_bot) else "the operator"
+                text = f'[replying to {who}: "{quoted[:500]}"]\n\n{text}'
+        return text
+
+    async def on_unsupported(self, message: Message) -> None:
+        """Anything the bot has no path for gets a named answer instead of silence."""
+        if not self._is_owner(message.from_user.id if message.from_user else None):
+            return
+        if message.forum_topic_created or message.forum_topic_edited or message.pinned_message or message.new_chat_members or message.left_chat_member:
+            return
+        fields = [name for name in ("game", "invoice", "story", "giveaway", "video_chat_started", "checklist", "paid_media") if getattr(message, name, None) is not None]
+        kind = ", ".join(fields) or "this message type"
+        try:
+            await message.reply(f"⚠️ I cannot read {kind}; send text, a file, a photo, a voice note or a location.")
+        except TelegramBadRequest:
+            pass
+
+    async def _flush_inbound(self, key: tuple[int, int], state: SessionState, wait: float) -> None:
+        await asyncio.sleep(wait)
         buffer = self._buffers.pop(key, None)
         if buffer is None:
             return
@@ -845,12 +1005,16 @@ class TelegramFront:
             logger.exception("submit failed")
             outbox = TelegramOutbox(self.bot, key[0], key[1] or None)
             await outbox.send_text(f"⚠️ could not start: {exc}", markdown=False)
+            await self.react_to_last(state.session.id, "failed")
             return
         if was_running:
+            await self.react_to_last(state.session.id, "steered")
             renderer = self._renderers.get(state.session.id)
             if renderer is not None:
                 renderer.view.narration.append(f"↪ steer (applies before the next model call): {text[:160]}")
                 renderer._mark()
+        else:
+            self.set_topic_status(state.session.id, "running")
 
     async def _download(self, message: Message, state: SessionState) -> Attachment | None:
         file_id: str | None = None
@@ -867,6 +1031,10 @@ class TelegramFront:
             file_id, name, mime = message.audio.file_id, message.audio.file_name or f"audio-{message.audio.file_unique_id}.mp3", message.audio.mime_type or "audio/mpeg"
         elif message.voice:
             file_id, name, mime = message.voice.file_id, f"voice-{message.voice.file_unique_id}.ogg", "audio/ogg"
+        elif message.video_note:
+            file_id, name, mime = message.video_note.file_id, f"video-note-{message.video_note.file_unique_id}.mp4", "video/mp4"
+        elif message.animation:
+            file_id, name, mime = message.animation.file_id, message.animation.file_name or f"animation-{message.animation.file_unique_id}.mp4", message.animation.mime_type or "video/mp4"
         if file_id is None:
             return None
         inbox = state.workspace / "inbox"
@@ -1074,6 +1242,8 @@ class TelegramFront:
             outbox,
             RunView(run_id=run_id, model=model, verbosity=self.config.telegram.verbosity),
             edit_interval=self.config.telegram.status_edit_interval_seconds,
+            edit_tiers=self.config.telegram.status_edit_tiers,
+            slow_tool_seconds=self.config.telegram.slow_tool_seconds,
             cost_lookup=cost_lookup,
             streaming=self.config.telegram.streaming and outbox.chat_id > 0,
             draft_interval=self.config.telegram.draft_interval_seconds,
@@ -1085,6 +1255,8 @@ class TelegramFront:
         renderer = await self._renderer_for(session_id, event.run_id)
         if renderer is None:
             return
+        if event.type is EventType.STATE_CHANGED and event.payload.get("to") in ("running", "compacting"):
+            self.set_topic_status(session_id, str(event.payload["to"]))
         await renderer.handle(event)
         if event.type is EventType.COMPACTION_COMPLETED:
             p = event.payload
@@ -1110,6 +1282,8 @@ class TelegramFront:
         await self._ask(session_id, dict(pending.payload))
 
     async def _on_finished(self, session_id: str, run_id: str, status: str) -> None:
+        self.set_topic_status(session_id, status)
+        await self.react_to_last(session_id, status)
         renderer = self._renderers.get(session_id)
         if renderer is None or renderer.view.run_id != run_id:
             return
@@ -1144,6 +1318,16 @@ class TelegramFront:
         renderer = self._renderers.get(session_id)
         if renderer is not None:
             await renderer.progress(line)
+
+
+def _cost_words(usd: float | None, unmetered: int) -> str:
+    """Spend for a summary line: a priced total, and an honest count of calls with no known price."""
+    if usd is None:
+        return " · cost unknown (no price for these calls)" if unmetered else ""
+    text = f" · ${usd:.4f}"
+    if unmetered:
+        text += f" (+{unmetered} unmetered call{'s' if unmetered != 1 else ''})"
+    return text
 
 
 def _unused(_: ReplyParameters | None = None) -> None:

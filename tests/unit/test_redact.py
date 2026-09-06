@@ -7,7 +7,7 @@ from protocore.contracts.types import HookEvent
 
 from daedalus.host.hooks import DaedalusHookManager
 from daedalus.providers.wire import parse_json_arguments
-from daedalus.security.redact import MASK, Redactor, RedactingFilter
+from daedalus.security.redact import MASK, RedactingFilter, Redactor
 
 
 def test_configured_values_are_masked_whatever_they_look_like() -> None:

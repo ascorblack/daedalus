@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { fmtInt, fmtUsd } from "../components";
 
-type Daily = { day: string; provider_id: string; model: string; calls: number; input_tokens: number; output_tokens: number; cache_read_tokens: number; reasoning_tokens: number; cost_usd: number | null };
+type Daily = { day: string; provider_id: string; model: string; calls: number; input_tokens: number; output_tokens: number; cache_read_tokens: number; reasoning_tokens: number; cost_usd: number | null; unmetered: number };
 type Recent = {
   at: string;
   provider_id: string;
@@ -19,7 +19,7 @@ type Recent = {
   duration_ms: number;
   raw: Record<string, unknown>;
 };
-type BySession = { session_id: string | null; title: string | null; calls: number; input_tokens: number; output_tokens: number; cost_usd: number | null };
+type BySession = { session_id: string | null; title: string | null; calls: number; input_tokens: number; output_tokens: number; cost_usd: number | null; unmetered: number };
 type UsageData = { daily: Daily[]; recent: Recent[]; sessions: BySession[] };
 
 const PURPOSE_LABEL: Record<string, string> = { stream: "turn", structured: "compaction", text: "text" };
@@ -69,7 +69,9 @@ export function UsageScreen() {
         <div className="card stat">
           <span className="sub">spent today</span>
           <b>{fmtUsd(todayCost)}</b>
-          <span className="sub">{fmtInt(sum(todayRows, "calls"))} calls</span>
+          <span className="sub">
+            {fmtInt(sum(todayRows, "calls"))} calls{sum(todayRows, "unmetered") > 0 ? ` · ${fmtInt(sum(todayRows, "unmetered"))} unmetered` : ""}
+          </span>
         </div>
         <div className="card stat">
           <span className="sub">tokens today</span>
@@ -110,7 +112,10 @@ export function UsageScreen() {
                     <span>{fmtTok(s.input_tokens)}↑ {fmtTok(s.output_tokens)}↓</span>
                   </div>
                 </div>
-                <div className="cost">{fmtUsd(s.cost_usd)}</div>
+                <div className="cost">
+                  {fmtUsd(s.cost_usd)}
+                  {s.unmetered > 0 && <div className="sub">{fmtInt(s.unmetered)} unmetered</div>}
+                </div>
               </div>
             ))}
           </div>
@@ -144,7 +149,10 @@ export function UsageScreen() {
                   <td className="num">{fmtTok(d.input_tokens)}</td>
                   <td className="num">{fmtTok(d.output_tokens)}</td>
                   <td className="num">{fmtTok(d.cache_read_tokens)}</td>
-                  <td className="num">{fmtUsd(d.cost_usd)}</td>
+                  <td className="num">
+                    {fmtUsd(d.cost_usd)}
+                    {d.unmetered > 0 && <span className="sub"> +{d.unmetered} unmetered</span>}
+                  </td>
                 </tr>
               )),
             )}

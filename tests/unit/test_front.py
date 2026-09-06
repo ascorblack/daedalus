@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -50,7 +51,7 @@ class RecordingBot:
 def _message(text: str | None = None, *, chat_type: str = "private", chat_id: int = OWNER, thread: int | None = None, document: bool = False, user: int = OWNER) -> Message:
     data: dict[str, Any] = {
         "message_id": 1,
-        "date": 1_700_000_000,
+        "date": int(time.time()),
         "chat": {"id": chat_id, "type": chat_type, "is_forum": chat_type == "supergroup"},
         "from": {"id": user, "is_bot": False, "first_name": "A"},
     }

@@ -277,10 +277,8 @@ async def test_lookup_rejects_non_http_url() -> None:
 
 
 def test_presets_are_seeded_and_resolve_the_default(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    from daedalus.config import RuntimeConfig
+    from daedalus.config import ModelPresetConfig, RuntimeConfig
     from daedalus.extensions.api import resolve_model_patch
-
-    from daedalus.config import ModelPresetConfig
 
     config = RuntimeConfig()
     config.providers["vllm"].base_url = "http://x/v1"

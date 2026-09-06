@@ -223,6 +223,9 @@ class SelfChangeConfig(BaseModel):
 class LimitsConfig(BaseModel):
     max_iterations: int = 200
     tool_timeout_seconds: float = 900.0
+    usd_per_run: float = Field(default=5.0, ge=0)
+    """Spend cap for one run; the run is stopped after the model call that crosses it. 0 = no cap.
+    Calls without a known price (self-hosted models) cannot count towards it."""
 
 
 class BalanceConfig(BaseModel):
@@ -241,7 +244,24 @@ class TelegramConfig(BaseModel):
     """Supergroup with topics; 0 means "not bound yet"."""
     general_topic_id: int = 0
     status_edit_interval_seconds: float = 1.0
+    status_edit_tiers: list[list[float]] = Field(default_factory=lambda: [[60, 1], [300, 2], [900, 5], [0, 10]])
+    """``[[run age in seconds, multiplier], …]``: the status message is edited less often as a run ages
+    (the last entry, age 0, applies beyond the previous one). Multiplies ``status_edit_interval_seconds``."""
+    slow_tool_seconds: int = Field(default=60, ge=5)
+    """A tool call running longer than this is marked as slow in the status message."""
     inbound_merge_window_seconds: float = 1.5
+    photo_caption_wait_seconds: float = 8.0
+    """A photo without a caption waits this long for the message that usually follows it (a voice note, the text)."""
+    stale_after_seconds: int = Field(default=300, ge=0)
+    """Messages older than this when received (queued while the bot was down) are acknowledged, not executed. 0 = off."""
+    max_inbound_file_mb: int = Field(default=1500, ge=1)
+    """Files larger than this are refused before download."""
+    forward_unknown_commands: bool = True
+    """``/anything`` that is not a bot command goes to the agent as text."""
+    reactions: bool = True
+    """React to the operator's messages with the run's state (👀 received, 🔥 done, 💔 failed)."""
+    topic_status_emoji: bool = True
+    """Prefix a session's topic name with its state (🟢 running, ❓ waiting, ✅ done, 💥 failed)."""
     verbosity: int = 1
     """0 = final answers only, 1 = tool summaries, 2 = everything."""
     streaming: bool = True

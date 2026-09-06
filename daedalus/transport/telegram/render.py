@@ -1,9 +1,11 @@
 """Turn core events into what the operator sees in a topic.
 
-One live status message per run (edited at most once per second) plus the final
-answer as ordinary messages. Everything the transport knows about a run lives in
-:class:`RunView`; the Telegram side is behind the small :class:`Outbox` protocol
-so the renderer can be exercised without a bot.
+One live status message per run plus the final answer as ordinary messages. The
+status message is edited at most once per interval, and the interval grows with the
+age of the run (a run in its second hour does not need a fresh edit every second).
+Everything the transport knows about a run lives in :class:`RunView`; the Telegram
+side is behind the small :class:`Outbox` protocol so the renderer can be exercised
+without a bot.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import html
 import json
 import random
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -44,6 +46,11 @@ _TOOL_ICONS = {
     "McpDisable": "🔌",
 }
 
+DEFAULT_EDIT_TIERS: tuple[tuple[float, float], ...] = ((60, 1), (300, 2), (900, 5), (0, 10))
+TOOL_TICK_SECONDS = 10.0
+"""How often a running tool's elapsed time is re-rendered (the display is bucketed, so most ticks edit nothing)."""
+TOOL_DURATION_SHOWN_FROM_SECONDS = 2.0
+
 
 class Outbox(Protocol):
     async def send_text(self, text: str, *, markdown: bool = True) -> int: ...
@@ -68,7 +75,11 @@ class RunView:
     narration: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
     tool_names: dict[str, str] = field(default_factory=dict)
+    tool_started: dict[str, float] = field(default_factory=dict)
+    tool_lines: dict[str, int] = field(default_factory=dict)
+    """Index in ``tools`` of the log line for a call id, so its duration can be appended."""
     current_tool: str | None = None
+    current_tool_since: float = 0.0
     tokens: dict[str, int] = field(default_factory=dict)
     changed_files: set[str] = field(default_factory=set)
     started: float = field(default_factory=time.monotonic)
@@ -77,6 +88,7 @@ class RunView:
     last_rendered: str = ""
     progress_line: str = ""
     final_sent: bool = False
+    delivery_failed: bool = False
     draft_id: int = 0
     draft_sent: str = ""
 
@@ -90,6 +102,8 @@ class RunRenderer:
         view: RunView,
         *,
         edit_interval: float = 1.0,
+        edit_tiers: Sequence[Sequence[float]] = DEFAULT_EDIT_TIERS,
+        slow_tool_seconds: float = 60.0,
         cost_lookup: Callable[[str], Awaitable[float | None]] | None = None,
         streaming: bool = False,
         draft_interval: float = 0.35,
@@ -97,11 +111,14 @@ class RunRenderer:
         self.outbox = outbox
         self.view = view
         self.edit_interval = edit_interval
+        self.edit_tiers = tuple((float(a), float(m)) for a, m in edit_tiers) or DEFAULT_EDIT_TIERS
+        self.slow_tool_seconds = slow_tool_seconds
         self.cost_lookup = cost_lookup
         self.streaming = streaming
         self.draft_interval = draft_interval
         self._flush_task: asyncio.Task[None] | None = None
         self._draft_task: asyncio.Task[None] | None = None
+        self._tick_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
     # -- events ---------------------------------------------------------------------
@@ -121,18 +138,31 @@ class RunRenderer:
                 self._mark_draft()
         elif t is EventType.TOOL_USE_START:
             name = str(p.get("tool_name") or "")
-            v.tool_names[str(p.get("tool_call_id"))] = name
+            call_id = str(p.get("tool_call_id"))
+            v.tool_names[call_id] = name
+            v.tool_started[call_id] = time.monotonic()
             v.current_tool = name
+            v.current_tool_since = v.tool_started[call_id]
             v.progress_line = ""
+            self._start_ticker()
             self._mark()
         elif t is EventType.TOOL_USE_STOP:
-            name = v.tool_names.get(str(p.get("tool_call_id")), "?")
+            call_id = str(p.get("tool_call_id"))
+            name = v.tool_names.get(call_id, "?")
             args = p.get("final_input") or {}
+            v.tool_lines[call_id] = len(v.tools)
             v.tools.append(f"{_TOOL_ICONS.get(name, '•')} {name} {_args_summary(name, args)}")
             if name in ("Write", "Edit") and args.get("path"):
                 v.changed_files.add(str(args["path"]))
             self._mark()
         elif t is EventType.TOOL_RESULT:
+            call_id = str(p.get("tool_call_id"))
+            started = v.tool_started.pop(call_id, None)
+            line = v.tool_lines.pop(call_id, None)
+            if started is not None and line is not None and line < len(v.tools):
+                elapsed = time.monotonic() - started
+                if elapsed >= TOOL_DURATION_SHOWN_FROM_SECONDS:
+                    v.tools[line] += f" · {_duration(int(elapsed))}"
             v.current_tool = None
             if v.verbosity >= 2:
                 content = str(p.get("content") or "")
@@ -150,7 +180,7 @@ class RunRenderer:
                 v.text_buffer = ""
             self._mark()
         elif t is EventType.ERROR:
-            v.narration.append(f"⚠️ {p.get('message') or json.dumps(p)[:300]}")
+            v.narration.append(f"⚠️ {redact(str(p.get('message') or json.dumps(p)[:300]))}")
             self._mark()
         elif t is EventType.STATE_CHANGED:
             v.state = str(p.get("to") or v.state)
@@ -161,6 +191,23 @@ class RunRenderer:
         elif t is EventType.MODEL_CHANGED:
             v.model = str(p.get("model_name") or p.get("to") or v.model)
             self._mark()
+
+    def _start_ticker(self) -> None:
+        """While a tool runs, re-render its elapsed time even though no event arrives."""
+        if self._tick_task is None or self._tick_task.done():
+            self._tick_task = asyncio.create_task(self._tick())
+
+    async def _tick(self) -> None:
+        v = self.view
+        last_bucket = -1
+        while v.current_tool and v.state in ("running", "compacting"):
+            await asyncio.sleep(TOOL_TICK_SECONDS)
+            if not v.current_tool:
+                return
+            bucket = _bucket(int(time.monotonic() - v.current_tool_since))
+            if bucket != last_bucket:
+                last_bucket = bucket
+                self._mark()
 
     def _mark_draft(self) -> None:
         if not self.streaming:
@@ -188,8 +235,18 @@ class RunRenderer:
         v.draft_sent = text
 
     async def progress(self, line: str) -> None:
-        self.view.progress_line = line
+        self.view.progress_line = redact(line)
         self._mark()
+
+    def current_edit_interval(self) -> float:
+        """The base interval scaled by the tier the run's age falls in."""
+        age = time.monotonic() - self.view.started
+        multiplier = self.edit_tiers[-1][1]
+        for limit, factor in self.edit_tiers:
+            if limit > 0 and age < limit:
+                multiplier = factor
+                break
+        return self.edit_interval * multiplier
 
     def _mark(self) -> None:
         self.view.dirty = True
@@ -197,7 +254,7 @@ class RunRenderer:
             self._flush_task = asyncio.create_task(self._flush_soon())
 
     async def _flush_soon(self) -> None:
-        wait = self.edit_interval - (time.monotonic() - self.view.last_edit)
+        wait = self.current_edit_interval() - (time.monotonic() - self.view.last_edit)
         if wait > 0:
             await asyncio.sleep(wait)
         await self.flush()
@@ -241,15 +298,28 @@ class RunRenderer:
             head += f" · ${cost:.4f}"
         return head
 
+    def _current_tool_line(self) -> str:
+        v = self.view
+        if not v.current_tool:
+            return ""
+        elapsed = int(time.monotonic() - v.current_tool_since)
+        slow = elapsed >= self.slow_tool_seconds
+        line = f"{'⏱' if slow else '▶'} {v.current_tool}"
+        if elapsed >= TOOL_TICK_SECONDS:
+            line += f" · {_duration(_bucket(elapsed))}"
+        if slow:
+            line += " (still running)"
+        if v.progress_line:
+            line += f": {v.progress_line}"
+        return line
+
     def render_status_html(self, cost: float | None = None) -> str:
         """The status message as rich HTML: one line of vitals, the tool log folded away, the latest note."""
         v = self.view
         parts = [f"<p><b>{_esc(self._head(cost))}</b></p>"]
-        if v.current_tool:
-            line = f"▶ {v.current_tool}"
-            if v.progress_line:
-                line += f": {v.progress_line}"
-            parts.append(f"<p>{_esc(line)}</p>")
+        current = self._current_tool_line()
+        if current:
+            parts.append(f"<p>{_esc(current)}</p>")
         if v.tools:
             shown = v.tools[-40:]
             while len(shown) > 3 and sum(len(t) for t in shown) > 7000:
@@ -270,11 +340,9 @@ class RunRenderer:
         """Plain-text status (the fallback when rich editing is unavailable, and for tests)."""
         v = self.view
         lines = [self._head()]
-        if v.current_tool:
-            line = f"▶ {v.current_tool}"
-            if v.progress_line:
-                line += f": {v.progress_line}"
-            lines.append(line)
+        current = self._current_tool_line()
+        if current:
+            lines.append(current)
         if v.tools:
             lines.append("")
             lines.extend(v.tools[-8:])
@@ -289,11 +357,18 @@ class RunRenderer:
         return "\n".join(lines)[:4000]
 
     async def finish(self, status: str, *, workspace: Path) -> None:
-        """Send the final answer and freeze the status message."""
+        """Send the final answer and freeze the status message.
+
+        Delivery degrades in steps and never ends in silence: rich Markdown, then plain
+        text per chunk, then the whole answer as a file, and as a last resort an explicit
+        note that Telegram refused it (the text is still in the workspace and the Mini App).
+        """
         v = self.view
         v.state = status
         final = v.text_buffer.strip()
         v.text_buffer = ""
+        if self._tick_task is not None:
+            self._tick_task.cancel()
         cost: float | None = None
         if self.cost_lookup is not None:
             try:
@@ -302,19 +377,7 @@ class RunRenderer:
                 cost = None
         if final and not v.final_sent:
             v.final_sent = True
-            if len(final) > DOCUMENT_THRESHOLD:
-                out = workspace / "answer.md"
-                out.write_text(final, encoding="utf-8")
-                await self.outbox.send_document(out, caption=final[:900])
-            else:
-                for chunk in split_message(final):
-                    try:
-                        await self.outbox.send_text(chunk)
-                    except Exception:  # noqa: BLE001 — one bad chunk must not truncate the answer
-                        try:
-                            await self.outbox.send_text(chunk, markdown=False)
-                        except Exception:  # noqa: BLE001
-                            continue
+            await self._deliver_final(final, workspace)
             if self.streaming and v.draft_id and v.draft_sent:
                 # The real message is in the chat now; drop the live draft so the client stops the dots.
                 try:
@@ -337,6 +400,42 @@ class RunRenderer:
             except Exception:  # noqa: BLE001
                 pass
 
+    async def _deliver_final(self, final: str, workspace: Path) -> None:
+        v = self.view
+        failures: list[str] = []
+        if len(final) <= DOCUMENT_THRESHOLD:
+            delivered_chunks = 0
+            for chunk in split_message(final):
+                try:
+                    await self.outbox.send_text(chunk)
+                    delivered_chunks += 1
+                except Exception as exc:  # noqa: BLE001 — one bad chunk must not truncate the answer
+                    failures.append(f"{type(exc).__name__}: {exc}")
+            if delivered_chunks and not failures:
+                return
+            if delivered_chunks:
+                v.delivery_failed = True
+                await self._say(f"⚠️ {len(failures)} part(s) of the answer could not be delivered ({failures[-1][:200]}); the full text follows as a file.")
+        try:
+            out = workspace / "answer.md"
+            out.write_text(final, encoding="utf-8")
+            await self.outbox.send_document(out, caption=final[:900])
+            return
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{type(exc).__name__}: {exc}")
+        v.delivery_failed = True
+        await self._say(
+            "⚠️ The answer could not be delivered to Telegram ("
+            + redact(failures[-1][:300] if failures else "unknown error")
+            + "). It is saved as answer.md in the workspace and visible in the Mini App."
+        )
+
+    async def _say(self, text: str) -> None:
+        try:
+            await self.outbox.send_text(text, markdown=False)
+        except Exception:  # noqa: BLE001 — nothing further to try
+            pass
+
 
 def _esc(text: str) -> str:
     return html.escape(text, quote=False)
@@ -350,6 +449,13 @@ def _duration(seconds: int) -> str:
     return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
 
 
+def _bucket(seconds: int) -> int:
+    """Round elapsed time down so the displayed value changes rarely (10 s steps, then whole minutes)."""
+    if seconds < 60:
+        return seconds - seconds % 10
+    return seconds - seconds % 60
+
+
 def _args_summary(name: str, args: dict[str, Any]) -> str:
     """One line of arguments for the tool log, with secrets masked before they reach the chat."""
     if name == "Exec":
@@ -360,4 +466,4 @@ def _args_summary(name: str, args: dict[str, Any]) -> str:
     return redact(json.dumps(args, ensure_ascii=False))[:120] if args else ""
 
 
-__all__ = ["Outbox", "RunRenderer", "RunView"]
+__all__ = ["DEFAULT_EDIT_TIERS", "Outbox", "RunRenderer", "RunView"]
