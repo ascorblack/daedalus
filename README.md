@@ -28,8 +28,11 @@ core; the copy it runs on is [protocore-exp](https://github.com/ascorblack/proto
   workspace and a summary handed from run to run.
 - **Spend visibility.** Every provider response is recorded as reported; balance thresholds
   alert you in chat; a daily cap is enforced by the supervisor.
-- **Any OpenAI-compatible model.** DeepSeek by default (thinking mode configurable), OpenRouter
-  and self-hosted vLLM out of the box, with a fallback chain.
+- **Any OpenAI-compatible model.** Clients are endpoints (DeepSeek, OpenRouter, self-hosted
+  vLLM, anything OpenAI-compatible, each with its own base_url and optional key); models are
+  named presets on top of them (client + model id + label), several per client if you like.
+  One preset is the default for new sessions, any session can switch from the chat, and a
+  fallback chain covers outages.
 - **Eyes on demand.** `ImageView` sends an image to a small vision model (OpenRouter,
   `qwen/qwen3.7-flash` by default) and returns what the agent asked about it, so the main
   model's context never carries raw pixels.
