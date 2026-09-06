@@ -249,6 +249,16 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         return {"run_id": run_id}
 
+    @api.delete("/api/sessions/{session_id}")
+    async def delete_session(session_id: str, keep_workspace: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        binding = await app.front.binding_for_session(session_id) if app.front is not None else None
+        if binding is not None and binding.thread_id and app.front is not None:
+            try:
+                await app.front.bot.delete_forum_topic(binding.chat_id, binding.thread_id)
+            except Exception:  # noqa: BLE001
+                pass
+        return {"deleted": await manager.delete_session(session_id, delete_workspace=not keep_workspace)}
+
     @api.post("/api/sessions/{session_id}/stop")
     async def stop(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         return {"stopped": await manager.stop(session_id)}

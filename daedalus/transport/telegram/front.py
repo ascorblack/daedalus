@@ -43,7 +43,8 @@ Each forum topic is one agent session with its own workspace. Write in a topic t
 
 /bind — (in a supergroup with topics) make it the session hub
 /new &lt;title&gt; — new session (new topic)
-/stop — stop the current run · /close — close this session's topic
+/stop — stop the current run · /close — close this topic (asks whether to delete the agent and its workspace)
+/delete &lt;id&gt; · /cleanup — delete a session; delete every session whose topic is already closed
 /sessions · /status — what exists, what is running
 /model [provider/]&lt;name&gt; · /thinking on|off|low|medium|high — model settings (default in General, per session in a topic)
 /usage · /balance — spend and provider balances
@@ -316,6 +317,9 @@ class TelegramFront:
         r.message.register(self.cmd_new, Command("new"))
         r.message.register(self.cmd_stop, Command("stop"))
         r.message.register(self.cmd_close, Command("close"))
+        r.message.register(self.cmd_delete, Command("delete"))
+        r.message.register(self.cmd_cleanup, Command("cleanup"))
+        r.message.register(self.on_topic_closed, F.forum_topic_closed)
         r.message.register(self.cmd_sessions, Command("sessions"))
         r.message.register(self.cmd_model, Command("model"))
         r.message.register(self.cmd_thinking, Command("thinking"))
@@ -379,15 +383,132 @@ class TelegramFront:
         binding = await self.binding_for_topic(message.chat.id, message.message_thread_id or 0)
         if binding is None:
             return
+        await self._ask_close(binding, message.chat.id, message.message_thread_id)
+
+    async def _ask_close(self, binding: TopicBinding, chat_id: int, thread_id: int | None) -> None:
+        state = await self.manager.get_state(binding.session_id)
+        size = 0
+        if state is not None and state.workspace.exists():
+            size = sum(f.stat().st_size for f in state.workspace.rglob("*") if f.is_file())
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🗑 Close and delete the agent + workspace", callback_data=f"cl:{binding.session_id}:delete")],
+                [InlineKeyboardButton(text="📦 Close the topic, keep the agent", callback_data=f"cl:{binding.session_id}:keep")],
+                [InlineKeyboardButton(text="Cancel", callback_data=f"cl:{binding.session_id}:cancel")],
+            ]
+        )
+        await tg_call(
+            self.bot.send_message,
+            chat_id,
+            f"Close session '{binding.title}' ({binding.session_id})? Its workspace holds {size / 1_048_576:.1f} MB.",
+            message_thread_id=thread_id,
+            reply_markup=keyboard,
+        )
+
+    async def _close_topic(self, binding: TopicBinding) -> None:
+        await self.manager.db.execute(
+            "UPDATE topics SET closed_at = ? WHERE chat_id = ? AND thread_id = ?",
+            (datetime.now(UTC).isoformat(), binding.chat_id, binding.thread_id),
+        )
+        if binding.thread_id:
+            try:
+                await self.bot.close_forum_topic(binding.chat_id, binding.thread_id)
+            except TelegramBadRequest:
+                pass
+
+    async def _on_close_decision(self, query: CallbackQuery, data: list[str]) -> None:
+        if len(data) != 3:
+            await query.answer("stale button")
+            return
+        _, session_id, action = data
+        binding = await self.binding_for_session(session_id)
+        if action == "cancel":
+            await query.answer("kept open")
+            if query.message is not None:
+                await query.message.edit_text("Close cancelled.", reply_markup=None)
+            return
+        if action == "keep":
+            if binding is not None:
+                await self.manager.stop(session_id)
+                await self._close_topic(binding)
+            await query.answer("closed")
+            if query.message is not None:
+                await query.message.edit_text(f"Topic closed; session {session_id} and its workspace are kept (/sessions, Mini App).", reply_markup=None)
+            return
+        if binding is not None:
+            await self._close_topic(binding)
+        removed = await self.manager.delete_session(session_id, delete_workspace=True)
+        await query.answer("deleted" if removed else "already gone")
+        if query.message is not None:
+            await query.message.edit_text(f"Session {session_id} deleted with its workspace.", reply_markup=None)
+        if binding is not None and binding.thread_id:
+            try:
+                await self.bot.delete_forum_topic(binding.chat_id, binding.thread_id)
+            except TelegramBadRequest:
+                pass
+
+    async def on_topic_closed(self, message: Message) -> None:
+        """The operator closed a topic by hand: ask in General what to do with its session."""
+        binding = await self.binding_for_topic(message.chat.id, message.message_thread_id or 0)
+        if binding is None:
+            return
         await self.manager.stop(binding.session_id)
         await self.manager.db.execute(
             "UPDATE topics SET closed_at = ? WHERE chat_id = ? AND thread_id = ?",
             (datetime.now(UTC).isoformat(), binding.chat_id, binding.thread_id),
         )
-        try:
-            await self.bot.close_forum_topic(binding.chat_id, binding.thread_id)
-        except TelegramBadRequest:
-            pass
+        await self._ask_close(binding, message.chat.id, self.config.telegram.general_topic_id or None)
+
+    async def cmd_delete(self, message: Message, command: CommandObject) -> None:
+        if not self._is_owner(message.from_user.id if message.from_user else None):
+            return
+        session_id = (command.args or "").strip()
+        if not session_id:
+            await message.answer("usage: /delete <session id>  (see /sessions)")
+            return
+        binding = await self.binding_for_session(session_id)
+        if binding is None:
+            removed = await self.manager.delete_session(session_id)
+            await message.answer("deleted" if removed else "no such session")
+            return
+        await self._ask_close(binding, message.chat.id, message.message_thread_id if message.is_topic_message else None)
+
+    async def cmd_cleanup(self, message: Message) -> None:
+        """Delete every session whose topic is already closed."""
+        if not self._is_owner(message.from_user.id if message.from_user else None):
+            return
+        orphans = await self.manager.closed_topic_sessions()
+        if not orphans:
+            await message.answer("No sessions with closed topics.")
+            return
+        total = sum(o["bytes"] for o in orphans) / 1_048_576
+        lines = [f"• {o['title']} ({o['session_id']}) {o['bytes'] / 1_048_576:.1f} MB" for o in orphans[:30]]
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=f"🗑 Delete all {len(orphans)} ({total:.1f} MB)", callback_data="cu:all")],
+                [InlineKeyboardButton(text="Cancel", callback_data="cu:cancel")],
+            ]
+        )
+        await message.answer("Sessions whose topics are closed:\n" + "\n".join(lines), reply_markup=keyboard)
+
+    async def _on_cleanup_decision(self, query: CallbackQuery, data: list[str]) -> None:
+        if data[-1] != "all":
+            await query.answer("cancelled")
+            if query.message is not None:
+                await query.message.edit_text("Cleanup cancelled.", reply_markup=None)
+            return
+        removed = 0
+        for orphan in await self.manager.closed_topic_sessions():
+            if await self.manager.delete_session(orphan["session_id"]):
+                removed += 1
+                try:
+                    if orphan["thread_id"]:
+                        await self.bot.delete_forum_topic(orphan["chat_id"], orphan["thread_id"])
+                except TelegramBadRequest:
+                    pass
+        await query.answer(f"deleted {removed}")
+        if query.message is not None:
+            await query.message.edit_text(f"Deleted {removed} session(s) with their workspaces.", reply_markup=None)
 
     async def cmd_sessions(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
@@ -672,6 +793,12 @@ class TelegramFront:
             return
         if data[0] == "aq":
             await self._on_answer(query, data)
+            return
+        if data[0] == "cl":
+            await self._on_close_decision(query, data)
+            return
+        if data[0] == "cu":
+            await self._on_cleanup_decision(query, data)
             return
         hook = self.callback_hooks.get(data[0])
         if hook is not None:

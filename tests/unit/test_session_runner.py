@@ -205,3 +205,20 @@ async def test_waiting_session_survives_restart(settings: Settings, db: Database
     await manager2.answer(state.session.id, [{"selected": ["Yes"]}])
     assert (await waiter2)[-1][2] == "completed"
     await manager2.close()
+
+
+async def test_delete_session_removes_records_and_workspace(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([{"text": "hi"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("gone")
+    (state.workspace / "inbox" / "f.txt").write_text("x")
+    waiter = asyncio.create_task(_wait_finished(manager))
+    await manager.submit(state.session.id, "hello")
+    await waiter
+    assert await manager.delete_session(state.session.id)
+    assert not state.workspace.exists()
+    for table in ("sessions", "session_messages", "runs", "live_control"):
+        row = await db.fetchone(f"SELECT count(*) c FROM {table}")
+        assert row["c"] == 0, table
+    assert await manager.get_state(state.session.id) is None
+    await manager.close()

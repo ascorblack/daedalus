@@ -128,6 +128,20 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
         <button className="btn small" onClick={() => { setShowFiles(false); setShowMcp((v) => !v); }}>
           {showMcp ? "chat" : "mcp"}
         </button>
+        <button
+          className="btn small danger"
+          onClick={async () => {
+            if (!window.confirm("Delete this session, its topic and its workspace?")) return;
+            try {
+              await api.delete(`/api/sessions/${id}`);
+              onBack();
+            } catch (e) {
+              toast((e as Error).message);
+            }
+          }}
+        >
+          🗑
+        </button>
       </div>
       <div className="screen">
         {showMcp && detail ? (

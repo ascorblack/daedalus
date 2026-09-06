@@ -301,6 +301,47 @@ class SessionManager:
             )
         return out
 
+    async def delete_session(self, session_id: str, *, delete_workspace: bool = True) -> bool:
+        """Remove a session entirely: its run, records, events and (optionally) its workspace."""
+        state = await self.get_state(session_id)
+        if state is None:
+            return False
+        if state.running and state.engine is not None:
+            state.engine.stop()
+            if state.task is not None:
+                state.task.cancel()
+                await asyncio.gather(state.task, return_exceptions=True)
+        self._states.pop(session_id, None)
+        locator.unregister(session_id)
+        runs = await self.db.fetchall("SELECT id FROM runs WHERE session_id = ?", (session_id,))
+        async with self.db.transaction() as conn:
+            for row in runs:
+                await conn.execute("DELETE FROM events WHERE run_id = ?", (row["id"],))
+                await conn.execute("DELETE FROM snapshots WHERE run_id = ?", (row["id"],))
+            await conn.execute("DELETE FROM runs WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM session_messages WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM live_control WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM pending_questions WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM topics WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        if delete_workspace and state.workspace.exists() and state.workspace.is_relative_to(self.settings.workspaces_dir):
+            shutil.rmtree(state.workspace, ignore_errors=True)
+        return True
+
+    async def closed_topic_sessions(self) -> list[dict[str, Any]]:
+        """Sessions whose topic is closed but whose data is still on disk."""
+        rows = await self.db.fetchall(
+            "SELECT t.session_id, t.title, t.chat_id, t.thread_id FROM topics t WHERE t.closed_at IS NOT NULL"
+        )
+        out = []
+        for row in rows:
+            state = await self.get_state(row["session_id"])
+            size = 0
+            if state is not None and state.workspace.exists():
+                size = sum(f.stat().st_size for f in state.workspace.rglob("*") if f.is_file())
+            out.append({"session_id": row["session_id"], "title": row["title"], "chat_id": row["chat_id"], "thread_id": row["thread_id"], "bytes": size})
+        return out
+
     def _register_services(self, state: SessionState) -> None:
         hooks = self.service_hooks
         services = SessionServices(
