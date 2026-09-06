@@ -223,6 +223,12 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL
     );
     """,
+    # schedules remember their in-flight run across restarts; lazy notes count promotion attempts
+    """
+    ALTER TABLE schedules ADD COLUMN active_session_id TEXT;
+    ALTER TABLE schedules ADD COLUMN active_run_id TEXT;
+    ALTER TABLE lazy_notes ADD COLUMN promote_attempts INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 
@@ -239,6 +245,7 @@ class Database:
         self._conn = await aiosqlite.connect(self.path, isolation_level=None)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._migrate()

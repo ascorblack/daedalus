@@ -21,11 +21,10 @@ import httpx
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.providers.pricing import pricing_table
+from daedalus.security.redact import redact as redact_text
 
-MIN_FREE_GB = 1.0
-WORKSPACES_WARN_GB = 20.0
-STALE_SNAPSHOT_HOURS = 24
 PROBE_TIMEOUT = 6.0
+"""Default per-probe timeout; the configured value (``ops.doctor_probe_timeout_seconds``) wins."""
 
 
 @dataclass(slots=True)
@@ -65,6 +64,10 @@ async def run_checks(ctx: DoctorContext) -> list[Check]:
     return checks
 
 
+def _timeout(ctx: DoctorContext) -> float:
+    return float(ctx.config.ops.doctor_probe_timeout_seconds)
+
+
 def summarize(checks: list[Check]) -> dict[str, int]:
     return {
         "ok": sum(1 for c in checks if c.ok),
@@ -98,6 +101,10 @@ async def _config(ctx: DoctorContext) -> list[Check]:
     cfg, st = ctx.config, ctx.settings
     try:
         pid, preset = cfg.preset()
+    except RuntimeError as exc:
+        out.append(Check("default model", False, str(exc), "fail", "create a preset in Settings → Models"))
+        pid, preset = "", None
+    if preset is not None:
         out.append(Check("default model", True, f"{pid} = {preset.display(pid)}", "ok"))
         provider = cfg.providers.get(preset.provider)
         if provider is None:
@@ -106,11 +113,12 @@ async def _config(ctx: DoctorContext) -> list[Check]:
             env_key = {"deepseek": st.deepseek_api_key, "openrouter": st.openrouter_api_key, "vllm": st.vllm_api_key}.get(provider.kind, "")
             has_key = bool(provider.api_key or env_key)
             out.append(Check("default provider key", has_key or provider.kind in ("vllm", "openai_compat"), "configured" if has_key else "no API key (fine for a keyless self-hosted endpoint)", "ok" if has_key else "warn", "set the key in Settings → Models → provider"))
-            table = pricing_table(provider.kind, provider.pricing)
-            priced = any(preset.model.startswith(k) for k in table)
-            out.append(Check("pricing for the default model", priced, "known" if priced else f"no price for {preset.model}: its calls are recorded as unmetered and cannot count toward caps", "ok" if priced else "warn", "add a pricing entry for the provider in config.toml"))
-    except RuntimeError as exc:
-        out.append(Check("default model", False, str(exc), "fail", "create a preset in Settings → Models"))
+            try:
+                table = pricing_table(provider.kind, provider.pricing)
+                priced = any(preset.model.startswith(k) for k in table)
+                out.append(Check("pricing for the default model", priced, "known" if priced else f"no price for {preset.model}: its calls are recorded as unmetered and cannot count toward caps", "ok" if priced else "warn", "add a pricing entry for the provider in config.toml"))
+            except Exception as exc:  # noqa: BLE001 — a hand-edited price table is exactly what this check is for
+                out.append(Check("pricing for the default model", False, f"the pricing table for {preset.provider} does not parse: {type(exc).__name__}: {exc}", "fail", "fix [providers.*.pricing] in config.toml"))
     vision = cfg.vision_preset()
     out.append(Check("vision preset", vision is not None, f"{vision[0]}" if vision else "no image-capable preset: ImageView and photos in chat are unavailable", "ok" if vision else "warn", "mark a preset as accepting images"))
     chain_bad = [c for c in cfg.model.chain if c not in cfg.presets]
@@ -125,7 +133,7 @@ async def _telegram(ctx: DoctorContext) -> list[Check]:
     out.append(Check("session hub", bool(ctx.config.telegram.forum_chat_id), f"forum {ctx.config.telegram.forum_chat_id}" if ctx.config.telegram.forum_chat_id else "no forum bound: only the private chat works, one session", "ok" if ctx.config.telegram.forum_chat_id else "warn", "add the bot to a supergroup with topics and send /bind there"))
     if ctx.front is not None:
         try:
-            me = await asyncio.wait_for(ctx.front.bot.get_me(), timeout=PROBE_TIMEOUT)
+            me = await asyncio.wait_for(ctx.front.bot.get_me(), timeout=_timeout(ctx))
             out.append(Check("bot api", True, f"@{me.username} via {st.telegram_api_base}{' (local server)' if st.telegram_local_mode else ''}", "ok"))
         except Exception as exc:  # noqa: BLE001
             out.append(Check("bot api", False, f"getMe failed: {type(exc).__name__}: {exc}", "fail", "check the local Bot API server / network"))
@@ -137,53 +145,55 @@ async def _state(ctx: DoctorContext) -> list[Check]:
     out: list[Check] = []
     for label, path in (("state dir", st.state_dir), ("workspaces dir", st.workspaces_dir)):
         writable = path.exists() and os.access(path, os.W_OK)
-        out.append(Check(label, writable, str(path) if writable else f"{path} is missing or not writable", "fail", "create it and make it writable by the bot user"))
+        out.append(Check(label, writable, str(path) if writable else f"{path} is missing or not writable", "ok" if writable else "fail", "create it and make it writable by the bot user"))
     try:
         usage = shutil.disk_usage(st.state_dir if st.state_dir.exists() else Path("/"))
         free_gb = usage.free / 1e9
-        out.append(Check("disk free", free_gb >= MIN_FREE_GB, f"{free_gb:.1f} GB free", "ok" if free_gb >= MIN_FREE_GB else "fail", "free space: /cleanup, prune Docker, remove old workspaces"))
+        min_free = ctx.config.ops.doctor_min_free_gb
+        out.append(Check("disk free", free_gb >= min_free, f"{free_gb:.1f} GB free", "ok" if free_gb >= min_free else "fail", "free space: /cleanup, prune Docker, remove old workspaces"))
     except OSError:
         pass
     if st.workspaces_dir.exists():
         total = await asyncio.to_thread(_dir_size, st.workspaces_dir)
         gb = total / 1e9
-        out.append(Check("workspace size", gb < WORKSPACES_WARN_GB, f"{gb:.1f} GB in {st.workspaces_dir}", "ok" if gb < WORKSPACES_WARN_GB else "warn", "close finished sessions with 'delete the agent + workspace', or /cleanup"))
-    out.append(Check("secrets dir", not st.secrets_dir.exists() or (st.secrets_dir.stat().st_mode & 0o077) == 0, "private" if not st.secrets_dir.exists() or (st.secrets_dir.stat().st_mode & 0o077) == 0 else f"{st.secrets_dir} is readable by others", "warn", f"chmod 700 {st.secrets_dir}"))
+        warn_gb = ctx.config.ops.doctor_workspaces_warn_gb
+        out.append(Check("workspace size", gb < warn_gb, f"{gb:.1f} GB in {st.workspaces_dir}", "ok" if gb < warn_gb else "warn", "close finished sessions with 'delete the agent + workspace', or /cleanup"))
+    private = not st.secrets_dir.exists() or (st.secrets_dir.stat().st_mode & 0o077) == 0
+    out.append(Check("secrets dir", private, "private" if private else f"{st.secrets_dir} is readable by others", "ok" if private else "warn", f"chmod 700 {st.secrets_dir}"))
     budget = st.state_dir / "BUDGET_EXCEEDED"
     out.append(Check("daily budget", not budget.exists(), "within budget" if not budget.exists() else f"exceeded: {budget.read_text(encoding='utf-8').strip()[:120]}", "ok" if not budget.exists() else "warn", "runs resume tomorrow, or the supervisor's /budget reset"))
     if ctx.guard is not None:
         n = getattr(ctx.guard, "unclean_boots", 0)
-        out.append(Check("boot health", n == 0, "clean boot" if n == 0 else f"{n} unclean restart(s) in the last 10 min" + (" — recovery was skipped" if getattr(ctx.guard, "skip_recovery", False) else ""), "ok" if n == 0 else "warn", "read the logs for the crash; a parked run can be resumed by sending a message to its session"))
+        skipped = getattr(ctx.guard, "skip_recovery", False)
+        out.append(Check("boot health", n == 0, "this boot was clean" if n == 0 else f"{n} unclean restart(s) counted at this boot" + (" — recovery was skipped" if skipped else ""), "ok" if n == 0 else "warn", "read the logs for the crash; a parked run resumes at the next clean restart, or send a message in its session to start a new run"))
     if ctx.db is not None:
         row = await ctx.db.fetchone("SELECT version FROM schema_version")
         out.append(Check("database", row is not None, f"schema version {row['version']}" if row else "schema version missing", "ok" if row else "fail"))
-        cutoff = (datetime.now(UTC) - timedelta(hours=STALE_SNAPSHOT_HOURS)).isoformat()
-        stale = await ctx.db.fetchall("SELECT s.run_id, s.session_id FROM snapshots s JOIN runs r ON r.id = s.run_id WHERE r.status IN ('running', 'paused') AND r.created_at < ?", (cutoff,))
+        parked = await ctx.db.fetchall("SELECT s.run_id, s.session_id, r.created_at FROM snapshots s JOIN runs r ON r.id = s.run_id WHERE r.status IN ('running', 'paused')")
+        live = ctx.manager.running_run_ids() if ctx.manager is not None else set()
+        if ctx.manager is None and (st.state_dir / "RUNNING").exists():
+            # Another process owns these runs right now; nothing here may touch them.
+            live = {r["run_id"] for r in parked}
+        waiting = [r for r in parked if r["run_id"] not in live]
+        if waiting:
+            hint = "they resume at the next clean restart; to start over, send a message in the session" + (" — recovery was skipped at this boot" if getattr(ctx.guard, "skip_recovery", False) else "")
+            out.append(Check("parked runs", not getattr(ctx.guard, "skip_recovery", False), f"{len(waiting)} unfinished run(s) with a snapshot, not active in this process", "ok" if not getattr(ctx.guard, "skip_recovery", False) else "warn", hint))
+        cutoff = (datetime.now(UTC) - timedelta(hours=ctx.config.ops.doctor_stale_snapshot_hours)).isoformat()
+        stale = [r for r in waiting if r["created_at"] < cutoff]
         if stale and ctx.fix:
             for row in stale:
                 await ctx.db.execute("DELETE FROM snapshots WHERE run_id = ?", (row["run_id"],))
                 await ctx.db.execute("UPDATE runs SET status = 'cancelled' WHERE id = ?", (row["run_id"],))
-            out.append(Check("stale run snapshots", True, f"removed {len(stale)} snapshot(s) older than a day", "ok", fixable=True, fixed=True))
+            out.append(Check("stale run snapshots", True, f"removed {len(stale)} snapshot(s) older than {ctx.config.ops.doctor_stale_snapshot_hours} h", "ok", fixable=True, fixed=True))
         else:
-            out.append(Check("stale run snapshots", not stale, "none" if not stale else f"{len(stale)} unfinished run(s) older than a day would be resumed at the next restart", "ok" if not stale else "warn", "/doctor fix removes them (the sessions keep their history)", fixable=True))
+            out.append(Check("stale run snapshots", not stale, "none" if not stale else f"{len(stale)} parked run(s) older than {ctx.config.ops.doctor_stale_snapshot_hours} h would be resumed at the next restart", "ok" if not stale else "warn", "/doctor fix removes them (the sessions keep their history)", fixable=True))
         if ctx.manager is not None:
-            orphans = await ctx.manager.sweep_orphan_workspaces() if ctx.fix else await _orphan_workspaces(ctx)
-            if ctx.fix:
-                out.append(Check("orphan workspaces", True, f"removed {len(orphans)}" if orphans else "none", "ok", fixable=True, fixed=bool(orphans)))
+            orphans = await ctx.manager.orphan_workspaces()
+            if ctx.fix and orphans:
+                removed = await ctx.manager.sweep_orphan_workspaces()
+                out.append(Check("orphan workspaces", True, f"removed {len(removed)}: {', '.join(removed[:10])}", "ok", fixable=True, fixed=True))
             else:
-                out.append(Check("orphan workspaces", not orphans, "none" if not orphans else f"{len(orphans)} folder(s) belong to no session or schedule", "ok" if not orphans else "warn", "/doctor fix deletes them", fixable=True))
-    return out
-
-
-async def _orphan_workspaces(ctx: DoctorContext) -> list[str]:
-    rows = await ctx.db.fetchall("SELECT id FROM sessions")
-    known = {r["id"] for r in rows}
-    sched = await ctx.db.fetchall("SELECT workspace FROM schedules")
-    known_paths = {Path(r["workspace"]).resolve() for r in sched}
-    out = []
-    for entry in ctx.settings.workspaces_dir.iterdir() if ctx.settings.workspaces_dir.exists() else []:
-        if entry.is_dir() and entry.name not in known and entry.resolve() not in known_paths and entry.name != "heartbeat" and not entry.name.startswith("lazy-"):
-            out.append(entry.name)
+                out.append(Check("orphan workspaces", not orphans, "none" if not orphans else f"{len(orphans)} folder(s) belong to no session or schedule: {', '.join(o.name for o in orphans[:10])}", "ok" if not orphans else "warn", "/doctor fix deletes them", fixable=True))
     return out
 
 
@@ -208,6 +218,8 @@ def _git_cmd(repo: Path, *args: str) -> tuple[int, str]:
 
 async def _git_probe(ctx: DoctorContext) -> list[Check]:
     out: list[Check] = []
+    if shutil.which("git") is None:
+        return [Check("git", False, "git is not installed in this environment", "warn", "install git; the supervisor rebuild and the self-development tools need it")]
     for label, repo in (("bot repo", ctx.settings.bot_repo_dir), ("core repo", ctx.settings.core_repo_dir)):
         if not (repo / ".git").exists():
             out.append(Check(label, False, f"{repo} is not a git checkout", "warn", "the supervisor rebuild needs a git checkout"))
@@ -229,7 +241,7 @@ async def _supervisor(ctx: DoctorContext) -> list[Check]:
     if selfdev is None:
         return [Check("supervisor", True, "socket present", "ok")]
     try:
-        status = await asyncio.wait_for(selfdev.supervisor_status(), timeout=PROBE_TIMEOUT)
+        status = await asyncio.wait_for(selfdev.supervisor_status(), timeout=_timeout(ctx))
     except Exception as exc:  # noqa: BLE001
         return [Check("supervisor", False, f"status call failed: {type(exc).__name__}: {exc}", "fail", "restart the container; the supervisor is PID 1")]
     if not status:
@@ -258,11 +270,11 @@ async def _runtime(ctx: DoctorContext) -> list[Check]:
     heartbeat = ctx.extensions.get("heartbeat")
     if heartbeat is not None:
         hb = heartbeat.status()
-        out.append(Check("heartbeat", True, "armed" if hb["armed"] else ("on, file empty" if hb["enabled"] else "off"), "ok" if hb["armed"] or not hb["enabled"] else "info", "write HEARTBEAT.md in Settings → Heartbeat"))
+        out.append(Check("heartbeat", True, "armed" if hb["armed"] else ("on, file empty" if hb["enabled"] else "off"), "ok" if hb["armed"] or not hb["enabled"] else "info"))
     inbox = ctx.extensions.get("inbox")
     if inbox is not None:
         unread = await inbox.unread_count()
-        out.append(Check("inbox", True, f"{unread} unread", "ok" if unread == 0 else "info", "/inbox"))
+        out.append(Check("inbox", True, f"{unread} unread", "ok" if unread == 0 else "info"))
     if ctx.db is not None:
         row = await ctx.db.fetchone("SELECT count(*) c FROM schedules WHERE enabled = 0 AND failure_count > 0")
         if row and row["c"]:
@@ -274,24 +286,31 @@ async def _runtime(ctx: DoctorContext) -> list[Check]:
 
 
 async def _providers(ctx: DoctorContext) -> list[Check]:
-    out: list[Check] = []
     st = ctx.settings
-    for pid, provider in ctx.config.providers.items():
+    timeout = _timeout(ctx)
+
+    async def probe(pid: str, provider: Any) -> Check | None:
         base = provider.base_url or (st.vllm_base_url if provider.kind == "vllm" else "")
         if not base:
-            continue
+            return None
         key = provider.api_key or {"deepseek": st.deepseek_api_key, "openrouter": st.openrouter_api_key, "vllm": st.vllm_api_key}.get(provider.kind, "")
-        url = base.rstrip("/") + "/models"
+        shown = redact_text(base)  # a base_url with inline credentials must not reach the chat
         try:
-            async with httpx.AsyncClient(timeout=PROBE_TIMEOUT) as client:
-                response = await client.get(url, headers={"authorization": f"Bearer {key}"} if key else {})
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(base.rstrip("/") + "/models", headers={"authorization": f"Bearer {key}"} if key else {})
             ok = response.status_code < 500 and response.status_code != 401
-            detail = f"HTTP {response.status_code}"
-            if response.status_code == 401:
-                detail += " (key rejected)"
-            out.append(Check(f"provider {pid}", ok, f"{base} → {detail}", "ok" if ok else "fail", "check the key and base_url in Settings → Models"))
-        except httpx.HTTPError as exc:
-            out.append(Check(f"provider {pid}", False, f"{base} unreachable: {type(exc).__name__}", "fail", "network, proxy or a wrong base_url"))
+            detail = f"HTTP {response.status_code}" + (" (key rejected)" if response.status_code == 401 else "")
+            return Check(f"provider {pid}", ok, f"{shown} → {detail}", "ok" if ok else "fail", "check the key and base_url in Settings → Models")
+        except Exception as exc:  # noqa: BLE001 — a typo in base_url raises InvalidURL, not HTTPError
+            return Check(f"provider {pid}", False, f"{shown} unreachable: {type(exc).__name__}", "fail", "network, proxy or a wrong base_url")
+
+    results = await asyncio.gather(*(probe(pid, p) for pid, p in ctx.config.providers.items()), return_exceptions=True)
+    out: list[Check] = []
+    for pid, result in zip(ctx.config.providers, results, strict=False):
+        if isinstance(result, Check):
+            out.append(result)
+        elif isinstance(result, BaseException):
+            out.append(Check(f"provider {pid}", False, f"probe crashed: {type(result).__name__}", "fail"))
     return out
 
 

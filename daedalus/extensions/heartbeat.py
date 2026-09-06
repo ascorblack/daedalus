@@ -4,7 +4,8 @@
 off) nothing runs and nothing is spent. Otherwise, inside the active hours and at the
 configured interval, the agent runs it in the standing "[heartbeat]" session and either
 reports something worth the operator's attention or calls ``StaySilent`` — in which case
-only the inbox records that the check happened.
+only the inbox records that the check happened. Its identity, last run and daily count
+are persisted so a restart neither resets the cap nor opens a second topic.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 FILE_NAME = "HEARTBEAT.md"
 TICK_SECONDS = 60
+KV_KEY = "heartbeat_state"
+MAX_TEXT_CHARS = 20_000
 TEMPLATE = """# Heartbeat
 
 This file is the prompt for the periodic unattended check. Leave it empty to switch the
@@ -73,8 +76,30 @@ class Heartbeat:
     def write(self, text: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".md.tmp")
-        tmp.write_text(text, encoding="utf-8")
+        tmp.write_text(text[:MAX_TEXT_CHARS], encoding="utf-8")
         tmp.replace(self.path)
+
+    # -- persistence ----------------------------------------------------------------
+
+    async def load(self) -> None:
+        data = await self.app.db.kv_get(KV_KEY, {}) or {}
+        self.session_id = data.get("session_id") or None
+        self.last_run = datetime.fromisoformat(data["last_run"]) if data.get("last_run") else None
+        today = data.get("runs_today") or ["", 0]
+        self.runs_today = (str(today[0]), int(today[1]))
+        manager = self.app.manager
+        if self.session_id and manager is not None:
+            state = await manager.get_state(self.session_id)
+            if state is None:
+                self.session_id = None
+            elif state.running or state.pending is not None:
+                self.active_run = state.run_id  # a run resumed from a snapshot is still ours
+
+    async def save(self) -> None:
+        await self.app.db.kv_set(
+            KV_KEY,
+            {"session_id": self.session_id, "last_run": self.last_run.isoformat() if self.last_run else None, "runs_today": list(self.runs_today)},
+        )
 
     def status(self) -> dict[str, Any]:
         cfg = self.app.config.heartbeat
@@ -130,9 +155,6 @@ class Heartbeat:
         if not text:
             raise RuntimeError("HEARTBEAT.md is empty")
         now = datetime.now(UTC)
-        today = now.strftime("%Y-%m-%d")
-        self.runs_today = (today, (self.runs_today[1] if self.runs_today[0] == today else 0) + 1)
-        self.last_run = now
         prompt = (
             f"Heartbeat check at {now.strftime('%Y-%m-%d %H:%M UTC')}" + (" (started by the operator)" if manual else "") + ".\n\n"
             f"{text}\n\n"
@@ -140,31 +162,36 @@ class Heartbeat:
             "operator's attention in a short final reply, or — when everything is routine — call StaySilent "
             "with a one-line note of what you checked and end. Never announce that there is nothing new."
         )
+        preset = self.app.config.heartbeat.preset or None
         state = await manager.get_state(self.session_id) if self.session_id else None
-        if state is None or state.running or state.pending is not None:
-            if state is not None and (state.running or state.pending is not None):
-                raise RuntimeError("the previous heartbeat run is still active")
+        if state is not None and (state.running or state.pending is not None):
+            raise RuntimeError("the previous heartbeat run is still active")
+        if state is None:
             workspace = self.app.settings.workspaces_dir / "heartbeat"
             metadata: dict[str, Any] = {"heartbeat": True, "unattended": True}
-            if self.app.config.heartbeat.preset:
-                metadata["preset"] = self.app.config.heartbeat.preset
-            preset = self.app.config.heartbeat.preset or None
             if scheduler is not None:
                 state = await scheduler.run_task_session("[heartbeat]", prompt, workspace, metadata, preset=preset)  # type: ignore[attr-defined]
             else:
                 state = await manager.create_session("[heartbeat]", workspace=workspace, metadata=metadata)
                 if preset:
                     await manager.set_model(state.session.id, preset=preset)
-                await manager.submit(state.session.id, prompt, [], as_answer=False)
+                await manager.submit(state.session.id, prompt, [], as_answer=False, origin="heartbeat")
             self.session_id = state.session.id
         else:
-            await manager.submit(state.session.id, prompt, [], as_answer=False)
+            if preset:
+                await manager.set_model(state.session.id, preset=preset)  # a preset changed in the settings applies to the next run
+            await manager.submit(state.session.id, prompt, [], as_answer=False, origin="heartbeat")
+        # The slot counts only once the run exists.
+        today = now.strftime("%Y-%m-%d")
+        self.runs_today = (today, (self.runs_today[1] if self.runs_today[0] == today else 0) + 1)
+        self.last_run = now
         self.active_run = state.run_id
+        await self.save()
         return state.session.id
 
     async def on_run_finished(self, session_id: str, run_id: str, status: str) -> None:
         if session_id != self.session_id or status == "awaiting":
-            return
+            return  # an awaiting run stays active; the scheduler's timeout sweep answers it and the run ends later
         self.active_run = None
         inbox = self.app.extensions.get("inbox")
         manager = self.app.manager
@@ -184,6 +211,7 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     heartbeat = Heartbeat(app)
     app.extensions["heartbeat"] = heartbeat
     assert app.manager is not None
+    await heartbeat.load()
     app.manager.on_finished(heartbeat.on_run_finished)
     if not heartbeat.path.exists():
         try:

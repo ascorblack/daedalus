@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
+
+from daedalus.transport.telegram.front import TelegramOutbox
+from daedalus.transport.telegram.markdown import split_message
 
 if TYPE_CHECKING:
     from daedalus.app import Application
@@ -76,9 +79,17 @@ class Inbox:
         if event.type is EventType.ERROR and event.payload.get("kind") == "run_cap":
             await self.post("run_cap", "A run hit its spend cap", str(event.payload.get("message") or ""), severity="warning", session_id=session_id, run_id=event.run_id)
 
+    async def prune(self, keep_days: int) -> int:
+        cutoff = (datetime.now(UTC) - timedelta(days=keep_days)).isoformat()
+        row = await self.app.db.fetchone("SELECT count(*) c FROM inbox WHERE read = 1 AND at < ?", (cutoff,))
+        await self.app.db.execute("DELETE FROM inbox WHERE read = 1 AND at < ?", (cutoff,))
+        return int(row["c"]) if row else 0
+
     async def on_run_finished(self, session_id: str, run_id: str, status: str) -> None:
         if status == "failed":
             state = await self.app.manager.get_state(session_id) if self.app.manager else None
+            if state is not None and (state.session.metadata.get("unattended") or state.session.metadata.get("heartbeat")):
+                return  # the scheduler / heartbeat post their own, richer entry
             title = state.session.title if state else session_id
             await self.post("run_failed", f"Run failed in '{title}'", "The run ended with an error; see the session for details.", severity="error", session_id=session_id, run_id=run_id)
 
@@ -115,9 +126,12 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
             unread = await inbox.unread_count()
             text = f"📥 **Inbox** — {unread} unread\n\n" + format_entries(entries)
             if arg != "all":
-                await inbox.mark_read([int(e["id"]) for e in entries])
                 text += "\n\n_(shown entries are now marked read; /inbox all shows everything)_"
-            await front.notify(text) if front._is_general(message) and message.chat.type != "private" else await message.answer(text)
+            outbox = TelegramOutbox(front.bot, message.chat.id, message.message_thread_id if message.is_topic_message else None)
+            for chunk in split_message(text):
+                await outbox.send_text(chunk)
+            if arg != "all":
+                await inbox.mark_read([int(e["id"]) for e in entries])  # only after the digest went out
 
         front.command_hooks["inbox"] = cmd_inbox
     return []

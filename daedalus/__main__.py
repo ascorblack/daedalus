@@ -63,6 +63,7 @@ async def cmd_doctor(args: argparse.Namespace) -> int:
         run_checks,
         summarize,
     )
+    from daedalus.host.session_runner import SessionManager  # Lazy: each subcommand imports only what it runs
     from daedalus.stores.database import Database  # Lazy: each subcommand imports only what it runs
 
     settings = _settings(args)
@@ -70,7 +71,12 @@ async def cmd_doctor(args: argparse.Namespace) -> int:
     db = Database(settings.db_path)
     await db.open()
     try:
-        checks = await run_checks(DoctorContext(settings=settings, config=config, db=db, fix=args.fix))
+        manager = SessionManager(settings, config, db=db)
+        await manager.start()
+        try:
+            checks = await run_checks(DoctorContext(settings=settings, config=config, db=db, manager=manager, fix=args.fix))
+        finally:
+            await manager.close()
     finally:
         await db.close()
     if args.json:

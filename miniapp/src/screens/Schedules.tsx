@@ -5,7 +5,7 @@ import { timeAgo } from "../components";
 export function SchedulesScreen({ toast, onOpen }: { toast: (t: string) => void; onOpen: (id: string) => void }) {
   const [items, setItems] = useState<Schedule[] | null>(null);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ name: "", prompt: "", cron: "", run_at: "", kind: "agent" as "agent" | "message" | "lazy" });
+  const [form, setForm] = useState({ name: "", prompt: "", cron: "", run_at: "", kind: "agent" as "agent" | "message" });
 
   const load = useCallback(async () => {
     try {
@@ -62,16 +62,15 @@ export function SchedulesScreen({ toast, onOpen }: { toast: (t: string) => void;
           <input className="field" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <label className="field">Kind</label>
           <div className="btnrow" style={{ marginTop: 0 }}>
-            {(["agent", "message", "lazy"] as const).map((k) => (
+            {(["agent", "message"] as const).map((k) => (
               <button key={k} className={`btn small ${form.kind === k ? "primary" : ""}`} onClick={() => setForm({ ...form, kind: k })}>
-                {k === "agent" ? "agent task" : k === "message" ? "plain reminder" : "lazy note"}
+                {k === "agent" ? "agent task" : "plain reminder"}
               </button>
             ))}
           </div>
           <div className="sub">
             {form.kind === "agent" && "runs the prompt as a task in its own session and workspace"}
-            {form.kind === "message" && "delivers the text to you as a reminder; no model call"}
-            {form.kind === "lazy" && "shown together with your next message in the session it was created from; becomes a task after a day"}
+            {form.kind === "message" && "delivers the text to you as a reminder; no model call (lazy notes are created by the agent from inside a session)"}
           </div>
           <label className="field">{form.kind === "agent" ? "Prompt for the future session" : "Reminder text"}</label>
           <textarea className="field" rows={4} value={form.prompt} onChange={(e) => setForm({ ...form, prompt: e.target.value })} />

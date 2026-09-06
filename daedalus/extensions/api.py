@@ -30,14 +30,16 @@ from protocore.contracts.types import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from daedalus.config import PROVIDER_KINDS, ModelPresetConfig, ProviderConfig
+from daedalus.config import PROVIDER_KINDS, HeartbeatConfig, ModelPresetConfig, ProviderConfig
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import Attachment
 from daedalus.security import redact
+from daedalus.transport.telegram.front import TelegramOutbox
+from daedalus.transport.telegram.markdown import split_message
 
 if TYPE_CHECKING:
     from daedalus.app import Application
@@ -102,12 +104,12 @@ class InboxReadBody(BaseModel):
 
 
 class HeartbeatBody(BaseModel):
-    text: str | None = None
+    text: str | None = Field(default=None, max_length=20_000)
     enabled: bool | None = None
-    interval_minutes: int | None = None
-    active_hours: str | None = None
+    interval_minutes: int | None = Field(default=None, ge=5)
+    active_hours: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}-\d{2}:\d{2}$")
     preset: str | None = None
-    max_runs_per_day: int | None = None
+    max_runs_per_day: int | None = Field(default=None, ge=1)
 
 
 class RenameBody(BaseModel):
@@ -343,6 +345,7 @@ def message_view(message: Message) -> dict[str, Any]:
         "role": message.role.value,
         "summary": is_summary,
         "internal": internal,
+        "origin": origin or ("operator" if message.role is MessageRole.user and not internal else ""),
         "compaction": compaction,
         "archived": archived,
         "headline": headline,
@@ -704,8 +707,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return DoctorContext(settings=settings, config=app.config, db=app.db, manager=manager, front=app.front, extensions=dict(app.extensions), guard=app.guard, fix=fix)
 
     @api.get("/api/doctor")
-    async def doctor(fix: int = 0, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        checks = await run_checks(_doctor_context(bool(fix)))
+    async def doctor(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        checks = await run_checks(_doctor_context(False))
+        return {"checks": [c.as_dict() for c in checks], "summary": summarize(checks)}
+
+    @api.post("/api/doctor/fix")
+    async def doctor_fix(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        checks = await run_checks(_doctor_context(True))
         return {"checks": [c.as_dict() for c in checks], "summary": summarize(checks)}
 
     # -- inbox --------------------------------------------------------------------------
@@ -716,6 +724,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if inbox is None:
             return {"entries": [], "unread": 0}
         return {"entries": await inbox.list(limit=limit, unread_only=bool(unread)), "unread": await inbox.unread_count()}  # type: ignore[attr-defined]
+
+    @api.get("/api/inbox/unread")
+    async def inbox_unread(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        inbox = app.extensions.get("inbox")
+        return {"unread": await inbox.unread_count() if inbox is not None else 0}  # type: ignore[attr-defined]
 
     @api.post("/api/inbox/read")
     async def inbox_read(body: InboxReadBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -750,12 +763,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             heartbeat.write(body.text)  # type: ignore[attr-defined]
         patch = {k: v for k, v in body.model_dump().items() if k != "text" and v is not None}
         if patch:
-            current = app.config.model_dump(mode="json")
-            current["heartbeat"] = {**current.get("heartbeat", {}), **patch}
+            if patch.get("preset") and patch["preset"] not in app.config.presets:
+                raise HTTPException(400, f"no such model preset {patch['preset']!r}")
             try:
-                new_config = type(app.config).model_validate(current)
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(400, str(exc)) from exc
+                heartbeat_config = HeartbeatConfig.model_validate({**app.config.heartbeat.model_dump(), **patch})
+            except ValueError as exc:
+                raise HTTPException(400, "; ".join(str(e.get("msg")) for e in getattr(exc, "errors", lambda: [])()) or "invalid heartbeat settings") from exc
+            new_config = app.config.model_copy(update={"heartbeat": heartbeat_config})
             await app.save_config(new_config)
             if app.front is not None:
                 app.front.config = new_config
@@ -1016,7 +1030,9 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
             fix = (command.args or "").strip().lower() == "fix"
             ctx = DoctorContext(settings=app.settings, config=app.config, db=app.db, manager=app.manager, front=app.front, extensions=dict(app.extensions), guard=app.guard, fix=fix)
             checks = await run_checks(ctx)
-            await message.answer(render_text(checks)[:4000])
+            outbox = TelegramOutbox(app.front.bot, message.chat.id, message.message_thread_id if message.is_topic_message else None)  # type: ignore[union-attr]
+            for chunk in split_message(redact.redact(render_text(checks))):
+                await outbox.send_text(chunk, markdown=False)
 
         app.front.command_hooks["doctor"] = cmd_doctor
     return [asyncio.create_task(server.serve(), name="api-server")]

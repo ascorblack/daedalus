@@ -44,7 +44,7 @@ async def history_search(context: ToolContext, query: str, limit: int = 10, all_
         return ok(context, f"no turns match {query!r}")
     lines = []
     for h in hits:
-        where = f" [session {h['session_id']} — {h.get('title') or '?'}]" if all_sessions else ""
+        where = f" [session {h['session_id']} — {h.get('title') or '?'}; read with HistoryExpand({h['seq']}, session_id={h['session_id']!r})]" if all_sessions else ""
         lines.append(f"seq {h['seq']} ({h['role']}){where}: {redact(str(h['snippet'])).replace(chr(10), ' ')}")
     return ok(context, "\n".join(lines) + "\n\nHistoryExpand(from_seq=N) reads a turn in full; give to_seq for a range.")
 
@@ -53,8 +53,9 @@ async def history_search(context: ToolContext, query: str, limit: int = 10, all_
     name="HistoryExpand",
     description=(
         "Read transcript turns verbatim by seq number (from HistorySearch or an archived-range "
-        "note in a summary). from_seq alone returns that turn; to_seq returns the range. "
-        "Long results are clipped; narrow the range to see more."
+        "note in a summary). from_seq alone returns that turn; to_seq returns the range. Pass "
+        "session_id for a hit HistorySearch found in another session. Long results are clipped; "
+        "narrow the range to see more."
     ),
 )
 async def history_expand(

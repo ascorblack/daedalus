@@ -23,9 +23,11 @@ THRESHOLD = 3
 
 
 class BootGuard:
-    def __init__(self, state_dir: Path) -> None:
+    def __init__(self, state_dir: Path, *, window_minutes: int = WINDOW_MINUTES, threshold: int = THRESHOLD) -> None:
         self.marker = state_dir / "RUNNING"
         self.history = state_dir / "boot-history.json"
+        self.window_minutes = window_minutes
+        self.threshold = threshold
         self.unclean_boots = 0
         self.skip_recovery = False
 
@@ -34,23 +36,23 @@ class BootGuard:
         try:
             now = datetime.now(UTC)
             unclean = self.marker.exists()
-            times: list[str] = []
+            self.history.parent.mkdir(parents=True, exist_ok=True)
+            self.marker.write_text(now.isoformat(), encoding="utf-8")  # armed first: a failure below must not disarm the next boot
+            times: list[datetime] = []
             if self.history.exists():
                 try:
-                    times = [t for t in json.loads(self.history.read_text(encoding="utf-8")) if isinstance(t, str)]
-                except (OSError, ValueError):
+                    times = [datetime.fromisoformat(t) for t in json.loads(self.history.read_text(encoding="utf-8")) if isinstance(t, str)]
+                except (OSError, ValueError, TypeError):
                     times = []
-            cutoff = now - timedelta(minutes=WINDOW_MINUTES)
-            recent = [t for t in times if datetime.fromisoformat(t) >= cutoff]
+            cutoff = now - timedelta(minutes=self.window_minutes)
+            recent = [t for t in times if t >= cutoff]
             if unclean:
-                recent.append(now.isoformat())
+                recent.append(now)
             self.unclean_boots = len(recent)
-            self.skip_recovery = self.unclean_boots >= THRESHOLD
-            self.history.parent.mkdir(parents=True, exist_ok=True)
-            self.history.write_text(json.dumps(recent), encoding="utf-8")
-            self.marker.write_text(now.isoformat(), encoding="utf-8")
+            self.skip_recovery = self.unclean_boots >= self.threshold
+            self.history.write_text(json.dumps([t.isoformat() for t in recent]), encoding="utf-8")
             if unclean:
-                logger.warning("unclean boot %d/%d within %d min%s", self.unclean_boots, THRESHOLD, WINDOW_MINUTES, " — skipping boot recovery" if self.skip_recovery else "")
+                logger.warning("unclean boot %d/%d within %d min%s", self.unclean_boots, self.threshold, self.window_minutes, " — skipping boot recovery" if self.skip_recovery else "")
         except Exception:  # noqa: BLE001 — the guard must never keep the bot from starting
             logger.warning("boot guard failed open", exc_info=True)
             self.skip_recovery = False

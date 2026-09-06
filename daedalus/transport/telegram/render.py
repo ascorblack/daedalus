@@ -177,7 +177,7 @@ class RunRenderer:
             if used:
                 v.tokens = {k: int(val) for k, val in used.items() if isinstance(val, int | float)}
             if p.get("stop_reason") == "tool_use":
-                narration = v.text_buffer.strip()
+                narration = split_headline(v.text_buffer.strip())[0]
                 if narration and v.verbosity >= 1:
                     v.narration.append(narration[:400])
                 v.text_buffer = ""
@@ -431,7 +431,6 @@ class RunRenderer:
             if delivered_chunks and not failures:
                 return
             if delivered_chunks:
-                v.delivery_failed = True
                 await self._say(
                     f"⚠️ {len(failures)} part(s) of the answer could not be delivered ({redact(failures[-1][:200])}); "
                     "the complete answer follows as a file (the parts above are repeated in it)."

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, HeartbeatStatus, Preset, ProviderConf, Settings } from "../api";
 import { timeAgo } from "../components";
 
@@ -404,7 +404,7 @@ function HealthTab({ toast }: { toast: (t: string) => void }) {
   const load = async (fix = false) => {
     setBusy(true);
     try {
-      setData(await api.get(`/api/doctor?fix=${fix ? 1 : 0}`));
+      setData(fix ? await api.post("/api/doctor/fix") : await api.get("/api/doctor"));
       if (fix) toast("fixes applied");
     } catch (e) {
       toast((e as Error).message);
@@ -457,12 +457,13 @@ function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void })
   const [hb, setHb] = useState<HeartbeatStatus | null>(null);
   const [text, setText] = useState("");
   const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(false);
   const load = () =>
     api
       .get<HeartbeatStatus>("/api/heartbeat")
       .then((r) => {
         setHb(r);
-        if (!dirty) setText(r.text);
+        if (!dirtyRef.current) setText(r.text);
       })
       .catch((e) => toast((e as Error).message));
   useEffect(() => {
@@ -477,6 +478,7 @@ function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void })
       setHb(r);
       if ("text" in patch) {
         setDirty(false);
+        dirtyRef.current = false;
         setText(r.text);
       }
       toast("saved");
@@ -547,6 +549,7 @@ function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void })
           onChange={(e) => {
             setText(e.target.value);
             setDirty(true);
+            dirtyRef.current = true;
           }}
         />
         <div className="btnrow">

@@ -49,8 +49,8 @@ export function App() {
   useEffect(() => {
     const poll = () =>
       api
-        .get<{ inbox_unread?: number }>("/api/status")
-        .then((st) => setUnread(st.inbox_unread ?? 0))
+        .get<{ unread: number }>("/api/inbox/unread")
+        .then((r) => setUnread(r.unread ?? 0))
         .catch(() => undefined);
     poll();
     const id = setInterval(poll, 20000);

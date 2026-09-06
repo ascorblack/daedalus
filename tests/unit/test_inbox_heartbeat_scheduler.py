@@ -112,7 +112,9 @@ async def test_lazy_note_rides_with_the_next_message_and_is_promoted_when_ignore
     assert app.front.outbox.sent == []
     decorated = await scheduler.decorate_prompt("s1", "hi again")
     assert decorated.startswith("[Reminder fired") and decorated.endswith("\n\nhi again") and "ask about the invoice" in decorated
-    assert await scheduler.decorate_prompt("s1", "x") == "x"  # delivered once
+    assert "ask about the invoice" in await scheduler.decorate_prompt("s1", "x")  # not yet committed: a refused start loses nothing
+    await scheduler.on_run_started("s1", "run-1")
+    assert await scheduler.decorate_prompt("s1", "x") == "x"  # delivered once the run exists
     # a second note that nobody reads for a day is promoted
     await app.db.execute(
         "INSERT INTO lazy_notes(schedule_id, session_id, text, fired_at) VALUES (?, ?, ?, ?)",
@@ -120,7 +122,7 @@ async def test_lazy_note_rides_with_the_next_message_and_is_promoted_when_ignore
     )
     promoted: list[tuple[str, str]] = []
 
-    async def fake_run(title: str, prompt: str, workspace: Any, metadata: dict[str, Any]) -> Any:
+    async def fake_run(title: str, prompt: str, workspace: Any, metadata: dict[str, Any], **_: Any) -> Any:
         promoted.append((title, prompt))
         return SimpleNamespace(session=SimpleNamespace(id="new"), run_id="r")
 

@@ -80,6 +80,7 @@ export type MessageView = {
   role: "system" | "user" | "assistant" | "tool";
   summary?: boolean;
   internal?: boolean;
+  origin?: string;
   compaction?: { reason: string; messages?: number; at?: string } | null;
   text: string;
   thinking: string;

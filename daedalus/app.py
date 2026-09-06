@@ -25,7 +25,8 @@ class Application:
         self.background: list[asyncio.Task[None]] = []
         self.extensions: dict[str, object] = {}
         self.stopping = asyncio.Event()
-        self.guard = BootGuard(settings.state_dir)
+        self._shut_down = False
+        self.guard = BootGuard(settings.state_dir, window_minutes=self.config.ops.boot_loop_window_minutes, threshold=self.config.ops.boot_loop_threshold)
 
     async def save_config(self, config: RuntimeConfig) -> None:
         self.config = config
@@ -56,7 +57,9 @@ class Application:
         resumed = await self.manager.resume_unfinished()
         if resumed:
             await self.front.notify(f"Resumed {len(resumed)} run(s) after restart.", markdown=False)
-        await self.front.redeliver_pending()
+        resent = await self.front.redeliver_pending()
+        if resent:
+            await self.front.notify(f"Re-sent {resent} answer(s) the previous process had not confirmed as delivered.", markdown=False)
 
     async def _report_startup(self) -> None:
         """Tell the operator about a failed rebuild or an exhausted budget."""
@@ -83,11 +86,13 @@ class Application:
         assert self.manager is not None and self.front is not None
         self.background.extend(await install_all(self))
 
-    async def run(self) -> None:
-        assert self.front is not None
+    def install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self.stopping.set)
+
+    async def run(self) -> None:
+        assert self.front is not None
         polling = asyncio.create_task(self.front.start(), name="telegram-polling")
         stop_waiter = asyncio.create_task(self.stopping.wait(), name="stop-waiter")
         done, _ = await asyncio.wait({polling, stop_waiter}, return_when=asyncio.FIRST_COMPLETED)
@@ -98,20 +103,27 @@ class Application:
             await polling
 
     async def shutdown(self) -> None:
-        for task in self.background:
-            task.cancel()
-        if self.front is not None:
-            await self.front.stop()
-        if self.manager is not None:
-            await self.manager.close()
-        await self.db.close()
-        self.guard.on_clean_shutdown()
+        """Stop everything; runs are drained before the transport closes so a finishing answer still reaches the chat."""
+        if self._shut_down:
+            return
+        self._shut_down = True
+        try:
+            for task in self.background:
+                task.cancel()
+            if self.manager is not None:
+                await self.manager.close()
+            if self.front is not None:
+                await self.front.stop()
+            await self.db.close()
+        finally:
+            self.guard.on_clean_shutdown()  # a deliberate stop is clean even when a step above failed
 
 
 async def serve(settings: Settings) -> int:
     app = Application(settings)
-    await app.start()
+    app.install_signal_handlers()
     try:
+        await app.start()
         await app.run()
     except Exception:
         logger.exception("fatal")

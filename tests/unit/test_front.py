@@ -135,7 +135,7 @@ async def test_new_in_forum_creates_topic_and_binding(front: TelegramFront) -> N
 
 async def test_ask_user_keyboard_single_choice_resumes_run(front: TelegramFront) -> None:
     state = await front.manager.create_session("q")
-    await front._bind(OWNER, 0, state.session.id, "q")
+    await front.bind_topic(OWNER, 0, state.session.id, "q")
     await front._ask(state.session.id, {"questions": [{"question": "Color?", "options": [{"label": "Red"}, {"label": "Blue"}], "multiSelect": False, "allow_custom": False}]})
     sent = front.bot.sent[-1]  # type: ignore[attr-defined]
     buttons = [b for row in sent["reply_markup"].inline_keyboard for b in row]

@@ -7,9 +7,11 @@
   ("when I next write, remind me…"); if the operator does not write within the TTL it is
   promoted to an ``agent`` task so it is never lost.
 
-A recurring task never overlaps itself, a task that keeps failing is switched off with an
-inbox entry, an unattended run that asks a question continues on its own judgement after a
-timeout, and everything a task produces lands in the inbox.
+A recurring task never overlaps itself (the in-flight run is recorded on the row, so a
+restart remembers it), a task that keeps failing is switched off with an inbox entry, an
+unattended run that asks a question continues on its own judgement after a timeout, and
+everything a task produces lands in the inbox. Side effects of a reminder (marking a lazy
+note delivered, a slot consumed) are committed only once the run actually exists.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ UNATTENDED_ANSWER = (
     "No operator is available for this unattended run. Continue with your best judgement, "
     "prefer the safe and reversible option, and state the assumption you made in your final reply."
 )
+PROMOTE_MAX_ATTEMPTS = 3
 
 
 def _now() -> datetime:
@@ -46,6 +49,7 @@ class Scheduler:
     def __init__(self, app: Application) -> None:
         self.app = app
         self._active: dict[str, str] = {}  # schedule id -> session id while a run is active
+        self._delivering: dict[str, list[int]] = {}  # session id -> lazy note ids folded into a message not yet started
 
     @property
     def root(self) -> Path:
@@ -58,6 +62,24 @@ class Scheduler:
         inbox = self._inbox()
         if inbox is not None:
             await inbox.post(kind, title, body, **kw)
+
+    async def restore(self) -> None:
+        """Rebuild the in-flight map from the rows after a restart; settle runs that are already over."""
+        manager = self.app.manager
+        if manager is None:
+            return
+        rows = await self.app.db.fetchall("SELECT * FROM schedules WHERE active_session_id IS NOT NULL")
+        for row in rows:
+            state = await manager.get_state(row["active_session_id"])
+            if state is not None and (state.running or state.pending is not None):
+                self._active[row["id"]] = row["active_session_id"]
+            else:
+                self._active[row["id"]] = row["active_session_id"]
+                run_status = "completed"
+                if row["active_run_id"]:
+                    run = await self.app.db.fetchone("SELECT status FROM runs WHERE id = ?", (row["active_run_id"],))
+                    run_status = "failed" if run and run["status"] == "error" else "completed"
+                await self.on_run_finished(row["active_session_id"], row["active_run_id"] or "", run_status)
 
     # -- CRUD -----------------------------------------------------------------------
 
@@ -123,7 +145,10 @@ class Scheduler:
         row = await self.app.db.fetchone("SELECT id FROM schedules WHERE id = ?", (schedule_id,))
         if row is None:
             return False
-        await self.app.db.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+        async with self.app.db.transaction() as conn:
+            await conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+            await conn.execute("DELETE FROM lazy_notes WHERE schedule_id = ? AND delivered_at IS NULL AND promoted_at IS NULL", (schedule_id,))
+        self._active.pop(schedule_id, None)
         return True
 
     async def set_enabled(self, schedule_id: str, enabled: bool) -> None:
@@ -160,23 +185,51 @@ class Scheduler:
         for row in rows:
             if row["id"] in self._active:
                 continue  # a recurring task never runs in parallel with itself
-            due = datetime.fromisoformat(row["next_run_at"])
-            stale = now - due > timedelta(hours=1)
-            if stale and not self.app.config.scheduler.catch_up_missed:
-                await self._advance(dict(row), ran=False)
-                await self._post("schedule_missed", f"Missed run of '{row['name']}' skipped", f"It was due {row['next_run_at']}; catch-up is off.", severity="notice")
-                continue
-            if stale:
-                await self._post("schedule_missed", f"Late run of '{row['name']}'", f"It was due {row['next_run_at']} (the bot was down); running now.", severity="notice")
-            await self.fire(dict(row))
+            schedule = dict(row)
+            try:
+                due = datetime.fromisoformat(row["next_run_at"])
+                stale = now - due > timedelta(hours=1)
+                if stale and not self.app.config.scheduler.catch_up_missed:
+                    await self._advance(schedule, ran=False)
+                    await self._post("schedule_missed", f"Missed run of '{row['name']}' skipped", f"It was due {row['next_run_at']}; catch-up is off.", severity="notice")
+                    continue
+                if stale:
+                    await self._post("schedule_missed", f"Late run of '{row['name']}'", f"It was due {row['next_run_at']} (the bot was down); running now.", severity="notice")
+                await self.fire(schedule)
+            except Exception as exc:  # noqa: BLE001 — one bad task must not skip the rest of the tick
+                logger.exception("schedule %s could not fire", row["id"])
+                await self._record_start_failure(schedule, f"{type(exc).__name__}: {exc}")
         await self._promote_lazy_notes(now)
         await self._answer_stale_questions(now)
+        inbox = self._inbox()
+        if inbox is not None:
+            await inbox.prune(self.app.config.scheduler.inbox_keep_days)
 
-    async def fire(self, schedule: dict[str, Any]) -> str:
+    async def _record_start_failure(self, schedule: dict[str, Any], error: str) -> None:
+        """A run that could not even start counts as a failure and is reported; the slot was consumed."""
+        failures = int(schedule.get("failure_count") or 0) + 1
+        limit = self.app.config.scheduler.max_failures
+        disable = bool(schedule.get("recurring")) and failures >= limit
+        await self.app.db.execute(
+            "UPDATE schedules SET failure_count = ?, last_error = ?, enabled = CASE WHEN ? THEN 0 ELSE enabled END WHERE id = ?",
+            (failures, error[:500], int(disable), schedule["id"]),
+        )
+        await self._post(
+            "schedule_failed",
+            f"'{schedule['name']}' could not start ({failures}/{limit})" + (" — switched off" if disable else ""),
+            error[:2000],
+            severity="error" if disable else "warning",
+        )
+
+    async def fire(self, schedule: dict[str, Any], *, advance: bool = True) -> str:
+        """Run a schedule now. ``advance=False`` (a manual run) leaves the next occurrence untouched."""
+        if schedule["id"] in self._active:
+            raise RuntimeError(f"schedule {schedule['id']} already has a run in flight")
         kind = schedule.get("kind") or "agent"
-        # The next occurrence is fixed before dispatch so a restart cannot fire the same slot twice.
         await self.app.db.execute("UPDATE schedules SET last_run_at = ? WHERE id = ?", (_now().isoformat(), schedule["id"]))
-        await self._advance(schedule, ran=True)
+        if advance:
+            # The next occurrence is fixed before dispatch so a restart cannot fire the same slot twice.
+            await self._advance(schedule, ran=True)
         if kind == "message":
             return await self._fire_message(schedule)
         if kind == "lazy":
@@ -214,55 +267,75 @@ class Scheduler:
         return [dict(r) for r in rows]
 
     async def decorate_prompt(self, session_id: str, text: str) -> str:
-        """Prepend fired lazy reminders to the operator's message; they count as delivered once the run starts."""
+        """Prepend fired lazy reminders to a message that starts a run; they are marked delivered once the run exists."""
         notes = await self.pending_lazy_notes(session_id)
         if not notes:
             return text
         block = "\n".join(f"[Reminder fired {n['fired_at'][:16].replace('T', ' ')} UTC, id={n['id']}] {n['text']}" for n in notes)
-        marks = ",".join("?" for _ in notes)
-        await self.app.db.execute(f"UPDATE lazy_notes SET delivered_at = ? WHERE id IN ({marks})", (_now().isoformat(), *[n["id"] for n in notes]))
+        self._delivering[session_id] = [int(n["id"]) for n in notes]
         return f"{block}\n\n{text}"
+
+    async def on_run_started(self, session_id: str, run_id: str) -> None:
+        ids = self._delivering.pop(session_id, [])
+        if ids:
+            marks = ",".join("?" for _ in ids)
+            await self.app.db.execute(f"UPDATE lazy_notes SET delivered_at = ? WHERE id IN ({marks})", (_now().isoformat(), *ids))
 
     async def _promote_lazy_notes(self, now: datetime) -> None:
         """A lazy note nobody has seen for a day becomes a task the agent runs itself."""
         cutoff = (now - timedelta(hours=self.app.config.scheduler.lazy_ttl_hours)).isoformat()
-        rows = await self.app.db.fetchall("SELECT * FROM lazy_notes WHERE delivered_at IS NULL AND promoted_at IS NULL AND fired_at <= ?", (cutoff,))
+        rows = await self.app.db.fetchall(
+            "SELECT * FROM lazy_notes WHERE delivered_at IS NULL AND promoted_at IS NULL AND fired_at <= ? AND promote_attempts < ?",
+            (cutoff, PROMOTE_MAX_ATTEMPTS),
+        )
+        manager = self.app.manager
         for row in rows:
-            await self.app.db.execute("UPDATE lazy_notes SET promoted_at = ? WHERE id = ?", (now.isoformat(), row["id"]))
-            manager = self.app.manager
             if manager is None:
-                continue
-            state = await manager.get_state(row["session_id"])
+                return
             prompt = f"[Reminder fired {row['fired_at'][:16].replace('T', ' ')} UTC; the operator did not return in time, so act on it yourself] {row['text']}"
             try:
+                state = await manager.get_state(row["session_id"])
                 if state is not None and not state.running and state.pending is None:
-                    await manager.submit(row["session_id"], prompt, as_answer=False)
+                    self._delivering.pop(row["session_id"], None)
+                    await manager.submit(row["session_id"], prompt, as_answer=False, origin="reminder")
                 else:
-                    await self.run_task_session(f"[reminder] {row['text'][:40]}", prompt, self.root / f"lazy-{row['id']}", {"lazy_note_id": row["id"]})
-                await self._post("reminder_promoted", "A lazy reminder became a task", row["text"], severity="notice", session_id=row["session_id"])
-            except Exception:  # noqa: BLE001
-                logger.exception("could not promote lazy note %s", row["id"])
+                    await self.run_task_session(f"[reminder] {row['text'][:40]}", prompt, self.root / f"lazy-{row['id']}", {"lazy_note_id": row["id"], "unattended": True}, origin="reminder")
+            except Exception as exc:  # noqa: BLE001
+                attempts = int(row["promote_attempts"] or 0) + 1
+                await self.app.db.execute("UPDATE lazy_notes SET promote_attempts = ? WHERE id = ?", (attempts, row["id"]))
+                logger.warning("could not promote lazy note %s (attempt %d): %s", row["id"], attempts, exc)
+                if attempts >= PROMOTE_MAX_ATTEMPTS:
+                    await self._post("reminder_lost", "A lazy reminder could not be turned into a task", f"{row['text']}\n\n{type(exc).__name__}: {exc}", severity="error", session_id=row["session_id"])
+                continue
+            await self.app.db.execute("UPDATE lazy_notes SET promoted_at = ? WHERE id = ?", (now.isoformat(), row["id"]))
+            await self._post("reminder_promoted", "A lazy reminder became a task", row["text"], severity="notice", session_id=row["session_id"])
 
     async def _answer_stale_questions(self, now: datetime) -> None:
-        """An unattended run waiting on AskUser for too long continues on its own judgement."""
+        """Any unattended run waiting on AskUser for too long continues on its own judgement."""
         manager = self.app.manager
-        if manager is None or not self._active:
+        if manager is None:
             return
         timeout = timedelta(minutes=self.app.config.scheduler.question_timeout_minutes)
-        for schedule_id, session_id in list(self._active.items()):
-            state = await manager.get_state(session_id)
+        rows = await self.app.db.fetchall("SELECT session_id, created_at FROM pending_questions")
+        for row in rows:
+            if now - datetime.fromisoformat(row["created_at"]) < timeout:
+                continue
+            state = await manager.get_state(row["session_id"])
             if state is None or state.pending is None:
                 continue
-            row = await self.app.db.fetchone("SELECT created_at FROM pending_questions WHERE session_id = ?", (session_id,))
-            if row is None or now - datetime.fromisoformat(row["created_at"]) < timeout:
+            meta = state.session.metadata
+            if not (meta.get("unattended") or meta.get("heartbeat")):
                 continue
+            front = self.app.front
             try:
-                await manager.answer(session_id, [{"custom": UNATTENDED_ANSWER}])
-                await self._post("schedule_question_timeout", "An unattended run waited too long for an answer", f"Task {schedule_id}: the question was answered with 'continue on your own judgement'.", severity="warning", session_id=session_id)
+                if front is not None:
+                    await front.close_question(row["session_id"], f"⏳ No answer for {self.app.config.scheduler.question_timeout_minutes} min: the unattended run continues on its own judgement.")
+                await manager.answer(row["session_id"], [{"custom": UNATTENDED_ANSWER}])
+                await self._post("schedule_question_timeout", "An unattended run waited too long for an answer", f"Session '{state.session.title}': the question was answered with 'continue on your own judgement'.", severity="warning", session_id=row["session_id"])
             except RuntimeError:
                 pass
 
-    async def run_task_session(self, title: str, prompt: str, workspace: Path, metadata: dict[str, Any], *, preset: str | None = None) -> Any:
+    async def run_task_session(self, title: str, prompt: str, workspace: Path, metadata: dict[str, Any], *, preset: str | None = None, origin: str = "schedule") -> Any:
         """Create the session (and topic) an unattended task runs in, and start it."""
         manager = self.app.manager
         front = self.app.front
@@ -273,12 +346,12 @@ class Scheduler:
             state, _ = await front.create_session_topic(title, metadata=metadata)
             if state.workspace != workspace:
                 state.workspace = workspace
-                manager._register_services(state)
+                manager.register_services(state)
         else:
             state = await manager.create_session(title, workspace=workspace, metadata=metadata)
         if preset:
             await manager.set_model(state.session.id, preset=preset)
-        await manager.submit(state.session.id, prompt, [], as_answer=False)
+        await manager.submit(state.session.id, prompt, [], as_answer=False, origin=origin)
         return state
 
     async def _fire_agent(self, schedule: dict[str, Any]) -> str:
@@ -294,12 +367,12 @@ class Scheduler:
         per_task = self.app.config.scheduler.topic_mode == "per_task"
         if front is not None and per_task and schedule.get("topic_thread_id") and self.app.config.telegram.forum_chat_id:
             state = await manager.create_session(title, workspace=workspace, metadata=metadata)
-            await front._bind(self.app.config.telegram.forum_chat_id, int(schedule["topic_thread_id"]), state.session.id, title)
+            await front.bind_topic(self.app.config.telegram.forum_chat_id, int(schedule["topic_thread_id"]), state.session.id, title)
         elif front is not None:
             state, binding = await front.create_session_topic(title, metadata=metadata)
             if state.workspace != workspace:
                 state.workspace = workspace
-                manager._register_services(state)
+                manager.register_services(state)
             if per_task:
                 await self.app.db.execute("UPDATE schedules SET topic_thread_id = ? WHERE id = ?", (binding.thread_id, schedule["id"]))
         else:
@@ -315,8 +388,10 @@ class Scheduler:
             "attention, call StaySilent instead of writing that there is nothing new. When finished, write SUMMARY.md "
             "in the workspace root describing what was done and anything the next run should know."
         )
+        run_id = await manager.submit(state.session.id, prompt, [], as_answer=False, origin="schedule")
+        # Only a run that exists is in flight — and the row remembers it across a restart.
         self._active[schedule["id"]] = state.session.id
-        await manager.submit(state.session.id, prompt, [], as_answer=False)
+        await self.app.db.execute("UPDATE schedules SET active_session_id = ?, active_run_id = ? WHERE id = ?", (state.session.id, run_id, schedule["id"]))
         return state.session.id
 
     async def on_run_finished(self, session_id: str, run_id: str, status: str) -> None:
@@ -329,6 +404,7 @@ class Scheduler:
             row = await self.app.db.fetchone("SELECT * FROM schedules WHERE id = ?", (schedule_id,))
             if row is None:
                 continue
+            await self.app.db.execute("UPDATE schedules SET active_session_id = NULL, active_run_id = NULL WHERE id = ?", (schedule_id,))
             summary = await self._collect_summary(dict(row), session_id)
             if status == "failed":
                 failures = int(row["failure_count"] or 0) + 1
@@ -389,6 +465,8 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     app.manager.service_hooks["schedule"] = scheduler.service
     app.manager.on_finished(scheduler.on_run_finished)
     app.manager.prompt_hooks.append(scheduler.decorate_prompt)
+    app.manager.run_started_hooks.append(scheduler.on_run_started)
+    await scheduler.restore()
     front = app.front
     if front is not None:
 
@@ -399,7 +477,7 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
                 return
             lines = [
                 f"{'✓' if s['enabled'] else '✗'} {s['id']} [{s.get('kind') or 'agent'}] {s['name']} — {('cron ' + s['cron']) if s['cron'] else 'once'}"
-                f" · next {s['next_run_at'] or '-'}" + (f" · failures {s['failure_count']}" if s.get("failure_count") else "")
+                f" · next {s['next_run_at'] or '-'}" + (f" · failures {s['failure_count']}" if s.get("failure_count") else "") + (" · running" if s["id"] in scheduler._active else "")
                 for s in items
             ]
             await message.answer("\n".join(lines) + "\n\n/schedule delete <id> · /schedule on|off <id> · /schedule run <id>")
@@ -415,9 +493,13 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
                 row = await app.db.fetchone("SELECT * FROM schedules WHERE id = ?", (parts[1],))
                 if row is None:
                     await message.answer("no such schedule")
-                else:
-                    sid = await scheduler.fire(dict(row))
-                    await message.answer(f"started session {sid}" if sid else "fired")
+                    return
+                try:
+                    sid = await scheduler.fire(dict(row), advance=False)
+                except RuntimeError as exc:
+                    await message.answer(str(exc))
+                    return
+                await message.answer(f"started session {sid}" if sid else "fired")
             else:
                 await message.answer("usage: /schedule delete <id> | on <id> | off <id> | run <id>")
 

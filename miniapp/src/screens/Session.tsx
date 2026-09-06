@@ -4,6 +4,18 @@ import { api, MessageView, Question, SessionDetail } from "../api";
 import { Status, fmtInt, fmtUsd } from "../components";
 import { codeBlock, renderMarkdown } from "../md";
 
+/** The trailing retrieval headline ⟦…⟧ is for the transcript index, not for the reader; a half-streamed one is cut too. */
+function stripHeadline(text: string): string {
+  const m = text.match(/(?:^|\n)\s*⟦[^⟦⟧]{3,2000}⟧\s*$/s);
+  if (m && m.index !== undefined) return text.slice(0, m.index).trimEnd();
+  const open = text.lastIndexOf("⟦");
+  if (open !== -1 && !text.slice(open).includes("⟧")) {
+    const lineStart = text.lastIndexOf("\n", open) + 1;
+    if (!text.slice(lineStart, open).trim()) return text.slice(0, lineStart).trimEnd();
+  }
+  return text;
+}
+
 // ── data shapes ───────────────────────────────────────────────────────────────────────────
 
 type LiveTool = { id: string; name: string; args: string; result?: string; error?: boolean };
@@ -108,7 +120,7 @@ function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Tu
       if (running) t.pendingTools++;
       t.activity.push({ kind: "tool", id: lt.id, name: lt.name, args: parseArgs(lt.args), result: lt.result, error: lt.error, running });
     }
-    if (live.text) t.answer = live.text;
+    if (live.text) t.answer = stripHeadline(live.text);
     t.endedAt = Date.now();
   }
   return turns;
@@ -556,6 +568,11 @@ function TurnView({ turn, live }: { turn: Turn; live: boolean }) {
   const steps = stepCount(turn.activity);
   return (
     <div className="turn">
+      {turn.user && turn.user.origin && turn.user.origin !== "operator" && (
+        <div className="sub" style={{ textAlign: "right", marginBottom: 2 }}>
+          <span className="badge">{turn.user.origin}</span>
+        </div>
+      )}
       {turn.user && <div className="msg user" dangerouslySetInnerHTML={{ __html: renderMarkdown(turn.user.text) }} />}
       {hasWork && (
         <button className="thinking-head" onClick={() => setOpen((o) => !o)}>

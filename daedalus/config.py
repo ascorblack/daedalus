@@ -243,6 +243,23 @@ class SchedulerConfig(BaseModel):
     """An unattended run (schedule, heartbeat) that asks a question waits this long, then continues on its own judgement."""
     lazy_ttl_hours: int = Field(default=24, ge=1)
     """A lazy reminder not yet seen by the operator after this long becomes an agent task."""
+    inbox_keep_days: int = Field(default=30, ge=1)
+    """Read inbox entries older than this are pruned."""
+
+
+class OpsConfig(BaseModel):
+    """Operational thresholds: boot-loop guard, delivery ledger, doctor."""
+
+    boot_loop_window_minutes: int = Field(default=10, ge=1)
+    boot_loop_threshold: int = Field(default=3, ge=2)
+    """Unclean boots inside the window after which boot recovery is skipped once."""
+    delivery_max_attempts: int = Field(default=3, ge=1)
+    delivery_max_age_hours: int = Field(default=24, ge=1)
+    delivery_keep_days: int = Field(default=7, ge=1)
+    doctor_min_free_gb: float = Field(default=1.0, ge=0)
+    doctor_workspaces_warn_gb: float = Field(default=20.0, ge=0)
+    doctor_stale_snapshot_hours: int = Field(default=24, ge=1)
+    doctor_probe_timeout_seconds: float = Field(default=6.0, ge=1)
 
 
 class HeartbeatConfig(BaseModel):
@@ -250,7 +267,7 @@ class HeartbeatConfig(BaseModel):
 
     enabled: bool = False
     interval_minutes: int = Field(default=60, ge=5)
-    active_hours: str = "08:00-23:00"
+    active_hours: str = Field(default="08:00-23:00", pattern=r"^\d{2}:\d{2}-\d{2}:\d{2}$")
     """UTC window ``HH:MM-HH:MM`` in which heartbeats run; may wrap past midnight."""
     preset: str = ""
     """Model preset for heartbeat runs; empty = the default preset."""
@@ -315,6 +332,7 @@ class RuntimeConfig(BaseModel):
     balance: BalanceConfig = Field(default_factory=BalanceConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    ops: OpsConfig = Field(default_factory=OpsConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     answer_language: str = "auto"
     """"auto" answers in the language of the request; otherwise a language name."""
@@ -483,5 +501,6 @@ __all__ = [
     "WebToolsConfig",
     "ExecToolsConfig",
     "HeartbeatConfig",
+    "OpsConfig",
     "VisionConfig",
 ]

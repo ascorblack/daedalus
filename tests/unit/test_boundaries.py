@@ -12,6 +12,8 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 PKG = ROOT / "daedalus"
 CORE = ROOT.parent / "protocore-exp" / "protocore"
@@ -28,20 +30,41 @@ def _modules(base: Path):  # type: ignore[no-untyped-def]
         yield path, ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
-def _imports(tree: ast.AST):  # type: ignore[no-untyped-def]
-    """Runtime imports only: an ``if TYPE_CHECKING:`` block never executes, so it crosses no boundary."""
+def _package_of(path: Path) -> str:
+    """Dotted package a module belongs to (``daedalus/host/x.py`` → ``daedalus.host``)."""
+    parts = path.relative_to(ROOT).with_suffix("").parts
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts[:-1])
+
+
+def _imports(tree: ast.AST, path: Path):  # type: ignore[no-untyped-def]
+    """Runtime imports, resolved to absolute names: relative imports and ``importlib.import_module``
+    with a literal count too. An ``if TYPE_CHECKING:`` block never executes, so it crosses no boundary."""
     skip: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
             skip.update(id(n) for n in ast.walk(node))
+    package = _package_of(path)
     for node in ast.walk(tree):
         if id(node) in skip:
             continue
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield alias.name, node
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            yield node.module, node
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = ".".join(package.split(".")[: len(package.split(".")) - node.level + 1])
+                name = f"{base}.{node.module}" if node.module else base
+            else:
+                name = node.module or ""
+            if name:
+                yield name, node
+        elif isinstance(node, ast.Call):
+            func = node.func
+            literal = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str) else None
+            if literal and ((isinstance(func, ast.Attribute) and func.attr == "import_module") or (isinstance(func, ast.Name) and func.id == "__import__")):
+                yield literal, node
 
 
 def _violations(base: Path, forbidden: tuple[str, ...], *, allowed_dirs: tuple[str, ...] = ()) -> list[str]:
@@ -50,7 +73,7 @@ def _violations(base: Path, forbidden: tuple[str, ...], *, allowed_dirs: tuple[s
         rel = path.relative_to(ROOT).as_posix()
         if any(rel.startswith(d) for d in allowed_dirs):
             continue
-        for name, node in _imports(tree):
+        for name, node in _imports(tree, path):
             if any(name == f or name.startswith(f + ".") for f in forbidden):
                 out.append(f"{rel}:{node.lineno} imports {name}")
     return out
@@ -79,21 +102,23 @@ def test_launcher_knows_nothing_about_the_host_package() -> None:
 
 def test_core_never_mentions_the_host() -> None:
     if not CORE.exists():
-        return
+        pytest.skip(f"core checkout not found at {CORE}")
     hits = [p.relative_to(CORE).as_posix() for p in CORE.rglob("*.py") if "daedalus" in p.read_text(encoding="utf-8", errors="ignore")]
     assert hits == []
 
 
 def test_environment_is_read_in_one_place() -> None:
-    # config reads settings; shell and selfdev pass the environment on to child processes
-    allowed = {"daedalus/config.py", "daedalus/tools/shell.py", "daedalus/extensions/selfdev.py", "daedalus/__main__.py"}
+    # settings come from daedalus.config.Settings; shell and selfdev only pass the environment on to child processes
+    allowed = {"daedalus/tools/shell.py", "daedalus/extensions/selfdev.py"}
     hits = []
     for path, tree in _modules(PKG):
         rel = path.relative_to(ROOT).as_posix()
         if rel in allowed:
             continue
         for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr in ("environ", "getenv") and isinstance(node.value, ast.Name) and node.value.id == "os":
+            if isinstance(node, ast.Attribute) and node.attr in ("environ", "getenv", "putenv") and isinstance(node.value, ast.Name) and node.value.id == "os":
+                hits.append(f"{rel}:{node.lineno}")
+            if isinstance(node, ast.ImportFrom) and node.module == "os" and any(a.name in ("environ", "getenv", "putenv") for a in node.names):
                 hits.append(f"{rel}:{node.lineno}")
     assert hits == [], "read settings through daedalus.config.Settings, not os.environ"
 
@@ -107,12 +132,14 @@ def test_in_function_imports_state_their_reason() -> None:
     for path, tree in list(_modules(PKG)) + list(_modules(ROOT / "launcher")):
         lines = path.read_text(encoding="utf-8").splitlines()
         rel = path.relative_to(ROOT).as_posix()
+        seen: set[int] = set()
         for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 continue
             for inner in ast.walk(node):
-                if not isinstance(inner, ast.Import | ast.ImportFrom):
+                if not isinstance(inner, ast.Import | ast.ImportFrom) or inner.lineno in seen:
                     continue
+                seen.add(inner.lineno)
                 span = "\n".join(lines[inner.lineno - 1 : (inner.end_lineno or inner.lineno)])
                 if not LAZY_RE.search(span):
                     offenders.append(f"{rel}:{inner.lineno}")

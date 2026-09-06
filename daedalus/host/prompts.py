@@ -72,16 +72,26 @@ future run needs when creating the task, because your current workspace is not s
 """
 
 
-HEADLINE_RE = re.compile(r"\s*⟦[^⟦⟧\n]{3,400}⟧\s*$")
+HEADLINE_RE = re.compile(r"(?:^|\n)\s*⟦[^⟦⟧]{3,2000}⟧\s*$", re.DOTALL)
 """The retrieval headline the agent appends to a final reply; hidden from the operator, kept in the transcript."""
 
 
 def split_headline(text: str) -> tuple[str, str]:
-    """Return ``(text without the trailing headline, headline)``; the headline is empty when absent."""
+    """Return ``(text without the trailing headline, headline)``; the headline is empty when absent.
+
+    The headline must stand on its own line at the very end, so a sentence that merely quotes the
+    format is left alone. A headline still being streamed (an opening ⟦ on its own line with no
+    closing ⟧ after it) is cut too, so a live draft never shows half of one.
+    """
     match = HEADLINE_RE.search(text)
-    if match is None:
-        return text, ""
-    return text[: match.start()].rstrip(), match.group(0).strip()
+    if match is not None:
+        return text[: match.start()].rstrip(), match.group(0).strip()
+    open_at = text.rfind("⟦")
+    if open_at != -1 and "⟧" not in text[open_at:]:
+        line_start = text.rfind("\n", 0, open_at) + 1
+        if not text[line_start:open_at].strip():
+            return text[:line_start].rstrip(), ""
+    return text, ""
 
 
 def rules_section(rules: str) -> str:

@@ -6,7 +6,7 @@ from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
-from daedalus.tools._common import ok, services_for
+from daedalus.tools._common import error, ok, services_for
 
 
 @tool(
@@ -20,6 +20,11 @@ from daedalus.tools._common import ok, services_for
 )
 async def stay_silent(context: ToolContext, note: str = "") -> ToolResult:
     services = services_for(context)
+    manager = services.extra.get("manager")
+    state = manager._states.get(context.session_id) if manager is not None else None
+    metadata = state.session.metadata if state is not None else {}
+    if not (metadata.get("unattended") or metadata.get("heartbeat")):
+        return error(context, "StaySilent is only for unattended runs (heartbeat, scheduled tasks); the operator is waiting for a reply here")
     services.extra["silent_run"] = context.run_id
     services.extra["silent_note"] = note.strip()[:500]
     return ok(context, "Noted. Finish with a brief final reply for the record; it will not be sent to the chat.")

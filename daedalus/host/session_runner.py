@@ -99,6 +99,11 @@ class SessionState:
     """Serialises run starts against history rewrites (compaction)."""
     history_keys: list[str] = field(default_factory=list)
     """Transcript keys of the working history at the last persist, to see what a compaction removed."""
+    persist_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    """Serialises history persistence so an older snapshot can never overwrite a newer one."""
+    persist_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    persist_gen: int = 0
+    """Bumped by every history rewrite (manual compaction); a persist captured before the bump is dropped."""
 
     @property
     def running(self) -> bool:
@@ -142,7 +147,9 @@ class SessionManager:
         self.service_hooks: dict[str, Any] = {}
         """Callbacks the transport layer installs: send_file, spawn_session, schedule, self_*."""
         self.prompt_hooks: list[Callable[[str, str], Awaitable[str]]] = []
-        """``(session_id, text) -> text`` applied to the operator's message before a run starts (fired reminders ride along)."""
+        """``(session_id, text) -> text`` applied to a message that starts a new run (fired reminders ride along)."""
+        self.run_started_hooks: list[Callable[[str, str], Awaitable[None]]] = []
+        """``(session_id, run_id)`` after a run was actually created — the point where a prompt hook's side effects may be committed."""
         self.shutting_down = False
         self.budget_flag = settings.state_dir / "BUDGET_EXCEEDED"
         self._capped_runs: set[str] = set()
@@ -160,10 +167,14 @@ class SessionManager:
         self.tools.register(AskUserTool())
         self.service_hooks.setdefault("mcp", self.mcp_service)
         locator.default = None
+        self._backfill_task = asyncio.create_task(self._backfill_index(), name="transcript-index")
+        self._backfill_task.add_done_callback(_log_task_failure)
+        logger.warning("tools registered: %s", ", ".join(sorted(t.name for t in self.tools.list_all())))
+
+    async def _backfill_index(self) -> None:
         indexed = await self.sessions.backfill_transcript_index()
         if indexed:
             logger.warning("transcript search index: %d older turns indexed", indexed)
-        logger.warning("tools registered: %s", ", ".join(sorted(t.name for t in self.tools.list_all())))
 
     async def close(self) -> None:
         """Shut down keeping every active run resumable (snapshots stay in place)."""
@@ -173,6 +184,13 @@ class SessionManager:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        pending = [t for s in self._states.values() for t in s.persist_tasks if not t.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)  # the last history write must land
+        backfill = getattr(self, "_backfill_task", None)
+        if backfill is not None and not backfill.done():
+            backfill.cancel()
+            await asyncio.gather(backfill, return_exceptions=True)
         await self.mcp.close()
         await self.providers.aclose()
 
@@ -341,7 +359,7 @@ class SessionManager:
         await self.sessions.create(session)
         state = SessionState(session=session, workspace=workspace, metadata=dict(metadata or {}))
         self._states[sid] = state
-        self._register_services(state)
+        self.register_services(state)
         return state
 
     async def get_state(self, session_id: str) -> SessionState | None:
@@ -356,7 +374,7 @@ class SessionManager:
         (workspace / "inbox").mkdir(parents=True, exist_ok=True)
         state = SessionState(session=session, workspace=workspace, metadata=dict(session.metadata))
         self._states[session_id] = state
-        self._register_services(state)
+        self.register_services(state)
         return state
 
     async def transcript(self, session_id: str, *, tail: int = 0) -> list[Message]:
@@ -460,6 +478,9 @@ class SessionManager:
             await asyncio.gather(asyncio.shield(state.task), return_exceptions=True)
         if state.running or state.pending is not None:
             raise RuntimeError("the session is busy; stop the run (or answer the question) first")
+        pending = [t for t in state.persist_tasks if not t.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)  # no straggler may write the old history later
         exceeded = self.budget_exceeded()
         if exceeded:
             raise RuntimeError(f"daily budget exceeded ({exceeded}); compaction is a paid call")
@@ -496,8 +517,11 @@ class SessionManager:
                 break
             logger.warning("compaction summary rejected (attempt %d): %s", attempt + 1, problem)
         if not summary:
-            raise RuntimeError(f"the model did not produce a well-formed summary: {problem}")
-        summary = self.redactor.redact(summary) + verbatim_tail(history)
+            if not candidate:
+                raise RuntimeError("the model returned an empty summary")
+            logger.warning("compaction summary accepted without the fixed sections: %s", problem)
+            summary = candidate  # a usable summary beats a session the operator cannot compact
+        summary = self.redactor.redact(summary + verbatim_tail(history))  # the tail is the operator's words and may quote a secret too
         if state.running or state.pending is not None:  # a run resumed from a snapshot meanwhile
             raise RuntimeError("the session became busy during compaction; nothing was changed")
         backup = state.workspace / f".history-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.jsonl"
@@ -514,9 +538,10 @@ class SessionManager:
             metadata={
                 COMPACTION_SUMMARY_METADATA_KEY: True,
                 "daedalus.compaction": {"reason": "manual", "messages": len(history), "at": datetime.now(UTC).isoformat()},
-                **({"daedalus.archived": {"from_seq": seqs[0], "to_seq": seqs[-1]}} if seqs else {}),
+                "daedalus.archived": {"from_seq": seqs[0], "to_seq": seqs[-1], "seqs": seqs} if seqs else {"seqs": []},
             },
         )
+        state.persist_gen += 1  # any persist captured before this point describes a history that is gone
         if state.engine is not None:
             engine = state.engine
             engine.history = [message]
@@ -544,21 +569,46 @@ class SessionManager:
             out.append({"session_id": row["session_id"], "title": row["title"], "chat_id": row["chat_id"], "thread_id": row["thread_id"], "bytes": size})
         return out
 
-    async def sweep_orphan_workspaces(self) -> list[str]:
-        """Delete workspace directories that no session or schedule refers to any more."""
-        rows = await self.db.fetchall("SELECT id FROM sessions")
+    async def orphan_workspaces(self) -> list[Path]:
+        """Workspace directories that no session, schedule or standing task refers to.
+
+        The one definition every caller shares: a session's own folder, any folder named in a
+        session's metadata (scheduled and heartbeat runs), and every schedule workspace are kept.
+        """
+        rows = await self.db.fetchall("SELECT id, metadata FROM sessions")
         known = {r["id"] for r in rows}
+        known_paths: set[Path] = set()
+        for r in rows:
+            try:
+                ws = json.loads(r["metadata"] or "{}").get("workspace")
+            except (TypeError, ValueError):
+                ws = None
+            if ws:
+                known_paths.add(Path(ws).resolve())
         sched = await self.db.fetchall("SELECT workspace FROM schedules")
-        known_paths = {Path(r["workspace"]).resolve() for r in sched}
-        removed: list[str] = []
-        for entry in self.settings.workspaces_dir.iterdir():
+        known_paths.update(Path(r["workspace"]).resolve() for r in sched)
+        known_paths.add((self.settings.workspaces_dir / "heartbeat").resolve())
+        out: list[Path] = []
+        if not self.settings.workspaces_dir.exists():
+            return out
+        for entry in sorted(self.settings.workspaces_dir.iterdir()):
             if not entry.is_dir() or entry.name in known or entry.resolve() in known_paths:
                 continue
+            out.append(entry)
+        return out
+
+    async def sweep_orphan_workspaces(self) -> list[str]:
+        """Delete the directories :meth:`orphan_workspaces` reports."""
+        removed: list[str] = []
+        for entry in await self.orphan_workspaces():
             shutil.rmtree(entry, ignore_errors=True)
             removed.append(entry.name)
         return removed
 
-    def _register_services(self, state: SessionState) -> None:
+    def running_run_ids(self) -> set[str]:
+        return {s.run_id for s in self._states.values() if s.run_id and (s.running or s.pending is not None)}
+
+    def register_services(self, state: SessionState) -> None:
         hooks = self.service_hooks
         services = SessionServices(
             session_id=state.session.id,
@@ -592,25 +642,24 @@ class SessionManager:
         *,
         steer: bool = False,
         as_answer: bool = True,
+        origin: str = "operator",
     ) -> str:
-        """Deliver operator input. Starts a run, or queues a follow-up when one is active."""
+        """Deliver input. Starts a run, or queues a follow-up when one is active.
+
+        ``origin`` names who wrote the text (``operator``, or a system source such as
+        ``reminder``); the transcript and the Mini App show it accordingly.
+        """
         state = await self.get_state(session_id)
         if state is None:
             raise KeyError(session_id)
         body, image_refs = await self._ingest_attachments(state, text, attachments)
-        if state.pending is None:
-            for hook in self.prompt_hooks:
-                try:
-                    body = await hook(session_id, body)
-                except Exception:  # noqa: BLE001
-                    logger.exception("prompt hook failed")
         if state.pending is not None:
             if as_answer:
                 # Free-text reply to a pending question counts as a custom answer.
                 return await self.answer(session_id, [{"custom": body}])
             await self.live.enqueue(session_id, "follow_up", new_queued_prompt("follow_up", body).to_dict())
             await self.sessions.append_transcript(
-                session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up", "daedalus.origin": "operator"})]
+                session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up", "daedalus.origin": origin})]
             )
             return state.run_id or ""
         exceeded = self.budget_exceeded()
@@ -630,16 +679,29 @@ class SessionManager:
             # The core folds queued prompts into the model's history later (and compaction may
             # rewrite them); the transcript keeps the operator's words as sent.
             await self.sessions.append_transcript(
-                session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind, "daedalus.origin": "operator"})]
+                session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind, "daedalus.origin": origin})]
             )
             return state.run_id or ""
+        # A new run starts: hooks may decorate the message (a fired reminder rides along); their
+        # side effects are committed only once the run exists, so a refused start loses nothing.
+        for hook in self.prompt_hooks:
+            try:
+                body = await hook(session_id, body)
+            except Exception:  # noqa: BLE001
+                logger.exception("prompt hook failed")
         message = Message(
             role=MessageRole.user,
             content_blocks=[TextBlock(text=body)],
-            metadata={"daedalus.origin": "operator", **({"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {})},
+            metadata={"daedalus.origin": origin, **({"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {})},
         )
         await self.sessions.append_transcript(session_id, [message])
-        return await self._start_run(state, message)
+        run_id = await self._start_run(state, message)
+        for started in self.run_started_hooks:
+            try:
+                await started(session_id, run_id)
+            except Exception:  # noqa: BLE001
+                logger.exception("run-started hook failed")
+        return run_id
 
     async def _ingest_attachments(
         self, state: SessionState, text: str, attachments: Sequence[Attachment]
@@ -784,36 +846,55 @@ class SessionManager:
             history = list(eng.history)
             previous = state.history_keys
             state.history_keys = [self.sessions.transcript_key(m) for m in history]
-            task = asyncio.get_running_loop().create_task(self._persist_history(state, history, previous))
+            task = asyncio.get_running_loop().create_task(self._persist_history(state, history, previous, state.persist_gen))
+            state.persist_tasks.add(task)
             task.add_done_callback(_log_task_failure)
+            task.add_done_callback(state.persist_tasks.discard)
 
         engine.reload_live_control = reload_live_control  # type: ignore[attr-defined]
         engine.persist_live_control = persist_live_control  # type: ignore[attr-defined]
         engine.persist_session_history = persist_session_history  # type: ignore[attr-defined]
 
-    async def _persist_history(self, state: SessionState, history: list[Message], previous_keys: list[str]) -> None:
+    async def _persist_history(self, state: SessionState, history: list[Message], previous_keys: list[str], gen: int | None = None) -> None:
         """Persist the working history and the transcript, then label fresh summaries with what they replaced.
 
-        A compaction summary the core just produced is tagged with the transcript seq range of
-        the turns it stands for, in its metadata (for the Mini App) and in its text (so the
-        model knows what HistoryExpand would return).
+        A compaction summary the core just produced is tagged with the transcript seqs of the
+        turns it stands for, in its metadata (for the Mini App) and in its text (so the model
+        knows what HistoryExpand would return). Persists are serialised per session and a
+        snapshot taken before a history rewrite is dropped, so an older picture never lands last.
         """
         session_id = state.session.id
-        await self.sessions.append_transcript(session_id, history, from_history=True)
-        current = {self.sessions.transcript_key(m) for m in history}
-        removed = [k for k in previous_keys if k not in current]
-        fresh = [i for i, m in enumerate(history) if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in m.metadata]
-        if removed and fresh and state.engine is not None:
-            seqs = await self.sessions.transcript_seqs(session_id, removed)
-            if seqs:
-                note = f"[archived turns seq {seqs[0]}–{seqs[-1]}: HistoryExpand({seqs[0]}, {seqs[-1]}) returns them verbatim]"
+        async with state.persist_lock:
+            if gen is not None and gen != state.persist_gen:
+                return
+            current = {self.sessions.transcript_key(m) for m in history}
+            removed = [k for k in previous_keys if k not in current]
+            fresh = [i for i, m in enumerate(history) if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in m.metadata]
+            if fresh:
+                seqs = await self.sessions.transcript_seqs(session_id, removed) if removed else []
+                if removed and len(seqs) < len(removed):
+                    logger.warning("session %s: %d of %d archived turns were never in the transcript", session_id, len(removed) - len(seqs), len(removed))
                 for index in fresh:
-                    annotated = annotate_summary(history[index], note, seqs[0], seqs[-1])
+                    original = history[index]
+                    if seqs:
+                        contiguous = seqs[-1] - seqs[0] + 1 == len(seqs)
+                        span = f"seq {seqs[0]}–{seqs[-1]}" if contiguous else f"within seq {seqs[0]}–{seqs[-1]} ({len(seqs)} turns)"
+                        note = f"[archived turns {span}: HistoryExpand({seqs[0]}, {seqs[-1]}) returns them verbatim]"
+                        annotated = annotate_summary(original, note, seqs)
+                    else:
+                        annotated = original.model_copy(update={"metadata": {**original.metadata, "daedalus.archived": {"seqs": []}}})
                     history[index] = annotated
-                    live = state.engine.history
-                    if index < len(live) and live[index].metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in live[index].metadata:
-                        live[index] = annotated
-        await self.sessions.replace_messages(session_id, TENANT, history)
+                    # Locate the live message by identity, never by position: the core may have
+                    # reshaped its history since this snapshot was taken.
+                    key = self.sessions.transcript_key(original)
+                    if state.engine is not None:
+                        live = state.engine.history
+                        for li, lm in enumerate(live):
+                            if lm.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in lm.metadata and self.sessions.transcript_key(lm) == key:
+                                live[li] = annotated
+                                break
+            await self.sessions.append_transcript(session_id, history, from_history=True)
+            await self.sessions.replace_messages(session_id, TENANT, history)
 
     async def _start_run(
         self, state: SessionState, message: Message | None, *, continue_turn: bool = False
@@ -1018,6 +1099,7 @@ class SessionManager:
                 continue
             state.engine = engine
             state.run_id = entry["run_id"]
+            state.history_keys = [self.sessions.transcript_key(m) for m in engine.history]
             if engine.state is LoopState.AWAITING:
                 row = await self.db.fetchone("SELECT * FROM pending_questions WHERE session_id = ?", (session_id,))
                 if row is None:
@@ -1051,8 +1133,8 @@ SUMMARY_SECTIONS = ("Goal", "Done", "Open", "Constraints", "Next steps", "Unknow
 
 COMPACT_PROMPT = """Summarise the conversation transcript below so that an agent can continue the work \
 in a fresh context. Write the summary in {language}, as Markdown with exactly these six sections, \
-each once, in this order, as level-2 headings: ## Goal · ## Done · ## Open · ## Constraints · \
-## Next steps · ## Unknowns.
+each once, in this order, as level-2 headings whose titles stay in English verbatim whatever the \
+language of the body: ## Goal · ## Done · ## Open · ## Constraints · ## Next steps · ## Unknowns.
 Goal: what was asked and why. Done: what was accomplished, with concrete results (paths, commands, \
 numbers, decisions) — every identifier verbatim, never rounded or guessed. Open: what is still in \
 progress or untouched. Constraints: preferences and rules the operator stated. Next steps: the exact \
@@ -1094,8 +1176,8 @@ def verbatim_tail(history: Sequence[Message], count: int = VERBATIM_TAIL_MESSAGE
     return "\n".join(lines)
 
 
-def annotate_summary(message: Message, note: str, from_seq: int, to_seq: int) -> Message:
-    """Append the archived-range note inside a summary's wrapper and record the range in its metadata."""
+def annotate_summary(message: Message, note: str, seqs: Sequence[int]) -> Message:
+    """Append the archived-range note inside a summary's wrapper and record the exact seqs in its metadata."""
     blocks = list(message.content_blocks)
     for i, block in enumerate(blocks):
         if isinstance(block, TextBlock):
@@ -1107,7 +1189,7 @@ def annotate_summary(message: Message, note: str, from_seq: int, to_seq: int) ->
                 text = f"{text.rstrip()}\n\n{note}"
             blocks[i] = block.model_copy(update={"text": text})
             break
-    return message.model_copy(update={"content_blocks": blocks, "metadata": {**message.metadata, "daedalus.archived": {"from_seq": from_seq, "to_seq": to_seq}}})
+    return message.model_copy(update={"content_blocks": blocks, "metadata": {**message.metadata, "daedalus.archived": {"from_seq": seqs[0], "to_seq": seqs[-1], "seqs": list(seqs)}}})
 
 
 def operator_language(history: Sequence[Message]) -> str:

@@ -300,7 +300,7 @@ class TelegramFront:
         self._topic_status: dict[str, str] = {}
         self._topic_status_tasks: dict[str, asyncio.Task[None]] = {}
         self._stale_counts: dict[tuple[int, int], int] = {}
-        self.ledger = DeliveryLedger(manager.db)
+        self.ledger = DeliveryLedger(manager.db, max_attempts=config.ops.delivery_max_attempts, max_age_hours=config.ops.delivery_max_age_hours, keep_days=config.ops.delivery_keep_days)
         self._stale_notices: dict[tuple[int, int], asyncio.Task[None]] = {}
         self.operator_hooks: dict[str, Callable[..., Awaitable[str]]] = {}
         """rebuild / rollback / panic, installed by the application."""
@@ -360,6 +360,10 @@ class TelegramFront:
 
         Extensions build their approval keyboards through this so only the transport speaks aiogram.
         """
+        for row in rows:
+            for _label, data in row:
+                if len(data.encode("utf-8")) > 64:
+                    raise ValueError(f"callback_data over Telegram's 64-byte limit: {data!r}")
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label[:60], callback_data=data) for label, data in row] for row in rows])
         msg = await tg_call(self.bot.send_message, outbox.chat_id, text, message_thread_id=outbox.thread_id, reply_markup=keyboard, flood_chat=outbox.chat_id)
         return int(msg.message_id)
@@ -378,7 +382,7 @@ class TelegramFront:
         )
         return TopicBinding(row["chat_id"], row["thread_id"], row["session_id"], row["title"]) if row else None
 
-    async def _bind(self, chat_id: int, thread_id: int, session_id: str, title: str) -> TopicBinding:
+    async def bind_topic(self, chat_id: int, thread_id: int, session_id: str, title: str) -> TopicBinding:
         await self.manager.db.execute(
             "INSERT OR REPLACE INTO topics(chat_id, thread_id, session_id, title, created_at) VALUES (?, ?, ?, ?, ?)",
             (chat_id, thread_id, session_id, title, datetime.now(UTC).isoformat()),
@@ -399,14 +403,14 @@ class TelegramFront:
         forum = (chat_id or self.config.telegram.forum_chat_id) if topic else 0
         if forum:
             topic = await self.bot.create_forum_topic(forum, title[:128])
-            binding = await self._bind(forum, topic.message_thread_id, state.session.id, title)
+            binding = await self.bind_topic(forum, topic.message_thread_id, state.session.id, title)
             await self.bot.send_message(
                 forum,
                 f"Session {state.session.id} — {title}\nworkspace: {state.workspace}",
                 message_thread_id=topic.message_thread_id,
             )
         else:
-            binding = await self._bind(self.settings.owner_user_id, 0, state.session.id, title)
+            binding = await self.bind_topic(self.settings.owner_user_id, 0, state.session.id, title)
         return state, binding
 
     async def _session_for_message(self, message: Message) -> SessionState | None:
@@ -427,7 +431,7 @@ class TelegramFront:
                 title = message.reply_to_message.forum_topic_created.name
             title = title or f"topic {thread_id}"
             state = await self.manager.create_session(title)
-            await self._bind(chat_id, thread_id, state.session.id, title)
+            await self.bind_topic(chat_id, thread_id, state.session.id, title)
             return state
         return None
 
@@ -1262,6 +1266,22 @@ class TelegramFront:
         await query.answer(label)
         await self._advance_question(session_id, query)
 
+    async def close_question(self, session_id: str, note: str) -> None:
+        """Retire an open question's keyboard (someone else answered it) and say why in the topic."""
+        state = self._question_state.pop(session_id, None)
+        outbox = await self.outbox_for_session(session_id)
+        if state is not None and outbox is not None:
+            for message_id in state.get("message_ids", []):
+                try:
+                    await self.bot.edit_message_reply_markup(chat_id=outbox.chat_id, message_id=message_id, reply_markup=None)
+                except Exception:  # noqa: BLE001
+                    pass
+        if outbox is not None:
+            try:
+                await outbox.send_text(note, markdown=False)
+            except Exception:  # noqa: BLE001
+                pass
+
     async def _advance_question(self, session_id: str, query: CallbackQuery | None) -> None:
         state = self._question_state.get(session_id)
         if state is None:
@@ -1377,7 +1397,9 @@ class TelegramFront:
             return
         services = state.services if state is not None else None
         quiet = services is not None and services.extra.get("silent_run") == run_id
-        final = split_headline(renderer.view.text_buffer.strip())[0] if not quiet else ""
+        # An interrupted run keeps its snapshot and resumes after the restart; its half-written
+        # text is not an answer to deliver, so it never enters the ledger.
+        final = split_headline(renderer.view.text_buffer.strip())[0] if not quiet and status != "interrupted" else ""
         if final:
             await self.ledger.begin(run_id, session_id, final)
         await renderer.finish(status, workspace=state.workspace if state else Path("/tmp"), quiet=quiet)

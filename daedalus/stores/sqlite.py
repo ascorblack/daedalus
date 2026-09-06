@@ -56,8 +56,8 @@ def fts_query(query: str) -> str:
     be read as FTS syntax; an explicitly quoted phrase is passed through as a phrase.
     """
     query = query.strip()
-    if query.startswith('"') and query.endswith('"') and len(query) > 2:
-        return '"' + query[1:-1].replace('"', '""') + '"'
+    if query.startswith('"') and query.endswith('"') and len(query) > 2 and '"' not in query[1:-1]:
+        return '"' + query[1:-1] + '"'
     tokens = _FTS_TOKEN_RE.findall(query)
     return " ".join(f'"{t.replace(chr(34), "")}"*' for t in tokens if t)
 
@@ -153,47 +153,73 @@ class SqliteSessionStore(ISessionStore):
                 else m
                 for m in messages
             ]
-        rows = await self._db.fetchall("SELECT key FROM transcript WHERE session_id = ?", (session_id,))
-        known = {r["key"] for r in rows}
-        fresh = []
+        seen: set[str] = set()
+        candidates: list[tuple[str, Message]] = []
         for message in messages:
             key = self.transcript_key(message)
-            if key in known:
+            if key in seen:
                 continue
-            known.add(key)
-            fresh.append((session_id, key, message.model_dump_json()))
-        if not fresh:
-            return 0
+            seen.add(key)
+            candidates.append((key, message))
+        added = 0
+        last_seq = 0
         async with self._db.transaction() as conn:
-            for session, key, dumped in fresh:
-                cursor = await conn.execute("INSERT OR IGNORE INTO transcript(session_id, key, message) VALUES (?, ?, ?)", (session, key, dumped))
+            # UNIQUE(session_id, key) + INSERT OR IGNORE is the dedup; rowcount says whether the row is new.
+            for key, message in candidates:
+                cursor = await conn.execute(
+                    "INSERT OR IGNORE INTO transcript(session_id, key, message) VALUES (?, ?, ?)", (session_id, key, message.model_dump_json())
+                )
                 if cursor.rowcount:
-                    message = Message.model_validate_json(dumped)
+                    added += 1
+                    last_seq = max(last_seq, int(cursor.lastrowid or 0))
                     text = message_text(message)
                     if text:
                         await conn.execute(
                             "INSERT INTO transcript_fts(session_id, seq, role, text) VALUES (?, ?, ?, ?)",
-                            (session, cursor.lastrowid, message.role.value, text),
+                            (session_id, cursor.lastrowid, message.role.value, text),
                         )
-        return len(fresh)
+            if added:
+                # Rows written here are indexed here; the backfill watermark must never fall behind them.
+                await conn.execute(
+                    "INSERT INTO kv(key, value) VALUES ('transcript_fts_watermark', ?)"
+                    " ON CONFLICT(key) DO UPDATE SET value = CASE WHEN CAST(kv.value AS INTEGER) < excluded.value THEN excluded.value ELSE kv.value END",
+                    (json.dumps(last_seq),),
+                )
+        return added
+
+    BACKFILL_BATCH = 500
 
     async def backfill_transcript_index(self) -> int:
-        """Index transcript rows written before the full-text table existed; returns how many."""
-        rows = await self._db.fetchall(
-            "SELECT t.seq, t.session_id, t.message FROM transcript t WHERE NOT EXISTS (SELECT 1 FROM transcript_fts f WHERE f.seq = t.seq)"
-        )
-        if not rows:
-            return 0
-        async with self._db.transaction() as conn:
-            for row in rows:
-                message = Message.model_validate_json(row["message"])
-                text = message_text(message)
-                if text:
-                    await conn.execute(
-                        "INSERT INTO transcript_fts(session_id, seq, role, text) VALUES (?, ?, ?, ?)",
-                        (row["session_id"], row["seq"], message.role.value, text),
-                    )
-        return len(rows)
+        """Index transcript rows written before the full-text table existed; returns how many.
+
+        Works up from a watermark in ``kv`` in batches, each in its own short transaction, so a
+        large transcript is indexed without holding the connection for the whole pass.
+        """
+        watermark = int(await self._db.kv_get("transcript_fts_watermark", 0) or 0)
+        indexed = 0
+        while True:
+            rows = await self._db.fetchall(
+                "SELECT seq, session_id, message FROM transcript WHERE seq > ? ORDER BY seq LIMIT ?", (watermark, self.BACKFILL_BATCH)
+            )
+            if not rows:
+                break
+            async with self._db.transaction() as conn:
+                for row in rows:
+                    message = Message.model_validate_json(row["message"])
+                    text = message_text(message)
+                    if text:
+                        await conn.execute(
+                            "INSERT INTO transcript_fts(session_id, seq, role, text) VALUES (?, ?, ?, ?)",
+                            (row["session_id"], row["seq"], message.role.value, text),
+                        )
+                        indexed += 1
+                watermark = int(rows[-1]["seq"])
+                await conn.execute(
+                    "INSERT INTO kv(key, value) VALUES ('transcript_fts_watermark', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (json.dumps(watermark),),
+                )
+            await asyncio.sleep(0)  # let the loop breathe between batches
+        return indexed
 
     async def search_transcript(self, query: str, *, session_id: str | None, limit: int = 10) -> list[dict[str, Any]]:
         """Full-text search; ``session_id=None`` searches every session. Returns seq, role, session, snippet."""
@@ -223,13 +249,15 @@ class SqliteSessionStore(ISessionStore):
         return [(int(r["seq"]), Message.model_validate_json(r["message"])) for r in rows]
 
     async def transcript_seqs(self, session_id: str, keys: Sequence[str]) -> list[int]:
-        if not keys:
-            return []
-        marks = ",".join("?" for _ in keys)
-        rows = await self._db.fetchall(
-            f"SELECT seq FROM transcript WHERE session_id = ? AND key IN ({marks}) ORDER BY seq", (session_id, *keys)
-        )
-        return [int(r["seq"]) for r in rows]
+        out: list[int] = []
+        for start in range(0, len(keys), 500):  # stay under SQLite's bind-parameter limit
+            chunk = list(keys[start : start + 500])
+            marks = ",".join("?" for _ in chunk)
+            rows = await self._db.fetchall(
+                f"SELECT seq FROM transcript WHERE session_id = ? AND key IN ({marks})", (session_id, *chunk)
+            )
+            out.extend(int(r["seq"]) for r in rows)
+        return sorted(out)
 
     async def list_transcript(self, session_id: str, *, limit: int = 0) -> list[Message]:
         if limit > 0:
@@ -588,23 +616,30 @@ class DeliveryLedger:
 
     Honest at-least-once: a row left ``attempting`` when the process died is re-sent after
     a restart with a visible "recovered" marker, because Telegram may already have it.
-    Poison rows cannot spin — three attempts, one day of staleness — and the ledger never
-    blocks a send: every method swallows its own errors.
+    Poison rows cannot spin — a few attempts, a day of staleness measured from the first
+    attempt — and the ledger never blocks a send: every method swallows its own errors.
     """
 
     MAX_ATTEMPTS = 3
     MAX_AGE_HOURS = 24
     KEEP_DAYS = 7
+    MAX_TEXT_CHARS = 200_000
 
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, *, max_attempts: int = MAX_ATTEMPTS, max_age_hours: int = MAX_AGE_HOURS, keep_days: int = KEEP_DAYS) -> None:
         self._db = db
+        self.max_attempts = max_attempts
+        self.max_age_hours = max_age_hours
+        self.keep_days = keep_days
 
     async def begin(self, run_id: str, session_id: str, text: str) -> None:
+        if len(text) > self.MAX_TEXT_CHARS:
+            text = text[: self.MAX_TEXT_CHARS] + "\n\n[… the recovered copy is truncated; the full answer is in the Mini App transcript]"
         try:
             await self._db.execute(
                 "INSERT OR REPLACE INTO deliveries(run_id, session_id, text, status, attempts, created_at, updated_at)"
-                " VALUES (?, ?, ?, 'attempting', COALESCE((SELECT attempts FROM deliveries WHERE run_id = ?), 0) + 1, ?, ?)",
-                (run_id, session_id, text[:200_000], run_id, _now(), _now()),
+                " VALUES (?, ?, ?, 'attempting', COALESCE((SELECT attempts FROM deliveries WHERE run_id = ?), 0) + 1,"
+                " COALESCE((SELECT created_at FROM deliveries WHERE run_id = ?), ?), ?)",
+                (run_id, session_id, text, run_id, run_id, _now(), _now()),
             )
         except Exception:  # noqa: BLE001
             pass
@@ -620,18 +655,18 @@ class DeliveryLedger:
 
     async def recoverable(self) -> list[dict[str, Any]]:
         """Rows a restart should re-send: not delivered, under the attempt cap, not stale."""
-        cutoff = (datetime.now(UTC) - timedelta(hours=self.MAX_AGE_HOURS)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(hours=self.max_age_hours)).isoformat()
         try:
             rows = await self._db.fetchall(
-                "SELECT * FROM deliveries WHERE status IN ('pending', 'attempting', 'failed') AND attempts < ? AND created_at >= ? ORDER BY created_at",
-                (self.MAX_ATTEMPTS, cutoff),
+                "SELECT * FROM deliveries WHERE status IN ('attempting', 'failed') AND attempts < ? AND created_at >= ? ORDER BY created_at",
+                (self.max_attempts, cutoff),
             )
             return [dict(r) for r in rows]
         except Exception:  # noqa: BLE001
             return []
 
     async def prune(self) -> None:
-        cutoff = (datetime.now(UTC) - timedelta(days=self.KEEP_DAYS)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=self.keep_days)).isoformat()
         try:
             await self._db.execute("DELETE FROM deliveries WHERE updated_at < ?", (cutoff,))
         except Exception:  # noqa: BLE001
