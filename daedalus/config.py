@@ -170,6 +170,12 @@ class ExecToolsConfig(BaseModel):
     """Exec / Read / Find output handling (the timeout itself is ``limits.tool_timeout_seconds``)."""
 
     max_output_chars: int = Field(default=60_000, ge=2_000, le=1_000_000)
+    sandbox: Literal["off", "workspace"] = "off"
+    """``workspace``: run Exec inside bubblewrap with the whole filesystem read-only except the session
+    workspace and a private /tmp, in its own PID namespace. Needs ``bwrap`` in the image; falls back to
+    an unsandboxed run with a warning when it is missing."""
+    sandbox_extra_writable: list[str] = Field(default_factory=list)
+    """Extra paths the sandbox may write (e.g. the bot repository worktrees for self-development)."""
 
 
 class ToolsConfig(BaseModel):

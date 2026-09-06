@@ -123,6 +123,9 @@ async def _config(ctx: DoctorContext) -> list[Check]:
     out.append(Check("vision preset", vision is not None, f"{vision[0]}" if vision else "no image-capable preset: ImageView and photos in chat are unavailable", "ok" if vision else "warn", "mark a preset as accepting images"))
     chain_bad = [c for c in cfg.model.chain if c not in cfg.presets]
     out.append(Check("fallback chain", not chain_bad, ", ".join(cfg.model.chain) or "none" if not chain_bad else f"unknown presets: {', '.join(chain_bad)}", "ok" if not chain_bad else "warn", "fix the chain in Settings → Models"))
+    sandbox = cfg.tools.exec.sandbox
+    has_bwrap = shutil.which("bwrap") is not None
+    out.append(Check("exec sandbox", sandbox == "off" or has_bwrap, f"{sandbox}" + ("" if sandbox == "off" or has_bwrap else " requested but bwrap is missing: Exec runs unsandboxed"), "ok" if sandbox == "off" or has_bwrap else "warn", "add bubblewrap to deploy/apt-packages.txt and rebuild"))
     out.append(Check("per-run spend cap", cfg.limits.usd_per_run > 0, f"${cfg.limits.usd_per_run:.2f} per run, ${st.usd_per_day:.2f} per day" if cfg.limits.usd_per_run > 0 else f"no per-run cap (daily cap ${st.usd_per_day:.2f})", "ok" if cfg.limits.usd_per_run > 0 else "warn", "set limits.usd_per_run in Settings"))
     return out
 

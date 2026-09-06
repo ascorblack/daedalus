@@ -3,14 +3,47 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import shutil
 import time
+from pathlib import Path
+from typing import Any
 
 from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
-from daedalus.tools._common import clip, error, ok, services_for
+from daedalus.tools._common import clip, error, ok, services_for, tool_config
+
+_warned_missing_bwrap = False
+
+
+def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config: Any) -> tuple[list[str], bool]:
+    """The argv to run ``command`` with: plain bash, or bash inside bubblewrap when the sandbox is on.
+
+    The sandbox binds the whole filesystem read-only, makes the session workspace (and any
+    configured extra path) writable, gives the command a private /tmp and PID namespace, and
+    dies with the parent so a timeout kill cannot leave it behind.
+    """
+    global _warned_missing_bwrap
+    plain = ["bash", "-lc", command]
+    if getattr(exec_config, "sandbox", "off") != "workspace":
+        return plain, False
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        if not _warned_missing_bwrap:
+            logging.getLogger(__name__).warning("tools.exec.sandbox=workspace but bwrap is not installed; running unsandboxed")
+            _warned_missing_bwrap = True
+        return plain, False
+    argv = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--unshare-pid", "--die-with-parent", "--new-session"]
+    writable = [workspace, *[Path(p) for p in getattr(exec_config, "sandbox_extra_writable", [])]]
+    if workdir != workspace and workspace not in workdir.parents:
+        writable.append(workdir)
+    for path in writable:
+        if path.exists():
+            argv += ["--bind", str(path), str(path)]
+    return argv + ["bash", "-lc", command], True
 
 
 @tool(
@@ -37,10 +70,9 @@ async def exec_command(
     limit = float(timeout_seconds or services.tool_timeout_seconds)
     environment = {**os.environ, **(env or {}), "DAEDALUS_SESSION_ID": context.session_id}
     started = time.monotonic()
+    argv, sandboxed = sandbox_argv(command, workdir, services.workspace_dir, tool_config(context).exec)
     proc = await asyncio.create_subprocess_exec(
-        "bash",
-        "-lc",
-        command,
+        *argv,
         cwd=str(workdir),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -81,7 +113,7 @@ async def exec_command(
     output = b"".join(chunks).decode("utf-8", "replace")
     elapsed = time.monotonic() - started
     body = clip(output, services.max_tool_output_chars, note="write to a file for the full output")
-    header = f"exit_code={proc.returncode} elapsed={elapsed:.1f}s cwd={workdir}"
+    header = f"exit_code={proc.returncode} elapsed={elapsed:.1f}s cwd={workdir}" + (" sandbox=workspace" if sandboxed else "")
     if timed_out:
         header += f" TIMED OUT after {limit:.0f}s (process group killed)"
     text = f"{header}\n{body}" if body else header

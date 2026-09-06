@@ -126,3 +126,50 @@ async def test_modes_override_limits_and_prompt(settings: Settings, db: Database
     assert "mode" not in refreshed.metadata
     await manager.close()
     assert json.dumps(config.modes["careful"].model_dump())
+
+
+def test_keyless_vendor_kinds_are_allowed_only_behind_a_proxy(settings: Settings) -> None:
+    from daedalus.config import ProviderConfig
+    from daedalus.providers.registry import ProviderRegistry
+
+    settings.deepseek_api_key = ""
+    registry = ProviderRegistry(settings, RuntimeConfig())
+    assert registry._endpoint("deepseek", ProviderConfig(kind="deepseek", base_url="https://api.deepseek.com")) is None
+    proxied = registry._endpoint("deepseek", ProviderConfig(kind="deepseek", base_url="http://keyproxy:3200/deepseek"))
+    assert proxied is not None and proxied.api_key == "" and proxied.kind == "deepseek"
+
+
+def test_sandbox_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from daedalus.config import ExecToolsConfig
+    from daedalus.tools import shell
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    argv, sandboxed = shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="off"))
+    assert argv == ["bash", "-lc", "ls"] and not sandboxed
+    monkeypatch.setattr(shell.shutil, "which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None)
+    argv, sandboxed = shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
+    assert sandboxed and argv[0] == "/usr/bin/bwrap" and "--unshare-pid" in argv and argv[argv.index("--bind") + 1] == str(ws) and argv[-3:] == ["bash", "-lc", "ls"]
+    monkeypatch.setattr(shell.shutil, "which", lambda name: None)
+    argv, sandboxed = shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
+    assert not sandboxed and argv[0] == "bash"
+
+
+def test_key_proxy_routing_and_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("keyproxy", Path(__file__).resolve().parents[2] / "deploy" / "keyproxy" / "proxy.py")
+    proxy = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(proxy)  # type: ignore[union-attr]
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dk")
+    monkeypatch.setenv("KEYPROXY_UPSTREAM_MYLLM", "http://10.0.0.1:9000/v1/")
+    monkeypatch.setenv("KEYPROXY_KEY_MYLLM", "")
+    table = proxy.upstreams()
+    assert table["deepseek"] == ("https://api.deepseek.com", "dk") and table["myllm"] == ("http://10.0.0.1:9000/v1", "")
+    assert proxy.target_url("https://api.deepseek.com", "chat/completions", "a=1") == "https://api.deepseek.com/chat/completions?a=1"
+    flag = tmp_path / "BUDGET_EXCEEDED"
+    monkeypatch.setattr(proxy, "BUDGET_FLAG", flag)
+    assert not proxy.budget_exceeded()
+    flag.write_text("x")
+    assert proxy.budget_exceeded()
+    assert any("user/balance".startswith(p.lstrip("/")) for p in proxy.BUDGET_EXEMPT_PATHS)

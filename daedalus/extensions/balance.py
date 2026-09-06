@@ -15,11 +15,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def fetch_deepseek_balance(api_key: str) -> float | None:
+async def fetch_deepseek_balance(base_url: str, api_key: str) -> float | None:
     async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(
-            "https://api.deepseek.com/user/balance", headers={"authorization": f"Bearer {api_key}"}
-        )
+        response = await client.get(base_url.rstrip("/") + "/user/balance", headers={"authorization": f"Bearer {api_key}"} if api_key else {})
     if response.status_code != 200:
         return None
     data = response.json()
@@ -30,11 +28,9 @@ async def fetch_deepseek_balance(api_key: str) -> float | None:
     return float(infos[0]["total_balance"]) if infos else None
 
 
-async def fetch_openrouter_balance(api_key: str) -> float | None:
+async def fetch_openrouter_balance(base_url: str, api_key: str) -> float | None:
     async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(
-            "https://openrouter.ai/api/v1/credits", headers={"authorization": f"Bearer {api_key}"}
-        )
+        response = await client.get(base_url.rstrip("/") + "/credits", headers={"authorization": f"Bearer {api_key}"} if api_key else {})
     if response.status_code != 200:
         return None
     data = (response.json() or {}).get("data") or {}
@@ -48,18 +44,22 @@ class BalanceMonitor:
         self.app = app
 
     async def current(self) -> dict[str, float | None]:
+        """Balances of every configured deepseek/openrouter endpoint, through its own base URL and key
+        (so a key proxy in front of the vendor is used the same way the model calls use it)."""
         out: dict[str, float | None] = {}
-        s = self.app.settings
-        if s.deepseek_api_key:
+        manager = self.app.manager
+        if manager is None:
+            return out
+        fetchers = {"deepseek": fetch_deepseek_balance, "openrouter": fetch_openrouter_balance}
+        for provider_id in manager.providers.available():
+            endpoint = manager.providers.get(provider_id).endpoint
+            fetch = fetchers.get(endpoint.kind)
+            if fetch is None:
+                continue
             try:
-                out["deepseek"] = await fetch_deepseek_balance(s.deepseek_api_key)
-            except httpx.HTTPError:
-                out["deepseek"] = None
-        if s.openrouter_api_key:
-            try:
-                out["openrouter"] = await fetch_openrouter_balance(s.openrouter_api_key)
-            except httpx.HTTPError:
-                out["openrouter"] = None
+                out[provider_id] = await fetch(endpoint.base_url, endpoint.api_key)
+            except (httpx.HTTPError, ValueError):
+                out[provider_id] = None
         return out
 
     async def loop(self) -> None:

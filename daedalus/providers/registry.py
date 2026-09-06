@@ -15,6 +15,13 @@ from daedalus.providers.openai_compat import (
 )
 from daedalus.providers.pricing import pricing_table
 
+VENDOR_HOSTS = {"deepseek": "api.deepseek.com", "openrouter": "openrouter.ai"}
+
+
+def _is_vendor_host(kind: str, base_url: str) -> bool:
+    host = base_url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    return host == VENDOR_HOSTS.get(kind, "")
+
 
 class ProviderRegistry:
     """Configured endpoints → live adapters (one shared HTTP client each)."""
@@ -90,8 +97,8 @@ class ProviderRegistry:
         api_key = pc.api_key or env_keys.get(pc.kind, "")
         if not base_url:
             return None
-        if pc.kind in ("deepseek", "openrouter") and not api_key:
-            return None
+        if pc.kind in ("deepseek", "openrouter") and not api_key and _is_vendor_host(pc.kind, base_url):
+            return None  # the vendor itself needs a key; a key proxy in front of it does not
         return ProviderEndpoint(
             id=provider_id,
             kind=pc.kind,

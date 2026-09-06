@@ -13,4 +13,5 @@ tar
 openssh-client
 less
 procps
+bubblewrap
 lsb-release
