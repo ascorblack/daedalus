@@ -244,8 +244,17 @@ class RuntimeConfig(BaseModel):
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".toml.tmp")
         with tmp.open("wb") as fh:
-            tomli_w.dump(self.model_dump(mode="json"), fh)
+            tomli_w.dump(_without_none(self.model_dump(mode="json")), fh)
         tmp.replace(path)
+
+
+def _without_none(value: Any) -> Any:
+    """TOML has no null: optional sections that are unset are simply omitted."""
+    if isinstance(value, dict):
+        return {k: _without_none(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_without_none(v) for v in value if v is not None]
+    return value
 
 
 def _migrate(raw: dict[str, Any]) -> bool:
