@@ -1,0 +1,233 @@
+"""Task board: the plan lives outside the model's context.
+
+A summary degrades; a board does not. Tasks carry acceptance criteria, a checklist,
+dependencies (a task becomes ready when every dependency is done), a priority and the
+session working on it. Work-in-progress is limited, a task whose session went quiet is
+handed back, and the board is the same object in the Mini App, in ``/board`` and in the
+agent's tools.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import uuid
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from daedalus.app import Application
+
+logger = logging.getLogger(__name__)
+
+STATUSES = ("todo", "doing", "review", "done", "blocked", "dropped")
+TICK_SECONDS = 300
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+class Board:
+    def __init__(self, app: Application) -> None:
+        self.app = app
+
+    async def add(
+        self,
+        *,
+        title: str,
+        acceptance: str = "",
+        depends_on: list[str] | None = None,
+        priority: int = 3,
+        checklist: list[str] | None = None,
+        session_id: str | None = None,
+        notes: str = "",
+    ) -> dict[str, Any]:
+        task_id = uuid.uuid4().hex[:6]
+        deps = [d for d in (depends_on or []) if d and d != task_id]
+        for dep in deps:
+            if await self.app.db.fetchone("SELECT id FROM board_tasks WHERE id = ?", (dep,)) is None:
+                raise ValueError(f"unknown dependency {dep}")
+        status = "blocked" if await self._has_open_deps(deps) else "todo"
+        await self.app.db.execute(
+            "INSERT INTO board_tasks(id, title, status, priority, acceptance, checklist, depends_on, session_id, notes, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, title[:200], status, max(1, min(int(priority), 5)), acceptance[:2000], json.dumps([{"text": c[:200], "done": False} for c in (checklist or [])]), json.dumps(deps), session_id, notes[:4000], _now(), _now()),
+        )
+        return await self.get(task_id)
+
+    async def get(self, task_id: str) -> dict[str, Any]:
+        row = await self.app.db.fetchone("SELECT * FROM board_tasks WHERE id = ?", (task_id,))
+        if row is None:
+            raise KeyError(task_id)
+        return self._view(dict(row))
+
+    @staticmethod
+    def _view(row: dict[str, Any]) -> dict[str, Any]:
+        row["checklist"] = json.loads(row.get("checklist") or "[]")
+        row["depends_on"] = json.loads(row.get("depends_on") or "[]")
+        return row
+
+    async def list(self, status: str | None = None, *, include_done: bool = True) -> list[dict[str, Any]]:
+        if status:
+            rows = await self.app.db.fetchall("SELECT * FROM board_tasks WHERE status = ? ORDER BY priority, created_at", (status,))
+        elif include_done:
+            rows = await self.app.db.fetchall("SELECT * FROM board_tasks ORDER BY CASE status WHEN 'doing' THEN 0 WHEN 'review' THEN 1 WHEN 'todo' THEN 2 WHEN 'blocked' THEN 3 WHEN 'done' THEN 4 ELSE 5 END, priority, created_at")
+        else:
+            rows = await self.app.db.fetchall("SELECT * FROM board_tasks WHERE status NOT IN ('done', 'dropped') ORDER BY priority, created_at")
+        return [self._view(dict(r)) for r in rows]
+
+    async def _has_open_deps(self, deps: list[str]) -> bool:
+        for dep in deps:
+            row = await self.app.db.fetchone("SELECT status FROM board_tasks WHERE id = ?", (dep,))
+            if row is not None and row["status"] not in ("done", "dropped"):
+                return True
+        return False
+
+    async def update(
+        self,
+        task_id: str,
+        *,
+        status: str | None = None,
+        note: str = "",
+        check: list[int] | None = None,
+        uncheck: list[int] | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        title: str | None = None,
+        acceptance: str | None = None,
+        priority: int | None = None,
+    ) -> dict[str, Any]:
+        task = await self.get(task_id)
+        if status and status not in STATUSES:
+            raise ValueError(f"status must be one of {', '.join(STATUSES)}")
+        if status == "doing" and task["status"] != "doing":
+            if await self._has_open_deps(task["depends_on"]):
+                raise ValueError("this task still has unfinished dependencies")
+            limit = self.app.config.board.wip_limit
+            row = await self.app.db.fetchone("SELECT count(*) c FROM board_tasks WHERE status = 'doing'")
+            if row and int(row["c"]) >= limit:
+                raise ValueError(f"work-in-progress limit reached ({limit} tasks in 'doing'); finish or hand back one first")
+        if status == "done" and any(not c["done"] for c in task["checklist"]):
+            raise ValueError("the checklist is not complete; check the items or drop them first")
+        checklist = task["checklist"]
+        for i in check or []:
+            if 0 <= i < len(checklist):
+                checklist[i]["done"] = True
+        for i in uncheck or []:
+            if 0 <= i < len(checklist):
+                checklist[i]["done"] = False
+        notes = task["notes"] or ""
+        if note:
+            notes = (notes + "\n" if notes else "") + f"[{_now()[:16].replace('T', ' ')}] {note[:1000]}"
+        await self.app.db.execute(
+            "UPDATE board_tasks SET status = ?, notes = ?, checklist = ?, session_id = COALESCE(?, session_id), run_id = COALESCE(?, run_id),"
+            " title = COALESCE(?, title), acceptance = COALESCE(?, acceptance), priority = COALESCE(?, priority), updated_at = ?, heartbeat_at = ? WHERE id = ?",
+            (status or task["status"], notes[-8000:], json.dumps(checklist), session_id, run_id, title, acceptance, priority, _now(), _now(), task_id),
+        )
+        if status in ("done", "dropped"):
+            await self._promote_dependents()
+        return await self.get(task_id)
+
+    async def delete(self, task_id: str) -> bool:
+        row = await self.app.db.fetchone("SELECT id FROM board_tasks WHERE id = ?", (task_id,))
+        if row is None:
+            return False
+        await self.app.db.execute("DELETE FROM board_tasks WHERE id = ?", (task_id,))
+        await self._promote_dependents()
+        return True
+
+    async def _promote_dependents(self) -> list[str]:
+        """A blocked task whose dependencies are all finished becomes ready."""
+        promoted: list[str] = []
+        for row in await self.app.db.fetchall("SELECT id, depends_on FROM board_tasks WHERE status = 'blocked'"):
+            deps = json.loads(row["depends_on"] or "[]")
+            if not await self._has_open_deps(deps):
+                await self.app.db.execute("UPDATE board_tasks SET status = 'todo', updated_at = ? WHERE id = ?", (_now(), row["id"]))
+                promoted.append(row["id"])
+        return promoted
+
+    async def recover_stale(self) -> list[str]:
+        """Hand back 'doing' tasks whose session has been quiet for longer than the stale window."""
+        manager = self.app.manager
+        hours = self.app.config.board.stale_hours
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+        handed: list[str] = []
+        for row in await self.app.db.fetchall("SELECT id, title, session_id, heartbeat_at, updated_at FROM board_tasks WHERE status = 'doing'"):
+            last = row["heartbeat_at"] or row["updated_at"]
+            if last >= cutoff:
+                continue
+            state = await manager.get_state(row["session_id"]) if manager is not None and row["session_id"] else None
+            if state is not None and (state.running or state.pending is not None):
+                continue
+            await self.app.db.execute("UPDATE board_tasks SET status = 'todo', updated_at = ?, notes = notes || ? WHERE id = ?", (_now(), f"\n[{_now()[:16].replace('T', ' ')}] handed back: no activity for {hours} h", row["id"]))
+            handed.append(row["id"])
+            inbox = self.app.extensions.get("inbox")
+            if inbox is not None:
+                await inbox.post("board_stale", f"Task '{row['title']}' handed back", f"No activity for {hours} h; it is 'todo' again.", severity="notice", session_id=row["session_id"])
+        return handed
+
+    async def touch(self, session_id: str) -> None:
+        await self.app.db.execute("UPDATE board_tasks SET heartbeat_at = ? WHERE status = 'doing' AND session_id = ?", (_now(), session_id))
+
+    async def loop(self) -> None:
+        while True:
+            try:
+                await self.recover_stale()
+            except Exception:  # noqa: BLE001
+                logger.exception("board recovery failed")
+            await asyncio.sleep(TICK_SECONDS)
+
+    def render(self, tasks: list[dict[str, Any]], *, limit: int = 30) -> str:
+        icons = {"todo": "▫️", "doing": "🔵", "review": "🟡", "done": "✅", "blocked": "⛔", "dropped": "✖️"}
+        lines = []
+        for t in tasks[:limit]:
+            done = sum(1 for c in t["checklist"] if c["done"])
+            extra = f" [{done}/{len(t['checklist'])}]" if t["checklist"] else ""
+            deps = f" ← {', '.join(t['depends_on'])}" if t["depends_on"] else ""
+            lines.append(f"{icons.get(t['status'], '·')} {t['id']} p{t['priority']} {t['title']}{extra}{deps}")
+        if len(tasks) > limit:
+            lines.append(f"… {len(tasks) - limit} more")
+        return "\n".join(lines) or "(the board is empty)"
+
+    async def service(self, op: str, **kwargs: Any) -> Any:
+        if op == "add":
+            return await self.add(**kwargs)
+        if op == "update":
+            return await self.update(kwargs.pop("task_id"), **kwargs)
+        if op == "list":
+            return await self.list(kwargs.get("status"), include_done=bool(kwargs.get("include_done", False)))
+        if op == "get":
+            return await self.get(kwargs["task_id"])
+        if op == "delete":
+            return await self.delete(kwargs["task_id"])
+        if op == "render":
+            return self.render(await self.list(kwargs.get("status"), include_done=bool(kwargs.get("include_done", False))))
+        raise ValueError(op)
+
+
+async def install(app: Application) -> list[asyncio.Task[None]]:
+    board = Board(app)
+    app.extensions["board"] = board
+    assert app.manager is not None
+    app.manager.service_hooks["board"] = board.service
+
+    async def touch_on_finish(session_id: str, run_id: str, status: str) -> None:
+        await board.touch(session_id)
+
+    app.manager.on_finished(touch_on_finish)
+    front = app.front
+    if front is not None:
+
+        async def cmd_board(message, command) -> None:  # type: ignore[no-untyped-def]
+            arg = (command.args or "").strip().lower()
+            include_done = arg == "all"
+            tasks = await board.list(None, include_done=include_done)
+            await message.answer(("📋 Board\n" + board.render(tasks) + "\n\n/board all shows finished tasks too")[:4000])
+
+        front.command_hooks["board"] = cmd_board
+    return [asyncio.create_task(board.loop(), name="board")]
+
+
+__all__ = ["STATUSES", "Board", "install"]

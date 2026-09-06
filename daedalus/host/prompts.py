@@ -66,6 +66,15 @@ Distinguish completed / attempted / failed / blocked / decided; never write vagu
 "made progress"; anchors are the terms someone would search for.
 """
 
+BOARD = """Board and peers:
+- Work with more than a few steps, or that must survive compaction and restarts, goes on the board: \
+BoardAdd with acceptance criteria and a checklist, BoardUpdate to claim (doing), annotate and finish. \
+Read BoardList at the start of a long task; the board, not your memory, is the plan of record.
+- Other sessions can be named peers (the operator registers them with /peer here <name>). AskPeer sends \
+them a question or a task and returns their answer; use it to split work (research / implement / review) \
+instead of doing everything in one context.
+"""
+
 SCHEDULING = """Scheduling: you can create recurring or one-shot tasks with ScheduleCreate. \
 A scheduled run happens in a fresh session with its own persistent workspace; write a \
 SUMMARY.md there at the end so the next run knows what happened. Attach any files the \
@@ -137,4 +146,4 @@ def governance_section(path: Path) -> str:
     return ""
 
 
-__all__ = ["DEFAULT_RULES", "HEADLINE_RE", "HISTORY", "PERSONA", "SCHEDULING", "SELF_DEVELOPMENT", "environment_section", "governance_section", "language_section", "rules_section", "split_headline"]
+__all__ = ["BOARD", "DEFAULT_RULES", "HEADLINE_RE", "HISTORY", "PERSONA", "SCHEDULING", "SELF_DEVELOPMENT", "environment_section", "governance_section", "language_section", "rules_section", "split_headline"]

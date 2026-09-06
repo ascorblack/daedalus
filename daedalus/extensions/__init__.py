@@ -23,6 +23,8 @@ EXTENSIONS = (
     "daedalus.extensions.heartbeat",
     "daedalus.extensions.learning",
     "daedalus.extensions.inbound",
+    "daedalus.extensions.board",
+    "daedalus.extensions.peers",
     "daedalus.extensions.balance",
     "daedalus.extensions.api",
 )

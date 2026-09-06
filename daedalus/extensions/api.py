@@ -129,6 +129,30 @@ class InboundBody(BaseModel):
     prompt: str = ""
 
 
+class BoardTaskBody(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    acceptance: str = ""
+    checklist: list[str] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
+    priority: int = Field(default=3, ge=1, le=5)
+    notes: str = ""
+
+
+class BoardUpdateBody(BaseModel):
+    status: str | None = None
+    note: str = ""
+    check: list[int] | None = None
+    uncheck: list[int] | None = None
+    priority: int | None = Field(default=None, ge=1, le=5)
+    title: str | None = None
+    acceptance: str | None = None
+
+
+class PeerBody(BaseModel):
+    name: str
+    session_id: str
+
+
 class ModeBody(BaseModel):
     mode: str | None = None
     """A configured mode name; null or "" = default behaviour."""
@@ -645,6 +669,63 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.get("/api/modes")
     async def modes(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         return {name: m.model_dump() for name, m in app.config.modes.items()}
+
+    # -- board ---------------------------------------------------------------------------------
+
+    def _board():  # type: ignore[no-untyped-def]
+        board = app.extensions.get("board")
+        if board is None:
+            raise HTTPException(503, "the board is not installed")
+        return board
+
+    @api.get("/api/board")
+    async def board_list(include_done: int = 0, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        return await _board().list(None, include_done=bool(include_done))
+
+    @api.post("/api/board")
+    async def board_add(body: BoardTaskBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            return await _board().add(title=body.title, acceptance=body.acceptance, checklist=body.checklist, depends_on=body.depends_on, priority=body.priority, notes=body.notes)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @api.put("/api/board/{task_id}")
+    async def board_update(task_id: str, body: BoardUpdateBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            return await _board().update(task_id, status=body.status, note=body.note, check=body.check, uncheck=body.uncheck, priority=body.priority, title=body.title, acceptance=body.acceptance)
+        except KeyError:
+            raise HTTPException(404, "no such task") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @api.delete("/api/board/{task_id}")
+    async def board_delete(task_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return {"deleted": await _board().delete(task_id)}
+
+    @api.get("/api/peers")
+    async def peers_list(_: dict[str, Any] = Depends(auth)) -> dict[str, str]:
+        peers = app.extensions.get("peers")
+        return await peers.registry() if peers is not None else {}  # type: ignore[attr-defined]
+
+    @api.post("/api/peers")
+    async def peers_register(body: PeerBody, _: dict[str, Any] = Depends(auth)) -> dict[str, str]:
+        peers = app.extensions.get("peers")
+        if peers is None:
+            raise HTTPException(503, "peers are not installed")
+        if await manager.get_state(body.session_id) is None:
+            raise HTTPException(404, "no such session")
+        try:
+            await peers.register(body.name, body.session_id)  # type: ignore[attr-defined]
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return await peers.registry()  # type: ignore[attr-defined]
+
+    @api.delete("/api/peers/{name}")
+    async def peers_forget(name: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        peers = app.extensions.get("peers")
+        if peers is None:
+            raise HTTPException(503, "peers are not installed")
+        return {"forgotten": await peers.forget(name.lower())}  # type: ignore[attr-defined]
 
     # -- inbound events ------------------------------------------------------------------
 

@@ -295,6 +295,19 @@ class WebhookConfig(BaseModel):
     enabled: bool = True
 
 
+class BoardConfig(BaseModel):
+    wip_limit: int = Field(default=3, ge=1)
+    """How many tasks may be 'doing' at once, across every session."""
+    stale_hours: int = Field(default=6, ge=1)
+    """A 'doing' task whose session has been quiet this long is handed back to 'todo'."""
+
+
+class PeersConfig(BaseModel):
+    max_depth: int = Field(default=3, ge=1)
+    """How many AskPeer hops may chain (a peer asking a peer …) before the call is refused."""
+    wait_timeout_minutes: int = Field(default=30, ge=1)
+
+
 class OpsConfig(BaseModel):
     """Operational thresholds: boot-loop guard, delivery ledger, doctor."""
 
@@ -384,6 +397,8 @@ class RuntimeConfig(BaseModel):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)
     asr: AsrConfig = Field(default_factory=AsrConfig)
+    board: BoardConfig = Field(default_factory=BoardConfig)
+    peers: PeersConfig = Field(default_factory=PeersConfig)
     modes: dict[str, ModeConfig] = Field(default_factory=lambda: {k: v.model_copy() for k, v in DEFAULT_MODES.items()})
     webhooks: dict[str, WebhookConfig] = Field(default_factory=dict)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
@@ -554,6 +569,8 @@ __all__ = [
     "WebToolsConfig",
     "ExecToolsConfig",
     "AsrConfig",
+    "BoardConfig",
+    "PeersConfig",
     "DEFAULT_MODES",
     "HeartbeatConfig",
     "ModeConfig",

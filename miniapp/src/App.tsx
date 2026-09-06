@@ -3,13 +3,14 @@ import { api, telegram } from "./api";
 import { useToast } from "./components";
 import { SessionsScreen } from "./screens/Sessions";
 import { InboxScreen } from "./screens/Inbox";
+import { BoardScreen } from "./screens/Board";
 import { SessionScreen } from "./screens/Session";
 import { ProposalsScreen } from "./screens/Proposals";
 import { SchedulesScreen } from "./screens/Schedules";
 import { UsageScreen } from "./screens/Usage";
 import { SettingsScreen } from "./screens/Settings";
 
-type Tab = "sessions" | "inbox" | "proposals" | "schedules" | "usage" | "settings";
+type Tab = "sessions" | "inbox" | "board" | "proposals" | "schedules" | "usage" | "settings";
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
@@ -34,6 +35,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 const TABS: { id: Tab; label: string; glyph: string }[] = [
   { id: "sessions", label: "Bots", glyph: "◉" },
   { id: "inbox", label: "Inbox", glyph: "▣" },
+  { id: "board", label: "Board", glyph: "☰" },
   { id: "proposals", label: "Changes", glyph: "⑂" },
   { id: "schedules", label: "Cron", glyph: "◷" },
   { id: "usage", label: "Usage", glyph: "▤" },
@@ -92,6 +94,7 @@ export function App() {
             <ErrorBoundary key={tab}>
               {tab === "sessions" && <SessionsScreen onOpen={setSessionId} toast={showToast} />}
               {tab === "inbox" && <InboxScreen onOpen={setSessionId} toast={showToast} onUnread={setUnread} />}
+              {tab === "board" && <BoardScreen onOpen={setSessionId} toast={showToast} />}
               {tab === "proposals" && <ProposalsScreen toast={showToast} />}
               {tab === "schedules" && <SchedulesScreen toast={showToast} onOpen={setSessionId} />}
               {tab === "usage" && <UsageScreen />}

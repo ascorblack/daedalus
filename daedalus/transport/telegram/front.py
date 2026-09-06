@@ -60,6 +60,7 @@ Each forum topic is one agent session with its own workspace. Write in a topic t
 /schedules · /schedule run|on|off|delete &lt;id&gt; — scheduled tasks
 /inbox [all|clear] · /heartbeat [on|off|run] · /doctor · /intents — inbox, the periodic check, health, standing intents
 /mode [quick|deep|careful|default] — limits and rules for this session
+/board [all] · /peer here &lt;name&gt;|list|forget &lt;name&gt; — the task board; name this topic as a peer other sessions can ask
 /approval manual|auto · /verbosity 0|1|2 — self-change approval, chat detail
 /rebuild · /rollback [n] · /panic — supervisor operations
 /prompt — show the editable working rules (edit them in the Mini App → Settings)
@@ -493,7 +494,7 @@ class TelegramFront:
         r.message.register(self.cmd_usage, Command("usage"))
         r.message.register(self.cmd_settings, Command("settings"))
         r.message.register(self.cmd_bind, Command("bind"))
-        r.message.register(self.cmd_operator, Command("rebuild", "rollback", "panic", "schedules", "verbosity", "approval", "balance", "schedule", "inbox", "heartbeat", "doctor", "intents"))
+        r.message.register(self.cmd_operator, Command("rebuild", "rollback", "panic", "schedules", "verbosity", "approval", "balance", "schedule", "inbox", "heartbeat", "doctor", "intents", "board", "peer"))
         r.message.register(self.cmd_mode, Command("mode"))
         r.message.register(
             self.on_message,

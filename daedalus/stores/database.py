@@ -294,6 +294,24 @@ MIGRATIONS: list[str] = [
         created_at TEXT NOT NULL
     );
     """,
+    # task board
+    """
+    CREATE TABLE board_tasks (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        priority INTEGER NOT NULL DEFAULT 3,
+        acceptance TEXT NOT NULL DEFAULT '',
+        checklist TEXT NOT NULL DEFAULT '[]',
+        depends_on TEXT NOT NULL DEFAULT '[]',
+        session_id TEXT,
+        run_id TEXT,
+        notes TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        heartbeat_at TEXT
+    );
+    """,
 ]
 
 

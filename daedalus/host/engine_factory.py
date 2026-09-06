@@ -99,6 +99,7 @@ def build_engine(
         prompts.governance_section(deps.governance_path),
         prompts.SELF_DEVELOPMENT,
         prompts.HISTORY,
+        prompts.BOARD,
         prompts.SCHEDULING,
         (mode.prompt.strip() + "\n") if mode is not None and mode.prompt.strip() else "",
         prompts.environment_section(
