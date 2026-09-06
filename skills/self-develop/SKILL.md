@@ -14,7 +14,10 @@ description: How to change your own code (host or core) safely: worktree, tests,
    - `tests/unit`, `tests/smoke` — smoke tests are the supervisor's preflight gate; keep them fast.
 3. Run the gates in the worktree: `uv sync --extra dev && uv run pytest -q` (host) or
    `uv run pytest -q` (core, ~3k tests; run the subset you touched first).
-4. Commit with a message that describes the change on its own terms.
+4. Commit with a message that describes the change on its own terms. The repositories are public:
+   no session or run ids, no trailers or co-author lines, no model or tool names as authors, and
+   nothing about the operator (addresses, hostnames, paths, accounts, workloads, circumstances) in
+   commits, pull requests, code comments or docs. What you know about the operator stays in the session.
 5. `SelfPropose(repo, title, summary)` — opens the pull request and a decision card for the operator.
 6. After the merge, `SelfRebuild(reason)`. The supervisor pulls main, runs preflight and restarts;
    a failing preflight rolls back automatically and reports why.

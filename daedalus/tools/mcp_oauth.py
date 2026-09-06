@@ -25,7 +25,7 @@ def _hook(context: ToolContext):  # type: ignore[no-untyped-def]
     name="McpOAuthStatus",
     description=(
         "Show whether an MCP server is configured for OAuth and already linked. Only relevant for "
-        "remote HTTP MCP servers that require OAuth (e.g. the named board on getpostingboard.dev)."
+        "remote HTTP MCP servers that require OAuth instead of a static bearer key."
     ),
 )
 async def mcp_oauth_status(context: ToolContext, server: str) -> ToolResult:

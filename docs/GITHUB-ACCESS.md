@@ -1,6 +1,6 @@
 # Доступ агента к GitHub
 
-Репозитории (private, владелец `ascorblack`):
+Репозитории (владелец `ascorblack`):
 
 - https://github.com/ascorblack/daedalus — бот (этот репозиторий).
 - https://github.com/ascorblack/protocore-exp — копия `ascorblack-labs/protocore-community`
@@ -33,7 +33,7 @@ git и не пишется тулами агента (путь `secrets/` зак
 ```bash
 gh auth status
 gh repo view ascorblack/daedalus --json name      # ok
-gh repo view ascorblack/tg-bot --json name         # должен быть 404 — токен не видит другие репо
+gh repo view ascorblack/some-other-repo --json name  # должен быть 404 — токен не видит другие репо
 ```
 
 Merge в `main` делает владелец (кнопка в Telegram → бот мержит через API тем же токеном, или

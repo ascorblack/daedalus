@@ -3,7 +3,7 @@
 # secrets, internal addresses, tooling trailers. Run before opening the repository.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-PATTERNS='sk-[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]+|ghp_[A-Za-z0-9]{20,}|[0-9]{6,}:[A-Za-z0-9_-]{30,}|192\.168\.[0-9.]+|10\.10\.[0-9.]+|Co-authored-by|Generated with|claude|codex'
+PATTERNS='sk-[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]+|ghp_[A-Za-z0-9]{20,}|[0-9]{6,}:[A-Za-z0-9_-]{30,}|192\.168\.[0-9.]+|10\.10\.[0-9.]+|Co-authored-by|Generated with|[Cc]laude-[Ss]ession|session_01|claude\\.ai/code|Signed-off-by'
 echo "== working tree"
 grep -rInE "$PATTERNS" --exclude-dir=.git --exclude-dir=.venv --exclude-dir=node_modules --exclude-dir=dist . || echo "clean"
 echo "== history (all blobs)"

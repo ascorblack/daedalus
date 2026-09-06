@@ -39,6 +39,21 @@ class GitError(RuntimeError):
 
 
 _TOKEN_RE = re.compile(r"(https?://)[^/@\s]+@")
+_PRIVATE_LINES = re.compile(r"(?im)^\s*(session|run|operator|owner|claude-session|co-authored-by|generated[- ]with|signed-off-by)\s*:.*(?:\n|$)")
+_PRIVATE_ADDRESSES = re.compile(r"\b(?:10|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}(?:\.\d{1,3}){1,2}\b|/home/[A-Za-z0-9_-]+|/srv/state/[^\s`'\"]*")
+
+
+def public_text(text: str) -> str:
+    """Strip what a pull request or commit must not carry into a public repository.
+
+    Session and run identifiers, tooling trailers and co-author lines go; private network
+    addresses and paths on the operator's machine are replaced with a placeholder. The
+    redactor handles credentials before this runs.
+    """
+    text = _PRIVATE_LINES.sub("", redact.shared().redact(text))
+    text = _PRIVATE_ADDRESSES.sub("<redacted>", text)
+    return text.strip()
+
 
 
 async def _run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None, timeout: float = 600) -> str:
@@ -144,7 +159,7 @@ class SelfDevelopment:
             raise GitError("the branch has no commits beyond origin/main")
         await self.git(spec, "push", "-u", "origin", head_branch, "--force-with-lease", cwd=worktree)
         receipts = await self.receipts_for(session_id, since=await self._branch_started(spec, worktree)) if session_id else ""
-        body = summary + "\n\n" + (f"Session: {session_id}" if session_id else "") + receipts
+        body = public_text(summary) + public_text(receipts)
         existing = (await self.gh("pr", "list", "--head", head_branch, "--json", "number,url", cwd=worktree)).strip()
         try:
             prs = json.loads(existing or "[]")

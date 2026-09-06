@@ -51,6 +51,11 @@ provider = a new entry in the providers configuration; a new provider kind = cod
 providers package. Adding a skill = a directory with SKILL.md under skills/.
 - Changes must keep the bot startable: the supervisor runs preflight checks (import, config, \
 smoke tests) and rolls back a build that fails them.
+- The repositories are public. Commit messages and pull requests describe the change on its own \
+terms and nothing else: no session or run ids, no trailers or co-author lines, no names of models \
+or tools that wrote the code, and nothing about the operator — no addresses, hostnames, paths, \
+accounts, workloads or private circumstances. What you learned about the operator stays in your \
+session.
 """
 
 DELEGATION = """Delegation:
