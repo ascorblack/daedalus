@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl
 
+import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -30,8 +31,11 @@ from protocore.contracts.types import (
 )
 from pydantic import BaseModel
 
+from daedalus.config import PROVIDER_KINDS, ProviderConfig
+
 if TYPE_CHECKING:
     from daedalus.app import Application
+    from daedalus.config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +108,105 @@ class SettingsBody(BaseModel):
     scheduler: dict[str, Any] | None = None
     telegram: dict[str, Any] | None = None
     answer_language: str | None = None
+
+
+class ProviderPatch(BaseModel):
+    """Partial edit of one configured provider endpoint (see ``apply_provider_patch``)."""
+
+    kind: str | None = None
+    base_url: str | None = None
+    default_model: str | None = None
+    api_key: str | None = None
+    """Omitted = keep the stored key; "" or null = clear it; any other value = store it."""
+    supports_images: bool | None = None
+    supports_thinking: bool | None = None
+    timeout_seconds: float | None = None
+
+
+class ModelsLookupBody(BaseModel):
+    base_url: str
+    api_key: str | None = None
+
+
+async def lookup_openai_models(
+    base_url: str,
+    api_key: str | None = None,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """List the model ids served at an OpenAI-compatible ``/models`` endpoint.
+
+    Tries ``{base}/models`` first, then ``{base}/v1/models``, so a base_url typed
+    without the ``/v1`` prefix (``http://host:9000``) still resolves; the returned
+    ``base_url`` is the exact root the list was found at. Tests inject an
+    ``httpx.AsyncClient`` with a mock transport; production uses its own short-timeout
+    client. Raises :class:`ValueError` when nothing answers with a model list.
+    """
+    base = (base_url or "").strip().rstrip("/")
+    if not base or not re.match(r"^https?://", base, re.IGNORECASE):
+        raise ValueError("base_url must be an http(s) URL")
+    candidates = [f"{base}/models"]
+    if not base.endswith("/v1"):
+        candidates.append(f"{base}/v1/models")
+    headers = {"accept": "application/json"}
+    if api_key:
+        headers["authorization"] = f"Bearer {api_key}"
+    errors: list[str] = []
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0), follow_redirects=True)
+    try:
+        for url in candidates:
+            try:
+                response = await client.get(url, headers=headers)
+            except httpx.HTTPError as exc:
+                errors.append(f"{url}: {exc.__class__.__name__}")
+                continue
+            if response.status_code != 200:
+                errors.append(f"{url}: HTTP {response.status_code}")
+                continue
+            try:
+                data = response.json()
+            except ValueError:
+                errors.append(f"{url}: not JSON")
+                continue
+            entries = data.get("data") if isinstance(data, dict) else None
+            models = [str(m["id"]) for m in entries] if isinstance(entries, list) else None
+            if not models:
+                errors.append(f"{url}: no model list in the response")
+                continue
+            return {"base_url": url[: -len("/models")], "models": models}
+    finally:
+        if owns_client:
+            await client.aclose()
+    raise ValueError("; ".join(errors[:3]) or "no response")
+
+
+def apply_provider_patch(providers: dict[str, Any], provider_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+    """Merge a partial patch into a config-style ``providers`` dict (in place; returns it).
+
+    ``patch`` is the ``exclude_unset`` dump of :class:`ProviderPatch` — only the keys the
+    client actually sent. Unknown or null fields are skipped; ``api_key`` is special-cased
+    so an absent key never overwrites a stored one. Unknown ids create a new endpoint
+    (defaulting to the generic OpenAI-compatible kind).
+    """
+    entry = dict(providers.get(provider_id) or {"kind": "openai_compat"})
+    for key, value in patch.items():
+        if key == "api_key":
+            entry[key] = value or ""
+        elif value is not None and key in ProviderConfig.model_fields:
+            entry[key] = value
+    providers[provider_id] = entry
+    return providers
+
+
+def mask_provider_keys(settings_view: dict[str, Any]) -> dict[str, Any]:
+    """Never echo stored keys back to the Mini App: replace with a ``api_key_set`` flag."""
+    for entry in (settings_view.get("providers") or {}).values():
+        entry["api_key_set"] = bool(entry.get("api_key"))
+        entry["api_key"] = ""
+    settings_view["provider_kinds"] = list(PROVIDER_KINDS)
+    return settings_view
 
 
 _SUMMARY_WRAP_RE = re.compile(r"</?compacted-turn[^>]*>")
@@ -529,7 +632,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         data["providers_available"] = list(manager.providers.available())
         data["usd_per_day"] = settings.usd_per_day
         data["prompt"]["default_rules"] = DEFAULT_RULES.strip()
-        return data
+        return mask_provider_keys(data)
 
     @api.get("/api/settings")
     async def get_settings(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -552,6 +655,66 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if app.front is not None:
             app.front.config = new_config
         return _settings_view()
+
+    # -- provider endpoints ----------------------------------------------------------------
+
+    async def _save_provider_config(new_config: RuntimeConfig) -> dict[str, Any]:
+        await app.save_config(new_config)
+        await manager.providers.close_retired()
+        if app.front is not None:
+            app.front.config = new_config
+        return _settings_view()
+
+    def _reference_check(config: RuntimeConfig, provider_id: str) -> str | None:
+        if config.model.provider == provider_id:
+            return "it is the active model provider"
+        if provider_id in config.model.chain:
+            return "it is in the model fallback chain"
+        if config.vision.provider == provider_id:
+            return "it is the vision provider"
+        return None
+
+    @api.put("/api/providers/{provider_id}")
+    async def put_provider(provider_id: str, body: ProviderPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        patch = body.model_dump(exclude_unset=True)
+        if not patch:
+            return _settings_view()
+        raw = app.config.model_dump(mode="json")
+        apply_provider_patch(raw.setdefault("providers", {}), provider_id, patch)
+        try:
+            new_config = type(app.config).model_validate(raw)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(400, str(exc)) from exc
+        if not new_config.providers[provider_id].base_url:
+            raise HTTPException(400, "base_url is required for a provider endpoint")
+        return await _save_provider_config(new_config)
+
+    @api.delete("/api/providers/{provider_id}")
+    async def delete_provider(provider_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        if provider_id not in app.config.providers:
+            raise HTTPException(404, "no such provider")
+        reason = _reference_check(app.config, provider_id)
+        if reason:
+            raise HTTPException(400, f"cannot delete {provider_id!r}: {reason}. Point the model settings elsewhere first.")
+        raw = app.config.model_dump(mode="json")
+        del raw["providers"][provider_id]
+        new_config = type(app.config).model_validate(raw)
+        return await _save_provider_config(new_config)
+
+    @api.post("/api/providers/lookup-models")
+    async def lookup_provider_models(body: ModelsLookupBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """List model ids served at an OpenAI-compatible endpoint (``{base}/models``).
+
+        Probes from the bot (a Mini App in a browser or Telegram cannot reach LAN
+        addresses), with an optional bearer key. ``base_url`` in the reply is the exact
+        root the list was found at (``/v1`` appended when the caller omitted it).
+        """
+        try:
+            return await lookup_openai_models(body.base_url, body.api_key)
+        except ValueError as exc:
+            message = str(exc)
+            status = 400 if message.startswith("base_url") else 502
+            raise HTTPException(status, message) from exc
 
     # -- static mini app ------------------------------------------------------------
 

@@ -64,17 +64,22 @@ class ProviderRegistry:
             await provider.aclose()
 
     def _endpoint(self, provider_id: str, pc: ProviderConfig) -> ProviderEndpoint | None:
-        api_key = ""
         base_url = pc.base_url
         headers: dict[str, str] = {}
-        if pc.kind == "deepseek":
-            api_key = self._settings.deepseek_api_key
-        elif pc.kind == "openrouter":
-            api_key = self._settings.openrouter_api_key
+        env_keys = {
+            "deepseek": self._settings.deepseek_api_key,
+            "openrouter": self._settings.openrouter_api_key,
+            "vllm": self._settings.vllm_api_key,
+        }
+        if pc.kind == "openrouter":
             headers = {"HTTP-Referer": "https://github.com/ascorblack/daedalus", "X-Title": "Daedalus"}
         elif pc.kind == "vllm":
+            # The environment pair is the deployment-time default; the operator may point
+            # any of these at a different endpoint (base_url, api_key) in config.toml.
             base_url = base_url or self._settings.vllm_base_url
-            api_key = self._settings.vllm_api_key
+        # A per-endpoint key stored in config.toml wins; otherwise fall back to the
+        # environment key of the built-in kinds. Self-hosted endpoints need no key at all.
+        api_key = pc.api_key or env_keys.get(pc.kind, "")
         if not base_url:
             return None
         if pc.kind in ("deepseek", "openrouter") and not api_key:

@@ -11,6 +11,18 @@ chain = [
 ]
 context_window = 128000
 
+# Provider endpoints the bot can talk to. Every provider is an OpenAI-compatible client
+# (chat/completions, tools, JSON mode, streaming); "kind" selects only the environment-key
+# fallback and extra headers:
+#   deepseek      -> falls back to DEEPSEEK_API_KEY
+#   openrouter    -> falls back to OPENROUTER_API_KEY, adds the referer headers OpenRouter wants
+#   vllm          -> falls back to VLLM_BASE_URL / VLLM_API_KEY (this is a plain vLLM server)
+#   openai_compat -> generic self-hosted endpoint
+# base_url is the OpenAI API root and usually ends in /v1 (e.g. http://192.0.2.10:9000/v1).
+# A per-endpoint api_key set in this file wins over the environment key; leave it empty for
+# self-hosted endpoints that need no key. The Mini App (Settings -> Providers) edits these
+# entries live, lists a server's models from its /models endpoint, and never shows stored keys.
+
 [providers.deepseek]
 kind = "deepseek"
 base_url = "https://api.deepseek.com"
@@ -33,7 +45,7 @@ timeout_seconds = 600.0
 
 [providers.vllm]
 kind = "vllm"
-base_url = ""
+base_url = ""            # empty = use VLLM_BASE_URL from the environment
 default_model = ""
 supports_images = false
 supports_thinking = false

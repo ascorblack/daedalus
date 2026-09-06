@@ -25,6 +25,9 @@ ReasoningEffort = Literal["low", "medium", "high"]
 ApprovalMode = Literal["manual", "auto"]
 ScheduleTopicMode = Literal["per_task", "per_run"]
 
+ProviderKind = Literal["deepseek", "openrouter", "vllm", "openai_compat"]
+PROVIDER_KINDS: tuple[ProviderKind, ...] = ("deepseek", "openrouter", "vllm", "openai_compat")
+
 
 class Settings(BaseSettings):
     """Environment-only settings."""
@@ -97,9 +100,13 @@ class ModelConfig(BaseModel):
 class ProviderConfig(BaseModel):
     """One configured provider endpoint (all OpenAI-compatible)."""
 
-    kind: Literal["deepseek", "openrouter", "vllm", "openai_compat"] = "openai_compat"
+    kind: ProviderKind = "openai_compat"
     base_url: str = ""
     default_model: str = ""
+    api_key: str = ""
+    """Optional key for this endpoint, stored in ``config.toml`` on the state volume
+    (masked in the Mini App, never echoed back). Empty means "no key" for self-hosted
+    endpoints and "use the environment key" for the built-in kinds (deepseek, openrouter, vllm)."""
     supports_images: bool = False
     supports_thinking: bool = False
     timeout_seconds: float = 600.0
@@ -280,8 +287,10 @@ __all__ = [
     "McpOAuthConfig",
     "McpServerConfig",
     "ModelConfig",
+    "PROVIDER_KINDS",
     "PromptConfig",
     "ProviderConfig",
+    "ProviderKind",
     "ReasoningEffort",
     "RuntimeConfig",
     "SchedulerConfig",

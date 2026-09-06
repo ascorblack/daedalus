@@ -132,8 +132,22 @@ export type Schedule = {
   last_summary: string | null;
 };
 
+export type ProviderConf = {
+  kind: string;
+  base_url: string;
+  default_model: string;
+  supports_images: boolean;
+  supports_thinking: boolean;
+  timeout_seconds: number;
+  api_key?: string; // always "" from the API — stored keys are masked
+  api_key_set?: boolean;
+  pricing?: Record<string, unknown>;
+};
+
 export type Settings = {
   model: { provider: string; name: string; thinking: boolean; reasoning_effort: string; chain: string[]; context_window: number; max_output_tokens: number };
+  providers: Record<string, ProviderConf>;
+  provider_kinds?: string[];
   prompt: { rules: string; default_rules?: string };
   self_change: { approval: string; auto_rebuild: boolean };
   limits: { max_iterations: number; tool_timeout_seconds: number };
