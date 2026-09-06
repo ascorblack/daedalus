@@ -534,6 +534,9 @@ class SessionManager:
                 # Free-text reply to a pending question counts as a custom answer.
                 return await self.answer(session_id, [{"custom": body}])
             await self.live.enqueue(session_id, "follow_up", new_queued_prompt("follow_up", body).to_dict())
+            await self.sessions.append_transcript(
+                session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up"})]
+            )
             return state.run_id or ""
         exceeded = self.budget_exceeded()
         if exceeded and not state.running:
@@ -549,6 +552,11 @@ class SessionManager:
             # next model call (after the current tool batch). follow_up would wait for the end.
             kind = "follow_up" if not steer and state.metadata.get("queue_mode") == "follow_up" else "steer"
             await self.live.enqueue(session_id, kind, new_queued_prompt(kind, body).to_dict())  # type: ignore[arg-type]
+            # The core folds queued prompts into the model's history later (and compaction may
+            # rewrite them); the transcript keeps the operator's words as sent.
+            await self.sessions.append_transcript(
+                session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind})]
+            )
             return state.run_id or ""
         message = Message(
             role=MessageRole.user,

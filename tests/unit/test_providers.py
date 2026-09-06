@@ -266,3 +266,25 @@ def test_session_provider_override_puts_that_client_first() -> None:
     assert rungs[0][0].endpoint.id == "vllm" and rungs[0][1] == "Qwen3.6"
     assert [p.endpoint.id for p, _ in rungs[1:]] == ["deepseek", "openrouter"]
     assert registry.rungs_for_session(config, "nope")[0][0].endpoint.id == "deepseek"
+
+
+async def test_core_tier2_keeps_operator_turns_verbatim() -> None:
+    from protocore.contracts.types import ToolResultBlock, ToolUseBlock
+    from protocore.runtime.context.compaction import CompactionState, run_tier2_summarisation
+    from protocore.runtime.runtime_constants import default_runtime_constants
+
+    body = json.dumps({"choices": [{"message": {"content": '{"summary": "did things"}'}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
+    provider = _provider(body)
+    history: list[Message] = [Message(role=MessageRole.user, content_blocks=[TextBlock(text="do the thing")])]
+    for i in range(4):
+        history.append(Message(role=MessageRole.assistant, content_blocks=[ToolUseBlock(tool_call_id=f"c{i}", name="Exec", arguments_json='{"command": "ls"}')]))
+        history.append(Message(role=MessageRole.tool, content_blocks=[ToolResultBlock(tool_call_id=f"c{i}", content="x\n" * 400)]))
+    history.append(Message(role=MessageRole.user, content_blocks=[TextBlock(text="remove the model-name field, keep only the global default")]))
+    for i in range(4, 10):
+        history.append(Message(role=MessageRole.assistant, content_blocks=[ToolUseBlock(tool_call_id=f"c{i}", name="Exec", arguments_json='{"command": "ls"}')]))
+        history.append(Message(role=MessageRole.tool, content_blocks=[ToolResultBlock(tool_call_id=f"c{i}", content="x\n" * 400)]))
+    rc = default_runtime_constants(model_context_window=32_000, compaction_summary_max_output_tokens=1024)
+    result = await run_tier2_summarisation(history, provider, CompactionState(), rc, model_name="m")
+    assert result.turns_summarised > 0
+    texts = [m.text for m in history if m.role is MessageRole.user]
+    assert "remove the model-name field, keep only the global default" in texts

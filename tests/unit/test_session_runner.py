@@ -294,3 +294,15 @@ async def test_compact_refuses_while_running(settings: Settings, db: Database) -
         await manager.compact(state.session.id)
     state.task.cancel()
     await manager.close()
+
+
+async def test_steer_sent_while_running_lands_in_the_transcript(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([{"text": "hi"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("busy")
+    state.task = asyncio.create_task(asyncio.sleep(5))
+    await manager.submit(state.session.id, "change of plan")
+    texts = [m.content_blocks[0].text for m in await manager.sessions.list_transcript(state.session.id)]  # type: ignore[union-attr]
+    assert texts == ["change of plan"]
+    state.task.cancel()
+    await manager.close()
