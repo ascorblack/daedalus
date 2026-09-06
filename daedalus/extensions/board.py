@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+NOTES_MAX_CHARS = 8000
 STATUSES = ("todo", "doing", "review", "done", "blocked", "dropped")
 TICK_SECONDS = 300
 
@@ -121,13 +122,22 @@ class Board:
         notes = task["notes"] or ""
         if note:
             notes = (notes + "\n" if notes else "") + f"[{_now()[:16].replace('T', ' ')}] {note[:1000]}"
+        # The claim belongs to whoever holds the task in 'doing'; leaving 'doing' releases it.
+        if status == "doing":
+            owner, owner_run = session_id or task["session_id"], run_id or task["run_id"]
+        elif status:
+            owner, owner_run = None, None
+        else:
+            owner, owner_run = task["session_id"], task["run_id"]
         await self.app.db.execute(
-            "UPDATE board_tasks SET status = ?, notes = ?, checklist = ?, session_id = COALESCE(?, session_id), run_id = COALESCE(?, run_id),"
+            "UPDATE board_tasks SET status = ?, notes = ?, checklist = ?, session_id = ?, run_id = ?,"
             " title = COALESCE(?, title), acceptance = COALESCE(?, acceptance), priority = COALESCE(?, priority), updated_at = ?, heartbeat_at = ? WHERE id = ?",
-            (status or task["status"], notes[-8000:], json.dumps(checklist), session_id, run_id, title, acceptance, priority, _now(), _now(), task_id),
+            (status or task["status"], notes[-NOTES_MAX_CHARS:], json.dumps(checklist), owner, owner_run, title, acceptance, priority, _now(), _now(), task_id),
         )
         if status in ("done", "dropped"):
             await self._promote_dependents()
+        elif status and task["status"] in ("done", "dropped"):
+            await self._demote_dependents()
         return await self.get(task_id)
 
     async def delete(self, task_id: str) -> bool:
@@ -135,6 +145,9 @@ class Board:
         if row is None:
             return False
         await self.app.db.execute("DELETE FROM board_tasks WHERE id = ?", (task_id,))
+        for row in await self.app.db.fetchall("SELECT id, depends_on FROM board_tasks WHERE depends_on LIKE ?", (f"%{task_id}%",)):
+            deps = [d for d in json.loads(row["depends_on"] or "[]") if d != task_id]
+            await self.app.db.execute("UPDATE board_tasks SET depends_on = ? WHERE id = ?", (json.dumps(deps), row["id"]))
         await self._promote_dependents()
         return True
 
@@ -148,20 +161,35 @@ class Board:
                 promoted.append(row["id"])
         return promoted
 
+    async def _demote_dependents(self) -> list[str]:
+        """A ready task whose dependency was reopened is blocked again."""
+        demoted: list[str] = []
+        for row in await self.app.db.fetchall("SELECT id, depends_on FROM board_tasks WHERE status = 'todo'"):
+            deps = json.loads(row["depends_on"] or "[]")
+            if deps and await self._has_open_deps(deps):
+                await self.app.db.execute("UPDATE board_tasks SET status = 'blocked', updated_at = ? WHERE id = ?", (_now(), row["id"]))
+                demoted.append(row["id"])
+        return demoted
+
     async def recover_stale(self) -> list[str]:
         """Hand back 'doing' tasks whose session has been quiet for longer than the stale window."""
         manager = self.app.manager
         hours = self.app.config.board.stale_hours
-        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
         handed: list[str] = []
         for row in await self.app.db.fetchall("SELECT id, title, session_id, heartbeat_at, updated_at FROM board_tasks WHERE status = 'doing'"):
             last = row["heartbeat_at"] or row["updated_at"]
-            if last >= cutoff:
+            try:
+                seen = datetime.fromisoformat(last)
+                seen = seen if seen.tzinfo else seen.replace(tzinfo=UTC)
+            except (TypeError, ValueError):
+                seen = cutoff
+            if seen >= cutoff:
                 continue
             state = await manager.get_state(row["session_id"]) if manager is not None and row["session_id"] else None
             if state is not None and (state.running or state.pending is not None):
                 continue
-            await self.app.db.execute("UPDATE board_tasks SET status = 'todo', updated_at = ?, notes = notes || ? WHERE id = ?", (_now(), f"\n[{_now()[:16].replace('T', ' ')}] handed back: no activity for {hours} h", row["id"]))
+            await self.app.db.execute("UPDATE board_tasks SET status = 'todo', session_id = NULL, run_id = NULL, updated_at = ?, notes = substr(notes || ?, ?) WHERE id = ?", (_now(), f"\n[{_now()[:16].replace('T', ' ')}] handed back: no activity for {hours} h", -NOTES_MAX_CHARS, row["id"]))
             handed.append(row["id"])
             inbox = self.app.extensions.get("inbox")
             if inbox is not None:

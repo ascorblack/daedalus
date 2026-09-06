@@ -137,6 +137,7 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
   const [view, setView] = useState<"chat" | "files" | "mcp">("chat");
   const [menu, setMenu] = useState(false);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
+  const [modes, setModes] = useState<string[]>([]);
   const [picker, setPicker] = useState<null | { presets: Record<string, { provider: string; model: string; label: string }>; global: string }>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [custom, setCustom] = useState("");
@@ -160,9 +161,10 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
     async (kind: "revert" | "fork", seq: number) => {
       try {
         if (kind === "revert") {
-          if (!window.confirm("Undo this turn and everything after it? The working history is cut and the workspace files go back to that point. The transcript keeps everything.")) return;
-          const r = await api.post<{ dropped: number; workspace_restored: boolean }>(`/api/sessions/${id}/revert`, { seq });
-          toast(`reverted: ${r.dropped} message(s) removed${r.workspace_restored ? ", workspace restored" : ""}`);
+          if (!window.confirm("Undo this turn and everything after it? The working history is cut and the workspace files are restored where a snapshot exists (nested git repositories stay as they are). The transcript keeps everything.")) return;
+          const r = await api.post<{ dropped: number; workspace_restored: boolean; untouched: string[] }>(`/api/sessions/${id}/revert`, { seq });
+          const ws = r.workspace_restored ? (r.untouched.length ? `, workspace restored (${r.untouched.length} nested repo(s) untouched)` : ", workspace restored") : ", files not restored (no snapshot)";
+          toast(`reverted: ${r.dropped} message(s) removed${ws}`);
         } else {
           const r = await api.post<{ id: string; title: string; messages: number }>(`/api/sessions/${id}/fork`, { seq });
           toast(`forked into "${r.title}" (${r.messages} messages) — open it from the Bots tab`);
@@ -186,6 +188,7 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
 
   useEffect(() => {
     load();
+    api.get<Record<string, unknown>>("/api/modes").then((m) => setModes(Object.keys(m))).catch(() => setModes([]));
   }, [load]);
 
   const status = (detail?.status ?? "idle") as Status;
@@ -441,7 +444,7 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
             <button onClick={() => setEditingTitle(detail?.title ?? "")}>Rename</button>
             <button onClick={compact}>Compact history</button>
             <div className="sub" style={{ padding: "6px 10px 2px" }}>mode: {detail?.mode || "default"}</div>
-            {["default", "quick", "deep", "careful"].map((m) => (
+            {["default", ...modes].map((m) => (
               <button key={m} onClick={() => setMode(m)}>
                 {(detail?.mode || "default") === m ? "• " : ""}
                 {m}

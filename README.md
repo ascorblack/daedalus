@@ -52,8 +52,14 @@ git clone https://github.com/ascorblack/daedalus
 git clone https://github.com/ascorblack/protocore-exp   # next to it
 cd daedalus
 cp deploy/env.example .env      # fill in the values
+mkdir -p ../daedalus-secrets && cp deploy/keyproxy.env.example ../daedalus-secrets/keyproxy.env
+chmod 600 ../daedalus-secrets/keyproxy.env   # provider keys go HERE, outside the checkout
 docker compose -f deploy/compose.yaml --env-file .env up -d --build
 ```
+
+Provider keys never enter the agent container: a small key-proxy container holds them and injects
+them into upstream calls (`http://keyproxy:3200/deepseek`, `…/openrouter`, `…/openai`, plus any
+`KEYPROXY_UPSTREAM_<NAME>` you add). The proxy also refuses model calls once the daily budget is spent.
 
 Then, in Telegram:
 

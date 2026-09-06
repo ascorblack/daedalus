@@ -123,6 +123,7 @@ def environment_section(
     session_title: str,
     model: str,
     extra_notes: str = "",
+    sandboxed: bool = False,
 ) -> str:
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
@@ -135,6 +136,8 @@ def environment_section(
         f"- Your core repository: {core_repo}",
         f"- Current model: {model}",
     ]
+    if sandboxed:
+        lines.append("- Exec and Verify run in a sandbox: the filesystem is read-only outside the workspace, /tmp is private, and background processes end with the command")
     if extra_notes:
         lines.append(extra_notes)
     return "\n".join(lines) + "\n"

@@ -77,10 +77,15 @@ class Peers:
             raise ValueError(f"peer chain too deep ({depth} > {self.app.config.peers.max_depth}); answer this yourself")
         if target.running or target.pending is not None:
             raise RuntimeError(f"peer {name!r} is busy" + (" waiting for the operator's answer" if target.pending is not None else "") + "; ask again later or leave a note on the board")
-        target.metadata["peer_depth"] = depth
         from_name = origin.metadata.get("peer_name") if origin is not None else None
         who = f"peer {from_name!r}" if from_name else f"session {from_session}"
         text = f"[question from {who} via AskPeer — answer it in your final reply; the reply is returned to them verbatim]\n\n{prompt}"
+        # Only what the peer writes after this point counts as its answer to this question.
+        watermark = max((int(m.metadata.get("daedalus.seq", 0)) for m in await manager.sessions.list_transcript(target_id)), default=0)
+        async with target.lock:
+            if target.running or target.pending is not None:
+                raise RuntimeError(f"peer {name!r} just became busy; ask again later")
+            target.metadata["peer_depth"] = depth  # cleared when the peer's run ends
         run_id = await manager.submit(target_id, text, as_answer=False, origin=f"peer:{from_name or from_session}")
         if not wait:
             return {"session_id": target_id, "run_id": run_id, "answer": None}
@@ -96,16 +101,31 @@ class Peers:
                 break
         else:
             return {"session_id": target_id, "run_id": run_id, "answer": None, "note": "the peer did not finish in time; its answer will be in its topic"}
-        history = await manager.transcript(target_id, tail=20)
-        answer = ""
-        for m in reversed(history):
+        answer = await self.answer_after(target_id, watermark)
+        if answer is None:
+            return {"session_id": target_id, "run_id": run_id, "answer": None, "note": "the peer's run ended without a reply (it may have failed or been stopped); see its topic"}
+        return {"session_id": target_id, "run_id": run_id, "answer": answer}
+
+    async def answer_after(self, session_id: str, watermark: int) -> str | None:
+        """The peer's latest final reply written after transcript ``watermark``, or None when there is none."""
+        manager = self.app.manager
+        assert manager is not None
+        rows = await manager.sessions.list_transcript(session_id)
+        for m in reversed(rows):
+            if int(m.metadata.get("daedalus.seq", 0)) <= watermark:
+                break
             if m.role is MessageRole.assistant:
                 text = "".join(b.text for b in m.content_blocks if isinstance(b, TextBlock)).strip()
                 if text:
-                    answer = split_headline(text)[0]
-                    break
-        target.metadata.pop("peer_depth", None)
-        return {"session_id": target_id, "run_id": run_id, "answer": answer}
+                    return split_headline(text)[0]
+        return None
+
+    async def on_run_finished(self, session_id: str, run_id: str, status: str) -> None:
+        """A peer's depth belongs to the question it is answering; it goes with the run."""
+        manager = self.app.manager
+        state = await manager.get_state(session_id) if manager is not None else None
+        if state is not None and status != "awaiting":
+            state.metadata.pop("peer_depth", None)
 
     async def service(self, op: str, **kwargs: Any) -> Any:
         if op == "ask":
@@ -120,6 +140,7 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     app.extensions["peers"] = peers
     assert app.manager is not None
     app.manager.service_hooks["peers"] = peers.service
+    app.manager.on_finished(peers.on_run_finished)
     front = app.front
     if front is not None:
 

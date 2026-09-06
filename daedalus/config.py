@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import tomli_w
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     vllm_base_url: str = ""
     vllm_api_key: str = ""
     github_token: str = ""
+    telegram_api_hash: str = ""
+    """Only the local Bot API server needs it; the bot reads it so the redactor can mask it."""
 
     state_dir: Path = Path("/srv/state")
     workspaces_dir: Path = Path("/srv/workspaces")
@@ -166,6 +168,10 @@ class WebToolsConfig(BaseModel):
     search_results: int = Field(default=8, ge=1, le=30)
 
 
+SANDBOX_NEVER_WRITABLE = frozenset({"/srv/state", "/srv/daedalus", "/srv/protocore-exp", "/opt/launcher", "/run/daedalus", "/run/daedalus-rebuild", "/etc/ssl", "/usr/local", "/var/lib"})
+"""Directories the sandbox may never be told to write, however the config is edited."""
+
+
 class ExecToolsConfig(BaseModel):
     """Exec / Read / Find output handling (the timeout itself is ``limits.tool_timeout_seconds``)."""
 
@@ -176,6 +182,17 @@ class ExecToolsConfig(BaseModel):
     an unsandboxed run with a warning when it is missing."""
     sandbox_extra_writable: list[str] = Field(default_factory=list)
     """Extra paths the sandbox may write (e.g. the bot repository worktrees for self-development)."""
+
+    @field_validator("sandbox_extra_writable")
+    @classmethod
+    def _writable_paths_are_specific(cls, value: list[str]) -> list[str]:
+        for raw in value:
+            path = Path(raw)
+            if not path.is_absolute():
+                raise ValueError(f"sandbox_extra_writable entries must be absolute paths: {raw!r}")
+            if len(path.parts) < 3 or str(path) in SANDBOX_NEVER_WRITABLE:
+                raise ValueError(f"{raw!r} would open too much to the sandbox; name a specific directory")
+        return value
 
 
 class ToolsConfig(BaseModel):
@@ -272,10 +289,11 @@ class AsrConfig(BaseModel):
 class ModeConfig(BaseModel):
     """A named bundle of run limits and behaviour a session can switch to."""
 
-    max_iterations: int | None = None
-    usd_per_run: float | None = None
-    tool_timeout_seconds: float | None = None
-    verbosity: int | None = None
+    max_iterations: int | None = Field(default=None, ge=1)
+    usd_per_run: float | None = Field(default=None, ge=0)
+    """``0`` means spend nothing (the run stops at its first priced call); ``None`` inherits ``limits.usd_per_run``."""
+    tool_timeout_seconds: float | None = Field(default=None, gt=0)
+    verbosity: int | None = Field(default=None, ge=0, le=2)
     prompt: str = ""
     """Extra rules appended to the system prompt while the mode is active."""
     description: str = ""
@@ -329,6 +347,9 @@ class OpsConfig(BaseModel):
     doctor_probe_timeout_seconds: float = Field(default=6.0, ge=1)
     checkpoint_max_gb: float = Field(default=2.0, ge=0)
     """Workspaces larger than this are not snapshotted (revert then restores the history only)."""
+    learning_digest_days: int = Field(default=7, ge=1)
+    learning_repeat_threshold: int = Field(default=3, ge=2)
+    """A failure or an ask seen this many times in a digest window becomes an improvement candidate."""
 
 
 class HeartbeatConfig(BaseModel):
@@ -387,8 +408,8 @@ class RuntimeConfig(BaseModel):
     """Named models keyed by id; the operator adds more in the Mini App."""
     providers: dict[str, ProviderConfig] = Field(
         default_factory=lambda: {
-            "deepseek": ProviderConfig(kind="deepseek", base_url="https://api.deepseek.com"),
-            "openrouter": ProviderConfig(kind="openrouter", base_url="https://openrouter.ai/api/v1"),
+            "deepseek": ProviderConfig(kind="deepseek", base_url="http://keyproxy:3200/deepseek"),
+            "openrouter": ProviderConfig(kind="openrouter", base_url="http://keyproxy:3200/openrouter"),
             "vllm": ProviderConfig(kind="vllm", base_url=""),
         }
     )

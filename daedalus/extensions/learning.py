@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DIGEST_EVERY_DAYS = 7
 CHECK_EVERY_SECONDS = 3600
 ERROR_PREFIX_CHARS = 60
 ASK_PREFIX_CHARS = 40
@@ -44,13 +43,16 @@ class Learning:
         try:
             state = await manager.get_state(session_id)
             history = list(state.engine.history) if state is not None and state.engine is not None else []
+            # The working history spans the whole session; this record is about the run that just ended.
+            start = min(state.run_history_start, len(history)) if state is not None else 0
+            history = history[start:]
             ask = ""
             headline = ""
             tools: Counter[str] = Counter()
             failures: list[dict[str, str]] = []
             names: dict[str, str] = {}
             for m in history:
-                if m.role is MessageRole.user and m.metadata.get("daedalus.origin") == "operator":
+                if m.role is MessageRole.user and not ask and m.metadata.get("daedalus.origin") not in (None, "core"):
                     ask = "".join(b.text for b in m.content_blocks if isinstance(b, TextBlock)).strip()
                 for b in m.content_blocks:
                     if isinstance(b, ToolUseBlock):
@@ -111,15 +113,15 @@ class Learning:
             "candidates": self._candidates(failures, asks),
         }
 
-    @staticmethod
-    def _candidates(failures: Counter[str], asks: Counter[str]) -> list[str]:
-        """Improvement candidates: anything that failed or was asked three times or more."""
+    def _candidates(self, failures: Counter[str], asks: Counter[str]) -> list[str]:
+        """Improvement candidates: anything that failed or was asked ``ops.learning_repeat_threshold`` times or more."""
+        threshold = self.app.config.ops.learning_repeat_threshold
         out = []
         for key, n in failures.most_common(5):
-            if n >= 3:
+            if n >= threshold:
                 out.append(f"'{key}' failed {n}× — a tool description, a default or a skill may be missing")
         for key, n in asks.most_common(5):
-            if n >= 3:
+            if n >= threshold:
                 out.append(f"the ask '{key}…' came {n}× — a skill or a scheduled task would make it one call")
         return out
 
@@ -144,16 +146,17 @@ class Learning:
             await asyncio.sleep(CHECK_EVERY_SECONDS)
 
     async def maybe_digest(self) -> bool:
+        every = self.app.config.ops.learning_digest_days
         last = await self.app.db.kv_get("learning_last_digest", None)
-        if last and datetime.now(UTC) - datetime.fromisoformat(last) < timedelta(days=DIGEST_EVERY_DAYS):
+        if last and datetime.now(UTC) - datetime.fromisoformat(last) < timedelta(days=every):
             return False
-        data = await self.report(DIGEST_EVERY_DAYS)
-        await self.app.db.kv_set("learning_last_digest", datetime.now(UTC).isoformat())
+        data = await self.report(every)
         if data["runs"] == 0:
-            return False
+            return False  # a quiet week does not arm the gate; the first busy week gets its digest
         inbox = self.app.extensions.get("inbox")
         if inbox is not None:
-            await inbox.post("learning_digest", f"Weekly digest: {data['runs']} runs, {len(data['candidates'])} improvement candidate(s)", self.render(data), severity="notice" if data["candidates"] else "info")
+            await inbox.post("learning_digest", f"Digest: {data['runs']} runs, {len(data['candidates'])} improvement candidate(s)", self.render(data), severity="notice" if data["candidates"] else "info")
+        await self.app.db.kv_set("learning_last_digest", datetime.now(UTC).isoformat())  # after the post, so a restart in between cannot lose a week
         return True
 
     async def service(self, op: str, **kwargs: Any) -> Any:

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daedalus import supervisor_client
+from daedalus.security import redact
 
 if TYPE_CHECKING:
     from aiogram.types import CallbackQuery, Message
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 REPOS = ("bot", "core")
+RECEIPT_COMMAND_CHARS = 160
 
 
 @dataclass(slots=True)
@@ -141,7 +143,7 @@ class SelfDevelopment:
         if ahead == "0":
             raise GitError("the branch has no commits beyond origin/main")
         await self.git(spec, "push", "-u", "origin", head_branch, "--force-with-lease", cwd=worktree)
-        receipts = await self.receipts_for(session_id) if session_id else ""
+        receipts = await self.receipts_for(session_id, since=await self._branch_started(spec, worktree)) if session_id else ""
         body = summary + "\n\n" + (f"Session: {session_id}" if session_id else "") + receipts
         existing = (await self.gh("pr", "list", "--head", head_branch, "--json", "number,url", cwd=worktree)).strip()
         try:
@@ -174,15 +176,38 @@ class SelfDevelopment:
         await self._send_card(proposal_id, repo, title, summary + receipts, pr_url, diffstat)
         return f"PR #{pr_number} opened: {pr_url}. Waiting for the operator's decision in chat."
 
-    async def receipts_for(self, session_id: str, *, hours: int = 24) -> str:
-        """Verification receipts the proposing session recorded recently, as evidence on the card."""
-        since = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+    async def _branch_started(self, spec: RepoSpec, worktree: Path) -> str | None:
+        """When the first commit beyond origin/main was made: receipts older than that are not evidence for it."""
+        try:
+            dates = (await self.git(spec, "log", "--format=%cI", "origin/main..HEAD", cwd=worktree)).split()
+        except GitError:
+            return None
+        return datetime.fromisoformat(dates[-1]).astimezone(UTC).isoformat() if dates else None
+
+    async def receipts_for(self, session_id: str, *, since: str | None = None, hours: int = 24) -> str:
+        """Verification receipts the proposing session recorded for this work, as evidence on the card.
+
+        The command is shown whole (clipped with an explicit mark) and a shell fallback that can
+        turn a failure into exit 0 is pointed out, so a green mark is read for what it is.
+        """
+        since = since or (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
         rows = await self.app.db.fetchall(
-            "SELECT id, criterion, command, exit_code, passed FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 12", (session_id, since)
+            "SELECT id, criterion, command, exit_code, passed, sandboxed FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 12", (session_id, since)
         )
         if not rows:
             return "\n\nVerification receipts: none — nothing in this proposal was checked with Verify."
-        lines = [f"- {'✅' if r['passed'] else '❌'} {r['criterion']} — `{r['command'][:80]}` (exit {r['exit_code']}, receipt v{r['id']})" for r in rows]
+        r = redact.shared()
+        lines = []
+        for row in rows:
+            command = r.redact(row["command"])
+            shown = command if len(command) <= RECEIPT_COMMAND_CHARS else command[:RECEIPT_COMMAND_CHARS] + "…"
+            caveats = []
+            if re.search(r"\|\||;\s*(true|exit 0)\b|set \+e", command):
+                caveats.append("has a shell fallback that can mask a failure")
+            if not row["sandboxed"]:
+                caveats.append("unsandboxed")
+            suffix = f" ⚠ {'; '.join(caveats)}" if caveats else ""
+            lines.append(f"- {'✅' if row['passed'] else '❌'} {r.redact(row['criterion'])} — `{shown}` (exit {row['exit_code']}, receipt v{row['id']}){suffix}")
         return "\n\nVerification receipts:\n" + "\n".join(lines)
 
     async def _send_card(self, proposal_id: str, repo: str, title: str, summary: str, pr_url: str, diffstat: str) -> None:

@@ -372,6 +372,7 @@ def _deep_merge(base: Any, patch: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+WEBHOOK_MAX_BYTES = 2 * 1024 * 1024
 _NUDGE_MARKERS = ("[internal control", "tool repeatedly failed with the same error", "has been disabled for the rest of this run", "The run has reached its budget")
 
 
@@ -643,7 +644,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         source = await manager.get_state(session_id)
         if source is None:
             raise HTTPException(404, "no such session")
-        title = (body.title or f"{source.session.title} (fork @{body.seq})")[:128]
+        title = (body.title or f"{re.sub(r'\s*\(fork @\d+\)$', '', source.session.title)} (fork @{body.seq})")[:128]
         front = app.front
         try:
             if front is not None:
@@ -654,7 +655,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(429, str(exc)) from exc
         except TelegramRefused as exc:
             raise HTTPException(502, str(exc)) from exc
-        result = await manager.fork_into(session_id, body.seq, target)
+        try:
+            result = await manager.fork_into(session_id, body.seq, target)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
         return {"id": target.session.id, "title": title, **result}
 
     @api.post("/api/sessions/{session_id}/mode")
@@ -743,16 +747,23 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.post("/webhooks/{provider}")
     async def webhook(provider: str, request: Request) -> dict[str, Any]:
+        # Every pre-verification refusal looks the same from outside: an anonymous caller learns nothing about what is configured.
         inbound = app.extensions.get("inbound")
         conf = app.config.webhooks.get(provider)
-        if inbound is None or conf is None or not conf.enabled:
-            raise HTTPException(404, "unknown webhook")
-        if not conf.secret:
-            raise HTTPException(503, "this webhook has no secret configured; refusing")
+        if inbound is None or conf is None or not conf.enabled or not conf.secret:
+            logger.warning("webhook %s refused: %s", provider, "not installed" if inbound is None else "unknown or disabled" if conf is None or not conf.enabled else "no secret configured")
+            raise HTTPException(401, "refused")
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > WEBHOOK_MAX_BYTES:
+            raise HTTPException(413, "payload too large")
         raw = await request.body()
+        if len(raw) > WEBHOOK_MAX_BYTES:
+            raise HTTPException(413, "payload too large")
         if not verify_signature(conf.scheme, conf.secret, raw, {k.lower(): v for k, v in request.headers.items()}):
-            raise HTTPException(401, "bad signature")
-        delivery_id = request.headers.get("x-github-delivery") or request.headers.get("x-delivery-id") or hashlib.sha256(raw).hexdigest()
+            raise HTTPException(401, "refused")
+        stamped = request.headers.get("x-github-delivery") or request.headers.get("x-delivery-id")
+        # Without a delivery id, identical bodies within the same minute are one event; later repeats are new ones.
+        delivery_id = stamped or hashlib.sha256(raw).hexdigest() + ":" + datetime.now(UTC).strftime("%Y%m%d%H%M")
         if not await inbound.record_delivery(provider, delivery_id):  # type: ignore[attr-defined]
             return {"status": "duplicate", "delivery_id": delivery_id}
         try:
@@ -765,6 +776,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             result = await inbound.deliver(source=f"webhook:{provider}", text=text, session_ref=conf.session or None, default_title=f"[webhook {provider}]", prompt=conf.prompt)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 — the sender must get a status, and the failure goes to the inbox
             logger.warning("webhook %s could not run", provider, exc_info=True)
+            await inbound.forget_delivery(provider, delivery_id)  # type: ignore[attr-defined]
             inbox = app.extensions.get("inbox")
             if inbox is not None:
                 await inbox.post("webhook_failed", f"Webhook {provider} could not start a run", f"{type(exc).__name__}: {exc}", severity="warning")  # type: ignore[attr-defined]
@@ -773,8 +785,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.get("/api/sessions/{session_id}/verifications")
     async def session_verifications(session_id: str, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
-        rows = await app.db.fetchall("SELECT id, run_id, criterion, command, exit_code, passed, output_digest, duration_ms, at FROM verifications WHERE session_id = ? ORDER BY id DESC LIMIT 100", (session_id,))
-        return [dict(r) for r in rows]
+        rows = await app.db.fetchall("SELECT id, run_id, criterion, command, exit_code, passed, output_digest, output_head, duration_ms, at, sandboxed FROM verifications WHERE session_id = ? ORDER BY id DESC LIMIT 100", (session_id,))
+        r = redact.shared()
+        return [{**dict(row), "criterion": r.redact(row["criterion"]), "command": r.redact(row["command"]), "output_head": r.redact(row["output_head"] or "")} for row in rows]
 
     @api.post("/api/sessions/{session_id}/compact")
     async def compact_session(session_id: str, body: CompactBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

@@ -124,6 +124,9 @@ FREE_REACTIONS = frozenset(
 )
 """The emoji a bot may react with (Telegram rejects anything else)."""
 
+VOICE_PENDING_TTL_SECONDS = 2 * 3600
+VOICE_PENDING_MAX = 50
+SPEECH_MIME_TYPES = {"audio/ogg", "audio/opus", "audio/oga", "audio/wav", "audio/x-wav", "audio/webm"}
 RUN_REACTIONS = {"received": "👀", "steered": "✍", "completed": "🔥", "failed": "💔", "cancelled": "🫡", "awaiting": "🤔", "interrupted": "😴", "busy": "🤝"}
 TOPIC_STATUS_PREFIX = {"running": "🟢", "awaiting": "🔴", "completed": "🏁", "failed": "💥", "cancelled": "⏹", "interrupted": "⏸", "compacting": "🗜"}
 """Telegram silently drops some emoji from the start of a topic name (✅ ❓ ✔️ ☑️ were measured to
@@ -321,7 +324,8 @@ class TelegramFront:
         self._topic_status: dict[str, str] = {}
         self._topic_status_tasks: dict[str, asyncio.Task[None]] = {}
         self._stale_counts: dict[tuple[int, int], int] = {}
-        self._voice_pending: dict[str, tuple[str, str, Attachment, int, int]] = {}
+        self._voice_pending: dict[str, tuple[str, str, Attachment, int, int, float]] = {}
+        """Transcripts awaiting the operator's ✓/✗, by token; entries expire (VOICE_PENDING_TTL_SECONDS) and the dict is capped."""
         self.ledger = DeliveryLedger(manager.db, max_attempts=config.ops.delivery_max_attempts, max_age_hours=config.ops.delivery_max_age_hours, keep_days=config.ops.delivery_keep_days)
         self._stale_notices: dict[tuple[int, int], asyncio.Task[None]] = {}
         self.operator_hooks: dict[str, Callable[..., Awaitable[str]]] = {}
@@ -1043,7 +1047,7 @@ class TelegramFront:
         if self.config.telegram.reactions:
             await TelegramOutbox(self.bot, message.chat.id, None).react(message.message_id, RUN_REACTIONS["received"])
         attachment = await self._download(message, state)  # may take a while for big files
-        if attachment is not None and (message.voice or message.audio) and self.config.asr.url:
+        if attachment is not None and (message.voice or (message.audio and (message.audio.mime_type or "") in SPEECH_MIME_TYPES)) and self.config.asr.url:
             if await self._voice_to_text(message, state, attachment, text):
                 return
         buffer = self._buffers.setdefault(key, InboundBuffer())
@@ -1072,11 +1076,16 @@ class TelegramFront:
             return False
         text = (caption.strip() + "\n\n" if caption.strip() else "") + transcript
         if self.config.asr.autosend:
-            await message.reply(f"🎙 _{transcript[:1000]}_")
+            await message.reply(f"🎙 {transcript[:1000]}")
             await self._enqueue_text(state, message, text, attachment)
             return True
         token = uuid.uuid4().hex[:8]
-        self._voice_pending[token] = (state.session.id, text, attachment, message.chat.id, message.message_thread_id or 0)
+        now = time.monotonic()
+        for stale in [k for k, v in self._voice_pending.items() if now - v[5] > VOICE_PENDING_TTL_SECONDS]:
+            self._voice_pending.pop(stale, None)
+        while len(self._voice_pending) >= VOICE_PENDING_MAX:
+            self._voice_pending.pop(next(iter(self._voice_pending)), None)
+        self._voice_pending[token] = (state.session.id, text, attachment, message.chat.id, message.message_thread_id or 0, now)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✓ Send to the agent", callback_data=f"vc:{token}:go"), InlineKeyboardButton(text="✗ Discard", callback_data=f"vc:{token}:no")]])
         await message.reply(f"🎙 I heard:\n\n{transcript[:3500]}", reply_markup=keyboard)
         return True
@@ -1098,11 +1107,17 @@ class TelegramFront:
         _, token, action = data
         pending = self._voice_pending.pop(token, None)
         if pending is None:
-            await query.answer("This transcript is no longer open.")
+            await query.answer("This transcript is no longer open; the audio file is still in the session inbox.", show_alert=True)
             return
-        session_id, text, attachment, chat_id, thread_id = pending
+        session_id, text, attachment, chat_id, thread_id, _ = pending
         if action != "go":
-            await query.answer("discarded")
+            state = await self.manager.get_state(session_id)
+            try:
+                if state is not None and attachment.path.is_relative_to(state.workspace):
+                    attachment.path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            await query.answer("discarded (the audio file was removed)")
             if query.message is not None:
                 try:
                     await query.message.edit_reply_markup(reply_markup=None)

@@ -1,5 +1,14 @@
 # docker compose -f deploy/compose.yaml --env-file .env up -d
 #
+# Secrets: provider keys do NOT belong in .env — .env sits inside the checkout, which is bind-mounted
+# into the agent container. Put them in ../../daedalus-secrets/keyproxy.env (outside every mount, chmod 600):
+#   DEEPSEEK_API_KEY=…  OPENROUTER_API_KEY=…  OPENAI_API_KEY=…  KEYPROXY_UPSTREAM_<NAME>=…  KEYPROXY_KEY_<NAME>=…
+#   KEYPROXY_USD_PER_DAY=20   (the proxy's own daily cap, read from the database; independent of the supervisor's flag)
+# What the key proxy does and does not buy: the agent process never holds a provider key, so a leak through a
+# log line, a header echo or a careless tool result cannot happen. It is not a wall against a deliberate
+# self-modification: the agent can still edit this file and ask the rebuilder for a new image. Review the
+# pull requests it opens.
+#
 # Volumes:
 #   ./..                  -> /srv/daedalus      the bot repository (this checkout)
 #   ../protocore-exp      -> /srv/protocore-exp the core repository
@@ -32,7 +41,7 @@ services:
       USD_PER_DAY: ${USD_PER_DAY:-20}
       API_HOST: 0.0.0.0
       API_PORT: ${API_PORT:-8765}
-      # Provider keys live in the key proxy, not here: a change to the agent's own code cannot read them.
+      # Provider keys live in the key proxy, not here (see the note at the top of this file).
       DEEPSEEK_API_KEY: ""
       OPENROUTER_API_KEY: ""
       OPENAI_API_KEY: ""
@@ -51,31 +60,38 @@ services:
       - rebuild-trigger:/run/daedalus-rebuild
     ports:
       - "127.0.0.1:${API_PORT:-8765}:${API_PORT:-8765}"
+    networks: [telegram, keys]
     depends_on:
-      - telegram-bot-api
-      - keyproxy
+      telegram-bot-api:
+        condition: service_started
+      keyproxy:
+        condition: service_healthy
 
-  # Holds the provider keys and injects them into upstream calls; refuses model calls once the
-  # daily budget flag exists. The agent container reaches providers only through it.
+  # Holds the provider keys and injects them into upstream calls; refuses model calls once the daily
+  # budget is spent (the supervisor's flag or its own read of the database). Reachable only from the
+  # agent container over the private "keys" network; it holds nothing but the keys it injects.
   keyproxy:
     build:
-      context: ..
-      dockerfile: deploy/keyproxy/Dockerfile
+      context: keyproxy
     image: daedalus-keyproxy:local
     restart: unless-stopped
     env_file:
-      - ../.env
+      - ${DAEDALUS_SECRETS_FILE:-../../daedalus-secrets/keyproxy.env}
     environment:
       KEYPROXY_PORT: "3200"
       KEYPROXY_BUDGET_FLAG: /srv/state/BUDGET_EXCEEDED
+      KEYPROXY_BUDGET_DB: /srv/state/daedalus.db
     volumes:
       - daedalus-state:/srv/state:ro
+    networks: [keys]
 
   # The only container that can talk to Docker. It rebuilds and replaces the agent container when
   # the supervisor drops a trigger file; the agent container itself never sees the docker socket.
+  # It needs no network of its own: the daemon does the building and pulling.
   rebuilder:
     image: docker:cli
     restart: unless-stopped
+    network_mode: none
     working_dir: ${DAEDALUS_COMPOSE_PROJECT_DIR:-/project}
     environment:
       COMPOSE_FILE: ${DAEDALUS_COMPOSE_FILE:-/project/deploy/compose.yaml}
@@ -103,6 +119,11 @@ services:
       TELEGRAM_LOCAL: "true"
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
+    networks: [telegram]
+
+networks:
+  telegram:
+  keys:
 
 volumes:
   daedalus-state:

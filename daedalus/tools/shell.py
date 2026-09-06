@@ -20,13 +20,20 @@ from daedalus.tools._common import clip, error, ok, services_for, tool_config
 _warned_missing_bwrap = False
 _bwrap_state: str | None = None
 """Cached result of :func:`bwrap_status`: "ok", or the reason the sandbox cannot run here."""
+_bwrap_probed_at = 0.0
+PROBE_RETRY_SECONDS = 300.0
+"""A failed probe is repeated after this long; a successful one is kept for the life of the process."""
 
 
 def bwrap_status() -> str:
-    """Whether bubblewrap can create namespaces in this container (Docker's default seccomp profile forbids it)."""
-    global _bwrap_state
-    if _bwrap_state is not None:
+    """Whether bubblewrap can create namespaces in this container (Docker's default seccomp profile forbids it).
+
+    Blocking (it runs a subprocess): call it through ``asyncio.to_thread`` from the event loop.
+    """
+    global _bwrap_state, _bwrap_probed_at
+    if _bwrap_state == "ok" or (_bwrap_state is not None and time.monotonic() - _bwrap_probed_at < PROBE_RETRY_SECONDS):
         return _bwrap_state
+    _bwrap_probed_at = time.monotonic()
     bwrap = shutil.which("bwrap")
     if bwrap is None:
         _bwrap_state = "bwrap is not installed"
@@ -39,18 +46,19 @@ def bwrap_status() -> str:
     return _bwrap_state
 
 
-def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config: Any) -> tuple[list[str], bool]:
+async def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config: Any) -> tuple[list[str], bool]:
     """The argv to run ``command`` with: plain bash, or bash inside bubblewrap when the sandbox is on.
 
     The sandbox binds the whole filesystem read-only, makes the session workspace (and any
     configured extra path) writable, gives the command a private /tmp and PID namespace, and
-    dies with the parent so a timeout kill cannot leave it behind.
+    dies with the parent so a timeout kill cannot leave it behind. What is writable is the
+    operator's choice alone: a working directory outside those paths is entered read-only.
     """
     global _warned_missing_bwrap
     plain = ["bash", "-lc", command]
     if getattr(exec_config, "sandbox", "off") != "workspace":
         return plain, False
-    status = bwrap_status()
+    status = await asyncio.to_thread(bwrap_status)
     if status != "ok":
         if not _warned_missing_bwrap:
             logging.getLogger(__name__).warning("tools.exec.sandbox=workspace but the sandbox is unavailable (%s); running unsandboxed", status)
@@ -59,8 +67,6 @@ def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config: Any)
     bwrap = shutil.which("bwrap") or "bwrap"
     argv = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--unshare-pid", "--die-with-parent", "--new-session"]
     writable = [workspace, *[Path(p) for p in getattr(exec_config, "sandbox_extra_writable", [])]]
-    if workdir != workspace and workspace not in workdir.parents:
-        writable.append(workdir)
     for path in writable:
         if path.exists():
             argv += ["--bind", str(path), str(path)]
@@ -74,7 +80,7 @@ def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config: Any)
         "workspace. Output (stdout and stderr, interleaved) is returned; very long output "
         "is clipped, so prefer writing large results to a file and reading it in parts. "
         "Long-running processes should be started in the background with nohup and "
-        "redirected output."
+        "redirected output (inside the sandbox, if one is on, they end with the command)."
     ),
 )
 async def exec_command(
@@ -91,7 +97,7 @@ async def exec_command(
     limit = float(timeout_seconds or services.tool_timeout_seconds)
     environment = {**os.environ, **(env or {}), "DAEDALUS_SESSION_ID": context.session_id}
     started = time.monotonic()
-    argv, sandboxed = sandbox_argv(command, workdir, services.workspace_dir, tool_config(context).exec)
+    argv, sandboxed = await sandbox_argv(command, workdir, services.workspace_dir, tool_config(context).exec)
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=str(workdir),

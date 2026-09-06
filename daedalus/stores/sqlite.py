@@ -282,6 +282,19 @@ class SqliteSessionStore(ISessionStore):
             out.append(message.model_copy(update={"metadata": {**message.metadata, "daedalus.seq": int(r["seq"])}}))
         return out
 
+    async def replace_transcript_message(self, session_id: str, key: str, message: Message) -> bool:
+        """Rewrite one transcript row in place (same key, same seq); the search index follows."""
+        row = await self._db.fetchone("SELECT seq FROM transcript WHERE session_id = ? AND key = ?", (session_id, key))
+        if row is None:
+            return False
+        async with self._db.transaction() as conn:
+            await conn.execute("UPDATE transcript SET message = ? WHERE session_id = ? AND key = ?", (message.model_dump_json(), session_id, key))
+            await conn.execute("DELETE FROM transcript_fts WHERE session_id = ? AND seq = ?", (session_id, int(row["seq"])))
+            text = message_text(message)
+            if text:
+                await conn.execute("INSERT INTO transcript_fts(session_id, seq, role, text) VALUES (?, ?, ?, ?)", (session_id, int(row["seq"]), message.role.value, text))
+        return True
+
     async def transcript_row(self, session_id: str, seq: int) -> tuple[str, Message] | None:
         row = await self._db.fetchone("SELECT key, message FROM transcript WHERE session_id = ? AND seq = ?", (session_id, seq))
         return (row["key"], Message.model_validate_json(row["message"])) if row else None

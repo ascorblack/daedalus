@@ -85,3 +85,35 @@ async def test_peers_register_ask_and_depth(app: Any) -> None:
     with pytest.raises(ValueError):  # target is at depth 1 already; asking onward would be depth 2
         await peers.ask(from_session=target.session.id, name="reviewer2", prompt="x", wait=False, timeout_minutes=None)
     assert await peers.forget("reviewer") and await peers.registry() == {}
+
+
+async def test_board_releases_the_claim_and_reblocks_on_reopen(app: Any) -> None:
+    board = Board(app)
+    a = await board.add(title="first")
+    b = await board.add(title="second", depends_on=[a["id"]])
+    await board.update(a["id"], status="doing", session_id="s1", run_id="r1")
+    moved = await board.update(a["id"], status="review")
+    assert moved["session_id"] is None and moved["run_id"] is None
+    await board.update(a["id"], status="done")
+    assert (await board.get(b["id"]))["status"] == "todo"
+    await board.update(a["id"], status="todo")
+    assert (await board.get(b["id"]))["status"] == "blocked"
+    await board.delete(a["id"])
+    assert (await board.get(b["id"]))["depends_on"] == [] and (await board.get(b["id"]))["status"] == "todo"
+
+
+async def test_peer_answer_only_counts_what_came_after_the_question(app: Any) -> None:
+    from protocore.contracts.types import Message, MessageRole, TextBlock
+
+    peers = Peers(app)
+    manager: SessionManager = app.manager
+    target = await manager.create_session("reviewer")
+    old = Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="old reply")])
+    await manager.sessions.append_transcript(target.session.id, [old])
+    watermark = max(int(m.metadata["daedalus.seq"]) for m in await manager.sessions.list_transcript(target.session.id))
+    assert await peers.answer_after(target.session.id, watermark) is None
+    await manager.sessions.append_transcript(target.session.id, [Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="fresh reply\n\n⟦ h | status: completed; next: none | anchors: x ⟧")])])
+    assert await peers.answer_after(target.session.id, watermark) == "fresh reply"
+    target.metadata["peer_depth"] = 2
+    await peers.on_run_finished(target.session.id, "r", "completed")
+    assert "peer_depth" not in target.metadata

@@ -10,14 +10,23 @@ Upstreams: ``deepseek`` → https://api.deepseek.com, ``openrouter`` → https:/
 ``openai`` → https://api.openai.com/v1. Keys: ``DEEPSEEK_API_KEY``, ``OPENROUTER_API_KEY``,
 ``OPENAI_API_KEY``. Extra upstreams: ``KEYPROXY_UPSTREAM_<NAME>=https://host/base`` with
 ``KEYPROXY_KEY_<NAME>=…``.
+
+The budget is checked in two independent ways: the supervisor's flag file, and — when
+``KEYPROXY_USD_PER_DAY`` is set — the proxy's own read of today's spend from the read-only
+database, which nothing in the agent container can unlink.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import sys
+import time
+from datetime import UTC, datetime
 from pathlib import Path
+
+import asyncio
 
 import httpx
 from aiohttp import web
@@ -31,9 +40,16 @@ DEFAULT_UPSTREAMS = {
     "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
 }
 BUDGET_FLAG = Path(os.environ.get("KEYPROXY_BUDGET_FLAG", "/srv/state/BUDGET_EXCEEDED"))
-BUDGET_EXEMPT_PATHS = ("/user/balance", "/credits", "/models")
-"""Reading a balance or the model list spends nothing; only completions are refused over budget."""
-HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "authorization", "x-api-key"}
+BUDGET_DB = Path(os.environ.get("KEYPROXY_BUDGET_DB", "/srv/state/daedalus.db"))
+BUDGET_USD_PER_DAY = float(os.environ.get("KEYPROXY_USD_PER_DAY", "0") or 0)
+BUDGET_CACHE_SECONDS = 30.0
+BUDGET_EXEMPT_TAILS = (("user", "balance"), ("credits",), ("models",))
+"""Reading a balance or the model list spends nothing; only completions are refused over budget.
+Matched on path segments (a leading ``v1`` ignored), so a ``…/deepseek/v1`` base_url behaves the same."""
+HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "authorization", "x-api-key", "api-key", "x-goog-api-key", "cookie", "proxy-authorization"}
+DROP_RESPONSE_HEADERS = {"content-length", "transfer-encoding", "connection", "content-encoding"}
+"""The body is streamed decoded, so the upstream's framing and encoding headers no longer describe it."""
+_spend_cache: tuple[float, float] = (0.0, 0.0)
 
 
 def upstreams() -> dict[str, tuple[str, str]]:
@@ -50,8 +66,38 @@ def upstreams() -> dict[str, tuple[str, str]]:
     return out
 
 
+def spent_today() -> float:
+    """Today's priced spend from the agent's database (read-only), cached briefly."""
+    global _spend_cache
+    at, value = _spend_cache
+    if time.monotonic() - at < BUDGET_CACHE_SECONDS:
+        return value
+    value = 0.0
+    if BUDGET_DB.exists():
+        try:
+            conn = sqlite3.connect(f"file:{BUDGET_DB}?mode=ro", uri=True, timeout=2.0)
+            try:
+                row = conn.execute("SELECT sum(cost_usd) FROM usage_events WHERE at >= ?", (datetime.now(UTC).strftime("%Y-%m-%d"),)).fetchone()
+            finally:
+                conn.close()
+            value = float(row[0] or 0.0)
+        except sqlite3.Error as exc:
+            logger.warning("spend query failed: %s", exc)
+    _spend_cache = (time.monotonic(), value)
+    return value
+
+
 def budget_exceeded() -> bool:
-    return BUDGET_FLAG.exists()
+    if BUDGET_FLAG.exists():
+        return True
+    return BUDGET_USD_PER_DAY > 0 and spent_today() > BUDGET_USD_PER_DAY
+
+
+def budget_exempt(rest: str) -> bool:
+    segments = tuple(s for s in rest.split("/") if s)
+    if segments and segments[0] == "v1":
+        segments = segments[1:]
+    return any(segments[-len(tail):] == tail for tail in BUDGET_EXEMPT_TAILS if len(segments) >= len(tail))
 
 
 def target_url(base: str, rest: str, query: str) -> str:
@@ -65,7 +111,7 @@ async def handle(request: web.Request) -> web.StreamResponse:
     if name not in table:
         return web.json_response({"error": f"unknown upstream {name!r}"}, status=404)
     base, key = table[name]
-    if budget_exceeded() and not any(rest.startswith(p.lstrip("/")) for p in BUDGET_EXEMPT_PATHS):
+    if budget_exceeded() and not budget_exempt(rest):
         return web.json_response({"error": {"message": "daily budget exceeded; refused by the key proxy", "type": "budget_exceeded"}}, status=402)
     headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS}
     if key:
@@ -79,25 +125,28 @@ async def handle(request: web.Request) -> web.StreamResponse:
         return web.json_response({"error": {"message": f"upstream unreachable: {type(exc).__name__}", "type": "proxy_error"}}, status=502)
     out = web.StreamResponse(status=response.status_code)
     for k, v in response.headers.items():
-        if k.lower() not in ("content-length", "transfer-encoding", "connection", "content-encoding"):
+        if k.lower() not in DROP_RESPONSE_HEADERS:
             out.headers[k] = v
     await out.prepare(request)
     try:
-        async for chunk in response.aiter_raw():
+        # aiter_bytes() decodes gzip/br on the way through; aiter_raw() would hand the client compressed bytes with the header gone.
+        async for chunk in response.aiter_bytes():
             await out.write(chunk)
+        await out.write_eof()
+    except (ConnectionResetError, asyncio.CancelledError):
+        pass  # the caller went away mid-stream
     finally:
         await response.aclose()
-    await out.write_eof()
     return out
 
 
 async def health(_: web.Request) -> web.Response:
-    return web.json_response({"ok": True, "upstreams": sorted(upstreams()), "budget_exceeded": budget_exceeded()})
+    return web.json_response({"ok": True, "upstreams": sorted(upstreams()), "budget_exceeded": budget_exceeded(), "spent_today_usd": round(spent_today(), 4) if BUDGET_USD_PER_DAY > 0 else None})
 
 
 def make_app() -> web.Application:
     app = web.Application(client_max_size=64 * 1024 * 1024)
-    app["client"] = httpx.AsyncClient(timeout=httpx.Timeout(900.0, connect=30.0), follow_redirects=False)
+    app["client"] = httpx.AsyncClient(timeout=httpx.Timeout(900.0, connect=30.0, pool=10.0), limits=httpx.Limits(max_connections=64, max_keepalive_connections=16), follow_redirects=False)
     app.router.add_get("/healthz", health)
     app.router.add_route("*", "/{upstream}/{rest:.*}", handle)
 

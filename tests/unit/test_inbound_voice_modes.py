@@ -139,20 +139,20 @@ def test_keyless_vendor_kinds_are_allowed_only_behind_a_proxy(settings: Settings
     assert proxied is not None and proxied.api_key == "" and proxied.kind == "deepseek"
 
 
-def test_sandbox_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_sandbox_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from daedalus.config import ExecToolsConfig
     from daedalus.tools import shell
 
     ws = tmp_path / "ws"
     ws.mkdir()
-    argv, sandboxed = shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="off"))
+    argv, sandboxed = await shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="off"))
     assert argv == ["bash", "-lc", "ls"] and not sandboxed
     monkeypatch.setattr(shell.shutil, "which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None)
     monkeypatch.setattr(shell, "_bwrap_state", "ok")
-    argv, sandboxed = shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
+    argv, sandboxed = await shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
     assert sandboxed and argv[0] == "/usr/bin/bwrap" and "--unshare-pid" in argv and argv[argv.index("--bind") + 1] == str(ws) and argv[-3:] == ["bash", "-lc", "ls"]
     monkeypatch.setattr(shell, "_bwrap_state", "bwrap cannot create namespaces here")
-    argv, sandboxed = shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
+    argv, sandboxed = await shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
     assert not sandboxed and argv[0] == "bash"
 
 
@@ -173,4 +173,120 @@ def test_key_proxy_routing_and_budget(tmp_path: Path, monkeypatch: pytest.Monkey
     assert not proxy.budget_exceeded()
     flag.write_text("x")
     assert proxy.budget_exceeded()
-    assert any("user/balance".startswith(p.lstrip("/")) for p in proxy.BUDGET_EXEMPT_PATHS)
+    assert proxy.budget_exempt("user/balance") and not proxy.budget_exempt("chat/completions")
+
+
+def test_signature_rejects_non_ascii_and_accepts_any_scheme_case() -> None:
+    assert verify_signature("bearer", "tok", b"x", {"authorization": "Bearer \u00fc"}) is False
+    assert verify_signature("github", "s", b"x", {"x-hub-signature-256": "sha256=\u00fc"}) is False
+    assert verify_signature("bearer", "tok", b"x", {"authorization": "bearer tok"}) is True
+
+
+def test_pathological_intent_patterns_are_bounded_and_refused() -> None:
+    import time
+
+    from daedalus.extensions.inbound import _NESTED_QUANTIFIER, search_bounded
+
+    started = time.monotonic()
+    assert search_bounded("(a+)+$", "a" * 40 + "b", seconds=0.5) is None
+    assert time.monotonic() - started < 3.0
+    assert search_bounded(r"build\s+failed", "the BUILD failed", seconds=1.0) is True
+    assert search_bounded("(", "x", seconds=1.0) is None
+    assert _NESTED_QUANTIFIER.search("(a+)+$") and _NESTED_QUANTIFIER.search(r"(\w*)*x") and not _NESTED_QUANTIFIER.search(r"build\s+failed|(foo)+")
+
+
+async def test_intent_creation_rejects_overlong_and_nested_patterns(app: Any) -> None:
+    inbound = Inbound(app)
+    with pytest.raises(ValueError, match="limited"):
+        await inbound.create_intent(pattern="(" + "x" * 500 + ")", action="a", session_id=None, cooldown_minutes=1, max_fires=1, expires_in_hours=None, created_by=None)
+    with pytest.raises(ValueError, match="quantifier"):
+        await inbound.create_intent(pattern="(a+)+$", action="a", session_id=None, cooldown_minutes=1, max_fires=1, expires_in_hours=None, created_by=None)
+
+
+async def test_intent_in_the_receiving_session_rides_with_the_event(app: Any) -> None:
+    inbound = Inbound(app)
+    standing = await inbound.resolve_session(None, default_title="[inbound]")
+    created = await inbound.create_intent(pattern="deploy", action="check the deploy log", session_id=standing.session.id, cooldown_minutes=1, max_fires=5, expires_in_hours=None, created_by=None)
+    await inbound.deliver(source="ci", text="deploy finished", session_ref=None, default_title="[inbound]")
+    assert len(app.submitted) == 1 and "check the deploy log" in app.submitted[0][1] and app.submitted[0][2] == "inbound:ci"
+    row = await app.db.fetchone("SELECT fired_count FROM intents WHERE id = ?", (created["id"],))
+    assert row["fired_count"] == 1
+    # the standing session is remembered by id, not found by title
+    assert await app.db.kv_get("inbound_session:[inbound]", None) == standing.session.id
+    await inbound.record_delivery("ci", "d9")
+    await inbound.forget_delivery("ci", "d9")
+    assert await inbound.record_delivery("ci", "d9") is True
+
+
+def test_flatten_payload_stays_linear_on_wide_dicts() -> None:
+    import time
+
+    started = time.monotonic()
+    text = flatten_payload({f"k{i}": "v" for i in range(200_000)})
+    assert time.monotonic() - started < 2.0 and len(text) <= 2100
+
+
+def test_mode_limits_are_bounded_and_zero_means_nothing() -> None:
+    from pydantic import ValidationError
+
+    from daedalus.config import ModeConfig
+
+    with pytest.raises(ValidationError):
+        ModeConfig(max_iterations=0)
+    with pytest.raises(ValidationError):
+        ModeConfig(usd_per_run=-1)
+    assert ModeConfig(usd_per_run=0).usd_per_run == 0
+
+
+async def test_sandbox_never_widens_to_the_working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from daedalus.config import ExecToolsConfig
+    from daedalus.tools import shell
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.setattr(shell.shutil, "which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None)
+    monkeypatch.setattr(shell, "_bwrap_state", "ok")
+    argv, sandboxed = await shell.sandbox_argv("ls", Path("/"), ws, ExecToolsConfig(sandbox="workspace"))
+    assert sandboxed and argv.count("--bind") == 1 and argv[argv.index("--bind") + 1] == str(ws)
+    with pytest.raises(ValueError):
+        ExecToolsConfig(sandbox_extra_writable=["/"])
+    with pytest.raises(ValueError):
+        ExecToolsConfig(sandbox_extra_writable=["/srv/state"])
+    assert ExecToolsConfig(sandbox_extra_writable=["/srv/state/worktrees"]).sandbox_extra_writable == ["/srv/state/worktrees"]
+
+
+def test_vendor_host_detection_uses_the_real_hostname() -> None:
+    from daedalus.providers.registry import _is_vendor_host
+
+    assert _is_vendor_host("deepseek", "https://user:pw@API.deepseek.com:443/v1#x")
+    assert not _is_vendor_host("deepseek", "https://api.deepseek.com.evil.tld")
+    assert not _is_vendor_host("deepseek", "http://keyproxy:3200/deepseek")
+
+
+async def test_key_proxy_decodes_compressed_upstreams_and_replaces_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    import gzip
+    import importlib.util
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    spec = importlib.util.spec_from_file_location("keyproxy_handle", Path(__file__).resolve().parents[2] / "deploy" / "keyproxy" / "proxy.py")
+    proxy = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(proxy)  # type: ignore[union-attr]
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "real-key")
+    seen: dict[str, Any] = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        seen["cookie"] = request.headers.get("cookie")
+        seen["url"] = str(request.url)
+        return httpx.Response(200, content=gzip.compress(b'{"data": [1, 2]}'), headers={"content-type": "application/json", "content-encoding": "gzip"})
+
+    app = proxy.make_app()
+    await app["client"].aclose()
+    app["client"] = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/deepseek/v1/models?x=1", headers={"authorization": "Bearer leaked", "cookie": "c=1"})
+        assert response.status == 200 and await response.json() == {"data": [1, 2]} and response.headers.get("content-encoding") is None
+        assert seen["auth"] == "Bearer real-key" and seen["cookie"] is None and seen["url"] == "https://api.deepseek.com/v1/models?x=1"
+        assert (await client.get("/nowhere/models")).status == 404
+    assert proxy.budget_exempt("v1/user/balance") and proxy.budget_exempt("models") and not proxy.budget_exempt("chat/completions") and not proxy.budget_exempt("models_delete")

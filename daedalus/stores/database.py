@@ -312,6 +312,10 @@ MIGRATIONS: list[str] = [
         heartbeat_at TEXT
     );
     """,
+    # 12 — a receipt says whether the check ran confined
+    """
+    ALTER TABLE verifications ADD COLUMN sandboxed INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 

@@ -105,6 +105,10 @@ class SessionState:
     persist_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     persist_gen: int = 0
     """Bumped by every history rewrite (manual compaction); a persist captured before the bump is dropped."""
+    run_history_start: int = 0
+    """Length of the working history when the current run began: what this run added starts here."""
+    checkpoint_capped: bool = False
+    """Set once the size cap has suppressed a snapshot, so the warning is logged once per session."""
 
     @property
     def running(self) -> bool:
@@ -218,6 +222,7 @@ class SessionManager:
             settings.openrouter_api_key,
             settings.vllm_api_key,
             settings.github_token,
+            settings.telegram_api_hash,
         ]
         values.extend(p.api_key for p in config.providers.values())
         for server in config.mcp.servers.values():
@@ -442,6 +447,9 @@ class SessionManager:
             await conn.execute("DELETE FROM live_control WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM pending_questions WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM topics WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM checkpoints WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM verifications WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM learning_records WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         if delete_workspace and state.workspace.exists() and state.workspace.is_relative_to(self.settings.workspaces_dir):
             shutil.rmtree(state.workspace, ignore_errors=True)
@@ -563,7 +571,11 @@ class SessionManager:
         limit = self.config.ops.checkpoint_max_gb
         try:
             if limit and await asyncio.to_thread(workspace_size, state.workspace) > limit * 1e9:
+                if not state.checkpoint_capped:
+                    state.checkpoint_capped = True
+                    logger.warning("session %s: workspace exceeds ops.checkpoint_max_gb=%s; no snapshots, revert restores the history only", state.session.id, limit)
                 return None
+            state.checkpoint_capped = False
             sha = await Checkpoints(state.workspace).snapshot(f"{kind} seq={seq} run={run_id}")
         except (CheckpointError, OSError) as exc:
             logger.warning("checkpoint failed for %s: %s", state.session.id, exc)
@@ -598,8 +610,8 @@ class SessionManager:
             if row is None:
                 raise ValueError(f"no transcript turn {seq}")
             key, target = row
-            if target.role is not MessageRole.user or target.metadata.get("daedalus.origin") not in (None, "operator"):
-                raise ValueError("revert points at an operator message")
+            if target.role is not MessageRole.user or target.metadata.get("daedalus.origin") in ("core", "revert") or target.metadata.get(COMPACTION_SUMMARY_METADATA_KEY):
+                raise ValueError("revert points at a turn that started a run (an operator, schedule, inbound or peer message)")
             history = list(state.engine.history) if state.engine is not None else list(await self.sessions.list_messages(session_id, TENANT, limit=10_000))
             keys = [self.sessions.transcript_key(m) for m in history]
             if key not in keys:
@@ -609,9 +621,10 @@ class SessionManager:
             dropped = len(history) - cut
             sha = await self.checkpoint_before(session_id, seq)
             restored = False
+            untouched: list[str] = []
             if sha:
                 try:
-                    await Checkpoints(state.workspace).restore(sha)
+                    untouched = await Checkpoints(state.workspace).restore(sha)
                     restored = True
                 except CheckpointError as exc:
                     logger.warning("workspace restore failed: %s", exc)
@@ -622,35 +635,81 @@ class SessionManager:
                 state.engine.compaction_state = CompactionState()
             state.history_keys = [self.sessions.transcript_key(m) for m in kept]
             await self.sessions.replace_messages(session_id, TENANT, kept)
+            # Input queued during the undone turns and any run snapshot that could resume them are pre-revert by definition.
+            await self.live.save_queues(session_id, [], [])
+            for run in await self.db.fetchall("SELECT id FROM runs WHERE session_id = ?", (session_id,)):
+                await self.events.delete_snapshot(run["id"])
+            workspace_note = ""
+            if restored:
+                workspace_note = "; workspace restored" + (f" ({len(untouched)} nested repositories untouched: {', '.join(untouched)[:200]})" if untouched else "")
             marker = Message(
                 role=MessageRole.user,
-                content_blocks=[TextBlock(text=f"[reverted to before seq {seq}: {dropped} message(s) left the working history{'; workspace restored' if restored else ''}]")],
-                metadata={"daedalus.origin": "revert", "daedalus.revert": {"seq": seq, "dropped": dropped, "workspace_restored": restored}},
+                content_blocks=[TextBlock(text=f"[reverted to before seq {seq}: {dropped} message(s) left the working history{workspace_note}]")],
+                metadata={"daedalus.origin": "revert", "daedalus.revert": {"seq": seq, "dropped": dropped, "workspace_restored": restored, "untouched": untouched}},
             )
             await self.sessions.append_transcript(session_id, [marker])
-            return {"dropped": dropped, "workspace_restored": restored, "kept": len(kept)}
+            return {"dropped": dropped, "workspace_restored": restored, "untouched": untouched, "kept": len(kept)}
 
     async def fork_into(self, source_id: str, seq: int, target: SessionState) -> dict[str, Any]:
-        """Give ``target`` the source's history before transcript ``seq`` and a copy of its workspace as of then."""
+        """Give ``target`` the source's history before transcript ``seq`` and a copy of its workspace as of then.
+
+        Turns a revert undid and turns a compaction summary already stands for are left out of
+        the working history; the archived originals still go into the fork's transcript, and
+        the summary is re-pointed at the fork's own seqs so HistoryExpand keeps working there.
+        """
         source = await self.get_state(source_id)
         if source is None:
             raise KeyError(source_id)
-        rows = await self.sessions.list_transcript(source_id)
-        before = [m for m in rows if int(m.metadata.get("daedalus.seq", 0)) < seq and m.metadata.get("daedalus.origin") != "revert"]
-        history = [m.model_copy(update={"metadata": {k: v for k, v in m.metadata.items() if k != "daedalus.seq"}}) for m in before]
-        await self.sessions.replace_messages(target.session.id, TENANT, history)
-        await self.sessions.append_transcript(target.session.id, history)
-        target.history_keys = [self.sessions.transcript_key(m) for m in history]
-        copied = False
-        if source.workspace.exists():
-            await asyncio.to_thread(shutil.copytree, source.workspace, target.workspace, dirs_exist_ok=True)
-            copied = True
-            sha = await self.checkpoint_before(source_id, seq)
-            if sha:
-                try:
-                    await Checkpoints(target.workspace).restore(sha)
-                except CheckpointError as exc:
-                    logger.warning("fork workspace restore failed: %s", exc)
+        async with source.lock:
+            if source.running:
+                raise RuntimeError("the source session is running; wait for the run to finish (or stop it) first")
+            pending = [t for t in source.persist_tasks if not t.done()]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            rows = await self.sessions.list_transcript(source_id)
+            reverted: set[int] = set()
+            archived: set[int] = set()
+            for m in rows:
+                own = int(m.metadata.get("daedalus.seq", 0))
+                if own >= seq:
+                    continue
+                if m.metadata.get("daedalus.origin") == "revert":
+                    cut = int((m.metadata.get("daedalus.revert") or {}).get("seq") or 0)
+                    reverted.update(range(cut, own))
+                if m.metadata.get("daedalus.archived"):
+                    archived.update(int(x) for x in (m.metadata["daedalus.archived"].get("seqs") or []))
+            before = [m for m in rows if int(m.metadata.get("daedalus.seq", 0)) < seq and int(m.metadata.get("daedalus.seq", 0)) not in reverted and m.metadata.get("daedalus.origin") != "revert"]
+            transcript = [m.model_copy(update={"metadata": {k: v for k, v in m.metadata.items() if k != "daedalus.seq"}}) for m in before]
+            await self.sessions.append_transcript(target.session.id, transcript)
+            keys = [self.sessions.transcript_key(m) for m in transcript]
+            new_seqs = await self.sessions.transcript_seqs(target.session.id, keys)
+            mapping = {int(m.metadata.get("daedalus.seq", 0)): new for m, new in zip(before, new_seqs, strict=False)}
+            history: list[Message] = []
+            for original, message in zip(before, transcript, strict=True):
+                own = int(original.metadata.get("daedalus.seq", 0))
+                if own in archived:
+                    continue
+                if message.metadata.get("daedalus.archived"):
+                    message = repoint_summary(message, mapping)
+                    await self.sessions.replace_transcript_message(target.session.id, self.sessions.transcript_key(original), message)
+                history.append(message)
+            # A fork taken mid-turn must not start on a tool call nobody answered.
+            while history and history[-1].role is MessageRole.assistant and any(isinstance(b, ToolUseBlock) for b in history[-1].content_blocks):
+                history.pop()
+            await self.sessions.replace_messages(target.session.id, TENANT, history)
+            target.history_keys = [self.sessions.transcript_key(m) for m in history]
+            copied = False
+            if source.workspace.exists():
+                await asyncio.to_thread(shutil.copytree, source.workspace, target.workspace, dirs_exist_ok=True)
+                copied = True
+                checkpoints = Checkpoints(target.workspace)
+                await checkpoints.relocate()
+                sha = await self.checkpoint_before(source_id, seq)
+                if sha:
+                    try:
+                        await checkpoints.restore(sha)
+                    except CheckpointError as exc:
+                        logger.warning("fork workspace restore failed: %s", exc)
         await self.sessions.update_metadata(target.session.id, {**target.session.metadata, "forked_from": {"session_id": source_id, "seq": seq}})
         return {"messages": len(history), "workspace_copied": copied}
 
@@ -1038,6 +1097,7 @@ class SessionManager:
             else:
                 engine.history = list(await self.sessions.list_messages(state.session.id, TENANT, limit=10_000))
             state.engine = engine
+            state.run_history_start = len(engine.history)
         else:
             run_id = state.run_id or uuid.uuid4().hex[:12]
             engine = state.engine
@@ -1113,7 +1173,10 @@ class SessionManager:
         if not texts:
             return
         await self.live.save_queues(state.session.id, [], [])
-        message = Message(role=MessageRole.user, content_blocks=[TextBlock(text="\n\n".join(texts))])
+        message = Message(role=MessageRole.user, content_blocks=[TextBlock(text="\n\n".join(texts))], metadata={"daedalus.origin": "operator"})
+        await self.sessions.append_transcript(state.session.id, [message])
+        seqs = await self.sessions.transcript_seqs(state.session.id, [self.sessions.transcript_key(message)])
+        await self.checkpoint(state, kind="before", seq=seqs[0] if seqs else None)
         await self._start_run(state, message)
 
     async def _dispatch_event(self, state: SessionState, event: TurnEvent) -> None:
@@ -1187,8 +1250,9 @@ class SessionManager:
     async def _enforce_run_cap(self, state: SessionState, run_id: str) -> None:
         """Stop a run whose priced spend crossed ``limits.usd_per_run``; unpriced calls cannot count."""
         mode = self.mode_for(state)
-        cap = mode.usd_per_run if mode is not None and mode.usd_per_run is not None else self.config.limits.usd_per_run
-        if cap <= 0 or state.engine is None or not state.running or run_id in self._capped_runs:
+        mode_cap = mode.usd_per_run if mode is not None else None
+        cap = mode_cap if mode_cap is not None else self.config.limits.usd_per_run
+        if (cap <= 0 and mode_cap is None) or state.engine is None or not state.running or run_id in self._capped_runs:
             return
         row = await self.db.fetchone(
             "SELECT sum(cost_usd) usd, sum(cost_usd IS NULL) unmetered FROM usage_events WHERE run_id = ?", (run_id,)
@@ -1318,6 +1382,25 @@ def annotate_summary(message: Message, note: str, seqs: Sequence[int]) -> Messag
             blocks[i] = block.model_copy(update={"text": text})
             break
     return message.model_copy(update={"content_blocks": blocks, "metadata": {**message.metadata, "daedalus.archived": {"from_seq": seqs[0], "to_seq": seqs[-1], "seqs": list(seqs)}}})
+
+
+def repoint_summary(message: Message, mapping: dict[int, int]) -> Message:
+    """A compaction summary copied into another session: its archived seqs and inline note now name that session's rows."""
+    archived = message.metadata.get("daedalus.archived") or {}
+    seqs = sorted(mapping[int(x)] for x in archived.get("seqs") or [] if int(x) in mapping)
+    blocks = list(message.content_blocks)
+    for i, block in enumerate(blocks):
+        if isinstance(block, TextBlock) and "[archived turns " in block.text:
+            text = re.sub(r"\[archived turns [^\]]*\]", "", block.text).rstrip()
+            if seqs:
+                contiguous = seqs[-1] - seqs[0] + 1 == len(seqs)
+                span = f"seq {seqs[0]}–{seqs[-1]}" if contiguous else f"within seq {seqs[0]}–{seqs[-1]} ({len(seqs)} turns)"
+                note = f"[archived turns {span}: HistoryExpand({seqs[0]}, {seqs[-1]}) returns them verbatim]"
+                text = f"{text[: -len('</compacted-turn>')].rstrip()}\n\n{note}</compacted-turn>" if text.endswith("</compacted-turn>") else f"{text}\n\n{note}"
+            blocks[i] = block.model_copy(update={"text": text})
+            break
+    meta = {"from_seq": seqs[0], "to_seq": seqs[-1], "seqs": seqs} if seqs else {"seqs": []}
+    return message.model_copy(update={"content_blocks": blocks, "metadata": {**message.metadata, "daedalus.archived": meta}})
 
 
 def operator_language(history: Sequence[Message]) -> str:

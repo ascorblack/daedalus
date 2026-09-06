@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import multiprocessing
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -24,18 +25,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 PAYLOAD_MAX_CHARS = 2000
+PAYLOAD_MAX_KEYS = 400
 DELIVERIES_KEEP_DAYS = 14
+PATTERN_MAX_CHARS = 500
+ACTION_MAX_CHARS = 4000
+INTENT_MATCH_SECONDS = 2.0
+"""A pattern that has not matched by then is a pattern that never will: the intent is disabled."""
+_NESTED_QUANTIFIER = re.compile(r"\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*[+*{]")
+KV_SESSION_PREFIX = "inbound_session:"
 
 
 def flatten_payload(value: Any, prefix: str = "", *, limit: int = PAYLOAD_MAX_CHARS) -> str:
     """``key.path: value`` lines from a JSON payload, capped so a webhook cannot flood the prompt."""
     lines: list[str] = []
+    total = 0
+    visited = 0
 
     def walk(v: Any, path: str) -> None:
-        if len("\n".join(lines)) > limit:
+        nonlocal total, visited
+        visited += 1
+        if total > limit or visited > PAYLOAD_MAX_KEYS:
             return
         if isinstance(v, dict):
-            for k, item in v.items():
+            for k, item in list(v.items())[:PAYLOAD_MAX_KEYS]:
                 walk(item, f"{path}.{k}" if path else str(k))
         elif isinstance(v, list):
             for i, item in enumerate(v[:20]):
@@ -44,6 +56,7 @@ def flatten_payload(value: Any, prefix: str = "", *, limit: int = PAYLOAD_MAX_CH
             text = str(v).replace("\n", " ")
             if text.strip():
                 lines.append(f"{path}: {text[:300]}")
+                total += len(lines[-1]) + 1
 
     walk(value, prefix)
     out = "\n".join(lines)
@@ -56,9 +69,34 @@ def verify_signature(scheme: str, secret: str, body: bytes, headers: dict[str, s
     if scheme == "github":
         signature = headers.get("x-hub-signature-256", "")
         expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-        return hmac.compare_digest(signature, expected)
+        return hmac.compare_digest(signature.encode("utf-8", "replace"), expected.encode())
     auth = headers.get("authorization", "")
-    return auth.startswith("Bearer ") and hmac.compare_digest(auth[7:], secret)
+    scheme_token, _, credential = auth.partition(" ")
+    return scheme_token.lower() == "bearer" and hmac.compare_digest(credential.strip().encode("utf-8", "replace"), secret.encode())
+
+
+def _regex_search(pattern: str, text: str, out: Any) -> None:
+    try:
+        out.value = 1 if re.search(pattern, text, re.IGNORECASE) else 0
+    except re.error:
+        out.value = -1
+
+
+def search_bounded(pattern: str, text: str, seconds: float = INTENT_MATCH_SECONDS) -> bool | None:
+    """``re.search`` with a wall-clock bound, in a throwaway process so a backtracking blowup cannot stall the bot.
+
+    Returns True/False, or ``None`` when the bound was hit (or the pattern does not compile).
+    """
+    ctx = multiprocessing.get_context("fork")
+    flag = ctx.Value("i", -2)
+    proc = ctx.Process(target=_regex_search, args=(pattern, text, flag), daemon=True)
+    proc.start()
+    proc.join(seconds)
+    if proc.is_alive():
+        proc.kill()
+        proc.join(1.0)
+        return None
+    return None if flag.value < 0 else bool(flag.value)
 
 
 class Inbound:
@@ -78,15 +116,23 @@ class Inbound:
             for s in await manager.list_sessions(limit=500):
                 if s["title"] == ref:
                     return await manager.get_state(s["id"])
+        remembered = await self.app.db.kv_get(KV_SESSION_PREFIX + default_title, None)
+        if remembered:
+            state = await manager.get_state(str(remembered))
+            if state is not None:
+                return state
         for s in await manager.list_sessions(limit=500):
-            if s["title"] == default_title:
+            if s["title"] == default_title and s.get("metadata", {}).get("inbound"):
+                await self.app.db.kv_set(KV_SESSION_PREFIX + default_title, s["id"])
                 return await manager.get_state(s["id"])
         front = self.app.front
         metadata = {"unattended": True, "inbound": True}
         if front is not None:
             state, _ = await front.create_session_topic(default_title, metadata=metadata)
-            return state
-        return await manager.create_session(default_title, metadata=metadata)
+        else:
+            state = await manager.create_session(default_title, metadata=metadata)
+        await self.app.db.kv_set(KV_SESSION_PREFIX + default_title, state.session.id)
+        return state
 
     async def deliver(self, *, source: str, text: str, session_ref: str | None, default_title: str, prompt: str = "") -> dict[str, Any]:
         manager = self.app.manager
@@ -97,15 +143,18 @@ class Inbound:
             outbox = await front.outbox_for_session(state.session.id)
             if outbox is not None:
                 try:
-                    await outbox.send_text(f"📨 **inbound from {source}**\n\n{text[:1500]}", markdown=True)
+                    await outbox.send_text(f"📨 inbound from {source}\n\n{text[:1500]}", markdown=False)
                 except Exception:  # noqa: BLE001
                     logger.warning("inbound echo failed", exc_info=True)
+        # Intents first: one that lives in the receiving session rides along with the event instead of queueing behind it.
+        folded = await self.match_intents(source, text, fold_into=state.session.id)
         body = (prompt.strip() + "\n\n" if prompt.strip() else "") + f"[inbound event from {source}]\n{text}"
+        if folded:
+            body += "\n\n" + "\n\n".join(folded)
         run_id = await manager.submit(state.session.id, body, as_answer=False, origin=f"inbound:{source}")
         inbox = self.app.extensions.get("inbox")
         if inbox is not None:
             await inbox.post("inbound", f"Inbound from {source}", text[:2000], session_id=state.session.id, run_id=run_id or None)
-        await self.match_intents(source, text)
         return {"session_id": state.session.id, "run_id": run_id}
 
     async def record_delivery(self, provider: str, delivery_id: str) -> bool:
@@ -120,19 +169,27 @@ class Inbound:
             await conn.execute("DELETE FROM webhook_deliveries WHERE at < ?", (cutoff,))
         return fresh
 
+    async def forget_delivery(self, provider: str, delivery_id: str) -> None:
+        """A delivery that could not be handled is not a delivery: the sender's retry must get through."""
+        await self.app.db.execute("DELETE FROM webhook_deliveries WHERE provider = ? AND delivery_id = ?", (provider, delivery_id))
+
     # -- intents ------------------------------------------------------------------------
 
     async def create_intent(self, *, pattern: str, action: str, session_id: str | None, cooldown_minutes: int, max_fires: int, expires_in_hours: int | None, created_by: str | None) -> dict[str, Any]:
+        if len(pattern) > PATTERN_MAX_CHARS or len(action) > ACTION_MAX_CHARS:
+            raise ValueError(f"pattern is limited to {PATTERN_MAX_CHARS} characters and action to {ACTION_MAX_CHARS}")
         try:
             re.compile(pattern, re.IGNORECASE)
         except re.error as exc:
             raise ValueError(f"pattern is not a valid regular expression: {exc}") from exc
+        if _NESTED_QUANTIFIER.search(pattern):
+            raise ValueError("pattern nests a quantifier inside a quantified group (e.g. (a+)+), which can take forever to match; simplify it")
         intent_id = uuid.uuid4().hex[:8]
         expires = (datetime.now(UTC) + timedelta(hours=expires_in_hours)).isoformat() if expires_in_hours else None
         await self.app.db.execute(
             "INSERT INTO intents(id, pattern, action, session_id, cooldown_minutes, max_fires, expires_at, created_by_session, created_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (intent_id, pattern[:500], action[:4000], session_id, max(1, cooldown_minutes), max(1, max_fires), expires, created_by, datetime.now(UTC).isoformat()),
+            (intent_id, pattern, action, session_id, max(1, cooldown_minutes), max(1, max_fires), expires, created_by, datetime.now(UTC).isoformat()),
         )
         return {"id": intent_id, "pattern": pattern, "expires_at": expires}
 
@@ -146,10 +203,16 @@ class Inbound:
         await self.app.db.execute("DELETE FROM intents WHERE id = ?", (intent_id,))
         return True
 
-    async def match_intents(self, source: str, text: str) -> list[str]:
-        """Fire every enabled intent whose pattern matches the event text, within cooldown, budget and expiry."""
+    async def match_intents(self, source: str, text: str, *, fold_into: str | None = None) -> list[str]:
+        """Fire every enabled intent whose pattern matches the event text, within cooldown, budget and expiry.
+
+        Returns the prompts of matched intents whose session is ``fold_into`` (the caller adds them
+        to the event it is about to submit there); every other match is submitted here. Without
+        ``fold_into`` the return value is the list of fired intent ids.
+        """
         now = datetime.now(UTC)
         fired: list[str] = []
+        folded: list[str] = []
         manager = self.app.manager
         if manager is None:
             return fired
@@ -163,20 +226,28 @@ class Inbound:
                 continue
             if row["last_fired_at"] and now - datetime.fromisoformat(row["last_fired_at"]) < timedelta(minutes=int(row["cooldown_minutes"])):
                 continue
-            try:
-                if not re.search(row["pattern"], text, re.IGNORECASE):
-                    continue
-            except re.error:
+            matched = await asyncio.to_thread(search_bounded, row["pattern"], text)
+            if matched is None:
+                await self.app.db.execute("UPDATE intents SET enabled = 0 WHERE id = ?", (row["id"],))
+                await self._post("intent_disabled", f"Standing intent '{row['pattern'][:80]}' disabled", f"its pattern did not finish matching within {INTENT_MATCH_SECONDS:.0f} s (or no longer compiles); rewrite it with IntentCreate", severity="warning")
+                continue
+            if not matched:
                 continue
             session = row["session_id"] or row["created_by_session"]
-            state = await manager.get_state(session) if session else None
             prompt = f"[standing intent {row['id']} matched an inbound event from {source}: pattern {row['pattern']!r}]\n\n{row['action']}\n\nThe event:\n{text[:PAYLOAD_MAX_CHARS]}"
+            if fold_into and session == fold_into:
+                folded.append(f"[standing intent {row['id']} matched this event: pattern {row['pattern']!r}]\n{row['action']}")
+                await self.app.db.execute("UPDATE intents SET fired_count = fired_count + 1, last_fired_at = ? WHERE id = ?", (now.isoformat(), row["id"]))
+                fired.append(row["id"])
+                continue
+            state = await manager.get_state(session) if session else None
             try:
                 if state is not None and not state.running and state.pending is None:
                     await manager.submit(state.session.id, prompt, as_answer=False, origin="intent")
                 else:
                     scheduler = self.app.extensions.get("scheduler")
                     if scheduler is None:
+                        await self._post("intent_deferred", f"Standing intent '{row['pattern'][:80]}' matched but could not run", "its session is busy or gone and no task session could be started; the intent stays armed", severity="notice")
                         continue
                     await scheduler.run_task_session(f"[intent] {row['pattern'][:30]}", prompt, self.app.settings.workspaces_dir / f"intent-{row['id']}", {"intent_id": row["id"], "unattended": True}, origin="intent")  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001
@@ -185,7 +256,7 @@ class Inbound:
             await self.app.db.execute("UPDATE intents SET fired_count = fired_count + 1, last_fired_at = ? WHERE id = ?", (now.isoformat(), row["id"]))
             fired.append(row["id"])
             await self._post("intent_fired", f"Standing intent fired: {row['pattern']}", row["action"][:500], severity="notice", session_id=session)
-        return fired
+        return folded if fold_into else fired
 
     async def _post(self, kind: str, title: str, body: str = "", **kw: Any) -> None:
         inbox = self.app.extensions.get("inbox")
@@ -226,4 +297,4 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     return []
 
 
-__all__ = ["Inbound", "flatten_payload", "install", "verify_signature"]
+__all__ = ["Inbound", "flatten_payload", "install", "search_bounded", "verify_signature"]

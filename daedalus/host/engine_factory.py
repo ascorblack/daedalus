@@ -109,6 +109,7 @@ def build_engine(
             session_title=session_title,
             model=model,
             extra_notes=extra_notes,
+            sandboxed=config.tools.exec.sandbox != "off",
         ),
     )
     engine_config = QueryEngineConfig(

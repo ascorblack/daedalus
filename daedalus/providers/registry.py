@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -19,7 +20,7 @@ VENDOR_HOSTS = {"deepseek": "api.deepseek.com", "openrouter": "openrouter.ai"}
 
 
 def _is_vendor_host(kind: str, base_url: str) -> bool:
-    host = base_url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    host = (urlsplit(base_url if "://" in base_url else "//" + base_url).hostname or "").lower()
     return host == VENDOR_HOSTS.get(kind, "")
 
 
