@@ -802,10 +802,10 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <div className="section-title">Context compaction</div>
         <div className="sub">When a finished run's prompt filled this share of the model window, the history is replaced by one structured summary (fixed headings, your messages quoted verbatim) before the next run. 0 = manual /compact only.</div>
         <div className="grid2">
-          <NumField label="Compact above (share of window)" value={s.compaction?.auto_ratio ?? 0.5} min={0} step={0.05} onSave={(v) => save({ compaction: { auto_ratio: v } })} />
-          <NumField label="Keep recent messages" value={s.compaction?.keep_recent_messages ?? 6} min={0} onSave={(v) => save({ compaction: { keep_recent_messages: v } })} />
-          <NumField label="Summary budget (words)" value={s.compaction?.max_words ?? 1200} min={200} step={100} onSave={(v) => save({ compaction: { max_words: v } })} />
-          <NumField label="Core mid-run trigger (share)" value={s.compaction?.core_trigger_ratio ?? 0.85} min={0.1} step={0.05} onSave={(v) => save({ compaction: { core_trigger_ratio: v } })} hint="the core's own incremental compaction inside a long run" />
+          <NumField label="Compact above (share of window)" value={s.compaction?.auto_ratio ?? 0.5} min={0} step={0.05} onSave={(v) => save({ compaction: { ...s.compaction, auto_ratio: v } })} />
+          <NumField label="Keep recent messages" value={s.compaction?.keep_recent_messages ?? 6} min={0} onSave={(v) => save({ compaction: { ...s.compaction, keep_recent_messages: v } })} />
+          <NumField label="Summary budget (words)" value={s.compaction?.max_words ?? 1200} min={200} step={100} onSave={(v) => save({ compaction: { ...s.compaction, max_words: v } })} />
+          <NumField label="Core mid-run trigger (share)" value={s.compaction?.core_trigger_ratio ?? 0.85} min={0.1} step={0.05} onSave={(v) => save({ compaction: { ...s.compaction, core_trigger_ratio: v } })} hint="the core's own incremental compaction inside a long run" />
         </div>
         <label className="field">Balance alert thresholds (USD, comma-separated)</label>
         <input className="field" defaultValue={s.balance.thresholds_usd.join(", ")} onBlur={(e) => save({ balance: { ...s.balance, thresholds_usd: e.target.value.split(",").map(Number).filter((n) => !Number.isNaN(n)) } })} />
