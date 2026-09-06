@@ -342,6 +342,7 @@ class TelegramFront:
             {
                 "send_file": self._service_send_file,
                 "spawn_session": self._service_spawn,
+                "spawn_agent": self._service_spawn_agent,
                 "progress": self._service_progress,
             }
         )
@@ -451,6 +452,9 @@ class TelegramFront:
         return state, binding
 
     async def _session_for_message(self, message: Message) -> SessionState | None:
+        forced = getattr(message, "forced_session_id", None)  # a command issued from the Mini App names its session outright
+        if forced:
+            return await self.manager.get_state(forced)
         chat_id = message.chat.id
         thread_id = message.message_thread_id or 0
         if message.chat.type == "private":
@@ -1592,6 +1596,50 @@ class TelegramFront:
         state, _ = await self.create_session_topic(title)
         attachments = [Attachment(path=Path(f), mime_type=mimetypes.guess_type(f)[0] or "application/octet-stream") for f in files if Path(f).is_file()]
         await self.manager.submit(state.session.id, prompt, attachments)
+        return state.session.id
+
+    async def _service_spawn_agent(
+        self,
+        session_id: str,
+        *,
+        title: str,
+        brief: str,
+        files: list[str],
+        first_message: str | None,
+        preset: str | None,
+        mode: str | None,
+        mcp: list[str],
+        peer_name: str | None,
+    ) -> str:
+        """A standing agent: its own topic and workspace, a brief in its system prompt, copies of the files it needs."""
+        metadata = {"brief": brief.strip(), "spawned_by": session_id}
+        state, _ = await self.create_session_topic(title, metadata=metadata)
+        copied: list[str] = []
+        for raw in files:
+            source = Path(raw)
+            if not source.exists():
+                continue
+            target = state.workspace / "inbox" / source.name
+            if source.is_dir():
+                shutil.copytree(source, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(source, target)
+            copied.append(str(target))
+        if preset:
+            await self.manager.set_model(state.session.id, preset=preset)
+        if mode:
+            await self.manager.set_mode(state.session.id, mode)
+        for server in mcp:
+            await self.manager.set_mcp(state.session.id, server, True)
+        peers = self.manager.service_hooks.get("peers")
+        if peer_name and peers is not None:
+            await peers("register", name=peer_name, session_id=state.session.id)
+        prompt = (first_message or "").strip()
+        if prompt or copied:
+            body = prompt or "Read your brief and the files in your inbox, then report in one message what you are set up to do."
+            if copied:
+                body += "\n\nFiles copied into your workspace inbox:\n" + "\n".join(f"- {c}" for c in copied)
+            await self.manager.submit(state.session.id, body, [], as_answer=False, origin=f"spawn:{session_id}")
         return state.session.id
 
     async def _service_progress(self, session_id: str, line: str) -> None:

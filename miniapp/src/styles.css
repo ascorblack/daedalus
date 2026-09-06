@@ -276,3 +276,9 @@ input.field, select.field, textarea.field {
 .tab-badge { position:absolute; top:-6px; right:-14px; min-width:16px; height:16px; padding:0 4px; border-radius:999px; background:var(--bad); color:#fff; font-size:10px; line-height:16px; text-align:center; font-weight:700; }
 .card.unread { border-color: color-mix(in srgb, var(--info) 45%, var(--line)); }
 .turn-actions { display:flex; justify-content:flex-end; gap:6px; margin:-2px 0 8px; opacity:0.75; }
+
+.palette { background:var(--card); border:1px solid var(--line); border-radius:14px; margin-bottom:6px; overflow:hidden; box-shadow:0 12px 30px rgba(0,0,0,.35); }
+.palette-item { display:flex; flex-direction:column; align-items:flex-start; gap:2px; width:100%; background:none; border:0; border-bottom:1px solid var(--line); color:var(--fg); padding:9px 12px; font-size:14px; cursor:pointer; text-align:left; }
+.palette-item:last-child { border-bottom:0; }
+.palette-item:active { background:var(--card-2); }
+.mono { font-family:var(--mono); }

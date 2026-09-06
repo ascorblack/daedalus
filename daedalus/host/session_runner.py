@@ -62,6 +62,8 @@ from daedalus.stores.sqlite import (
 from daedalus.tools import discover_tools
 
 logger = logging.getLogger(__name__)
+BRIEF_MAX_CHARS = 12_000
+"""A spawned agent's brief lives in its system prompt; longer hand-overs belong in files."""
 
 EventSink = Callable[[str, TurnEvent], Awaitable[None]]
 RunFinished = Callable[[str, str, str], Awaitable[None]]  # session_id, run_id, status
@@ -780,6 +782,7 @@ class SessionManager:
             max_tool_output_chars=self.config.tools.exec.max_output_chars,
             send_file=_bind(hooks.get("send_file"), state.session.id),
             spawn_session=_bind(hooks.get("spawn_session"), state.session.id),
+            spawn_agent=_bind(hooks.get("spawn_agent"), state.session.id),
             schedule=hooks.get("schedule"),
             self_propose=hooks.get("self_propose"),
             self_rebuild=hooks.get("self_rebuild"),
@@ -1030,7 +1033,7 @@ class SessionManager:
             reasoning_effort=overrides.get("reasoning_effort") or preset.reasoning_effort,
             context_window=state.context_window or preset.context_window,
             max_output_tokens=preset.max_output_tokens,
-            extra_notes=state.extra_notes,
+            extra_notes=self.notes_for(state),
             blocked_tools=blocked_for(self.mcp, enabled),
         )
         self._attach_hooks(engine, state)
@@ -1286,6 +1289,29 @@ class SessionManager:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         row = await self.db.fetchone(f"SELECT sum(cost_usd) usd, sum(cost_usd IS NULL) unmetered FROM usage_events{where}", tuple(params))
         return (float(row["usd"] or 0.0), int(row["unmetered"] or 0)) if row else (0.0, 0)
+
+    @staticmethod
+    def notes_for(state: SessionState) -> str:
+        """What the system prompt says about this session beyond the environment: the brief it was created with."""
+        parts = [state.extra_notes.strip()] if state.extra_notes.strip() else []
+        brief = str(state.metadata.get("brief") or "").strip()
+        if brief:
+            origin = state.metadata.get("spawned_by")
+            parts.append("- Your brief" + (f" (from session {origin})" if origin else "") + ", the standing instructions for this session:\n" + brief)
+        return "\n".join(parts)
+
+    async def set_brief(self, session_id: str, brief: str) -> str:
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        brief = brief.strip()[:BRIEF_MAX_CHARS]
+        for meta in (state.metadata, state.session.metadata):
+            if brief:
+                meta["brief"] = brief
+            else:
+                meta.pop("brief", None)
+        await self.sessions.update_metadata(session_id, state.session.metadata)
+        return brief
 
     @staticmethod
     def session_cap(state: SessionState) -> float | None:

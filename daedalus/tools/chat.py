@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
@@ -48,6 +50,46 @@ async def spawn_task(
     return ok(context, f"started session {session_id} — {title}", session_id=session_id)
 
 
-TOOLS = [send_file, spawn_task]
+@tool(
+    name="SpawnAgent",
+    description=(
+        "Create a standing agent: a new session (its own chat topic and workspace) that keeps a brief "
+        "you write in its system prompt, gets copies of the files it needs, and optionally a model "
+        "preset, a mode, MCP servers and a peer name so you can AskPeer it later. Use it when another "
+        "agent should own a job for good and you hold what it needs (instructions, files, settings); "
+        "SpawnTask is for a one-off job. The brief is the hand-over: what the agent is for, how the work "
+        "is done, where things are, what to avoid. Paths are relative to this workspace or absolute."
+    ),
+)
+async def spawn_agent(
+    context: ToolContext,
+    title: str,
+    brief: str,
+    files: list[str] | None = None,
+    first_message: str | None = None,
+    preset: str | None = None,
+    mode: str | None = None,
+    mcp: list[str] | None = None,
+    peer_name: str | None = None,
+) -> ToolResult:
+    services = services_for(context)
+    if services.spawn_agent is None:
+        return error(context, "spawning agents is not available here")
+    if not brief.strip():
+        return error(context, "the brief is what the new agent lives by; write it")
+    paths = [str(services.resolve(f)) for f in files or []]
+    missing = [p for p in paths if not Path(p).exists()]
+    if missing:
+        return error(context, "these files do not exist: " + ", ".join(missing))
+    try:
+        session_id = await services.spawn_agent(
+            title=title, brief=brief, files=paths, first_message=first_message, preset=preset, mode=mode, mcp=list(mcp or []), peer_name=peer_name
+        )
+    except (ValueError, KeyError) as exc:
+        return error(context, str(exc))
+    return ok(context, f"agent '{title}' created as session {session_id}" + (f", peer '{peer_name}'" if peer_name else "") + (f", {len(paths)} file(s) copied to its inbox" if paths else ""), session_id=session_id)
+
+
+TOOLS = [send_file, spawn_task, spawn_agent]
 
 __all__ = ["TOOLS"]

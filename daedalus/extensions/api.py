@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from daedalus.config import PROVIDER_KINDS, HeartbeatConfig, ModelPresetConfig, ProviderConfig
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
+from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
@@ -152,6 +153,14 @@ class BoardUpdateBody(BaseModel):
 class PeerBody(BaseModel):
     name: str
     session_id: str
+
+
+class CommandBody(BaseModel):
+    line: str = Field(min_length=2, max_length=4000)
+
+
+class BriefBody(BaseModel):
+    brief: str = Field(default="", max_length=12_000)
 
 
 class SessionCapBody(BaseModel):
@@ -515,6 +524,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "model": await session_model_label(state),
             "mode": state.metadata.get("mode") or "",
             "usd_cap": state.metadata.get("usd_cap"),
+            "brief": state.metadata.get("brief") or "",
+            "spawned_by": state.metadata.get("spawned_by"),
             "verifications": dict(await app.db.fetchone("SELECT count(*) total, sum(passed) passed FROM verifications WHERE session_id = ?", (session_id,)) or {}),
             "messages": [message_view(m) for m in source],
             "usage": dict(usage) if usage else {},
@@ -689,6 +700,32 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         spent, _ = await manager.spend(session_id=session_id)
         return {"usd_cap": cap, "spent_usd": round(spent, 4)}
+
+    @api.post("/api/sessions/{session_id}/brief")
+    async def set_brief(session_id: str, body: BriefBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            return {"brief": await manager.set_brief(session_id, body.brief)}
+        except KeyError:
+            raise HTTPException(404, "no such session") from None
+
+    @api.get("/api/commands")
+    async def list_commands(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        return [{"name": c.name, "args": c.args, "description": c.description, "scope": c.scope, "confirm": c.confirm} for c in slash.COMMANDS]
+
+    @api.post("/api/sessions/{session_id}/command")
+    async def run_slash_command(session_id: str, body: CommandBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Run a slash command for this session and return the text the chat would have shown."""
+        try:
+            text = await slash.run_command(app, session_id, body.line)
+        except KeyError as exc:
+            raise HTTPException(404, f"unknown command or session: {exc}") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except TelegramBusy as exc:
+            raise HTTPException(429, str(exc)) from exc
+        return {"text": redact.redact(text)}
 
     @api.get("/api/limits/spend")
     async def limits_spend(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

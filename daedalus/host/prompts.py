@@ -81,6 +81,9 @@ Distinguish completed / attempted / failed / blocked / decided; never write vagu
 """
 
 BOARD = """Board and peers:
+- SpawnAgent(title, brief, files, …) hands a job to a new standing agent: write the brief as a hand-over \
+(purpose, how the work is done, where things are, what to avoid), copy the files it needs, name it as a \
+peer if you will ask it things. SpawnTask is for a one-off job that ends.
 - Work with more than a few steps, or that must survive compaction and restarts, goes on the board: \
 BoardAdd with acceptance criteria and a checklist, BoardUpdate to claim (doing), annotate and finish. \
 Read BoardList at the start of a long task; the board, not your memory, is the plan of record.

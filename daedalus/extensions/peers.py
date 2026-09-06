@@ -132,6 +132,9 @@ class Peers:
             return await self.ask(**kwargs)
         if op == "list":
             return await self.registry()
+        if op == "register":
+            await self.register(kwargs["name"], kwargs["session_id"])
+            return {"registered": kwargs["name"]}
         raise ValueError(op)
 
 

@@ -101,8 +101,12 @@ export type SessionDetail = {
   messages: MessageView[];
   mode?: string;
   usd_cap?: number | null;
+  brief?: string;
+  spawned_by?: string | null;
   usage: { c?: number; i?: number; o?: number; ch?: number; usd?: number | null };
 };
+
+export type SlashCommand = { name: string; args: string; description: string; scope: string; confirm: boolean };
 
 export type Question = {
   question: string;

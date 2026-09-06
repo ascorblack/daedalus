@@ -1,6 +1,6 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { api, MessageView, Question, SessionDetail } from "../api";
+import { api, SlashCommand, MessageView, Question, SessionDetail } from "../api";
 import { Status, fmtInt, fmtUsd } from "../components";
 import { codeBlock, renderMarkdown } from "../md";
 
@@ -138,6 +138,8 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
   const [menu, setMenu] = useState(false);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [modes, setModes] = useState<string[]>([]);
+  const [commands, setCommands] = useState<SlashCommand[]>([]);
+  const [commandResult, setCommandResult] = useState<{ line: string; text: string } | null>(null);
   const [picker, setPicker] = useState<null | { presets: Record<string, { provider: string; model: string; label: string }>; global: string }>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [custom, setCustom] = useState("");
@@ -189,6 +191,7 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
   useEffect(() => {
     load();
     api.get<Record<string, unknown>>("/api/modes").then((m) => setModes(Object.keys(m))).catch(() => setModes([]));
+    api.get<SlashCommand[]>("/api/commands").then(setCommands).catch(() => setCommands([]));
   }, [load]);
 
   const status = (detail?.status ?? "idle") as Status;
@@ -309,10 +312,43 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
     stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
   }
 
+  const paletteQuery = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).split(" ")[0].toLowerCase() : null;
+  const paletteItems = paletteQuery === null || draft.includes(" ") ? [] : commands.filter((c) => c.name.startsWith(paletteQuery));
+
+  async function runCommand(line: string) {
+    const name = line.slice(1).split(" ")[0].toLowerCase();
+    const spec = commands.find((c) => c.name === name);
+    if (spec?.confirm && !window.confirm(`Run /${name}?`)) return;
+    setDraft("");
+    if (textarea.current) textarea.current.style.height = "auto";
+    try {
+      const r = await api.post<{ text: string }>(`/api/sessions/${id}/command`, { line });
+      const short = r.text.length < 140 && !r.text.includes("\n");
+      if (short) toast(r.text);
+      else setCommandResult({ line, text: r.text });
+      load();
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
+  function pickCommand(c: SlashCommand) {
+    if (c.args) {
+      setDraft(`/${c.name} `);
+      textarea.current?.focus();
+    } else {
+      runCommand(`/${c.name}`);
+    }
+  }
+
   async function send() {
     const text = draft.trim();
     const files = pending;
     if (sending || (!text && files.length === 0)) return;
+    if (text.startsWith("/") && files.length === 0 && commands.some((c) => c.name === text.slice(1).split(" ")[0].toLowerCase())) {
+      await runCommand(text);
+      return;
+    }
     setSending(true);
     setDraft("");
     setPending([]);
@@ -457,6 +493,24 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
                   <option key={m} value={m}>{m}</option>
                 ))}
               </select>
+              <label className="field">Brief (standing instructions in this session's system prompt{detail.spawned_by ? `; set by session ${detail.spawned_by}` : ""})</label>
+              <textarea
+                className="field"
+                rows={4}
+                defaultValue={detail.brief ?? ""}
+                placeholder="What this agent is for, how the work is done, where things are…"
+                onBlur={async (e) => {
+                  const brief = e.target.value.trim();
+                  if (brief === (detail.brief ?? "")) return;
+                  try {
+                    await api.post(`/api/sessions/${id}/brief`, { brief });
+                    toast(brief ? "brief saved (applies from the next run)" : "brief removed");
+                    load();
+                  } catch (err) {
+                    toast((err as Error).message);
+                  }
+                }}
+              />
               <label className="field">Spend cap for this session (USD, all its runs; empty = global limits only)</label>
               <div className="composer-row">
                 <input
@@ -510,6 +564,18 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
         )}
       </div>
 
+      {commandResult && (
+        <div className="sheet-backdrop" onClick={() => setCommandResult(null)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="grip" />
+            <h3 className="mono">{commandResult.line}</h3>
+            <div className="sheet-body">
+              <pre className="diff" style={{ whiteSpace: "pre-wrap" }}>{commandResult.text}</pre>
+            </div>
+          </div>
+        </div>
+      )}
+
       {picker && (
         <div className="sheet-backdrop" onClick={() => setPicker(null)}>
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
@@ -557,6 +623,16 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
               ))}
             </div>
           )}
+          {paletteItems.length > 0 && (
+            <div className="palette">
+              {paletteItems.slice(0, 8).map((c) => (
+                <button key={c.name} className="palette-item" onClick={() => pickCommand(c)}>
+                  <span className="mono">/{c.name} <span className="sub">{c.args}</span></span>
+                  <span className="sub">{c.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <div className="composer-box">
             <textarea
               ref={textarea}
@@ -570,6 +646,15 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
               placeholder={status === "running" ? "Steer the agent (applies before its next step)" : "Ask anything"}
               rows={1}
               onKeyDown={(e) => {
+                if (e.key === "Tab" && paletteItems.length > 0) {
+                  e.preventDefault();
+                  pickCommand(paletteItems[0]);
+                  return;
+                }
+                if (e.key === "Escape" && paletteQuery !== null) {
+                  setDraft("");
+                  return;
+                }
                 if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) {
                   e.preventDefault();
                   send();

@@ -34,6 +34,8 @@ class SessionServices:
     self_propose: SelfDevFn | None = None
     self_rebuild: SelfDevFn | None = None
     self_rollback: SelfDevFn | None = None
+    spawn_agent: Callable[..., Awaitable[str]] | None = None
+    """Create a standing agent session with a brief, files and settings (see the SpawnAgent tool)."""
     extra: dict[str, Any] = field(default_factory=dict)
 
     def resolve(self, path: str | None) -> Path:
