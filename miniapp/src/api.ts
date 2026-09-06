@@ -165,11 +165,19 @@ export type Settings = {
     exec: { max_output_chars: number };
   };
   self_change: { approval: string; auto_rebuild: boolean };
-  limits: { max_iterations: number; tool_timeout_seconds: number };
+  limits: { max_iterations: number; tool_timeout_seconds: number; usd_per_run: number };
   usd_per_day?: number;
   balance: { enabled: boolean; poll_seconds: number; thresholds_usd: number[] };
   scheduler: { topic_mode: string; catch_up_missed: boolean };
-  telegram: { verbosity: number };
+  telegram: {
+    verbosity: number;
+    reactions: boolean;
+    topic_status_emoji: boolean;
+    stale_after_seconds: number;
+    max_inbound_file_mb: number;
+    forward_unknown_commands: boolean;
+    slow_tool_seconds: number;
+  };
   providers_available: string[];
 };
 

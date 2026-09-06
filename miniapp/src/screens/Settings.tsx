@@ -545,6 +545,8 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <div className="sub">daily cap: ${(s as any).usd_per_day} — set in the environment, enforced by the supervisor</div>
         <label className="field">Max iterations per run</label>
         <input className="field" type="number" defaultValue={s.limits.max_iterations} onBlur={(e) => save({ limits: { ...s.limits, max_iterations: Number(e.target.value) } })} />
+        <label className="field">Spend cap per run (USD, 0 = none; calls without a known price do not count)</label>
+        <input className="field" type="number" step="0.5" defaultValue={s.limits.usd_per_run} onBlur={(e) => save({ limits: { ...s.limits, usd_per_run: Number(e.target.value) } })} />
         <label className="field">Balance alert thresholds (USD, comma-separated)</label>
         <input className="field" defaultValue={s.balance.thresholds_usd.join(", ")} onBlur={(e) => save({ balance: { ...s.balance, thresholds_usd: e.target.value.split(",").map(Number).filter((n) => !Number.isNaN(n)) } })} />
         <label className="field">Balance poll interval (seconds)</label>
@@ -563,6 +565,23 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
             </button>
           ))}
         </div>
+        <div className="btnrow">
+          <button className={`btn small ${s.telegram.reactions ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, reactions: !s.telegram.reactions } })}>
+            reactions {s.telegram.reactions ? "on" : "off"}
+          </button>
+          <button className={`btn small ${s.telegram.topic_status_emoji ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, topic_status_emoji: !s.telegram.topic_status_emoji } })}>
+            topic status emoji {s.telegram.topic_status_emoji ? "on" : "off"}
+          </button>
+          <button className={`btn small ${s.telegram.forward_unknown_commands ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, forward_unknown_commands: !s.telegram.forward_unknown_commands } })}>
+            unknown /commands → agent {s.telegram.forward_unknown_commands ? "on" : "off"}
+          </button>
+        </div>
+        <label className="field">Ignore messages older than (seconds, 0 = never)</label>
+        <input className="field" type="number" defaultValue={s.telegram.stale_after_seconds} onBlur={(e) => save({ telegram: { ...s.telegram, stale_after_seconds: Number(e.target.value) } })} />
+        <label className="field">Largest accepted file (MB)</label>
+        <input className="field" type="number" defaultValue={s.telegram.max_inbound_file_mb} onBlur={(e) => save({ telegram: { ...s.telegram, max_inbound_file_mb: Number(e.target.value) } })} />
+        <label className="field">Mark a tool call as slow after (seconds)</label>
+        <input className="field" type="number" defaultValue={s.telegram.slow_tool_seconds} onBlur={(e) => save({ telegram: { ...s.telegram, slow_tool_seconds: Number(e.target.value) } })} />
         <label className="field">Scheduled runs</label>
         <div className="btnrow" style={{ marginTop: 0 }}>
           {["per_task", "per_run"].map((m) => (
