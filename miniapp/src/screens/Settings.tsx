@@ -580,6 +580,8 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <input className="field" type="number" defaultValue={s.telegram.stale_after_seconds} onBlur={(e) => save({ telegram: { ...s.telegram, stale_after_seconds: Number(e.target.value) } })} />
         <label className="field">Largest accepted file (MB)</label>
         <input className="field" type="number" defaultValue={s.telegram.max_inbound_file_mb} onBlur={(e) => save({ telegram: { ...s.telegram, max_inbound_file_mb: Number(e.target.value) } })} />
+        <label className="field">Wait for a caption after a bare photo (seconds)</label>
+        <input className="field" type="number" defaultValue={s.telegram.photo_caption_wait_seconds} onBlur={(e) => save({ telegram: { ...s.telegram, photo_caption_wait_seconds: Number(e.target.value) } })} />
         <label className="field">Mark a tool call as slow after (seconds)</label>
         <input className="field" type="number" defaultValue={s.telegram.slow_tool_seconds} onBlur={(e) => save({ telegram: { ...s.telegram, slow_tool_seconds: Number(e.target.value) } })} />
         <label className="field">Scheduled runs</label>

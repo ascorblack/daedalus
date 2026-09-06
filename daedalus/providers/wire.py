@@ -20,6 +20,8 @@ from protocore.contracts.types import (
     ToolUseBlock,
 )
 
+from daedalus.security.redact import redact
+
 logger = logging.getLogger(__name__)
 
 
@@ -152,7 +154,7 @@ def parse_json_arguments(raw: str) -> dict[str, Any]:
         value = json.loads(text)
     except json.JSONDecodeError:
         value, how = _repair_arguments(text)
-        logger.warning("tool-call arguments repaired (%s): %.200r", how, raw)
+        logger.debug("tool-call arguments repaired (%s): %.200r", how, redact(raw))
     return value if isinstance(value, dict) else {"value": value}
 
 
@@ -168,8 +170,8 @@ def _repair_arguments(text: str) -> tuple[Any, str]:
         candidates.append(("fence", fenced.group(1)))
     base = fenced.group(1) if fenced else text
     candidates.append(("trailing-comma", _TRAILING_COMMA_RE.sub(r"\1", base)))
-    if "'" in base and '"' not in base:
-        candidates.append(("single-quotes", _SINGLE_QUOTED_RE.sub(lambda m: json.dumps(m.group(1)), base)))
+    if "'" in base:
+        candidates.append(("single-quotes", _TRAILING_COMMA_RE.sub(r"\1", _SINGLE_QUOTED_RE.sub(lambda m: json.dumps(m.group(1)), base))))
     start, end = base.find("{"), base.rfind("}")
     if start != -1 and end > start:
         candidates.append(("brace-slice", _TRAILING_COMMA_RE.sub(r"\1", base[start : end + 1])))

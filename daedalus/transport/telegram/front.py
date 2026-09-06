@@ -98,7 +98,10 @@ async def tg_call(fn: Callable[..., Awaitable[Any]], *args: Any, attempts: int =
     """
     for attempt in range(attempts):
         try:
-            return await fn(*args, **kwargs)
+            result = await fn(*args, **kwargs)
+            if attempt and flood_chat is not None:
+                _FLOOD_UNTIL.pop(flood_chat, None)  # the pause was waited out; edits may resume
+            return result
         except TelegramRetryAfter as exc:
             if flood_chat is not None:
                 note_flood(flood_chat, float(exc.retry_after))
@@ -119,6 +122,11 @@ TOPIC_STATUS_PREFIX = {"running": "🟢", "awaiting": "🔴", "completed": "🏁
 """Telegram silently drops some emoji from the start of a topic name (✅ ❓ ✔️ ☑️ were measured to
 vanish, and a repeat rename then fails with TOPIC_NOT_MODIFIED); every prefix here was verified to survive."""
 TOPIC_RENAME_DEBOUNCE_SECONDS = 2.0
+TOPIC_RENAME_MAX_WAIT_SECONDS = 60.0
+STALE_NOTICE_DELAY_SECONDS = 3.0
+"""Stale messages delivered in a burst after a restart are answered with one notice per chat."""
+
+assert set(RUN_REACTIONS.values()) <= FREE_REACTIONS, "a run reaction is not one Telegram lets bots use"
 
 
 class TelegramOutbox(Outbox):
@@ -288,6 +296,8 @@ class TelegramFront:
         """Per session: the chat and id of the operator's latest message, for the outcome reaction."""
         self._topic_status: dict[str, str] = {}
         self._topic_status_tasks: dict[str, asyncio.Task[None]] = {}
+        self._stale_counts: dict[tuple[int, int], int] = {}
+        self._stale_notices: dict[tuple[int, int], asyncio.Task[None]] = {}
         self.operator_hooks: dict[str, Callable[..., Awaitable[str]]] = {}
         """rebuild / rollback / panic, installed by the application."""
         self.command_hooks: dict[str, Callable[[Message, CommandObject], Awaitable[None]]] = {}
@@ -315,6 +325,10 @@ class TelegramFront:
         await self.dp.start_polling(self.bot, handle_signals=False)
 
     async def stop(self) -> None:
+        for task in list(self._topic_status_tasks.values()) + list(self._stale_notices.values()):
+            task.cancel()
+        for renderer in self._renderers.values():
+            renderer.close()
         await self.dp.stop_polling()
         await self.bot.session.close()
 
@@ -534,24 +548,37 @@ class TelegramFront:
         The end of a run is exactly when the chat is busiest (final status edit, the answer,
         the reaction), so the completion rename is the one most likely to hit flood control.
         """
-        await asyncio.sleep(TOPIC_RENAME_DEBOUNCE_SECONDS)
-        binding = await self.binding_for_session(session_id)
-        if binding is None or not binding.thread_id:
-            return
-        for _ in range(3):
-            while flooded(binding.chat_id):
-                await asyncio.sleep(1.0)
-            name = self._topic_name(session_id, binding.title)
-            try:
-                await tg_call(self.bot.edit_forum_topic, binding.chat_id, binding.thread_id, name=name, attempts=1, flood_chat=binding.chat_id)
-                logger.debug("topic %s renamed to %r", binding.thread_id, name)
+        try:
+            await asyncio.sleep(TOPIC_RENAME_DEBOUNCE_SECONDS)
+            binding = await self.binding_for_session(session_id)
+            if binding is None or not binding.thread_id:
                 return
-            except TelegramBadRequest as exc:
-                if "not modified" not in str(exc).lower():
-                    logger.warning("could not mark topic status: %s", exc)
-                return
-            except TelegramRetryAfter as exc:
-                await asyncio.sleep(float(exc.retry_after) + 0.5)
+            state = self.manager._states.get(session_id)
+            title = state.session.title if state is not None else binding.title
+            deadline = time.monotonic() + TOPIC_RENAME_MAX_WAIT_SECONDS
+            for _ in range(3):
+                while flooded(binding.chat_id):
+                    if time.monotonic() > deadline:
+                        return  # give up; the next state change carries the newer state anyway
+                    await asyncio.sleep(1.0)
+                name = self._topic_name(session_id, title)
+                try:
+                    await tg_call(self.bot.edit_forum_topic, binding.chat_id, binding.thread_id, name=name, attempts=1, flood_chat=binding.chat_id)
+                    logger.debug("topic %s renamed to %r", binding.thread_id, name)
+                    return
+                except TelegramBadRequest as exc:
+                    if "not modified" not in str(exc).lower():
+                        logger.warning("could not mark topic status: %s", exc)
+                    return
+                except TelegramRetryAfter as exc:
+                    await asyncio.sleep(min(float(exc.retry_after) + 0.5, max(0.0, deadline - time.monotonic())))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a cosmetic rename must never become an unretrieved task exception
+            logger.warning("topic status rename failed", exc_info=True)
+        finally:
+            if self._topic_status_tasks.get(session_id) is asyncio.current_task():
+                self._topic_status_tasks.pop(session_id, None)
 
     async def react_to_last(self, session_id: str, kind: str) -> None:
         """Put the run's outcome on the operator's message that started it."""
@@ -923,13 +950,14 @@ class TelegramFront:
             if await interceptor(message):
                 return
         if self._is_stale(message):
-            age = int((datetime.now(UTC) - message.date).total_seconds() // 60)
-            await message.reply(f"⏳ Ignored: this message arrived {age} min late (sent while the bot was down). Send it again if it still applies.")
+            self._note_stale(message)
             return
         state = await self._session_for_message(message)
         if state is None:
             return
         if await self._maybe_custom_answer(message, state):
+            if self.config.telegram.reactions:
+                await TelegramOutbox(self.bot, message.chat.id, None).react(message.message_id, RUN_REACTIONS["received"])
             return
         oversize = self._oversize(message)
         if oversize:
@@ -949,7 +977,7 @@ class TelegramFront:
         if buffer.task is not None:
             buffer.task.cancel()
         wait = self.config.telegram.inbound_merge_window_seconds
-        if buffer.attachments and not any(buffer.text):
+        if message.photo is not None and not any(buffer.text):
             # A bare photo is usually followed by the words about it (often a voice note).
             wait = max(wait, self.config.telegram.photo_caption_wait_seconds)
         buffer.task = asyncio.create_task(self._flush_inbound(key, state, wait))
@@ -959,6 +987,27 @@ class TelegramFront:
         if limit <= 0:
             return False
         return (datetime.now(UTC) - message.date).total_seconds() > limit
+
+    def _note_stale(self, message: Message) -> None:
+        """Count stale messages per chat and answer the burst with one notice."""
+        key = (message.chat.id, message.message_thread_id or 0)
+        self._stale_counts[key] = self._stale_counts.get(key, 0) + 1
+        task = self._stale_notices.get(key)
+        if task is None or task.done():
+            self._stale_notices[key] = asyncio.create_task(self._send_stale_notice(key, message))
+
+    async def _send_stale_notice(self, key: tuple[int, int], sample: Message) -> None:
+        await asyncio.sleep(STALE_NOTICE_DELAY_SECONDS)
+        count = self._stale_counts.pop(key, 0)
+        self._stale_notices.pop(key, None)
+        if not count:
+            return
+        age = int((datetime.now(UTC) - sample.date).total_seconds() // 60)
+        what = "this message" if count == 1 else f"{count} messages"
+        try:
+            await sample.reply(f"⏳ Ignored: {what} arrived {age}+ min late (sent while the bot was down). Send it again if it still applies.")
+        except TelegramBadRequest:
+            pass
 
     def _oversize(self, message: Message) -> str | None:
         """Refuse a file by its declared size before spending the download."""
@@ -993,12 +1042,11 @@ class TelegramFront:
         """Anything the bot has no path for gets a named answer instead of silence."""
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
-        if message.forum_topic_created or message.forum_topic_edited or message.pinned_message or message.new_chat_members or message.left_chat_member:
-            return
-        fields = [name for name in ("game", "invoice", "story", "giveaway", "video_chat_started", "checklist", "paid_media") if getattr(message, name, None) is not None]
-        kind = ", ".join(fields) or "this message type"
+        fields = [name for name in ("game", "invoice", "story", "giveaway", "checklist", "paid_media", "dice", "venue") if getattr(message, name, None) is not None]
+        if not fields:
+            return  # a service message (topic reopened, chat title changed, …): nothing to read, nothing to say
         try:
-            await message.reply(f"⚠️ I cannot read {kind}; send text, a file, a photo, a voice note or a location.")
+            await message.reply(f"⚠️ I cannot read {', '.join(fields)}; send text, a file, a photo, a voice note or a location.")
         except TelegramBadRequest:
             pass
 
@@ -1231,7 +1279,7 @@ class TelegramFront:
         if qs is None or "awaiting_custom" not in qs:
             return False
         index = qs.pop("awaiting_custom")
-        qs["answers"][index]["custom"] = message.text or message.caption or ""
+        qs["answers"][index]["custom"] = self._text_of(message)
         qs["index"] = index
         await self._advance_question(state.session.id, None)
         return True
@@ -1242,6 +1290,8 @@ class TelegramFront:
         renderer = self._renderers.get(session_id)
         if renderer is not None and renderer.view.run_id == run_id:
             return renderer
+        if renderer is not None:
+            renderer.close()  # a new run replaces it; its timers must not keep editing a dead status
         outbox = await self.outbox_for_session(session_id)
         if outbox is None:
             return None
@@ -1299,7 +1349,11 @@ class TelegramFront:
         self.set_topic_status(session_id, status)
         await self.react_to_last(session_id, status)
         renderer = self._renderers.get(session_id)
-        if renderer is None or renderer.view.run_id != run_id:
+        if renderer is None:
+            return
+        if renderer.view.run_id != run_id:
+            renderer.close()
+            self._renderers.pop(session_id, None)
             return
         state = await self.manager.get_state(session_id)
         if status == "awaiting":

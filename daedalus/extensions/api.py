@@ -106,7 +106,7 @@ class SettingsBody(BaseModel):
     mcp: dict[str, Any] | None = None
     self_change: dict[str, Any] | None = None
     limits: dict[str, Any] | None = None
-    """Only max_iterations and tool_timeout_seconds; the spend cap is the supervisor's."""
+    """max_iterations, tool_timeout_seconds and usd_per_run; the daily cap is the supervisor's."""
     balance: dict[str, Any] | None = None
     scheduler: dict[str, Any] | None = None
     telegram: dict[str, Any] | None = None
@@ -232,12 +232,41 @@ def apply_provider_patch(providers: dict[str, Any], provider_id: str, patch: dic
 
 
 def mask_provider_keys(settings_view: dict[str, Any]) -> dict[str, Any]:
-    """Never echo stored keys back to the Mini App: replace with a ``api_key_set`` flag."""
+    """Never echo stored credentials back to the Mini App.
+
+    Provider keys become an ``api_key_set`` flag; MCP header and env values (the same
+    values the redactor masks everywhere else) are shown as the mask and, when sent back
+    unchanged, keep their stored value (see :func:`restore_masked_mcp`).
+    """
     for entry in (settings_view.get("providers") or {}).values():
         entry["api_key_set"] = bool(entry.get("api_key"))
         entry["api_key"] = ""
+    for server in ((settings_view.get("mcp") or {}).get("servers") or {}).values():
+        for section in ("headers", "env"):
+            values = server.get(section)
+            if isinstance(values, dict):
+                server[section] = {k: (redact.MASK if v else v) for k, v in values.items()}
     settings_view["provider_kinds"] = list(PROVIDER_KINDS)
     return settings_view
+
+
+def restore_masked_mcp(current: dict[str, Any], patch: dict[str, Any]) -> None:
+    """A masked MCP header/env value sent back by the Mini App means "keep what is stored"."""
+    stored = ((current.get("mcp") or {}).get("servers") or {})
+    for name, server in ((patch.get("servers") or {}).items()):
+        if not isinstance(server, dict):
+            continue
+        for section in ("headers", "env"):
+            values = server.get(section)
+            if not isinstance(values, dict):
+                continue
+            kept = (stored.get(name) or {}).get(section) or {}
+            for key, value in list(values.items()):
+                if value == redact.MASK:
+                    if key in kept:
+                        values[key] = kept[key]
+                    else:
+                        del values[key]
 
 
 _SUMMARY_WRAP_RE = re.compile(r"</?compacted-turn[^>]*>")
@@ -726,6 +755,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         model_patch = dumped.pop("model", None)
         if isinstance(model_patch, dict):
             resolve_model_patch(current, model_patch)
+        if isinstance(dumped.get("mcp"), dict):
+            restore_masked_mcp(current, dumped["mcp"])
         for section, value in dumped.items():
             if isinstance(value, dict):
                 current[section] = _deep_merge(current.get(section, {}), value)

@@ -105,9 +105,13 @@ async def test_stale_message_is_acknowledged_not_executed(front: TelegramFront) 
     object.__setattr__(old, "date", old.date.replace(year=2020))
     object.__setattr__(old, "reply", reply)
     await front.on_message(old)
-    await asyncio.sleep(0.05)
+    second = _message("and this")
+    object.__setattr__(second, "date", second.date.replace(year=2020))
+    object.__setattr__(second, "reply", reply)
+    await front.on_message(second)
+    await asyncio.sleep(3.3)
     assert front.submitted == []  # type: ignore[attr-defined]
-    assert replies and replies[0].startswith("⏳ Ignored")
+    assert replies == [replies[0]] and replies[0].startswith("⏳ Ignored: 2 messages")
 
 
 async def test_unknown_command_goes_to_the_agent(front: TelegramFront) -> None:

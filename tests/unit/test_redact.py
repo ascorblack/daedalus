@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from protocore.contracts.hooks import HookActionKind
 from protocore.contracts.types import HookEvent
@@ -26,6 +27,12 @@ def test_secret_shapes_are_masked() -> None:
         "AKIAIOSFODNN7EXAMPLE": MASK,
         "postgres://user:s3cretpass@db.local/x": f"postgres://user:{MASK}@db.local/x",
         "DB_PASSWORD='hunter22'": f"DB_PASSWORD='{MASK}'",
+        '{"api_key": "8f3c1d2e9a0b7c6d5e4f3a2b1c0d9e8f"}': f'{{"api_key": "{MASK}"}}',
+        '{"password": "hunter2hunter2"}': f'{{"password": "{MASK}"}}',
+        "X-Api-Key: 8f3c1d2e9a0b7c6d5e4f3a2b": f"X-Api-Key: {MASK}",
+        'curl -H "Authorization: token 8f3c1d2e9a0b7c6d5e4f"': f'curl -H "Authorization: token {MASK}"',
+        "glpat-ABCDEFGHIJKLMNOPQRST": MASK,
+        "api_key: 8f3c1d2e9a0b7c6d5e4f": f"api_key: {MASK}",
     }
     for raw, expected in cases.items():
         assert r.redact(raw) == expected, raw
@@ -36,10 +43,29 @@ def test_pem_blocks_are_masked_whole() -> None:
     assert Redactor().redact(text) == f"before\n{MASK}\nafter"
 
 
-def test_ordinary_text_is_untouched() -> None:
+def test_ordinary_text_and_source_code_are_untouched() -> None:
     r = Redactor(["real-secret-value-1"])
-    text = "git status shows 3 files; the token bucket refills at 10/s; user=alice"
-    assert r.redact(text) == text
+    for text in (
+        "git status shows 3 files; the token bucket refills at 10/s; user=alice",
+        'input_tokens=normalized["input_tokens"],',
+        "tokens = response.json()",
+        "access_token: Optional[str] = None",
+        "self.password = derive(salt)",
+        "TOKEN_BUDGET = 128000",
+        'api_key = os.environ["OPENAI_API_KEY"]',
+        "https://github.com/x/y/commit/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b",
+        "data:image/png;base64,eyJhbGciOiJIUzI1NiJ9AAAA",
+    ):
+        assert r.redact(text) == text, text
+
+
+def test_own_source_files_survive_redaction_byte_identical() -> None:
+    """The agent reads and rewrites its own code through the redactor; it must not mangle it."""
+    root = Path(__file__).resolve().parents[2]
+    r = Redactor()
+    for rel in ("daedalus/providers/openai_compat.py", "daedalus/mcp/oauth.py", "daedalus/extensions/api.py", "daedalus/config.py", "launcher/supervisor.py"):
+        text = (root / rel).read_text(encoding="utf-8")
+        assert r.redact(text) == text, rel
 
 
 def test_nested_arguments_are_redacted() -> None:
@@ -71,3 +97,27 @@ def test_tool_argument_repairs() -> None:
     assert parse_json_arguments('Here you go: {"q": "x"} thanks') == {"q": "x"}
     assert parse_json_arguments('{"command": "ls -la') == {"command": "ls -la"}
     assert parse_json_arguments("") == {}
+
+
+async def test_failed_tool_result_is_masked_in_event_and_history() -> None:
+    """A tool that raised skips the core hook; the session runner masks the event and the history."""
+    from types import SimpleNamespace
+
+    from protocore.contracts.types import Message, MessageRole, ToolResultBlock
+    from protocore.runtime.events.envelope import TurnEvent
+    from protocore.runtime.events.types import EventType
+
+    from daedalus.host.session_runner import SessionManager
+
+    raw = "tool 'WebFetch' execution failed: 401 for https://api.x.test/?key=sk-proj-abcdefghijklmnopqrstuvwxyz"
+    engine = SimpleNamespace(history=[Message(role=MessageRole.tool, content_blocks=[ToolResultBlock(tool_call_id="c9", content=raw, is_error=True)])])
+    state = SimpleNamespace(engine=engine)
+    manager = SimpleNamespace(redactor=Redactor(), _redact_history_result=SessionManager._redact_history_result)
+    event = TurnEvent(type=EventType.ERROR, run_id="r", payload={"message": raw})
+    SessionManager._redact_event(manager, state, event)  # type: ignore[arg-type]
+    assert "sk-proj-" not in event.payload["message"]
+    event = TurnEvent(type=EventType.TOOL_RESULT, run_id="r", payload={"tool_call_id": "c9", "content": raw})
+    SessionManager._redact_event(manager, state, event)  # type: ignore[arg-type]
+    assert "sk-proj-" not in event.payload["content"]
+    block = engine.history[0].content_blocks[0]
+    assert isinstance(block, ToolResultBlock) and "sk-proj-" not in block.content and block.is_error

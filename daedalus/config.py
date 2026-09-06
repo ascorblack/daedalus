@@ -244,7 +244,7 @@ class TelegramConfig(BaseModel):
     """Supergroup with topics; 0 means "not bound yet"."""
     general_topic_id: int = 0
     status_edit_interval_seconds: float = 1.0
-    status_edit_tiers: list[list[float]] = Field(default_factory=lambda: [[60, 1], [300, 2], [900, 5], [0, 10]])
+    status_edit_tiers: list[tuple[float, float]] = Field(default_factory=lambda: [(60, 1), (300, 2), (900, 5), (0, 10)])
     """``[[run age in seconds, multiplier], …]``: the status message is edited less often as a run ages
     (the last entry, age 0, applies beyond the previous one). Multiplies ``status_edit_interval_seconds``."""
     slow_tool_seconds: int = Field(default=60, ge=5)

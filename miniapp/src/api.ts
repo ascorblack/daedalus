@@ -177,6 +177,7 @@ export type Settings = {
     max_inbound_file_mb: number;
     forward_unknown_commands: boolean;
     slow_tool_seconds: number;
+    photo_caption_wait_seconds: number;
   };
   providers_available: string[];
 };

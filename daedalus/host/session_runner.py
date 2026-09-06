@@ -140,6 +140,8 @@ class SessionManager:
         """Callbacks the transport layer installs: send_file, spawn_session, schedule, self_*."""
         self.shutting_down = False
         self.budget_flag = settings.state_dir / "BUDGET_EXCEEDED"
+        self._capped_runs: set[str] = set()
+        """Runs already stopped at the per-run cap (the stop is cooperative; the notice fires once)."""
 
     # -- lifecycle ------------------------------------------------------------------
 
@@ -864,6 +866,7 @@ class SessionManager:
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 (pending.session_id, pending.run_id, pending.tool_call_id, pending.kind, json.dumps(pending.payload), datetime.now(UTC).isoformat()),
             )
+        self._redact_event(state, event)
         durable = event.to_event()
         durable.payload.setdefault("tenant_id", TENANT)
         durable.payload.setdefault("event_type", event.type.value)
@@ -876,10 +879,50 @@ class SessionManager:
         if event.type is EventType.MESSAGE_STOP:
             await self._enforce_run_cap(state, event.run_id)
 
+    def _redact_event(self, state: SessionState, event: TurnEvent) -> None:
+        """Mask secrets the core's hook did not see: failure results, error text, tool arguments.
+
+        A tool that returned normally was masked by the PostToolUse hook before its result
+        entered the history. A tool that raised takes the dispatcher's failure path, which
+        skips the hook, so its message is masked here — in the event every consumer sees and
+        in the history message the core already appended.
+        """
+        p = event.payload
+        if event.type is EventType.TOOL_RESULT:
+            content = p.get("content")
+            if isinstance(content, str):
+                cleaned = self.redactor.redact(content)
+                if cleaned != content:
+                    p["content"] = cleaned
+                    self._redact_history_result(state, str(p.get("tool_call_id")), cleaned)
+        elif event.type is EventType.TOOL_USE_STOP and isinstance(p.get("final_input"), dict):
+            p["final_input"] = self.redactor.redact_any(p["final_input"])
+        elif event.type is EventType.ERROR and isinstance(p.get("message"), str):
+            p["message"] = self.redactor.redact(p["message"])
+
+    @staticmethod
+    def _redact_history_result(state: SessionState, tool_call_id: str, cleaned: str) -> None:
+        engine = state.engine
+        if engine is None:
+            return
+        for index in range(len(engine.history) - 1, -1, -1):
+            message = engine.history[index]
+            if message.role is not MessageRole.tool:
+                continue
+            blocks = list(message.content_blocks)
+            changed = False
+            for bi, block in enumerate(blocks):
+                if isinstance(block, ToolResultBlock) and block.tool_call_id == tool_call_id:
+                    blocks[bi] = block.model_copy(update={"content": cleaned})
+                    changed = True
+            if changed:
+                engine.history[index] = message.model_copy(update={"content_blocks": blocks})
+                return
+
     async def _enforce_run_cap(self, state: SessionState, run_id: str) -> None:
         """Stop a run whose priced spend crossed ``limits.usd_per_run``; unpriced calls cannot count."""
         cap = self.config.limits.usd_per_run
-        if cap <= 0 or state.engine is None or not state.running:
+        if cap <= 0 or state.engine is None or not state.running or run_id in self._capped_runs:
             return
         row = await self.db.fetchone(
             "SELECT sum(cost_usd) usd, sum(cost_usd IS NULL) unmetered FROM usage_events WHERE run_id = ?", (run_id,)
@@ -887,16 +930,13 @@ class SessionManager:
         spent = float(row["usd"] or 0.0) if row else 0.0
         if spent < cap:
             return
+        self._capped_runs.add(run_id)
         note = f"💸 per-run cap reached: ${spent:.2f} spent of ${cap:.2f} (limits.usd_per_run); stopping this run. Send a message to continue in a new run."
         if row and row["unmetered"]:
             note += f" {int(row['unmetered'])} call(s) had no known price and are not counted."
         logger.warning("run %s stopped at the per-run cap: $%.4f >= $%.2f", run_id, spent, cap)
         state.engine.stop()
-        for sink in self._sinks:
-            try:
-                await sink(state.session.id, TurnEvent(type=EventType.ERROR, run_id=run_id, payload={"message": note, "kind": "run_cap"}))
-            except Exception:  # noqa: BLE001
-                logger.exception("event sink failed")
+        await self._dispatch_event(state, TurnEvent(type=EventType.ERROR, run_id=run_id, payload={"message": note, "kind": "run_cap"}))
 
     # -- recovery -------------------------------------------------------------------
 

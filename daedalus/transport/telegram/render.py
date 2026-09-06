@@ -50,6 +50,8 @@ DEFAULT_EDIT_TIERS: tuple[tuple[float, float], ...] = ((60, 1), (300, 2), (900, 
 TOOL_TICK_SECONDS = 10.0
 """How often a running tool's elapsed time is re-rendered (the display is bucketed, so most ticks edit nothing)."""
 TOOL_DURATION_SHOWN_FROM_SECONDS = 2.0
+MAX_TICKER_SECONDS = 12 * 3600
+"""A safety bound for the elapsed-time ticker of a run whose end event never arrives."""
 
 
 class Outbox(Protocol):
@@ -200,7 +202,7 @@ class RunRenderer:
     async def _tick(self) -> None:
         v = self.view
         last_bucket = -1
-        while v.current_tool and v.state in ("running", "compacting"):
+        while v.current_tool and v.state in ("running", "compacting") and time.monotonic() - v.started < MAX_TICKER_SECONDS:
             await asyncio.sleep(TOOL_TICK_SECONDS)
             if not v.current_tool:
                 return
@@ -208,6 +210,12 @@ class RunRenderer:
             if bucket != last_bucket:
                 last_bucket = bucket
                 self._mark()
+
+    def close(self) -> None:
+        """Stop every background task; call when the renderer is discarded without :meth:`finish`."""
+        for task in (self._tick_task, self._flush_task, self._draft_task):
+            if task is not None and not task.done():
+                task.cancel()
 
     def _mark_draft(self) -> None:
         if not self.streaming:
@@ -378,6 +386,8 @@ class RunRenderer:
         if final and not v.final_sent:
             v.final_sent = True
             await self._deliver_final(final, workspace)
+            if v.delivery_failed:
+                v.narration.append("⚠️ the answer did not reach Telegram as a message (see the note above)")
             if self.streaming and v.draft_id and v.draft_sent:
                 # The real message is in the chat now; drop the live draft so the client stops the dots.
                 try:
@@ -415,7 +425,10 @@ class RunRenderer:
                 return
             if delivered_chunks:
                 v.delivery_failed = True
-                await self._say(f"⚠️ {len(failures)} part(s) of the answer could not be delivered ({failures[-1][:200]}); the full text follows as a file.")
+                await self._say(
+                    f"⚠️ {len(failures)} part(s) of the answer could not be delivered ({redact(failures[-1][:200])}); "
+                    "the complete answer follows as a file (the parts above are repeated in it)."
+                )
         try:
             out = workspace / "answer.md"
             out.write_text(final, encoding="utf-8")

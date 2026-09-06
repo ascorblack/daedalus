@@ -61,6 +61,10 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
         # and the same tool call with the same arguments is refused after a few repeats.
         resilience_post_tool_empty_nudge_enabled=True,
         loop_guard_enabled=True,
+        # The core's defaults (3 identical calls, 1 nudge) were tuned for short runs; a 200-iteration
+        # run legitimately re-runs the same test command or re-reads the same file many times.
+        loop_guard_identical_tool_limit=30,
+        loop_guard_nudge_max=3,
     )
 
 
