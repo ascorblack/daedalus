@@ -55,6 +55,9 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
         agent_thinking_default=thinking,
         # Summaries must not be cut mid-JSON: give the summariser room for a full sentence pair.
         compaction_summary_max_output_tokens=1024,
+        # A summariser writes sentences whatever it is given: a small tool exchange comes back
+        # no smaller, so units under this size are kept as they are instead of paid for.
+        compaction_summary_min_unit_tokens=400,
         # Long tasks are the point: no per-run tool-call cap; spend and iterations bound the run.
         leader_tool_call_soft_cap=0,
         compaction_protect_first_user_turn=True,
