@@ -60,7 +60,7 @@ def strip_tags(markup: str) -> str:
     text = re.sub(r"</(p|li|details|summary|blockquote|h[1-6]|pre|tr)>", "\n", markup)
     text = re.sub(r"<br\s*/?>", "\n", text)
     text = _TAG_RE.sub("", text)
-    return html.unescape(re.sub(r"\n{3,}", "\n\n", text)).strip()[:4000]
+    return html.unescape(re.sub(r"\n{3,}", "\n\n", text)).strip()[:4000] or "(status)"
 
 
 def split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:

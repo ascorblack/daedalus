@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { api, MessageView, Question, SessionDetail } from "../api";
 import { Status, fmtInt, fmtUsd } from "../components";
@@ -153,26 +153,40 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
     const url = api.streamUrl(id);
     const headers = api.authHeaders();
     let stop = false;
+    const controller = new AbortController();
     (async () => {
-      const res = await fetch(url, { headers });
-      if (!res.body) return;
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+      let backoff = 1000;
       while (!stop) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
-        for (const frame of frames) {
-          const event = /^event: (.*)$/m.exec(frame)?.[1];
-          const data = /^data: (.*)$/m.exec(frame)?.[1];
-          if (!event || !data) continue;
-          handle(event, JSON.parse(data));
+        try {
+          const res = await fetch(url, { headers, signal: controller.signal });
+          if (!res.body) return;
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          backoff = 1000;
+          while (!stop) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const frames = buffer.split("\n\n");
+            buffer = frames.pop() ?? "";
+            for (const frame of frames) {
+              const event = /^event: (.*)$/m.exec(frame)?.[1];
+              const data = /^data: (.*)$/m.exec(frame)?.[1];
+              if (!event || !data) continue;
+              handle(event, JSON.parse(data));
+            }
+          }
+        } catch {
+          /* aborted or dropped: reconnect below */
         }
+        if (stop) return;
+        // The stream ended (server restart, proxy timeout): re-read the transcript and reconnect.
+        load();
+        await new Promise((r) => setTimeout(r, backoff));
+        backoff = Math.min(backoff * 2, 15000);
       }
-    })().catch(() => undefined);
+    })();
     function handle(event: string, p: Record<string, any>) {
       if (event === "message_start") setLive((s) => ({ ...s, text: "", thinking: "", startedAt: s.startedAt ?? Date.now() }));
       else if (event === "content_block_delta") {
@@ -192,6 +206,7 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
     }
     return () => {
       stop = true;
+      controller.abort();
     };
   }, [id, load]);
 
@@ -359,7 +374,9 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
         {view === "chat" && (
           <div className="timeline">
             {turns.map((t, i) => (
-              <TurnView key={t.key} turn={t} live={busy && i === turns.length - 1} onThoughts={() => setSheet(t)} />
+              <Safe key={t.key}>
+                <TurnView turn={t} live={busy && i === turns.length - 1} onThoughts={() => setSheet(t)} />
+              </Safe>
             ))}
             {detail?.pending && <QuestionCard sessionId={id} questions={detail.pending.questions} onDone={load} toast={toast} />}
           </div>
@@ -418,6 +435,16 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
       {sheet && <ThoughtsSheet turn={sheet} onClose={() => setSheet(null)} />}
     </div>
   );
+}
+
+class Safe extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  render() {
+    return this.state.failed ? <div className="note">this message could not be rendered</div> : this.props.children;
+  }
 }
 
 function shortModel(name?: string): string {

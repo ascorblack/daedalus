@@ -88,9 +88,9 @@ class ModelConfig(BaseModel):
     reasoning_effort: ReasoningEffort = "medium"
     chain: list[str] = Field(default_factory=lambda: ["deepseek", "openrouter"])
     """Fallback order of provider ids; the first entry is the primary."""
-    context_window: int = 128_000
+    context_window: int = Field(default=128_000, ge=8_000, le=4_000_000)
     """Tokens of history the run may hold before compaction; set below the model's real window to keep runs cheap."""
-    max_output_tokens: int = 32_000
+    max_output_tokens: int = Field(default=32_000, ge=1_024, le=1_000_000)
     """Cap on one model reply (``max_tokens``); thinking tokens count against it."""
 
 
@@ -212,7 +212,12 @@ class RuntimeConfig(BaseModel):
             config.save(path)
             return config
         with path.open("rb") as fh:
-            return cls.model_validate(tomllib.load(fh))
+            raw = tomllib.load(fh)
+        if _migrate(raw):
+            config = cls.model_validate(raw)
+            config.save(path)
+            return config
+        return cls.model_validate(raw)
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,6 +225,21 @@ class RuntimeConfig(BaseModel):
         with tmp.open("wb") as fh:
             tomli_w.dump(self.model_dump(mode="json"), fh)
         tmp.replace(path)
+
+
+def _migrate(raw: dict[str, Any]) -> bool:
+    """Rewrite config shapes older versions wrote; returns True when something changed."""
+    changed = False
+    for provider in (raw.get("providers") or {}).values():
+        pricing = provider.get("pricing") if isinstance(provider, dict) else None
+        if not isinstance(pricing, dict):
+            continue
+        for model, entry in list(pricing.items()):
+            if isinstance(entry, dict) and "off_peak_utc" in entry and "peak_utc" not in entry:
+                # The seeded DeepSeek tables used an off-peak window; the built-in schedule replaces them.
+                del pricing[model]
+                changed = True
+    return changed
 
 
 __all__ = [

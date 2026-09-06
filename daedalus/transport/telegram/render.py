@@ -250,17 +250,20 @@ class RunRenderer:
                 line += f": {v.progress_line}"
             parts.append(f"<p>{_esc(line)}</p>")
         if v.tools:
-            items = "".join(f"<li>{_esc(t)}</li>" for t in v.tools[-40:])
-            if len(v.tools) > 40:
-                items = f"<li>… {len(v.tools) - 40} earlier</li>" + items
+            shown = v.tools[-40:]
+            while len(shown) > 3 and sum(len(t) for t in shown) > 7000:
+                shown = shown[1:]
+            items = "".join(f"<li>{_esc(t[:200])}</li>" for t in shown)
+            if len(v.tools) > len(shown):
+                items = f"<li>… {len(v.tools) - len(shown)} earlier</li>" + items
             open_attr = " open" if v.state in ("running", "awaiting", "compacting") and len(v.tools) <= 6 else ""
             parts.append(f"<details{open_attr}><summary>{len(v.tools)} tool call{'s' if len(v.tools) != 1 else ''}</summary><ul>{items}</ul></details>")
         if v.narration and v.verbosity >= 1:
             notes = v.narration[-3:] if v.state in ("running", "awaiting") else v.narration[-1:]
-            parts.append("<blockquote>" + "<br/>".join(_esc(n) for n in notes) + "</blockquote>")
+            parts.append("<blockquote>" + "<br/>".join(_esc(n[:400]) for n in notes) + "</blockquote>")
         if v.changed_files:
-            parts.append("<p>files: " + ", ".join(f"<code>{_esc(f)}</code>" for f in sorted(v.changed_files)[:20]) + "</p>")
-        return "".join(parts)[:12_000]
+            parts.append("<p>files: " + ", ".join(f"<code>{_esc(f[:120])}</code>" for f in sorted(v.changed_files)[:20]) + "</p>")
+        return "".join(parts)
 
     def render_status(self) -> str:
         """Plain-text status (the fallback when rich editing is unavailable, and for tests)."""

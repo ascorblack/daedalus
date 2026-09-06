@@ -27,6 +27,7 @@ from protocore.contracts.types import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from protocore.runtime.context.compaction import CompactionState
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 from protocore.runtime.live_control import new_queued_prompt
@@ -91,6 +92,8 @@ class SessionState:
     """Per-session override; ``None`` follows the configured model window."""
     extra_notes: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    """Serialises run starts against history rewrites (compaction)."""
 
     @property
     def running(self) -> bool:
@@ -346,18 +349,37 @@ class SessionManager:
         return state
 
     async def compact(self, session_id: str, instructions: str = "") -> str:
-        """Replace the whole history with one model-written summary; returns the summary."""
+        """Replace the whole history with one model-written summary; returns the summary.
+
+        Holds the session lock for the whole operation (including the summarising call) so
+        no run can start against the history while it is being rewritten. The replaced
+        transcript is kept in the workspace as ``.history-<timestamp>.jsonl``.
+        """
         state = await self.get_state(session_id)
         if state is None:
             raise KeyError(session_id)
+        async with state.lock:
+            return await self._compact_locked(state, instructions)
+
+    async def _compact_locked(self, state: SessionState, instructions: str) -> str:
+        session_id = state.session.id
+        if state.running and state.engine is not None and state.engine.is_terminal and state.task is not None:
+            # The loop has settled; only bookkeeping remains.
+            await asyncio.gather(asyncio.shield(state.task), return_exceptions=True)
         if state.running or state.pending is not None:
             raise RuntimeError("the session is busy; stop the run (or answer the question) first")
+        exceeded = self.budget_exceeded()
+        if exceeded:
+            raise RuntimeError(f"daily budget exceeded ({exceeded}); compaction is a paid call")
         history = list(state.engine.history) if state.engine is not None else list(
             await self.sessions.list_messages(session_id, TENANT, limit=10_000)
         )
         if not history:
             raise RuntimeError("nothing to compact")
-        provider, model = self.providers.rungs_for(self.config)[0]
+        rungs = self.providers.rungs_for(self.config)
+        if not rungs:
+            raise RuntimeError("no model provider is configured")
+        provider, model = rungs[0]
         language = self.config.answer_language if self.config.answer_language != "auto" else operator_language(history)
         prompt = COMPACT_PROMPT.format(language=language) + (
             f"\n\nThe operator asks to focus on: {instructions.strip()}" if instructions.strip() else ""
@@ -368,12 +390,19 @@ class SessionManager:
             max_tokens=6000,
             temperature=0.2,
             extra={"enable_thinking": False},
-            observability=LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, call_purpose="compaction", call_category="compaction"),
+            observability=LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, run_id=state.run_id, call_purpose="compaction", call_category="compaction"),
         )
         response = await provider.complete_text(request)
         summary = "".join(b.text for b in response.message.content_blocks if isinstance(b, TextBlock)).strip()
         if not summary:
             raise RuntimeError("the model returned an empty summary")
+        if state.running or state.pending is not None:  # a run resumed from a snapshot meanwhile
+            raise RuntimeError("the session became busy during compaction; nothing was changed")
+        backup = state.workspace / f".history-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.jsonl"
+        try:
+            backup.write_text("\n".join(m.model_dump_json() for m in history) + "\n", encoding="utf-8")
+        except OSError:
+            logger.warning("could not write the history backup %s", backup, exc_info=True)
         message = Message(
             role=MessageRole.user,
             content_blocks=[TextBlock(text=f"<compacted-turn id='manual'>{summary}</compacted-turn>")],
@@ -383,8 +412,13 @@ class SessionManager:
             },
         )
         if state.engine is not None:
-            state.engine.history = [message]
-            state.engine.compact_checkpoint = None  # type: ignore[attr-defined]
+            engine = state.engine
+            engine.history = [message]
+            engine.compact_checkpoint = None  # type: ignore[attr-defined]
+            # The core gates automatic compaction on the last measured prompt size; that
+            # measurement described the history that no longer exists.
+            engine.last_observed_prompt_tokens = 0
+            engine.compaction_state = CompactionState()
         await self.sessions.replace_messages(session_id, TENANT, [message])
         return summary
 
@@ -621,6 +655,12 @@ class SessionManager:
         engine.persist_session_history = persist_session_history  # type: ignore[attr-defined]
 
     async def _start_run(
+        self, state: SessionState, message: Message | None, *, continue_turn: bool = False
+    ) -> str:
+        async with state.lock:
+            return await self._start_run_locked(state, message, continue_turn=continue_turn)
+
+    async def _start_run_locked(
         self, state: SessionState, message: Message | None, *, continue_turn: bool = False
     ) -> str:
         if state.engine is None or not continue_turn:

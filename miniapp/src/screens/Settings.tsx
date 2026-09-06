@@ -77,11 +77,11 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <div className="grid2">
           <div>
             <label className="field">Context window (tokens)</label>
-            <input className="field" type="number" step={1000} defaultValue={s.model.context_window} onBlur={(e) => Number(e.target.value) !== s.model.context_window && save({ model: { ...s.model, context_window: Number(e.target.value) } })} />
+            <input className="field" type="number" step={1000} min={8000} defaultValue={s.model.context_window} onBlur={(e) => Number(e.target.value) >= 8000 && Number(e.target.value) !== s.model.context_window && save({ model: { ...s.model, context_window: Number(e.target.value) } })} />
           </div>
           <div>
             <label className="field">Max output per reply</label>
-            <input className="field" type="number" step={1000} defaultValue={s.model.max_output_tokens} onBlur={(e) => Number(e.target.value) !== s.model.max_output_tokens && save({ model: { ...s.model, max_output_tokens: Number(e.target.value) } })} />
+            <input className="field" type="number" step={1000} min={1024} defaultValue={s.model.max_output_tokens} onBlur={(e) => Number(e.target.value) >= 1024 && Number(e.target.value) !== s.model.max_output_tokens && save({ model: { ...s.model, max_output_tokens: Number(e.target.value) } })} />
           </div>
         </div>
         <div className="sub" style={{ marginTop: 6 }}>The window bounds how much history a run keeps before compaction (the model itself may allow more); the output cap is the max_tokens of one reply, thinking included.</div>

@@ -234,6 +234,7 @@ class TelegramFront:
         self._renderers: dict[str, RunRenderer] = {}
         self._buffers: dict[tuple[int, int], InboundBuffer] = {}
         self._question_state: dict[str, dict[str, Any]] = {}
+        self._compact_focus: dict[str, str] = {}
         self.operator_hooks: dict[str, Callable[..., Awaitable[str]]] = {}
         """rebuild / rollback / panic, installed by the application."""
         self.command_hooks: dict[str, Callable[[Message, CommandObject], Awaitable[None]]] = {}
@@ -461,18 +462,55 @@ class TelegramFront:
         if state is None or (self._is_general(message) and message.chat.type != "private"):
             await message.answer("Use /compact inside a session topic (or the private chat).")
             return
-        note = await message.answer("🗜 Compacting the history…")
-        try:
-            summary = await self.manager.compact(state.session.id, command.args or "")
-        except Exception as exc:  # noqa: BLE001
-            await note.edit_text(f"⚠️ compact failed: {exc}")
+        count = len(await self.manager.sessions.list_messages(state.session.id, "daedalus", limit=10_000))
+        if count == 0:
+            await message.answer("Nothing to compact yet.")
             return
-        outbox = TelegramOutbox(self.bot, message.chat.id, message.message_thread_id if message.is_topic_message else None)
-        await note.delete()
-        await outbox.send_html(
-            "<p><b>🗜 History compacted.</b> The session continues from this summary.</p>"
-            f"<details><summary>Summary</summary>{markdown_to_html(summary)}</details>"
+        focus = (command.args or "").strip()
+        self._compact_focus[state.session.id] = focus
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=f"🗜 Replace {count} messages with a summary", callback_data=f"cp:{state.session.id}:go")],
+                [InlineKeyboardButton(text="Cancel", callback_data=f"cp:{state.session.id}:cancel")],
+            ]
         )
+        await message.answer(
+            "Compact the history? The agent keeps only a model-written summary; the full transcript is saved "
+            "in the workspace as .history-<time>.jsonl." + (f"\nFocus: {focus}" if focus else ""),
+            reply_markup=keyboard,
+        )
+
+    async def _on_compact_decision(self, query: CallbackQuery, data: list[str]) -> None:
+        if len(data) != 3:
+            await query.answer("stale button")
+            return
+        _, session_id, action = data
+        focus = self._compact_focus.pop(session_id, "")
+        if action != "go":
+            await query.answer("cancelled")
+            if query.message is not None:
+                await query.message.edit_text("Compact cancelled.", reply_markup=None)
+            return
+        await query.answer("compacting…")
+        if query.message is not None:
+            await query.message.edit_text("🗜 Compacting the history…", reply_markup=None)
+        try:
+            summary = await self.manager.compact(session_id, focus)
+        except Exception as exc:  # noqa: BLE001
+            if query.message is not None:
+                await query.message.edit_text(f"⚠️ compact failed: {exc}")
+            return
+        outbox = await self.outbox_for_session(session_id)
+        if query.message is not None:
+            try:
+                await query.message.delete()
+            except TelegramBadRequest:
+                pass
+        if outbox is not None:
+            await outbox.send_html(
+                "<p><b>🗜 History compacted.</b> The session continues from this summary.</p>"
+                f"<details><summary>Summary</summary>{markdown_to_html(summary)}</details>"
+            )
 
     async def cmd_prompt(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
@@ -899,6 +937,9 @@ class TelegramFront:
             return
         if data[0] == "cu":
             await self._on_cleanup_decision(query, data)
+            return
+        if data[0] == "cp":
+            await self._on_compact_decision(query, data)
             return
         hook = self.callback_hooks.get(data[0])
         if hook is not None:

@@ -63,10 +63,8 @@ class ProviderEndpoint:
     def pricing_for(self, model: str) -> ModelPricing | None:
         if model in self.pricing:
             return self.pricing[model]
-        for key, value in self.pricing.items():
-            if model.startswith(key):
-                return value
-        return None
+        best = max((key for key in self.pricing if model.startswith(key)), key=len, default=None)
+        return self.pricing[best] if best is not None else None
 
 
 @dataclass(slots=True)

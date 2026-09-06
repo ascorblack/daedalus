@@ -2,12 +2,14 @@
 
 The built-in table is the published DeepSeek list; ``[providers.<id>.pricing.<model>]``
 in the config overrides or extends it. Off-peak is everything outside the peak
-windows; DeepSeek's are 01:00-04:00 and 06:00-10:00 UTC on weekdays.
+windows. DeepSeek's schedule (api-docs.deepseek.com, "Models & Pricing", read 2026-09-06):
+"Off-peak rates are half of the peak rates. Peak hours are 01:00-04:00 and 06:00-10:00 UTC,
+Monday through Friday (all other hours are off-peak)."
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -57,6 +59,13 @@ class ModelPricing:
         peak = entry.get("peak_utc") or ()
         if isinstance(peak, str):
             peak = (peak,) if peak else ()
+        weekdays_only = bool(entry.get("peak_weekdays_only", True))
+        legacy = str(entry.get("off_peak_utc") or "")
+        if not peak and "-" in legacy:
+            # Older entries named the off-peak window; peak is its complement, every day.
+            start, _, end = legacy.partition("-")
+            peak = (f"{end}-{start}",)
+            weekdays_only = False
         return cls(
             input=float(entry.get("input", 0.0)),
             output=float(entry.get("output", 0.0)),
@@ -65,7 +74,7 @@ class ModelPricing:
             output_off_peak=_opt(entry.get("output_off_peak")),
             cache_hit_off_peak=_opt(entry.get("cache_hit_off_peak")),
             peak_utc=tuple(str(w) for w in peak),
-            peak_weekdays_only=bool(entry.get("peak_weekdays_only", True)),
+            peak_weekdays_only=weekdays_only,
         )
 
 

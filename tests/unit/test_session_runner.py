@@ -253,3 +253,41 @@ def test_transcript_for_summary_clips_tool_results() -> None:
     text = transcript_for_summary(history, result_chars=100)
     assert "[user] do it" in text and "[tool call] Exec" in text and "[assistant] done" in text
     assert " … " in text and len(text) < 1000
+
+
+async def test_compact_replaces_history_with_summary_and_keeps_a_backup(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([{"text": "hi"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("c")
+    waiter = asyncio.create_task(_wait_finished(manager))
+    await manager.submit(state.session.id, "hello there")
+    await waiter
+
+    async def fake_complete(request):  # type: ignore[no-untyped-def]
+        from protocore.contracts.llm import LLMResponse
+        from protocore.contracts.types import Message, MessageRole, StopReason, TextBlock
+
+        assert "hello there" in request.messages[0].content_blocks[0].text
+        return LLMResponse(message=Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="**Summary** of the chat")]), stop_reason=StopReason.end_turn)
+
+    provider.complete_text = fake_complete  # type: ignore[attr-defined]
+    summary = await manager.compact(state.session.id)
+    assert summary.startswith("**Summary**")
+    messages = await manager.sessions.list_messages(state.session.id, "daedalus", limit=100)
+    assert len(messages) == 1 and messages[0].metadata.get("protocore.compaction_summary") is True
+    assert "<compacted-turn" in messages[0].content_blocks[0].text
+    backups = list(state.workspace.glob(".history-*.jsonl"))
+    assert len(backups) == 1 and "hello there" in backups[0].read_text()
+    assert state.engine is not None and len(state.engine.history) == 1 and state.engine.last_observed_prompt_tokens == 0
+    await manager.close()
+
+
+async def test_compact_refuses_while_running(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([{"text": "hi"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("busy")
+    state.task = asyncio.create_task(asyncio.sleep(5))
+    with pytest.raises(RuntimeError):
+        await manager.compact(state.session.id)
+    state.task.cancel()
+    await manager.close()

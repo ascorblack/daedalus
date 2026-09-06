@@ -36,10 +36,11 @@ class EngineDeps:
 
 
 def runtime_constants(config: RuntimeConfig, *, context_window: int) -> Any:
+    context_window = max(8_000, int(context_window))
     output_cap = max(1024, min(config.model.max_output_tokens, context_window))
     return default_runtime_constants(
         model_context_window=context_window,
-        llm_output_max_tokens_ratio=output_cap / context_window,
+        llm_output_max_tokens_ratio=min(1.0, max(0.01, output_cap / context_window)),
         max_iterations=config.limits.max_iterations,
         tool_timeout_seconds=int(config.limits.tool_timeout_seconds),
         steer_follow_up_enabled=True,

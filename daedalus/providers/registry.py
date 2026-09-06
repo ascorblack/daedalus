@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+
 import httpx
 
 from daedalus.config import ProviderConfig, RuntimeConfig, Settings

@@ -187,3 +187,36 @@ def test_builtin_pricing_and_peak_windows() -> None:
     assert price.cost(usage, now=weekend) == 0.22
     override = pricing_table("deepseek", {"deepseek-v4-flash": {"input": 1.0, "output": 2.0, "cache_hit": 0.1}})
     assert override["deepseek-v4-flash"].cost(usage, now=peak) == 1.0
+
+
+def test_legacy_off_peak_pricing_entry_still_prices_off_peak() -> None:
+    from datetime import UTC, datetime
+
+    from daedalus.providers.pricing import ModelPricing
+
+    legacy = ModelPricing.from_entry({"input": 0.44, "output": 1.32, "cache_hit": 0.014, "input_off_peak": 0.22, "off_peak_utc": "16:30-00:30"})
+    usage = {"input_tokens": 1_000_000}
+    assert legacy.cost(usage, now=datetime(2026, 9, 5, 20, 0, tzinfo=UTC)) == 0.22
+    assert legacy.cost(usage, now=datetime(2026, 9, 5, 12, 0, tzinfo=UTC)) == 0.44
+
+
+def test_pricing_prefers_the_longest_prefix_and_config_overrides() -> None:
+    from daedalus.providers.openai_compat import ProviderEndpoint
+    from daedalus.providers.pricing import pricing_table
+
+    table = pricing_table("deepseek", {"deepseek-v4": {"input": 9.0, "output": 9.0, "cache_hit": 9.0}})
+    endpoint = ProviderEndpoint(id="d", kind="deepseek", base_url="x", pricing=table)
+    assert endpoint.pricing_for("deepseek-v4-flash-2027").input == 0.44  # built-in longer prefix wins
+    assert endpoint.pricing_for("deepseek-v4-ultra").input == 9.0
+
+
+def test_dsml_guard_keeps_prose_after_the_block_and_marker_mentions() -> None:
+    from daedalus.providers.dsml import DsmlGuard, parse_dsml
+
+    text = 'before <|DSML|tool_calls><|DSML|invoke name="t"><|DSML|parameter name="n">7</|DSML|parameter><|DSML|parameter name="j">{"a":1}</|DSML|parameter></|DSML|invoke></|DSML|tool_calls> after'
+    prose, calls = parse_dsml(text)
+    assert prose == "before\n\nafter" and calls[0].arguments == {"n": "7", "j": {"a": 1}}
+    g = DsmlGuard()
+    shown = g.feed("the marker <|DS") + g.feed("ML| appears in prose only")
+    rest, calls = g.finish()
+    assert shown + rest == "the marker <|DSML| appears in prose only" and calls == []

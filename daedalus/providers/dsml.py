@@ -14,6 +14,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+HOLD_LIMIT = 4000
+"""Characters buffered after a marker before deciding it was prose, not a call block."""
+
 _MARKERS = ("<｜｜DSML｜｜", "<｜DSML｜", "<|DSML|", "</｜｜DSML｜｜", "</｜DSML｜", "</|DSML|")
 _CANON_OPEN = "<DSML:"
 _CANON_CLOSE = "</DSML:"
@@ -50,17 +53,20 @@ def parse_dsml(text: str) -> tuple[str, list[RecoveredCall]]:
         for param in _PARAM_RE.finditer(invoke.group(2)):
             pname, attrs, raw = param.group(1), param.group(2), param.group(3)
             value = raw.strip()
-            if 'string="true"' in attrs:
-                arguments[pname] = value
-            else:
+            if 'string="true"' not in attrs and (value[:1] in "{[" or value in ("true", "false", "null")):
                 try:
                     arguments[pname] = json.loads(value)
+                    continue
                 except json.JSONDecodeError:
-                    arguments[pname] = value
+                    pass
+            arguments[pname] = value
         calls.append(RecoveredCall(name=invoke.group(1), arguments=arguments))
     if not calls:
         return text, []
-    prose = canon[: block.start()].rstrip()
+    prose = (text[: block.start()] if text[: block.start()] == canon[: block.start()] else canon[: block.start()]).rstrip()
+    trailing = canon[block.end() :].strip()
+    if trailing:
+        prose = f"{prose}\n\n{trailing}" if prose else trailing
     return prose, calls
 
 
@@ -76,6 +82,11 @@ class DsmlGuard:
         """Return the part of ``text`` that can be shown now."""
         if self.holding:
             self.held += text
+            if len(self.held) > HOLD_LIMIT and "tool_calls" not in _canonical(self.held[:200]):
+                # A mention of the marker in prose, not a call block: stop buffering.
+                self.holding = False
+                held, self.held = self.held, ""
+                return held
             return ""
         buffer = self._tail + text
         self._tail = ""
