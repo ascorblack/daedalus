@@ -195,7 +195,15 @@ class SqliteSessionStore(ISessionStore):
         Works up from a watermark in ``kv`` in batches, each in its own short transaction, so a
         large transcript is indexed without holding the connection for the whole pass.
         """
-        watermark = int(await self._db.kv_get("transcript_fts_watermark", 0) or 0)
+        watermark_row = await self._db.kv_get("transcript_fts_watermark", None)
+        counts = await self._db.fetchone("SELECT (SELECT count(*) FROM transcript_fts) fts, (SELECT count(*) FROM transcript) rows")
+        if watermark_row is None or (counts is not None and int(counts["fts"]) > int(counts["rows"])):
+            # No watermark yet, or more index rows than transcript rows (an older indexer double-counted):
+            # the index is derived data, so rebuild it from the transcript rather than reason about it.
+            await self._db.execute("DELETE FROM transcript_fts")
+            await self._db.kv_set("transcript_fts_watermark", 0)
+            watermark_row = 0
+        watermark = int(watermark_row or 0)
         indexed = 0
         while True:
             rows = await self._db.fetchall(

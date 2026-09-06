@@ -38,7 +38,7 @@ from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import Attachment
 from daedalus.security import redact
-from daedalus.transport.telegram.front import TelegramOutbox
+from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
 
 if TYPE_CHECKING:
@@ -340,6 +340,7 @@ def message_view(message: Message) -> dict[str, Any]:
     headline = ""
     if message.role is MessageRole.assistant:
         body, headline = split_headline(body)
+        body = redact.redact(body)
     archived = message.metadata.get("daedalus.archived") if isinstance(message.metadata, dict) else None
     return {
         "role": message.role.value,
@@ -391,7 +392,12 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def new_session(body: NewSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         front = app.front
         if front is not None:
-            state, _binding = await front.create_session_topic(body.title)
+            try:
+                state, _binding = await front.create_session_topic(body.title)
+            except TelegramBusy as exc:
+                raise HTTPException(429, f"Telegram asks to wait {exc.retry_after}s before creating another topic (session {exc.session_id} exists without a topic)") from exc
+            except TelegramRefused as exc:
+                raise HTTPException(502, f"Telegram refused to create the topic: {exc}") from exc
         else:
             state = await manager.create_session(body.title)
         if body.prompt:

@@ -231,7 +231,7 @@ class RunRenderer:
     async def push_draft(self) -> None:
         """Send the accumulated answer text as a live draft (plain text, capped at the message limit)."""
         v = self.view
-        text = split_headline(v.text_buffer.strip())[0][:3800]
+        text = redact(split_headline(v.text_buffer.strip())[0])[:3800]
         if not self.streaming or not text or text == v.draft_sent or not v.draft_id:
             return
         try:
@@ -377,6 +377,7 @@ class RunRenderer:
         v = self.view
         v.state = status
         final, _headline = split_headline(v.text_buffer.strip())
+        final = redact(final)  # the model may quote a secret the operator pasted; Telegram must not receive it
         v.text_buffer = ""
         if quiet:
             v.final_sent = True

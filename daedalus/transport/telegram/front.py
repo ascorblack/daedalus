@@ -19,7 +19,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     CallbackQuery,
@@ -130,6 +130,23 @@ STALE_NOTICE_DELAY_SECONDS = 3.0
 """Stale messages delivered in a burst after a restart are answered with one notice per chat."""
 
 assert set(RUN_REACTIONS.values()) <= FREE_REACTIONS, "a run reaction is not one Telegram lets bots use"
+
+
+class TelegramBusy(RuntimeError):
+    """Telegram asked for a pause; ``retry_after`` seconds. The session (if any) was created without its topic."""
+
+    def __init__(self, retry_after: int, session_id: str = "") -> None:
+        super().__init__(f"Telegram asks to wait {retry_after}s")
+        self.retry_after = retry_after
+        self.session_id = session_id
+
+
+class TelegramRefused(RuntimeError):
+    """Telegram rejected the call outright."""
+
+    def __init__(self, reason: str, session_id: str = "") -> None:
+        super().__init__(reason)
+        self.session_id = session_id
 
 
 class TelegramOutbox(Outbox):
@@ -402,13 +419,24 @@ class TelegramFront:
         state = await self.manager.create_session(title, metadata=metadata)
         forum = (chat_id or self.config.telegram.forum_chat_id) if topic else 0
         if forum:
-            topic = await self.bot.create_forum_topic(forum, title[:128])
+            try:
+                topic = await tg_call(self.bot.create_forum_topic, forum, title[:128], attempts=2, flood_chat=forum)
+            except TelegramRetryAfter as exc:
+                # The session exists without a topic; it is reachable from the Mini App and gets a topic later.
+                raise TelegramBusy(int(exc.retry_after), state.session.id) from exc
+            except TelegramAPIError as exc:
+                raise TelegramRefused(str(exc), state.session.id) from exc
             binding = await self.bind_topic(forum, topic.message_thread_id, state.session.id, title)
-            await self.bot.send_message(
-                forum,
-                f"Session {state.session.id} — {title}\nworkspace: {state.workspace}",
-                message_thread_id=topic.message_thread_id,
-            )
+            try:
+                await tg_call(
+                    self.bot.send_message,
+                    forum,
+                    f"Session {state.session.id} — {title}\nworkspace: {state.workspace}",
+                    message_thread_id=topic.message_thread_id,
+                    flood_chat=forum,
+                )
+            except Exception:  # noqa: BLE001 — the banner is cosmetic
+                logger.warning("could not post the session banner", exc_info=True)
         else:
             binding = await self.bind_topic(self.settings.owner_user_id, 0, state.session.id, title)
         return state, binding
