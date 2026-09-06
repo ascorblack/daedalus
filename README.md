@@ -19,7 +19,8 @@ core; the copy it runs on is [protocore-exp](https://github.com/ascorblack/proto
   the answer also streams as a live draft (with a Stop button); everywhere a status message
   shows the run's vitals with the tool log folded into a collapsible block.
 - **Mini App.** A Telegram Mini App (and plain browser page) with the roster of sessions,
-  live transcripts, change proposals with diffs, scheduled tasks, usage and settings.
+  live transcripts (kept in full even after the model's context is compacted), change
+  proposals with diffs, scheduled tasks, usage and settings.
 - **Self-development.** The agent edits its host code or its core in a git worktree, opens a
   pull request, and you approve or reject it (with a reason) in chat. After the merge the
   supervisor pulls, runs preflight checks and restarts; a bad build rolls back on its own.
@@ -79,7 +80,7 @@ uv run pytest -q                                 # tests
 | `/compact [focus]` | replace the session history with a model-written summary (shown collapsed in the Mini App) |
 | `/prompt` | show the working rules of the system prompt (edit them in the Mini App → Settings) |
 | `/sessions`, `/status` | list sessions; what is running |
-| `/model [provider/]name`, `/thinking on\|off\|low\|medium\|high` | model settings (default in General, per session in a topic) |
+| `/model [provider/]name\|default`, `/thinking on\|off\|low\|medium\|high` | model settings (default in General, per session in a topic; the Mini App chat has a model picker too) |
 | `/usage`, `/balance` | spend today and per session; provider balances |
 | `/schedules`, `/schedule run\|on\|off\|delete <id>` | scheduled tasks |
 | `/approval manual\|auto`, `/verbosity 0\|1\|2` | self-change approval mode; chat detail |
