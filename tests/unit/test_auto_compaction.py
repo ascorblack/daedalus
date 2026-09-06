@@ -110,3 +110,40 @@ def test_identifiers_are_indexed_by_code() -> None:
     for token in ("/srv/state/worktrees/bot", "PR #42", "8765", "https://example.org/x?y=1", "/srv/workspaces/abc/notes.md", "62d62b5f668d"):
         assert f"- {token}" in index, token
     assert "/noise/from/results/only.txt" not in index and "- 2026" not in index
+
+
+async def test_a_stalled_summariser_call_is_retried_then_given_up(settings: Settings, db: Database) -> None:
+    import asyncio
+
+    import pytest
+
+    config = RuntimeConfig()
+    config.compaction.call_timeout_seconds = 10  # the floor; the fake below never returns
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    provider = manager.providers.get(manager.providers.available()[0])
+    calls = 0
+
+    async def stalled(request: Any) -> LLMResponse:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")
+
+    provider.complete_text = stalled  # type: ignore[method-assign]
+    manager.config.compaction.call_timeout_seconds = 10
+    orig = asyncio.wait_for
+
+    async def fast_wait_for(coro: Any, timeout: float) -> Any:  # the test cannot wait ten real seconds twice
+        return await orig(coro, timeout=0.05)
+
+    import daedalus.host.session_runner as sr
+
+    sr.asyncio.wait_for = fast_wait_for  # type: ignore[assignment]
+    try:
+        with pytest.raises(TimeoutError):
+            await manager._summary_call(provider, "m", "prompt", "body", None)  # type: ignore[arg-type]
+    finally:
+        sr.asyncio.wait_for = orig  # type: ignore[assignment]
+    assert calls == 2
+    await manager.close()

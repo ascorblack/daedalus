@@ -592,6 +592,7 @@ class SessionManager:
         summary = ""
         candidate = ""
         problem = ""
+        timeout = self.config.compaction.call_timeout_seconds
         for attempt in range(2 if strict else 1):
             reminder = f"\n\nYour previous attempt was rejected: {problem}. Produce every section, each exactly once, in the given order." if problem else ""
             request = LLMRequest(
@@ -602,7 +603,12 @@ class SessionManager:
                 extra={"enable_thinking": False},
                 observability=observability,
             )
-            response = await provider.complete_text(request)
+            try:
+                response = await asyncio.wait_for(provider.complete_text(request), timeout=timeout)
+            except TimeoutError:
+                # A provider stall must not hold the session: one more try, then the compaction waits for the next run.
+                logger.warning("compaction summariser call exceeded %.0fs; retrying once", timeout)
+                response = await asyncio.wait_for(provider.complete_text(request), timeout=timeout)
             candidate = "".join(b.text for b in response.message.content_blocks if isinstance(b, TextBlock)).strip()
             problem = validate_summary_sections(candidate)
             if not problem:
