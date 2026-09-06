@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,25 @@ from protocore.tools.decorator import tool
 from daedalus.tools._common import clip, error, ok, services_for, tool_config
 
 _warned_missing_bwrap = False
+_bwrap_state: str | None = None
+"""Cached result of :func:`bwrap_status`: "ok", or the reason the sandbox cannot run here."""
+
+
+def bwrap_status() -> str:
+    """Whether bubblewrap can create namespaces in this container (Docker's default seccomp profile forbids it)."""
+    global _bwrap_state
+    if _bwrap_state is not None:
+        return _bwrap_state
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        _bwrap_state = "bwrap is not installed"
+        return _bwrap_state
+    try:
+        probe = subprocess.run([bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "true"], capture_output=True, text=True, timeout=20)
+        _bwrap_state = "ok" if probe.returncode == 0 else f"bwrap cannot create namespaces here: {(probe.stderr or probe.stdout).strip()[:120]} (the container needs cap_add SYS_ADMIN and an unconfined seccomp profile)"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _bwrap_state = f"bwrap probe failed: {type(exc).__name__}"
+    return _bwrap_state
 
 
 def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config: Any) -> tuple[list[str], bool]:
@@ -30,12 +50,13 @@ def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config: Any)
     plain = ["bash", "-lc", command]
     if getattr(exec_config, "sandbox", "off") != "workspace":
         return plain, False
-    bwrap = shutil.which("bwrap")
-    if bwrap is None:
+    status = bwrap_status()
+    if status != "ok":
         if not _warned_missing_bwrap:
-            logging.getLogger(__name__).warning("tools.exec.sandbox=workspace but bwrap is not installed; running unsandboxed")
+            logging.getLogger(__name__).warning("tools.exec.sandbox=workspace but the sandbox is unavailable (%s); running unsandboxed", status)
             _warned_missing_bwrap = True
         return plain, False
+    bwrap = shutil.which("bwrap") or "bwrap"
     argv = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--unshare-pid", "--die-with-parent", "--new-session"]
     writable = [workspace, *[Path(p) for p in getattr(exec_config, "sandbox_extra_writable", [])]]
     if workdir != workspace and workspace not in workdir.parents:

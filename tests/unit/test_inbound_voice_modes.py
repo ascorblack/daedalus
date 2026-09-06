@@ -148,9 +148,10 @@ def test_sandbox_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     argv, sandboxed = shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="off"))
     assert argv == ["bash", "-lc", "ls"] and not sandboxed
     monkeypatch.setattr(shell.shutil, "which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None)
+    monkeypatch.setattr(shell, "_bwrap_state", "ok")
     argv, sandboxed = shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
     assert sandboxed and argv[0] == "/usr/bin/bwrap" and "--unshare-pid" in argv and argv[argv.index("--bind") + 1] == str(ws) and argv[-3:] == ["bash", "-lc", "ls"]
-    monkeypatch.setattr(shell.shutil, "which", lambda name: None)
+    monkeypatch.setattr(shell, "_bwrap_state", "bwrap cannot create namespaces here")
     argv, sandboxed = shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
     assert not sandboxed and argv[0] == "bash"
 
