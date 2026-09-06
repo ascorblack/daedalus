@@ -316,6 +316,10 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE verifications ADD COLUMN sandboxed INTEGER NOT NULL DEFAULT 0;
     """,
+    # 13 — a scheduled task can run inside the session that created it
+    """
+    ALTER TABLE schedules ADD COLUMN run_in TEXT NOT NULL DEFAULT 'new';
+    """,
 ]
 
 

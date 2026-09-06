@@ -257,6 +257,27 @@ class BalanceConfig(BaseModel):
     thresholds_usd: list[float] = Field(default_factory=lambda: [5.0, 2.0, 0.5])
 
 
+class HarnessVendorConfig(BaseModel):
+    """One coding-agent CLI the harness container can run on the operator's subscription."""
+
+    enabled: bool = True
+    model: str = ""
+    """Model passed to the CLI; empty = the CLI's own default."""
+    effort: str = ""
+    """Reasoning effort for CLIs that take one (claude: low…max, codex: low…xhigh); empty = default."""
+    max_turns: int = Field(default=40, ge=1, le=500)
+
+
+class HarnessConfig(BaseModel):
+    """The harness service: the operator's claude / codex / grok subscriptions as delegable workers."""
+
+    url: str = "http://harness:3300"
+    timeout_seconds: float = Field(default=1800.0, ge=30)
+    vendors: dict[str, HarnessVendorConfig] = Field(
+        default_factory=lambda: {"claude": HarnessVendorConfig(), "codex": HarnessVendorConfig(model="gpt-5.6-terra", effort="medium"), "grok": HarnessVendorConfig(model="grok-4.6")}
+    )
+
+
 class SchedulerConfig(BaseModel):
     topic_mode: ScheduleTopicMode = "per_task"
     catch_up_missed: bool = True
@@ -403,6 +424,7 @@ class RuntimeConfig(BaseModel):
             "openrouter.qwen-qwen3.7-flash": ModelPresetConfig(
                 provider="openrouter", model="qwen/qwen3.7-flash", label="Qwen 3.7 Flash (vision)", thinking=False, images=True, max_output_tokens=4_000
             ),
+            "grok.grok-4.6": ModelPresetConfig(provider="grok", model="grok-4.6", label="Grok 4.6 (subscription via harness)", thinking=False, images=False),
         }
     )
     """Named models keyed by id; the operator adds more in the Mini App."""
@@ -411,6 +433,7 @@ class RuntimeConfig(BaseModel):
             "deepseek": ProviderConfig(kind="deepseek", base_url="http://keyproxy:3200/deepseek"),
             "openrouter": ProviderConfig(kind="openrouter", base_url="http://keyproxy:3200/openrouter"),
             "vllm": ProviderConfig(kind="vllm", base_url=""),
+            "grok": ProviderConfig(kind="openai_compat", base_url="http://harness:3300/grok/v1", timeout_seconds=1800.0, pricing={"grok": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
         }
     )
     prompt: PromptConfig = Field(default_factory=PromptConfig)
@@ -421,6 +444,7 @@ class RuntimeConfig(BaseModel):
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     balance: BalanceConfig = Field(default_factory=BalanceConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    harness: HarnessConfig = Field(default_factory=HarnessConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)
     asr: AsrConfig = Field(default_factory=AsrConfig)

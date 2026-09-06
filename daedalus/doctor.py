@@ -58,7 +58,7 @@ class DoctorContext:
 
 async def run_checks(ctx: DoctorContext) -> list[Check]:
     checks: list[Check] = []
-    for probe in (_config, _telegram, _state, _git_probe, _supervisor, _runtime, _providers):
+    for probe in (_config, _telegram, _state, _git_probe, _supervisor, _runtime, _providers, _harness):
         try:
             checks.extend(await probe(ctx))
         except Exception as exc:  # noqa: BLE001 — one broken probe must not hide the others
@@ -289,6 +289,27 @@ async def _runtime(ctx: DoctorContext) -> list[Check]:
         row = await ctx.db.fetchone("SELECT count(*) c FROM deliveries WHERE status = 'failed'")
         if row and row["c"]:
             out.append(Check("deliveries", False, f"{row['c']} answer(s) could not be delivered to Telegram", "warn", "they are in the Mini App transcript and answer.md in the workspace"))
+    return out
+
+
+async def _harness(ctx: DoctorContext) -> list[Check]:
+    cfg = ctx.config.harness
+    enabled = [v for v, c in cfg.vendors.items() if c.enabled]
+    if not enabled:
+        return [Check("harness", True, "no vendors enabled", "ok")]
+    try:
+        async with httpx.AsyncClient(timeout=_timeout(ctx)) as client:
+            response = await client.get(cfg.url.rstrip("/") + "/healthz")
+        data = response.json()
+    except Exception as exc:  # noqa: BLE001
+        return [Check("harness", False, f"{cfg.url} unreachable: {type(exc).__name__}", "warn", "start the harness container (deploy/compose.yaml) or disable every vendor in Settings → Tools")]
+    out = [Check("harness", True, f"{cfg.url} → HTTP {response.status_code}", "ok")]
+    vendors = data.get("vendors") or {}
+    for vendor in enabled:
+        st = vendors.get(vendor) or {}
+        usable = bool(st.get("installed")) and bool(st.get("logged_in"))
+        detail = "logged in" if usable else ("not installed in the harness image" if not st.get("installed") else "not logged in")
+        out.append(Check(f"harness {vendor}", usable, detail, "ok" if usable else "warn", f"run `{vendor} login` on the host (the login files are mounted into the harness), or disable the vendor"))
     return out
 
 

@@ -97,6 +97,7 @@ class ScheduleBody(BaseModel):
     model: str | None = None
     kind: str = "agent"
     target_session: str | None = None
+    run_in: str = "new"
 
 
 class InboxReadBody(BaseModel):
@@ -194,6 +195,8 @@ class ProviderPatch(BaseModel):
     api_key: str | None = None
     """Omitted = keep the stored key; "" or null = clear it; any other value = store it."""
     timeout_seconds: float | None = None
+    pricing: dict[str, dict[str, Any]] | None = None
+    """Per-model USD per 1M tokens; a subscription-backed endpoint sets zeros so its runs are metered, not unknown."""
 
 
 class ModelsLookupBody(BaseModel):
@@ -1071,7 +1074,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if scheduler is None:
             raise HTTPException(503, "scheduler is not installed")
         try:
-            return await scheduler.create(name=body.name, prompt=body.prompt, cron=body.cron, run_at=body.run_at, model=body.model, kind=body.kind, target_session=body.target_session)  # type: ignore[attr-defined]
+            return await scheduler.create(name=body.name, prompt=body.prompt, cron=body.cron, run_at=body.run_at, model=body.model, kind=body.kind, target_session=body.target_session, run_in=body.run_in)  # type: ignore[attr-defined]
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 

@@ -53,6 +53,15 @@ providers package. Adding a skill = a directory with SKILL.md under skills/.
 smoke tests) and rolls back a build that fails them.
 """
 
+DELEGATION = """Delegation:
+- Delegate(vendor, task) hands a bounded task to a coding harness on the operator's own \
+subscriptions — claude (Claude Code), codex (OpenAI Codex) or grok (Grok Build). It runs in \
+your workspace with its own tools and loop, so give it a complete brief: goal, constraints, \
+files in play, what 'done' looks like. Prefer it for large multi-file changes, long \
+investigations and independent second opinions; keep small edits and anything that needs \
+your session's context to yourself. Its result is a claim like any other: check it (Verify).
+"""
+
 HISTORY = """Memory of this conversation:
 - When the history grows, older turns are replaced by summaries. Every turn stays in the \
 transcript: HistorySearch finds turns by words, HistoryExpand(from_seq, to_seq) reads them \

@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+RUN_IN = ("new", "self")
+"""Where an agent task runs when it fires: a fresh task session, or the session that created it."""
 KINDS = ("agent", "message", "lazy")
 UNATTENDED_ANSWER = (
     "No operator is available for this unattended run. Continue with your best judgement, "
@@ -49,6 +51,7 @@ class Scheduler:
     def __init__(self, app: Application) -> None:
         self.app = app
         self._active: dict[str, str] = {}  # schedule id -> session id while a run is active
+        self._active_runs: dict[str, str] = {}  # schedule id -> run id, so a session's other runs are not mistaken for the task's
         self._delivering: dict[str, list[int]] = {}  # session id -> lazy note ids folded into a message not yet started
 
     @property
@@ -73,6 +76,8 @@ class Scheduler:
             state = await manager.get_state(row["active_session_id"])
             if state is not None and (state.running or state.pending is not None):
                 self._active[row["id"]] = row["active_session_id"]
+                if row["active_run_id"]:
+                    self._active_runs[row["id"]] = row["active_run_id"]
             else:
                 self._active[row["id"]] = row["active_session_id"]
                 run_status = "completed"
@@ -95,9 +100,16 @@ class Scheduler:
         created_by_session: str | None = None,
         kind: str = "agent",
         target_session: str | None = None,
+        run_in: str = "new",
     ) -> dict[str, Any]:
         if kind not in KINDS:
             raise ValueError(f"kind must be one of {', '.join(KINDS)}")
+        if run_in not in RUN_IN:
+            raise ValueError(f"run_in must be one of {', '.join(RUN_IN)}")
+        if run_in == "self" and kind != "agent":
+            raise ValueError("run_in='self' applies to agent tasks only")
+        if run_in == "self" and not (target_session or created_by_session):
+            raise ValueError("a task that runs in its own session needs that session")
         schedule_id = uuid.uuid4().hex[:8]
         if cron:
             if not croniter.is_valid(cron):
@@ -118,7 +130,14 @@ class Scheduler:
             raise ValueError("a lazy reminder needs the session it belongs to")
         workspace = self.root / f"sched-{schedule_id}"
         copied: list[str] = []
-        if kind == "agent":
+        if kind == "agent" and run_in == "self":
+            manager = self.app.manager
+            owner = await manager.get_state(target_session or created_by_session or "") if manager is not None else None
+            if owner is None:
+                raise ValueError("the session this task should run in does not exist")
+            workspace = owner.workspace
+            copied = [str(Path(f)) for f in files or [] if Path(f).is_file()]
+        elif kind == "agent":
             (workspace / "inbox").mkdir(parents=True, exist_ok=True)
             for source in files or []:
                 src = Path(source)
@@ -128,14 +147,14 @@ class Scheduler:
                     copied.append(str(dst))
         await self.app.db.execute(
             "INSERT INTO schedules(id, name, cron, run_at, prompt, files, model, recurring, enabled, workspace,"
-            " next_run_at, created_by_session, created_at, kind, target_session) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)",
+            " next_run_at, created_by_session, created_at, kind, target_session, run_in) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
             (
                 schedule_id, name, cron, run_at, prompt, json.dumps(copied), model, recurring,
                 str(workspace), next_run.isoformat(), created_by_session, _now().isoformat(), kind,
-                target_session or created_by_session,
+                target_session or created_by_session, run_in,
             ),
         )
-        return {"id": schedule_id, "name": name, "kind": kind, "next_run_at": next_run.isoformat(), "workspace": str(workspace)}
+        return {"id": schedule_id, "name": name, "kind": kind, "run_in": run_in, "next_run_at": next_run.isoformat(), "workspace": str(workspace)}
 
     async def list(self) -> list[dict[str, Any]]:
         rows = await self.app.db.fetchall("SELECT * FROM schedules ORDER BY next_run_at")
@@ -149,6 +168,7 @@ class Scheduler:
             await conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
             await conn.execute("DELETE FROM lazy_notes WHERE schedule_id = ? AND delivered_at IS NULL AND promoted_at IS NULL", (schedule_id,))
         self._active.pop(schedule_id, None)
+        self._active_runs.pop(schedule_id, None)
         return True
 
     async def set_enabled(self, schedule_id: str, enabled: bool) -> None:
@@ -358,6 +378,10 @@ class Scheduler:
         manager = self.app.manager
         front = self.app.front
         assert manager is not None
+        if (schedule.get("run_in") or "new") == "self":
+            fired = await self._fire_in_own_session(schedule)
+            if fired is not None:
+                return fired
         workspace = Path(schedule["workspace"])
         (workspace / "inbox").mkdir(parents=True, exist_ok=True)
         title = f"[cron] {schedule['name']}"
@@ -389,18 +413,52 @@ class Scheduler:
             "in the workspace root describing what was done and anything the next run should know."
         )
         run_id = await manager.submit(state.session.id, prompt, [], as_answer=False, origin="schedule")
-        # Only a run that exists is in flight — and the row remembers it across a restart.
-        self._active[schedule["id"]] = state.session.id
-        await self.app.db.execute("UPDATE schedules SET active_session_id = ?, active_run_id = ? WHERE id = ?", (state.session.id, run_id, schedule["id"]))
+        await self._mark_in_flight(schedule["id"], state.session.id, run_id)
         return state.session.id
+
+    async def _fire_in_own_session(self, schedule: dict[str, Any]) -> str | None:
+        """Run the task as a turn of the session that owns it; None when that session cannot take it now."""
+        manager = self.app.manager
+        assert manager is not None
+        target = schedule.get("target_session") or schedule.get("created_by_session")
+        state = await manager.get_state(target) if target else None
+        if state is None:
+            await self._post("schedule_orphaned", f"'{schedule['name']}' lost its session", "The session it was meant to run in no longer exists; this run starts a task session instead.", severity="warning")
+            return None
+        if state.pending is not None:
+            await self._post("schedule_skipped", f"'{schedule['name']}' skipped", "Its session is waiting for the operator's answer; the next occurrence will try again.", severity="notice", session_id=state.session.id)
+            return state.session.id
+        prompt = schedule["prompt"]
+        files = json.loads(schedule.get("files") or "[]")
+        if files:
+            prompt += "\n\nFiles attached to this task:\n" + "\n".join(f"- {f}" for f in files)
+        if schedule.get("last_summary"):
+            prompt += f"\n\nYour note from the previous run ({schedule.get('last_run_at')}):\n{schedule['last_summary'][:6000]}"
+        prompt += (
+            f"\n\n[scheduled run '{schedule['name']}' in this session; no operator message accompanies it. "
+            "If nothing needs attention, answer in one line. End with a short note for the next run.]"
+        )
+        run_id = await manager.submit(state.session.id, prompt, [], as_answer=False, origin="schedule")
+        await self._mark_in_flight(schedule["id"], state.session.id, run_id)
+        return state.session.id
+
+    async def _mark_in_flight(self, schedule_id: str, session_id: str, run_id: str) -> None:
+        # Only a run that exists is in flight — and the row remembers it across a restart.
+        self._active[schedule_id] = session_id
+        self._active_runs[schedule_id] = run_id
+        await self.app.db.execute("UPDATE schedules SET active_session_id = ?, active_run_id = ? WHERE id = ?", (session_id, run_id, schedule_id))
 
     async def on_run_finished(self, session_id: str, run_id: str, status: str) -> None:
         for schedule_id, sid in list(self._active.items()):
             if sid != session_id:
                 continue
+            expected = self._active_runs.get(schedule_id)
+            if expected and run_id and run_id != expected:
+                continue  # another turn of the same session ended, not the scheduled one
             if status == "awaiting":
                 continue  # the operator still has to answer; the summary is collected when the run ends
             self._active.pop(schedule_id, None)
+            self._active_runs.pop(schedule_id, None)
             row = await self.app.db.fetchone("SELECT * FROM schedules WHERE id = ?", (schedule_id,))
             if row is None:
                 continue
@@ -438,7 +496,7 @@ class Scheduler:
 
     async def _collect_summary(self, schedule: dict[str, Any], session_id: str) -> str:
         summary_file = Path(schedule["workspace"]) / "SUMMARY.md"
-        if summary_file.is_file():
+        if (schedule.get("run_in") or "new") != "self" and summary_file.is_file():
             return summary_file.read_text(encoding="utf-8")[-8000:]
         manager = self.app.manager
         assert manager is not None

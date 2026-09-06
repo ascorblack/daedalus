@@ -168,3 +168,33 @@ async def test_stay_silent_is_refused_outside_unattended_runs(app: Any) -> None:
     ctx = ToolContext(tenant_id="daedalus", run_id="r2", session_id=task.session.id)
     result = await stay_silent().invoke(ctx, {"note": "checked"})
     assert not result.is_error and task.services.extra["silent_run"] == "r2"  # type: ignore[union-attr]
+
+
+async def test_agent_task_can_run_in_its_own_session(app: Any) -> None:
+    scheduler = Scheduler(app)
+    manager = app.manager
+    owner = await manager.create_session("owner")
+    submitted: list[tuple[str, str, str]] = []
+
+    async def fake_submit(session_id: str, text: str, attachments=(), *, steer=False, as_answer=True, origin="operator") -> str:  # type: ignore[no-untyped-def]
+        submitted.append((session_id, text, origin))
+        return "run-self"
+
+    manager.submit = fake_submit  # type: ignore[method-assign]
+    with pytest.raises(ValueError):
+        await scheduler.create(name="x", prompt="p", cron="*/20 * * * *", run_at=None, kind="message", run_in="self")
+    with pytest.raises(ValueError):
+        await scheduler.create(name="x", prompt="p", cron="*/20 * * * *", run_at=None, kind="agent", run_in="self", created_by_session="nope")
+    created = await scheduler.create(name="ping", prompt="check the board", cron="*/20 * * * *", run_at=None, kind="agent", run_in="self", created_by_session=owner.session.id)
+    assert created["run_in"] == "self" and created["workspace"] == str(owner.workspace)
+    row = dict(await app.db.fetchone("SELECT * FROM schedules WHERE id = ?", (created["id"],)))
+    assert await scheduler.fire(row) == owner.session.id
+    assert submitted and submitted[0][0] == owner.session.id and submitted[0][2] == "schedule" and "in this session" in submitted[0][1]
+    assert scheduler._active[created["id"]] == owner.session.id and scheduler._active_runs[created["id"]] == "run-self"
+    # another turn of the same session ending is not the task ending
+    await scheduler.on_run_finished(owner.session.id, "run-operator", "completed")
+    assert created["id"] in scheduler._active
+    await scheduler.on_run_finished(owner.session.id, "run-self", "completed")
+    assert created["id"] not in scheduler._active
+    row = await app.db.fetchone("SELECT active_session_id FROM schedules WHERE id = ?", (created["id"],))
+    assert row["active_session_id"] is None

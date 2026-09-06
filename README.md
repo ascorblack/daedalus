@@ -57,6 +57,11 @@ chmod 600 ../daedalus-secrets/keyproxy.env   # provider keys go HERE, outside th
 docker compose -f deploy/compose.yaml --env-file .env up -d --build
 ```
 
+Your coding-agent subscriptions (Claude Code, OpenAI Codex, Grok Build) can work for the agent
+too: log in with each CLI on the host, and the `harness` container mounts those logins. The agent
+delegates bounded tasks to them (`Delegate`) and Grok also serves as a plain model provider. The
+subscriptions stay inside the harness container; the agent never sees a token.
+
 Provider keys never enter the agent container: a small key-proxy container holds them and injects
 them into upstream calls (`http://keyproxy:3200/deepseek`, `…/openrouter`, `…/openai`, plus any
 `KEYPROXY_UPSTREAM_<NAME>` you add). The proxy also refuses model calls once the daily budget is spent.

@@ -85,6 +85,33 @@ services:
       - daedalus-state:/srv/state:ro
     networks: [keys]
 
+  # The operator's coding-agent subscriptions (claude, codex, grok) as a service. The CLIs and their
+  # logins live here only; the agent hands tasks over HTTP (Delegate) and Grok doubles as a model
+  # provider (http://harness:3300/grok/v1). Login on the host; the login directories are mounted rw
+  # because the CLIs refresh their tokens. DAEDALUS_HARNESS_HOME is the host home that holds them.
+  harness:
+    build:
+      context: harness
+    image: daedalus-harness:local
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      HOME: /home/node
+      HARNESS_PORT: "3300"
+      HARNESS_ROOTS: /srv/workspaces:/srv/state/worktrees
+    volumes:
+      - ${DAEDALUS_HARNESS_HOME:-~}/.claude:/home/node/.claude
+      - ${DAEDALUS_HARNESS_HOME:-~}/.claude.json:/home/node/.claude.json
+      - ${DAEDALUS_HARNESS_HOME:-~}/.codex:/home/node/.codex
+      - ${DAEDALUS_HARNESS_HOME:-~}/.grok:/home/node/.grok
+      - daedalus-workspaces:/srv/workspaces
+      - type: volume
+        source: daedalus-state
+        target: /srv/state/worktrees
+        volume:
+          subpath: worktrees
+    networks: [keys]
+
   # The only container that can talk to Docker. It rebuilds and replaces the agent container when
   # the supervisor drops a trigger file; the agent container itself never sees the docker socket.
   # It needs no network of its own: the daemon does the building and pulling.

@@ -22,7 +22,10 @@ from daedalus.tools._common import error, ok, services_for
         "as a reminder, with no model call — use it for plain alarms ('take the pills', "
         "'call X at 15:00'); 'lazy' is a silent note that is shown together with the "
         "operator's next message in this session ('when I next write, remind me to…') and "
-        "becomes an agent task if the operator stays away for a day."
+        "becomes an agent task if the operator stays away for a day. run_in chooses where an "
+        "agent task runs: 'new' (default) starts a fresh task session with its own workspace each "
+        "time; 'self' runs it as a turn of THIS session — same context, files, MCP servers and "
+        "board claims — which is what a recurring ping to yourself wants."
     ),
 )
 async def schedule_create(
@@ -34,6 +37,7 @@ async def schedule_create(
     files: list[str] | None = None,
     model: str | None = None,
     kind: str = "agent",
+    run_in: str = "new",
 ) -> ToolResult:
     services = services_for(context)
     if services.schedule is None:
@@ -51,10 +55,12 @@ async def schedule_create(
             model=model,
             created_by_session=context.session_id,
             kind=kind,
+            run_in=run_in,
         )
     except ValueError as exc:
         return error(context, str(exc))
-    return ok(context, f"scheduled {created['id']} '{name}' ({created.get('kind', kind)}), next at {created.get('next_run_at')}", schedule_id=created["id"])
+    where = " in this session" if created.get("run_in") == "self" else ""
+    return ok(context, f"scheduled {created['id']} '{name}' ({created.get('kind', kind)}{where}), next at {created.get('next_run_at')}", schedule_id=created["id"])
 
 
 @tool(name="ScheduleList", description="List scheduled tasks with their next run time.")

@@ -98,6 +98,7 @@ def build_engine(
         prompts.language_section(config.answer_language),
         prompts.governance_section(deps.governance_path),
         prompts.SELF_DEVELOPMENT,
+        prompts.DELEGATION if any(v.enabled for v in config.harness.vendors.values()) else "",
         prompts.HISTORY,
         prompts.BOARD,
         prompts.SCHEDULING,

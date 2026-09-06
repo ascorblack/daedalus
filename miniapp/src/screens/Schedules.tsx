@@ -93,7 +93,7 @@ export function SchedulesScreen({ toast, onOpen }: { toast: (t: string) => void;
             <div className="grow">
               <div className="title">
                 {s.enabled ? "" : "⏸ "}
-                {s.name} <span className="badge">{s.kind === "message" ? "reminder" : s.kind === "lazy" ? "lazy" : "agent"}</span>
+                {s.name} <span className="badge">{s.kind === "message" ? "reminder" : s.kind === "lazy" ? "lazy" : s.run_in === "self" ? "agent · own session" : "agent"}</span>
               </div>
               <div className="sub">
                 {s.cron ? `cron ${s.cron}` : `once ${s.run_at}`} · next {s.next_run_at ? new Date(s.next_run_at).toLocaleString() : "—"}

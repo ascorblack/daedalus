@@ -127,6 +127,7 @@ export type Proposal = {
 export type Schedule = {
   id: string;
   name: string;
+  run_in?: string;
   cron: string | null;
   run_at: string | null;
   prompt: string;
@@ -193,6 +194,7 @@ export type Settings = {
   usd_per_day?: number;
   balance: { enabled: boolean; poll_seconds: number; thresholds_usd: number[] };
   scheduler: { topic_mode: string; catch_up_missed: boolean };
+  harness: { url: string; timeout_seconds: number; vendors: Record<string, { enabled: boolean; model: string; effort: string; max_turns: number }> };
   telegram: {
     verbosity: number;
     reactions: boolean;
