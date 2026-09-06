@@ -149,8 +149,10 @@ a { color: var(--info); text-decoration: none; }
 .act-wrap.nested .act { padding:4px 0; }
 .note { display:flex; gap:10px; color:var(--muted); font-size:15px; line-height:1.4; padding:4px 0; }
 .note::before { content:"•"; flex:none; width:18px; text-align:center; color:var(--muted); }
-.note > * { min-width:0; flex:1; }
-.note p { margin:0; }
+.note .md { min-width:0; flex:1; }
+.note p { margin:0 0 6px; }
+.note p:last-child { margin-bottom:0; }
+.note ul, .note ol { margin:4px 0; padding-left:20px; }
 .thought { white-space:pre-wrap; color:var(--muted); font-size:13.5px; line-height:1.45; padding:4px 0 8px 28px; font-style:italic; max-height:360px; overflow:auto; }
 .working { color:var(--muted); font-size:14px; padding-left:28px; }
 

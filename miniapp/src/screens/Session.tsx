@@ -645,7 +645,11 @@ function ActivityList({ items, compact }: { items: Activity[]; compact: boolean 
   while (i < items.length) {
     const it = items[i];
     if (it.kind === "note") {
-      out.push(<div key={i} className="note" dangerouslySetInnerHTML={{ __html: renderMarkdown(it.text) }} />);
+      out.push(
+        <div key={i} className="note">
+          <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(it.text) }} />
+        </div>,
+      );
       i++;
       continue;
     }

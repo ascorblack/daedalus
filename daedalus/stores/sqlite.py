@@ -11,7 +11,15 @@ from typing import Any
 from protocore.contracts.events import IEventStream
 from protocore.contracts.run import IRunStore, RunNotFoundError
 from protocore.contracts.session import ISessionStore, SessionNotFoundError
-from protocore.contracts.types import Event, Message, Run, RunStatus, Session
+from protocore.contracts.types import (
+    COMPACTION_SUMMARY_METADATA_KEY,
+    Event,
+    Message,
+    MessageRole,
+    Run,
+    RunStatus,
+    Session,
+)
 
 from daedalus.providers.openai_compat import UsageRecord, UsageSink
 from daedalus.stores.database import Database
@@ -96,10 +104,22 @@ class SqliteSessionStore(ISessionStore):
                 break
         return f"{message.role.value}:{message.created_at.isoformat()}{extra}"
 
-    async def append_transcript(self, session_id: str, messages: Sequence[Message]) -> int:
-        """Append messages not yet in the transcript (by key); returns how many were added."""
+    async def append_transcript(self, session_id: str, messages: Sequence[Message], *, from_history: bool = False) -> int:
+        """Append messages not yet in the transcript (by key); returns how many were added.
+
+        ``from_history`` marks a sync from the model's working history: a user-role message
+        there that the host did not tag as the operator's was injected by the core (a nudge,
+        a budget notice) and is recorded as such so the UI can hide it.
+        """
         if not messages:
             return 0
+        if from_history:
+            messages = [
+                m.model_copy(update={"metadata": {**m.metadata, "daedalus.origin": "core"}})
+                if m.role is MessageRole.user and "daedalus.origin" not in m.metadata and not m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)
+                else m
+                for m in messages
+            ]
         rows = await self._db.fetchall("SELECT key FROM transcript WHERE session_id = ?", (session_id,))
         known = {r["key"] for r in rows}
         fresh = []

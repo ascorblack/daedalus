@@ -249,6 +249,14 @@ def _deep_merge(base: Any, patch: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+_NUDGE_MARKERS = ("[internal control", "tool repeatedly failed with the same error", "has been disabled for the rest of this run", "The run has reached its budget")
+
+
+def _looks_like_core_nudge(text: str) -> bool:
+    head = text.lstrip()[:400]
+    return any(marker in head for marker in _NUDGE_MARKERS)
+
+
 def message_view(message: Message) -> dict[str, Any]:
     text: list[str] = []
     thinking: list[str] = []
@@ -273,7 +281,10 @@ def message_view(message: Message) -> dict[str, Any]:
     if is_summary:
         body = _SUMMARY_WRAP_RE.sub("", body).strip()
         compaction = compaction or {"reason": "auto"}
-    internal = message.role is MessageRole.user and body.lstrip().startswith("[internal control")
+    origin = message.metadata.get("daedalus.origin") if isinstance(message.metadata, dict) else None
+    internal = message.role is MessageRole.user and not is_summary and (
+        origin == "core" or (origin != "operator" and _looks_like_core_nudge(body))
+    )
     return {
         "role": message.role.value,
         "summary": is_summary,

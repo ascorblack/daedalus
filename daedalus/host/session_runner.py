@@ -477,7 +477,7 @@ class SessionManager:
             # measurement described the history that no longer exists.
             engine.last_observed_prompt_tokens = 0
             engine.compaction_state = CompactionState()
-        await self.sessions.append_transcript(session_id, history)
+        await self.sessions.append_transcript(session_id, history, from_history=True)
         await self.sessions.replace_messages(session_id, TENANT, [message])
         await self.sessions.append_transcript(session_id, [message])
         return summary
@@ -556,7 +556,7 @@ class SessionManager:
                 return await self.answer(session_id, [{"custom": body}])
             await self.live.enqueue(session_id, "follow_up", new_queued_prompt("follow_up", body).to_dict())
             await self.sessions.append_transcript(
-                session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up"})]
+                session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up", "daedalus.origin": "operator"})]
             )
             return state.run_id or ""
         exceeded = self.budget_exceeded()
@@ -576,13 +576,13 @@ class SessionManager:
             # The core folds queued prompts into the model's history later (and compaction may
             # rewrite them); the transcript keeps the operator's words as sent.
             await self.sessions.append_transcript(
-                session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind})]
+                session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind, "daedalus.origin": "operator"})]
             )
             return state.run_id or ""
         message = Message(
             role=MessageRole.user,
             content_blocks=[TextBlock(text=body)],
-            metadata={"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {},
+            metadata={"daedalus.origin": "operator", **({"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {})},
         )
         await self.sessions.append_transcript(session_id, [message])
         return await self._start_run(state, message)
@@ -730,7 +730,7 @@ class SessionManager:
             history = list(eng.history)
             loop = asyncio.get_running_loop()
             loop.create_task(self.sessions.replace_messages(session_id, TENANT, history))
-            loop.create_task(self.sessions.append_transcript(session_id, history))
+            loop.create_task(self.sessions.append_transcript(session_id, history, from_history=True))
 
         engine.reload_live_control = reload_live_control  # type: ignore[attr-defined]
         engine.persist_live_control = persist_live_control  # type: ignore[attr-defined]
@@ -793,7 +793,7 @@ class SessionManager:
             )
         finally:
             await self.sessions.replace_messages(session_id, TENANT, list(engine.history))
-            await self.sessions.append_transcript(session_id, list(engine.history))
+            await self.sessions.append_transcript(session_id, list(engine.history), from_history=True)
             try:
                 if status == "interrupted":
                     pass  # snapshot stays; resume_unfinished() continues the run after restart
