@@ -371,7 +371,7 @@ function TextField({ label, value, placeholder, onSave, hint }: { label: string;
   );
 }
 
-function ToolsTab({ s, save, providerIds, lookup, toast }: { s: Settings; save: (patch: any) => Promise<void>; providerIds: string[]; lookup: (provider: string) => Promise<string[] | null>; toast: (t: string) => void }) {
+function ToolsTab({ s, save, providerIds, lookup }: { s: Settings; save: (patch: any) => Promise<void>; providerIds: string[]; lookup: (provider: string) => Promise<string[] | null> }) {
   const [models, setModels] = useState<string[] | null>(null);
   const web = s.tools.web;
   return (
@@ -432,7 +432,6 @@ function ToolsTab({ s, save, providerIds, lookup, toast }: { s: Settings; save: 
         <div className="sub">Configured under [mcp.servers.&lt;name&gt;] in config.toml; every session starts with them off and toggles them from its ⋯ menu.</div>
         <div className="sub" style={{ marginTop: 6 }}>{Object.keys((s as any).mcp?.servers ?? {}).join(", ") || "none configured"}</div>
         <div className="sub" style={{ marginTop: 6 }}>Changes here apply to the next tool call; no restart needed.</div>
-        {toast && null}
       </div>
     </>
   );
@@ -537,7 +536,7 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <button className={tab === "general" ? "on" : ""} onClick={() => setTab("general")}>General</button>
         <button className={tab === "tools" ? "on" : ""} onClick={() => setTab("tools")}>Tools</button>
       </div>
-      {tab === "tools" && <ToolsTab s={s} save={save} providerIds={providerIds} lookup={lookupProviderModels} toast={toast} />}
+      {tab === "tools" && <ToolsTab s={s} save={save} providerIds={providerIds} lookup={lookupProviderModels} />}
       {tab === "general" && (
       <>
       <div className="card">
