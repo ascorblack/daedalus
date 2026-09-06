@@ -54,8 +54,11 @@ class ScriptedProvider(ILLMProvider):
         yield ProviderDelta(kind=ProviderDeltaKind.usage, usage=usage)
         yield ProviderDelta(kind=ProviderDeltaKind.finish, finish_reason="stop")
 
-    async def complete_structured(self, request: LLMRequest, response_schema: dict[str, Any]) -> dict[str, Any]:
-        return {}
+    async def complete_structured(self, request: LLMRequest, response_schema: dict[str, Any]) -> LLMResponse:
+        return LLMResponse(
+            message=Message(role=MessageRole.assistant, content_blocks=[TextBlock(text='{"summary": "summary"}')]),
+            stop_reason=StopReason.end_turn,
+        )
 
     async def complete_text(self, request: LLMRequest) -> LLMResponse:
         return LLMResponse(

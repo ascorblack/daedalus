@@ -51,6 +51,8 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int) -> Any:
         # Advertise every registered tool; the registry would otherwise clip the list.
         tool_retrieval_top_k=200,
         agent_thinking_default=config.model.thinking,
+        # Summaries must not be cut mid-JSON: give the summariser room for a full sentence pair.
+        compaction_summary_max_output_tokens=1024,
     )
 
 

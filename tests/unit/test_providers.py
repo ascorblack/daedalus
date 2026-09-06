@@ -220,3 +220,35 @@ def test_dsml_guard_keeps_prose_after_the_block_and_marker_mentions() -> None:
     shown = g.feed("the marker <|DS") + g.feed("ML| appears in prose only")
     rest, calls = g.finish()
     assert shown + rest == "the marker <|DSML| appears in prose only" and calls == []
+
+
+async def test_structured_completion_returns_a_response_the_core_summariser_can_read() -> None:
+    from protocore.contracts.llm import LLMResponse
+
+    body = json.dumps({"choices": [{"message": {"content": '{"summary": "Ran ls; touched /srv/x.py"}'}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
+    provider = _provider(body)
+    response = await provider.complete_structured(_request(), {"type": "object"})
+    assert isinstance(response, LLMResponse)
+    assert json.loads(response.message.text)["summary"].startswith("Ran ls")
+    assert provider.captured["json"]["response_format"] == {"type": "json_object"}  # type: ignore[attr-defined]
+
+
+async def test_core_tier2_compaction_runs_through_the_provider() -> None:
+    """The real core summariser, fed by our adapter: old turns collapse into <compacted-turn> summaries."""
+    from protocore.contracts.types import ToolResultBlock, ToolUseBlock
+    from protocore.runtime.context.compaction import CompactionState, run_tier2_summarisation
+    from protocore.runtime.runtime_constants import default_runtime_constants
+
+    body = json.dumps({"choices": [{"message": {"content": '{"summary": "Listed /srv with Exec and read config.py."}'}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
+    provider = _provider(body)
+    history: list[Message] = [Message(role=MessageRole.user, content_blocks=[TextBlock(text="do the thing")])]
+    for i in range(8):
+        history.append(Message(role=MessageRole.assistant, content_blocks=[ToolUseBlock(tool_call_id=f"c{i}", name="Exec", arguments_json=json.dumps({"command": f"ls /srv/{i} && cat config{i}.py"}))]))
+        history.append(Message(role=MessageRole.tool, content_blocks=[ToolResultBlock(tool_call_id=f"c{i}", content=("file line\n" * 400))]))
+    rc = default_runtime_constants(model_context_window=32_000, compaction_summary_max_output_tokens=1024)
+    result = await run_tier2_summarisation(history, provider, CompactionState(), rc, model_name="deepseek-v4-flash")
+    assert result.turns_summarised > 0 and result.tokens_freed > 0
+    summaries = [m for m in history if m.metadata.get("protocore.compaction_summary")]
+    assert summaries and "<compacted-turn" in summaries[0].text
+    # The most recent turns stay verbatim so the model knows where it stopped.
+    assert history[-1].content_blocks[0].content.startswith("file line")  # type: ignore[union-attr]

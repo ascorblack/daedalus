@@ -215,18 +215,35 @@ class OpenAICompatibleProvider(ILLMProvider):
 
     async def complete_structured(
         self, request: LLMRequest, response_schema: dict[str, Any]
-    ) -> dict[str, Any]:
+    ) -> LLMResponse:
+        """JSON-mode completion. The core reads the raw JSON text from ``response.message.text``
+        (the compaction summariser parses ``{"summary": ...}`` itself), so the object is
+        validated here but returned as text."""
         body = await self._build_body(request, stream=False)
         body["response_format"] = {"type": "json_object"}
         started = time.monotonic()
         data = await self._post(body)
         text = _message_text(data)
         usage_raw = data.get("usage") or {}
-        await self._record_usage(request, "structured", usage_raw, normalize_usage(usage_raw), started)
+        normalized = normalize_usage(usage_raw)
+        cost = await self._record_usage(request, "structured", usage_raw, normalized, started)
+        finish = (data.get("choices") or [{}])[0].get("finish_reason") or "stop"
         parsed = parse_json_text(text)
         if parsed is None:
-            raise LLMProviderError(f"{self.endpoint.id}: structured response is not JSON")
-        return parsed
+            raise LLMProviderError(
+                f"{self.endpoint.id}: structured response is not JSON"
+                + (" (output truncated by max_tokens)" if finish == "length" else "")
+            )
+        return LLMResponse(
+            message=Message(role=MessageRole.assistant, content_blocks=[TextBlock(text=json.dumps(parsed, ensure_ascii=False))]),
+            stop_reason=StopReason.max_tokens if finish == "length" else StopReason.end_turn,
+            usage=LLMResponseUsage(
+                input_tokens=normalized["input_tokens"],
+                output_tokens=normalized["output_tokens"],
+                cache_read_input_tokens=normalized["cache_read_input_tokens"],
+                response_cost_usd=cost,
+            ),
+        )
 
     async def complete_text(self, request: LLMRequest) -> LLMResponse:
         body = await self._build_body(request, stream=False)
