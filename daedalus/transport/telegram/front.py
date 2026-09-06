@@ -470,8 +470,8 @@ class TelegramFront:
         self._compact_focus[state.session.id] = focus
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text=f"🗜 Replace {count} messages with a summary", callback_data=f"cp:{state.session.id}:go")],
-                [InlineKeyboardButton(text="Cancel", callback_data=f"cp:{state.session.id}:cancel")],
+                [InlineKeyboardButton(text=f"🗜 Replace {count} messages with a summary", callback_data=f"cm:{state.session.id}:go")],
+                [InlineKeyboardButton(text="Cancel", callback_data=f"cm:{state.session.id}:cancel")],
             ]
         )
         await message.answer(
@@ -938,7 +938,7 @@ class TelegramFront:
         if data[0] == "cu":
             await self._on_cleanup_decision(query, data)
             return
-        if data[0] == "cp":
+        if data[0] == "cm":
             await self._on_compact_decision(query, data)
             return
         hook = self.callback_hooks.get(data[0])

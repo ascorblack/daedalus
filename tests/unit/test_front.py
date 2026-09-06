@@ -157,3 +157,15 @@ async def test_ask_user_keyboard_single_choice_resumes_run(front: TelegramFront)
     object.__setattr__(query.message, "edit_text", answer)
     await front.on_callback(query)
     assert front.answered == [(state.session.id, [{"question": "Color?", "selected": ["Blue"], "custom": None}])]  # type: ignore[attr-defined]
+
+
+def test_builtin_callback_prefixes_do_not_shadow_extension_hooks() -> None:
+    """Extensions register callback prefixes (selfdev uses ``cp``); the front's own must stay distinct."""
+    import re
+    from pathlib import Path
+
+    front_src = Path("daedalus/transport/telegram/front.py").read_text()
+    builtin = set(re.findall(r'if data\[0\] == "(\w+)"', front_src))
+    selfdev_src = Path("daedalus/extensions/selfdev.py").read_text()
+    extension = set(re.findall(r'callback_hooks\["(\w+)"\]', selfdev_src))
+    assert builtin.isdisjoint(extension), builtin & extension
