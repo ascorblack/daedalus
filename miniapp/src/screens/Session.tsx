@@ -101,7 +101,8 @@ function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Tu
       t.activity.push({ kind: "note", text: t.answer });
       t.answer = "";
     }
-    if (live.thinking) t.activity.push({ kind: "thinking", text: live.thinking });
+    const thinkingKnown = t.activity.some((a) => a.kind === "thinking" && a.text === live.thinking);
+    if (live.thinking && !thinkingKnown) t.activity.push({ kind: "thinking", text: live.thinking });
     for (const lt of fresh) {
       const running = lt.result === undefined;
       if (running) t.pendingTools++;
