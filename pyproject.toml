@@ -17,6 +17,7 @@ dependencies = [
     "croniter>=3.0",
     "tomli-w>=1.0",
     "mcp>=2.1.1",
+    "python-multipart>=0.0.32",
 ]
 
 [project.optional-dependencies]

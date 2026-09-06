@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from protocore.contracts.types import (
@@ -240,6 +240,42 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {"run_id": run_id}
+
+    @api.post("/api/sessions/{session_id}/upload")
+    async def upload(
+        session_id: str,
+        text: str = Form(""),
+        files: list[UploadFile] = File(default=[]),
+        _: dict[str, Any] = Depends(auth),
+    ) -> dict[str, Any]:
+        """Send a message with attachments (or attachments alone) from the Mini App."""
+        from daedalus.host.session_runner import Attachment
+
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        inbox = state.workspace / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        attachments: list[Attachment] = []
+        for upload_file in files:
+            name = Path(upload_file.filename or "file").name
+            target = inbox / name
+            counter = 1
+            while target.exists():
+                target = inbox / f"{Path(name).stem}-{counter}{Path(name).suffix}"
+                counter += 1
+            with target.open("wb") as fh:
+                while chunk := await upload_file.read(1 << 20):
+                    fh.write(chunk)
+            attachments.append(Attachment(path=target, mime_type=upload_file.content_type or mimetypes.guess_type(name)[0] or "application/octet-stream"))
+        if not text.strip() and not attachments:
+            raise HTTPException(400, "nothing to send")
+        body = text.strip() or ("Files attached." if len(attachments) > 1 else "File attached.")
+        try:
+            run_id = await manager.submit(session_id, body, attachments)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"run_id": run_id, "files": [a.path.name for a in attachments]}
 
     @api.post("/api/sessions/{session_id}/answer")
     async def answer(session_id: str, body: AnswerBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
