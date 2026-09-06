@@ -142,7 +142,7 @@ a { color: var(--info); text-decoration: none; }
 .row-wrap.nested .row { padding:4px 0; }
 .note { display:flex; gap:10px; color:var(--muted); font-size:15px; line-height:1.4; padding:4px 0; }
 .note::before { content:"•"; flex:none; width:18px; text-align:center; color:var(--muted); }
-.note > * { min-width:0; }
+.note > * { min-width:0; flex:1; }
 .note p { margin:0; }
 .thought { white-space:pre-wrap; color:var(--muted); font-size:14px; line-height:1.45; padding:6px 0 6px 28px; border-left:0; font-style:italic; }
 .working { color:var(--muted); font-size:14px; padding-left:28px; }

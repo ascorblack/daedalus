@@ -358,7 +358,10 @@ class SessionManager:
         if not history:
             raise RuntimeError("nothing to compact")
         provider, model = self.providers.rungs_for(self.config)[0]
-        prompt = COMPACT_PROMPT + (f"\n\nThe operator asks to focus on: {instructions.strip()}" if instructions.strip() else "")
+        language = self.config.answer_language if self.config.answer_language != "auto" else operator_language(history)
+        prompt = COMPACT_PROMPT.format(language=language) + (
+            f"\n\nThe operator asks to focus on: {instructions.strip()}" if instructions.strip() else ""
+        )
         request = LLMRequest(
             model=model,
             messages=[Message(role=MessageRole.user, content_blocks=[TextBlock(text=prompt + "\n\n" + transcript_for_summary(history))])],
@@ -781,10 +784,21 @@ class SessionManager:
 
 
 COMPACT_PROMPT = """Summarise the conversation transcript below so that an agent can continue the work \
-in a fresh context. Write in the language the operator used. Include: the goal and what was asked; \
+in a fresh context. Write the summary in {language}. Include: the goal and what was asked; \
 what has been done, with concrete results (paths, commands, numbers, decisions); what is still open; \
 constraints and preferences the operator stated; and the exact next steps. Be precise and compact \
 (Markdown, at most ~600 words). Do not add commentary."""
+
+
+def operator_language(history: Sequence[Message]) -> str:
+    """A coarse guess at the operator's language from their messages (Cyrillic → Russian, else English)."""
+    text = " ".join(
+        b.text for m in history if m.role is MessageRole.user for b in m.content_blocks if isinstance(b, TextBlock)
+    )
+    letters = [c for c in text if c.isalpha()]
+    if letters and sum("\u0400" <= c <= "\u04ff" for c in letters) / len(letters) > 0.3:
+        return "Russian"
+    return "English"
 
 
 def transcript_for_summary(history: Sequence[Message], *, result_chars: int = 600) -> str:

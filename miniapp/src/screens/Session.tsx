@@ -83,13 +83,14 @@ function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Tu
   if (busy) {
     if (!current) current = open("live", live.startedAt ?? Date.now());
     const t: Turn = current;
-    if (t.answer) {
+    const fresh = live.tools.filter((lt) => !seen.has(lt.id));
+    if (t.answer && (live.text || live.thinking || fresh.length)) {
+      // Something newer is streaming, so the text before it was not the final answer.
       t.activity.push({ kind: "note", text: t.answer });
       t.answer = "";
     }
     if (live.thinking) t.activity.push({ kind: "thinking", text: live.thinking });
-    for (const lt of live.tools) {
-      if (seen.has(lt.id)) continue;
+    for (const lt of fresh) {
       const running = lt.result === undefined;
       if (running) t.pendingTools++;
       t.activity.push({ kind: "tool", id: lt.id, name: lt.name, args: parseArgs(lt.args), result: lt.result, error: lt.error, running });
