@@ -300,7 +300,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             return f"{overrides['provider']}/{model}" if model else overrides["provider"]
         if overrides.get("model_name"):
             return str(overrides["model_name"])
-        if state.engine is not None:
+        if state.engine is not None and state.running:
             return str(state.engine.effective_model_name)
         return app.config.model.name
 
