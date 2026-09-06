@@ -37,9 +37,11 @@ async def image_view(context: ToolContext, path: str, task: str, detail: str = "
     if size > MAX_IMAGE_BYTES:
         return error(context, f"image is {size} bytes; downscale it first (limit {MAX_IMAGE_BYTES})")
     vision = services.extra.get("vision")
-    if vision is None:
+    if not vision:
         return error(context, "no vision model is configured (set OPENROUTER_API_KEY or [vision] in the config)")
     provider, model, blobs, tenant = vision
+    manager = services.extra.get("manager")
+    max_out = int(getattr(getattr(getattr(manager, "config", None), "vision", None), "max_output_tokens", 2000))
     if not getattr(getattr(provider, "endpoint", None), "supports_images", False) or getattr(provider, "_image_loader", None) is None:
         return error(context, "the configured vision provider cannot receive images; set [vision] to an image-capable endpoint")
     meta = await blobs.put(tenant, target.read_bytes(), content_type=mime)
@@ -59,7 +61,7 @@ async def image_view(context: ToolContext, path: str, task: str, detail: str = "
                 metadata={"image_refs": [{"ref": meta.ref, "mime": mime}]},
             ),
         ],
-        max_tokens=2000 if detail == "full" else 800,
+        max_tokens=max_out if detail == "full" else min(800, max_out),
         temperature=0.1,
     )
     try:

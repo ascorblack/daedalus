@@ -153,6 +153,11 @@ export type Settings = {
   providers: Record<string, ProviderConf>;
   provider_kinds?: string[];
   prompt: { rules: string; default_rules?: string };
+  vision: { provider: string; model: string; max_output_tokens: number };
+  tools: {
+    web: { fetch_timeout_seconds: number; search_timeout_seconds: number; proxy: string; user_agent: string; fetch_max_chars: number; search_url: string; search_region: string; search_results: number };
+    exec: { max_output_chars: number };
+  };
   self_change: { approval: string; auto_rebuild: boolean };
   limits: { max_iterations: number; tool_timeout_seconds: number };
   usd_per_day?: number;

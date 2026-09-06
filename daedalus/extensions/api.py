@@ -101,6 +101,7 @@ class SettingsBody(BaseModel):
     model: dict[str, Any] | None = None
     prompt: dict[str, Any] | None = None
     vision: dict[str, Any] | None = None
+    tools: dict[str, Any] | None = None
     mcp: dict[str, Any] | None = None
     self_change: dict[str, Any] | None = None
     limits: dict[str, Any] | None = None
@@ -243,6 +244,13 @@ def mask_provider_keys(settings_view: dict[str, Any]) -> dict[str, Any]:
 
 
 _SUMMARY_WRAP_RE = re.compile(r"</?compacted-turn[^>]*>")
+
+
+def _deep_merge(base: Any, patch: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base) if isinstance(base, dict) else {}
+    for key, value in patch.items():
+        out[key] = _deep_merge(out.get(key, {}), value) if isinstance(value, dict) and isinstance(out.get(key), dict) else value
+    return out
 
 
 def message_view(message: Message) -> dict[str, Any]:
@@ -601,12 +609,20 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             (since,),
         )
         recent = await app.db.fetchall(
-            "SELECT at, provider_id, model, purpose, session_id, run_id, input_tokens, output_tokens, cache_read_tokens,"
-            " reasoning_tokens, cost_usd, duration_ms, raw FROM usage_events ORDER BY seq DESC LIMIT 100"
+            "SELECT u.at, u.provider_id, u.model, u.purpose, u.session_id, u.run_id, u.input_tokens, u.output_tokens,"
+            " u.cache_read_tokens, u.reasoning_tokens, u.cost_usd, u.duration_ms, u.raw, s.title session_title"
+            " FROM usage_events u LEFT JOIN sessions s ON s.id = u.session_id ORDER BY u.seq DESC LIMIT 200"
+        )
+        by_session = await app.db.fetchall(
+            "SELECT u.session_id, s.title, count(*) calls, sum(u.input_tokens) input_tokens, sum(u.output_tokens) output_tokens,"
+            " sum(u.cost_usd) cost_usd FROM usage_events u LEFT JOIN sessions s ON s.id = u.session_id"
+            " WHERE u.at >= ? GROUP BY u.session_id ORDER BY cost_usd DESC NULLS LAST, calls DESC LIMIT 20",
+            (since,),
         )
         return {
             "daily": [dict(r) for r in rows],
             "recent": [{**dict(r), "raw": json.loads(r["raw"])} for r in recent],
+            "sessions": [dict(r) for r in by_session],
         }
 
     @api.get("/api/balance")
@@ -714,7 +730,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             resolve_model_patch(current, model_patch)
         for section, value in dumped.items():
             if isinstance(value, dict):
-                current[section] = {**current.get(section, {}), **value}
+                current[section] = _deep_merge(current.get(section, {}), value)
             else:
                 current[section] = value
         try:

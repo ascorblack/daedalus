@@ -146,6 +146,32 @@ class VisionConfig(BaseModel):
 
     provider: str = "openrouter"
     model: str = "qwen/qwen3.7-flash"
+    max_output_tokens: int = Field(default=2000, ge=100, le=32_000)
+
+
+class WebToolsConfig(BaseModel):
+    """WebFetch / WebSearch behaviour."""
+
+    fetch_timeout_seconds: float = Field(default=60.0, ge=1, le=600)
+    search_timeout_seconds: float = Field(default=30.0, ge=1, le=600)
+    proxy: str = ""
+    """HTTP(S)/SOCKS proxy URL for both tools, e.g. ``socks5://127.0.0.1:1080``; empty = direct."""
+    user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) Daedalus/0.1"
+    fetch_max_chars: int = Field(default=40_000, ge=1_000, le=500_000)
+    search_url: str = "https://html.duckduckgo.com/html/"
+    search_region: str = "wt-wt"
+    search_results: int = Field(default=8, ge=1, le=30)
+
+
+class ExecToolsConfig(BaseModel):
+    """Exec / Read / Find output handling (the timeout itself is ``limits.tool_timeout_seconds``)."""
+
+    max_output_chars: int = Field(default=60_000, ge=2_000, le=1_000_000)
+
+
+class ToolsConfig(BaseModel):
+    web: WebToolsConfig = Field(default_factory=WebToolsConfig)
+    exec: ExecToolsConfig = Field(default_factory=ExecToolsConfig)
 
 
 class McpOAuthConfig(BaseModel):
@@ -244,6 +270,7 @@ class RuntimeConfig(BaseModel):
     )
     prompt: PromptConfig = Field(default_factory=PromptConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
     self_change: SelfChangeConfig = Field(default_factory=SelfChangeConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
@@ -346,5 +373,8 @@ __all__ = [
     "SelfChangeConfig",
     "Settings",
     "TelegramConfig",
+    "ToolsConfig",
+    "WebToolsConfig",
+    "ExecToolsConfig",
     "VisionConfig",
 ]

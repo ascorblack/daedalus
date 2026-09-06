@@ -351,9 +351,97 @@ function AddProviderRow({ kinds, onAdd, toast }: { kinds: string[]; onAdd: (id: 
   );
 }
 
+function NumField({ label, value, min, step, onSave, hint }: { label: string; value: number; min?: number; step?: number; onSave: (v: number) => void; hint?: string }) {
+  return (
+    <div>
+      <label className="field">{label}</label>
+      <input className="field" type="number" min={min} step={step} defaultValue={value} onBlur={(e) => { const v = Number(e.target.value); if (!Number.isNaN(v) && v !== value && (min === undefined || v >= min)) onSave(v); }} />
+      {hint && <div className="sub">{hint}</div>}
+    </div>
+  );
+}
+
+function TextField({ label, value, placeholder, onSave, hint }: { label: string; value: string; placeholder?: string; onSave: (v: string) => void; hint?: string }) {
+  return (
+    <div>
+      <label className="field">{label}</label>
+      <input className="field" defaultValue={value} placeholder={placeholder} onBlur={(e) => e.target.value.trim() !== value && onSave(e.target.value.trim())} />
+      {hint && <div className="sub">{hint}</div>}
+    </div>
+  );
+}
+
+function ToolsTab({ s, save, providerIds, lookup, toast }: { s: Settings; save: (patch: any) => Promise<void>; providerIds: string[]; lookup: (provider: string) => Promise<string[] | null>; toast: (t: string) => void }) {
+  const [models, setModels] = useState<string[] | null>(null);
+  const web = s.tools.web;
+  return (
+    <>
+      <div className="card">
+        <div className="section-title" style={{ marginTop: 0 }}>ImageView</div>
+        <div className="sub">The agent's eyes: a separate image-capable model answers questions about pictures so the main context never carries pixels.</div>
+        <div className="grid2">
+          <div>
+            <label className="field">Client</label>
+            <select className="field" value={s.vision.provider} onChange={(e) => save({ vision: { provider: e.target.value } })}>
+              {providerIds.map((p) => <option key={p}>{p}</option>)}
+              {!providerIds.includes(s.vision.provider) && <option>{s.vision.provider}</option>}
+            </select>
+          </div>
+          <NumField label="Max output tokens" value={s.vision.max_output_tokens} min={100} step={100} onSave={(v) => save({ vision: { max_output_tokens: v } })} />
+        </div>
+        <label className="field">Model id</label>
+        <div className="row" style={{ gap: 8 }}>
+          <input className="field" style={{ flex: 1 }} defaultValue={s.vision.model} onBlur={(e) => e.target.value.trim() !== s.vision.model && save({ vision: { model: e.target.value.trim() } })} />
+          <button className="btn small" onClick={async () => setModels(await lookup(s.vision.provider))}>⟳ /models</button>
+        </div>
+        {models && (
+          <div className="btnrow">
+            {models.length === 0 && <span className="sub">no models listed</span>}
+            {models.map((m) => <button key={m} className={`btn small ${m === s.vision.model ? "primary" : ""}`} onClick={() => (setModels(null), save({ vision: { model: m } }))}>{m}</button>)}
+          </div>
+        )}
+        <div className="sub" style={{ marginTop: 6 }}>The client must accept images (toggle “images” on it in General → Providers); a vLLM serving a vision model works too.</div>
+      </div>
+
+      <div className="card">
+        <div className="section-title" style={{ marginTop: 0 }}>WebFetch & WebSearch</div>
+        <div className="grid2">
+          <NumField label="Fetch timeout (s)" value={web.fetch_timeout_seconds} min={1} onSave={(v) => save({ tools: { web: { fetch_timeout_seconds: v } } })} />
+          <NumField label="Search timeout (s)" value={web.search_timeout_seconds} min={1} onSave={(v) => save({ tools: { web: { search_timeout_seconds: v } } })} />
+          <NumField label="Fetch max chars" value={web.fetch_max_chars} min={1000} step={1000} onSave={(v) => save({ tools: { web: { fetch_max_chars: v } } })} />
+          <NumField label="Search results" value={web.search_results} min={1} onSave={(v) => save({ tools: { web: { search_results: v } } })} />
+        </div>
+        <TextField label="Proxy (http/https/socks5 URL, empty = direct)" value={web.proxy} placeholder="socks5://127.0.0.1:1080" onSave={(v) => save({ tools: { web: { proxy: v } } })} />
+        <TextField label="User agent" value={web.user_agent} onSave={(v) => save({ tools: { web: { user_agent: v } } })} />
+        <div className="grid2">
+          <TextField label="Search endpoint (DuckDuckGo HTML)" value={web.search_url} onSave={(v) => save({ tools: { web: { search_url: v } } })} />
+          <TextField label="Search region" value={web.search_region} placeholder="wt-wt, ru-ru, us-en" onSave={(v) => save({ tools: { web: { search_region: v } } })} />
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="section-title" style={{ marginTop: 0 }}>Exec, Read, Find</div>
+        <div className="grid2">
+          <NumField label="Tool timeout (s)" value={s.limits.tool_timeout_seconds} min={10} step={30} onSave={(v) => save({ limits: { tool_timeout_seconds: v } })} hint="Exec default; the agent can ask for more per call." />
+          <NumField label="Max output chars per call" value={s.tools.exec.max_output_chars} min={2000} step={5000} onSave={(v) => save({ tools: { exec: { max_output_chars: v } } })} hint="Longer output is clipped head+tail; the agent is told to use files." />
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="section-title" style={{ marginTop: 0 }}>MCP servers</div>
+        <div className="sub">Configured under [mcp.servers.&lt;name&gt;] in config.toml; every session starts with them off and toggles them from its ⋯ menu.</div>
+        <div className="sub" style={{ marginTop: 6 }}>{Object.keys((s as any).mcp?.servers ?? {}).join(", ") || "none configured"}</div>
+        <div className="sub" style={{ marginTop: 6 }}>Changes here apply to the next tool call; no restart needed.</div>
+        {toast && null}
+      </div>
+    </>
+  );
+}
+
 export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
   const [s, setS] = useState<Settings | null>(null);
   const [status, setStatus] = useState<any>(null);
+  const [tab, setTab] = useState<"general" | "tools">("general");
   useEffect(() => {
     api.get<Settings>("/api/settings").then(setS).catch((e) => toast((e as Error).message));
     api.get("/api/status").then(setStatus).catch(() => setStatus(null));
@@ -445,6 +533,13 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
 
   return (
     <>
+      <div className="segmented">
+        <button className={tab === "general" ? "on" : ""} onClick={() => setTab("general")}>General</button>
+        <button className={tab === "tools" ? "on" : ""} onClick={() => setTab("tools")}>Tools</button>
+      </div>
+      {tab === "tools" && <ToolsTab s={s} save={save} providerIds={providerIds} lookup={lookupProviderModels} toast={toast} />}
+      {tab === "general" && (
+      <>
       <div className="card">
         <div className="section-title" style={{ marginTop: 0 }}>
           Models
@@ -580,6 +675,8 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
           )}
           {status.budget_exceeded && <div className="sub" style={{ color: "var(--bad)" }}>budget exceeded: {status.budget_exceeded}</div>}
         </div>
+      )}
+      </>
       )}
     </>
   );

@@ -11,9 +11,8 @@ from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
-from daedalus.tools._common import clip, error, ok, services_for
+from daedalus.tools._common import clip, error, ok, services_for, tool_config
 
-_UA = "Mozilla/5.0 (X11; Linux x86_64) Daedalus/0.1"
 _TAG_RE = re.compile(r"<(script|style|noscript)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
 _HTML_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"[ \t]+")
@@ -34,10 +33,13 @@ def html_to_text(raw: str) -> str:
     name="WebFetch",
     description="Fetch a URL and return its content as plain text (HTML is converted).",
 )
-async def web_fetch(context: ToolContext, url: str, max_chars: int = 40000) -> ToolResult:
+async def web_fetch(context: ToolContext, url: str, max_chars: int | None = None) -> ToolResult:
     services = services_for(context)
+    web = tool_config(context).web
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0, headers={"user-agent": _UA}) as client:
+        async with httpx.AsyncClient(
+            follow_redirects=True, timeout=web.fetch_timeout_seconds, headers={"user-agent": web.user_agent}, proxy=web.proxy or None
+        ) as client:
             response = await client.get(url)
     except httpx.HTTPError as exc:
         return error(context, f"fetch failed: {exc}")
@@ -48,7 +50,7 @@ async def web_fetch(context: ToolContext, url: str, max_chars: int = 40000) -> T
         body = response.text
     else:
         return ok(context, f"HTTP {response.status_code}, {content_type}, {len(response.content)} bytes (binary; use exec with curl -o to save it)")
-    limit = min(max_chars, services.max_tool_output_chars)
+    limit = min(max_chars or web.fetch_max_chars, services.max_tool_output_chars)
     return ok(context, f"HTTP {response.status_code} {url}\n\n{clip(body, limit)}", status=response.status_code)
 
 
@@ -60,12 +62,14 @@ _RESULT_RE = re.compile(
 
 
 @tool(name="WebSearch", description="Search the web and return the top results with snippets.")
-async def web_search(context: ToolContext, query: str, limit: int = 8) -> ToolResult:
+async def web_search(context: ToolContext, query: str, limit: int | None = None) -> ToolResult:
+    web = tool_config(context).web
+    limit = limit or web.search_results
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, headers={"user-agent": _UA}) as client:
-            response = await client.post(
-                "https://html.duckduckgo.com/html/", data={"q": query, "kl": "wt-wt"}
-            )
+        async with httpx.AsyncClient(
+            follow_redirects=True, timeout=web.search_timeout_seconds, headers={"user-agent": web.user_agent}, proxy=web.proxy or None
+        ) as client:
+            response = await client.post(web.search_url, data={"q": query, "kl": web.search_region})
     except httpx.HTTPError as exc:
         return error(context, f"search failed: {exc}")
     results: list[str] = []

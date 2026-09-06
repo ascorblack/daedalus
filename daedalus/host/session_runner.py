@@ -181,6 +181,10 @@ class SessionManager:
         self.config = config
         self.providers.reload(config)
         self.mcp.reload(config.mcp.servers)
+        for state in self._states.values():
+            if state.services is not None:
+                state.services.tool_timeout_seconds = config.limits.tool_timeout_seconds
+                state.services.max_tool_output_chars = config.tools.exec.max_output_chars
 
     def _vision(self) -> tuple[Any, str, FileBlobStore, str] | None:
         try:
@@ -505,6 +509,7 @@ class SessionManager:
                 self.settings.secrets_dir,
             ),
             tool_timeout_seconds=self.config.limits.tool_timeout_seconds,
+            max_tool_output_chars=self.config.tools.exec.max_output_chars,
             send_file=_bind(hooks.get("send_file"), state.session.id),
             spawn_session=_bind(hooks.get("spawn_session"), state.session.id),
             schedule=hooks.get("schedule"),
@@ -512,7 +517,7 @@ class SessionManager:
             self_rebuild=hooks.get("self_rebuild"),
             self_rollback=hooks.get("self_rollback"),
             progress=_bind(hooks.get("progress"), state.session.id),
-            extra={"skill_store": self.skills, "manager": self, "vision": self._vision()},
+            extra={"skill_store": self.skills, "manager": self, "vision": _LiveVision(self)},
         )
         state.services = services
         locator.register(services)
@@ -927,6 +932,22 @@ def transcript_for_summary(history: Sequence[Message], *, result_chars: int = 60
             elif isinstance(block, ThinkingBlock):
                 continue
     return "\n".join(lines)[-200_000:]
+
+
+class _LiveVision:
+    """Resolves the ImageView provider/model at call time, so settings edits apply immediately."""
+
+    def __init__(self, manager: SessionManager) -> None:
+        self._manager = manager
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        resolved = self._manager._vision()
+        if resolved is None:
+            raise ValueError("no vision model is configured")
+        return iter(resolved)
+
+    def __bool__(self) -> bool:
+        return self._manager._vision() is not None
 
 
 def _log_task_failure(task: asyncio.Task[None]) -> None:
