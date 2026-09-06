@@ -502,6 +502,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         state = await manager.get_state(session_id)
         if state is None:
             raise HTTPException(404, "no such session")
+        if body.get("context_window"):
+            # Per-session window (in memory): smaller than the model's for cheap runs or tests.
+            state.context_window = max(8_000, int(body["context_window"]))
         if body.get("preset"):
             preset = app.config.presets.get(str(body["preset"]))
             if preset is None:
