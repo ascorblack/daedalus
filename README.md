@@ -62,6 +62,12 @@ too: log in with each CLI on the host, and the `harness` container mounts those 
 delegates bounded tasks to them (`Delegate`) and Grok also serves as a plain model provider. The
 subscriptions stay inside the harness container; the agent never sees a token.
 
+Your ChatGPT (Codex) and SuperGrok logins can also serve as model providers: the key proxy
+reads the CLIs' own login files (`~/.codex/auth.json`, `~/.grok/auth.json`), refreshes them, and
+exposes them as `codex` and `grok` providers; the Usage screen shows their quota windows. This
+follows the practice of pi and OpenCode — OpenAI documents ChatGPT sign-in for Codex clients and
+xAI books such use under its own "API product" category. Claude is deliberately not bridged.
+
 Provider keys never enter the agent container: a small key-proxy container holds them and injects
 them into upstream calls (`http://keyproxy:3200/deepseek`, `…/openrouter`, `…/openai`, plus any
 `KEYPROXY_UPSTREAM_<NAME>` you add). The proxy also refuses model calls once the daily budget is spent.

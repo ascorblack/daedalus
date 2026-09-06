@@ -455,7 +455,8 @@ class RuntimeConfig(BaseModel):
             "openrouter.qwen-qwen3.7-flash": ModelPresetConfig(
                 provider="openrouter", model="qwen/qwen3.7-flash", label="Qwen 3.7 Flash (vision)", thinking=False, images=True, max_output_tokens=4_000
             ),
-            "grok.grok-4.6": ModelPresetConfig(provider="grok", model="grok-4.6", label="Grok 4.6 (subscription via harness)", thinking=False, images=False),
+            "grok.grok-4.6": ModelPresetConfig(provider="grok", model="grok-4.6", label="Grok 4.6 (SuperGrok subscription)", thinking=True, images=False, context_window=500_000),
+            "codex.gpt-5.6-terra": ModelPresetConfig(provider="codex", model="gpt-5.6-terra", label="GPT-5.6 Terra (ChatGPT subscription)", thinking=True, reasoning_effort="medium", images=True, context_window=400_000),
         }
     )
     """Named models keyed by id; the operator adds more in the Mini App."""
@@ -464,7 +465,8 @@ class RuntimeConfig(BaseModel):
             "deepseek": ProviderConfig(kind="deepseek", base_url="http://keyproxy:3200/deepseek"),
             "openrouter": ProviderConfig(kind="openrouter", base_url="http://keyproxy:3200/openrouter"),
             "vllm": ProviderConfig(kind="vllm", base_url=""),
-            "grok": ProviderConfig(kind="openai_compat", base_url="http://harness:3300/grok/v1", timeout_seconds=1800.0, pricing={"grok": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
+            "grok": ProviderConfig(kind="openai_compat", base_url="http://keyproxy:3200/grok/v1", timeout_seconds=900.0, pricing={"grok": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
+            "codex": ProviderConfig(kind="openai_compat", base_url="http://keyproxy:3200/codex/v1", timeout_seconds=900.0, pricing={"gpt": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
         }
     )
     prompt: PromptConfig = Field(default_factory=PromptConfig)

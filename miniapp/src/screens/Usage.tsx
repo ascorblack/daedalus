@@ -20,7 +20,48 @@ type Recent = {
   raw: Record<string, unknown>;
 };
 type BySession = { session_id: string | null; title: string | null; calls: number; input_tokens: number; output_tokens: number; cost_usd: number | null; unmetered: number };
-type UsageData = { daily: Daily[]; recent: Recent[]; sessions: BySession[] };
+type SubWindow = { name: string; used_percent: number; resets_at?: number | string | null };
+type Subscription = { provider: string; logged_in: boolean; plan?: string; limit_reached?: boolean; windows?: SubWindow[]; products?: { product: string; used_percent?: number }[]; error?: string };
+type UsageData = { daily: Daily[]; recent: Recent[]; sessions: BySession[]; subscriptions?: Record<string, Subscription> };
+
+function resetLabel(at: number | string | null | undefined): string {
+  if (!at) return "";
+  const d = typeof at === "number" ? new Date(at * 1000) : new Date(at);
+  if (Number.isNaN(d.getTime())) return "";
+  const hours = Math.max(0, Math.round((d.getTime() - Date.now()) / 3600000));
+  return ` · resets ${d.toLocaleString()} (${hours} h)`;
+}
+
+function SubscriptionsCard({ subs }: { subs: Record<string, Subscription> }) {
+  const entries = Object.entries(subs);
+  if (!entries.length) return null;
+  return (
+    <div className="card">
+      <div className="section-title" style={{ marginTop: 0 }}>Subscriptions</div>
+      <div className="sub">Quota windows of the ChatGPT (Codex) and SuperGrok logins the key proxy holds; they are not billed per token.</div>
+      {entries.map(([name, s]) => (
+        <div key={name} style={{ marginTop: 10 }}>
+          <div className="title">
+            {name === "codex" ? "Codex · ChatGPT" : "Grok · SuperGrok"} {s.plan && <span className="badge">{s.plan}</span>} {s.limit_reached && <span className="badge" style={{ color: "var(--bad)" }}>limit reached</span>}
+          </div>
+          {!s.logged_in && <div className="sub">not logged in on the host</div>}
+          {s.error && <div className="sub" style={{ color: "var(--bad)" }}>{s.error}</div>}
+          {(s.windows ?? []).map((w) => (
+            <div key={w.name} style={{ marginTop: 6 }}>
+              <div className="sub">{w.name}: {Math.round(w.used_percent)}% used{resetLabel(w.resets_at)}</div>
+              <div style={{ height: 6, borderRadius: 3, background: "var(--line)", overflow: "hidden" }}>
+                <div style={{ width: `${Math.min(100, Math.max(0, w.used_percent))}%`, height: "100%", background: w.used_percent >= 100 ? "var(--bad)" : w.used_percent >= 80 ? "var(--warn)" : "var(--ok)" }} />
+              </div>
+            </div>
+          ))}
+          {(s.products ?? []).filter((p) => p.used_percent !== undefined && p.used_percent !== null).map((p) => (
+            <div key={p.product} className="sub">{p.product}: {Math.round(p.used_percent ?? 0)}%</div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 const PURPOSE_LABEL: Record<string, string> = { stream: "turn", structured: "compaction", text: "text" };
 
@@ -81,6 +122,8 @@ export function UsageScreen() {
           </span>
         </div>
       </div>
+
+      {usage.subscriptions && <SubscriptionsCard subs={usage.subscriptions} />}
 
       {balance && Object.keys(balance.balances).length > 0 && (
         <div className="card">

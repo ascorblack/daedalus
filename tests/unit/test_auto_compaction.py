@@ -68,7 +68,8 @@ async def test_auto_compaction_keeps_the_tail_and_quotes_the_operator(settings: 
     history = [_op("Rule: answer in Russian only."), Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="да")]), _op("Second ask about /srv/x."), Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="сделано")]), _op("latest ask"), Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="ответ")])]
     await manager.sessions.replace_messages(state.session.id, "daedalus", history)
     await manager.sessions.append_transcript(state.session.id, history)
-    provider = manager.providers.get(manager.providers.available()[0])
+    _, preset = manager.config.preset()
+    provider = manager.providers.get(preset.provider)  # the session's own model summarises its history
     calls: list[str] = []
 
     async def fake_complete(request: Any) -> LLMResponse:

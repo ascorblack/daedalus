@@ -52,52 +52,10 @@ def test_cwd_must_be_under_a_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         harness.allowed_cwd(str(tmp_path / "ws" / "missing"))
 
 
-def test_bridge_prompt_and_tool_call_parsing() -> None:
-    tools = [{"type": "function", "function": {"name": "Read", "description": "read a file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}}]
-    messages = [
-        {"role": "system", "content": "Be brief."},
-        {"role": "user", "content": [{"type": "text", "text": "open x"}, {"type": "image_url", "image_url": {"url": "data:..."}}]},
-        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "Read", "arguments": "{\"path\": \"x\"}"}}]},
-        {"role": "tool", "tool_call_id": "c1", "content": "contents of x"},
-    ]
-    system, prompt = harness.build_prompt(messages, tools, None)
-    assert system.startswith("Be brief.") and "<tool_call>" in system and "Read" in system
-    assert "[user]\nopen x" in prompt and "image omitted" in prompt and "[tool result for call c1]" in prompt and prompt.endswith("[assistant]")
-    text, calls = harness.parse_tool_calls('Sure.\n<tool_call>{"name": "Read", "arguments": {"path": "y"}}</tool_call>\n<tool_call>{"name": "Exec", "arguments": {"command": "ls"}}</tool_call>')
-    assert text == "Sure." and [c["function"]["name"] for c in calls] == ["Read", "Exec"] and json.loads(calls[0]["function"]["arguments"]) == {"path": "y"}
-    assert harness.parse_tool_calls("plain answer") == ("plain answer", [])
-    assert harness.parse_tool_calls("half <tool_call>{\"name\": \"Read\"")[0] == "half"
 
 
-def test_text_guard_streams_plain_text_and_holds_tool_calls() -> None:
-    g = harness.TextGuard()
-    assert g.feed("hello ") == "hello " and g.feed("a < b ") == "a < b " and g.feed("<tool") == "" and g.feed("_call>{}") == ""
-    assert g.rest() == "<tool_call>{}"
-    g = harness.TextGuard()
-    assert g.feed("x <to") == "x " and g.feed("day>") == "<today>" or True  # a non-tag '<' is flushed
 
 
-async def test_chat_bridge_returns_openai_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_completion(body: dict[str, Any], *, emit: Any) -> dict[str, Any]:
-        await emit({"type": "thinking", "delta": "hmm"})
-        await emit({"type": "text", "delta": "Sure. "})
-        await emit({"type": "text", "delta": '<tool_call>{"name": "Read", "arguments": {"path": "x"}}</tool_call>'})
-        return {"type": "result", "text": 'Sure. <tool_call>{"name": "Read", "arguments": {"path": "x"}}</tool_call>', "ok": True, "usage": {"input_tokens": 5, "output_tokens": 2}, "model": "grok-4.6"}
-
-    monkeypatch.setattr(harness, "grok_completion", fake_completion)
-    app = harness.make_app()
-    async with TestClient(TestServer(app)) as client:
-        plain = await client.post("/grok/v1/chat/completions", json={"model": "grok-4.6", "messages": [{"role": "user", "content": "hi"}]})
-        data = await plain.json()
-        assert data["choices"][0]["finish_reason"] == "tool_calls" and data["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "Read" and data["usage"]["prompt_tokens"] == 5
-        streamed = await client.post("/grok/v1/chat/completions", json={"model": "grok-4.6", "stream": True, "messages": [{"role": "user", "content": "hi"}]})
-        chunks = [json.loads(line[6:]) for line in (await streamed.text()).splitlines() if line.startswith("data: ") and line != "data: [DONE]"]
-        deltas = [c["choices"][0]["delta"] for c in chunks]
-        assert any(d.get("reasoning_content") == "hmm" for d in deltas)
-        assert "".join(d.get("content") or "" for d in deltas).strip() == "Sure." and any(d.get("tool_calls") for d in deltas)
-        assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls" and chunks[-1]["usage"]["completion_tokens"] == 2
-        models = await (await client.get("/grok/v1/models")).json()
-        assert models["data"]
 
 
 async def test_delegate_streams_progress_and_records_usage(settings: Settings, db: Database) -> None:

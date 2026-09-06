@@ -75,14 +75,22 @@ services:
       context: keyproxy
     image: daedalus-keyproxy:local
     restart: unless-stopped
+    # The operator's uid: the CLI login files below are 0600 and the proxy refreshes them in place.
+    user: "1000:1000"
     env_file:
       - ${DAEDALUS_SECRETS_FILE:-../../daedalus-secrets/keyproxy.env}
     environment:
+      HOME: /home/keyproxy
       KEYPROXY_PORT: "3200"
       KEYPROXY_BUDGET_FLAG: /srv/state/BUDGET_EXCEEDED
       KEYPROXY_BUDGET_DB: /srv/state/daedalus.sqlite
+      KEYPROXY_CODEX_AUTH: /home/keyproxy/.codex/auth.json
+      KEYPROXY_GROK_AUTH: /home/keyproxy/.grok/auth.json
     volumes:
       - daedalus-state:/srv/state:ro
+      # Subscriptions (Codex = ChatGPT plan, Grok = SuperGrok): the CLIs' logins, served as /codex/v1 and /grok/v1.
+      - ${DAEDALUS_HARNESS_HOME:-~}/.codex:/home/keyproxy/.codex
+      - ${DAEDALUS_HARNESS_HOME:-~}/.grok:/home/keyproxy/.grok
     networks: [keys]
 
   # The operator's coding-agent subscriptions (claude, codex, grok) as a service. The CLIs and their

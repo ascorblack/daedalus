@@ -1003,7 +1003,24 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "daily": [dict(r) for r in rows],
             "recent": [{**dict(r), "raw": json.loads(r["raw"])} for r in recent],
             "sessions": [dict(r) for r in by_session],
+            "subscriptions": await subscription_usage(),
         }
+
+    async def subscription_usage() -> dict[str, Any]:
+        """Quota windows of the Codex and Grok subscriptions, read from the key proxy that holds their logins."""
+        origin = ""
+        for provider in app.config.providers.values():
+            if "keyproxy" in provider.base_url:
+                origin = provider.base_url.split("/", 3)[0] + "//" + provider.base_url.split("/", 3)[2]
+                break
+        if not origin:
+            return {}
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                response = await client.get(origin + "/subscriptions/usage")
+            return response.json() if response.status_code == 200 else {}
+        except (httpx.HTTPError, ValueError):
+            return {}
 
     @api.get("/api/balance")
     async def balance(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

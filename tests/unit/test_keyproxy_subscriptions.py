@@ -1,0 +1,135 @@
+"""The key proxy's subscription upstreams: Codex chat ⇄ Responses translation, Grok identity headers, usage views."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+from aiohttp.test_utils import TestClient, TestServer
+
+KEYPROXY_DIR = Path(__file__).resolve().parents[2] / "deploy" / "keyproxy"
+if str(KEYPROXY_DIR) not in sys.path:
+    sys.path.insert(0, str(KEYPROXY_DIR))
+
+
+def _load(name: str) -> Any:
+    spec = importlib.util.spec_from_file_location(name, KEYPROXY_DIR / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    sys.modules[name] = module
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+
+subs = _load("subscriptions")
+proxy = _load("proxy")
+
+
+def test_chat_body_becomes_a_responses_body() -> None:
+    body = {
+        "model": "gpt-5.6-terra",
+        "messages": [
+            {"role": "system", "content": "Be terse."},
+            {"role": "user", "content": [{"type": "text", "text": "open x"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "Read", "arguments": "{\"path\": \"x\"}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "contents"},
+        ],
+        "tools": [{"type": "function", "function": {"name": "Read", "description": "read", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}}],
+        "tool_choice": {"type": "function", "function": {"name": "Read"}},
+        "max_tokens": 500,
+        "reasoning_effort": "high",
+    }
+    out = subs.chat_to_responses(body)
+    assert out["instructions"] == "Be terse." and out["store"] is False and out["stream"] is True and out["max_output_tokens"] == 500
+    assert [i["type"] for i in out["input"]] == ["message", "function_call", "function_call_output"]
+    assert out["input"][0]["content"][1]["type"] == "input_image"
+    assert out["input"][1] == {"type": "function_call", "call_id": "c1", "name": "Read", "arguments": "{\"path\": \"x\"}"}
+    assert out["tools"][0]["name"] == "Read" and out["tool_choice"] == {"type": "function", "name": "Read"} and out["reasoning"] == {"effort": "high", "summary": "auto"}
+
+
+async def _lines(events: list[dict[str, Any]]) -> Any:
+    for e in events:
+        yield f"event: {e['type']}"
+        yield f"data: {json.dumps(e)}"
+        yield ""
+
+
+async def test_responses_events_become_chat_chunks() -> None:
+    events = [
+        {"type": "response.created", "response": {}},
+        {"type": "response.reasoning_summary_text.delta", "delta": "thinking"},
+        {"type": "response.output_text.delta", "delta": "Hello"},
+        {"type": "response.output_item.added", "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Read"}},
+        {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": "{\"path\":"},
+        {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": " \"x\"}"},
+        {"type": "response.completed", "response": {"status": "completed", "usage": {"input_tokens": 10, "output_tokens": 4, "input_tokens_details": {"cached_tokens": 3}, "output_tokens_details": {"reasoning_tokens": 2}}}},
+    ]
+    chunks = [json.loads(c[6:]) async for c in subs.responses_events_to_chunks(_lines(events), model="m") if c.startswith("data: {")]
+    deltas = [c["choices"][0]["delta"] for c in chunks]
+    assert deltas[0] == {"reasoning_content": "thinking"} and deltas[1]["content"] == "Hello"
+    assert deltas[2]["tool_calls"][0]["id"] == "call_1" and deltas[2]["tool_calls"][0]["function"]["name"] == "Read"
+    assert "".join(d["tool_calls"][0]["function"]["arguments"] for d in deltas[2:5]) == "{\"path\": \"x\"}"
+    assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls" and chunks[-1]["usage"] == {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14, "prompt_tokens_details": {"cached_tokens": 3}, "completion_tokens_details": {"reasoning_tokens": 2}}
+    full = await subs.collect_completion(subs.responses_events_to_chunks(_lines(events), model="m"), model="m")
+    assert full["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] == "{\"path\": \"x\"}" and full["choices"][0]["message"]["content"] == "Hello"
+    failed = [{"type": "response.failed", "response": {"error": {"message": "nope"}}}]
+    assert (await subs.collect_completion(subs.responses_events_to_chunks(_lines(failed), model="m"), model="m"))["error"]["message"] == "nope"
+
+
+def test_usage_views() -> None:
+    codex = subs.codex_usage_view({"plan_type": "plus", "rate_limit": {"limit_reached": True, "primary_window": {"used_percent": 0, "reset_at": 1}, "secondary_window": {"used_percent": 100, "reset_at": 2}}, "model_usage": {"gpt-6-astra": {}, "gpt-5.6-terra": {}}})
+    assert codex["limit_reached"] and [w["name"] for w in codex["windows"]] == ["5h", "weekly"] and codex["models"] == ["gpt-5.6-terra", "gpt-6-astra"]
+    grok = subs.grok_usage_view({"config": {"currentPeriod": {"end": "2026-09-10T02:13:38+00:00"}, "creditUsagePercent": 59.0, "productUsage": [{"product": "GrokBuild", "usagePercent": 59.0}]}})
+    assert grok["windows"][0]["used_percent"] == 59.0 and grok["products"][0]["product"] == "GrokBuild" and not grok["limit_reached"]
+
+
+async def test_proxy_routes_codex_and_grok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        url = str(request.url)
+        if url.endswith("/codex/responses"):
+            sse = "\n".join([
+                "event: response.output_text.delta", "data: " + json.dumps({"type": "response.output_text.delta", "delta": "PONG"}), "",
+                "event: response.completed", "data: " + json.dumps({"type": "response.completed", "response": {"status": "completed", "usage": {"input_tokens": 5, "output_tokens": 1}}}), "",
+            ])
+            return httpx.Response(200, content=sse.encode(), headers={"content-type": "text/event-stream"})
+        if url.endswith("/wham/usage"):
+            return httpx.Response(200, json={"plan_type": "plus", "rate_limit": {"primary_window": {"used_percent": 1}}, "model_usage": {"gpt-5.6-terra": {}}})
+        if "cli-chat-proxy.grok.com" in url:
+            return httpx.Response(200, json={"echo": dict(request.headers)})
+        return httpx.Response(404)
+
+    codex_file = tmp_path / "codex.json"
+    codex_file.write_text(json.dumps({"tokens": {"access_token": "eyJ.e30.x", "refresh_token": "r", "account_id": "acct"}}))
+    grok_file = tmp_path / "grok.json"
+    grok_file.write_text(json.dumps({"https://auth.x.ai::c": {"key": "grok-token", "refresh_token": "r", "expires_at": "2999-01-01T00:00:00Z", "oidc_client_id": "c"}}))
+    monkeypatch.setattr(proxy, "CODEX_AUTH", subs.CodexAuth(codex_file))
+    monkeypatch.setattr(proxy, "GROK_AUTH", subs.GrokAuth(grok_file))
+    monkeypatch.setattr(subs, "_jwt_claims", lambda token: {"exp": 4102444800, "https://api.openai.com/auth": {"chatgpt_account_id": "acct"}})
+    app = proxy.make_app()
+    await app["client"].aclose()
+    app["client"] = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    async with TestClient(TestServer(app)) as client:
+        plain = await client.post("/codex/v1/chat/completions", json={"model": "gpt-5.6-terra", "messages": [{"role": "user", "content": "hi"}]})
+        data = await plain.json()
+        assert data["choices"][0]["message"]["content"] == "PONG" and data["usage"]["prompt_tokens"] == 5
+        sent = [r for r in seen if str(r.url).endswith("/codex/responses")][0]
+        assert sent.headers["authorization"] == "Bearer eyJ.e30.x" and sent.headers["chatgpt-account-id"] == "acct" and sent.headers["originator"] == "codex_cli_rs"
+        assert json.loads(sent.content)["store"] is False
+        streamed = await client.post("/codex/v1/chat/completions", json={"model": "gpt-5.6-terra", "stream": True, "messages": [{"role": "user", "content": "hi"}]})
+        text = await streamed.text()
+        assert '"content": "PONG"' in text and text.strip().endswith("data: [DONE]")
+        models = await (await client.get("/codex/v1/models")).json()
+        assert models["data"][0]["id"] == "gpt-5.6-terra"
+        grok = await (await client.get("/grok/v1/models")).json()
+        echoed = grok["echo"]
+        assert echoed["authorization"] == "Bearer grok-token" and echoed["x-grok-client-identifier"] == "grok-shell" and echoed["x-xai-token-auth"] == "xai-grok-cli"
+        assert str([r for r in seen if "grok.com" in str(r.url)][0].url) == "https://cli-chat-proxy.grok.com/v1/models"
+        usage = await (await client.get("/subscriptions/usage")).json()
+        assert usage["codex"]["plan"] == "plus" and usage["grok"]["logged_in"] is True

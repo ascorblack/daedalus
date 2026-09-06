@@ -8,11 +8,8 @@ workspace with its own tools and loop; progress, text and the final result strea
 NDJSON. This is the sanctioned shape for every vendor: the subscription is used through
 the vendor's own product.
 
-``POST /grok/v1/chat/completions`` is an OpenAI-compatible bridge over ``grok -p`` with
-tools disabled, so Grok can serve as an ordinary model provider. Tool calls travel as
-``<tool_call>{…}</tool_call>`` blocks in the text and are returned as OpenAI ``tool_calls``.
-Only Grok is bridged this way: Anthropic and OpenAI restrict their subscriptions to their
-own harnesses.
+(Grok and Codex as *model providers* live in the key proxy, which speaks to their backends
+with the CLIs' own logins; this container is only for delegated work.)
 """
 
 from __future__ import annotations
@@ -21,7 +18,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shutil
 import signal
 import time
@@ -39,14 +35,7 @@ ROOTS = tuple(Path(p) for p in os.environ.get("HARNESS_ROOTS", "/srv/workspaces:
 MAX_PARALLEL = int(os.environ.get("HARNESS_MAX_PARALLEL", "4"))
 DEFAULT_TIMEOUT = float(os.environ.get("HARNESS_TIMEOUT_SECONDS", "1800"))
 PROGRESS_CHARS = 160
-TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
-TOOL_CALL_OPEN = "<tool_call>"
 GROK_READ_ONLY_TOOLS = "read_file,list_dir,grep,web_search,web_fetch"
-GROK_CHAT_TOOLS = "todo_write"
-"""The bridge cannot run Grok without tools (an empty list means "all"), so it leaves one harmless
-built-in: the terminal, file and web tools are gone, and the model falls back to the text protocol."""
-GROK_CHAT_MAX_TURNS = 4
-"""Grok spends a turn or two trying its built-ins before it writes a protocol block; the answer is the last turn."""
 CLAUDE_READ_ONLY_TOOLS = "Read,Grep,Glob,LS,WebFetch,WebSearch"
 VENDORS = ("claude", "codex", "grok")
 
@@ -74,18 +63,6 @@ def cli_status() -> dict[str, Any]:
         "codex": {"installed": shutil.which("codex") is not None, "logged_in": (home / ".codex" / "auth.json").is_file()},
         "grok": {"installed": shutil.which("grok") is not None, "logged_in": (home / ".grok" / "auth.json").is_file()},
     }
-
-
-def grok_models() -> list[str]:
-    cache = Path.home() / ".grok" / "models_cache.json"
-    try:
-        data = json.loads(cache.read_text(encoding="utf-8"))
-        models = sorted(str(k) for k in (data.get("models") or {}))
-        if models:
-            return models
-    except (OSError, ValueError):
-        pass
-    return ["grok-4.6", "grok-4.5"]
 
 
 # -- argv builders ------------------------------------------------------------------------
@@ -250,7 +227,7 @@ async def run_cli(argv: list[str], *, cwd: Path, timeout: float, on_line: Any, s
             pass
         await proc.wait()
         await err_task
-        raise HarnessError(f"timed out after {timeout:.0f} s")
+        raise HarnessError(f"timed out after {timeout:.0f} s") from None
     finally:
         if not err_task.done():
             await err_task
@@ -333,184 +310,6 @@ async def run_task(body: dict[str, Any], emit: Any) -> dict[str, Any]:
     return result
 
 
-# -- chat-completions bridge (grok) ---------------------------------------------------------------
-
-
-def _content_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    parts = []
-    for block in content or []:
-        if isinstance(block, dict):
-            if block.get("type") == "text":
-                parts.append(str(block.get("text") or ""))
-            elif block.get("type") == "image_url":
-                parts.append("[image omitted: this provider cannot see pictures]")
-    return "\n".join(parts)
-
-
-def tool_protocol(tools: list[dict[str, Any]], tool_choice: Any) -> str:
-    lines = ["You can call tools. Available tools (JSON schema of the arguments follows each name):"]
-    for tool in tools:
-        fn = tool.get("function") or {}
-        lines.append(f"- {fn.get('name')}: {fn.get('description') or ''}\n  arguments schema: {json.dumps(fn.get('parameters') or {}, ensure_ascii=False)}")
-    lines.append(
-        "To call a tool, write exactly one block per call, nothing after the last block:\n"
-        '<tool_call>{"name": "<tool name>", "arguments": {…}}</tool_call>\n'
-        "Several calls may be listed one after another. When you are not calling a tool, answer in plain text and never write the tag."
-    )
-    forced = None
-    if isinstance(tool_choice, dict):
-        forced = (tool_choice.get("function") or {}).get("name")
-    if forced:
-        lines.append(f"You MUST call the tool {forced!r} now.")
-    return "\n".join(lines)
-
-
-def build_prompt(messages: list[dict[str, Any]], tools: list[dict[str, Any]], tool_choice: Any) -> tuple[str, str]:
-    """(system prompt, conversation prompt) for one bridged completion."""
-    system_parts = [_content_text(m.get("content")) for m in messages if m.get("role") == "system"]
-    if tools:
-        system_parts.append(tool_protocol(tools, tool_choice))
-    lines: list[str] = ["The conversation so far (you are the assistant); continue it with your next assistant message only.", ""]
-    for m in messages:
-        role = m.get("role")
-        if role == "system":
-            continue
-        if role == "user":
-            lines.append(f"[user]\n{_content_text(m.get('content'))}\n")
-        elif role == "assistant":
-            body = _content_text(m.get("content"))
-            calls = m.get("tool_calls") or []
-            for call in calls:
-                fn = call.get("function") or {}
-                body += f"\n<tool_call>{json.dumps({'name': fn.get('name'), 'arguments': _loads(fn.get('arguments')), 'id': call.get('id')}, ensure_ascii=False)}</tool_call>"
-            lines.append(f"[assistant]\n{body.strip()}\n")
-        elif role == "tool":
-            lines.append(f"[tool result for call {m.get('tool_call_id')}]\n{_content_text(m.get('content'))}\n")
-    lines.append("[assistant]")
-    return "\n".join(p for p in system_parts if p).strip(), "\n".join(lines)
-
-
-def _loads(raw: Any) -> Any:
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return {"_raw": raw}
-    return raw
-
-
-def parse_tool_calls(text: str) -> tuple[str, list[dict[str, Any]]]:
-    """Split a bridged answer into plain text and the tool calls written in the protocol."""
-    calls: list[dict[str, Any]] = []
-    for i, match in enumerate(TOOL_CALL_RE.finditer(text)):
-        try:
-            data = json.loads(match.group(1))
-        except json.JSONDecodeError:
-            continue
-        name = str(data.get("name") or "")
-        if not name:
-            continue
-        arguments = data.get("arguments")
-        if arguments is None:
-            arguments = {}
-        calls.append({"id": f"call_{uuid.uuid4().hex[:12]}", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)}, "index": i})
-    plain = TOOL_CALL_RE.sub("", text)
-    if TOOL_CALL_OPEN in plain:  # an unterminated block: drop the tail rather than show the protocol
-        plain = plain.split(TOOL_CALL_OPEN, 1)[0]
-    return plain.strip(), calls
-
-
-class TextGuard:
-    """Streams text but holds back anything that could be the start of a tool-call block."""
-
-    def __init__(self) -> None:
-        self.buffer = ""
-        self.holding = False
-
-    def feed(self, delta: str) -> str:
-        self.buffer += delta
-        if self.holding:
-            return ""
-        idx = self.buffer.find("<")
-        if idx < 0:
-            out, self.buffer = self.buffer, ""
-            return out
-        head, tail = self.buffer[:idx], self.buffer[idx:]
-        if TOOL_CALL_OPEN.startswith(tail[: len(TOOL_CALL_OPEN)]) or tail.startswith(TOOL_CALL_OPEN):
-            if tail.startswith(TOOL_CALL_OPEN):
-                self.holding = True
-            self.buffer = tail
-            return head
-        # a '<' that is not the tag: flush up to and including it, keep scanning
-        self.buffer = tail[1:]
-        return head + "<" + self.feed("")
-
-    def rest(self) -> str:
-        out, self.buffer = self.buffer, ""
-        return out
-
-
-def _chunk(model: str, completion_id: str, delta: dict[str, Any], finish: str | None = None, usage: dict[str, Any] | None = None) -> str:
-    body: dict[str, Any] = {"id": completion_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": model, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
-    if usage is not None:
-        body["usage"] = usage
-    return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
-
-
-def openai_usage(usage: dict[str, Any]) -> dict[str, Any]:
-    prompt = int(usage.get("input_tokens") or 0) + int(usage.get("cache_read_input_tokens") or 0)
-    completion = int(usage.get("output_tokens") or 0)
-    return {
-        "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion,
-        "prompt_tokens_details": {"cached_tokens": int(usage.get("cache_read_input_tokens") or 0)},
-        "completion_tokens_details": {"reasoning_tokens": int(usage.get("reasoning_tokens") or 0)},
-    }
-
-
-async def grok_completion(body: dict[str, Any], *, emit: Any) -> dict[str, Any]:
-    """One bridged completion: returns the result event after streaming deltas through ``emit``."""
-    messages = body.get("messages") or []
-    if not isinstance(messages, list) or not messages:
-        raise HarnessError("messages are required")
-    system_prompt, prompt = build_prompt(messages, body.get("tools") or [], body.get("tool_choice"))
-    model = str(body.get("model") or "")
-    if model.startswith("grok/"):
-        model = model[5:]
-    scratch = Path("/tmp/harness-chat")
-    scratch.mkdir(parents=True, exist_ok=True)
-    preamble = (
-        "You are answering inside a chat API. Your built-in tools are disabled; the only tools are the ones "
-        "listed below, and the only way to call one is the <tool_call> block written as text. "
-    )
-    argv = grok_argv(prompt, model=model, max_turns=GROK_CHAT_MAX_TURNS, read_only=False, cwd=scratch, tools=GROK_CHAT_TOOLS, system_prompt=preamble + (system_prompt or "You are a helpful assistant."))
-    result: dict[str, Any] = {}
-
-    async def on_line(line: str) -> None:
-        if not line.startswith("{"):
-            return
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            return
-        for ev in translate_messages_event(event):
-            if ev["type"] == "result":
-                result.update(ev)
-            elif ev["type"] == "thinking":
-                await emit(ev)
-            # Text is not streamed: the model may chatter for a turn before the answer, and only the last turn counts.
-
-    timeout = float(body.get("timeout_seconds") or DEFAULT_TIMEOUT)
-    code, stderr = await run_cli(argv, cwd=scratch, timeout=timeout, on_line=on_line)
-    if not result:
-        raise HarnessError(f"grok produced no result (exit {code}): {stderr.strip()[-400:]}")
-    if not result.get("ok") and not result.get("text"):
-        raise HarnessError(f"grok gave no answer ({result.get('subtype') or 'error'}): {stderr.strip()[-300:]}")
-    result["model"] = model or "grok"
-    return result
-
-
 # -- HTTP -------------------------------------------------------------------------------------------
 
 
@@ -546,73 +345,11 @@ async def handle_run(request: web.Request) -> web.StreamResponse:
     return response
 
 
-async def handle_models(request: web.Request) -> web.Response:
-    return web.json_response({"object": "list", "data": [{"id": m, "object": "model", "owned_by": "xai"} for m in grok_models()]})
-
-
-async def handle_chat(request: web.Request) -> web.StreamResponse:
-    try:
-        body = await request.json()
-    except ValueError:
-        return web.json_response({"error": {"message": "body must be JSON", "type": "invalid_request_error"}}, status=400)
-    stream = bool(body.get("stream", False))
-    model = str(body.get("model") or "grok")
-    completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    sem: asyncio.Semaphore = request.app["sem"]
-    if not stream:
-        try:
-            async with sem:
-                result = await grok_completion(body, emit=_noop)
-        except HarnessError as exc:
-            return web.json_response({"error": {"message": str(exc), "type": "harness_error"}}, status=502)
-        text, calls = parse_tool_calls(result.get("text") or "")
-        message: dict[str, Any] = {"role": "assistant", "content": text or None}
-        if calls:
-            message["tool_calls"] = calls
-        return web.json_response({
-            "id": completion_id, "object": "chat.completion", "created": int(time.time()), "model": model,
-            "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if calls else "stop"}],
-            "usage": openai_usage(result.get("usage") or {}),
-        })
-    response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
-    await response.prepare(request)
-    async def emit(ev: dict[str, Any]) -> None:
-        if ev["type"] == "thinking":
-            await response.write(_chunk(model, completion_id, {"reasoning_content": ev["delta"]}).encode("utf-8"))
-
-    try:
-        try:
-            async with sem:
-                result = await grok_completion(body, emit=emit)
-        except HarnessError as exc:
-            await response.write(f"data: {json.dumps({'error': {'message': str(exc), 'type': 'harness_error'}})}\n\n".encode())
-            await response.write(b"data: [DONE]\n\n")
-            await response.write_eof()
-            return response
-        text, calls = parse_tool_calls(result.get("text") or "")
-        if text:
-            await response.write(_chunk(model, completion_id, {"role": "assistant", "content": text}).encode("utf-8"))
-        for call in calls:
-            await response.write(_chunk(model, completion_id, {"tool_calls": [{"index": call["index"], "id": call["id"], "type": "function", "function": call["function"]}]}).encode("utf-8"))
-        await response.write(_chunk(model, completion_id, {}, finish="tool_calls" if calls else "stop", usage=openai_usage(result.get("usage") or {})).encode("utf-8"))
-        await response.write(b"data: [DONE]\n\n")
-        await response.write_eof()
-    except ConnectionResetError:
-        pass
-    return response
-
-
-async def _noop(_: dict[str, Any]) -> None:
-    return None
-
-
 def make_app() -> web.Application:
     app = web.Application(client_max_size=16 * 1024 * 1024)
     app["sem"] = asyncio.Semaphore(MAX_PARALLEL)
     app.router.add_get("/healthz", handle_health)
     app.router.add_post("/run", handle_run)
-    app.router.add_get("/grok/v1/models", handle_models)
-    app.router.add_post("/grok/v1/chat/completions", handle_chat)
     return app
 
 
