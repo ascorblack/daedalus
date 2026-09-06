@@ -247,6 +247,54 @@ class SchedulerConfig(BaseModel):
     """Read inbox entries older than this are pruned."""
 
 
+class AsrConfig(BaseModel):
+    """Speech-to-text for voice notes: any OpenAI-compatible ``/audio/transcriptions`` endpoint."""
+
+    url: str = ""
+    """Base URL (``https://api.openai.com/v1``, a local faster-whisper server, …); empty = voice notes arrive as files only."""
+    api_key: str = ""
+    model: str = "whisper-1"
+    language: str = ""
+    """ISO code hint; empty = auto."""
+    timeout_seconds: float = Field(default=120.0, ge=5)
+    max_seconds: int = Field(default=600, ge=5)
+    """Longer voice notes are not transcribed."""
+    autosend: bool = False
+    """Send the transcript to the agent without the confirm step (dictation is error-prone; off by default)."""
+
+
+class ModeConfig(BaseModel):
+    """A named bundle of run limits and behaviour a session can switch to."""
+
+    max_iterations: int | None = None
+    usd_per_run: float | None = None
+    tool_timeout_seconds: float | None = None
+    verbosity: int | None = None
+    prompt: str = ""
+    """Extra rules appended to the system prompt while the mode is active."""
+    description: str = ""
+
+
+DEFAULT_MODES: dict[str, ModeConfig] = {
+    "quick": ModeConfig(max_iterations=25, usd_per_run=0.5, description="short answers, few tool calls, cheap", prompt="Mode: quick. Answer briefly, prefer a direct answer over investigation, at most a handful of tool calls."),
+    "deep": ModeConfig(max_iterations=400, usd_per_run=15.0, description="long autonomous work with a high budget", prompt="Mode: deep. Work autonomously to completion; verify with Verify; ask only when a choice is genuinely the operator's."),
+    "careful": ModeConfig(max_iterations=100, description="ask before anything irreversible", prompt="Mode: careful. Before any irreversible action (deleting, pushing, sending, paying, changing configuration) ask with AskUser and wait."),
+}
+
+
+class WebhookConfig(BaseModel):
+    """One inbound webhook provider: how it is authenticated and where its events run."""
+
+    secret: str = ""
+    """HMAC-SHA256 secret (GitHub style ``X-Hub-Signature-256``) or bearer token; empty = the endpoint refuses."""
+    scheme: Literal["github", "bearer"] = "bearer"
+    session: str = ""
+    """Session id (or title) the events run in; empty = a standing session named after the provider."""
+    prompt: str = ""
+    """What to do with an event; the flattened payload follows it."""
+    enabled: bool = True
+
+
 class OpsConfig(BaseModel):
     """Operational thresholds: boot-loop guard, delivery ledger, doctor."""
 
@@ -335,6 +383,9 @@ class RuntimeConfig(BaseModel):
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)
+    asr: AsrConfig = Field(default_factory=AsrConfig)
+    modes: dict[str, ModeConfig] = Field(default_factory=lambda: {k: v.model_copy() for k, v in DEFAULT_MODES.items()})
+    webhooks: dict[str, WebhookConfig] = Field(default_factory=dict)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     answer_language: str = "auto"
     """"auto" answers in the language of the request; otherwise a language name."""
@@ -502,7 +553,11 @@ __all__ = [
     "ToolsConfig",
     "WebToolsConfig",
     "ExecToolsConfig",
+    "AsrConfig",
+    "DEFAULT_MODES",
     "HeartbeatConfig",
+    "ModeConfig",
     "OpsConfig",
+    "WebhookConfig",
     "VisionConfig",
 ]

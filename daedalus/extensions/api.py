@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 from daedalus.config import PROVIDER_KINDS, HeartbeatConfig, ModelPresetConfig, ProviderConfig
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
+from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import Attachment
 from daedalus.security import redact
@@ -120,6 +121,19 @@ class RevertBody(BaseModel):
     seq: int
 
 
+class InboundBody(BaseModel):
+    text: str = Field(min_length=1, max_length=20_000)
+    sender: str = Field(default="local", max_length=100)
+    session: str | None = None
+    """Session id or exact title; empty = the standing '[inbound]' session."""
+    prompt: str = ""
+
+
+class ModeBody(BaseModel):
+    mode: str | None = None
+    """A configured mode name; null or "" = default behaviour."""
+
+
 class ForkBody(BaseModel):
     seq: int
     title: str | None = None
@@ -141,6 +155,10 @@ class SettingsBody(BaseModel):
     balance: dict[str, Any] | None = None
     scheduler: dict[str, Any] | None = None
     telegram: dict[str, Any] | None = None
+    asr: dict[str, Any] | None = None
+    modes: dict[str, Any] | None = None
+    webhooks: dict[str, Any] | None = None
+    ops: dict[str, Any] | None = None
     answer_language: str | None = None
 
 
@@ -277,8 +295,28 @@ def mask_provider_keys(settings_view: dict[str, Any]) -> dict[str, Any]:
             values = server.get(section)
             if isinstance(values, dict):
                 server[section] = {k: (redact.MASK if v else v) for k, v in values.items()}
+    asr = settings_view.get("asr") or {}
+    if isinstance(asr, dict):
+        asr["api_key_set"] = bool(asr.get("api_key"))
+        asr["api_key"] = ""
+    for hook in (settings_view.get("webhooks") or {}).values():
+        if isinstance(hook, dict):
+            hook["secret_set"] = bool(hook.get("secret"))
+            hook["secret"] = ""
     settings_view["provider_kinds"] = list(PROVIDER_KINDS)
     return settings_view
+
+
+def restore_masked_secrets(current: dict[str, Any], dumped: dict[str, Any]) -> None:
+    """An empty or masked secret sent back by the Mini App means "keep what is stored"."""
+    asr = dumped.get("asr")
+    if isinstance(asr, dict) and not asr.get("api_key") and "api_key" in asr:
+        asr["api_key"] = (current.get("asr") or {}).get("api_key", "")
+    hooks = dumped.get("webhooks")
+    if isinstance(hooks, dict):
+        for name, hook in hooks.items():
+            if isinstance(hook, dict) and not hook.get("secret") and "secret" in hook:
+                hook["secret"] = ((current.get("webhooks") or {}).get(name) or {}).get("secret", "")
 
 
 def restore_masked_mcp(current: dict[str, Any], patch: dict[str, Any]) -> None:
@@ -442,6 +480,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "workspace": str(state.workspace),
             "pending": state.pending.payload if state.pending else None,
             "model": await session_model_label(state),
+            "mode": state.metadata.get("mode") or "",
             "verifications": dict(await app.db.fetchone("SELECT count(*) total, sum(passed) passed FROM verifications WHERE session_id = ?", (session_id,)) or {}),
             "messages": [message_view(m) for m in source],
             "usage": dict(usage) if usage else {},
@@ -593,6 +632,63 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(502, str(exc)) from exc
         result = await manager.fork_into(session_id, body.seq, target)
         return {"id": target.session.id, "title": title, **result}
+
+    @api.post("/api/sessions/{session_id}/mode")
+    async def set_mode(session_id: str, body: ModeBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            return {"mode": await manager.set_mode(session_id, body.mode)}
+        except KeyError:
+            raise HTTPException(404, "no such session") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @api.get("/api/modes")
+    async def modes(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return {name: m.model_dump() for name, m in app.config.modes.items()}
+
+    # -- inbound events ------------------------------------------------------------------
+
+    @api.post("/api/inbound")
+    async def inbound_post(body: InboundBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        inbound = app.extensions.get("inbound")
+        if inbound is None:
+            raise HTTPException(503, "inbound events are not installed")
+        try:
+            return await inbound.deliver(source=body.sender, text=body.text, session_ref=body.session, default_title="[inbound]", prompt=body.prompt)  # type: ignore[attr-defined]
+        except TelegramBusy as exc:
+            raise HTTPException(429, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/webhooks/{provider}")
+    async def webhook(provider: str, request: Request) -> dict[str, Any]:
+        inbound = app.extensions.get("inbound")
+        conf = app.config.webhooks.get(provider)
+        if inbound is None or conf is None or not conf.enabled:
+            raise HTTPException(404, "unknown webhook")
+        if not conf.secret:
+            raise HTTPException(503, "this webhook has no secret configured; refusing")
+        raw = await request.body()
+        if not verify_signature(conf.scheme, conf.secret, raw, {k.lower(): v for k, v in request.headers.items()}):
+            raise HTTPException(401, "bad signature")
+        delivery_id = request.headers.get("x-github-delivery") or request.headers.get("x-delivery-id") or hashlib.sha256(raw).hexdigest()
+        if not await inbound.record_delivery(provider, delivery_id):  # type: ignore[attr-defined]
+            return {"status": "duplicate", "delivery_id": delivery_id}
+        try:
+            payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except ValueError:
+            payload = {"raw": raw.decode("utf-8", "replace")[:PAYLOAD_MAX_CHARS]}
+        event = request.headers.get("x-github-event") or request.headers.get("x-event") or ""
+        text = (f"event: {event}\n" if event else "") + flatten_payload(payload)
+        try:
+            result = await inbound.deliver(source=f"webhook:{provider}", text=text, session_ref=conf.session or None, default_title=f"[webhook {provider}]", prompt=conf.prompt)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — the sender must get a status, and the failure goes to the inbox
+            logger.warning("webhook %s could not run", provider, exc_info=True)
+            inbox = app.extensions.get("inbox")
+            if inbox is not None:
+                await inbox.post("webhook_failed", f"Webhook {provider} could not start a run", f"{type(exc).__name__}: {exc}", severity="warning")  # type: ignore[attr-defined]
+            raise HTTPException(503, "accepted but could not start a run; see the inbox") from exc
+        return {"status": "accepted", "delivery_id": delivery_id, **result}
 
     @api.get("/api/sessions/{session_id}/verifications")
     async def session_verifications(session_id: str, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
@@ -922,6 +1018,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             resolve_model_patch(current, model_patch)
         if isinstance(dumped.get("mcp"), dict):
             restore_masked_mcp(current, dumped["mcp"])
+        restore_masked_secrets(current, dumped)
+        for section in ("modes", "webhooks"):
+            if isinstance(dumped.get(section), dict):
+                current[section] = dumped.pop(section)  # whole-dict sections replace, so an entry can be removed
         for section, value in dumped.items():
             if isinstance(value, dict):
                 current[section] = _deep_merge(current.get(section, {}), value)

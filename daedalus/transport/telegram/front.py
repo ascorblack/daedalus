@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import shutil
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -41,6 +42,7 @@ from daedalus.host.session_runner import Attachment, SessionManager, SessionStat
 from daedalus.stores.sqlite import DeliveryLedger
 from daedalus.transport.telegram.markdown import markdown_to_html, split_message, strip_tags
 from daedalus.transport.telegram.render import Outbox, RunRenderer, RunView
+from daedalus.transport.telegram.voice import TranscriptionError, transcribe
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,8 @@ Each forum topic is one agent session with its own workspace. Write in a topic t
 /model [provider/]&lt;name&gt;|default · /thinking on|off|low|medium|high — model settings (default in General, per session in a topic)
 /usage · /balance — spend and provider balances
 /schedules · /schedule run|on|off|delete &lt;id&gt; — scheduled tasks
-/inbox [all|clear] · /heartbeat [on|off|run] · /doctor — what happened while you were away, the periodic check, health
+/inbox [all|clear] · /heartbeat [on|off|run] · /doctor · /intents — inbox, the periodic check, health, standing intents
+/mode [quick|deep|careful|default] — limits and rules for this session
 /approval manual|auto · /verbosity 0|1|2 — self-change approval, chat detail
 /rebuild · /rollback [n] · /panic — supervisor operations
 /prompt — show the editable working rules (edit them in the Mini App → Settings)
@@ -317,6 +320,7 @@ class TelegramFront:
         self._topic_status: dict[str, str] = {}
         self._topic_status_tasks: dict[str, asyncio.Task[None]] = {}
         self._stale_counts: dict[tuple[int, int], int] = {}
+        self._voice_pending: dict[str, tuple[str, str, Attachment, int, int]] = {}
         self.ledger = DeliveryLedger(manager.db, max_attempts=config.ops.delivery_max_attempts, max_age_hours=config.ops.delivery_max_age_hours, keep_days=config.ops.delivery_keep_days)
         self._stale_notices: dict[tuple[int, int], asyncio.Task[None]] = {}
         self.operator_hooks: dict[str, Callable[..., Awaitable[str]]] = {}
@@ -489,7 +493,8 @@ class TelegramFront:
         r.message.register(self.cmd_usage, Command("usage"))
         r.message.register(self.cmd_settings, Command("settings"))
         r.message.register(self.cmd_bind, Command("bind"))
-        r.message.register(self.cmd_operator, Command("rebuild", "rollback", "panic", "schedules", "verbosity", "approval", "balance", "schedule", "inbox", "heartbeat", "doctor"))
+        r.message.register(self.cmd_operator, Command("rebuild", "rollback", "panic", "schedules", "verbosity", "approval", "balance", "schedule", "inbox", "heartbeat", "doctor", "intents"))
+        r.message.register(self.cmd_mode, Command("mode"))
         r.message.register(
             self.on_message,
             F.text | F.caption | F.document | F.photo | F.audio | F.video | F.voice | F.video_note | F.animation | F.sticker | F.location | F.contact | F.poll,
@@ -909,6 +914,27 @@ class TelegramFront:
         await self.manager.set_model(state.session.id, thinking=thinking, reasoning_effort=effort)
         await message.answer(f"Session thinking={thinking} effort={effort or default.reasoning_effort}")
 
+    async def cmd_mode(self, message: Message, command: CommandObject) -> None:
+        if not self._is_owner(message.from_user.id if message.from_user else None):
+            return
+        state = await self._session_for_message(message)
+        if state is None or (self._is_general(message) and message.chat.type != "private"):
+            await message.answer("Use /mode inside a session topic (or the private chat).")
+            return
+        arg = (command.args or "").strip().lower()
+        modes = self.config.modes
+        if not arg:
+            current = state.metadata.get("mode") or "default"
+            lines = [f"  {name} — {m.description or ''} (iterations {m.max_iterations or self.config.limits.max_iterations}, cap ${m.usd_per_run if m.usd_per_run is not None else self.config.limits.usd_per_run})" for name, m in modes.items()]
+            await message.answer(f"mode: {current}\navailable:\n" + "\n".join(lines) + "\nusage: /mode <name> · /mode default")
+            return
+        try:
+            chosen = await self.manager.set_mode(state.session.id, None if arg in ("default", "off", "reset") else arg)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+        await message.answer(f"mode: {chosen or 'default'} (applies from the next run)")
+
     async def cmd_status(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
@@ -1016,6 +1042,9 @@ class TelegramFront:
         if self.config.telegram.reactions:
             await TelegramOutbox(self.bot, message.chat.id, None).react(message.message_id, RUN_REACTIONS["received"])
         attachment = await self._download(message, state)  # may take a while for big files
+        if attachment is not None and (message.voice or message.audio) and self.config.asr.url:
+            if await self._voice_to_text(message, state, attachment, text):
+                return
         buffer = self._buffers.setdefault(key, InboundBuffer())
         if text:
             buffer.text.append(text)
@@ -1028,6 +1057,73 @@ class TelegramFront:
             # A bare photo is usually followed by the words about it (often a voice note).
             wait = max(wait, self.config.telegram.photo_caption_wait_seconds)
         buffer.task = asyncio.create_task(self._flush_inbound(key, state, wait))
+
+    async def _voice_to_text(self, message: Message, state: SessionState, attachment: Attachment, caption: str) -> bool:
+        """Transcribe a voice note; the transcript is confirmed before it goes to the agent (unless autosend)."""
+        duration = int(getattr(message.voice or message.audio, "duration", 0) or 0)
+        if duration > self.config.asr.max_seconds:
+            await message.reply(f"🎙 {duration}s is over the transcription limit ({self.config.asr.max_seconds}s); the file is attached as is.")
+            return False
+        try:
+            transcript = await transcribe(attachment.path, self.config.asr)
+        except TranscriptionError as exc:
+            await message.reply(f"🎙 could not transcribe ({exc}); the file is attached as is.")
+            return False
+        text = (caption.strip() + "\n\n" if caption.strip() else "") + transcript
+        if self.config.asr.autosend:
+            await message.reply(f"🎙 _{transcript[:1000]}_")
+            await self._enqueue_text(state, message, text, attachment)
+            return True
+        token = uuid.uuid4().hex[:8]
+        self._voice_pending[token] = (state.session.id, text, attachment, message.chat.id, message.message_thread_id or 0)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✓ Send to the agent", callback_data=f"vc:{token}:go"), InlineKeyboardButton(text="✗ Discard", callback_data=f"vc:{token}:no")]])
+        await message.reply(f"🎙 I heard:\n\n{transcript[:3500]}", reply_markup=keyboard)
+        return True
+
+    async def _enqueue_text(self, state: SessionState, message: Message, text: str, attachment: Attachment | None) -> None:
+        key = (message.chat.id, message.message_thread_id or 0)
+        buffer = self._buffers.setdefault(key, InboundBuffer())
+        buffer.text.append(text)
+        if attachment is not None:
+            buffer.attachments.append(attachment)
+        if buffer.task is not None:
+            buffer.task.cancel()
+        buffer.task = asyncio.create_task(self._flush_inbound(key, state, self.config.telegram.inbound_merge_window_seconds))
+
+    async def _on_voice_decision(self, query: CallbackQuery, data: list[str]) -> None:
+        if len(data) != 3:
+            await query.answer("stale button")
+            return
+        _, token, action = data
+        pending = self._voice_pending.pop(token, None)
+        if pending is None:
+            await query.answer("This transcript is no longer open.")
+            return
+        session_id, text, attachment, chat_id, thread_id = pending
+        if action != "go":
+            await query.answer("discarded")
+            if query.message is not None:
+                try:
+                    await query.message.edit_reply_markup(reply_markup=None)
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        await query.answer("sent")
+        if query.message is not None:
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception:  # noqa: BLE001
+                pass
+        state = await self.manager.get_state(session_id)
+        if state is None:
+            return
+        key = (chat_id, thread_id)
+        buffer = self._buffers.setdefault(key, InboundBuffer())
+        buffer.text.append(text)
+        buffer.attachments.append(attachment)
+        if buffer.task is not None:
+            buffer.task.cancel()
+        buffer.task = asyncio.create_task(self._flush_inbound(key, state, 0.1))
 
     def _is_stale(self, message: Message) -> bool:
         limit = self.config.telegram.stale_after_seconds
@@ -1235,6 +1331,9 @@ class TelegramFront:
         if data[0] == "cm":
             await self._on_compact_decision(query, data)
             return
+        if data[0] == "vc":
+            await self._on_voice_decision(query, data)
+            return
         hook = self.callback_hooks.get(data[0])
         if hook is not None:
             await hook(query, data)
@@ -1365,9 +1464,11 @@ class TelegramFront:
             row = await self.manager.db.fetchone("SELECT sum(cost_usd) c, count(*) n FROM usage_events WHERE run_id = ?", (rid,))
             return float(row["c"]) if row and row["c"] is not None else None
 
+        mode = self.manager.mode_for(state) if state is not None else None
+        verbosity = mode.verbosity if mode is not None and mode.verbosity is not None else self.config.telegram.verbosity
         renderer = RunRenderer(
             outbox,
-            RunView(run_id=run_id, model=model, verbosity=self.config.telegram.verbosity),
+            RunView(run_id=run_id, model=model, verbosity=verbosity),
             edit_interval=self.config.telegram.status_edit_interval_seconds,
             edit_tiers=self.config.telegram.status_edit_tiers,
             slow_tool_seconds=self.config.telegram.slow_tool_seconds,

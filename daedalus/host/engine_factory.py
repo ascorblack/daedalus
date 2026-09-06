@@ -13,7 +13,7 @@ from protocore.runtime.runtime_constants import default_runtime_constants
 from protocore.runtime.tool_dispatch import ToolDispatcher
 from protocore.runtime.tool_permission import ToolPermissionGate
 
-from daedalus.config import RuntimeConfig
+from daedalus.config import ModeConfig, RuntimeConfig
 from daedalus.host import prompts
 from daedalus.host.hooks import DaedalusHookManager
 from daedalus.providers.openai_compat import OpenAICompatibleProvider
@@ -35,14 +35,16 @@ class EngineDeps:
     governance_path: Path
 
 
-def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_tokens: int, thinking: bool) -> Any:
+def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_tokens: int, thinking: bool, mode: ModeConfig | None = None) -> Any:
     context_window = max(8_000, int(context_window))
     output_cap = max(1024, min(max_output_tokens, context_window))
+    max_iterations = mode.max_iterations if mode is not None and mode.max_iterations else config.limits.max_iterations
+    tool_timeout = mode.tool_timeout_seconds if mode is not None and mode.tool_timeout_seconds else config.limits.tool_timeout_seconds
     return default_runtime_constants(
         model_context_window=context_window,
         llm_output_max_tokens_ratio=min(1.0, max(0.01, output_cap / context_window)),
-        max_iterations=config.limits.max_iterations,
-        tool_timeout_seconds=int(config.limits.tool_timeout_seconds),
+        max_iterations=max_iterations,
+        tool_timeout_seconds=int(tool_timeout),
         steer_follow_up_enabled=True,
         steer_default_mode="all",
         follow_up_default_mode="all",
@@ -85,6 +87,7 @@ def build_engine(
     max_output_tokens: int = 32_000,
     extra_notes: str = "",
     blocked_tools: set[str] | None = None,
+    mode: ModeConfig | None = None,
 ) -> QueryEngine:
     primary_provider, primary_model = rungs[0]
     model = model_name or primary_model
@@ -97,6 +100,7 @@ def build_engine(
         prompts.SELF_DEVELOPMENT,
         prompts.HISTORY,
         prompts.SCHEDULING,
+        (mode.prompt.strip() + "\n") if mode is not None and mode.prompt.strip() else "",
         prompts.environment_section(
             workspace=workspace,
             bot_repo=deps.bot_repo,
@@ -115,7 +119,7 @@ def build_engine(
         model_name=model,
         system_prompt_sections=tuple(s for s in sections if s),
         tool_visibility_policy=ToolVisibilityPolicy(pinned=set(all_tools) - set(blocked_tools or ()), blocked=set(blocked_tools or ())),
-        rc=runtime_constants(config, context_window=context_window, max_output_tokens=max_output_tokens, thinking=thinking),
+        rc=runtime_constants(config, context_window=context_window, max_output_tokens=max_output_tokens, thinking=thinking, mode=mode),
         thinking_enabled=thinking,
         reasoning_effort=reasoning_effort,
     )

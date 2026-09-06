@@ -22,6 +22,7 @@ EXTENSIONS = (
     "daedalus.extensions.scheduler",
     "daedalus.extensions.heartbeat",
     "daedalus.extensions.learning",
+    "daedalus.extensions.inbound",
     "daedalus.extensions.balance",
     "daedalus.extensions.api",
 )

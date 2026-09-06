@@ -146,6 +146,16 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
   const stick = useRef(true);
   const userScrolling = useRef(false);
 
+  async function setMode(mode: string) {
+    try {
+      await api.post(`/api/sessions/${id}/mode`, { mode: mode === "default" ? null : mode });
+      toast(`mode: ${mode} (from the next run)`);
+      load();
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
   const turnAction = useCallback(
     async (kind: "revert" | "fork", seq: number) => {
       try {
@@ -430,6 +440,13 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
             <button onClick={() => setView(view === "mcp" ? "chat" : "mcp")}>{view === "mcp" ? "Back to chat" : "MCP servers"}</button>
             <button onClick={() => setEditingTitle(detail?.title ?? "")}>Rename</button>
             <button onClick={compact}>Compact history</button>
+            <div className="sub" style={{ padding: "6px 10px 2px" }}>mode: {detail?.mode || "default"}</div>
+            {["default", "quick", "deep", "careful"].map((m) => (
+              <button key={m} onClick={() => setMode(m)}>
+                {(detail?.mode || "default") === m ? "• " : ""}
+                {m}
+              </button>
+            ))}
             <button className="danger" onClick={remove}>
               Delete session
             </button>

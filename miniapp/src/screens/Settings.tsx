@@ -343,8 +343,32 @@ function TextField({ label, value, placeholder, onSave, hint }: { label: string;
 
 function ToolsTab({ s, save }: { s: Settings; save: (patch: any) => Promise<void> }) {
   const web = s.tools.web;
+  const asr = s.asr;
   return (
     <>
+      <div className="card">
+        <div className="section-title" style={{ marginTop: 0 }}>Voice notes (speech-to-text)</div>
+        <div className="sub">Any OpenAI-compatible /audio/transcriptions endpoint (OpenAI, a local whisper server). Empty URL = voice notes are attached as files only. The transcript is shown with ✓ Send / ✗ Discard before it reaches the agent.</div>
+        <label className="field">Endpoint base URL</label>
+        <input className="field" defaultValue={asr.url} placeholder="https://api.openai.com/v1" onBlur={(e) => save({ asr: { ...asr, api_key: "", url: e.target.value.trim() } })} />
+        <label className="field">API key {asr.api_key_set ? "(set — leave empty to keep)" : ""}</label>
+        <input className="field" type="password" defaultValue="" placeholder={asr.api_key_set ? "••••••" : ""} onBlur={(e) => e.target.value && save({ asr: { ...asr, api_key: e.target.value } })} />
+        <div className="grid2">
+          <div>
+            <label className="field">Model</label>
+            <input className="field" defaultValue={asr.model} onBlur={(e) => save({ asr: { ...asr, api_key: "", model: e.target.value.trim() } })} />
+          </div>
+          <div>
+            <label className="field">Language hint (empty = auto)</label>
+            <input className="field" defaultValue={asr.language} onBlur={(e) => save({ asr: { ...asr, api_key: "", language: e.target.value.trim() } })} />
+          </div>
+        </div>
+        <div className="btnrow">
+          <button className={`btn small ${asr.autosend ? "primary" : ""}`} onClick={() => save({ asr: { ...asr, api_key: "", autosend: !asr.autosend } })}>
+            send without confirmation {asr.autosend ? "on" : "off"}
+          </button>
+        </div>
+      </div>
       <div className="card">
         <div className="section-title" style={{ marginTop: 0 }}>ImageView</div>
         <div className="sub">The agent's eyes: a separate image-capable model answers questions about pictures so the main context never carries pixels. Pick any model marked “images on” in General → Models.</div>

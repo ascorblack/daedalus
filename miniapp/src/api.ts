@@ -99,6 +99,7 @@ export type SessionDetail = {
   pending: { questions: Question[] } | null;
   model: string;
   messages: MessageView[];
+  mode?: string;
   usage: { c?: number; i?: number; o?: number; ch?: number; usd?: number | null };
 };
 
@@ -182,6 +183,7 @@ export type Settings = {
   provider_kinds?: string[];
   prompt: { rules: string; default_rules?: string };
   vision: { preset: string; max_output_tokens: number };
+  asr: { url: string; api_key: string; api_key_set?: boolean; model: string; language: string; timeout_seconds: number; max_seconds: number; autosend: boolean };
   tools: {
     web: { fetch_timeout_seconds: number; search_timeout_seconds: number; proxy: string; user_agent: string; fetch_max_chars: number; search_url: string; search_region: string; search_results: number };
     exec: { max_output_chars: number };

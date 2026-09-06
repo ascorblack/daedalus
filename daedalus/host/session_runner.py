@@ -859,6 +859,27 @@ class SessionManager:
         await self.db.execute("DELETE FROM pending_questions WHERE session_id = ?", (session_id,))
         return await self._start_run(state, None, continue_turn=True)
 
+    async def set_mode(self, session_id: str, mode: str | None) -> str:
+        """Switch a session to a configured mode (limits, prompt rules, verbosity); empty = default."""
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        name = (mode or "").strip()
+        if name and name not in self.config.modes:
+            raise ValueError(f"no such mode {name!r}; configured: {', '.join(self.config.modes) or 'none'}")
+        if name:
+            state.metadata["mode"] = name
+            state.session.metadata["mode"] = name
+        else:
+            state.metadata.pop("mode", None)
+            state.session.metadata.pop("mode", None)
+        await self.sessions.update_metadata(session_id, state.session.metadata)
+        return name
+
+    def mode_for(self, state: SessionState) -> Any:
+        name = str(state.metadata.get("mode") or "")
+        return self.config.modes.get(name) if name else None
+
     async def stop(self, session_id: str) -> bool:
         state = self._states.get(session_id)
         if state is None or not state.running or state.engine is None:
@@ -908,9 +929,12 @@ class SessionManager:
             core_repo=self.settings.core_repo_dir,
             governance_path=self.governance_path,
         )
+        mode_name = str(state.metadata.get("mode") or "")
+        mode = self.config.modes.get(mode_name) if mode_name else None
         engine = build_engine(
             deps=deps,
             config=self.config,
+            mode=mode,
             run_id=run_id,
             session_id=state.session.id,
             session_title=state.session.title,
@@ -1162,7 +1186,8 @@ class SessionManager:
 
     async def _enforce_run_cap(self, state: SessionState, run_id: str) -> None:
         """Stop a run whose priced spend crossed ``limits.usd_per_run``; unpriced calls cannot count."""
-        cap = self.config.limits.usd_per_run
+        mode = self.mode_for(state)
+        cap = mode.usd_per_run if mode is not None and mode.usd_per_run is not None else self.config.limits.usd_per_run
         if cap <= 0 or state.engine is None or not state.running or run_id in self._capped_runs:
             return
         row = await self.db.fetchone(
