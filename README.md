@@ -29,10 +29,11 @@ core; the copy it runs on is [protocore-exp](https://github.com/ascorblack/proto
 - **Spend visibility.** Every provider response is recorded as reported; balance thresholds
   alert you in chat; a daily cap is enforced by the supervisor.
 - **Any OpenAI-compatible model.** Clients are endpoints (DeepSeek, OpenRouter, self-hosted
-  vLLM, anything OpenAI-compatible, each with its own base_url and optional key); models are
-  named presets on top of them (client + model id + label), several per client if you like.
-  One preset is the default for new sessions, any session can switch from the chat, and a
-  fallback chain covers outages.
+  vLLM, anything OpenAI-compatible, each with its own base_url, optional key and timeout).
+  Models are named presets on top of them: client, model id, label, thinking mode and effort,
+  image support, context window and output cap, several per client if you like. One preset is
+  the default for new sessions, others can be marked as fallbacks, any session can switch from
+  the chat, and ImageView uses whichever image-capable preset you point it at.
 - **Eyes on demand.** `ImageView` sends an image to a small vision model (OpenRouter,
   `qwen/qwen3.7-flash` by default) and returns what the agent asked about it, so the main
   model's context never carries raw pixels.
@@ -114,8 +115,9 @@ The agent's changes land through pull requests in this repository and in `protoc
 
 Secrets and machine facts live in `.env` (see `deploy/env.example`). Everything the operator
 may change at runtime lives in `config.toml` on the state volume and is edited through the bot
-commands and the Mini App: model and thinking, context window and output cap
-(`[model] context_window`, `max_output_tokens`), the working rules of the system prompt
+commands and the Mini App: model presets (`[presets.<id>]` with provider, model, thinking,
+reasoning_effort, images, context_window, max_output_tokens; `[model] preset` and `chain` pick
+the default and the fallbacks), the working rules of the system prompt
 (`[prompt] rules`, empty = built-in default), fallback chain, approval mode, spend limits,
 balance thresholds, scheduler behaviour, per-model pricing overrides (DeepSeek list prices with
 their peak/off-peak schedule are built in), the vision model, and MCP servers:
