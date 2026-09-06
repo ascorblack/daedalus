@@ -125,8 +125,40 @@ class ProviderPatch(BaseModel):
 
 
 class ModelsLookupBody(BaseModel):
-    base_url: str
+    base_url: str | None = None
     api_key: str | None = None
+    provider: str | None = None
+    """A configured client id: probe its stored base_url with its stored key (keys stay server-side)."""
+
+
+class PresetPatch(BaseModel):
+    label: str | None = None
+    provider: str | None = None
+    model: str | None = None
+
+
+PRESET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def resolve_model_patch(current: dict[str, Any], patch: dict[str, Any]) -> None:
+    """Merge a ``model`` settings patch in place. A ``preset`` id sets provider+name from the
+    preset; a bare provider/name edit drops a preset binding it no longer matches."""
+    merged = {**current.get("model", {}), **{k: v for k, v in patch.items() if k != "preset"}}
+    presets = current.get("presets") or {}
+    if "preset" in patch:
+        preset_id = str(patch.get("preset") or "").strip()
+        if preset_id:
+            preset = presets.get(preset_id)
+            if not preset:
+                raise HTTPException(400, f"no such model preset {preset_id!r}")
+            merged["provider"], merged["name"], merged["preset"] = preset["provider"], preset["model"], preset_id
+        else:
+            merged["preset"] = ""
+    elif merged.get("preset"):
+        preset = presets.get(merged["preset"])
+        if preset is None or preset["provider"] != merged.get("provider") or preset["model"] != merged.get("name"):
+            merged["preset"] = ""
+    current["model"] = merged
 
 
 async def lookup_openai_models(
@@ -297,6 +329,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if overrides.get("provider"):
             provider = app.config.providers.get(overrides["provider"])
             model = overrides.get("model_name") or (provider.default_model if provider else "")
+            for preset in app.config.presets.values():
+                if preset.provider == overrides["provider"] and preset.model == model and preset.label:
+                    return preset.label
             return f"{overrides['provider']}/{model}" if model else overrides["provider"]
         if overrides.get("model_name"):
             return str(overrides["model_name"])
@@ -467,6 +502,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         state = await manager.get_state(session_id)
         if state is None:
             raise HTTPException(404, "no such session")
+        if body.get("preset"):
+            preset = app.config.presets.get(str(body["preset"]))
+            if preset is None:
+                raise HTTPException(400, f"no such model preset {body['preset']!r}")
+            body = {**body, "provider": preset.provider, "model": preset.model}
         try:
             await manager.set_model(
                 session_id,
@@ -665,7 +705,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.put("/api/settings")
     async def put_settings(body: SettingsBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         current = app.config.model_dump(mode="json")
-        for section, value in body.model_dump(exclude_none=True).items():
+        dumped = body.model_dump(exclude_none=True)
+        model_patch = dumped.pop("model", None)
+        if isinstance(model_patch, dict):
+            resolve_model_patch(current, model_patch)
+        for section, value in dumped.items():
             if isinstance(value, dict):
                 current[section] = {**current.get(section, {}), **value}
             else:
@@ -696,6 +740,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             return "it is in the model fallback chain"
         if config.vision.provider == provider_id:
             return "it is the vision provider"
+        users = [pid for pid, preset in config.presets.items() if preset.provider == provider_id]
+        if users:
+            return f"model preset(s) {', '.join(users)} use it"
         return None
 
     @api.put("/api/providers/{provider_id}")
@@ -733,12 +780,60 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         addresses), with an optional bearer key. ``base_url`` in the reply is the exact
         root the list was found at (``/v1`` appended when the caller omitted it).
         """
+        base_url, api_key = body.base_url, body.api_key
+        if body.provider:
+            provider_config = app.config.providers.get(body.provider)
+            if provider_config is None:
+                raise HTTPException(404, f"no such provider {body.provider!r}")
+            base_url = provider_config.base_url or (settings.vllm_base_url if provider_config.kind == "vllm" else "")
+            api_key = provider_config.api_key or {
+                "deepseek": settings.deepseek_api_key,
+                "openrouter": settings.openrouter_api_key,
+                "vllm": settings.vllm_api_key,
+            }.get(provider_config.kind, "") or None
+        if not base_url:
+            raise HTTPException(400, "base_url is required (or a provider with one configured)")
         try:
-            return await lookup_openai_models(body.base_url, body.api_key)
+            return await lookup_openai_models(base_url, api_key)
         except ValueError as exc:
             message = str(exc)
             status = 400 if message.startswith("base_url") else 502
             raise HTTPException(status, message) from exc
+
+    # -- model presets -------------------------------------------------------------------
+
+    @api.put("/api/presets/{preset_id}")
+    async def put_preset(preset_id: str, body: PresetPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Create or edit a named model choice: label, client (provider id) and model id."""
+        if not PRESET_ID_RE.fullmatch(preset_id):
+            raise HTTPException(400, "preset id: letters, digits, . _ - (max 64)")
+        raw = app.config.model_dump(mode="json")
+        entry = dict(raw.setdefault("presets", {}).get(preset_id) or {"provider": "", "model": "", "label": ""})
+        for key, value in body.model_dump(exclude_unset=True).items():
+            if value is not None:
+                entry[key] = str(value).strip()
+        if entry["provider"] not in raw.get("providers", {}):
+            raise HTTPException(400, f"provider {entry['provider']!r} is not a configured client")
+        if not entry["model"]:
+            raise HTTPException(400, "a preset needs a model id")
+        raw["presets"][preset_id] = entry
+        if raw["model"].get("preset") == preset_id:
+            raw["model"]["provider"], raw["model"]["name"] = entry["provider"], entry["model"]
+        try:
+            new_config = type(app.config).model_validate(raw)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(400, str(exc)) from exc
+        return await _save_provider_config(new_config)
+
+    @api.delete("/api/presets/{preset_id}")
+    async def delete_preset(preset_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        if preset_id not in app.config.presets:
+            raise HTTPException(404, "no such preset")
+        if app.config.model.preset == preset_id:
+            raise HTTPException(400, "this preset is the global default; pick another default first")
+        raw = app.config.model_dump(mode="json")
+        del raw["presets"][preset_id]
+        return await _save_provider_config(type(app.config).model_validate(raw))
 
     # -- static mini app ------------------------------------------------------------
 

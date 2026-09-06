@@ -145,8 +145,11 @@ export type ProviderConf = {
   pricing?: Record<string, unknown>;
 };
 
+export type Preset = { provider: string; model: string; label: string };
+
 export type Settings = {
-  model: { provider: string; name: string; thinking: boolean; reasoning_effort: string; chain: string[]; context_window: number; max_output_tokens: number };
+  model: { provider: string; name: string; preset: string; thinking: boolean; reasoning_effort: string; chain: string[]; context_window: number; max_output_tokens: number };
+  presets: Record<string, Preset>;
   providers: Record<string, ProviderConf>;
   provider_kinds?: string[];
   prompt: { rules: string; default_rules?: string };

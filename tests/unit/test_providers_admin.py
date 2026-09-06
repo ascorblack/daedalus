@@ -274,3 +274,22 @@ async def test_lookup_rejects_non_http_url() -> None:
 
     with pytest.raises(ValueError, match="http"):
         await lookup_openai_models("file:///etc/passwd")
+
+
+def test_presets_are_seeded_and_resolve_the_default(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from daedalus.config import RuntimeConfig
+    from daedalus.extensions.api import resolve_model_patch
+
+    config = RuntimeConfig()
+    config.providers["vllm"].base_url = "http://x/v1"
+    config.providers["vllm"].default_model = "Qwen3.6"
+    path = tmp_path / "c.toml"
+    config.save(path)
+    loaded = RuntimeConfig.load(path)
+    assert loaded.model.preset == "deepseek.deepseek-v4-flash"
+    assert loaded.presets["vllm.Qwen3.6"].provider == "vllm"
+    raw = loaded.model_dump(mode="json")
+    resolve_model_patch(raw, {"preset": "vllm.Qwen3.6"})
+    assert (raw["model"]["provider"], raw["model"]["name"], raw["model"]["preset"]) == ("vllm", "Qwen3.6", "vllm.Qwen3.6")
+    resolve_model_patch(raw, {"name": "other"})
+    assert raw["model"]["preset"] == ""

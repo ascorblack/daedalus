@@ -124,7 +124,8 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
   const [view, setView] = useState<"chat" | "files" | "mcp">("chat");
   const [menu, setMenu] = useState(false);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
-  const [picker, setPicker] = useState<null | { providers: Record<string, { default_model: string }>; available: string[]; global: string }>(null);
+  const [picker, setPicker] = useState<null | { presets: Record<string, { provider: string; model: string; label: string }>; global: string }>(null);
+  const textarea = useRef<HTMLTextAreaElement>(null);
   const [custom, setCustom] = useState("");
   const [tick, setTick] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
@@ -270,6 +271,7 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
     setDraft("");
     setPending([]);
     if (fileInput.current) fileInput.current.value = "";
+    if (textarea.current) textarea.current.style.height = "auto";
     try {
       if (files.length > 0) {
         const form = new FormData();
@@ -327,7 +329,8 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
   async function openPicker() {
     try {
       const st = await api.get<any>("/api/settings");
-      setPicker({ providers: st.providers ?? {}, available: st.providers_available ?? [], global: `${st.model.provider}/${st.model.name}` });
+      const def = st.presets?.[st.model.preset];
+      setPicker({ presets: st.presets ?? {}, global: def?.label || `${st.model.provider}/${st.model.name}` });
     } catch (e) {
       toast((e as Error).message);
     }
@@ -425,9 +428,9 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
               <button className="menu-item" onClick={() => chooseModel({ clear: true })}>
                 Global default <span className="sub">{picker.global}</span>
               </button>
-              {picker.available.map((pid) => (
-                <button key={pid} className="menu-item" onClick={() => chooseModel({ provider: pid, model: picker.providers[pid]?.default_model || undefined })}>
-                  {pid} <span className="sub">{picker.providers[pid]?.default_model || "default model"}</span>
+              {Object.entries(picker.presets).map(([pid, p]) => (
+                <button key={pid} className="menu-item" onClick={() => chooseModel({ preset: pid })}>
+                  {p.label || p.model} <span className="sub">{p.provider}/{p.model}</span>
                 </button>
               ))}
               <div className="sub" style={{ margin: "10px 0 4px" }}>Or a specific model: provider/model-id</div>
@@ -465,8 +468,14 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
           )}
           <div className="composer-box">
             <textarea
+              ref={textarea}
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                const el = e.target;
+                el.style.height = "auto";
+                el.style.height = `${Math.min(el.scrollHeight, Math.max(120, window.innerHeight * 0.4))}px`;
+              }}
               placeholder={status === "running" ? "Steer the agent (applies before its next step)" : "Ask anything"}
               rows={1}
               onKeyDown={(e) => {
@@ -485,12 +494,12 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
                 <Icon name="model" /> {shortModel(detail?.model)}
               </button>
               <span className="grow" />
-              {status === "running" ? (
+              {status === "running" && !draft.trim() && pending.length === 0 ? (
                 <button className="roundbtn stop" onClick={stop} aria-label="stop">
                   <Icon name="stop" />
                 </button>
               ) : (
-                <button className="roundbtn send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)} aria-label="send">
+                <button className="roundbtn send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)} aria-label={status === "running" ? "steer" : "send"} title={status === "running" ? "send as a steer" : "send"}>
                   <Icon name="up" />
                 </button>
               )}

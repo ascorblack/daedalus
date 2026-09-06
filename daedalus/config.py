@@ -87,6 +87,8 @@ class Settings(BaseSettings):
 class ModelConfig(BaseModel):
     provider: str = "deepseek"
     name: str = "deepseek-v4-flash"
+    preset: str = ""
+    """Id of the model preset the default was chosen from; ``provider``/``name`` mirror it."""
     thinking: bool = True
     reasoning_effort: ReasoningEffort = "medium"
     chain: list[str] = Field(default_factory=lambda: ["deepseek", "openrouter"])
@@ -95,6 +97,22 @@ class ModelConfig(BaseModel):
     """Tokens of history the run may hold before compaction; set below the model's real window to keep runs cheap."""
     max_output_tokens: int = Field(default=32_000, ge=1_024, le=1_000_000)
     """Cap on one model reply (``max_tokens``); thinking tokens count against it."""
+
+
+class ModelPresetConfig(BaseModel):
+    """A named model choice: which client (provider) serves which model id.
+
+    Presets are what the operator picks, as the global default and per session; the
+    provider entries only describe endpoints.
+    """
+
+    provider: str = ""
+    model: str = ""
+    label: str = ""
+    """Display label; empty shows ``provider/model``."""
+
+    def display(self, preset_id: str = "") -> str:
+        return self.label or f"{self.provider}/{self.model}" if self.provider else (self.label or preset_id)
 
 
 class ProviderConfig(BaseModel):
@@ -204,6 +222,8 @@ class TelegramConfig(BaseModel):
 
 class RuntimeConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
+    presets: dict[str, ModelPresetConfig] = Field(default_factory=dict)
+    """Named model choices keyed by id; seeded from the providers' default models."""
     providers: dict[str, ProviderConfig] = Field(
         default_factory=lambda: {
             "deepseek": ProviderConfig(
@@ -264,9 +284,36 @@ def _without_none(value: Any) -> Any:
     return value
 
 
+def preset_id_for(provider_id: str, model: str) -> str:
+    slug = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in model).strip(".-") or "model"
+    return f"{provider_id}.{slug}"
+
+
+def _seed_presets(raw: dict[str, Any]) -> bool:
+    """Back-fill presets for configs written before they existed: one per provider default
+    model, plus the active ``[model]`` pair, which becomes ``[model].preset``."""
+    if isinstance(raw.get("presets"), dict) and raw["presets"]:
+        return False
+    model = raw.get("model") or {}
+    presets: dict[str, Any] = {}
+    for provider_id, provider in (raw.get("providers") or {}).items():
+        default_model = (provider.get("default_model") or "").strip() if isinstance(provider, dict) else ""
+        if default_model:
+            presets.setdefault(preset_id_for(provider_id, default_model), {"provider": provider_id, "model": default_model, "label": ""})
+    active_provider, active_name = model.get("provider") or "", (model.get("name") or "").strip()
+    if active_provider and active_name:
+        pid = next((k for k, v in presets.items() if v["provider"] == active_provider and v["model"] == active_name), None)
+        if pid is None:
+            pid = preset_id_for(active_provider, active_name)
+            presets[pid] = {"provider": active_provider, "model": active_name, "label": ""}
+        raw["model"] = {**model, "preset": pid}
+    raw["presets"] = presets
+    return True
+
+
 def _migrate(raw: dict[str, Any]) -> bool:
     """Rewrite config shapes older versions wrote; returns True when something changed."""
-    changed = False
+    changed = _seed_presets(raw)
     for provider in (raw.get("providers") or {}).values():
         pricing = provider.get("pricing") if isinstance(provider, dict) else None
         if not isinstance(pricing, dict):
@@ -280,6 +327,7 @@ def _migrate(raw: dict[str, Any]) -> bool:
 
 
 __all__ = [
+    "preset_id_for",
     "ApprovalMode",
     "BalanceConfig",
     "LimitsConfig",
@@ -287,6 +335,7 @@ __all__ = [
     "McpOAuthConfig",
     "McpServerConfig",
     "ModelConfig",
+    "ModelPresetConfig",
     "PROVIDER_KINDS",
     "PromptConfig",
     "ProviderConfig",

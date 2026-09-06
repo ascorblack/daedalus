@@ -663,17 +663,24 @@ class TelegramFront:
             return
         arg = (command.args or "").strip()
         if not arg:
+            presets = "\n".join(f"  {pid} — {p.display(pid)}" for pid, p in self.config.presets.items()) or "  (none)"
             await message.answer(
-                f"default: {self.config.model.provider}/{self.config.model.name}\n"
-                f"providers: {', '.join(self.manager.providers.available())}\n"
-                "usage: /model [provider/]model-name"
+                f"default: {self.config.model.provider}/{self.config.model.name}"
+                f"{' (preset ' + self.config.model.preset + ')' if self.config.model.preset else ''}\n"
+                f"presets:\n{presets}\nproviders: {', '.join(self.manager.providers.available())}\n"
+                "usage: /model <preset-id> | [provider/]model-name | default"
             )
             return
-        provider, _, name = arg.rpartition("/") if "/" in arg and arg.split("/")[0] in self.manager.providers.available() else ("", "", arg)
+        preset = self.config.presets.get(arg)
+        if preset is not None:
+            provider, name = preset.provider, preset.model
+        else:
+            provider, _, name = arg.rpartition("/") if "/" in arg and arg.split("/")[0] in self.manager.providers.available() else ("", "", arg)
         if self._is_general(message):
             if provider:
                 self.config.model.provider = provider
             self.config.model.name = name
+            self.config.model.preset = arg if preset is not None else ""
             await self.save_config(self.config)
             self.manager.reload_config(self.config)
             await message.answer(f"Default model: {self.config.model.provider}/{self.config.model.name}")

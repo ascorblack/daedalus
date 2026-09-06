@@ -237,3 +237,9 @@ input.field, select.field, textarea.field {
 .chip { cursor:pointer; }
 .card.row .pill { flex:none; }
 .card.row .avatar { flex:none; }
+
+.preset { border-top:1px solid var(--line); padding-top:8px; margin-top:8px; }
+.preset.default { border-left:3px solid var(--ok); padding-left:8px; margin-left:-11px; }
+.radio { width:18px; height:18px; border-radius:50%; border:2px solid var(--muted); background:none; flex:none; cursor:pointer; padding:0; }
+.radio.on { border-color:var(--ok); background:radial-gradient(circle, var(--ok) 45%, transparent 50%); }
+.composer-box textarea { max-height:40vh; overflow-y:auto; line-height:1.4; }

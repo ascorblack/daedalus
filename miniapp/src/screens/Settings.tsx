@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, ProviderConf, Settings } from "../api";
+import { api, Preset, ProviderConf, Settings } from "../api";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "vllm", "openai_compat"];
 
@@ -30,6 +30,113 @@ function RulesEditor({ rules, fallback, onSave }: { rules: string; fallback: str
 }
 
 type Patch = (id: string, patch: Record<string, unknown>) => Promise<Settings | undefined>;
+
+function PresetRow({ id, p, isDefault, providers, onDefault, onPatch, onDelete, onLookup }: {
+  id: string;
+  p: Preset;
+  isDefault: boolean;
+  providers: string[];
+  onDefault: () => void;
+  onPatch: (patch: Partial<Preset>) => void;
+  onDelete: () => void;
+  onLookup: (provider: string) => Promise<string[] | null>;
+}) {
+  const [label, setLabel] = useState(p.label);
+  const [model, setModel] = useState(p.model);
+  const [models, setModels] = useState<string[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setLabel(p.label), [p.label]);
+  useEffect(() => setModel(p.model), [p.model]);
+  return (
+    <div className={`preset ${isDefault ? "default" : ""}`}>
+      <div className="row" style={{ gap: 8 }}>
+        <button className={`radio ${isDefault ? "on" : ""}`} onClick={onDefault} aria-label="make default" title="global default for new sessions" />
+        <input className="field" style={{ flex: 1 }} value={label} placeholder={`${p.provider}/${p.model}`} onChange={(e) => setLabel(e.target.value)} onBlur={() => label.trim() !== p.label && onPatch({ label: label.trim() })} />
+        <span className="sub" style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{id}</span>
+        <DeleteButton label="✕" onDelete={onDelete} />
+      </div>
+      <div className="row" style={{ gap: 8, marginTop: 6 }}>
+        <select className="field" style={{ width: 130 }} value={p.provider} onChange={(e) => onPatch({ provider: e.target.value })}>
+          {providers.map((x) => (
+            <option key={x}>{x}</option>
+          ))}
+          {!providers.includes(p.provider) && <option>{p.provider}</option>}
+        </select>
+        <input className="field" style={{ flex: 1 }} value={model} placeholder="model id" onChange={(e) => setModel(e.target.value)} onBlur={() => model.trim() && model.trim() !== p.model && onPatch({ model: model.trim() })} />
+        <button className="btn small" disabled={busy} onClick={async () => { setBusy(true); setModels(await onLookup(p.provider)); setBusy(false); }}>
+          {busy ? "…" : "⟳ /models"}
+        </button>
+      </div>
+      {models && (
+        <div className="btnrow" style={{ marginTop: 6 }}>
+          {models.length === 0 && <span className="sub">the server lists no models</span>}
+          {models.map((m) => (
+            <button key={m} className={`btn small ${m === p.model ? "primary" : ""}`} onClick={() => (setModels(null), onPatch({ model: m }))}>
+              {m}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddPresetRow({ providers, onAdd, toast }: { providers: string[]; onAdd: (id: string, preset: Preset) => void; toast: (t: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [provider, setProvider] = useState(providers[0] ?? "");
+  const [model, setModel] = useState("");
+  const [label, setLabel] = useState("");
+  const [models, setModels] = useState<string[] | null>(null);
+  useEffect(() => { if (!providers.includes(provider)) setProvider(providers[0] ?? ""); }, [providers, provider]);
+  if (!open)
+    return (
+      <button className="btn small" style={{ marginTop: 10 }} onClick={() => setOpen(true)}>
+        ＋ add model
+      </button>
+    );
+  async function lookup() {
+    try {
+      const r = await api.post<{ models: string[] }>("/api/providers/lookup-models", { provider });
+      setModels(r.models);
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+  function add() {
+    if (!provider || !model.trim()) {
+      toast("pick a client and a model id");
+      return;
+    }
+    const id = `${provider}.${model.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "")}`;
+    onAdd(id, { provider, model: model.trim(), label: label.trim() });
+    setOpen(false); setModel(""); setLabel(""); setModels(null);
+  }
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="row" style={{ gap: 8 }}>
+        <select className="field" style={{ width: 130 }} value={provider} onChange={(e) => setProvider(e.target.value)}>
+          {providers.map((x) => (
+            <option key={x}>{x}</option>
+          ))}
+        </select>
+        <input className="field" style={{ flex: 1 }} value={model} placeholder="model id" onChange={(e) => setModel(e.target.value)} />
+        <button className="btn small" onClick={lookup}>⟳ /models</button>
+      </div>
+      {models && (
+        <div className="btnrow" style={{ marginTop: 6 }}>
+          {models.map((m) => (
+            <button key={m} className={`btn small ${m === model ? "primary" : ""}`} onClick={() => setModel(m)}>{m}</button>
+          ))}
+        </div>
+      )}
+      <div className="row" style={{ gap: 8, marginTop: 6 }}>
+        <input className="field" style={{ flex: 1 }} value={label} placeholder="label (optional), e.g. Qwen fast" onChange={(e) => setLabel(e.target.value)} />
+        <button className="btn small primary" onClick={add}>add</button>
+        <button className="btn small" onClick={() => setOpen(false)}>cancel</button>
+      </div>
+    </div>
+  );
+}
 type Lookup = (baseUrl: string, apiKey: string) => Promise<{ base_url: string; models: string[] } | null>;
 
 function DeleteButton({ label, onDelete }: { label: string; onDelete: () => void }) {
@@ -162,10 +269,10 @@ function ProviderBlock({
       {error && <div className="sub" style={{ color: "var(--bad)" }}>{error}</div>}
       {models && (
         <div className="sub" style={{ marginTop: 6 }}>
-          Models on the server — pick one to make it the default model:
+          Models on this endpoint — pick one as its fallback model (the chain uses it), or add it as a model above:
           <div className="btnrow">
             {models.map((m) => (
-              <button key={m} className="btn small" onClick={() => (setModels(null), onActivate(id, m))}>
+              <button key={m} className="btn small" onClick={() => (setModels(null), onPatch(id, { default_model: m }))}>
                 {m}
               </button>
             ))}
@@ -297,6 +404,33 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
     }
   }
 
+  async function patchPreset(id: string, patch: Partial<Preset>) {
+    try {
+      const next = await api.put<Settings>(`/api/presets/${encodeURIComponent(id)}`, patch);
+      setS({ ...next, providers_available: next.providers_available ?? (s?.providers_available ?? []) });
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
+  async function removePreset(id: string) {
+    try {
+      const next = await api.delete<Settings>(`/api/presets/${encodeURIComponent(id)}`);
+      setS({ ...next, providers_available: next.providers_available ?? (s?.providers_available ?? []) });
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  }
+
+  async function lookupProviderModels(provider: string): Promise<string[] | null> {
+    try {
+      return (await api.post<{ models: string[] }>("/api/providers/lookup-models", { provider })).models;
+    } catch (e) {
+      toast((e as Error).message);
+      return null;
+    }
+  }
+
   async function removeProvider(id: string) {
     try {
       const next = await api.delete<Settings>(`/api/providers/${encodeURIComponent(id)}`);
@@ -313,17 +447,24 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
     <>
       <div className="card">
         <div className="section-title" style={{ marginTop: 0 }}>
-          Model
+          Models
         </div>
-        <label className="field">Provider</label>
-        <select className="field" value={s.model.provider} onChange={(e) => save({ model: { ...s.model, provider: e.target.value } })}>
-          {(s.providers_available ?? []).map((p) => (
-            <option key={p}>{p}</option>
-          ))}
-          {!(s.providers_available ?? []).includes(s.model.provider) && <option>{s.model.provider}</option>}
-        </select>
-        <label className="field">Model name</label>
-        <input className="field" defaultValue={s.model.name} onBlur={(e) => e.target.value !== s.model.name && save({ model: { ...s.model, name: e.target.value } })} />
+        <div className="sub">A model is a client plus a model id. The marked one is the default for new sessions; any session can switch from the chip in its chat. Several models may share one client.</div>
+        {Object.entries(s.presets ?? {}).map(([id, p]) => (
+          <PresetRow
+            key={id}
+            id={id}
+            p={p}
+            isDefault={s.model.preset === id || (!s.model.preset && s.model.provider === p.provider && s.model.name === p.model)}
+            providers={providerIds}
+            onDefault={() => save({ model: { preset: id } as any })}
+            onPatch={(patch) => void patchPreset(id, patch)}
+            onDelete={() => void removePreset(id)}
+            onLookup={lookupProviderModels}
+          />
+        ))}
+        {Object.keys(s.presets ?? {}).length === 0 && <div className="sub" style={{ marginTop: 6 }}>No models yet: add one below.</div>}
+        <AddPresetRow providers={providerIds} toast={toast} onAdd={(id, p) => void patchPreset(id, p)} />
         <label className="field">Thinking</label>
         <div className="btnrow" style={{ marginTop: 0 }}>
           <button className={`btn small ${s.model.thinking ? "primary" : ""}`} onClick={() => save({ model: { ...s.model, thinking: !s.model.thinking } })}>
