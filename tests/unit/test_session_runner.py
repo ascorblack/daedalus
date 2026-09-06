@@ -242,7 +242,7 @@ async def test_rename_updates_session_and_topic(settings: Settings, db: Database
     await manager.close()
 
 
-SECTIONED = "## Goal\ng\n## Done\nd\n## Open\no\n## Constraints\nc\n## Next steps\nn\n## Unknowns\nu"
+SECTIONED = "## Goal\ng\n## Constraints\nc\n## State\ns\n## Discoveries\nd\n## Open\no\n## Next steps\nn\n## Unknowns\nu\n## Identifiers\ni"
 
 
 def test_summary_sections_are_validated() -> None:
@@ -250,8 +250,8 @@ def test_summary_sections_are_validated() -> None:
 
     assert validate_summary_sections(SECTIONED) == ""
     assert "appears 0 times" in validate_summary_sections("## Goal\nx")
-    assert "appears 2 times" in validate_summary_sections(SECTIONED + "\n## Done\nagain")
-    assert validate_summary_sections("## Done\nd\n## Goal\ng\n## Open\no\n## Constraints\nc\n## Next steps\nn\n## Unknowns\nu") == "sections are out of order"
+    assert "appears 2 times" in validate_summary_sections(SECTIONED + "\n## State\nagain")
+    assert validate_summary_sections("## Constraints\nc\n## Goal\ng\n## State\ns\n## Discoveries\nd\n## Open\no\n## Next steps\nn\n## Unknowns\nu\n## Identifiers\ni") == "sections are out of order"
 
 
 def test_transcript_for_summary_clips_tool_results() -> None:
@@ -284,7 +284,7 @@ async def test_compact_replaces_history_with_summary_and_keeps_a_backup(settings
 
         assert "hello there" in request.messages[0].content_blocks[0].text
         calls.append(1)
-        text = "## Goal\nx\n## Done\ny" if len(calls) == 1 else SECTIONED
+        text = "## Goal\nx\n## State\ny" if len(calls) == 1 else SECTIONED
         return LLMResponse(message=Message(role=MessageRole.assistant, content_blocks=[TextBlock(text=text)]), stop_reason=StopReason.end_turn)
 
     calls: list[int] = []

@@ -198,6 +198,8 @@ class SettingsBody(BaseModel):
     modes: dict[str, Any] | None = None
     webhooks: dict[str, Any] | None = None
     ops: dict[str, Any] | None = None
+    compaction: dict[str, Any] | None = None
+    harness: dict[str, Any] | None = None
     answer_language: str | None = None
 
 

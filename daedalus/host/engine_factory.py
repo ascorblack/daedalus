@@ -58,6 +58,8 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
         # A summariser writes sentences whatever it is given: a small tool exchange comes back
         # no smaller, so units under this size are kept as they are instead of paid for.
         compaction_summary_min_unit_tokens=400,
+        # The host compacts the whole history between runs; the core's tiers only catch a run that grows past that.
+        compaction_trigger_ratio=config.compaction.core_trigger_ratio,
         # Long tasks are the point: no per-run tool-call cap; spend and iterations bound the run.
         leader_tool_call_soft_cap=0,
         compaction_protect_first_user_turn=True,

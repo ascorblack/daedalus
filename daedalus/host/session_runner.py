@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import shutil
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -150,6 +151,8 @@ class SessionManager:
         self._states: dict[str, SessionState] = {}
         self._sinks: list[EventSink] = []
         self._finished: list[RunFinished] = []
+        self.compaction_hooks: list[Callable[[str, dict[str, Any]], Awaitable[None]]] = []
+        """Called after an automatic compaction with what changed, so the chat can say so in one line."""
         self._pending_restored: list[Callable[[str, PendingQuestion], Awaitable[None]]] = []
         self.service_hooks: dict[str, Any] = {}
         """Callbacks the transport layer installs: send_file, spawn_session, schedule, self_*."""
@@ -469,8 +472,8 @@ class SessionManager:
         state.session = state.session.model_copy(update={"title": title})
         return state
 
-    async def compact(self, session_id: str, instructions: str = "") -> str:
-        """Replace the whole history with one model-written summary; returns the summary.
+    async def compact(self, session_id: str, instructions: str = "", *, keep_recent: int = 0) -> str:
+        """Replace the history (all of it, or all but the last ``keep_recent`` messages) with one summary.
 
         Holds the session lock for the whole operation (including the summarising call) so
         no run can start against the history while it is being rewritten. The replaced
@@ -480,14 +483,37 @@ class SessionManager:
         if state is None:
             raise KeyError(session_id)
         async with state.lock:
-            return await self._compact_locked(state, instructions)
+            return await self._compact_locked(state, instructions, keep_recent=keep_recent)
 
-    async def _compact_locked(self, state: SessionState, instructions: str) -> str:
+    async def _maybe_auto_compact(self, state: SessionState) -> None:
+        """After a run: when the last prompt filled ``compaction.auto_ratio`` of the window, compact before the next one."""
+        cfg = self.config.compaction
+        if cfg.auto_ratio <= 0 or state.pending is not None:
+            return
+        status = await self.context_status(state)
+        if not status["window"] or status["tokens"] < cfg.auto_ratio * status["window"] or status["messages"] < cfg.min_messages:
+            return
+        async with state.lock:
+            try:
+                started = time.monotonic()
+                await self._compact_locked(state, "", keep_recent=cfg.keep_recent_messages, reason="auto", own_task_ok=True)
+                after = await self.context_status(state)
+                logger.warning("session %s: auto-compacted %d → %d messages in %.0fs (prompt was %d of %d tokens)", state.session.id, status["messages"], after["messages"], time.monotonic() - started, status["tokens"], status["window"])
+                for hook in self.compaction_hooks:
+                    try:
+                        await hook(state.session.id, {"before_messages": status["messages"], "after_messages": after["messages"], "before_tokens": status["tokens"], "window": status["window"], "seconds": round(time.monotonic() - started)})
+                    except Exception:  # noqa: BLE001
+                        logger.exception("compaction hook failed")
+            except Exception:  # noqa: BLE001 — the next run must start even when the summary could not be made
+                logger.exception("auto-compaction failed for session %s", state.session.id)
+
+    async def _compact_locked(self, state: SessionState, instructions: str, *, keep_recent: int = 0, reason: str = "manual", own_task_ok: bool = False) -> str:
         session_id = state.session.id
-        if state.running and state.engine is not None and state.engine.is_terminal and state.task is not None:
+        if state.running and state.engine is not None and state.engine.is_terminal and state.task is not None and not own_task_ok:
             # The loop has settled; only bookkeeping remains.
             await asyncio.gather(asyncio.shield(state.task), return_exceptions=True)
-        if state.running or state.pending is not None:
+        busy = state.running and not (own_task_ok and state.task is asyncio.current_task())
+        if busy or state.pending is not None:
             raise RuntimeError("the session is busy; stop the run (or answer the question) first")
         pending = [t for t in state.persist_tasks if not t.done()]
         if pending:
@@ -495,26 +521,82 @@ class SessionManager:
         exceeded = self.budget_exceeded()
         if exceeded:
             raise RuntimeError(f"daily budget exceeded ({exceeded}); compaction is a paid call")
-        history = list(state.engine.history) if state.engine is not None else list(
+        full = list(state.engine.history) if state.engine is not None else list(
             await self.sessions.list_messages(session_id, TENANT, limit=10_000)
         )
-        if not history:
+        if not full:
             raise RuntimeError("nothing to compact")
+        cut = compaction_cut(full, keep_recent)
+        history, tail = full[:cut], full[cut:]
+        if not history:
+            raise RuntimeError("nothing to compact: the whole history is inside the kept tail")
         rungs, _ = self.resolve_model(await self.live.load(session_id))
         provider, model = rungs[0]  # the session's own model summarises its own history
         language = self.config.answer_language if self.config.answer_language != "auto" else operator_language(history)
-        prompt = COMPACT_PROMPT.format(language=language) + (
-            f"\n\nThe operator asks to focus on: {instructions.strip()}" if instructions.strip() else ""
-        )
-        transcript_text = transcript_for_summary(history)
         observability = LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, run_id=state.run_id, call_purpose="compaction", call_category="compaction")
+        summary = await self._summarise_history(provider, model, history, language=language, instructions=instructions, observability=observability)
+        # What the operator said is written by code, never by the summariser: rules do not decay.
+        summary = self.redactor.redact(summary + operator_quotes(history) + identifier_index(history) + verbatim_tail(history))
+        busy = state.running and not (own_task_ok and state.task is asyncio.current_task())
+        if busy or state.pending is not None:  # a run resumed from a snapshot meanwhile
+            raise RuntimeError("the session became busy during compaction; nothing was changed")
+        backup = state.workspace / f".history-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.jsonl"
+        try:
+            backup.write_text("\n".join(m.model_dump_json() for m in history) + "\n", encoding="utf-8")
+        except OSError:
+            logger.warning("could not write the history backup %s", backup, exc_info=True)
+        await self.sessions.append_transcript(session_id, history, from_history=True)
+        seqs = await self.sessions.transcript_seqs(session_id, [self.sessions.transcript_key(m) for m in history])
+        archive_note = f"\n\n[archived turns seq {seqs[0]}–{seqs[-1]}: HistoryExpand({seqs[0]}, {seqs[-1]}) returns them verbatim]" if seqs else ""
+        message = Message(
+            role=MessageRole.user,
+            content_blocks=[TextBlock(text=f"<compacted-turn id='{reason}'>{summary}{archive_note}</compacted-turn>")],
+            metadata={
+                COMPACTION_SUMMARY_METADATA_KEY: True,
+                "daedalus.compaction": {"reason": reason, "messages": len(history), "kept": len(tail), "at": datetime.now(UTC).isoformat()},
+                "daedalus.archived": {"from_seq": seqs[0], "to_seq": seqs[-1], "seqs": seqs} if seqs else {"seqs": []},
+            },
+        )
+        rebuilt = [message, *tail]
+        state.persist_gen += 1  # any persist captured before this point describes a history that is gone
+        if state.engine is not None:
+            engine = state.engine
+            engine.history = rebuilt
+            engine.compact_checkpoint = None  # type: ignore[attr-defined]
+            # The core gates automatic compaction on the last measured prompt size; that
+            # measurement described the history that no longer exists.
+            engine.last_observed_prompt_tokens = 0
+            engine.compaction_state = CompactionState()
+        state.history_keys = [self.sessions.transcript_key(m) for m in rebuilt]
+        await self.sessions.replace_messages(session_id, TENANT, rebuilt)
+        await self.sessions.append_transcript(session_id, [message])
+        return summary
+
+    async def _summarise_history(self, provider: Any, model: str, history: Sequence[Message], *, language: str, instructions: str, observability: LLMObservabilityContext) -> str:
+        """One structured summary of ``history``: a single call, or parallel part summaries merged when the transcript is long."""
+        cfg = self.config.compaction
+        focus = f"\n\nThe operator asks to focus on: {instructions.strip()}" if instructions.strip() else ""
+        transcript_text = transcript_for_summary(history)
+        parts = split_transcript(transcript_text, cfg.chunk_tokens)
+        if len(parts) == 1:
+            return await self._summary_call(provider, model, COMPACT_PROMPT.format(language=language, max_words=cfg.max_words) + focus, transcript_text, observability)
+        part_words = max(300, cfg.max_words // 2)
+        partials = await asyncio.gather(*(
+            self._summary_call(provider, model, CHUNK_PROMPT.format(index=i + 1, total=len(parts), language=language, max_words=part_words) + focus, part, observability, strict=False)
+            for i, part in enumerate(parts)
+        ))
+        joined = "\n\n".join(f"<part {i + 1}>\n{text}\n</part {i + 1}>" for i, text in enumerate(partials) if text)
+        return await self._summary_call(provider, model, MERGE_PROMPT.format(language=language, max_words=cfg.max_words) + focus, joined, observability)
+
+    async def _summary_call(self, provider: Any, model: str, prompt: str, body: str, observability: LLMObservabilityContext, *, strict: bool = True) -> str:
         summary = ""
+        candidate = ""
         problem = ""
-        for attempt in range(2):
+        for attempt in range(2 if strict else 1):
             reminder = f"\n\nYour previous attempt was rejected: {problem}. Produce every section, each exactly once, in the given order." if problem else ""
             request = LLMRequest(
                 model=model,
-                messages=[Message(role=MessageRole.user, content_blocks=[TextBlock(text=prompt + reminder + "\n\n" + transcript_text)])],
+                messages=[Message(role=MessageRole.user, content_blocks=[TextBlock(text=prompt + reminder + "\n\n" + body)])],
                 max_tokens=6000,
                 temperature=0.2,
                 extra={"enable_thinking": False},
@@ -532,38 +614,6 @@ class SessionManager:
                 raise RuntimeError("the model returned an empty summary")
             logger.warning("compaction summary accepted without the fixed sections: %s", problem)
             summary = candidate  # a usable summary beats a session the operator cannot compact
-        summary = self.redactor.redact(summary + verbatim_tail(history))  # the tail is the operator's words and may quote a secret too
-        if state.running or state.pending is not None:  # a run resumed from a snapshot meanwhile
-            raise RuntimeError("the session became busy during compaction; nothing was changed")
-        backup = state.workspace / f".history-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.jsonl"
-        try:
-            backup.write_text("\n".join(m.model_dump_json() for m in history) + "\n", encoding="utf-8")
-        except OSError:
-            logger.warning("could not write the history backup %s", backup, exc_info=True)
-        await self.sessions.append_transcript(session_id, history, from_history=True)
-        seqs = await self.sessions.transcript_seqs(session_id, [self.sessions.transcript_key(m) for m in history])
-        archive_note = f"\n\n[archived turns seq {seqs[0]}–{seqs[-1]}: HistoryExpand({seqs[0]}, {seqs[-1]}) returns them verbatim]" if seqs else ""
-        message = Message(
-            role=MessageRole.user,
-            content_blocks=[TextBlock(text=f"<compacted-turn id='manual'>{summary}{archive_note}</compacted-turn>")],
-            metadata={
-                COMPACTION_SUMMARY_METADATA_KEY: True,
-                "daedalus.compaction": {"reason": "manual", "messages": len(history), "at": datetime.now(UTC).isoformat()},
-                "daedalus.archived": {"from_seq": seqs[0], "to_seq": seqs[-1], "seqs": seqs} if seqs else {"seqs": []},
-            },
-        )
-        state.persist_gen += 1  # any persist captured before this point describes a history that is gone
-        if state.engine is not None:
-            engine = state.engine
-            engine.history = [message]
-            engine.compact_checkpoint = None  # type: ignore[attr-defined]
-            # The core gates automatic compaction on the last measured prompt size; that
-            # measurement described the history that no longer exists.
-            engine.last_observed_prompt_tokens = 0
-            engine.compaction_state = CompactionState()
-        state.history_keys = [self.sessions.transcript_key(message)]
-        await self.sessions.replace_messages(session_id, TENANT, [message])
-        await self.sessions.append_transcript(session_id, [message])
         return summary
 
     # -- checkpoints, revert, fork ------------------------------------------------------
@@ -1190,6 +1240,8 @@ class SessionManager:
                     await callback(session_id, run_id, status)
                 except Exception:  # noqa: BLE001
                     logger.exception("run-finished callback failed")
+            if status in ("completed", "failed", "cancelled"):
+                await self._maybe_auto_compact(state)
             if status == "completed":
                 await self._drain_leftover_follow_ups(state)
 
@@ -1458,21 +1510,41 @@ class SessionManager:
         return resumed
 
 
-SUMMARY_SECTIONS = ("Goal", "Done", "Open", "Constraints", "Next steps", "Unknowns")
+SUMMARY_SECTIONS = ("Goal", "Constraints", "State", "Discoveries", "Open", "Next steps", "Unknowns", "Identifiers")
 
 COMPACT_PROMPT = """Summarise the conversation transcript below so that an agent can continue the work \
-in a fresh context. Write the summary in {language}, as Markdown with exactly these six sections, \
+in a fresh context. Write the summary in {language}, as Markdown with exactly these eight sections, \
 each once, in this order, as level-2 headings whose titles stay in English verbatim whatever the \
-language of the body: ## Goal · ## Done · ## Open · ## Constraints · ## Next steps · ## Unknowns.
-Goal: what was asked and why. Done: what was accomplished, with concrete results (paths, commands, \
-numbers, decisions) — every identifier verbatim, never rounded or guessed. Open: what is still in \
-progress or untouched. Constraints: preferences and rules the operator stated. Next steps: the exact \
-actions to take next. Unknowns: what the transcript does not show. The absence of a tool result or \
-confirmation means the outcome is UNKNOWN, not that it did not happen or that it succeeded; put such \
-items under Unknowns rather than asserting them. Never include credentials or tokens. At most \
-~700 words. No commentary outside the sections."""
+language of the body: ## Goal · ## Constraints · ## State · ## Discoveries · ## Open · ## Next steps · \
+## Unknowns · ## Identifiers.
+Goal: what was asked and why, with the success criteria. Constraints: rules, preferences and decisions \
+the operator stated — quote them, do not paraphrase. State: what is done, with concrete results (paths, \
+commands, numbers, decisions) — every identifier verbatim, never rounded or guessed. Discoveries: \
+technical facts learned, errors and how they were resolved, approaches that failed and why. Open: what \
+is in progress or untouched. Next steps: the exact actions to take next, in order. Unknowns: what the \
+transcript does not show. The absence of a tool result or confirmation means the outcome is UNKNOWN, \
+not that it did not happen or that it succeeded; put such items under Unknowns rather than asserting \
+them. Identifiers: one line per path, id, URL, port, command, name or number that later work may need, \
+each exactly as it appeared. Never include credentials or tokens. At most ~{max_words} words. No \
+commentary outside the sections."""
+
+CHUNK_PROMPT = """The text below is ONE PART of a longer conversation transcript (part {index} of {total}). \
+Summarise this part in {language} with exactly these eight level-2 headings, each once, in this order, \
+titles in English: ## Goal · ## Constraints · ## State · ## Discoveries · ## Open · ## Next steps · \
+## Unknowns · ## Identifiers. Keep every identifier (paths, ids, URLs, ports, commands, numbers) \
+verbatim; quote operator rules rather than paraphrasing; an outcome the part does not show is UNKNOWN. \
+Never include credentials or tokens. At most ~{max_words} words. No commentary outside the sections."""
+
+MERGE_PROMPT = """Below are summaries of consecutive parts of one conversation, oldest first. Merge them \
+into ONE summary in {language} with exactly these eight level-2 headings, each once, in this order, \
+titles in English: ## Goal · ## Constraints · ## State · ## Discoveries · ## Open · ## Next steps · \
+## Unknowns · ## Identifiers. Keep the latest known state of each thing and every identifier verbatim; \
+keep every quoted operator rule; an item still unknown stays under Unknowns. At most ~{max_words} \
+words. No commentary outside the sections."""
 
 VERBATIM_TAIL_MESSAGES = 3
+OPERATOR_QUOTE_CHARS = 400
+"""Older operator messages are quoted by code, each clipped to this many characters, so a rule never depends on the summariser."""
 
 
 def validate_summary_sections(summary: str) -> str:
@@ -1487,6 +1559,84 @@ def validate_summary_sections(summary: str) -> str:
     if positions != sorted(positions):
         return "sections are out of order"
     return ""
+
+
+def operator_quotes(history: Sequence[Message], *, skip_last: int = VERBATIM_TAIL_MESSAGES, clip: int = OPERATOR_QUOTE_CHARS) -> str:
+    """Every older operator message, quoted by code: constraints survive compaction unchanged.
+
+    The summariser is asked to quote rules too, but a model paraphrases under pressure; this
+    section is written without it. The most recent ``skip_last`` operator messages are left to
+    :func:`verbatim_tail`, which prints them whole.
+    """
+    operator = [
+        m for m in history
+        if m.role is MessageRole.user and m.metadata.get("daedalus.origin") == "operator" and not m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)
+    ]
+    older = operator[:-skip_last] if skip_last else operator
+    lines: list[str] = []
+    seen: set[str] = set()
+    for m in older:
+        text = " ".join("".join(b.text for b in m.content_blocks if isinstance(b, TextBlock)).split())
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        lines.append("- " + (text[:clip] + "…" if len(text) > clip else text))
+    return ("\n\n## Operator said (verbatim, oldest first)\n" + "\n".join(lines)) if lines else ""
+
+
+IDENTIFIER_RE = re.compile(
+    r"(?<![\w/])(?:/[\w.@~-]+(?:/[\w.@~-]+)+|https?://[^\s'\"<>)]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\b[0-9a-f]{12,40}\b|\b[A-Za-z][\w-]*\.(?:py|md|toml|json|txt|yaml|yml|ts|tsx|sh|sql)\b|\bPR\s?#?\d{1,6}\b|#\d{1,6}\b|\b\d{4,5}\b)"
+)
+IDENTIFIER_INDEX_MAX = 150
+"""Identifiers pinned by code below the summary: paths, URLs, ids, file names, PR numbers, ports."""
+
+
+def identifier_index(history: Sequence[Message], *, limit: int = IDENTIFIER_INDEX_MAX) -> str:
+    """Every identifier the operator or the agent's tool calls named, in first-seen order, written by code.
+
+    The summariser keeps some of these; this list keeps all of them, because a path or an
+    id that is gone from context is gone from the work. Tool results are not scanned: they
+    carry directory listings and logs, which would bury the ones that matter.
+    """
+    seen: dict[str, None] = {}
+    for m in history:
+        if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY):
+            continue
+        for b in m.content_blocks:
+            if isinstance(b, TextBlock) and (m.role is MessageRole.assistant or m.metadata.get("daedalus.origin") == "operator"):
+                source = b.text
+            elif isinstance(b, ToolUseBlock):
+                source = b.arguments_json or ""
+            else:
+                continue
+            for found in IDENTIFIER_RE.findall(source):
+                token = found.strip().rstrip(".,;:")
+                if token.isdigit() and (len(token) < 4 or 1900 <= int(token) <= 2100):
+                    continue  # bare years and short numbers are noise
+                if len(token) > 200 or token in seen:
+                    continue
+                seen[token] = None
+    if not seen:
+        return ""
+    items = list(seen)[-limit:]
+    return "\n\n## Identifiers seen (extracted)\n" + "\n".join(f"- {t}" for t in items)
+
+
+def compaction_cut(history: Sequence[Message], keep_recent: int) -> int:
+    """Index where the kept tail starts: at most ``keep_recent`` messages, never inside a tool exchange.
+
+    The tail begins at a user-role message that is not a tool result (a turn boundary), so a
+    tool call is never separated from its result and a summary never ends on an unanswered call.
+    """
+    if keep_recent <= 0 or len(history) <= keep_recent:
+        return len(history) if keep_recent <= 0 else 0
+    cut = len(history) - keep_recent
+    while cut > 0:
+        m = history[cut]
+        if m.role is MessageRole.user and not any(isinstance(b, ToolResultBlock) for b in m.content_blocks):
+            break
+        cut -= 1
+    return cut
 
 
 def verbatim_tail(history: Sequence[Message], count: int = VERBATIM_TAIL_MESSAGES) -> str:
@@ -1549,6 +1699,25 @@ def operator_language(history: Sequence[Message]) -> str:
     if letters and sum("\u0400" <= c <= "\u04ff" for c in letters) / len(letters) > 0.3:
         return "Russian"
     return "English"
+
+
+def split_transcript(text: str, chunk_tokens: int) -> list[str]:
+    """Consecutive parts of a rendered transcript, each about ``chunk_tokens`` (4 chars per token), split on line ends."""
+    limit = max(1, chunk_tokens) * 4
+    if len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    current: list[str] = []
+    size = 0
+    for line in text.split("\n"):
+        if size + len(line) + 1 > limit and current:
+            parts.append("\n".join(current))
+            current, size = [], 0
+        current.append(line)
+        size += len(line) + 1
+    if current:
+        parts.append("\n".join(current))
+    return parts
 
 
 def transcript_for_summary(history: Sequence[Message], *, result_chars: int = 600) -> str:

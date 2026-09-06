@@ -263,6 +263,29 @@ class BalanceConfig(BaseModel):
     thresholds_usd: list[float] = Field(default_factory=lambda: [5.0, 2.0, 0.5])
 
 
+class CompactionConfig(BaseModel):
+    """Whole-history compaction the host performs between runs (the core's tiers stay as the mid-run fallback).
+
+    When the last prompt reached ``auto_ratio`` of the window, everything but the most recent
+    messages is replaced by one structured summary: fixed English headings (the carrier that
+    kept the most identifiers in the compaction-representation study), operator messages quoted
+    verbatim by code rather than paraphrased by the model, and an identifier list.
+    """
+
+    auto_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
+    """Prompt size, as a share of the window, above which a finished run triggers compaction. 0 = manual only."""
+    keep_recent_messages: int = Field(default=6, ge=0, le=60)
+    """Messages at the end of the history kept as they are (cut at a turn boundary, never inside a tool exchange)."""
+    max_words: int = Field(default=1200, ge=200, le=6000)
+    """Length budget for the summary body, without the quoted operator messages."""
+    chunk_tokens: int = Field(default=30_000, ge=5_000)
+    """Longer transcripts are summarised in parallel chunks first, then merged."""
+    min_messages: int = Field(default=12, ge=2)
+    """Fewer messages than this are never compacted automatically."""
+    core_trigger_ratio: float = Field(default=0.85, gt=0.0, lt=1.0)
+    """Where the core's own mid-run compaction starts; above the host's ratio so runs boundaries compact first."""
+
+
 class HarnessVendorConfig(BaseModel):
     """One coding-agent CLI the harness container can run on the operator's subscription."""
 
@@ -451,6 +474,7 @@ class RuntimeConfig(BaseModel):
     balance: BalanceConfig = Field(default_factory=BalanceConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     harness: HarnessConfig = Field(default_factory=HarnessConfig)
+    compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)
     asr: AsrConfig = Field(default_factory=AsrConfig)

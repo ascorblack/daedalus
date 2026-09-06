@@ -338,6 +338,7 @@ class TelegramFront:
         manager.add_sink(self._on_event)
         manager.on_finished(self._on_finished)
         manager.on_pending_restored(self._on_pending_restored)
+        manager.compaction_hooks.append(self._on_auto_compaction)
         manager.service_hooks.update(
             {
                 "send_file": self._service_send_file,
@@ -1528,6 +1529,18 @@ class TelegramFront:
         if outbox is not None:
             await outbox.send_text("↩️ Restarted while waiting for your answer; here is the question again.", markdown=False)
         await self._ask(session_id, dict(pending.payload))
+
+    async def _on_auto_compaction(self, session_id: str, info: dict[str, Any]) -> None:
+        outbox = await self.outbox_for_session(session_id)
+        if outbox is None:
+            return
+        try:
+            await outbox.send_text(
+                f"🗜 Context compacted: {info['before_messages']} → {info['after_messages']} messages, the prompt was {info['before_tokens'] // 1000}k of {info['window'] // 1000}k tokens ({info['seconds']} s). The full transcript stays searchable.",
+                markdown=False,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("compaction notice failed", exc_info=True)
 
     async def _on_finished(self, session_id: str, run_id: str, status: str) -> None:
         self.set_topic_status(session_id, status)
