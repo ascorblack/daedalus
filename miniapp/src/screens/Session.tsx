@@ -99,24 +99,28 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
 
   async function send() {
     const text = draft.trim();
-    if (!text && pending.length === 0) return;
+    const files = pending;
+    if (sending || (!text && files.length === 0)) return;
     setSending(true);
+    setDraft("");
+    setPending([]);
+    if (fileInput.current) fileInput.current.value = "";
     try {
-      if (pending.length > 0) {
+      if (files.length > 0) {
         const form = new FormData();
         form.append("text", text);
-        for (const f of pending) form.append("files", f, f.name);
+        for (const f of files) form.append("files", f, f.name);
         const res = await fetch(`/api/sessions/${id}/upload`, { method: "POST", headers: api.authHeaders(), body: form });
         if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? res.statusText);
       } else {
         await api.post(`/api/sessions/${id}/messages`, { text });
       }
-      setDraft("");
-      setPending([]);
       setLive(EMPTY_LIVE);
       stickToBottom.current = true;
       load();
     } catch (e) {
+      setDraft(text);
+      setPending(files);
       toast((e as Error).message);
     } finally {
       setSending(false);
@@ -144,6 +148,8 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
           </div>
         </div>
         <Pill status={status} />
+      </div>
+      <div className="chat-actions">
         {status === "running" && (
           <button className="btn small danger" onClick={stop}>
             stop
