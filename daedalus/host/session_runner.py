@@ -126,7 +126,7 @@ class SessionManager:
         self.providers = ProviderRegistry(
             settings, config, usage_sink=self.usage, image_loader=self._load_image
         )
-        self.mcp = McpManager(config.mcp.servers, self.tools)
+        self.mcp = McpManager(config.mcp.servers, self.tools, token_dir=settings.state_dir / "mcp")
         self.governance_path = governance_path or (settings.bot_repo_dir / "GOVERNANCE.md")
         self._states: dict[str, SessionState] = {}
         self._sinks: list[EventSink] = []
@@ -220,7 +220,9 @@ class SessionManager:
             )
         return current
 
-    async def mcp_service(self, op: str, *, session_id: str, server: str | None = None) -> str:
+    async def mcp_service(
+        self, op: str, *, session_id: str, server: str | None = None, redirect_url: str = ""
+    ) -> str:
         state = await self.get_state(session_id)
         if state is None:
             raise KeyError(session_id)
@@ -233,7 +235,27 @@ class SessionManager:
                 err = f" (error: {item['error']})" if item["error"] else ""
                 lines.append(f"[{mark}] {item['name']} — {item['description'] or 'no description'}: {tools}{err}")
             return "\n".join(lines) or "no MCP servers are configured"
-        assert server is not None
+        if server is None:
+            raise KeyError("server is required")
+        if op == "oauth_status":
+            return "\n".join(f"{key}: {value}" for key, value in self.mcp.oauth_status(server).items())
+        if op == "oauth_begin":
+            url = await self.mcp.oauth_begin(server)
+            return (
+                "Give this authorization URL to the owner to open in a browser (it creates or links the account on "
+                "the server's own page):\n\n"
+                f"{url}\n\n"
+                "After approving, the browser redirects to a local address that cannot load — copy the FULL address "
+                "from the URL bar and paste it back, then run McpOAuthFinish."
+            )
+        if op == "oauth_finish":
+            if not redirect_url:
+                raise KeyError("redirect_url is required for oauth_finish")
+            result = await self.mcp.oauth_finish(server, redirect_url)
+            return f"linked {server}: scopes {result.get('scope')}, access token valid for {result.get('expires_in')}s. Now run McpEnable(server={server!r})."
+        if op == "oauth_disconnect":
+            removed = await self.mcp.oauth_disconnect(server)
+            return f"removed stored OAuth tokens for {server}" if removed else f"{server} is not OAuth-configured"
         current = await self.set_mcp(session_id, server, enabled=(op == "enable"))
         if op == "enable":
             names = sorted(self.mcp.tool_names(server))

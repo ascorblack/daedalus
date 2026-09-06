@@ -12,8 +12,10 @@ import json
 import logging
 import re
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -21,6 +23,7 @@ from protocore.contracts.tools import Tool, ToolContext
 from protocore.contracts.types import ToolDefinition, ToolParameterSchema, ToolResult
 
 from daedalus.config import McpServerConfig
+from daedalus.mcp.oauth import MCPOAuthClient, NeedsAuthorization
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +79,22 @@ def _describe(exc: BaseException) -> str:
     return f"{type(inner).__name__}: {inner}"
 
 
+def _looks_like_auth_failure(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "401" in text or "unauthorized" in text or "invalid_token" in text or "invalid token" in text
+
+
+def _safe_slug(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name) or "server"
+
+
 class McpConnection:
     """One server; the transport and session live in a background task."""
 
-    def __init__(self, name: str, config: McpServerConfig) -> None:
+    def __init__(self, name: str, config: McpServerConfig, oauth: MCPOAuthClient | None = None) -> None:
         self.name = name
         self.config = config
+        self.oauth = oauth
         self.session: ClientSession | None = None
         self.tools: list[McpToolProxy] = []
         self._task: asyncio.Task[None] | None = None
@@ -108,9 +121,20 @@ class McpConnection:
                 async with stdio_client(params) as (read, write):
                     await self._serve(read, write)
             else:
-                import httpx
-
-                async with httpx.AsyncClient(headers=dict(self.config.headers), timeout=60.0) as client:
+                headers = dict(self.config.headers)
+                if self.oauth is not None:
+                    try:
+                        token = await self.oauth.access_token()
+                    except NeedsAuthorization:
+                        self.error = (
+                            f"{self.name}: this MCP server needs an OAuth link before it can connect. "
+                            "Ask the owner to run McpOAuthBegin(server=...) to get the authorization URL, open it, "
+                            "and paste the redirect URL back via McpOAuthFinish. Then enable this server again."
+                        )
+                        self._ready.set()
+                        return
+                    headers["Authorization"] = f"Bearer {token}"
+                async with httpx.AsyncClient(headers=headers, timeout=60.0) as client:
                     async with streamable_http_client(self.config.url, http_client=client) as streams:
                         await self._serve(streams[0], streams[1])
         except BaseException as exc:  # noqa: BLE001 — anyio wraps transport failures in groups
@@ -141,9 +165,26 @@ class McpConnection:
         return McpToolProxy(self, remote.name, definition)
 
     async def call(self, tool: str, arguments: dict[str, Any]) -> Any:
-        if self.session is None:
-            raise RuntimeError(f"MCP server {self.name} is not connected")
-        return await asyncio.wait_for(self.session.call_tool(tool, arguments), timeout=self.config.timeout_seconds)
+        for attempt in (1, 2):
+            if self.session is None:
+                raise RuntimeError(f"MCP server {self.name} is not connected")
+            try:
+                return await asyncio.wait_for(self.session.call_tool(tool, arguments), timeout=self.config.timeout_seconds)
+            except (TimeoutError, asyncio.CancelledError):
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if attempt == 1 and self.oauth is not None and _looks_like_auth_failure(exc):
+                    await self._refresh_and_reconnect()
+                    continue
+                raise
+
+    async def _refresh_and_reconnect(self) -> None:
+        """The access token expired mid-session: refresh it and restart the transport."""
+        if self.oauth is None:
+            return
+        await self.oauth.refresh()
+        await self.stop()
+        await self.start()
 
     async def stop(self) -> None:
         self._closing.set()
@@ -155,10 +196,12 @@ class McpConnection:
 
 
 class McpManager:
-    def __init__(self, servers: dict[str, McpServerConfig], registry: Any) -> None:
+    def __init__(self, servers: dict[str, McpServerConfig], registry: Any, token_dir: Path | None = None) -> None:
         self._configs = servers
         self._registry = registry
         self._connections: dict[str, McpConnection] = {}
+        self._token_dir = token_dir
+        self._oauth_clients: dict[str, MCPOAuthClient] = {}
 
     def reload(self, servers: dict[str, McpServerConfig]) -> None:
         self._configs = servers
@@ -169,6 +212,54 @@ class McpManager:
     def describe(self, name: str) -> str:
         cfg = self._configs.get(name)
         return cfg.description if cfg else ""
+
+    def oauth_client(self, name: str) -> MCPOAuthClient | None:
+        """The lazily-created OAuth client for an HTTP server that declares an ``oauth`` block."""
+        config = self._configs.get(name)
+        if config is None or config.oauth is None or not config.url or self._token_dir is None:
+            return None
+        existing = self._oauth_clients.get(name)
+        if existing is not None:
+            return existing
+        client = MCPOAuthClient(
+            server=name,
+            config=config.oauth,
+            server_url=config.url,
+            token_path=self._token_dir / f"{_safe_slug(name)}.json",
+            http=httpx.AsyncClient(timeout=30.0),
+        )
+        self._oauth_clients[name] = client
+        return client
+
+    def oauth_status(self, name: str) -> dict[str, Any]:
+        if name not in self._configs:
+            raise KeyError(f"unknown MCP server {name!r}; configured: {self.available()}")
+        oauth = self.oauth_client(name)
+        if oauth is None:
+            return {"configured": False, "note": "this server has no oauth block in its config"}
+        return oauth.status()
+
+    async def oauth_begin(self, name: str) -> str:
+        oauth = self.oauth_client(name)
+        if oauth is None:
+            raise KeyError(f"MCP server {name!r} is not configured for OAuth")
+        return await oauth.authorization_url()
+
+    async def oauth_finish(self, name: str, redirect_url: str) -> dict[str, Any]:
+        oauth = self.oauth_client(name)
+        if oauth is None:
+            raise KeyError(f"MCP server {name!r} is not configured for OAuth")
+        return await oauth.finish_authorization(redirect_url)
+
+    async def oauth_disconnect(self, name: str) -> bool:
+        oauth = self.oauth_client(name)
+        if oauth is None:
+            return False
+        oauth.disconnect()
+        connection = self._connections.get(name)
+        if connection is not None and connection.session is not None:
+            await connection.stop()
+        return True
 
     def all_tool_names(self) -> set[str]:
         return {t.name for c in self._connections.values() for t in c.tools}
@@ -183,7 +274,7 @@ class McpManager:
             raise KeyError(f"unknown MCP server {name!r}; configured: {self.available()}")
         connection = self._connections.get(name)
         if connection is None:
-            connection = McpConnection(name, self._configs[name])
+            connection = McpConnection(name, self._configs[name], oauth=self.oauth_client(name))
             self._connections[name] = connection
         await connection.start()
         for proxy in connection.tools:
@@ -194,6 +285,9 @@ class McpManager:
     async def close(self) -> None:
         for connection in self._connections.values():
             await connection.stop()
+        for client in self._oauth_clients.values():
+            await client.http.aclose()
+        self._oauth_clients.clear()
 
     def status(self) -> list[dict[str, Any]]:
         out = []

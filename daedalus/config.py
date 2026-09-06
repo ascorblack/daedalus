@@ -123,6 +123,25 @@ class VisionConfig(BaseModel):
     model: str = "qwen/qwen3.7-flash"
 
 
+class McpOAuthConfig(BaseModel):
+    """OAuth 2.1 (authorization code + PKCE) for remote MCP servers that require it.
+
+    The flow is interactive: ``McpOAuthBegin`` returns an authorization URL the owner
+    opens, the server redirects back to ``redirect_uri`` (loopback; the owner pastes the
+    final URL back via ``McpOAuthFinish``), and the client exchanges the code for tokens.
+    Tokens live on the state volume (0600), never in chat or tool arguments.
+    """
+
+    issuer: str = ""
+    """Discovery base for ``/.well-known/oauth-authorization-server``; empty = origin of the server URL."""
+    scopes: list[str] = Field(default_factory=list)
+    """OAuth scopes requested, e.g. ``["board:read", "board:write"]``."""
+    redirect_uri: str = ""
+    """Loopback redirect registered with the server; default ``http://127.0.0.1:8931/callback``."""
+    client_name: str = ""
+    """Client name sent during dynamic client registration (default: ``"<server> MCP client"``)."""
+
+
 class McpServerConfig(BaseModel):
     transport: Literal["stdio", "http"] = "stdio"
     command: str = ""
@@ -132,6 +151,8 @@ class McpServerConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     description: str = ""
     timeout_seconds: float = 120.0
+    oauth: McpOAuthConfig | None = None
+    """When set, the HTTP transport authenticates with OAuth bearer tokens instead of static headers."""
 
 
 class McpConfig(BaseModel):
@@ -247,6 +268,7 @@ __all__ = [
     "BalanceConfig",
     "LimitsConfig",
     "McpConfig",
+    "McpOAuthConfig",
     "McpServerConfig",
     "ModelConfig",
     "PromptConfig",
