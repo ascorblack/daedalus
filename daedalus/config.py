@@ -384,6 +384,14 @@ class PeersConfig(BaseModel):
     wait_timeout_minutes: int = Field(default=30, ge=1)
 
 
+class SubagentsConfig(BaseModel):
+    max_depth: int = Field(default=2, ge=1)
+    """How deep SubAgent may nest (a subagent starting a subagent …) before the call is refused."""
+    max_active: int = Field(default=4, ge=1)
+    """Running subagents one leader may have at a time."""
+    wait_timeout_minutes: int = Field(default=30, ge=1)
+
+
 class OpsConfig(BaseModel):
     """Operational thresholds: boot-loop guard, delivery ledger, doctor."""
 
@@ -485,6 +493,7 @@ class RuntimeConfig(BaseModel):
     asr: AsrConfig = Field(default_factory=AsrConfig)
     board: BoardConfig = Field(default_factory=BoardConfig)
     peers: PeersConfig = Field(default_factory=PeersConfig)
+    subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
     modes: dict[str, ModeConfig] = Field(default_factory=lambda: {k: v.model_copy() for k, v in DEFAULT_MODES.items()})
     webhooks: dict[str, WebhookConfig] = Field(default_factory=dict)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)

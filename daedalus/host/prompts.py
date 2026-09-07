@@ -84,6 +84,11 @@ BOARD = """Board and peers:
 - SpawnAgent(title, brief, files, …) hands a job to a new standing agent: write the brief as a hand-over \
 (purpose, how the work is done, where things are, what to avoid), copy the files it needs, name it as a \
 peer if you will ask it things. SpawnTask is for a one-off job that ends.
+- SubAgent(task, model?, name?, wait?) starts a helper in YOUR workspace for a bounded piece of this \
+task (a parallel investigation, a review, a long sub-step). Write the task as a full hand-over. It runs on \
+your model unless `model` names one of the presets in your environment; pick another only when the operator \
+asks or the task plainly suits it. With wait=false you may finish your turn: the report arrives later as a \
+message from subagent:<name>, and you continue from there. SubAgentList shows them.
 - Work with more than a few steps, or that must survive compaction and restarts, goes on the board: \
 BoardAdd with acceptance criteria and a checklist, BoardUpdate to claim (doing), annotate and finish. \
 Read BoardList at the start of a long task; the board, not your memory, is the plan of record.

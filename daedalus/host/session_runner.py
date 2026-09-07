@@ -456,7 +456,8 @@ class SessionManager:
             await conn.execute("DELETE FROM verifications WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM learning_records WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        if delete_workspace and state.workspace.exists() and state.workspace.is_relative_to(self.settings.workspaces_dir):
+        # A subagent shares its leader's workspace: only a session's own directory is ever removed.
+        if delete_workspace and state.workspace == self.workspace_for(session_id) and state.workspace.exists() and state.workspace.is_relative_to(self.settings.workspaces_dir):
             shutil.rmtree(state.workspace, ignore_errors=True)
         return True
 
@@ -1369,13 +1370,16 @@ class SessionManager:
         operator = sum(1 for m in history if m.role is MessageRole.user and m.metadata.get("daedalus.origin") not in (None, "core") and not m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY))
         return {"tokens": tokens, "window": window, "messages": len(history), "summaries": summaries, "operator_turns": operator}
 
-    @staticmethod
-    def notes_for(state: SessionState) -> str:
+    def notes_for(self, state: SessionState) -> str:
         """What the system prompt says about this session beyond the environment: the brief it was created with."""
         parts = [state.extra_notes.strip()] if state.extra_notes.strip() else []
+        available = set(self.providers.available())
+        models = [pid for pid, preset in self.config.presets.items() if preset.provider in available and preset.model]
+        if models:
+            parts.append("- Models SubAgent accepts (preset ids): " + ", ".join(models))
         brief = str(state.metadata.get("brief") or "").strip()
         if brief:
-            origin = state.metadata.get("spawned_by")
+            origin = state.metadata.get("spawned_by") or state.metadata.get("subagent_of")
             parts.append("- Your brief" + (f" (from session {origin})" if origin else "") + ", the standing instructions for this session:\n" + brief)
         return "\n".join(parts)
 
