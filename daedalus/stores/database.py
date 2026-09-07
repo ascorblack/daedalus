@@ -320,6 +320,10 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE schedules ADD COLUMN run_in TEXT NOT NULL DEFAULT 'new';
     """,
+    # 14 — a receipt names the shared dependencies its observation rests on
+    """
+    ALTER TABLE verifications ADD COLUMN dependencies TEXT NOT NULL DEFAULT '';
+    """,
 ]
 
 
