@@ -82,3 +82,14 @@ def test_run_origin_is_taken_from_the_opening_message() -> None:
     message = Message(role=MessageRole.user, content_blocks=[TextBlock(text="x")], metadata={"daedalus.origin": "reminder"})
     assert str(message.metadata.get("daedalus.origin") or "operator").split(":")[0] == "reminder"
     assert SimpleNamespace(run_origin="subagent:leader").run_origin.split(":")[0] == "subagent"
+
+
+async def test_wrong_tool_argument_names_answer_with_the_accepted_ones() -> None:
+    from daedalus.tools import discover_tools
+
+    tools = {t.name: t for t in discover_tools()}
+    ctx = ToolContext(tenant_id="daedalus", run_id="r1", session_id="s")
+    result = await tools["BoardAdd"].invoke(ctx, {"title": "x", "status": "doing"})
+    assert result.is_error and "unknown argument 'status'" in result.content and "title" in result.content
+    result = await tools["Edit"].invoke(ctx, {"old_string": "a", "new_string": "b"})
+    assert result.is_error and "missing" in result.content and "path" in result.content
