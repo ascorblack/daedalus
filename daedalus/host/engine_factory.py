@@ -43,16 +43,16 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
     return default_runtime_constants(
         model_context_window=context_window,
         llm_output_max_tokens_ratio=min(1.0, max(0.01, output_cap / context_window)),
-        max_iterations=max_iterations,
+        max_turns_per_run=max_iterations,
+        # Long runs are the point: no cumulative output-token budget per run; turns, spend and the operator bound it.
+        run_max_output_tokens_budget=0,
         tool_timeout_seconds=int(tool_timeout),
         steer_follow_up_enabled=True,
         steer_default_mode="all",
         follow_up_default_mode="all",
-        mid_session_controls_enabled=True,
         memory_enabled=True,
         # Advertise every registered tool; the registry would otherwise clip the list.
         tool_retrieval_top_k=200,
-        agent_thinking_default=thinking,
         # Summaries must not be cut mid-JSON: give the summariser room for a full sentence pair.
         compaction_summary_max_output_tokens=1024,
         # A summariser writes sentences whatever it is given: a small tool exchange comes back

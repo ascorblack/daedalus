@@ -1274,11 +1274,10 @@ wheels = [
 
 [[package]]
 name = "protocore"
-version = "2.0.0a3"
+version = "2.0.0a4"
 source = { editable = "../protocore-exp" }
 dependencies = [
     { name = "jinja2" },
-    { name = "pluggy" },
     { name = "pydantic" },
     { name = "typing-extensions" },
 ]
@@ -1288,15 +1287,17 @@ requires-dist = [
     { name = "bandit", marker = "extra == 'dev'", specifier = ">=1.7" },
     { name = "jinja2", specifier = ">=3.1,<4" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
-    { name = "pluggy", specifier = ">=1.5" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
+    { name = "pytest", marker = "extra == 'testing'", specifier = ">=8.2" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+    { name = "pytest-asyncio", marker = "extra == 'testing'", specifier = ">=0.23" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "typing-extensions", specifier = ">=4.12" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["testing", "dev"]
 
 [[package]]
 name = "pycparser"

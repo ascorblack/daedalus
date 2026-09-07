@@ -34,7 +34,6 @@ from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 from protocore.runtime.live_control import new_queued_prompt
 from protocore.runtime.loop_state import LoopState
-from protocore.runtime.query import query
 from protocore.runtime.query_engine import QueryEngine
 from protocore.tests_support.adapters import InMemoryToolRegistry
 from protocore.tools.ask_user import AskUserTool
@@ -1202,7 +1201,8 @@ class SessionManager:
         run_id = engine.config.run_id
         status = "completed"
         try:
-            iterator = query(engine) if continue_turn else engine.run(message)
+            # A continuation drives the model against the history as it stands; nothing is appended.
+            iterator = engine.run(None) if continue_turn else engine.run(message)
             async for event in iterator:
                 await self._dispatch_event(state, event)
             if engine.state is LoopState.AWAITING and state.pending is not None:

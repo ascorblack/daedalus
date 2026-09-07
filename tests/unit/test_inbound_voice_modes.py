@@ -111,9 +111,9 @@ async def test_transcribe_uses_an_openai_compatible_endpoint(tmp_path: Path) -> 
 async def test_modes_override_limits_and_prompt(settings: Settings, db: Database) -> None:
     config = RuntimeConfig()
     rc = runtime_constants(config, context_window=100_000, max_output_tokens=8_000, thinking=False, mode=config.modes["quick"])
-    assert rc.max_iterations == 25
+    assert rc.max_turns_per_run == 25
     rc = runtime_constants(config, context_window=100_000, max_output_tokens=8_000, thinking=False, mode=None)
-    assert rc.max_iterations == config.limits.max_iterations
+    assert rc.max_turns_per_run == config.limits.max_iterations
     manager = SessionManager(settings, config, db=db)
     await manager.start()
     state = await manager.create_session("m")
