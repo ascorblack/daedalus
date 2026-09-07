@@ -1,8 +1,15 @@
-import { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { api, SlashCommand, MessageView, Question, SessionDetail } from "../api";
 import { Status, fmtInt, fmtUsd } from "../components";
 import { codeBlock, renderMarkdown } from "../md";
+import { confirmAsync, enterSends, errorText, fmtTok, haptic } from "../ui";
+
+/** Markdown parsed once per text: a token streaming into one turn must not re-parse every other. */
+const Md = memo(function Md({ text, className }: { text: string; className?: string }) {
+  const html = useMemo(() => renderMarkdown(text), [text]);
+  return <div className={className} dangerouslySetInnerHTML={{ __html: html }} />;
+});
 
 /** The trailing retrieval headline ⟦…⟧ is for the transcript index, not for the reader; a half-streamed one is cut too. */
 function stripHeadline(text: string): string {
@@ -66,12 +73,12 @@ function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Tu
       if (m.compaction?.reason !== "core") {
         // The host compacted between runs (auto) or on request (manual): a block of its own after the
         // turn, so the answer that came before it stays the answer.
-        turns.push({ key: `s${i}`, summary: m, activity: [], answer: "", startedAt: at, endedAt: at, pendingTools: 0 });
+        turns.push({ key: `s${m.seq ?? i}`, summary: m, activity: [], answer: "", startedAt: at, endedAt: at, pendingTools: 0 });
         current = null;
         return;
       }
       // The core compacted mid-run: a step inside the turn, where the summarised work used to be.
-      if (!current) current = open(`a${i}`, at);
+      if (!current) current = open(`a${m.seq ?? i}`, at);
       if (current.answer) {
         current.activity.push({ kind: "note", text: current.answer });
         current.answer = "";
@@ -80,12 +87,12 @@ function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Tu
       return;
     }
     if (m.role === "user") {
-      current = open(`u${i}`, at);
+      current = open(`u${m.seq ?? i}`, at);
       current.user = m;
       return;
     }
     if (m.role === "system") return;
-    if (!current) current = open(`a${i}`, at);
+    if (!current) current = open(`a${m.seq ?? i}`, at);
     current.endedAt = at;
     if (current.answer) {
       // Text that turned out not to be final becomes a note.
@@ -156,7 +163,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
       toast(`mode: ${mode} (from the next run)`);
       load();
     } catch (e) {
-      toast((e as Error).message);
+      toast(errorText(e));
     }
   }
 
@@ -164,7 +171,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
     async (kind: "revert" | "fork", seq: number) => {
       try {
         if (kind === "revert") {
-          if (!window.confirm("Undo this turn and everything after it? The working history is cut and the workspace files are restored where a snapshot exists (nested git repositories stay as they are). The transcript keeps everything.")) return;
+          if (!(await confirmAsync("Undo this turn and everything after it? The working history is cut and the workspace files are restored where a snapshot exists (nested git repositories stay as they are). The transcript keeps everything."))) return;
           const r = await api.post<{ dropped: number; workspace_restored: boolean; untouched: string[] }>(`/api/sessions/${id}/revert`, { seq });
           const ws = r.workspace_restored ? (r.untouched.length ? `, workspace restored (${r.untouched.length} nested repo(s) untouched)` : ", workspace restored") : ", files not restored (no snapshot)";
           toast(`reverted: ${r.dropped} message(s) removed${ws}`);
@@ -174,20 +181,27 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
         }
         load();
       } catch (e) {
-        toast((e as Error).message);
+        toast(errorText(e));
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [id, toast],
   );
 
-  const load = useCallback(async () => {
-    try {
-      setDetail(await api.get<SessionDetail>(`/api/sessions/${id}`));
-    } catch (e) {
-      toast((e as Error).message);
-    }
-  }, [id, toast]);
+  const [offline, setOffline] = useState(false);
+  const load = useCallback(
+    async (quiet = false) => {
+      try {
+        setDetail(await api.get<SessionDetail>(`/api/sessions/${id}`));
+        setOffline(false);
+      } catch (e) {
+        // Timers and the event stream retry by themselves: one banner in the header, not a toast every few seconds.
+        setOffline(true);
+        if (!quiet) toast(errorText(e));
+      }
+    },
+    [id, toast],
+  );
 
   useEffect(() => {
     load();
@@ -198,13 +212,13 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
   const status = (detail?.status ?? "idle") as Status;
   const busy = status === "running" || status === "waiting";
 
-  // While a run is active, re-read the transcript even if the event stream stalls; tick the timer.
+  // The event stream carries every change while a run is active; this re-read is the safety net, not the feed.
   useEffect(() => {
     if (!busy) {
       setLive(EMPTY_LIVE);
       return;
     }
-    const t = setInterval(load, 3000);
+    const t = setInterval(() => load(true), 20000);
     const clock = setInterval(() => setTick((n) => n + 1), 1000);
     return () => {
       clearInterval(t);
@@ -238,7 +252,11 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
               const event = /^event: (.*)$/m.exec(frame)?.[1];
               const data = /^data: (.*)$/m.exec(frame)?.[1];
               if (!event || !data) continue;
-              handle(event, JSON.parse(data));
+              try {
+                handle(event, JSON.parse(data));
+              } catch {
+                /* one malformed frame must not end the stream */
+              }
             }
           }
         } catch {
@@ -246,7 +264,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
         }
         if (stop) return;
         // The stream ended (server restart, proxy timeout): re-read the transcript and reconnect.
-        load();
+        load(true);
         await new Promise((r) => setTimeout(r, backoff));
         backoff = Math.min(backoff * 2, 15000);
       }
@@ -265,8 +283,8 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
         setLive((s) => ({ ...s, tools: s.tools.map((t) => (t.id === p.tool_call_id ? { ...t, result: String(p.content ?? p.output ?? ""), error: !!p.is_error } : t)) }));
       } else if (event === "message_stop") {
         // The history now carries this message; drop the streamed copy once it is loaded.
-        load().then(() => setLive((s) => ({ ...s, text: "", thinking: "" })));
-      } else if (event === "state_changed" || event === "tool_call_pending" || event === "run_settled" || event === "compaction_completed") load();
+        load(true).then(() => setLive((s) => ({ ...s, text: "", thinking: "" })));
+      } else if (event === "state_changed" || event === "tool_call_pending" || event === "run_settled" || event === "compaction_completed") load(true);
     }
     return () => {
       stop = true;
@@ -319,7 +337,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
   async function runCommand(line: string) {
     const name = line.slice(1).split(" ")[0].toLowerCase();
     const spec = commands.find((c) => c.name === name);
-    if (spec?.confirm && !window.confirm(`Run /${name}?`)) return;
+    if (spec?.confirm && !(await confirmAsync(`Run /${name}?`))) return;
     setDraft("");
     if (textarea.current) textarea.current.style.height = "auto";
     try {
@@ -329,7 +347,8 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
       else setCommandResult({ line, text: r.text });
       load();
     } catch (e) {
-      toast((e as Error).message);
+      setDraft(line);
+      toast(errorText(e));
     }
   }
 
@@ -366,19 +385,25 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
         await api.post(`/api/sessions/${id}/messages`, { text });
       }
       stick.current = true;
+      haptic("light");
       load();
     } catch (e) {
       setDraft(text);
       setPending(files);
-      toast((e as Error).message);
+      toast(errorText(e));
     } finally {
       setSending(false);
     }
   }
 
   async function stop() {
-    await api.post(`/api/sessions/${id}/stop`);
-    toast("stopping");
+    try {
+      await api.post(`/api/sessions/${id}/stop`);
+      haptic("medium");
+      toast("stopping");
+    } catch (e) {
+      toast(errorText(e));
+    }
   }
 
   async function rename(title: string) {
@@ -388,7 +413,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
       await api.patch(`/api/sessions/${id}`, { title: title.trim() });
       load();
     } catch (e) {
-      toast((e as Error).message);
+      toast(errorText(e));
     }
   }
 
@@ -398,24 +423,24 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
       toast("stop the run first");
       return;
     }
-    if (!window.confirm("Replace the whole history with a summary? The agent keeps only the summary.")) return;
+    if (!(await confirmAsync("Replace the whole history with a summary? The agent keeps only the summary."))) return;
     toast("compacting…");
     try {
       await api.post(`/api/sessions/${id}/compact`, { instructions: "" });
       await load();
       toast("compacted");
     } catch (e) {
-      toast((e as Error).message);
+      toast(errorText(e));
     }
   }
 
   async function openPicker() {
     try {
       const st = await api.get<any>("/api/settings");
-      const def = st.presets?.[st.model.preset];
-      setPicker({ presets: st.presets ?? {}, global: def?.label || `${st.model.provider}/${st.model.name}` });
+      const def = st.presets?.[st.model?.preset];
+      setPicker({ presets: st.presets ?? {}, global: def ? def.label || `${def.provider}/${def.model}` : String(st.model?.preset ?? "default") });
     } catch (e) {
-      toast((e as Error).message);
+      toast(errorText(e));
     }
   }
 
@@ -426,18 +451,18 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
       toast(`model: ${r.model}`);
       load();
     } catch (e) {
-      toast((e as Error).message);
+      toast(errorText(e));
     }
   }
 
   async function remove() {
     setMenu(false);
-    if (!window.confirm("Delete this session, its topic and its workspace?")) return;
+    if (!(await confirmAsync("Delete this session, its topic and its workspace?"))) return;
     try {
       await api.delete(`/api/sessions/${id}`);
       onBack();
     } catch (e) {
-      toast((e as Error).message);
+      toast(errorText(e));
     }
   }
 
@@ -471,16 +496,20 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
               ↳ subagent of <b>{detail.leader_title ?? detail.subagent_of}</b>
             </div>
           )}
-          <div className="sub">
+          <div className="sub meta">
             {busy ? <span className="live-dot" /> : null}
-            {detail?.model} · {fmtInt(detail?.usage.i)}↑ {fmtInt(detail?.usage.o)}↓ · {fmtUsd(detail?.usage.usd)}
-            {detail?.context && detail.context.tokens > 0 && (
-              <span title={`context in use: ${detail.context.tokens.toLocaleString()} of ${detail.context.window.toLocaleString()} tokens · ${detail.context.messages} messages (${detail.context.summaries} summaries, ${detail.context.operator_turns} yours)`}>
-                {" · ctx "}
-                {fmtInt(detail.context.tokens)}
-                {detail.context.window > 0 && `/${fmtInt(detail.context.window)} (${Math.round((100 * detail.context.tokens) / detail.context.window)}%)`}
+            <span title={detail?.model}>{shortModel(detail?.model, 28)}</span>
+            <span title={`${fmtInt(detail?.usage.i)} tokens in, ${fmtInt(detail?.usage.o)} out`}>
+              {fmtTok(detail?.usage.i)}↑ {fmtTok(detail?.usage.o)}↓
+            </span>
+            <span>{fmtUsd(detail?.usage.usd)}</span>
+            {detail?.context && detail.context.tokens > 0 && detail.context.window > 0 && (
+              <span className="ctx" title={`context in use: ${detail.context.tokens.toLocaleString()} of ${detail.context.window.toLocaleString()} tokens · ${detail.context.messages} messages (${detail.context.summaries} summaries, ${detail.context.operator_turns} yours)`}>
+                ctx {Math.round((100 * detail.context.tokens) / detail.context.window)}%
+                <i className="ctxbar" style={{ ["--fill" as string]: `${Math.min(100, Math.round((100 * detail.context.tokens) / detail.context.window))}%` }} />
               </span>
             )}
+            {offline && <span className="offline">reconnecting…</span>}
           </div>
         </div>
         <button className="iconbtn" onClick={() => setMenu((m) => !m)} aria-label="menu">
@@ -494,7 +523,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
           {detail.subagents.map((s) => (
             <button key={s.session_id} className={"chip subchip " + s.status} onClick={() => onOpen?.(s.session_id)} title={`${s.model} · session ${s.session_id}`}>
               {s.running ? <span className="live-dot" /> : <span className={"dot " + s.status} />}
-              {s.name || s.session_id}
+              <span className="name">{s.name || s.session_id}</span>
               <span className="sub">{s.running ? "working" : s.status === "failed" ? "failed" : "done"}</span>
             </button>
           ))}
@@ -539,7 +568,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                     toast(brief ? "brief saved (applies from the next run)" : "brief removed");
                     load();
                   } catch (err) {
-                    toast((err as Error).message);
+                    toast(errorText(err));
                   }
                 }}
               />
@@ -562,7 +591,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                       toast(cap === null ? "session cap removed" : `session cap: $${cap}`);
                       load();
                     } catch (err) {
-                      toast((err as Error).message);
+                      toast(errorText(err));
                     }
                   }}
                 />
@@ -581,18 +610,107 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
         </div>
       )}
 
-      <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
-        {view === "mcp" && detail && <McpPanel sessionId={id} toast={toast} />}
-        {view === "files" && detail && <Files sessionId={id} />}
-        {view === "chat" && (
-          <div className="timeline">
-            {turns.map((t, i) => (
-              <Safe key={t.key}>
-                <TurnView turn={t} live={busy && i === turns.length - 1} onTurnAction={turnAction} />
-              </Safe>
-            ))}
-            {detail?.pending && <QuestionCard sessionId={id} questions={detail.pending.questions} onDone={load} toast={toast} />}
+      <div className={`chat-body ${view === "chat" ? "" : "split"}`}>
+        <div className="chat-main">
+          <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
+            <div className="timeline">
+              {turns.map((t, i) => (
+                <Safe key={t.key}>
+                  <TurnView turn={t} live={busy && i === turns.length - 1} onTurnAction={turnAction} />
+                </Safe>
+              ))}
+              {detail?.pending && <QuestionCard key={detail.pending.questions.map((q) => q.question).join("|")} sessionId={id} questions={detail.pending.questions} onDone={() => load()} toast={toast} />}
+            </div>
           </div>
+          <div className="composer">
+            {pending.length > 0 && (
+              <div className="attachments">
+                {pending.map((f, i) => (
+                  <span key={i} className="pill">
+                    {f.name} ({Math.ceil(f.size / 1024)} KB)
+                    <button className="x" onClick={() => setPending((p) => p.filter((_, j) => j !== i))}>
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            {paletteItems.length > 0 && (
+              <div className="palette">
+                {paletteItems.slice(0, 8).map((c) => (
+                  <button key={c.name} className="palette-item" onClick={() => pickCommand(c)}>
+                    <span className="mono">/{c.name} <span className="sub">{c.args}</span></span>
+                    <span className="sub">{c.description}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="composer-box">
+              <textarea
+                ref={textarea}
+                value={draft}
+                onChange={(e) => {
+                  setDraft(e.target.value);
+                  const el = e.target;
+                  el.style.height = "auto";
+                  el.style.height = `${Math.min(el.scrollHeight, Math.max(120, window.innerHeight * 0.4))}px`;
+                }}
+                placeholder={status === "running" ? "Steer the agent (applies before its next step)" : "Ask anything"}
+                rows={1}
+                onKeyDown={(e) => {
+                  if (e.key === "Tab" && paletteItems.length > 0) {
+                    e.preventDefault();
+                    pickCommand(paletteItems[0]);
+                    return;
+                  }
+                  if (e.key === "Escape" && paletteQuery !== null) {
+                    setDraft("");
+                    return;
+                  }
+                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    send();
+                    return;
+                  }
+                  if (e.key === "Enter" && !e.shiftKey && enterSends()) {
+                    e.preventDefault();
+                    send();
+                  }
+                }}
+              />
+              <div className="composer-row">
+                <input ref={fileInput} type="file" multiple hidden onChange={(e) => setPending((p) => [...p, ...Array.from(e.target.files ?? [])])} />
+                <button className="roundbtn" title="attach files" onClick={() => fileInput.current?.click()} aria-label="attach">
+                  <Icon name="plus" />
+                </button>
+                <button className="chip" onClick={openPicker} title="model for this session">
+                  <Icon name="model" /> {shortModel(detail?.model)}
+                </button>
+                <span className="grow" />
+                {status === "running" && (
+                  <button className="roundbtn stop" onClick={stop} aria-label="stop" title="stop the run">
+                    <Icon name="stop" />
+                  </button>
+                )}
+                {(status !== "running" || draft.trim() || pending.length > 0) && (
+                  <button className="roundbtn send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)} aria-label={status === "running" ? "steer" : "send"} title={status === "running" ? "send as a steer" : "send"}>
+                    <Icon name="up" />
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+        {view !== "chat" && detail && (
+          <aside className="side-pane">
+            <div className="side-head">
+              <span className="side-title">{view === "files" ? "Workspace files" : "MCP servers"}</span>
+              <button className="btn small" onClick={() => setView("chat")}>
+                close
+              </button>
+            </div>
+            <div className="side-body">{view === "files" ? <Files sessionId={id} /> : <McpPanel sessionId={id} toast={toast} />}</div>
+          </aside>
         )}
       </div>
 
@@ -641,80 +759,6 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
           </div>
         </div>
       )}
-      {view === "chat" && (
-        <div className="composer">
-          {pending.length > 0 && (
-            <div className="attachments">
-              {pending.map((f, i) => (
-                <span key={i} className="pill">
-                  {f.name} ({Math.ceil(f.size / 1024)} KB)
-                  <button className="x" onClick={() => setPending((p) => p.filter((_, j) => j !== i))}>
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-          {paletteItems.length > 0 && (
-            <div className="palette">
-              {paletteItems.slice(0, 8).map((c) => (
-                <button key={c.name} className="palette-item" onClick={() => pickCommand(c)}>
-                  <span className="mono">/{c.name} <span className="sub">{c.args}</span></span>
-                  <span className="sub">{c.description}</span>
-                </button>
-              ))}
-            </div>
-          )}
-          <div className="composer-box">
-            <textarea
-              ref={textarea}
-              value={draft}
-              onChange={(e) => {
-                setDraft(e.target.value);
-                const el = e.target;
-                el.style.height = "auto";
-                el.style.height = `${Math.min(el.scrollHeight, Math.max(120, window.innerHeight * 0.4))}px`;
-              }}
-              placeholder={status === "running" ? "Steer the agent (applies before its next step)" : "Ask anything"}
-              rows={1}
-              onKeyDown={(e) => {
-                if (e.key === "Tab" && paletteItems.length > 0) {
-                  e.preventDefault();
-                  pickCommand(paletteItems[0]);
-                  return;
-                }
-                if (e.key === "Escape" && paletteQuery !== null) {
-                  setDraft("");
-                  return;
-                }
-                if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-            />
-            <div className="composer-row">
-              <input ref={fileInput} type="file" multiple hidden onChange={(e) => setPending((p) => [...p, ...Array.from(e.target.files ?? [])])} />
-              <button className="roundbtn" title="attach files" onClick={() => fileInput.current?.click()} aria-label="attach">
-                <Icon name="plus" />
-              </button>
-              <button className="chip" onClick={openPicker} title="model for this session">
-                <Icon name="model" /> {shortModel(detail?.model)}
-              </button>
-              <span className="grow" />
-              {status === "running" && !draft.trim() && pending.length === 0 ? (
-                <button className="roundbtn stop" onClick={stop} aria-label="stop">
-                  <Icon name="stop" />
-                </button>
-              ) : (
-                <button className="roundbtn send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)} aria-label={status === "running" ? "steer" : "send"} title={status === "running" ? "send as a steer" : "send"}>
-                  <Icon name="up" />
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -729,9 +773,10 @@ class Safe extends Component<{ children: ReactNode }, { failed: boolean }> {
   }
 }
 
-function shortModel(name?: string): string {
+function shortModel(name?: string, max = 18): string {
   if (!name) return "model";
-  return name.split("/").pop()!.replace(/^deepseek-/, "").slice(0, 18);
+  const short = name.split("/").pop()!.replace(/^deepseek-/, "").replace(/\s*\(.*\)$/, "");
+  return short.length > max ? `${short.slice(0, max - 1)}…` : short;
 }
 
 // ── turns ─────────────────────────────────────────────────────────────────────────────────
@@ -748,7 +793,7 @@ function stepCount(items: Activity[]): number {
   return items.filter((a) => a.kind === "tool").length;
 }
 
-function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork", seq: number) => void }) {
+const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork", seq: number) => void }) {
   const [open, setOpen] = useState(live);
   const wasLive = useRef(live);
   useEffect(() => {
@@ -768,7 +813,7 @@ function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onT
           <span className="badge">{turn.user.origin}</span>
         </div>
       )}
-      {turn.user && <div className="msg user" dangerouslySetInnerHTML={{ __html: renderMarkdown(turn.user.text) }} />}
+      {turn.user && <Md className="msg user" text={turn.user.text} />}
       {turn.user && turn.user.seq && onTurnAction && !live && (
         <div className="turn-actions">
           <button className="btn small" onClick={() => onTurnAction("revert", turn.user!.seq!)} title="undo this turn and everything after it (files too)">
@@ -786,7 +831,7 @@ function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onT
             <i />
             <i />
           </span>
-          {live ? "Thinking for" : "Thought for"} {fmtDuration(elapsed)}
+          {live ? (turn.pendingTools > 0 ? "Working for" : "Thinking for") : "Worked for"} {fmtDuration(elapsed)}
           {steps > 0 && <span className="steps">· {steps} step{steps === 1 ? "" : "s"}</span>}
           <span className={`chev ${open ? "down" : ""}`}>›</span>
         </button>
@@ -797,10 +842,10 @@ function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onT
           {live && !turn.answer && turn.pendingTools === 0 && turn.activity.length > 0 && <div className="working">working…</div>}
         </div>
       )}
-      {turn.answer && <div className={`answer ${live ? "streaming" : ""}`} dangerouslySetInnerHTML={{ __html: renderMarkdown(turn.answer) }} />}
+      {turn.answer && <Md className={`answer ${live ? "streaming" : ""}`} text={turn.answer} />}
     </div>
   );
-}
+});
 
 function SummaryBlock({ message }: { message: MessageView }) {
   const [open, setOpen] = useState(false);
@@ -812,7 +857,7 @@ function SummaryBlock({ message }: { message: MessageView }) {
         {meta ? ` · ${meta.messages} messages compacted (${meta.reason})` : ""}
         <span className="chev">{open ? "⌄" : "›"}</span>
       </button>
-      {open && <div className="summary-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.text) }} />}
+      {open && <Md className="summary-body" text={message.text} />}
     </div>
   );
 }
@@ -853,11 +898,42 @@ function describe(t: ToolItem): { verb: string; noun: string; detail: string; ic
     case "Recall":
     case "Forget":
       return { verb: t.name === "Recall" ? "Recalled" : t.name === "Forget" ? "Forgot" : "Remembered", noun: "memory", detail: str("query") || str("text").slice(0, 60), icon: "bulb" };
-    default:
+    case "Verify":
+      return { verb: r ? "Verifying" : t.error ? "Verification failed" : "Verified", noun: "check", detail: str("criterion"), icon: "wrench" };
+    case "SubAgent":
+      return { verb: r ? "Starting subagent" : "Started subagent", noun: "subagent", detail: str("name") || str("task").split("\n")[0].slice(0, 60), icon: "spawn" };
+    case "SubAgentList":
+      return { verb: "Listed subagents", noun: "list", detail: "", icon: "spawn" };
+    case "SpawnAgent":
+      return { verb: r ? "Creating agent" : "Created agent", noun: "agent", detail: str("title"), icon: "spawn" };
+    case "AskPeer":
+      return { verb: r ? "Asking peer" : "Asked peer", noun: "peer", detail: str("name"), icon: "question" };
+    case "Delegate":
+      return { verb: r ? "Delegating" : "Delegated", noun: "task", detail: str("vendor"), icon: "spawn" };
+    case "StaySilent":
+      return { verb: "Stayed silent", noun: "note", detail: str("note").slice(0, 60), icon: "dot" };
+    case "HistorySearch":
+      return { verb: r ? "Searching history" : "Searched history", noun: "search", detail: str("query"), icon: "search" };
+    case "HistoryExpand":
+      return { verb: "Read earlier turns", noun: "range", detail: `seq ${str("from_seq")}–${str("to_seq")}`, icon: "file" };
+    default: {
+      if (t.name.startsWith("Board")) {
+        const what = t.name.replace(/^Board/, "").toLowerCase();
+        const verb = what === "add" ? (r ? "adding" : "added") : what === "update" ? (r ? "updating" : "updated") : what === "get" ? "read" : "listed";
+        return { verb: `Board: ${verb}`, noun: "task", detail: str("title") || str("task_id") || str("id"), icon: "skill" };
+      }
       if (t.name.startsWith("Self")) return { verb: t.name.replace(/^Self/, "Self: "), noun: "step", detail: str("branch") || str("title") || str("repo"), icon: "wrench" };
       if (t.name.startsWith("Schedule")) return { verb: t.name.replace(/^Schedule/, "Schedule: "), noun: "task", detail: str("name") || str("schedule_id"), icon: "clock" };
-      if (t.name.startsWith("Mcp")) return { verb: t.name.replace(/^Mcp_?/, "MCP "), noun: "call", detail: str("server"), icon: "plug" };
+      if (t.name.startsWith("Mcp")) {
+        // Mcp_Postingboard_read_thread → "postingboard · read thread", with the first string argument as the detail.
+        const parts = t.name.replace(/^Mcp_?/, "").split("_");
+        const server = (parts.shift() ?? "").toLowerCase();
+        const tool = parts.join(" ").replace(/_/g, " ");
+        const first = Object.values(a).find((v) => typeof v === "string") as string | undefined;
+        return { verb: `${server} · ${tool || "call"}`, noun: "call", detail: (first ?? "").slice(0, 60), icon: "plug" };
+      }
       return { verb: t.name, noun: "call", detail: Object.keys(a).length ? JSON.stringify(a).slice(0, 60) : "", icon: "dot" };
+    }
   }
 }
 
@@ -869,7 +945,7 @@ function ActivityList({ items, compact }: { items: Activity[]; compact: boolean 
     if (it.kind === "note") {
       out.push(
         <div key={i} className="note">
-          <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(it.text) }} />
+          <Md className="md" text={it.text} />
         </div>,
       );
       i++;
@@ -913,13 +989,18 @@ function ToolGroup({ family, group }: { family: string; group: ToolItem[] }) {
       <div className={`act head ${running ? "running" : ""}`} onClick={() => setOpen((o) => !o)}>
         <Icon name={d.icon} />
         <span className="verb">
-          {groupVerb(family, running)} {group.length} {d.noun}s
+          {groupVerb(family, running)} {group.length} {plural(d.noun)}
         </span>
         <span className={`chev ${open ? "down" : ""}`}>›</span>
       </div>
       {open && group.map((g) => <ToolRow key={g.id} item={g} nested />)}
     </div>
   );
+}
+
+function plural(noun: string): string {
+  const irregular: Record<string, string> = { search: "searches", memory: "memories", query: "queries", check: "checks" };
+  return irregular[noun] ?? `${noun}s`;
 }
 
 function groupVerb(name: string, running: boolean): string {
@@ -963,7 +1044,7 @@ function SummaryRow({ text, reason }: { text: string; reason: string }) {
         <span className="detail">{reason !== "auto" ? `${reason} · ` : ""}{text.replace(/\s+/g, " ").slice(0, 80)}</span>
         <span className={`chev ${open ? "down" : ""}`}>›</span>
       </div>
-      {open && <div className="summary-inline" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />}
+      {open && <Md className="summary-inline" text={text} />}
     </div>
   );
 }
@@ -1012,7 +1093,7 @@ function ToolCard({ item }: { item: ToolItem }) {
         <pre className="add">{String(a.new_string ?? a.new ?? "")}</pre>
       </div>,
     );
-  else parts.push(<div key="c" dangerouslySetInnerHTML={{ __html: codeBlock(JSON.stringify(a, null, 1), "args") }} />);
+  else parts.push(<div key="c" dangerouslySetInnerHTML={{ __html: codeBlock(JSON.stringify(a, null, 2), "args") }} />);
   if (item.result !== undefined) parts.push(<pre key="r" className={`result ${item.error ? "error" : ""}`}>{item.result.slice(0, 6000)}</pre>);
   return <div className="toolcard">{parts}</div>;
 }
@@ -1080,7 +1161,7 @@ function QuestionCard({ sessionId, questions, onDone, toast }: { sessionId: stri
       });
       onDone();
     } catch (e) {
-      toast((e as Error).message);
+      toast(errorText(e));
     }
   }
   const complete = answers.every((a) => a.selected.length > 0 || a.custom.trim());
@@ -1109,34 +1190,71 @@ function QuestionCard({ sessionId, questions, onDone, toast }: { sessionId: stri
   );
 }
 
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function Files({ sessionId }: { sessionId: string }) {
   const [path, setPath] = useState("");
   const [data, setData] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [showHidden, setShowHidden] = useState(false);
   useEffect(() => {
-    api.get(`/api/sessions/${sessionId}/files?path=${encodeURIComponent(path)}`).then(setData).catch(() => setData(null));
+    setError(null);
+    api
+      .get(`/api/sessions/${sessionId}/files?path=${encodeURIComponent(path)}`)
+      .then(setData)
+      .catch((e) => {
+        setData(null);
+        setError(errorText(e));
+      });
   }, [sessionId, path]);
-  if (!data) return <div className="empty">…</div>;
-  const up = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  if (error) return <div className="empty">could not read {path || "the workspace"}: {error}</div>;
+  if (!data) return <div className="empty">Loading…</div>;
+  const crumbs = path ? path.split("/") : [];
+  const all: any[] = data.kind === "dir" ? data.entries : [];
+  const entries = all.filter((e) => showHidden || !e.name.startsWith("."));
+  const hidden = all.length - all.filter((e) => !e.name.startsWith(".")).length;
+  const download = api.downloadUrl(sessionId, path);
   return (
-    <div>
-      <div className="sub" style={{ marginBottom: 8 }}>
-        /{path}{" "}
-        {path && (
-          <button className="btn small" onClick={() => setPath(up)}>
-            up
-          </button>
+    <div className="files">
+      <div className="crumbs">
+        <button className="crumb" onClick={() => setPath("")}>workspace</button>
+        {crumbs.map((c, i) => (
+          <span key={i}>
+            <span className="sub"> / </span>
+            <button className="crumb" onClick={() => setPath(crumbs.slice(0, i + 1).join("/"))}>{c}</button>
+          </span>
+        ))}
+        {data.kind !== "dir" && (
+          <a className="btn small" style={{ marginLeft: "auto" }} href={download} target="_blank" rel="noreferrer">
+            download{data.size ? ` · ${fmtBytes(data.size)}` : ""}
+          </a>
         )}
       </div>
+      {data.kind === "dir" && entries.length === 0 && <div className="empty">empty</div>}
       {data.kind === "dir" &&
-        data.entries.map((e: any) => (
-          <div key={e.name} className="card pressable row" onClick={() => setPath(path ? `${path}/${e.name}` : e.name)}>
-            <span>{e.dir ? "📁" : "📄"}</span>
+        entries.map((e: any) => (
+          <button key={e.name} className="card pressable row filerow" onClick={() => setPath(path ? `${path}/${e.name}` : e.name)}>
+            <span aria-hidden>{e.dir ? "📁" : IMAGE_EXT.test(e.name) ? "🖼" : "📄"}</span>
             <div className="grow title">{e.name}</div>
-            {!e.dir && <span className="sub">{fmtInt(e.size)} B</span>}
-          </div>
+            {!e.dir && <span className="sub">{fmtBytes(e.size)}</span>}
+            {e.mtime && <span className="sub">{new Date(e.mtime * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}</span>}
+          </button>
         ))}
-      {data.kind === "file" && <pre className="diff">{data.content}</pre>}
-      {data.kind === "binary" && <div className="empty">binary file, {fmtInt(data.size)} bytes</div>}
+      {data.kind === "dir" && hidden > 0 && (
+        <button className="btn small" onClick={() => setShowHidden((h) => !h)}>
+          {showHidden ? "hide" : "show"} {hidden} hidden {hidden === 1 ? "entry" : "entries"}
+        </button>
+      )}
+      {data.kind === "file" && data.truncated && <div className="sub" style={{ margin: "6px 0" }}>showing the first 512 KB; download for the whole file</div>}
+      {data.kind === "file" && <pre className="filetext">{data.content}</pre>}
+      {data.kind === "binary" && IMAGE_EXT.test(path) && <img className="preview" src={download} alt={path} />}
+      {data.kind === "binary" && !IMAGE_EXT.test(path) && <div className="empty">binary file, {fmtBytes(data.size)}</div>}
     </div>
   );
 }
@@ -1147,7 +1265,7 @@ function McpPanel({ sessionId, toast }: { sessionId: string; toast: (t: string) 
   const [data, setData] = useState<{ enabled: string[]; servers: McpServer[] } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const load = useCallback(() => {
-    api.get<{ enabled: string[]; servers: McpServer[] }>(`/api/sessions/${sessionId}/mcp`).then(setData).catch((e) => toast((e as Error).message));
+    api.get<{ enabled: string[]; servers: McpServer[] }>(`/api/sessions/${sessionId}/mcp`).then(setData).catch((e) => toast(errorText(e)));
   }, [sessionId, toast]);
   useEffect(load, [load]);
   async function toggle(server: string, enabled: boolean) {
@@ -1156,7 +1274,7 @@ function McpPanel({ sessionId, toast }: { sessionId: string; toast: (t: string) 
       setData(await api.put(`/api/sessions/${sessionId}/mcp`, { server, enabled }));
       toast(`${server}: ${enabled ? "enabled" : "disabled"}`);
     } catch (e) {
-      toast((e as Error).message);
+      toast(errorText(e));
     } finally {
       setBusy(null);
     }

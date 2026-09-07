@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { confirmAsync } from "../ui";
 import { timeAgo } from "../components";
 
 type Task = {
@@ -72,7 +73,7 @@ export function BoardScreen({ toast, onOpen }: { toast: (t: string) => void; onO
     }
   }
   async function remove(t: Task) {
-    if (!window.confirm(`Delete task ${t.id} "${t.title}"?`)) return;
+    if (!(await confirmAsync(`Delete task ${t.id} "${t.title}"?`))) return;
     await api.delete(`/api/board/${t.id}`);
     load();
   }

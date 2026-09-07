@@ -6,7 +6,7 @@ export function ProposalsScreen({ toast }: { toast: (t: string) => void }) {
   const [items, setItems] = useState<Proposal[] | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [diff, setDiff] = useState<string>("");
-  const [reason, setReason] = useState("");
+  const [reasons, setReasons] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     try {
@@ -31,9 +31,9 @@ export function ProposalsScreen({ toast }: { toast: (t: string) => void }) {
 
   async function decide(id: string, decision: "approve" | "reject") {
     try {
-      const r = await api.post<{ result: string }>(`/api/proposals/${id}/decide`, { decision, reason });
+      const r = await api.post<{ result: string }>(`/api/proposals/${id}/decide`, { decision, reason: reasons[id] ?? "" });
       toast(r.result);
-      setReason("");
+      setReasons((m) => ({ ...m, [id]: "" }));
       load();
     } catch (e) {
       toast((e as Error).message);
@@ -61,7 +61,7 @@ export function ProposalsScreen({ toast }: { toast: (t: string) => void }) {
                 )}
               </div>
             </div>
-            <Pill status={p.status === "merged" ? "done" : p.status === "pending" ? "waiting" : "failed"} />
+            <Pill status={p.status === "merged" ? "done" : p.status === "pending" ? "waiting" : p.status === "rejected" || p.status === "closed" ? p.status : "failed"} />
           </div>
           <div style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>{p.summary}</div>
           {p.reason && <div className="sub">reason: {p.reason}</div>}
@@ -80,7 +80,7 @@ export function ProposalsScreen({ toast }: { toast: (t: string) => void }) {
               </>
             )}
           </div>
-          {p.status === "pending" && <input className="field" style={{ marginTop: 8 }} placeholder="reason (optional, sent to the agent on rejection)" value={reason} onChange={(e) => setReason(e.target.value)} />}
+          {p.status === "pending" && <input className="field" style={{ marginTop: 8 }} placeholder="reason (optional, sent to the agent on rejection)" value={reasons[p.id] ?? ""} onChange={(e) => setReasons((m) => ({ ...m, [p.id]: e.target.value }))} />}
           {open === p.id && <Diff text={diff} />}
         </div>
       ))}

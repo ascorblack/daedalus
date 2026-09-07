@@ -11,8 +11,17 @@ declare global {
         ready: () => void;
         expand: () => void;
         onEvent: (event: string, cb: () => void) => void;
+        offEvent?: (event: string, cb: () => void) => void;
         setHeaderColor?: (color: string) => void;
         setBackgroundColor?: (color: string) => void;
+        platform?: string;
+        showConfirm?: (text: string, cb: (ok: boolean) => void) => void;
+        disableVerticalSwipes?: () => void;
+        enableVerticalSwipes?: () => void;
+        enableClosingConfirmation?: () => void;
+        disableClosingConfirmation?: () => void;
+        openLink?: (url: string) => void;
+        BackButton?: { show: () => void; hide: () => void; onClick: (cb: () => void) => void; offClick: (cb: () => void) => void };
         HapticFeedback?: { impactOccurred: (style: string) => void; notificationOccurred: (t: string) => void };
       };
     };
@@ -21,7 +30,15 @@ declare global {
 
 const tg = () => window.Telegram?.WebApp;
 const tokenFromQuery = new URLSearchParams(window.location.search).get("token");
-if (tokenFromQuery) sessionStorage.setItem("daedalus_token", tokenFromQuery);
+if (tokenFromQuery) {
+  sessionStorage.setItem("daedalus_token", tokenFromQuery);
+  // The token is the credential: it must not stay in the address bar, the history or a Referer.
+  try {
+    window.history.replaceState(null, "", window.location.pathname + window.location.hash);
+  } catch {
+    /* ignore */
+  }
+}
 
 function authHeaders(): Record<string, string> {
   const initData = tg()?.initData;
@@ -43,13 +60,15 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) {
-    let detail = response.statusText;
+    let detail: unknown = response.statusText;
     try {
       detail = (await response.json()).detail ?? detail;
     } catch {
       /* ignore */
     }
-    throw new ApiError(response.status, detail);
+    if (Array.isArray(detail)) detail = detail.map((d: any) => (d && d.msg ? `${(d.loc ?? []).slice(-1)[0] ?? ""}: ${d.msg}` : JSON.stringify(d))).join("; ");
+    const text = typeof detail === "string" && detail ? detail : response.status >= 500 ? `Server unavailable (${response.status})` : `Request failed (${response.status})`;
+    throw new ApiError(response.status, text);
   }
   return (await response.json()) as T;
 }
@@ -60,9 +79,10 @@ export const api = {
   put: <T>(path: string, body?: unknown) => call<T>("PUT", path, body),
   patch: <T>(path: string, body?: unknown) => call<T>("PATCH", path, body),
   delete: <T>(path: string) => call<T>("DELETE", path),
-  streamUrl: (sessionId: string) => {
+  streamUrl: (sessionId: string) => `/api/sessions/${sessionId}/stream`,
+  downloadUrl: (sessionId: string, path: string) => {
     const token = sessionStorage.getItem("daedalus_token");
-    return `/api/sessions/${sessionId}/stream${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+    return `/api/sessions/${sessionId}/download?path=${encodeURIComponent(path)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
   },
   authHeaders,
 };

@@ -93,8 +93,8 @@ function Row({ s, onOpen, child }: { s: SessionSummary; onOpen: (id: string) => 
       {child && <span className="subarrow" aria-hidden>↳</span>}
       <Avatar status={s.status as Status} seed={s.id} />
       <div className="grow">
-        <div className="title">
-          {child ? s.metadata?.subagent_name || s.title.replace(/^\[sub\]\s*/, "") : s.title}
+        <div className="title-row">
+          <span className="title">{child ? s.metadata?.subagent_name || s.title.replace(/^\[sub\]\s*/, "") : s.title}</span>
           {(child || orphan) && <span className="badge sub">subagent</span>}
         </div>
         <div className="sub">

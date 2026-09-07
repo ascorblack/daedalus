@@ -74,9 +74,36 @@ export function App() {
         document.documentElement.style.setProperty(`--tg-theme-${key.replace(/_/g, "-")}`, value);
       }
     };
+    const paint = () => {
+      const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#000000";
+      tg.setHeaderColor?.(bg);
+      tg.setBackgroundColor?.(bg);
+    };
+    const onTheme = () => {
+      apply();
+      paint();
+    };
     apply();
-    tg.onEvent("themeChanged", apply);
+    paint();
+    tg.onEvent("themeChanged", onTheme);
+    return () => tg.offEvent?.("themeChanged", onTheme);
   }, []);
+
+  // Telegram's own back button leaves a session; the vertical swipe must not close the app mid-chat.
+  useEffect(() => {
+    const tg = telegram();
+    if (!tg?.initData || !tg.BackButton) return;
+    if (!sessionId) {
+      tg.BackButton.hide();
+      tg.enableVerticalSwipes?.();
+      return;
+    }
+    const back = () => setSessionId(null);
+    tg.BackButton.onClick(back);
+    tg.BackButton.show();
+    tg.disableVerticalSwipes?.();
+    return () => tg.BackButton?.offClick(back);
+  }, [sessionId]);
 
   return (
     <div className="app">
@@ -114,7 +141,7 @@ export function App() {
           </nav>
         </>
       )}
-      {toast && <div className="toast">{toast}</div>}
+      {toast && <div className="toast" role="status" aria-live="polite">{toast}</div>}
     </div>
   );
 }

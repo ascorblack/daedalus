@@ -42,8 +42,10 @@ export function timeAgo(iso: string | null | undefined): string {
 }
 
 export function fmtUsd(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  return `$${value.toFixed(value < 1 ? 4 : 2)}`;
+  if (value === null || value === undefined) return "free";
+  if (value === 0) return "$0";
+  if (value < 0.01) return "< $0.01";
+  return `${value.toFixed(2)}`;
 }
 
 export function fmtInt(value: number | null | undefined): string {

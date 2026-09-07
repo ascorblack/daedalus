@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { confirmAsync } from "../ui";
 import { timeAgo } from "../components";
 
 type Entry = {
@@ -55,8 +56,13 @@ export function InboxScreen({ toast, onOpen, onUnread }: { toast: (t: string) =>
   }
 
   async function remove(id: number) {
-    await api.delete(`/api/inbox/${id}`);
-    load();
+    if (!(await confirmAsync("Remove this inbox entry?"))) return;
+    try {
+      await api.delete(`/api/inbox/${id}`);
+      load();
+    } catch (e) {
+      toast((e as Error).message);
+    }
   }
 
   return (

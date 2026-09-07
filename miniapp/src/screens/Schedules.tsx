@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, Schedule } from "../api";
+import { confirmAsync } from "../ui";
 import { timeAgo } from "../components";
 
 export function SchedulesScreen({ toast, onOpen }: { toast: (t: string) => void; onOpen: (id: string) => void }) {
@@ -36,8 +37,13 @@ export function SchedulesScreen({ toast, onOpen }: { toast: (t: string) => void;
   }
 
   async function remove(id: string) {
-    await api.delete(`/api/schedules/${id}`);
-    load();
+    if (!(await confirmAsync("Delete this scheduled task?"))) return;
+    try {
+      await api.delete(`/api/schedules/${id}`);
+      load();
+    } catch (e) {
+      toast((e as Error).message);
+    }
   }
 
   async function runNow(id: string) {

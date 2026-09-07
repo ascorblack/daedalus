@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, HeartbeatStatus, Preset, ProviderConf, Settings } from "../api";
+import { numInput } from "../ui";
 import { timeAgo } from "../components";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "vllm", "openai_compat"];
@@ -335,14 +336,14 @@ function TotalCaps({ s, save }: { s: Settings; save: (patch: any) => Promise<voi
     <>
       <label className="field">Total spend cap, all sessions and providers (USD, 0 = none)</label>
       <div className="composer-row">
-        <input className="field" type="number" step="1" min={0} defaultValue={s.limits.usd_total} onBlur={(e) => { const v = Number(e.target.value); if (!Number.isNaN(v) && v !== s.limits.usd_total) save({ limits: { usd_total: v } }); }} />
+        <input className="field" type="number" step="1" min={0} defaultValue={s.limits.usd_total} onBlur={(e) => { const v = numInput(e.target.value, 0); if (v !== null && v !== s.limits.usd_total) save({ limits: { usd_total: v } }); }} />
         <span className="sub" style={{ whiteSpace: "nowrap" }}>spent {spend ? `$${spend.total.spent_usd.toFixed(2)}` : "…"}</span>
       </div>
       <label className="field">Per-provider total caps (USD, 0 = none)</label>
       {providers.map((pid) => (
         <div key={pid} className="composer-row" style={{ marginBottom: 6 }}>
           <span style={{ minWidth: 90 }}>{pid}</span>
-          <input className="field" type="number" step="1" min={0} defaultValue={caps[pid] ?? 0} onBlur={(e) => { const v = Number(e.target.value); if (!Number.isNaN(v) && v !== (caps[pid] ?? 0)) save({ limits: { usd_total_per_provider: { [pid]: v } } }); }} />
+          <input className="field" type="number" step="1" min={0} defaultValue={caps[pid] ?? 0} onBlur={(e) => { const v = numInput(e.target.value, 0); if (v !== null && v !== (caps[pid] ?? 0)) save({ limits: { usd_total_per_provider: { [pid]: v } } }); }} />
           <span className="sub" style={{ whiteSpace: "nowrap" }}>spent {spend?.per_provider[pid] ? `$${spend.per_provider[pid].spent_usd.toFixed(2)}` : "$0.00"}</span>
         </div>
       ))}
@@ -358,7 +359,7 @@ function NumField({ label, value, min, step, onSave, hint }: { label: string; va
   return (
     <div>
       <label className="field">{label}</label>
-      <input className="field" type="number" min={min} step={step} defaultValue={value} onBlur={(e) => { const v = Number(e.target.value); if (!Number.isNaN(v) && v !== value && (min === undefined || v >= min)) onSave(v); }} />
+      <input className="field" type="number" min={min} step={step} defaultValue={value} onBlur={(e) => { const v = numInput(e.target.value, min); if (v !== null && v !== value) onSave(v); }} />
       {hint && <div className="sub">{hint}</div>}
     </div>
   );
@@ -596,11 +597,11 @@ function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void })
           </span>
         </div>
         <label className="field">Every N minutes</label>
-        <input className="field" type="number" defaultValue={hb.interval_minutes} onBlur={(e) => put({ interval_minutes: Number(e.target.value) })} />
+        <input className="field" type="number" defaultValue={hb.interval_minutes} onBlur={(e) => { const v = numInput(e.target.value, 1); if (v !== null) put({ interval_minutes: v }); }} />
         <label className="field">Active hours (UTC, HH:MM-HH:MM)</label>
         <input className="field" defaultValue={hb.active_hours} onBlur={(e) => put({ active_hours: e.target.value })} />
         <label className="field">Max runs per day</label>
-        <input className="field" type="number" defaultValue={hb.max_runs_per_day} onBlur={(e) => put({ max_runs_per_day: Number(e.target.value) })} />
+        <input className="field" type="number" defaultValue={hb.max_runs_per_day} onBlur={(e) => { const v = numInput(e.target.value, 0); if (v !== null) put({ max_runs_per_day: v }); }} />
         <label className="field">Model preset (empty = default)</label>
         <select className="field" value={hb.preset} onChange={(e) => put({ preset: e.target.value })}>
           <option value="">default</option>
@@ -795,9 +796,9 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         </div>
         <div className="sub">daily cap: ${(s as any).usd_per_day} — set in the environment, enforced by the supervisor</div>
         <label className="field">Max iterations per run</label>
-        <input className="field" type="number" defaultValue={s.limits.max_iterations} onBlur={(e) => save({ limits: { ...s.limits, max_iterations: Number(e.target.value) } })} />
+        <input className="field" type="number" defaultValue={s.limits.max_iterations} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ limits: { ...s.limits, max_iterations: v } }); }} />
         <label className="field">Spend cap per run (USD, 0 = none; calls without a known price do not count)</label>
-        <input className="field" type="number" step="0.5" defaultValue={s.limits.usd_per_run} onBlur={(e) => save({ limits: { ...s.limits, usd_per_run: Number(e.target.value) } })} />
+        <input className="field" type="number" step="0.5" defaultValue={s.limits.usd_per_run} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ limits: { ...s.limits, usd_per_run: v } }); }} />
         <TotalCaps s={s} save={save} />
         <div className="section-title">Context compaction</div>
         <div className="sub">When a finished run's prompt filled this share of the model window, the history is replaced by one structured summary (fixed headings, your messages quoted verbatim) before the next run. 0 = manual /compact only.</div>
@@ -810,7 +811,7 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <label className="field">Balance alert thresholds (USD, comma-separated)</label>
         <input className="field" defaultValue={s.balance.thresholds_usd.join(", ")} onBlur={(e) => save({ balance: { ...s.balance, thresholds_usd: e.target.value.split(",").map(Number).filter((n) => !Number.isNaN(n)) } })} />
         <label className="field">Balance poll interval (seconds)</label>
-        <input className="field" type="number" defaultValue={s.balance.poll_seconds} onBlur={(e) => save({ balance: { ...s.balance, poll_seconds: Number(e.target.value) } })} />
+        <input className="field" type="number" defaultValue={s.balance.poll_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ balance: { ...s.balance, poll_seconds: v } }); }} />
       </div>
 
       <div className="card">
@@ -837,13 +838,13 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
           </button>
         </div>
         <label className="field">Ignore messages older than (seconds, 0 = never)</label>
-        <input className="field" type="number" defaultValue={s.telegram.stale_after_seconds} onBlur={(e) => save({ telegram: { ...s.telegram, stale_after_seconds: Number(e.target.value) } })} />
+        <input className="field" type="number" defaultValue={s.telegram.stale_after_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, stale_after_seconds: v } }); }} />
         <label className="field">Largest accepted file (MB)</label>
-        <input className="field" type="number" defaultValue={s.telegram.max_inbound_file_mb} onBlur={(e) => save({ telegram: { ...s.telegram, max_inbound_file_mb: Number(e.target.value) } })} />
+        <input className="field" type="number" defaultValue={s.telegram.max_inbound_file_mb} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, max_inbound_file_mb: v } }); }} />
         <label className="field">Wait for a caption after a bare photo (seconds)</label>
-        <input className="field" type="number" defaultValue={s.telegram.photo_caption_wait_seconds} onBlur={(e) => save({ telegram: { ...s.telegram, photo_caption_wait_seconds: Number(e.target.value) } })} />
+        <input className="field" type="number" defaultValue={s.telegram.photo_caption_wait_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, photo_caption_wait_seconds: v } }); }} />
         <label className="field">Mark a tool call as slow after (seconds)</label>
-        <input className="field" type="number" defaultValue={s.telegram.slow_tool_seconds} onBlur={(e) => save({ telegram: { ...s.telegram, slow_tool_seconds: Number(e.target.value) } })} />
+        <input className="field" type="number" defaultValue={s.telegram.slow_tool_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, slow_tool_seconds: v } }); }} />
         <label className="field">Scheduled runs</label>
         <div className="btnrow" style={{ marginTop: 0 }}>
           {["per_task", "per_run"].map((m) => (
