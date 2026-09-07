@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 
 from protocore.contracts.llm import ILLMProvider, IProviderChain
@@ -23,6 +24,7 @@ class ProviderChain(IProviderChain):
         self._rungs = list(rungs)
         self._index = 0
         self._ruled_out: list[tuple[str, str]] = []
+        self._advance_lock = asyncio.Lock()
 
     def _label(self, index: int) -> str:
         provider, model = self._rungs[index]
@@ -35,11 +37,16 @@ class ProviderChain(IProviderChain):
         return self._rungs[self._index][1]
 
     async def advance(self, *, reason: str) -> bool:
-        if self._index + 1 >= len(self._rungs):
-            return False
-        self._ruled_out.append((self._label(self._index), reason))
-        self._index += 1
-        return True
+        # The check-and-advance is one transition. The contract makes advance
+        # async precisely because a rung may be materialised (with awaits)
+        # when the run reaches it; concurrent failures must not interleave
+        # inside the transition and demote past each other.
+        async with self._advance_lock:
+            if self._index + 1 >= len(self._rungs):
+                return False
+            self._ruled_out.append((self._label(self._index), reason))
+            self._index += 1
+            return True
 
     def attempted(self) -> Sequence[tuple[str, str]]:
         """``(provider_name, reason)`` for every rung already ruled out, in order."""

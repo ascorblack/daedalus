@@ -180,6 +180,27 @@ async def test_fork_skips_reverted_turns_and_repoints_summaries(settings: Settin
     await manager.close()
 
 
+async def test_verify_digest_hashes_raw_bytes(settings: Settings, db: Database) -> None:
+    """The receipt digest must cover the bytes the process printed, not a decoded copy.
+
+    Output containing invalid UTF-8 used to be decoded with "replace" first and
+    re-encoded for the hash, so the digest described a lossy copy (U+FFFD
+    sequences) instead of the real output.
+    """
+    import hashlib
+
+    manager = await _manager(settings, db)
+    state = await manager.create_session("verify-raw")
+    state.services.extra["manager"] = manager  # type: ignore[union-attr]
+    ctx = ToolContext(tenant_id="daedalus", run_id="r1", session_id=state.session.id)
+    raw = b"\xff\xfe raw"
+    result = await verify().invoke(ctx, {"criterion": "raw bytes", "command": "printf '\\377\\376 raw'"})
+    assert not result.is_error
+    row = await db.fetchone("SELECT output_digest FROM verifications WHERE session_id = ?", (state.session.id,))
+    assert row["output_digest"] == hashlib.sha256(raw).hexdigest()
+    await manager.close()
+
+
 async def test_verify_receipts_are_redacted(settings: Settings, db: Database) -> None:
     from daedalus.security import redact
 
