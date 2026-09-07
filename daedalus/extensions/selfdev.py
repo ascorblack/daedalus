@@ -378,7 +378,7 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
         try:
             return await selfdev.propose(repo=repo, title=title, summary=summary, session_id=session_id, branch=branch)
         except GitError as exc:
-            return f"proposal failed: {exc}"
+            raise RuntimeError(f"proposal failed: {exc}") from exc  # the tool turns it into an error result, not a success that reads like one
 
     async def self_rebuild(*, reason: str, **_: Any) -> str:
         return await selfdev.rebuild(reason)

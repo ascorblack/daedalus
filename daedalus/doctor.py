@@ -237,6 +237,11 @@ async def _git_probe(ctx: DoctorContext) -> list[Check]:
         msg = f"{head} on {branch}" + (f", {len(dirty.splitlines())} uncommitted change(s)" if dirty else ", clean")
         ok = code == 0 and not dirty
         out.append(Check(label, ok, msg, "ok" if ok else "warn", "commit or discard local changes: a rebuild resets the checkout to origin/main"))
+        # Reading a public repository proves nothing about the token; only the server's answer to a push does.
+        push_code, push_out = await asyncio.to_thread(_git_cmd, repo, "push", "--dry-run", "origin", "HEAD:refs/heads/doctor-permission-probe")
+        can_push = push_code == 0 and "denied" not in push_out.lower()
+        detail = "the token may push (dry run accepted)" if can_push else redact_text(push_out.strip().splitlines()[-1] if push_out.strip() else f"exit {push_code}")[:160]
+        out.append(Check(f"{label} push access", can_push, detail, "ok" if can_push else "fail", "grant the GitHub token write access to this repository (fine-grained token → repository access + Contents: read and write); a recreated repository needs the token re-issued"))
     return out
 
 

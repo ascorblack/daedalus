@@ -67,3 +67,30 @@ async def test_spawn_agent_tool_hands_over_brief_files_and_settings(settings: Se
     assert not result.is_error and result.metadata["session_id"] == "child123" and "peer 'changelog'" in result.content
     assert calls[0]["files"] == [str(parent.workspace / "howto.md")] and calls[0]["mode"] == "careful" and calls[0]["mcp"] == ["postingboard"]
     await manager.close()
+
+
+async def test_self_propose_failure_is_an_error_result(settings: Settings, db: Database) -> None:
+    from daedalus.tools.selfdev import self_propose
+
+    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    await manager.start()
+    state = await manager.create_session("p")
+
+    async def refused(**kw: Any) -> str:
+        raise RuntimeError("proposal failed: remote: Permission to x/y.git denied to me. 403")
+
+    state.services.self_propose = refused  # type: ignore[union-attr]
+    ctx = ToolContext(tenant_id="daedalus", run_id="r", session_id=state.session.id)
+    result = await self_propose().invoke(ctx, {"repo": "bot", "title": "t", "summary": "s"})
+    assert result.is_error and "proposal failed" in result.content and "write access" in result.content
+    await manager.close()
+
+
+def test_core_compaction_trigger_stays_below_the_output_reservation() -> None:
+    from daedalus.host.engine_factory import runtime_constants
+
+    config = RuntimeConfig()
+    rc = runtime_constants(config, context_window=128_000, max_output_tokens=32_000, thinking=False, mode=None)
+    assert rc.compaction_trigger_ratio == 0.7  # 1 − 32k/128k − 0.05, below the 0.85 default
+    rc = runtime_constants(config, context_window=128_000, max_output_tokens=4_000, thinking=False, mode=None)
+    assert rc.compaction_trigger_ratio == 0.85

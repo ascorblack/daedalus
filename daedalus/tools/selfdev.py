@@ -50,9 +50,13 @@ async def self_propose(
         return error(context, "self-development is not available in this session")
     if repo not in ("bot", "core"):
         return error(context, "repo must be 'bot' or 'core'")
-    result = await services.self_propose(
-        repo=repo, title=title, summary=summary, session_id=context.session_id, branch=branch
-    )
+    try:
+        result = await services.self_propose(
+            repo=repo, title=title, summary=summary, session_id=context.session_id, branch=branch
+        )
+    except RuntimeError as exc:
+        hint = " The token cannot push: the operator must grant the GitHub token write access to this repository (Contents: read and write)." if "denied" in str(exc) or "403" in str(exc) else ""
+        return error(context, f"{exc}{hint}")
     return ok(context, result)
 
 

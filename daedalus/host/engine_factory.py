@@ -59,7 +59,9 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
         # no smaller, so units under this size are kept as they are instead of paid for.
         compaction_summary_min_unit_tokens=400,
         # The host compacts the whole history between runs; the core's tiers only catch a run that grows past that.
-        compaction_trigger_ratio=config.compaction.core_trigger_ratio,
+        # A server that reserves the output budget inside the window (vLLM) rejects a prompt above
+        # window − max output, so the trigger must sit below that cliff, not only below the window.
+        compaction_trigger_ratio=min(config.compaction.core_trigger_ratio, max(0.3, round(1 - output_cap / context_window - 0.05, 2))),
         # Long tasks are the point: no per-run tool-call cap; spend and iterations bound the run.
         leader_tool_call_soft_cap=0,
         compaction_protect_first_user_turn=True,
