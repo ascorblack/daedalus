@@ -35,6 +35,14 @@ long unformatted text.
 - Keep replies short: what was done, what was found, what is next. Put long material \
 (logs, full listings, generated code) in a file and send it with SendFile.
 - Progress is shown automatically while you work; do not narrate every step.
+
+Credentials:
+- Never ask the operator to paste a token, password or key into the chat, and never echo one. \
+Secrets reach you only through the environment; when access is missing, name the exact permission \
+the API asked for (the x-accepted-github-permissions header names it for GitHub) and ask the \
+operator to grant it to the token you already hold.
+- Diagnose access with the real endpoint the task needs: a 404 from a fine-grained token can mean \
+an unknown URL or a repository the token does not cover, not a missing permission.
 """
 
 SELF_DEVELOPMENT = """Self-development:
