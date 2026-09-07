@@ -63,19 +63,20 @@ function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Tu
     const at = Date.parse(m.created_at) || Date.now();
     if (m.role === "tool" || m.internal) return;
     if (m.summary) {
-      if (m.compaction?.reason === "manual") {
-        // The whole history was replaced: this block is the new beginning.
+      if (m.compaction?.reason !== "core") {
+        // The host compacted between runs (auto) or on request (manual): a block of its own after the
+        // turn, so the answer that came before it stays the answer.
         turns.push({ key: `s${i}`, summary: m, activity: [], answer: "", startedAt: at, endedAt: at, pendingTools: 0 });
         current = null;
         return;
       }
-      // Automatic compaction: a step inside the turn, where the summarised work used to be.
+      // The core compacted mid-run: a step inside the turn, where the summarised work used to be.
       if (!current) current = open(`a${i}`, at);
       if (current.answer) {
         current.activity.push({ kind: "note", text: current.answer });
         current.answer = "";
       }
-      current.activity.push({ kind: "summary", text: m.text, reason: m.compaction?.reason ?? "auto" });
+      current.activity.push({ kind: "summary", text: m.text, reason: "core" });
       return;
     }
     if (m.role === "user") {

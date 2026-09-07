@@ -423,7 +423,8 @@ def message_view(message: Message) -> dict[str, Any]:
     body = "".join(text)
     if is_summary:
         body = _SUMMARY_WRAP_RE.sub("", body).strip()
-        compaction = compaction or {"reason": "auto"}
+        # A summary without the host's record came from the core mid-run; the host's own (auto/manual) sit between runs.
+        compaction = compaction or {"reason": "core"}
     origin = message.metadata.get("daedalus.origin") if isinstance(message.metadata, dict) else None
     internal = message.role is MessageRole.user and not is_summary and (
         origin == "core" or (origin != "operator" and _looks_like_core_nudge(body))
