@@ -64,10 +64,14 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
         except ProcessLookupError:
             pass
         await proc.wait()  # a grandchild that escaped the group may still hold the pipe; the direct child is enough
-    output = b"".join(chunks).decode("utf-8", "replace")
+    raw_output = b"".join(chunks)
     exit_code = -1 if timed_out else int(proc.returncode or 0)
     passed = exit_code == 0
-    full_digest = hashlib.sha256(output.encode("utf-8")).hexdigest()
+    # Digest the raw bytes, not the decoded string: decode("replace") turns
+    # invalid UTF-8 into U+FFFD, and re-encoding that would make the receipt
+    # hash a lossy copy instead of what the process actually printed.
+    full_digest = hashlib.sha256(raw_output).hexdigest()
+    output = raw_output.decode("utf-8", "replace")
     digest = full_digest[:16]
     receipt_id = ""
     if manager is not None:

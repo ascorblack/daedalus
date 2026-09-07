@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -26,6 +28,20 @@ async def test_advance_records_rung_and_reason_in_order() -> None:
     assert chain.attempted() == (("a:m1", "rate limit"), ("b:m2", "5xx"))
     assert await chain.advance(reason="no more rungs") is False
     assert chain.attempted() == (("a:m1", "rate limit"), ("b:m2", "5xx"))
+
+
+async def test_concurrent_advances_are_serialized() -> None:
+    """Two failures landing at once must each demote exactly once, in order.
+
+    The contract makes ``advance`` async because a rung may be materialised
+    (with awaits) when the run reaches it; the check-and-advance must stay
+    one atomic transition even when callers race.
+    """
+    chain = ProviderChain([(_provider("a"), "m1"), (_provider("b"), "m2"), (_provider("c"), "m3")])
+    results = await asyncio.gather(chain.advance(reason="429"), chain.advance(reason="429"))
+    assert results == [True, True]
+    assert chain.current_model_name() == "m3"
+    assert chain.attempted() == (("a:m1", "429"), ("b:m2", "429"))
 
 
 def test_attempted_shape_matches_core_contract() -> None:

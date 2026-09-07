@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -29,13 +30,27 @@ def _atomic_write(path: Path, text: str) -> None:
     A crash between the two writes of a plain ``write_text`` (marker, then
     history) would leave the second file half-written; the guard's counter
     would then reset on the next boot and forget the crash loop it exists
-    to detect. Write to a per-process temp file in the same directory and
+    to detect. Write to a per-write temp file in the same directory and
     ``os.replace`` it into place: the old content stands until the new one
     is complete.
+
+    The temp name carries a per-write uuid suffix, not just the pid: two
+    coroutines in one process writing concurrently must not share a temp
+    file and clobber each other mid-write. The file is flushed and fsynced
+    before the replace, because a power cut right after ``os.replace`` can
+    otherwise leave the destination as a 0-byte file — exactly the crash the
+    guard counts. A failed write removes its orphaned temp file.
     """
-    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class BootGuard:
