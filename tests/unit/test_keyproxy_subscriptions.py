@@ -44,7 +44,7 @@ def test_chat_body_becomes_a_responses_body() -> None:
         "reasoning_effort": "high",
     }
     out = subs.chat_to_responses(body)
-    assert out["instructions"] == "Be terse." and out["store"] is False and out["stream"] is True and out["max_output_tokens"] == 500
+    assert out["instructions"] == "Be terse." and out["store"] is False and out["stream"] is True and "max_output_tokens" not in out
     assert [i["type"] for i in out["input"]] == ["message", "function_call", "function_call_output"]
     assert out["input"][0]["content"][1]["type"] == "input_image"
     assert out["input"][1] == {"type": "function_call", "call_id": "c1", "name": "Read", "arguments": "{\"path\": \"x\"}"}
@@ -126,7 +126,7 @@ async def test_proxy_routes_codex_and_grok(monkeypatch: pytest.MonkeyPatch, tmp_
         text = await streamed.text()
         assert '"content": "PONG"' in text and text.strip().endswith("data: [DONE]")
         models = await (await client.get("/codex/v1/models")).json()
-        assert models["data"][0]["id"] == "gpt-5.6-terra"
+        assert {m["id"] for m in models["data"]} >= {"gpt-5.6-luna", "gpt-5.6-terra"}
         grok = await (await client.get("/grok/v1/models")).json()
         echoed = grok["echo"]
         assert echoed["authorization"] == "Bearer grok-token" and echoed["x-grok-client-identifier"] == "grok-shell" and echoed["x-xai-token-auth"] == "xai-grok-cli"

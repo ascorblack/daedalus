@@ -457,6 +457,7 @@ class RuntimeConfig(BaseModel):
             ),
             "grok.grok-4.6": ModelPresetConfig(provider="grok", model="grok-4.6", label="Grok 4.6 (SuperGrok subscription)", thinking=True, images=False, context_window=500_000),
             "codex.gpt-5.6-terra": ModelPresetConfig(provider="codex", model="gpt-5.6-terra", label="GPT-5.6 Terra (ChatGPT subscription)", thinking=True, reasoning_effort="medium", images=True, context_window=400_000),
+            "codex.gpt-5.6-luna": ModelPresetConfig(provider="codex", model="gpt-5.6-luna", label="GPT-5.6 Luna (ChatGPT subscription, cheapest)", thinking=True, reasoning_effort="low", images=True, context_window=400_000),
         }
     )
     """Named models keyed by id; the operator adds more in the Mini App."""

@@ -46,7 +46,7 @@ GROK_HEADERS = {
 REFRESH_SKEW_SECONDS = 300
 USAGE_CACHE_SECONDS = 60
 MODELS_CACHE_SECONDS = 300
-CODEX_FALLBACK_MODELS = ("gpt-5.6-terra", "gpt-5.6-sol")
+CODEX_FALLBACK_MODELS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")
 
 
 class SubscriptionError(RuntimeError):
@@ -267,8 +267,7 @@ def chat_to_responses(body: dict[str, Any]) -> dict[str, Any]:
         out["tool_choice"] = {"type": "function", "name": choice["function"]["name"]}
     elif isinstance(choice, str) and choice in ("auto", "none", "required"):
         out["tool_choice"] = choice
-    if body.get("max_tokens"):
-        out["max_output_tokens"] = int(body["max_tokens"])
+    # The ChatGPT backend rejects max_output_tokens ("Unsupported parameter"); the plan's own limits apply.
     effort = body.get("reasoning_effort")
     if effort:
         out["reasoning"] = {"effort": str(effort), "summary": "auto"}
