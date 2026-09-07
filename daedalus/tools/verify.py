@@ -43,7 +43,8 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
         return error(context, f"working directory does not exist: {workdir}")
     limit = float(timeout_seconds or services.tool_timeout_seconds)
     started = time.monotonic()
-    argv, sandboxed = await sandbox_argv(command, workdir, services.workspace_dir, tool_config(context).exec)
+    # A failure anywhere in a pipeline fails the check; `pytest | tail` must not pass on tail's exit code.
+    argv, sandboxed = await sandbox_argv("set -o pipefail\n" + command, workdir, services.workspace_dir, tool_config(context).exec)
     proc = await asyncio.create_subprocess_exec(
         *argv, cwd=str(workdir), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         env={**os.environ, "DAEDALUS_SESSION_ID": context.session_id}, start_new_session=True,

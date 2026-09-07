@@ -240,6 +240,8 @@ class McpConfig(BaseModel):
 class SelfChangeConfig(BaseModel):
     approval: ApprovalMode = "manual"
     auto_rebuild: bool = True
+    rebuild_wait_minutes: int = Field(default=30, ge=1)
+    """How long an automatic rebuild waits for the active runs to finish before restarting anyway."""
     """Trigger a rebuild automatically after a merge."""
 
 
@@ -401,6 +403,8 @@ class OpsConfig(BaseModel):
     delivery_max_attempts: int = Field(default=3, ge=1)
     delivery_max_age_hours: int = Field(default=24, ge=1)
     delivery_keep_days: int = Field(default=7, ge=1)
+    events_keep_per_run: int = Field(default=300, ge=10)
+    """Core events kept per finished run (the transcript is the record; events feed the live view)."""
     doctor_min_free_gb: float = Field(default=1.0, ge=0)
     doctor_workspaces_warn_gb: float = Field(default=20.0, ge=0)
     doctor_stale_snapshot_hours: int = Field(default=24, ge=1)

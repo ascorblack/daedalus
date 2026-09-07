@@ -86,6 +86,7 @@ class SelfDevelopment:
             "core": RepoSpec("core", s.core_repo_dir, s.state_dir / "worktrees" / "core"),
         }
         self._reason_waits: dict[tuple[int, int], str] = {}  # (chat_id, thread_id) -> proposal id
+        self._background: set[asyncio.Task[None]] = set()
 
     # -- git plumbing ---------------------------------------------------------------
 
@@ -219,6 +220,8 @@ class SelfDevelopment:
             caveats = []
             if re.search(r"\|\||;\s*(true|exit 0)\b|set \+e", command):
                 caveats.append("has a shell fallback that can mask a failure")
+            if re.search(r"\|\s*(?:tail|head|grep|wc)\b", command):
+                caveats.append("pipes the output into a filter; read the receipt's output, not only its exit code")
             if not row["sandboxed"]:
                 caveats.append("unsandboxed")
             suffix = f" ⚠ {'; '.join(caveats)}" if caveats else ""
@@ -267,7 +270,7 @@ class SelfDevelopment:
             )
             result = f"merged PR #{row['pr_number']}"
             if self.app.config.self_change.auto_rebuild:
-                result += "; " + await self.rebuild(f"merged PR #{row['pr_number']}: {row['title']}")
+                result += "; " + await self.rebuild_when_idle(f"merged PR #{row['pr_number']}: {row['title']}")
             await self._notify_session(row["session_id"], f"Your change proposal '{row['title']}' was approved and merged. {result}")
             return result
         try:
@@ -306,6 +309,26 @@ class SelfDevelopment:
             logger.exception("could not deliver the decision to session %s", session_id)
 
     # -- supervisor ---------------------------------------------------------------------
+
+    async def rebuild_when_idle(self, reason: str) -> str:
+        """Rebuild once no run is active: a restart mid-run kills the run that proposed the change."""
+        manager = self.app.manager
+        if manager is None or not manager.running_run_ids():
+            return await self.rebuild(reason)
+
+        async def _wait_then_rebuild() -> None:
+            deadline = asyncio.get_running_loop().time() + 60 * self.app.config.self_change.rebuild_wait_minutes
+            while manager.running_run_ids() and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(5)
+            outcome = await self.rebuild(reason)
+            inbox = self.app.extensions.get("inbox")
+            if inbox is not None:
+                await inbox.post("rebuild", f"Rebuild: {reason}", outcome, severity="notice")
+
+        task = asyncio.create_task(_wait_then_rebuild(), name="rebuild-when-idle")
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        return "rebuild scheduled for when no run is active (the running ones finish first)"
 
     async def rebuild(self, reason: str) -> str:
         try:

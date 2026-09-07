@@ -428,6 +428,10 @@ class Scheduler:
         if state.pending is not None:
             await self._post("schedule_skipped", f"'{schedule['name']}' skipped", "Its session is waiting for the operator's answer; the next occurrence will try again.", severity="notice", session_id=state.session.id)
             return state.session.id
+        if state.running:
+            # A wake-up call for a session that is already working is noise: it would land mid-task as a steer.
+            logger.warning("schedule %s skipped: session %s is busy", schedule["id"], state.session.id)
+            return state.session.id
         prompt = schedule["prompt"]
         files = json.loads(schedule.get("files") or "[]")
         if files:
@@ -437,7 +441,7 @@ class Scheduler:
         prompt += (
             f"\n\n[scheduled run '{schedule['name']}' in this session; no operator message accompanies it. "
             "Take the work as far as it goes now — the next occurrence is skipped while this turn runs. "
-            "If nothing needs attention, answer in one line. End with a short note for the next run.]"
+            "If nothing needs attention, call StaySilent with a one-line note of what you checked. End with a short note for the next run.]"
         )
         run_id = await manager.submit(state.session.id, prompt, [], as_answer=False, origin="schedule")
         await self._mark_in_flight(schedule["id"], state.session.id, run_id)

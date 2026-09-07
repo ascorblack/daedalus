@@ -19,6 +19,7 @@ import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import MCPError
 from protocore.contracts.tools import Tool, ToolContext
 from protocore.contracts.types import ToolDefinition, ToolParameterSchema, ToolResult
 
@@ -57,7 +58,7 @@ class McpToolProxy(Tool):
         try:
             result = await self._connection.call(self._remote, arguments)
         except Exception as exc:  # noqa: BLE001
-            return ToolResult(tool_call_id=call_id, content=f"MCP tool failed: {exc}", is_error=True)
+            return ToolResult(tool_call_id=call_id, content=f"MCP tool failed: {_describe(exc)}", is_error=True)
         parts: list[str] = []
         for item in getattr(result, "content", []) or []:
             text = getattr(item, "text", None)
@@ -88,11 +89,20 @@ def _describe(exc: BaseException) -> str:
     inner = exc
     while isinstance(inner, BaseExceptionGroup) and inner.exceptions:
         inner = inner.exceptions[0]
+    if isinstance(inner, MCPError):
+        data = inner.data
+        detail = f" · {json.dumps(data, default=str)[:600]}" if data not in (None, "", {}) else ""
+        return f"MCP error {inner.code}: {inner.message}{detail}"
     return f"{type(inner).__name__}: {inner}"
 
 
 def _looks_like_auth_failure(exc: BaseException) -> bool:
-    text = f"{type(exc).__name__}: {exc}".lower()
+    inner = exc
+    while isinstance(inner, BaseExceptionGroup) and inner.exceptions:
+        inner = inner.exceptions[0]
+    if isinstance(inner, MCPError) and (inner.code in (401, 403, -32001) or "401" in json.dumps(inner.data, default=str)):
+        return True
+    text = f"{type(exc).__name__}: {exc} {_describe(exc)}".lower()
     return "401" in text or "unauthorized" in text or "invalid_token" in text or "invalid token" in text
 
 
@@ -301,6 +311,9 @@ class McpManager:
         if connection is None:
             connection = McpConnection(name, self._configs[name], oauth=self.oauth_client(name))
             self._connections[name] = connection
+        if connection.error or (connection.session is None and connection._task is not None and not connection._task.done()):
+            # A connection that failed or wedged is rebuilt, not reused: McpEnable is the agent's way to recover.
+            await connection.stop()
         await connection.start()
         for proxy in connection.tools:
             if self._registry.get(proxy.name) is None:

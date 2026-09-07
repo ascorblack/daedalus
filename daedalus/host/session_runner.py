@@ -98,6 +98,8 @@ class SessionState:
     """Per-session override; ``None`` follows the configured model window."""
     extra_notes: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    run_origin: str = "operator"
+    """Who started the current run (``operator``, ``schedule``, ``reminder``, ``subagent:…``): StaySilent and the reply routing read it."""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """Serialises run starts against history rewrites (compaction)."""
     history_keys: list[str] = field(default_factory=list)
@@ -902,7 +904,7 @@ class SessionManager:
             # A message sent while the agent works is a steer: the core places it before the
             # next model call (after the current tool batch). follow_up would wait for the end.
             kind = "follow_up" if not steer and state.metadata.get("queue_mode") == "follow_up" else "steer"
-            await self.live.enqueue(session_id, kind, new_queued_prompt(kind, body).to_dict())  # type: ignore[arg-type]
+            await self.live.enqueue(session_id, kind, {**new_queued_prompt(kind, body).to_dict(), "origin": origin})  # type: ignore[arg-type]
             # The core folds queued prompts into the model's history later (and compaction may
             # rewrite them); the transcript keeps the operator's words as sent.
             await self.sessions.append_transcript(
@@ -1173,6 +1175,8 @@ class SessionManager:
     async def _start_run_locked(
         self, state: SessionState, message: Message | None, *, continue_turn: bool = False
     ) -> str:
+        if message is not None:
+            state.run_origin = str(message.metadata.get("daedalus.origin") or "operator")
         if state.engine is None or not continue_turn:
             run_id = uuid.uuid4().hex[:12]
             engine = await self._build_engine(state, run_id)
@@ -1238,6 +1242,7 @@ class SessionManager:
                     await self.runs.update_status(run_id, TENANT, run_status)
                     await self.events.delete_snapshot(run_id)
                     self.events.close_run(run_id)
+                    await self.events.trim(run_id, TENANT, max_len=self.config.ops.events_keep_per_run)
             except Exception:  # noqa: BLE001
                 logger.exception("run %s bookkeeping failed", run_id)
             if status in ("completed", "failed", "cancelled"):
@@ -1249,18 +1254,22 @@ class SessionManager:
                     logger.exception("run-finished callback failed")
             if status in ("completed", "failed", "cancelled"):
                 await self._maybe_auto_compact(state)
-            if status == "completed":
+            if status in ("completed", "failed"):
+                # A run that ended in an error still owes an answer to what arrived meanwhile.
                 await self._drain_leftover_follow_ups(state)
 
     async def _drain_leftover_follow_ups(self, state: SessionState) -> None:
         """Input that arrived while the run was settling starts the next turn instead of rotting in the queue."""
         queued = await self.live.load(state.session.id)
-        texts = [str(item.get("text") or "").strip() for item in queued["follow_up"] + queued["steer"]]
-        texts = [t for t in texts if t]
-        if not texts:
+        items = [item for item in queued["follow_up"] + queued["steer"] if str(item.get("text") or "").strip()]
+        if not items:
             return
         await self.live.save_queues(state.session.id, [], [])
-        message = Message(role=MessageRole.user, content_blocks=[TextBlock(text="\n\n".join(texts))], metadata={"daedalus.origin": "operator"})
+        texts = [str(item["text"]).strip() for item in items]
+        origins = {str(item.get("origin") or "operator") for item in items}
+        # The transcript already holds each item as it was sent; this copy only opens the run and stays hidden.
+        origin = "operator" if "operator" in origins else next(iter(origins))
+        message = Message(role=MessageRole.user, content_blocks=[TextBlock(text="\n\n".join(texts))], metadata={"daedalus.origin": origin, "daedalus.delivery": "drained"})
         await self.sessions.append_transcript(state.session.id, [message])
         seqs = await self.sessions.transcript_seqs(state.session.id, [self.sessions.transcript_key(message)])
         await self.checkpoint(state, kind="before", seq=seqs[0] if seqs else None)

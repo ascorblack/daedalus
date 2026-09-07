@@ -65,6 +65,9 @@ def bot_env() -> dict[str, str]:
     env = dict(os.environ)
     env.pop("VIRTUAL_ENV", None)
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # Commits the agent makes in its workspace carry its own identity; the repos' local config covers the self-development checkouts.
+    for key, value in (("GIT_AUTHOR_NAME", "Daedalus"), ("GIT_AUTHOR_EMAIL", "daedalus@localhost"), ("GIT_COMMITTER_NAME", "Daedalus"), ("GIT_COMMITTER_EMAIL", "daedalus@localhost")):
+        env.setdefault(key, value)
     token = env.get("GITHUB_TOKEN")
     if token:
         # Private repositories: git authenticates with the fine-grained token, never with a stored password.

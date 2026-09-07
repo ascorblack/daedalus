@@ -170,6 +170,8 @@ class SqliteSessionStore(ISessionStore):
                     "INSERT OR IGNORE INTO transcript(session_id, key, message) VALUES (?, ?, ?)", (session_id, key, message.model_dump_json())
                 )
                 if cursor.rowcount:
+                    await conn.execute("UPDATE sessions SET last_message_at = ? WHERE id = ?", (_now(), session_id))
+                if cursor.rowcount:
                     added += 1
                     last_seq = max(last_seq, int(cursor.lastrowid or 0))
                     text = message_text(message)

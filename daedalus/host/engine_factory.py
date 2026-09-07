@@ -54,10 +54,10 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
         # Advertise every registered tool; the registry would otherwise clip the list.
         tool_retrieval_top_k=200,
         # Summaries must not be cut mid-JSON: give the summariser room for a full sentence pair.
-        compaction_summary_max_output_tokens=1024,
+        compaction_summary_max_output_tokens=2048,
         # A summariser writes sentences whatever it is given: a small tool exchange comes back
         # no smaller, so units under this size are kept as they are instead of paid for.
-        compaction_summary_min_unit_tokens=400,
+        compaction_summary_min_unit_tokens=1500,
         # The host compacts the whole history between runs; the core's tiers only catch a run that grows past that.
         # A server that reserves the output budget inside the window (vLLM) rejects a prompt above
         # window − max output, so the trigger must sit below that cliff, not only below the window.
@@ -74,6 +74,8 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
         # run legitimately re-runs the same test command or re-reads the same file many times.
         loop_guard_identical_tool_limit=30,
         loop_guard_nudge_max=3,
+        # Three failures of one tool in a run that takes hundreds of turns is not a broken tool.
+        max_consecutive_tool_errors=8,
     )
 
 
