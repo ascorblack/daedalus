@@ -67,7 +67,8 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
     output = b"".join(chunks).decode("utf-8", "replace")
     exit_code = -1 if timed_out else int(proc.returncode or 0)
     passed = exit_code == 0
-    digest = hashlib.sha256(output.encode("utf-8")).hexdigest()[:16]
+    full_digest = hashlib.sha256(output.encode("utf-8")).hexdigest()
+    digest = full_digest[:16]
     receipt_id = ""
     if manager is not None:
         # Receipts travel to proposal cards and pull-request bodies: nothing secret may be recorded.
@@ -77,7 +78,7 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
                 "INSERT INTO verifications(session_id, run_id, criterion, command, cwd, exit_code, passed, output_digest, output_head, duration_ms, at, sandboxed)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    context.session_id, context.run_id, r.redact(criterion)[:300], r.redact(command)[:2000], str(workdir), exit_code, int(passed), digest,
+                    context.session_id, context.run_id, r.redact(criterion)[:300], r.redact(command)[:2000], str(workdir), exit_code, int(passed), full_digest,
                     r.redact(output[:OUTPUT_HEAD_CHARS]), int((time.monotonic() - started) * 1000), datetime.now(UTC).isoformat(), int(sandboxed),
                 ),
             )
