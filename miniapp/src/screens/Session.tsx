@@ -129,7 +129,7 @@ function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Tu
 
 // ── screen ────────────────────────────────────────────────────────────────────────────────
 
-export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () => void; toast: (t: string) => void }) {
+export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBack: () => void; onOpen?: (id: string) => void; toast: (t: string) => void }) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [live, setLive] = useState<LiveState>(EMPTY_LIVE);
   const [draft, setDraft] = useState("");
@@ -466,6 +466,11 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
               {detail?.title ?? "…"}
             </div>
           )}
+          {detail?.subagent_of && (
+            <div className="sub leader-link" onClick={() => onOpen?.(detail.subagent_of!)} title="open the leader session">
+              ↳ subagent of <b>{detail.leader_title ?? detail.subagent_of}</b>
+            </div>
+          )}
           <div className="sub">
             {busy ? <span className="live-dot" /> : null}
             {detail?.model} · {fmtInt(detail?.usage.i)}↑ {fmtInt(detail?.usage.o)}↓ · {fmtUsd(detail?.usage.usd)}
@@ -482,6 +487,19 @@ export function SessionScreen({ id, onBack, toast }: { id: string; onBack: () =>
           <Icon name="more" />
         </button>
       </div>
+
+      {detail && detail.subagents && detail.subagents.length > 0 && (
+        <div className="subagents" aria-label="subagents">
+          <span className="subagents-label">Subagents</span>
+          {detail.subagents.map((s) => (
+            <button key={s.session_id} className={"chip subchip " + s.status} onClick={() => onOpen?.(s.session_id)} title={`${s.model} · session ${s.session_id}`}>
+              {s.running ? <span className="live-dot" /> : <span className={"dot " + s.status} />}
+              {s.name || s.session_id}
+              <span className="sub">{s.running ? "working" : s.status === "failed" ? "failed" : "done"}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {menu && detail && (
         <div className="sheet-backdrop" onClick={() => setMenu(false)}>

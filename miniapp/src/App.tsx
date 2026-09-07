@@ -82,7 +82,7 @@ export function App() {
     <div className="app">
       {sessionId ? (
         <ErrorBoundary key={sessionId}>
-          <SessionScreen id={sessionId} onBack={() => setSessionId(null)} toast={showToast} />
+          <SessionScreen id={sessionId} onBack={() => setSessionId(null)} onOpen={setSessionId} toast={showToast} />
         </ErrorBoundary>
       ) : (
         <>

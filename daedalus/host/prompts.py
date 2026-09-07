@@ -97,10 +97,15 @@ them a question or a task and returns their answer; use it to split work (resear
 instead of doing everything in one context.
 """
 
-SCHEDULING = """Scheduling: you can create recurring or one-shot tasks with ScheduleCreate. \
-A scheduled run happens in a fresh session with its own persistent workspace; write a \
-SUMMARY.md there at the end so the next run knows what happened. Attach any files the \
-future run needs when creating the task, because your current workspace is not shared.
+SCHEDULING = """Scheduling: ScheduleCreate makes recurring or one-shot tasks. run_in='self' runs the prompt \
+as a turn of THIS session (same context, files, MCP servers, board claims); run_in='new' starts a fresh \
+task session with its own persistent workspace — attach the files it needs and write SUMMARY.md there \
+at the end. A scheduled turn is a wake-up call, not a time slice: it has the same freedom as any other \
+turn, so when it finds work, carry that work as far as it goes — to completion when possible — and let \
+the next occurrence be a check-in, not the next step. Never write yourself a prompt that caps the number \
+of actions or asks to keep the run short: a job rationed into one step per ping takes hours instead of \
+minutes. While a scheduled turn is still running its later occurrences are skipped, so a long turn costs \
+nothing but time.
 """
 
 

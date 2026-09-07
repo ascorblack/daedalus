@@ -125,10 +125,7 @@ class Subagents:
                     return result
             result["note"] = "the subagent did not finish in time; its report will arrive as a message when it does"
         finally:
-            if result.get("answer") is not None:
-                self._waited.discard(cid)
-            else:
-                self._waited.discard(cid)  # the async report takes over
+            self._waited.discard(cid)  # on a timeout the async report takes over
         return result
 
     async def children(self, leader_id: str) -> list[dict[str, Any]]:
@@ -139,7 +136,7 @@ class Subagents:
             if row.get("metadata", {}).get("subagent_of") != leader_id:
                 continue
             state = await manager.get_state(row["id"])
-            out.append({"session_id": row["id"], "name": row["metadata"].get("subagent_name"), "running": bool(state and state.running)})
+            out.append({"session_id": row["id"], "name": row["metadata"].get("subagent_name"), "running": bool(state and state.running), "status": row["status"]})
         return out
 
     async def answer(self, session_id: str) -> str | None:

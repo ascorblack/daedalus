@@ -74,7 +74,10 @@ export type SessionSummary = {
   created_at: string;
   last_message_at: string;
   run_id: string | null;
+  metadata?: { subagent_of?: string; subagent_name?: string; [k: string]: unknown };
 };
+
+export type SubagentView = { session_id: string; name: string | null; running: boolean; status: string; model: string };
 
 export type MessageView = {
   role: "system" | "user" | "assistant" | "tool";
@@ -103,6 +106,10 @@ export type SessionDetail = {
   usd_cap?: number | null;
   brief?: string;
   spawned_by?: string | null;
+  subagent_of?: string | null;
+  subagent_name?: string | null;
+  leader_title?: string | null;
+  subagents?: SubagentView[];
   context?: { tokens: number; window: number; messages: number; summaries: number; operator_turns: number };
   usage: { c?: number; i?: number; o?: number; ch?: number; usd?: number | null };
 };

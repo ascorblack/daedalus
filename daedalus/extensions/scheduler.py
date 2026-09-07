@@ -436,6 +436,7 @@ class Scheduler:
             prompt += f"\n\nYour note from the previous run ({schedule.get('last_run_at')}):\n{schedule['last_summary'][:6000]}"
         prompt += (
             f"\n\n[scheduled run '{schedule['name']}' in this session; no operator message accompanies it. "
+            "Take the work as far as it goes now — the next occurrence is skipped while this turn runs. "
             "If nothing needs attention, answer in one line. End with a short note for the next run.]"
         )
         run_id = await manager.submit(state.session.id, prompt, [], as_answer=False, origin="schedule")

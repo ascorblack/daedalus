@@ -518,6 +518,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             (session_id,),
         )
         context = await manager.context_status(state)
+        leader = await manager.get_state(str(state.metadata["subagent_of"])) if state.metadata.get("subagent_of") else None
+        subagents = []
+        for child in await app.extensions["subagents"].children(session_id) if "subagents" in app.extensions else []:
+            child_state = await manager.get_state(child["session_id"])
+            subagents.append({**child, "model": await session_model_label(child_state) if child_state else ""})
         return {
             "context": context,
             "id": session_id,
@@ -531,6 +536,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "usd_cap": state.metadata.get("usd_cap"),
             "brief": state.metadata.get("brief") or "",
             "spawned_by": state.metadata.get("spawned_by"),
+            "subagent_of": state.metadata.get("subagent_of"),
+            "subagent_name": state.metadata.get("subagent_name"),
+            "leader_title": leader.session.title if leader is not None else None,
+            "subagents": subagents,
             "verifications": dict(await app.db.fetchone("SELECT count(*) total, sum(passed) passed FROM verifications WHERE session_id = ?", (session_id,)) or {}),
             "messages": [message_view(m) for m in source],
             "usage": dict(usage) if usage else {},

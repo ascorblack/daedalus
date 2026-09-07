@@ -282,3 +282,18 @@ input.field, select.field, textarea.field {
 .palette-item:last-child { border-bottom:0; }
 .palette-item:active { background:var(--card-2); }
 .mono { font-family:var(--mono); }
+
+/* subagents */
+.card.row.subrow { margin-left: 22px; padding-top: 8px; padding-bottom: 8px; position: relative; }
+.card.row.subrow .avatar { width: 30px; height: 30px; }
+.subarrow { position: absolute; left: -18px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 14px; }
+.badge.sub { margin-left: 8px; color: var(--info); border-color: color-mix(in srgb, var(--info) 40%, transparent); vertical-align: 2px; }
+.leader-link { cursor: pointer; color: var(--info); }
+.leader-link b { font-weight: 600; }
+.subagents { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--card); }
+.subagents-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; margin-right: 2px; }
+.chip.subchip { padding: 5px 10px; font: inherit; font-size: 13px; }
+.chip.subchip .sub { font-size: 11px; }
+.chip.subchip.running { border-color: color-mix(in srgb, var(--info) 45%, var(--line)); }
+.chip.subchip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); display: inline-block; }
+.chip.subchip .dot.failed { background: var(--bad); }

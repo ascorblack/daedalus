@@ -25,7 +25,8 @@ from daedalus.tools._common import error, ok, services_for
         "becomes an agent task if the operator stays away for a day. run_in chooses where an "
         "agent task runs: 'new' (default) starts a fresh task session with its own workspace each "
         "time; 'self' runs it as a turn of THIS session — same context, files, MCP servers and "
-        "board claims — which is what a recurring ping to yourself wants."
+        "board claims — which is what a recurring ping to yourself wants. A fired turn may run as long "
+        "as the work needs; do not put action caps or 'keep it short' into the prompt."
     ),
 )
 async def schedule_create(
