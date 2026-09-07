@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -20,6 +21,21 @@ logger = logging.getLogger(__name__)
 
 WINDOW_MINUTES = 10
 THRESHOLD = 3
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write text to path without ever leaving a truncated file behind.
+
+    A crash between the two writes of a plain ``write_text`` (marker, then
+    history) would leave the second file half-written; the guard's counter
+    would then reset on the next boot and forget the crash loop it exists
+    to detect. Write to a per-process temp file in the same directory and
+    ``os.replace`` it into place: the old content stands until the new one
+    is complete.
+    """
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 class BootGuard:
@@ -37,12 +53,13 @@ class BootGuard:
             now = datetime.now(UTC)
             unclean = self.marker.exists()
             self.history.parent.mkdir(parents=True, exist_ok=True)
-            self.marker.write_text(now.isoformat(), encoding="utf-8")  # armed first: a failure below must not disarm the next boot
+            _atomic_write(self.marker, now.isoformat())  # armed first: a failure below must not disarm the next boot
             times: list[datetime] = []
             if self.history.exists():
                 try:
                     times = [datetime.fromisoformat(t) for t in json.loads(self.history.read_text(encoding="utf-8")) if isinstance(t, str)]
                 except (OSError, ValueError, TypeError):
+                    logger.warning("boot history unreadable; starting the count fresh", exc_info=True)
                     times = []
             cutoff = now - timedelta(minutes=self.window_minutes)
             recent = [t for t in times if t >= cutoff]
@@ -50,7 +67,7 @@ class BootGuard:
                 recent.append(now)
             self.unclean_boots = len(recent)
             self.skip_recovery = self.unclean_boots >= self.threshold
-            self.history.write_text(json.dumps([t.isoformat() for t in recent]), encoding="utf-8")
+            _atomic_write(self.history, json.dumps([t.isoformat() for t in recent]))
             if unclean:
                 logger.warning("unclean boot %d/%d within %d min%s", self.unclean_boots, self.threshold, self.window_minutes, " — skipping boot recovery" if self.skip_recovery else "")
         except Exception:  # noqa: BLE001 — the guard must never keep the bot from starting
@@ -60,7 +77,7 @@ class BootGuard:
     def on_clean_shutdown(self) -> None:
         try:
             self.marker.unlink(missing_ok=True)
-            self.history.write_text("[]", encoding="utf-8")
+            _atomic_write(self.history, "[]")
         except OSError:
             pass
 

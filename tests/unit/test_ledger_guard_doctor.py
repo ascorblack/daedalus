@@ -55,6 +55,19 @@ def test_boot_guard_counts_unclean_boots_and_fails_open(tmp_path: Path) -> None:
     assert not guard.skip_recovery
 
 
+def test_boot_guard_writes_atomically_and_leaves_no_tmp_remnants(tmp_path: Path) -> None:
+    guard = BootGuard(tmp_path)
+    guard.on_boot()
+    guard.on_clean_shutdown()
+    guard = BootGuard(tmp_path)
+    guard.on_boot()
+    # history is valid json and no half-written temp files sit next to it
+    import json as _json
+
+    assert isinstance(_json.loads(guard.history.read_text(encoding="utf-8")), list)
+    assert not [p for p in tmp_path.iterdir() if ".tmp." in p.name]
+
+
 async def test_doctor_runs_without_a_bot_and_fixes_stale_snapshots(settings: Settings, db: Database) -> None:
     settings.state_dir.mkdir(parents=True, exist_ok=True)
     settings.workspaces_dir.mkdir(parents=True, exist_ok=True)
