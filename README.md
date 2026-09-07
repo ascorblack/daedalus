@@ -115,7 +115,7 @@ daedalus/
   host/         sessions, engine wiring, prompts, skills store
   providers/    OpenAI-compatible adapter, fallback chain, registry
   tools/        one tool per module, PascalCase names: Exec, Read, Write, Edit, Find, Search, WebFetch,
-                WebSearch, ImageView, SendFile, SpawnTask, Self*, Schedule*, Mcp*
+                WebSearch, ImageView, SendFile, SpawnTask, SpawnAgent, SubAgent, AskPeer, Self*, Schedule*, Mcp*
   stores/       SQLite stores, blob store, durable memory
   transport/    Telegram (aiogram 3)
   extensions/   self-development, scheduler, balance monitor, HTTP API
