@@ -235,3 +235,27 @@ async def test_learning_record_covers_only_the_run(settings: Settings, db: Datab
     row = await db.fetchone("SELECT ask, tools, failures FROM learning_records WHERE run_id = 'run-b'")
     assert row["ask"] == "new ask" and row["tools"] == "{}" and row["failures"] == "[]"
     await manager.close()
+
+
+async def test_verify_receipt_records_time_and_dependencies(settings: Settings, db: Database) -> None:
+    """The receipt names when it was taken and the shared channels it rests on.
+
+    A digest without a timestamp is 'verified for me, right now'; a receipt
+    without its named dependencies hides the trust root the observation
+    stands on. Both must be in the stored row and the receipt text.
+    """
+    manager = await _manager(settings, db)
+    state = await manager.create_session("verify-deps")
+    state.services.extra["manager"] = manager  # type: ignore[union-attr]
+    ctx = ToolContext(tenant_id="daedalus", run_id="r1", session_id=state.session.id)
+    result = await verify().invoke(ctx, {"criterion": "echo works", "command": "echo hello", "dependencies": "container shell + provider API"})
+    assert not result.is_error
+    assert "· at " in result.content and "· deps: container shell + provider API" in result.content
+    row = await db.fetchone("SELECT at, dependencies FROM verifications WHERE session_id = ?", (state.session.id,))
+    assert row["dependencies"] == "container shell + provider API"
+    assert row["at"]
+    # without dependencies the field stays empty, the header stays clean
+    await verify().invoke(ctx, {"criterion": "plain", "command": "true"})
+    row2 = await db.fetchone("SELECT dependencies FROM verifications WHERE session_id = ? AND criterion = 'plain'", (state.session.id,))
+    assert row2["dependencies"] == ""
+    await manager.close()

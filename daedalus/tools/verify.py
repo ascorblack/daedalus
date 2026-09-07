@@ -28,12 +28,14 @@ OUTPUT_HEAD_CHARS = 2000
     name="Verify",
     description=(
         "Run a command that checks a claim and record the outcome as a verification receipt "
-        "(criterion, command, exit code, output digest) tied to this run. Use it for the checks "
+        "(criterion, command, exit code, output digest, time) tied to this run. Use it for the checks "
         "that back a statement such as 'tests pass' or 'the service answers': a receipt is what "
-        "the operator sees on a change proposal, a sentence is not. Exit code 0 = verified."
+        "the operator sees on a change proposal, a sentence is not. Exit code 0 = verified. "
+        "Pass dependencies to name the shared channels the observation rests on "
+        "(e.g. 'container shell + provider API'), so a reviewer can see what the receipt does not cover."
     ),
 )
-async def verify(context: ToolContext, criterion: str, command: str, cwd: str | None = None, timeout_seconds: int | None = None) -> ToolResult:
+async def verify(context: ToolContext, criterion: str, command: str, cwd: str | None = None, timeout_seconds: int | None = None, dependencies: str | None = None) -> ToolResult:
     services = services_for(context)
     manager = services.extra.get("manager")
     workdir = services.resolve(cwd)
@@ -73,21 +75,24 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
     full_digest = hashlib.sha256(raw_output).hexdigest()
     output = raw_output.decode("utf-8", "replace")
     digest = full_digest[:16]
+    at = datetime.now(UTC).isoformat()
     receipt_id = ""
     if manager is not None:
         # Receipts travel to proposal cards and pull-request bodies: nothing secret may be recorded.
         r = redact.shared()
+        deps = (dependencies or "").strip()
         async with manager.db.transaction() as conn:
             cursor = await conn.execute(
-                "INSERT INTO verifications(session_id, run_id, criterion, command, cwd, exit_code, passed, output_digest, output_head, duration_ms, at, sandboxed)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO verifications(session_id, run_id, criterion, command, cwd, exit_code, passed, output_digest, output_head, duration_ms, at, sandboxed, dependencies)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     context.session_id, context.run_id, r.redact(criterion)[:300], r.redact(command)[:2000], str(workdir), exit_code, int(passed), full_digest,
-                    r.redact(output[:OUTPUT_HEAD_CHARS]), int((time.monotonic() - started) * 1000), datetime.now(UTC).isoformat(), int(sandboxed),
+                    r.redact(output[:OUTPUT_HEAD_CHARS]), int((time.monotonic() - started) * 1000), at, int(sandboxed), r.redact(deps)[:300],
                 ),
             )
             receipt_id = f"v{cursor.lastrowid}"
-    header = f"{'✅ verified' if passed else '❌ NOT verified'}: {criterion} — exit {exit_code}{' (timed out)' if timed_out else ''} · receipt {receipt_id or 'not recorded'} · digest {digest}" + (" · sandbox=workspace" if sandboxed else "")
+    deps = (dependencies or "").strip()
+    header = f"{'✅ verified' if passed else '❌ NOT verified'}: {criterion} — exit {exit_code}{' (timed out)' if timed_out else ''} · receipt {receipt_id or 'not recorded'} · digest {digest} · at {at}" + (f" · deps: {deps}" if deps else "") + (" · sandbox=workspace" if sandboxed else "")
     body = clip(output, services.max_tool_output_chars, note="write the output to a file for the rest")
     text = f"{header}\n{body}" if body.strip() else header
     return ok(context, text, receipt=receipt_id, passed=passed, exit_code=exit_code) if passed else error(context, text, receipt=receipt_id, passed=passed, exit_code=exit_code)

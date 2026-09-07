@@ -207,7 +207,7 @@ class SelfDevelopment:
         """
         since = since or (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
         rows = await self.app.db.fetchall(
-            "SELECT id, criterion, command, exit_code, passed, sandboxed FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 12", (session_id, since)
+            "SELECT id, criterion, command, exit_code, passed, sandboxed, dependencies FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 12", (session_id, since)
         )
         if not rows:
             return "\n\nVerification receipts: none — nothing in this proposal was checked with Verify."
@@ -222,7 +222,9 @@ class SelfDevelopment:
             if not row["sandboxed"]:
                 caveats.append("unsandboxed")
             suffix = f" ⚠ {'; '.join(caveats)}" if caveats else ""
-            lines.append(f"- {'✅' if row['passed'] else '❌'} {r.redact(row['criterion'])} — `{shown}` (exit {row['exit_code']}, receipt v{row['id']}){suffix}")
+            deps = (row["dependencies"] or "").strip()
+            deps_note = f" · deps: {deps}" if deps else ""
+            lines.append(f"- {'✅' if row['passed'] else '❌'} {r.redact(row['criterion'])} — `{shown}` (exit {row['exit_code']}, receipt v{row['id']}){deps_note}{suffix}")
         return "\n\nVerification receipts:\n" + "\n".join(lines)
 
     async def _send_card(self, proposal_id: str, repo: str, title: str, summary: str, pr_url: str, diffstat: str) -> None:
