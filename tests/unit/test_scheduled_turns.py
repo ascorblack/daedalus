@@ -93,3 +93,38 @@ async def test_wrong_tool_argument_names_answer_with_the_accepted_ones() -> None
     assert result.is_error and "unknown argument 'status'" in result.content and "title" in result.content
     result = await tools["Edit"].invoke(ctx, {"old_string": "a", "new_string": "b"})
     assert result.is_error and "missing" in result.content and "path" in result.content
+
+
+async def test_context_overflow_compacts_and_drives_the_turn_again(settings: Settings, db: Database) -> None:
+    from protocore.runtime.events.envelope import TurnEvent
+    from protocore.runtime.events.types import EventType
+
+    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    await manager.start()
+    calls: list[str] = []
+
+    async def fake_submit(session_id: str, text: str, attachments=(), *, steer=False, as_answer=True, origin="operator") -> str:  # type: ignore[no-untyped-def]
+        calls.append(f"submit:{origin}")
+        return "run-2"
+
+    async def fake_compact(state: Any, instructions: str, *, keep_recent: int = 0, reason: str = "manual", own_task_ok: bool = False) -> str:
+        calls.append(f"compact:{reason}")
+        return "ok"
+
+    async def fake_status(state: Any) -> dict[str, Any]:
+        return {"tokens": 90_000, "window": 128_000, "messages": 40, "summaries": 1, "operator_turns": 2}
+
+    manager.submit = fake_submit  # type: ignore[method-assign]
+    manager._compact_locked = fake_compact  # type: ignore[method-assign]
+    manager.context_status = fake_status  # type: ignore[method-assign]
+    try:
+        state = await manager.create_session("s")
+        await manager._dispatch_event(state, TurnEvent(type=EventType.ERROR, run_id="r1", payload={"kind": "llm_context_window_exceeded", "message": "too big"}))
+        assert state.last_error_kind == "llm_context_window_exceeded"
+        await manager._recover_from_overflow(state)
+        assert calls == ["compact:auto", "submit:core"] and state.overflow_streak == 1
+        await manager._recover_from_overflow(state)
+        await manager._recover_from_overflow(state)  # the third overflow in a row is left alone
+        assert calls.count("submit:core") == 2 and state.overflow_streak == 2
+    finally:
+        await manager.close()

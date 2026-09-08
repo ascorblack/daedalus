@@ -15,6 +15,7 @@ declare global {
         setHeaderColor?: (color: string) => void;
         setBackgroundColor?: (color: string) => void;
         platform?: string;
+        isExpanded?: boolean;
         showConfirm?: (text: string, cb: (ok: boolean) => void) => void;
         disableVerticalSwipes?: () => void;
         enableVerticalSwipes?: () => void;

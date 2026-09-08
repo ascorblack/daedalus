@@ -111,7 +111,7 @@ async def test_failed_tool_result_is_masked_in_event_and_history() -> None:
 
     raw = "tool 'WebFetch' execution failed: 401 for https://api.x.test/?key=sk-proj-abcdefghijklmnopqrstuvwxyz"
     engine = SimpleNamespace(history=[Message(role=MessageRole.tool, content_blocks=[ToolResultBlock(tool_call_id="c9", content=raw, is_error=True)])])
-    state = SimpleNamespace(engine=engine)
+    state = SimpleNamespace(engine=engine, last_error_kind="")
     manager = SimpleNamespace(redactor=Redactor(), _redact_history_result=SessionManager._redact_history_result)
     event = TurnEvent(type=EventType.ERROR, run_id="r", payload={"message": raw})
     SessionManager._redact_event(manager, state, event)  # type: ignore[arg-type]

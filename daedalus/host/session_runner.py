@@ -100,6 +100,10 @@ class SessionState:
     metadata: dict[str, Any] = field(default_factory=dict)
     run_origin: str = "operator"
     """Who started the current run (``operator``, ``schedule``, ``reminder``, ``subagent:…``): StaySilent and the reply routing read it."""
+    last_error_kind: str = ""
+    """The kind of the error that ended the current run, from the core's ERROR event (``llm_context_window_exceeded`` …)."""
+    overflow_streak: int = 0
+    """Consecutive runs that overflowed the context window; recovery stops after a few so a hopeless history cannot loop."""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """Serialises run starts against history rewrites (compaction)."""
     history_keys: list[str] = field(default_factory=list)
@@ -1175,6 +1179,7 @@ class SessionManager:
     async def _start_run_locked(
         self, state: SessionState, message: Message | None, *, continue_turn: bool = False
     ) -> str:
+        state.last_error_kind = ""
         if message is not None:
             state.run_origin = str(message.metadata.get("daedalus.origin") or "operator")
         if state.engine is None or not continue_turn:
@@ -1257,6 +1262,36 @@ class SessionManager:
             if status in ("completed", "failed"):
                 # A run that ended in an error still owes an answer to what arrived meanwhile.
                 await self._drain_leftover_follow_ups(state)
+            if status == "completed":
+                state.overflow_streak = 0
+            elif status == "failed" and state.last_error_kind == "llm_context_window_exceeded" and not state.running:
+                await self._recover_from_overflow(state)
+
+    OVERFLOW_NOTE = (
+        "[The previous turn stopped because the conversation no longer fitted the model's context window. "
+        "The history has been compacted into the summary above; continue the work from where it stopped.]"
+    )
+
+    async def _recover_from_overflow(self, state: SessionState) -> None:
+        """A run the provider refused for size is not the end of the task: shrink the history and drive the turn again."""
+        if state.overflow_streak >= 2:
+            logger.warning("session %s: overflowed %d times in a row; not retrying", state.session.id, state.overflow_streak)
+            return
+        state.overflow_streak += 1
+        cfg = self.config.compaction
+        status = await self.context_status(state)
+        if status["messages"] >= cfg.min_messages:
+            async with state.lock:
+                try:
+                    await self._compact_locked(state, "", keep_recent=cfg.keep_recent_messages, reason="auto", own_task_ok=True)
+                except RuntimeError as exc:
+                    logger.warning("session %s: overflow recovery could not compact: %s", state.session.id, exc)
+                    return
+        logger.warning("session %s: context overflow; history compacted, driving the turn again", state.session.id)
+        try:
+            await self.submit(state.session.id, self.OVERFLOW_NOTE, as_answer=False, origin="core")
+        except RuntimeError as exc:
+            logger.warning("session %s: overflow recovery did not start: %s", state.session.id, exc)
 
     async def _drain_leftover_follow_ups(self, state: SessionState) -> None:
         """Input that arrived while the run was settling starts the next turn instead of rotting in the queue."""
@@ -1323,6 +1358,7 @@ class SessionManager:
             p["final_input"] = self.redactor.redact_any(p["final_input"])
         elif event.type is EventType.ERROR and isinstance(p.get("message"), str):
             p["message"] = self.redactor.redact(p["message"])
+            state.last_error_kind = str(p.get("kind") or state.last_error_kind)
 
     @staticmethod
     def _redact_history_result(state: SessionState, tool_call_id: str, cleaned: str) -> None:

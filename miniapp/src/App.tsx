@@ -68,6 +68,12 @@ export function App() {
     }
     tg.ready();
     tg.expand();
+    // Reopened from the background, the app may come back collapsed: ask for the full height again.
+    const onViewport = () => {
+      if (!tg.isExpanded) tg.expand();
+    };
+    tg.onEvent("viewportChanged", onViewport);
+    tg.onEvent("activated", onViewport);
     const apply = () => {
       document.documentElement.dataset.scheme = tg.colorScheme;
       for (const [key, value] of Object.entries(tg.themeParams ?? {})) {
@@ -86,7 +92,11 @@ export function App() {
     apply();
     paint();
     tg.onEvent("themeChanged", onTheme);
-    return () => tg.offEvent?.("themeChanged", onTheme);
+    return () => {
+      tg.offEvent?.("themeChanged", onTheme);
+      tg.offEvent?.("viewportChanged", onViewport);
+      tg.offEvent?.("activated", onViewport);
+    };
   }, []);
 
   // Telegram's own back button leaves a session; the vertical swipe must not close the app mid-chat.

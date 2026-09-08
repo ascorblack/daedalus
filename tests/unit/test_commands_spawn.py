@@ -91,6 +91,6 @@ def test_core_compaction_trigger_stays_below_the_output_reservation() -> None:
 
     config = RuntimeConfig()
     rc = runtime_constants(config, context_window=128_000, max_output_tokens=32_000, thinking=False, mode=None)
-    assert rc.compaction_trigger_ratio == 0.7  # 1 − 32k/128k − 0.05, below the 0.85 default
+    assert rc.compaction_trigger_ratio == 0.6  # 1 − 32k/128k − 0.15: a turn of tool results below the vLLM cliff, under the 0.85 default
     rc = runtime_constants(config, context_window=128_000, max_output_tokens=4_000, thinking=False, mode=None)
-    assert rc.compaction_trigger_ratio == 0.85
+    assert rc.compaction_trigger_ratio == 0.82  # 1 − 4k/128k − 0.15: still below the 0.85 default

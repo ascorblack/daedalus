@@ -50,7 +50,9 @@ body {
 button, input, textarea, select { font: inherit; color: inherit; }
 a { color: var(--info); text-decoration: none; }
 
-.app { display: flex; flex-direction: column; height: var(--tg-viewport-stable-height, 100dvh); }
+/* The viewport itself, not Telegram's stable-height variable: on Android that variable keeps the
+   collapsed height after the app is minimised and reopened, and the screen shrinks to a strip. */
+.app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
 .screen { flex: 1; overflow-y: auto; padding: 12px 14px calc(72px + env(safe-area-inset-bottom)); }
 .topbar { display: flex; align-items: center; gap: 10px; padding: 10px 14px 6px; }
 .topbar h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
