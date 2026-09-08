@@ -194,6 +194,8 @@ a { color: var(--info); text-decoration: none; }
 .toolcard { margin:4px 0 8px 28px; display:flex; flex-direction:column; gap:6px; }
 .toolcard .result { margin:0; padding:8px 10px; background:var(--card); border:1px solid var(--line); border-radius:12px; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-word; max-height:280px; overflow:auto; color:var(--muted); }
 .toolcard .result.error { color:var(--bad); }
+.toolcard .result.full { max-height:70vh; }
+.toolcard > .btn.small { align-self:flex-start; }
 .diff pre { margin:0; padding:8px 10px; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-word; }
 .diff .del { background:rgba(248,113,113,.14); border-radius:12px 12px 0 0; color:#fca5a5; }
 .diff .add { background:rgba(74,222,128,.12); border-radius:0 0 12px 12px; color:#86efac; }

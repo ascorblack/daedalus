@@ -466,6 +466,10 @@ def _looks_like_core_nudge(text: str) -> bool:
     return any(marker in head for marker in _NUDGE_MARKERS)
 
 
+TOOL_RESULT_PREVIEW_CHARS = 4000
+"""Characters of a tool result the transcript listing carries; the rest comes from the tool-result endpoint."""
+
+
 def message_view(message: Message) -> dict[str, Any]:
     text: list[str] = []
     thinking: list[str] = []
@@ -483,7 +487,8 @@ def message_view(message: Message) -> dict[str, Any]:
                 args = {"raw": block.arguments_json}
             tool_calls.append({"id": block.tool_call_id, "name": block.name, "arguments": redact.shared().redact_any(args)})
         elif isinstance(block, ToolResultBlock):
-            tool_results.append({"id": block.tool_call_id, "content": redact.redact(block.content[:4000]), "is_error": block.is_error})
+            # The listing carries a preview; the full text (a skill body, a long command output) is one request away.
+            tool_results.append({"id": block.tool_call_id, "content": redact.redact(block.content[:TOOL_RESULT_PREVIEW_CHARS]), "is_error": block.is_error, "length": len(block.content)})
     compaction = message.metadata.get("daedalus.compaction") if isinstance(message.metadata, dict) else None
     is_summary = bool(message.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)) if isinstance(message.metadata, dict) else False
     body = "".join(text)
@@ -729,6 +734,18 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 manager._sinks.remove(sink)
 
         return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @api.get("/api/sessions/{session_id}/tool-results/{call_id}")
+    async def tool_result(session_id: str, call_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The whole text of one tool result, for the listing's preview to expand."""
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        for message in reversed(await manager.transcript(session_id)):
+            for block in message.content_blocks:
+                if isinstance(block, ToolResultBlock) and block.tool_call_id == call_id:
+                    return {"id": call_id, "content": redact.redact(block.content), "is_error": block.is_error, "length": len(block.content)}
+        raise HTTPException(404, "no such tool result")
 
     @api.post("/api/sessions/{session_id}/messages")
     async def send_message(session_id: str, body: SendMessageBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

@@ -128,7 +128,7 @@ export type MessageView = {
   text: string;
   thinking: string;
   tool_calls: { id: string; name: string; arguments: Record<string, unknown> }[];
-  tool_results: { id: string; content: string; is_error: boolean }[];
+  tool_results: { id: string; content: string; is_error: boolean; length?: number }[];
   created_at: string;
 };
 

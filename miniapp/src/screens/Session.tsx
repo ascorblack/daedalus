@@ -1,4 +1,4 @@
-import { Component, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { api, LoopView, SlashCommand, MessageView, Question, SessionDetail } from "../api";
 import { ServiceRow, Status, ToolPicker, fmtInt, fmtUsd, loopLabel } from "../components";
@@ -30,7 +30,7 @@ type LiveTool = { id: string; name: string; args: string; result?: string; error
 type LiveState = { text: string; thinking: string; tools: LiveTool[]; startedAt: number | null };
 const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null };
 
-type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean };
+type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean; length?: number };
 type NoteItem = { kind: "note"; text: string };
 type ThinkItem = { kind: "thinking"; text: string };
 type SummaryItem = { kind: "summary"; text: string; reason: string };
@@ -57,7 +57,7 @@ function parseArgs(raw: string): Record<string, unknown> {
 
 /** Group the flat message list into turns: a user message plus everything the agent did after it. */
 function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Turn[] {
-  const results = new Map<string, { content: string; is_error: boolean }>();
+  const results = new Map<string, { content: string; is_error: boolean; length?: number }>();
   for (const m of messages) for (const r of m.tool_results) results.set(r.id, r);
   const seen = new Set<string>();
   const turns: Turn[] = [];
@@ -110,7 +110,7 @@ function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Tu
       const content = r?.content ?? liveResult?.result;
       const running = content === undefined;
       if (running) current.pendingTools++;
-      current.activity.push({ kind: "tool", id: c.id, name: c.name, args: c.arguments, result: content, error: r?.is_error ?? liveResult?.error, running });
+      current.activity.push({ kind: "tool", id: c.id, name: c.name, args: c.arguments, result: content, error: r?.is_error ?? liveResult?.error, running, length: r?.length });
     }
   });
   if (busy) {
@@ -735,7 +735,9 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
             <div className="timeline">
               {turns.map((t, i) => (
                 <Safe key={t.key}>
-                  <TurnView turn={t} live={busy && i === turns.length - 1} onTurnAction={turnAction} />
+                  <SessionIdContext.Provider value={id}>
+                    <TurnView turn={t} live={busy && i === turns.length - 1} onTurnAction={turnAction} />
+                  </SessionIdContext.Provider>
                 </Safe>
               ))}
               {detail?.pending && <QuestionCard key={detail.pending.questions.map((q) => q.question).join("|")} sessionId={id} questions={detail.pending.questions} onDone={() => load()} toast={toast} />}
@@ -1282,8 +1284,39 @@ function ToolCard({ item }: { item: ToolItem }) {
       </div>,
     );
   else parts.push(<div key="c" dangerouslySetInnerHTML={{ __html: codeBlock(JSON.stringify(a, null, 2), "args") }} />);
-  if (item.result !== undefined) parts.push(<pre key="r" className={`result ${item.error ? "error" : ""}`}>{item.result.slice(0, 6000)}</pre>);
+  if (item.result !== undefined) parts.push(<ToolResultText key="r" item={item} />);
   return <div className="toolcard">{parts}</div>;
+}
+
+const SessionIdContext = createContext("");
+
+function ToolResultText({ item }: { item: ToolItem }) {
+  const sessionId = useContext(SessionIdContext);
+  const [full, setFull] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const text = full ?? item.result ?? "";
+  const clipped = full === null && item.length !== undefined && item.length > text.length;
+  async function loadAll() {
+    setLoading(true);
+    try {
+      const r = await api.get<{ content: string }>(`/api/sessions/${sessionId}/tool-results/${encodeURIComponent(item.id)}`);
+      setFull(r.content);
+    } catch {
+      setFull(text);
+    } finally {
+      setLoading(false);
+    }
+  }
+  return (
+    <>
+      <pre className={`result ${item.error ? "error" : ""} ${full !== null ? "full" : ""}`}>{text}</pre>
+      {clipped && (
+        <button type="button" className="btn small" onClick={loadAll} disabled={loading}>
+          {loading ? "Loading…" : `Show all (${item.length!.toLocaleString()} characters)`}
+        </button>
+      )}
+    </>
+  );
 }
 
 function langOf(path: string): string {
