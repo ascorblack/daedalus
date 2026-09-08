@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+import traceback
 from collections.abc import Iterable
 from typing import Any
 
@@ -37,6 +38,8 @@ _SECRET_NAME = r"(?:API_?KEY|APIKEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIALS?|PR
 _CRED_VALUE = r"(?=[^\s\"'`,;]*\d)(?=[^\s\"'`,;]*[A-Za-z])[A-Za-z0-9_\-./+=~:]{16,}"
 """An unbroken run of at least 16 credential characters containing both a letter and a digit.
 Bare words, integers, dotted attribute chains and anything with brackets do not qualify."""
+_SECRET_NAME_RE = re.compile(_SECRET_NAME, re.IGNORECASE)
+_CRED_VALUE_RE = re.compile(_CRED_VALUE)
 
 _SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("pem", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL)),
@@ -109,10 +112,26 @@ class Redactor:
         if isinstance(value, str):
             return self.redact(value)
         if isinstance(value, dict):
-            return {k: self.redact_any(v) for k, v in value.items()}
+            return {k: self._redact_member(k, v) for k, v in value.items()}
         if isinstance(value, list):
             return [self.redact_any(v) for v in value]
         return value
+
+    def _redact_member(self, key: Any, value: Any) -> Any:
+        """Redact a dict value, using its key as context for the key-name-based shapes.
+
+        ``redact`` alone sees only the value, so a credential sitting under a secret-named
+        key (``{"api_key": "…"}``) is missed — the JSON-string path catches it because the
+        key is present in the text. Passing the key here keeps the structured path as safe
+        as the string path, without over-masking (both a secret-named key AND a
+        credential-looking value are required).
+        """
+        if isinstance(value, str):
+            out = self.redact(value)
+            if out == value and isinstance(key, str) and _SECRET_NAME_RE.search(key) and _CRED_VALUE_RE.search(value):
+                out = MASK
+            return out
+        return self.redact_any(value)
 
     def contains_secret(self, text: str) -> bool:
         return self.redact(text) != text
@@ -134,7 +153,13 @@ class RedactingFilter(logging.Filter):
         if cleaned != message:
             record.msg = cleaned
             record.args = ()
-        if record.exc_text:
+        # The formatter builds ``record.exc_text`` lazily AFTER filters run, so a secret
+        # carried by the exception itself (``raise ValueError(secret)``) would otherwise
+        # reach the handler unmasked. Build it here, redact it, and let the formatter reuse
+        # the cleaned text (it only computes ``exc_text`` when it is still ``None``).
+        if record.exc_info is not None and record.exc_text is None:
+            record.exc_text = self.redactor.redact("".join(traceback.format_exception(record.exc_info[1])))
+        elif record.exc_text:
             record.exc_text = self.redactor.redact(record.exc_text)
         return True
 
