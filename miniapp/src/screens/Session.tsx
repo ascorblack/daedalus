@@ -836,8 +836,8 @@ function LoopPanel({ sessionId, loop, onChange, toast }: { sessionId: string; lo
           <textarea className="field" rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder="what each wake-up is for" />
           <div className="composer-row">
             <select className="field" value={mode} onChange={(e) => setMode(e.target.value as "interval" | "dynamic")}>
-              <option value="interval">every N minutes</option>
-              <option value="dynamic">the agent picks each delay</option>
+              <option value="interval">every N min</option>
+              <option value="dynamic">self-paced</option>
             </select>
             {mode === "interval" && <input className="field" type="number" min={1} style={{ maxWidth: 110 }} value={minutes} onChange={(e) => setMinutes(e.target.value)} aria-label="minutes" />}
             <input className="field" type="number" min={1} style={{ maxWidth: 130 }} placeholder="max runs" value={maxRuns} onChange={(e) => setMaxRuns(e.target.value)} aria-label="max runs" />

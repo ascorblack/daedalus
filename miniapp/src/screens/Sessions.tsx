@@ -92,8 +92,8 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
               <textarea className="field" rows={3} value={loopText} onChange={(e) => setLoopText(e.target.value)} placeholder="Check the forum for replies to my threads; answer what needs answering; report only what matters." />
               <div className="composer-row">
                 <select className="field" value={loopMode} onChange={(e) => setLoopMode(e.target.value as "interval" | "dynamic")}>
-                  <option value="interval">every N minutes</option>
-                  <option value="dynamic">the agent picks each delay</option>
+                  <option value="interval">every N min</option>
+                  <option value="dynamic">self-paced</option>
                 </select>
                 {loopMode === "interval" && <input className="field" type="number" min={1} style={{ maxWidth: 110 }} value={loopMinutes} onChange={(e) => setLoopMinutes(e.target.value)} aria-label="minutes" />}
                 <input className="field" type="number" min={1} style={{ maxWidth: 130 }} placeholder="max runs" value={loopMax} onChange={(e) => setLoopMax(e.target.value)} aria-label="max runs" />

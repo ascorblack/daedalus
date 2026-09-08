@@ -402,6 +402,6 @@ input.field, select.field, textarea.field {
 .toggle-row input { width: 18px; height: 18px; margin: 0; accent-color: var(--info); }
 .toggle-row .sub { flex: 1; min-width: 0; }
 .loop-form { border: 1px solid var(--line); border-radius: 10px; padding: 4px 12px 10px; margin-bottom: 8px; }
-.loop-form select.field { flex: 1; }
+.loop-form select.field, .loop-panel select.field { flex: 1; min-width: 140px; }
 .loop-panel { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px 10px; margin-bottom: 8px; }
 .loop-instruction { color: var(--fg); white-space: pre-wrap; margin-bottom: 4px; }
