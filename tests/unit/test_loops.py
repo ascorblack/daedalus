@@ -166,3 +166,48 @@ async def test_loop_cannot_be_created_for_a_nonexistent_session(app: Any) -> Non
     assert excinfo.value.args == ("no-such-session",)
     assert await app.db.fetchone("SELECT * FROM loops WHERE session_id = ?", ("no-such-session",)) is None
     assert app.submitted == []
+
+
+async def test_loops_do_not_inject_across_live_sessions(app: Any) -> None:
+    """Foreign-session probe: two LIVE sessions, each with its own loop — no cross-injection.
+
+    Architectural contract for the "cross-session execution without an ownership gate"
+    defect class (the ownership predicate, class A). It is distinct from the liveness
+    gate (class 2, ``test_persisted_loop_for_deleted_session_is_gated_not_fired``): a
+    liveness predicate (``get_state``) cannot distinguish "exists, but foreign", so only
+    the ownership binding — a loop fires only into its own ``session_id`` — closes the
+    class. Both target sessions are LIVE here, so a liveness check would pass for both;
+    the probe drives the active-set loader (``tick``) and proves each prompt reaches only
+    its owner, in both directions.
+
+    In the single-agent architecture a loop is structurally bound to its ``session_id``
+    (no retargeting surface), so this is expected green today. If a shared store or lease
+    is added, the test catches an ownership regression instead of being masked as liveness.
+    Complements ``test_persisted_loop_for_deleted_session_is_gated_not_fired`` (class 2)
+    and ``test_loop_cannot_be_created_for_a_nonexistent_session`` (class 1).
+    """
+    loops = Loops(app)
+    a = await app.manager.create_session("owner")
+    b = await app.manager.create_session("foreign")
+    sid_a, sid_b = a.session.id, b.session.id
+    assert sid_a != sid_b
+    # Both sessions are live: a liveness predicate would pass for both.
+    assert await app.manager.get_state(sid_a) is not None
+    assert await app.manager.get_state(sid_b) is not None
+    # Each session gets its own loop (the first iteration fires at once, into its own session).
+    await loops.create(sid_a, instruction="owner work", interval_seconds=600)
+    await loops.create(sid_b, instruction="foreign work", interval_seconds=600)
+    # Make both due and drive the active-set loader (all_active -> _fire), not just create.
+    due = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    await app.db.execute("UPDATE loops SET next_run_at = ? WHERE session_id = ?", (due, sid_a))
+    await app.db.execute("UPDATE loops SET next_run_at = ? WHERE session_id = ?", (due, sid_b))
+    await loops.tick()
+
+    def texts_for(sid: str) -> list[str]:
+        return [text for (s, text, origin) in app.submitted if s == sid and origin == "loop"]
+
+    # Each prompt reached only its owner; neither session received the other's prompt.
+    assert any("owner work" in t for t in texts_for(sid_a))
+    assert any("foreign work" in t for t in texts_for(sid_b))
+    assert not any("foreign work" in t for t in texts_for(sid_a))  # B's prompt did not reach A
+    assert not any("owner work" in t for t in texts_for(sid_b))  # A's prompt did not reach B
