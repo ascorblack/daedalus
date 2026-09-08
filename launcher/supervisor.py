@@ -78,9 +78,13 @@ def bot_env() -> dict[str, str]:
         env["GH_TOKEN"] = token or org_token
         if org_token:
             env["GH_ORG_TOKEN"] = org_token
-        env["GIT_CONFIG_COUNT"] = "1"
+        # The helper picks the token by the repository owner, which git only sends when useHttpPath is on:
+        # without it every push goes out with the operator's token and the organisation answers 403.
+        env["GIT_CONFIG_COUNT"] = "2"
         env["GIT_CONFIG_KEY_0"] = "credential.helper"
         env["GIT_CONFIG_VALUE_0"] = f"!{Path(__file__).parent / 'git-credential-daedalus'}"
+        env["GIT_CONFIG_KEY_1"] = "credential.useHttpPath"
+        env["GIT_CONFIG_VALUE_1"] = "true"
     env.update(
         {
             "BOT_REPO_DIR": str(BOT_REPO),
