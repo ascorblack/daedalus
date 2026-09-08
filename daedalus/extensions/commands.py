@@ -7,6 +7,7 @@ or send through the chat are handled here directly, with the same effect.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -52,6 +53,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("schedule", "run|on|off|delete <id>", "act on a scheduled task", scope="global"),
     CommandSpec("intents", "[delete <id>]", "standing intents", scope="global"),
     CommandSpec("peer", "here <name> | list | forget <name>", "name this session as a peer", scope="session"),
+    CommandSpec("loop", "[10m] <instruction> | status | pause | resume | stop | remove", "this session's loop: a standing task it is woken up for", scope="session"),
     CommandSpec("heartbeat", "[on|off|run]", "the periodic check", scope="global"),
     CommandSpec("balance", "", "provider balances", scope="global"),
     CommandSpec("doctor", "[fix]", "health checks", scope="global"),
@@ -140,6 +142,38 @@ async def run_command(app: Application, session_id: str, line: str) -> str:
         await manager.set_session_cap(session_id, cap)
         spent, _ = await manager.spend(session_id=session_id)
         return f"Session cap: ${cap:.2f} (spent so far ${spent:.2f})."
+    if name == "loop":
+        loops = app.extensions.get("loops")
+        if loops is None:
+            return "loops are not installed"
+        head = args.split(" ", 1)[0].lower() if args else "status"
+        if head in ("", "status", "list"):
+            loop = await loops.get(session_id)
+            return ("Loop: " + loops.note(loop).lstrip("- ")) if loop else "No loop. /loop 10m <instruction> wakes this session every 10 minutes for it; /loop <instruction> lets the agent pace itself."
+        if head in ("pause", "resume", "stop", "remove"):
+            try:
+                if head == "pause":
+                    await loops.pause(session_id, "paused by the operator")
+                elif head == "resume":
+                    await loops.resume(session_id)
+                elif head == "stop":
+                    await loops.stop(session_id, "stopped by the operator")
+                else:
+                    await loops.remove(session_id)
+            except ValueError as exc:
+                return str(exc)
+            return f"Loop {head}d." if head != "remove" else "Loop removed."
+        interval = None
+        text = args
+        match = re.match(r"^(\d+)\s*(s|m|h|d)\s+(.+)$", args, re.S)
+        if match:
+            interval = int(match.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[match.group(2)]
+            text = match.group(3)
+        try:
+            loop = await loops.create(session_id, instruction=text, mode="interval" if interval else "dynamic", interval_seconds=interval, max_runs=None, start_now=True)
+        except ValueError as exc:
+            return str(exc)
+        return "Loop started: " + loops.note(loop).lstrip("- ")
     if name == "brief":
         if not args:
             current = str(state.metadata.get("brief") or "")

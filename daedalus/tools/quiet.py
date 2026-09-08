@@ -24,7 +24,7 @@ async def stay_silent(context: ToolContext, note: str = "") -> ToolResult:
     state = manager._states.get(context.session_id) if manager is not None else None
     metadata = state.session.metadata if state is not None else {}
     origin = (state.run_origin if state is not None else "operator").split(":")[0]
-    if not (metadata.get("unattended") or metadata.get("heartbeat") or origin in ("schedule", "reminder", "heartbeat")):
+    if not (metadata.get("unattended") or metadata.get("heartbeat") or origin in ("schedule", "reminder", "heartbeat", "loop")):
         return error(context, "StaySilent is only for unattended runs (heartbeat, scheduled tasks); the operator is waiting for a reply here")
     services.extra["silent_run"] = context.run_id
     services.extra["silent_note"] = note.strip()[:500]

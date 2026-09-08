@@ -1,7 +1,7 @@
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { api, SlashCommand, MessageView, Question, SessionDetail } from "../api";
-import { Status, ToolPicker, fmtInt, fmtUsd } from "../components";
+import { api, LoopView, SlashCommand, MessageView, Question, SessionDetail } from "../api";
+import { Status, ToolPicker, fmtInt, fmtUsd, loopLabel } from "../components";
 import { codeBlock, renderMarkdown } from "../md";
 import { confirmAsync, enterSends, errorText, fmtTok, haptic } from "../ui";
 
@@ -510,6 +510,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
               </span>
             )}
             {offline && <span className="offline">reconnecting…</span>}
+            {detail?.loop && <span className={`badge loop ${detail.loop.status}`} title={detail.loop.instruction}>{loopLabel(detail.loop)}</span>}
           </div>
         </div>
         <button className="iconbtn" onClick={() => setMenu((m) => !m)} aria-label="menu">
@@ -554,6 +555,8 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                   {detail.context.window > 0 && ` / ${detail.context.window.toLocaleString()} tokens (${Math.round((100 * detail.context.tokens) / detail.context.window)}%)`} · {detail.context.messages} messages in the working history: {detail.context.summaries} summaries, {detail.context.operator_turns} yours. The header's ↑↓ figures are lifetime totals.
                 </div>
               )}
+              <label className="field">Loop{detail.loop ? ` · ${loopLabel(detail.loop)}` : ""}</label>
+              <LoopPanel sessionId={id} loop={detail.loop ?? null} onChange={() => load(true)} toast={toast} />
               <label className="field">Tools</label>
               <ToolPicker
                 off={detail.tools_off ?? []}
@@ -771,6 +774,79 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+function LoopPanel({ sessionId, loop, onChange, toast }: { sessionId: string; loop: LoopView | null; onChange: () => void; toast: (t: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(loop?.instruction ?? "");
+  const [mode, setMode] = useState<"interval" | "dynamic">(loop?.mode ?? "interval");
+  const [minutes, setMinutes] = useState(String(loop?.interval_seconds ? Math.round(loop.interval_seconds / 60) : 10));
+  const [maxRuns, setMaxRuns] = useState(loop?.max_runs ? String(loop.max_runs) : "");
+  async function action(a: string) {
+    try {
+      await api.post(`/api/sessions/${sessionId}/loop/action`, { action: a });
+      toast(`loop: ${a}`);
+      onChange();
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
+  async function save() {
+    if (!text.trim()) return;
+    try {
+      await api.post(`/api/sessions/${sessionId}/loop`, { instruction: text.trim(), mode, interval_minutes: mode === "interval" ? Math.max(1, Number(minutes) || 10) : null, max_runs: maxRuns.trim() ? Math.max(1, Number(maxRuns) || 1) : null, start_now: true });
+      toast(loop ? "loop updated; an iteration starts now" : "loop started");
+      setEditing(false);
+      onChange();
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
+  if (!loop && !editing) {
+    return (
+      <div className="btnrow" style={{ marginTop: 0 }}>
+        <span className="sub">No loop.</span>
+        <button className="btn small" onClick={() => setEditing(true)}>+ Loop</button>
+      </div>
+    );
+  }
+  return (
+    <div className="loop-panel">
+      {loop && !editing && (
+        <>
+          <div className="sub loop-instruction">{loop.instruction}</div>
+          <div className="sub">
+            {loop.status === "active" && loop.next_run_at ? `next wake-up ${new Date(loop.next_run_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : loop.status === "active" ? "next wake-up: when the agent asks (LoopNext)" : `${loop.status}${loop.stop_reason || loop.pause_note ? `: ${loop.stop_reason || loop.pause_note}` : ""}`}
+            {loop.last_reason ? ` · last reason: ${loop.last_reason}` : ""}
+          </div>
+          <div className="btnrow" style={{ marginTop: 6 }}>
+            {loop.status === "active" ? <button className="btn small" onClick={() => action("pause")}>pause</button> : <button className="btn small primary" onClick={() => action("resume")}>resume</button>}
+            {loop.status === "active" && <button className="btn small" onClick={() => action("run")}>run now</button>}
+            <button className="btn small" onClick={() => setEditing(true)}>edit</button>
+            {loop.status !== "stopped" && loop.status !== "done" && <button className="btn small danger" onClick={() => action("stop")}>stop</button>}
+            <button className="btn small danger" onClick={async () => { if (await confirmAsync("Remove the loop from this session?")) action("remove"); }}>remove</button>
+          </div>
+        </>
+      )}
+      {editing && (
+        <>
+          <textarea className="field" rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder="what each wake-up is for" />
+          <div className="composer-row">
+            <select className="field" value={mode} onChange={(e) => setMode(e.target.value as "interval" | "dynamic")}>
+              <option value="interval">every N minutes</option>
+              <option value="dynamic">the agent picks each delay</option>
+            </select>
+            {mode === "interval" && <input className="field" type="number" min={1} style={{ maxWidth: 110 }} value={minutes} onChange={(e) => setMinutes(e.target.value)} aria-label="minutes" />}
+            <input className="field" type="number" min={1} style={{ maxWidth: 130 }} placeholder="max runs" value={maxRuns} onChange={(e) => setMaxRuns(e.target.value)} aria-label="max runs" />
+          </div>
+          <div className="btnrow" style={{ marginTop: 6 }}>
+            <button className="btn small primary" onClick={save} disabled={!text.trim()}>{loop ? "save & run" : "start loop"}</button>
+            <button className="btn small" onClick={() => setEditing(false)}>cancel</button>
+          </div>
+        </>
       )}
     </div>
   );

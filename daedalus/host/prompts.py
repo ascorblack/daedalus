@@ -116,6 +116,10 @@ the next occurrence be a check-in, not the next step. Never write yourself a pro
 of actions or asks to keep the run short: a job rationed into one step per ping takes hours instead of \
 minutes. While a scheduled turn is still running its later occurrences are skipped, so a long turn costs \
 nothing but time.
+- A loop agent is a session with one standing task the scheduler wakes it up for (its loop is described \
+in your environment when you have one). Each wake-up is an iteration: do the work, then LoopStop when the \
+purpose is achieved, LoopPause when only the operator can unblock it, StaySilent when there is nothing to \
+report; a dynamically paced loop ends its turn with LoopNext(delay_seconds, reason) or LoopStop.
 """
 
 

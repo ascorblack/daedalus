@@ -394,6 +394,17 @@ class SubagentsConfig(BaseModel):
     wait_timeout_minutes: int = Field(default=30, ge=1)
 
 
+class LoopsConfig(BaseModel):
+    """Loop agents: a session woken up for one standing task, on an interval or when it asks."""
+
+    min_interval_seconds: int = Field(default=60, ge=10)
+    """The shortest cadence a loop may run at, and the floor for a delay the agent picks."""
+    max_delay_seconds: int = Field(default=7 * 24 * 3600, ge=60)
+    """The longest delay a dynamically paced loop may ask for."""
+    tick_seconds: int = Field(default=20, ge=5)
+    """How often due loops are looked for."""
+
+
 class OpsConfig(BaseModel):
     """Operational thresholds: boot-loop guard, delivery ledger, doctor."""
 
@@ -498,6 +509,7 @@ class RuntimeConfig(BaseModel):
     board: BoardConfig = Field(default_factory=BoardConfig)
     peers: PeersConfig = Field(default_factory=PeersConfig)
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
+    loops: LoopsConfig = Field(default_factory=LoopsConfig)
     modes: dict[str, ModeConfig] = Field(default_factory=lambda: {k: v.model_copy() for k, v in DEFAULT_MODES.items()})
     webhooks: dict[str, WebhookConfig] = Field(default_factory=dict)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)

@@ -1626,9 +1626,13 @@ class TelegramFront:
         mode: str | None,
         mcp: list[str],
         peer_name: str | None,
+        tools_off: list[str] | None = None,
+        loop: dict[str, Any] | None = None,
     ) -> str:
         """A standing agent: its own topic and workspace, a brief in its system prompt, copies of the files it needs."""
-        metadata = {"brief": brief.strip(), "spawned_by": session_id}
+        metadata: dict[str, Any] = {"brief": brief.strip(), "spawned_by": session_id}
+        if tools_off:
+            metadata["tools_off"] = sorted(set(tools_off))
         state, _ = await self.create_session_topic(title, metadata=metadata)
         copied: list[str] = []
         for raw in files:
@@ -1656,6 +1660,11 @@ class TelegramFront:
             if copied:
                 body += "\n\nFiles copied into your workspace inbox:\n" + "\n".join(f"- {c}" for c in copied)
             await self.manager.submit(state.session.id, body, [], as_answer=False, origin=f"spawn:{session_id}")
+        loops = self.manager.service_hooks.get("loops")
+        if loop and loops is not None:
+            # The first iteration starts once any first message has been answered; the loop's own tick handles a busy session.
+            await loops("create", session_id=state.session.id, instruction=str(loop.get("instruction") or ""), mode=str(loop.get("mode") or "interval"),
+                        interval_seconds=loop.get("interval_seconds"), max_runs=loop.get("max_runs"), start_now=True)
         return state.session.id
 
     async def _service_progress(self, session_id: str, line: str) -> None:

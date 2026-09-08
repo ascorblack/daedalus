@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, ToolInfo } from "./api";
+import { api, LoopView, ToolInfo } from "./api";
 
 export type Status = "idle" | "running" | "waiting" | "failed" | "done";
 
@@ -78,6 +78,20 @@ export function ToolPicker({ off, onChange, note }: { off: string[]; onChange: (
       )}
     </div>
   );
+}
+
+export function fmtInterval(seconds: number | null | undefined): string {
+  if (!seconds) return "dynamic";
+  for (const [size, suffix] of [[86400, "d"], [3600, "h"], [60, "m"]] as [number, string][]) if (seconds >= size && seconds % size === 0) return `${seconds / size}${suffix}`;
+  return `${seconds}s`;
+}
+
+/** "loop · 10m · #12" / "loop · paused" — the short form of a session's loop. */
+export function loopLabel(loop: LoopView | null | undefined): string {
+  if (!loop) return "";
+  const cadence = loop.mode === "interval" ? `every ${fmtInterval(loop.interval_seconds)}` : "self-paced";
+  const status = loop.status === "active" ? "" : ` · ${loop.status}`;
+  return `loop · ${cadence} · #${loop.run_count}${loop.max_runs ? "/" + loop.max_runs : ""}${status}`;
 }
 
 export function timeAgo(iso: string | null | undefined): string {

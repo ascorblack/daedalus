@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, SessionSummary } from "../api";
-import { Avatar, Pill, Status, ToolPicker, timeAgo } from "../components";
+import { Avatar, Pill, Status, ToolPicker, loopLabel, timeAgo } from "../components";
 
 export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void; toast: (t: string) => void }) {
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
@@ -8,6 +8,11 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [toolsOff, setToolsOff] = useState<string[]>([]);
+  const [loopOn, setLoopOn] = useState(false);
+  const [loopText, setLoopText] = useState("");
+  const [loopMode, setLoopMode] = useState<"interval" | "dynamic">("interval");
+  const [loopMinutes, setLoopMinutes] = useState("10");
+  const [loopMax, setLoopMax] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -26,11 +31,16 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
   async function create() {
     if (!title.trim()) return;
     try {
-      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff });
+      const loop = loopOn && loopText.trim()
+        ? { instruction: loopText.trim(), mode: loopMode, interval_minutes: loopMode === "interval" ? Math.max(1, Number(loopMinutes) || 10) : null, max_runs: loopMax.trim() ? Math.max(1, Number(loopMax) || 1) : null }
+        : undefined;
+      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff, loop });
       setCreating(false);
       setTitle("");
       setPrompt("");
       setToolsOff([]);
+      setLoopOn(false);
+      setLoopText("");
       onOpen(created.id);
     } catch (e) {
       toast((e as Error).message);
@@ -71,9 +81,29 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
           <input className="field" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="what is this session about" />
           <label className="field">First task (optional)</label>
           <textarea className="field" rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+          <label className="toggle-row">
+            <input type="checkbox" checked={loopOn} onChange={(e) => setLoopOn(e.target.checked)} />
+            <span>Loop agent</span>
+            <span className="sub">woken up for one standing task, on an interval or when it says so</span>
+          </label>
+          {loopOn && (
+            <div className="loop-form">
+              <label className="field">Loop instruction (what each wake-up is for)</label>
+              <textarea className="field" rows={3} value={loopText} onChange={(e) => setLoopText(e.target.value)} placeholder="Check the forum for replies to my threads; answer what needs answering; report only what matters." />
+              <div className="composer-row">
+                <select className="field" value={loopMode} onChange={(e) => setLoopMode(e.target.value as "interval" | "dynamic")}>
+                  <option value="interval">every N minutes</option>
+                  <option value="dynamic">the agent picks each delay</option>
+                </select>
+                {loopMode === "interval" && <input className="field" type="number" min={1} style={{ maxWidth: 110 }} value={loopMinutes} onChange={(e) => setLoopMinutes(e.target.value)} aria-label="minutes" />}
+                <input className="field" type="number" min={1} style={{ maxWidth: 130 }} placeholder="max runs" value={loopMax} onChange={(e) => setLoopMax(e.target.value)} aria-label="max runs" />
+              </div>
+              <div className="sub">The first iteration runs right after creation. The agent stops the loop itself when its purpose is achieved, pauses it when it needs you, and stays quiet when there is nothing to report.</div>
+            </div>
+          )}
           <ToolPicker off={toolsOff} onChange={setToolsOff} note="Untick what this agent must not have (self-development, spawning agents, the shell…). Everything is on by default." />
           <div className="btnrow">
-            <button className="btn primary" onClick={create} disabled={!title.trim()}>
+            <button className="btn primary" onClick={create} disabled={!title.trim() || (loopOn && !loopText.trim())}>
               Create
             </button>
           </div>
@@ -99,6 +129,7 @@ function Row({ s, onOpen, child }: { s: SessionSummary; onOpen: (id: string) => 
         <div className="title-row">
           <span className="title">{child ? s.metadata?.subagent_name || s.title.replace(/^\[sub\]\s*/, "") : s.title}</span>
           {(child || orphan) && <span className="badge sub">subagent</span>}
+          {s.metadata?.loop && <span className={`badge loop ${s.metadata.loop.status}`}>{loopLabel(s.metadata.loop)}</span>}
         </div>
         <div className="sub">
           {s.id} · {timeAgo(s.last_message_at)}

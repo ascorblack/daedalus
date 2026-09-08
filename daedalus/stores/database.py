@@ -324,6 +324,25 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE verifications ADD COLUMN dependencies TEXT NOT NULL DEFAULT '';
     """,
+    # 15 — a loop: the standing task a session is woken up for, on an interval or when it says so
+    """
+    CREATE TABLE loops (
+        session_id TEXT PRIMARY KEY,
+        instruction TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'interval',
+        interval_seconds INTEGER,
+        max_runs INTEGER,
+        status TEXT NOT NULL DEFAULT 'active',
+        next_run_at TEXT,
+        last_run_at TEXT,
+        run_count INTEGER NOT NULL DEFAULT 0,
+        last_reason TEXT,
+        stop_reason TEXT,
+        pause_note TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 

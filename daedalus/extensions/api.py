@@ -86,10 +86,25 @@ class NewSessionBody(BaseModel):
     prompt: str | None = None
     tools_off: list[str] = Field(default_factory=list)
     """Tools this session does not get (by name); everything else stays on."""
+    loop: LoopBody | None = None
+    """Make it a loop agent: woken up for this instruction on an interval or when it says so."""
 
 
 class ToolsOffBody(BaseModel):
     tools_off: list[str] = Field(default_factory=list)
+
+
+class LoopBody(BaseModel):
+    instruction: str = Field(min_length=1, max_length=4000)
+    mode: str = "interval"
+    interval_minutes: int | None = Field(default=None, ge=1)
+    max_runs: int | None = Field(default=None, ge=1)
+    start_now: bool = True
+
+
+class LoopActionBody(BaseModel):
+    action: str
+    reason: str = ""
 
 
 class DecisionBody(BaseModel):
@@ -522,6 +537,14 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             state = await manager.create_session(body.title, metadata=metadata)
         if body.prompt:
             await manager.submit(state.session.id, body.prompt)
+        if body.loop is not None:
+            loops = app.extensions.get("loops")
+            if loops is None:
+                raise HTTPException(503, "loops are not installed")
+            try:
+                await loops.create(state.session.id, instruction=body.loop.instruction, mode=body.loop.mode, interval_seconds=(body.loop.interval_minutes or 0) * 60 or None, max_runs=body.loop.max_runs, start_now=body.loop.start_now)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
         return {"id": state.session.id, "title": body.title}
 
     async def session_model_label(state: Any) -> str:
@@ -564,6 +587,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "brief": state.metadata.get("brief") or "",
             "spawned_by": state.metadata.get("spawned_by"),
             "tools_off": sorted(manager.tools_off(state)),
+            "loop": state.metadata.get("loop"),
             "subagent_of": state.metadata.get("subagent_of"),
             "subagent_name": state.metadata.get("subagent_name"),
             "leader_title": leader.session.title if leader is not None else None,
@@ -753,6 +777,41 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             desc = " ".join((t.definition.description or "").split())
             out.append({"name": t.name, "description": desc[:160], "group": _tool_group(t.name)})
         return out
+
+    @api.post("/api/sessions/{session_id}/loop")
+    async def set_session_loop(session_id: str, body: LoopBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Attach (or replace) the session's loop."""
+        loops = app.extensions.get("loops")
+        if loops is None:
+            raise HTTPException(503, "loops are not installed")
+        try:
+            return await loops.create(session_id, instruction=body.instruction, mode=body.mode, interval_seconds=(body.interval_minutes or 0) * 60 or None, max_runs=body.max_runs, start_now=body.start_now)
+        except KeyError as exc:
+            raise HTTPException(404, "no such session") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @api.post("/api/sessions/{session_id}/loop/action")
+    async def session_loop_action(session_id: str, body: LoopActionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """pause | resume | stop | remove | run (an iteration now)."""
+        loops = app.extensions.get("loops")
+        if loops is None:
+            raise HTTPException(503, "loops are not installed")
+        try:
+            if body.action == "pause":
+                return await loops.pause(session_id, body.reason or "paused by the operator")
+            if body.action == "resume":
+                return await loops.resume(session_id)
+            if body.action == "stop":
+                return await loops.stop(session_id, body.reason or "stopped by the operator")
+            if body.action == "remove":
+                return {"removed": await loops.remove(session_id)}
+            if body.action == "run":
+                await loops.schedule_next(session_id, 0, "run now")
+                return {"fired": await loops._fire_if_due(session_id)}
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        raise HTTPException(422, "action is pause, resume, stop, remove or run")
 
     @api.post("/api/sessions/{session_id}/tools")
     async def set_session_tools(session_id: str, body: ToolsOffBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

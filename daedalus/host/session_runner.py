@@ -1445,6 +1445,9 @@ class SessionManager:
         models = [pid for pid, preset in self.config.presets.items() if preset.provider in available and preset.model]
         if models:
             parts.append("- Models SubAgent accepts (preset ids): " + ", ".join(models))
+        loop_note = str(state.metadata.get("loop_note") or "").strip()
+        if loop_note:
+            parts.append(loop_note)
         brief = str(state.metadata.get("brief") or "").strip()
         if brief:
             origin = state.metadata.get("spawned_by") or state.metadata.get("subagent_of")

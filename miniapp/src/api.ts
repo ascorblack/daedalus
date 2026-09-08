@@ -95,7 +95,21 @@ export type SessionSummary = {
   created_at: string;
   last_message_at: string;
   run_id: string | null;
-  metadata?: { subagent_of?: string; subagent_name?: string; [k: string]: unknown };
+  metadata?: { subagent_of?: string; subagent_name?: string; loop?: LoopView; [k: string]: unknown };
+};
+
+export type LoopView = {
+  mode: "interval" | "dynamic";
+  interval_seconds: number | null;
+  status: "active" | "paused" | "stopped" | "done";
+  run_count: number;
+  max_runs: number | null;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_reason: string | null;
+  stop_reason: string | null;
+  pause_note: string | null;
+  instruction: string;
 };
 
 export type ToolInfo = { name: string; description: string; group: string };
@@ -130,6 +144,7 @@ export type SessionDetail = {
   brief?: string;
   spawned_by?: string | null;
   tools_off?: string[];
+  loop?: LoopView | null;
   subagent_of?: string | null;
   subagent_name?: string | null;
   leader_title?: string | null;

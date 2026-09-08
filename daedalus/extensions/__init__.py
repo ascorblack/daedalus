@@ -26,6 +26,7 @@ EXTENSIONS = (
     "daedalus.extensions.board",
     "daedalus.extensions.peers",
     "daedalus.extensions.subagents",
+    "daedalus.extensions.loops",
     "daedalus.extensions.balance",
     "daedalus.extensions.api",
 )
