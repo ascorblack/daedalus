@@ -1068,8 +1068,6 @@ function describe(t: ToolItem): { verb: string; noun: string; detail: string; ic
       return { verb: "Asked you", noun: "question", detail: "", icon: "question" };
     case "Skill":
       return { verb: r ? "Loading skill" : "Loaded skill", noun: "skill", detail: str("skill") || str("name"), icon: "skill" };
-    case "SpawnTask":
-      return { verb: "Started task", noun: "task", detail: str("title"), icon: "spawn" };
     case "Remember":
     case "Recall":
     case "Forget":
@@ -1084,8 +1082,6 @@ function describe(t: ToolItem): { verb: string; noun: string; detail: string; ic
       return { verb: r ? "Creating agent" : "Created agent", noun: "agent", detail: str("title"), icon: "spawn" };
     case "AskPeer":
       return { verb: r ? "Asking peer" : "Asked peer", noun: "peer", detail: str("name"), icon: "question" };
-    case "Delegate":
-      return { verb: r ? "Delegating" : "Delegated", noun: "task", detail: str("vendor"), icon: "spawn" };
     case "StaySilent":
       return { verb: "Stayed silent", noun: "note", detail: str("note").slice(0, 60), icon: "dot" };
     case "HistorySearch":

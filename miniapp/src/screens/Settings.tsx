@@ -444,23 +444,7 @@ function ToolsTab({ s, save }: { s: Settings; save: (patch: any) => Promise<void
         </div>
       </div>
 
-      <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>Subscription harnesses (Delegate)</div>
-        <div className="sub">Claude Code, Codex and Grok Build on your own subscriptions, run by the harness container. Log in with each CLI on the host; the agent delegates bounded tasks with Delegate. Grok is also a model provider (preset “Grok 4.6”).</div>
-        <TextField label="Harness URL" value={s.harness?.url ?? ""} placeholder="http://harness:3300" onSave={(v) => save({ harness: { url: v } })} />
-        {Object.entries(s.harness?.vendors ?? {}).map(([name, v]) => (
-          <div key={name} className="grid2" style={{ alignItems: "end" }}>
-            <div>
-              <label className="field">{name}</label>
-              <button className={`btn small ${v.enabled ? "primary" : ""}`} onClick={() => save({ harness: { vendors: { [name]: { enabled: !v.enabled } } } })}>
-                {v.enabled ? "enabled" : "disabled"}
-              </button>
-            </div>
-            <TextField label="Model (empty = CLI default)" value={v.model} onSave={(m) => save({ harness: { vendors: { [name]: { model: m } } } })} />
-          </div>
-        ))}
-      </div>
-
+      
       <div className="card">
         <div className="section-title" style={{ marginTop: 0 }}>MCP servers</div>
         <div className="sub">Configured under [mcp.servers.&lt;name&gt;] in config.toml; every session starts with them off and toggles them from its ⋯ menu.</div>

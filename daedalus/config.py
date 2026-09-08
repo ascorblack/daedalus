@@ -290,27 +290,6 @@ class CompactionConfig(BaseModel):
     """Where the core's own mid-run compaction starts; above the host's ratio so runs boundaries compact first."""
 
 
-class HarnessVendorConfig(BaseModel):
-    """One coding-agent CLI the harness container can run on the operator's subscription."""
-
-    enabled: bool = True
-    model: str = ""
-    """Model passed to the CLI; empty = the CLI's own default."""
-    effort: str = ""
-    """Reasoning effort for CLIs that take one (claude: low…max, codex: low…xhigh); empty = default."""
-    max_turns: int = Field(default=40, ge=1, le=500)
-
-
-class HarnessConfig(BaseModel):
-    """The harness service: the operator's claude / codex / grok subscriptions as delegable workers."""
-
-    url: str = "http://harness:3300"
-    timeout_seconds: float = Field(default=1800.0, ge=30)
-    vendors: dict[str, HarnessVendorConfig] = Field(
-        default_factory=lambda: {"claude": HarnessVendorConfig(), "codex": HarnessVendorConfig(model="gpt-5.6-terra", effort="medium"), "grok": HarnessVendorConfig(model="grok-4.6")}
-    )
-
-
 class SchedulerConfig(BaseModel):
     topic_mode: ScheduleTopicMode = "per_task"
     catch_up_missed: bool = True
@@ -501,7 +480,6 @@ class RuntimeConfig(BaseModel):
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     balance: BalanceConfig = Field(default_factory=BalanceConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
-    harness: HarnessConfig = Field(default_factory=HarnessConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)

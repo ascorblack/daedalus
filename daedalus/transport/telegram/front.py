@@ -342,7 +342,6 @@ class TelegramFront:
         manager.service_hooks.update(
             {
                 "send_file": self._service_send_file,
-                "spawn_session": self._service_spawn,
                 "spawn_agent": self._service_spawn_agent,
                 "progress": self._service_progress,
             }
@@ -1607,12 +1606,6 @@ class TelegramFront:
         else:
             await outbox.send_document(path, caption)
         return "delivered"
-
-    async def _service_spawn(self, session_id: str, title: str, prompt: str, files: list[str]) -> str:
-        state, _ = await self.create_session_topic(title)
-        attachments = [Attachment(path=Path(f), mime_type=mimetypes.guess_type(f)[0] or "application/octet-stream") for f in files if Path(f).is_file()]
-        await self.manager.submit(state.session.id, prompt, attachments)
-        return state.session.id
 
     async def _service_spawn_agent(
         self,

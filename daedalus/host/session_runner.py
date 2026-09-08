@@ -160,7 +160,7 @@ class SessionManager:
         """Called after an automatic compaction with what changed, so the chat can say so in one line."""
         self._pending_restored: list[Callable[[str, PendingQuestion], Awaitable[None]]] = []
         self.service_hooks: dict[str, Any] = {}
-        """Callbacks the transport layer installs: send_file, spawn_session, schedule, self_*."""
+        """Callbacks the transport layer installs: send_file, spawn_agent, schedule, self_*."""
         self.prompt_hooks: list[Callable[[str, str], Awaitable[str]]] = []
         """``(session_id, text) -> text`` applied to a message that starts a new run (fired reminders ride along)."""
         self.run_started_hooks: list[Callable[[str, str], Awaitable[None]]] = []
@@ -849,7 +849,6 @@ class SessionManager:
             tool_timeout_seconds=self.config.limits.tool_timeout_seconds,
             max_tool_output_chars=self.config.tools.exec.max_output_chars,
             send_file=_bind(hooks.get("send_file"), state.session.id),
-            spawn_session=_bind(hooks.get("spawn_session"), state.session.id),
             spawn_agent=_bind(hooks.get("spawn_agent"), state.session.id),
             schedule=hooks.get("schedule"),
             self_propose=hooks.get("self_propose"),

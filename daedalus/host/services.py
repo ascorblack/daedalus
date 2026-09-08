@@ -15,7 +15,6 @@ from typing import Any
 
 ProgressFn = Callable[[str], Awaitable[None]]
 SendFileFn = Callable[[Path, str | None], Awaitable[str]]
-SpawnFn = Callable[[str, str, list[str]], Awaitable[str]]
 ScheduleFn = Callable[..., Awaitable[Any]]
 SelfDevFn = Callable[..., Awaitable[str]]
 
@@ -29,7 +28,6 @@ class SessionServices:
     max_tool_output_chars: int = 60_000
     progress: ProgressFn | None = None
     send_file: SendFileFn | None = None
-    spawn_session: SpawnFn | None = None
     schedule: ScheduleFn | None = None
     self_propose: SelfDevFn | None = None
     self_rebuild: SelfDevFn | None = None

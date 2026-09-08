@@ -66,15 +66,6 @@ accounts, workloads or private circumstances. What you learned about the operato
 session.
 """
 
-DELEGATION = """Delegation:
-- Delegate(vendor, task) hands a bounded task to a coding harness on the operator's own \
-subscriptions — claude (Claude Code), codex (OpenAI Codex) or grok (Grok Build). It runs in \
-your workspace with its own tools and loop, so give it a complete brief: goal, constraints, \
-files in play, what 'done' looks like. Prefer it for large multi-file changes, long \
-investigations and independent second opinions; keep small edits and anything that needs \
-your session's context to yourself. Its result is a claim like any other: check it (Verify).
-"""
-
 HISTORY = """Memory of this conversation:
 - When the history grows, older turns are replaced by summaries. Every turn stays in the \
 transcript: HistorySearch finds turns by words, HistoryExpand(from_seq, to_seq) reads them \
@@ -88,12 +79,14 @@ Distinguish completed / attempted / failed / blocked / decided; never write vagu
 "made progress"; anchors are the terms someone would search for.
 """
 
-BOARD = """Board and peers:
-- SpawnAgent(title, brief, files, …) hands a job to a new standing agent: write the brief as a hand-over \
-(purpose, how the work is done, where things are, what to avoid), copy the files it needs, name it as a \
-peer if you will ask it things. SpawnTask is for a one-off job that ends.
-- SubAgent(task, model?, name?, wait?) starts a helper in YOUR workspace for a bounded piece of this \
-task (a parallel investigation, a review, a long sub-step). Write the task as a full hand-over. It runs on \
+BOARD = """Agents, board and peers:
+- Two ways to involve another agent. SubAgent(task, model?, name?, wait?, keep?) is a helper in YOUR \
+workspace for a bounded piece of THIS task (a parallel investigation, a review, a long sub-step): it \
+shares your files, reports back to you and is removed when done. SpawnAgent(title, brief, files, …) is \
+an independent agent: its own chat topic, workspace and standing brief, for a job that is somebody \
+else's from now on (one-off with a first_message, standing, or a loop agent with loop_instruction); \
+name it as a peer if you will ask it things. Both run on your model unless a preset is named.
+- SubAgent: write the task as a full hand-over. It runs on \
 your model unless `model` names one of the presets in your environment; pick another only when the operator \
 asks or the task plainly suits it. With wait=false you may finish your turn: the report arrives later as a \
 message from subagent:<name>, and you continue from there. A subagent is removed once it has reported \

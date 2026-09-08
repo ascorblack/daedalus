@@ -247,7 +247,6 @@ export type Settings = {
   balance: { enabled: boolean; poll_seconds: number; thresholds_usd: number[] };
   scheduler: { topic_mode: string; catch_up_missed: boolean };
   compaction: { auto_ratio: number; keep_recent_messages: number; max_words: number; chunk_tokens: number; min_messages: number; core_trigger_ratio: number };
-  harness: { url: string; timeout_seconds: number; vendors: Record<string, { enabled: boolean; model: string; effort: string; max_turns: number }> };
   telegram: {
     verbosity: number;
     reactions: boolean;

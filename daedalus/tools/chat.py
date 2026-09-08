@@ -33,34 +33,16 @@ async def send_file(context: ToolContext, path: str, caption: str | None = None)
 
 
 @tool(
-    name="SpawnTask",
-    description=(
-        "Start a new, independent agent session (a new chat topic with its own workspace) "
-        "for a separate task. Returns the new session id. Attach files by absolute path to "
-        "copy them into the new workspace."
-    ),
-)
-async def spawn_task(
-    context: ToolContext, title: str, prompt: str, files: list[str] | None = None
-) -> ToolResult:
-    services = services_for(context)
-    if services.spawn_session is None:
-        return error(context, "spawning sessions is not available here")
-    session_id = await services.spawn_session(title, prompt, [str(services.resolve(f)) for f in files or []])
-    return ok(context, f"started session {session_id} — {title}", session_id=session_id)
-
-
-@tool(
     name="SpawnAgent",
     description=(
-        "Create a standing agent: a new session (its own chat topic and workspace) that keeps a brief "
+        "Create an independent agent: a new session (its own chat topic and workspace) that keeps a brief "
         "you write in its system prompt, gets copies of the files it needs, and optionally a model "
-        "preset, a mode, MCP servers, a peer name, tools to withhold (tools_off), and a loop: "
-        "loop_instruction makes it a loop agent woken up for that task every loop_interval_minutes, or at "
-        "delays it picks itself when no interval is given. Also optionally a model "
-        "preset, a mode, MCP servers and a peer name so you can AskPeer it later. Use it when another "
+        "preset, a mode, MCP servers, a peer name (so you can AskPeer it later), tools to withhold "
+        "(tools_off), and a loop: loop_instruction makes it a loop agent woken up for that task every "
+        "loop_interval_minutes, or at delays it picks itself when no interval is given. A first_message "
+        "starts it on a one-off job at once. Use it when another "
         "agent should own a job for good and you hold what it needs (instructions, files, settings); "
-        "SpawnTask is for a one-off job. The brief is the hand-over: what the agent is for, how the work "
+        "for a piece of YOUR current task in your own workspace use SubAgent instead. The brief is the hand-over: what the agent is for, how the work "
         "is done, where things are, what to avoid. Paths are relative to this workspace or absolute."
     ),
 )
@@ -103,6 +85,6 @@ async def spawn_agent(
     return ok(context, f"agent '{title}' created as session {session_id}" + extras, session_id=session_id)
 
 
-TOOLS = [send_file, spawn_task, spawn_agent]
+TOOLS = [send_file, spawn_agent]
 
 __all__ = ["TOOLS"]

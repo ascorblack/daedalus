@@ -266,7 +266,6 @@ class SettingsBody(BaseModel):
     webhooks: dict[str, Any] | None = None
     ops: dict[str, Any] | None = None
     compaction: dict[str, Any] | None = None
-    harness: dict[str, Any] | None = None
     answer_language: str | None = None
 
 
@@ -521,7 +520,7 @@ def message_view(message: Message) -> dict[str, Any]:
 
 _TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Self-development", ("Self", "LearningReport")),
-    ("Agents & peers", ("SubAgent", "SpawnAgent", "SpawnTask", "AskPeer", "PeerList", "Delegate")),
+    ("Agents & peers", ("SubAgent", "SpawnAgent", "AskPeer", "PeerList")),
     ("Scheduling & board", ("Schedule", "Board", "Intent", "StaySilent")),
     ("MCP", ("Mcp",)),
     ("Memory & history", ("Remember", "Recall", "Forget", "History", "Skill")),

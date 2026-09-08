@@ -57,12 +57,7 @@ chmod 600 ../daedalus-secrets/keyproxy.env   # provider keys go HERE, outside th
 docker compose -f deploy/compose.yaml --env-file .env up -d --build
 ```
 
-Your coding-agent subscriptions (Claude Code, OpenAI Codex, Grok Build) can work for the agent
-too: log in with each CLI on the host, and the `harness` container mounts those logins. The agent
-delegates bounded tasks to them (`Delegate`) and Grok also serves as a plain model provider. The
-subscriptions stay inside the harness container; the agent never sees a token.
-
-Your ChatGPT (Codex) and SuperGrok logins can also serve as model providers: the key proxy
+Your ChatGPT (Codex) and SuperGrok logins can serve as model providers: the key proxy
 reads the CLIs' own login files (`~/.codex/auth.json`, `~/.grok/auth.json`), refreshes them, and
 exposes them as `codex` and `grok` providers; the Usage screen shows their quota windows. This
 follows the practice of pi and OpenCode — OpenAI documents ChatGPT sign-in for Codex clients and
@@ -115,7 +110,7 @@ daedalus/
   host/         sessions, engine wiring, prompts, skills store
   providers/    OpenAI-compatible adapter, fallback chain, registry
   tools/        one tool per module, PascalCase names: Exec, Read, Write, Edit, Find, Search, WebFetch,
-                WebSearch, ImageView, SendFile, SpawnTask, SpawnAgent, SubAgent, AskPeer, Self*, Schedule*, Mcp*
+                WebSearch, ImageView, SendFile, SpawnAgent, SubAgent, AskPeer, Self*, Schedule*, Mcp*
   stores/       SQLite stores, blob store, durable memory
   transport/    Telegram (aiogram 3)
   extensions/   self-development, scheduler, balance monitor, HTTP API
