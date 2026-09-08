@@ -451,3 +451,13 @@ input.field, select.field, textarea.field {
   .sheet { width: min(760px, 92vw); padding: 12px 24px 20px; }
   .sheet-section { padding: 14px 0; }
 }
+
+/* services */
+.service-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); }
+.service-row:first-of-type { border-top: 0; }
+.service-row .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.service-row .dot.running { background: var(--ok); }
+.service-row .dot.dead { background: var(--bad); }
+.service-name { font-size: 13px; font-weight: 600; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.service-url { color: var(--info); font-weight: 400; font-size: 12px; text-decoration: none; }
+.service-cmd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }

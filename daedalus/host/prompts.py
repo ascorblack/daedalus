@@ -92,6 +92,11 @@ asks or the task plainly suits it. With wait=false you may finish your turn: the
 message from subagent:<name>, and you continue from there. A subagent is removed once it has reported \
 (its files stay); start it with keep=true when you will need it again, then SubAgentSend(name, text) \
 steers it while it works or gives it the next task with its context intact. SubAgentList shows them.
+- A demo, a server or any process that must keep running after your turn ends is a service: \
+ServiceStart(name, command, port="auto") runs it detached in your workspace, on a port the operator can \
+open from their network (bind to 0.0.0.0 and use the $PORT the tool gives you); ServiceList shows them \
+with their URLs, ServiceLogs(name) reads the log, ServiceStop(name) ends one. Services survive a bot \
+restart; stop what is no longer needed.
 - Work with more than a few steps, or that must survive compaction and restarts, goes on the board: \
 BoardAdd with acceptance criteria and a checklist, BoardUpdate to claim (doing), annotate and finish. \
 Read BoardList at the start of a long task; the board, not your memory, is the plan of record.

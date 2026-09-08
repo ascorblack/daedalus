@@ -521,7 +521,8 @@ def message_view(message: Message) -> dict[str, Any]:
 _TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Self-development", ("Self", "LearningReport")),
     ("Agents & peers", ("SubAgent", "SpawnAgent", "AskPeer", "PeerList")),
-    ("Scheduling & board", ("Schedule", "Board", "Intent", "StaySilent")),
+    ("Scheduling & board", ("Schedule", "Board", "Intent", "StaySilent", "Loop")),
+    ("Services", ("Service",)),
     ("MCP", ("Mcp",)),
     ("Memory & history", ("Remember", "Recall", "Forget", "History", "Skill")),
     ("Web", ("Web",)),
@@ -677,6 +678,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "spawned_by": state.metadata.get("spawned_by"),
             "tools_off": sorted(manager.tools_off(state)),
             "loop": state.metadata.get("loop"),
+            "services": await app.extensions["services"].list(session_id) if "services" in app.extensions else [],
             "subagent_of": state.metadata.get("subagent_of"),
             "subagent_name": state.metadata.get("subagent_name"),
             "leader_title": leader.session.title if leader is not None else None,
@@ -866,6 +868,31 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             desc = " ".join((t.definition.description or "").split())
             out.append({"name": t.name, "description": desc[:160], "group": _tool_group(t.name)})
         return out
+
+    @api.get("/api/sessions/{session_id}/services")
+    async def session_services(session_id: str, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        services = app.extensions.get("services")
+        return await services.list(session_id) if services is not None else []
+
+    @api.post("/api/sessions/{session_id}/services/{name}/stop")
+    async def session_service_stop(session_id: str, name: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        services = app.extensions.get("services")
+        if services is None:
+            raise HTTPException(503, "services are not installed")
+        try:
+            return await services.stop(session_id, name, note="stopped by the operator")
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @api.get("/api/sessions/{session_id}/services/{name}/logs")
+    async def session_service_logs(session_id: str, name: str, lines: int = 120, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        services = app.extensions.get("services")
+        if services is None:
+            raise HTTPException(503, "services are not installed")
+        try:
+            return {"text": await services.logs(session_id, name, lines)}
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
 
     @api.post("/api/sessions/{session_id}/loop")
     async def set_session_loop(session_id: str, body: LoopBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

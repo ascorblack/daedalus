@@ -160,6 +160,8 @@ class SessionManager:
         """Called after an automatic compaction with what changed, so the chat can say so in one line."""
         self._pending_restored: list[Callable[[str, PendingQuestion], Awaitable[None]]] = []
         self.service_hooks: dict[str, Any] = {}
+        self.delete_hooks: list[Callable[[str], Awaitable[None]]] = []
+        """Called with the session id before a session is removed (extensions release what they hold for it)."""
         """Callbacks the transport layer installs: send_file, spawn_agent, schedule, self_*."""
         self.prompt_hooks: list[Callable[[str, str], Awaitable[str]]] = []
         """``(session_id, text) -> text`` applied to a message that starts a new run (fired reminders ride along)."""
@@ -443,6 +445,13 @@ class SessionManager:
     async def delete_session(self, session_id: str, *, delete_workspace: bool = True) -> bool:
         """Remove a session entirely: its run, records, events and (optionally) its workspace."""
         state = await self.get_state(session_id)
+        if state is None:
+            return False
+        for hook in self.delete_hooks:
+            try:
+                await hook(session_id)
+            except Exception:  # noqa: BLE001
+                logger.exception("delete hook failed for %s", session_id)
         if state is None:
             return False
         if state.running and state.engine is not None:

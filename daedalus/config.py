@@ -56,6 +56,10 @@ class Settings(BaseSettings):
 
     api_host: str = "127.0.0.1"
     api_port: int = 8765
+    services_port_range: str = "8100-8119"
+    """Ports a session's services may listen on; the compose file publishes the same range from the container."""
+    services_public_host: str = ""
+    """The address the operator reaches those ports at (the docker host on the LAN); empty = shown as <host>."""
     miniapp_public_url: str = ""
 
     usd_per_day: float = 20.0

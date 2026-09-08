@@ -112,6 +112,8 @@ export type LoopView = {
   instruction: string;
 };
 
+export type ServiceView = { name: string; command: string; cwd: string; port: number | null; url: string | null; pid: number | null; status: "running" | "stopped" | "dead"; restart: boolean; note: string | null; started_at: string; stopped_at: string | null };
+
 export type ToolInfo = { name: string; description: string; group: string };
 
 export type SubagentView = { session_id: string; name: string | null; running: boolean; status: string; model: string; kept?: boolean };
@@ -145,6 +147,7 @@ export type SessionDetail = {
   spawned_by?: string | null;
   tools_off?: string[];
   loop?: LoopView | null;
+  services?: ServiceView[];
   subagent_of?: string | null;
   subagent_name?: string | null;
   leader_title?: string | null;

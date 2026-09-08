@@ -343,6 +343,25 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL
     );
     """,
+    # 16 — a service: a long-running process a session started and the operator can reach
+    """
+    CREATE TABLE services (
+        session_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        command TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        port INTEGER,
+        pid INTEGER,
+        status TEXT NOT NULL DEFAULT 'running',
+        restart INTEGER NOT NULL DEFAULT 1,
+        log_path TEXT NOT NULL,
+        note TEXT,
+        started_at TEXT NOT NULL,
+        stopped_at TEXT,
+        PRIMARY KEY (session_id, name)
+    );
+    CREATE INDEX services_port ON services(port);
+    """,
 ]
 
 
