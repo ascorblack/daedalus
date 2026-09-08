@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -40,6 +41,14 @@ def _atomic_write(path: Path, text: str) -> None:
     before the replace, because a power cut right after ``os.replace`` can
     otherwise leave the destination as a 0-byte file — exactly the crash the
     guard counts. A failed write removes its orphaned temp file.
+
+    Cross-platform durability (Defect #7): on Windows ``os.replace`` maps to
+    ``MoveFileExW(MOVEFILE_REPLACE_EXISTING)`` and can transiently raise
+    ``PermissionError`` (WinError 5/32) while a concurrent reader holds the
+    target, so the replace is retried with a short backoff; on POSIX the
+    rename is only durable once the *parent directory* is fsynced, so the
+    parent is fsynced after the replace (best-effort — a failure there does
+    not lose the already-replaced content).
     """
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
     try:
@@ -47,10 +56,45 @@ def _atomic_write(path: Path, text: str) -> None:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        _replace_into_place(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+    if os.name != "nt":
+        try:
+            _fsync_dir(path.parent)
+        except OSError as e:
+            logger.warning("boot_guard: parent-dir fsync failed for %s: %s", path, e)
+
+
+def _replace_into_place(tmp: Path, path: Path) -> None:
+    """``os.replace`` with a bounded retry on Windows sharing violations.
+
+    On Windows the replace can transiently fail with ``PermissionError``
+    (WinError 5/32) while a concurrent reader holds the target without
+    ``FILE_SHARE_DELETE``; back off and retry. On POSIX the replace is atomic
+    and needs no retry.
+    """
+    if os.name == "nt":
+        for attempt in range(15):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 14:
+                    raise
+                time.sleep(0.002 * (attempt + 1))
+    else:
+        os.replace(tmp, path)
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Fsync a directory so a preceding rename is durable across power loss."""
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 class BootGuard:

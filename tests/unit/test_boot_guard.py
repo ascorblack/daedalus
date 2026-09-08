@@ -90,5 +90,26 @@ def test_atomic_write_fsyncs_before_replace(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(boot_guard.os, "replace", spy_replace)
     monkeypatch.setattr(boot_guard.os, "fsync", lambda fd: order.append("fsync"))
     _atomic_write(target, "x")
-    assert order == ["write", "flush", "fsync", "replace"]
+    # write, flush, file-fsync, replace, then the parent-dir fsync (POSIX durability).
+    assert order == ["write", "flush", "fsync", "replace", "fsync"]
+    assert target.read_text(encoding="utf-8") == "x"
+
+
+def test_replace_retries_on_windows_sharing_violation(tmp_path: Path, monkeypatch) -> None:
+    """On Windows a transient PermissionError on replace is retried, not fatal (Defect #7)."""
+    target = tmp_path / "marker"
+    monkeypatch.setattr(boot_guard.os, "name", "nt")
+    monkeypatch.setattr(boot_guard.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+    real_replace = boot_guard.os.replace
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError("WinError 32 sharing violation")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(boot_guard.os, "replace", flaky)
+    _atomic_write(target, "x")
+    assert calls["n"] == 2  # first attempt failed, second succeeded
     assert target.read_text(encoding="utf-8") == "x"
