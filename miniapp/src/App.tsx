@@ -9,6 +9,7 @@ import { ProposalsScreen } from "./screens/Proposals";
 import { SchedulesScreen } from "./screens/Schedules";
 import { UsageScreen } from "./screens/Usage";
 import { SettingsScreen } from "./screens/Settings";
+import { LoginScreen } from "./screens/Login";
 
 type Tab = "sessions" | "inbox" | "board" | "proposals" | "schedules" | "usage" | "settings";
 
@@ -47,6 +48,16 @@ export function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [toast, showToast] = useToast();
   const [unread, setUnread] = useState(0);
+  // Inside Telegram every request carries initData; outside, the browser needs a token or the session cookie.
+  const [authed, setAuthed] = useState<boolean | null>(() => (telegram()?.initData ? true : null));
+
+  useEffect(() => {
+    if (authed !== null) return;
+    api
+      .get("/api/auth/me")
+      .then(() => setAuthed(true))
+      .catch(() => setAuthed(false));
+  }, [authed]);
 
   useEffect(() => {
     const poll = () =>
@@ -114,6 +125,15 @@ export function App() {
     tg.disableVerticalSwipes?.();
     return () => tg.BackButton?.offClick(back);
   }, [sessionId]);
+
+  if (authed === null) return <div className="app"><div className="empty">Loading…</div></div>;
+  if (authed === false) {
+    return (
+      <div className="app">
+        <LoginScreen onDone={() => setAuthed(true)} />
+      </div>
+    );
+  }
 
   return (
     <div className="app">

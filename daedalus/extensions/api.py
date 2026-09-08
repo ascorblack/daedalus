@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -51,6 +52,50 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 INIT_DATA_MAX_AGE = 24 * 3600
+
+
+LOGIN_WIDGET_MAX_AGE = 24 * 3600
+SESSION_COOKIE = "daedalus_session"
+SESSION_TTL = 30 * 24 * 3600
+
+
+def validate_login_widget(data: dict[str, Any], bot_token: str, *, max_age: int = LOGIN_WIDGET_MAX_AGE) -> dict[str, Any]:
+    """Verify what Telegram's Login Widget handed the page (id, first_name, …, auth_date, hash) and return it."""
+    fields = {k: v for k, v in data.items() if k != "hash" and v is not None}
+    received = str(data.get("hash") or "")
+    if not received or not fields.get("id") or not fields.get("auth_date"):
+        raise ValueError("incomplete login data")
+    check = "\n".join(f"{k}={fields[k]}" for k in sorted(fields))
+    secret = hashlib.sha256(bot_token.encode()).digest()
+    expected = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, received):
+        raise ValueError("bad signature")
+    if time.time() - int(fields["auth_date"]) > max_age:
+        raise ValueError("login data expired")
+    return fields
+
+
+def session_cookie_value(secret: bytes, user_id: int, *, ttl: int = SESSION_TTL) -> str:
+    """A signed, expiring statement that the browser holding it is the owner."""
+    payload = base64.urlsafe_b64encode(json.dumps({"uid": int(user_id), "exp": int(time.time()) + ttl}).encode()).decode().rstrip("=")
+    signature = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def verify_session_cookie(secret: bytes, value: str) -> int | None:
+    """The user id a session cookie vouches for, or None when it is forged or expired."""
+    payload, _, signature = (value or "").partition(".")
+    if not payload or not signature:
+        return None
+    if not hmac.compare_digest(hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest(), signature):
+        return None
+    try:
+        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (ValueError, TypeError):
+        return None
+    if int(data.get("exp", 0)) < time.time():
+        return None
+    return int(data.get("uid", 0)) or None
 
 
 def validate_init_data(init_data: str, bot_token: str, *, max_age: int = INIT_DATA_MAX_AGE) -> dict[str, Any]:
@@ -497,6 +542,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     manager = app.manager
     assert manager is not None
     settings = app.settings
+    session_secret = hashlib.sha256(f"session:{settings.telegram_bot_token}:{api_token}".encode()).digest()
 
     async def auth(request: Request) -> dict[str, Any]:
         header = request.headers.get("authorization", "")
@@ -514,7 +560,51 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             token = request.query_params.get("token")  # browser navigation cannot set headers
         if token and secrets.compare_digest(token, api_token):
             return {"user_id": settings.owner_user_id}
+        # A browser that logged in with Telegram's widget holds a signed cookie; the site and the installed app use it.
+        cookie = request.cookies.get(SESSION_COOKIE)
+        if cookie and verify_session_cookie(session_secret, cookie) == settings.owner_user_id:
+            return {"user_id": settings.owner_user_id, "via": "cookie"}
         raise HTTPException(401, "authentication required")
+
+    # -- auth: the site outside Telegram ---------------------------------------------
+
+    bot_username: dict[str, str] = {}
+
+    async def _bot_username() -> str:
+        if bot_username.get("name"):
+            return bot_username["name"]
+        front = app.front
+        if front is None or getattr(front, "bot", None) is None:
+            raise HTTPException(503, "the Telegram bot is not running")
+        me = await front.bot.get_me()
+        bot_username["name"] = str(me.username or "")
+        return bot_username["name"]
+
+    @api.get("/api/auth/config")
+    async def auth_config() -> dict[str, Any]:
+        """What the login page needs: the bot whose Login Widget vouches for the operator."""
+        return {"bot_username": await _bot_username(), "cookie": SESSION_COOKIE}
+
+    @api.post("/api/auth/telegram")
+    async def auth_telegram(body: dict[str, Any], response: JSONResponse) -> dict[str, Any]:
+        """Telegram's Login Widget result: verified with the bot token, accepted only for the owner, answered with a session cookie."""
+        try:
+            fields = validate_login_widget(body, settings.telegram_bot_token)
+        except ValueError as exc:
+            raise HTTPException(401, f"login refused: {exc}") from exc
+        if int(fields.get("id", 0)) != settings.owner_user_id:
+            raise HTTPException(403, "not the owner")
+        response.set_cookie(SESSION_COOKIE, session_cookie_value(session_secret, settings.owner_user_id), max_age=SESSION_TTL, httponly=True, secure=True, samesite="lax", path="/")
+        return {"ok": True, "user_id": settings.owner_user_id, "name": fields.get("first_name")}
+
+    @api.get("/api/auth/me")
+    async def auth_me(who: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return {"user_id": who["user_id"], "via": who.get("via", "token")}
+
+    @api.post("/api/auth/logout")
+    async def auth_logout(response: JSONResponse) -> dict[str, Any]:
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        return {"ok": True}
 
     # -- sessions -------------------------------------------------------------------
 

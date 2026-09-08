@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, HeartbeatStatus, Preset, ProviderConf, Settings } from "../api";
+import { api, telegram, HeartbeatStatus, Preset, ProviderConf, Settings } from "../api";
 import { numInput } from "../ui";
 import { timeAgo } from "../components";
 
@@ -724,6 +724,23 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <button className={tab === "health" ? "on" : ""} onClick={() => setTab("health")}>Health</button>
       </div>
       {tab === "health" && <HealthTab toast={toast} />}
+      {tab === "health" && !telegram()?.initData && (
+        <div className="btnrow">
+          <button
+            className="btn small"
+            onClick={async () => {
+              try {
+                await api.post("/api/auth/logout");
+                sessionStorage.removeItem("daedalus_token");
+              } finally {
+                window.location.reload();
+              }
+            }}
+          >
+            Log out of this browser
+          </button>
+        </div>
+      )}
       {tab === "tools" && <ToolsTab s={s} save={save} />}
       {tab === "heartbeat" && <HeartbeatTab s={s} toast={toast} />}
       {tab === "general" && (
