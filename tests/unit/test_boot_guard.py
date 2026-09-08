@@ -87,6 +87,7 @@ def test_atomic_write_fsyncs_before_replace(tmp_path: Path, monkeypatch) -> None
         return real_replace(src, dst)
 
     monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(boot_guard.os, "name", "posix")
     monkeypatch.setattr(boot_guard.os, "replace", spy_replace)
     monkeypatch.setattr(boot_guard.os, "fsync", lambda fd: order.append("fsync"))
     _atomic_write(target, "x")
@@ -106,10 +107,52 @@ def test_replace_retries_on_windows_sharing_violation(tmp_path: Path, monkeypatc
     def flaky(src, dst):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise PermissionError("WinError 32 sharing violation")
+            err = PermissionError("WinError 32 sharing violation")
+            err.winerror = 32
+            raise err
         return real_replace(src, dst)
 
     monkeypatch.setattr(boot_guard.os, "replace", flaky)
     _atomic_write(target, "x")
     assert calls["n"] == 2  # first attempt failed, second succeeded
     assert target.read_text(encoding="utf-8") == "x"
+
+
+def test_replace_does_not_retry_non_sharing_permission_error(tmp_path: Path, monkeypatch) -> None:
+    """A PermissionError that is not a sharing violation (WinError 5/32) is re-raised immediately."""
+    target = tmp_path / "marker"
+    monkeypatch.setattr(boot_guard.os, "name", "nt")
+    calls = {"n": 0}
+
+    def denied(src, dst):
+        calls["n"] += 1
+        err = PermissionError("WinError 87 invalid parameter (not a sharing violation)")
+        err.winerror = 87
+        raise err
+
+    monkeypatch.setattr(boot_guard.os, "replace", denied)
+    with pytest.raises(PermissionError):
+        _atomic_write(target, "x")
+    assert calls["n"] == 1  # no retry on a non-sharing PermissionError
+    assert [p.name for p in tmp_path.iterdir()] == []  # temp cleaned up
+
+
+def test_replace_retries_exhaust_then_reraise(tmp_path: Path, monkeypatch) -> None:
+    """15 sharing violations exhaust the retry budget and re-raise (no infinite retry)."""
+    target = tmp_path / "marker"
+    monkeypatch.setattr(boot_guard.os, "name", "nt")
+    monkeypatch.setattr(boot_guard.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def always_violated(src, dst):
+        calls["n"] += 1
+        err = PermissionError("WinError 32 sharing violation")
+        err.winerror = 32
+        raise err
+
+    monkeypatch.setattr(boot_guard.os, "replace", always_violated)
+    with pytest.raises(PermissionError):
+        _atomic_write(target, "x")
+    assert calls["n"] == 15  # bounded
+    assert not target.exists()
+    assert [p.name for p in tmp_path.iterdir()] == []  # temp cleaned up

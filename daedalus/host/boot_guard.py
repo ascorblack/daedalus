@@ -72,15 +72,18 @@ def _replace_into_place(tmp: Path, path: Path) -> None:
 
     On Windows the replace can transiently fail with ``PermissionError``
     (WinError 5/32) while a concurrent reader holds the target without
-    ``FILE_SHARE_DELETE``; back off and retry. On POSIX the replace is atomic
-    and needs no retry.
+    ``FILE_SHARE_DELETE``; back off and retry. A ``PermissionError`` that is
+    not a sharing violation (a permanent access denial) is re-raised
+    immediately. On POSIX the replace is atomic and needs no retry.
     """
     if os.name == "nt":
         for attempt in range(15):
             try:
                 os.replace(tmp, path)
                 return
-            except PermissionError:
+            except PermissionError as e:
+                if getattr(e, "winerror", None) not in (5, 32):
+                    raise
                 if attempt == 14:
                     raise
                 time.sleep(0.002 * (attempt + 1))
