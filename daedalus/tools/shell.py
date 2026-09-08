@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import shutil
 import subprocess
 import time
@@ -74,12 +73,41 @@ async def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config
     return argv + ["bash", "-lc", command], True
 
 
-_SECRET_ENV = re.compile(r"^(TELEGRAM_BOT_TOKEN|TELEGRAM_API_HASH|TELEGRAM_API_ID|KEYPROXY_.*|.*_API_KEY|.*_SECRET|.*_PASSWORD)$")
+# Environment names a tool's subprocess may inherit. Everything else —
+# including any secret name the bot's environment gains later — stays in
+# the bot's process unless the caller passes it explicitly through the
+# tool's ``env`` parameter.
+_SAFE_ENV_BASE = frozenset({
+    # process basics
+    "PATH", "HOME", "USER", "SHELL", "TERM", "HOSTNAME", "PWD", "SHLVL",
+    "TMPDIR", "TEMP", "TMP",
+    # locale / timezone
+    "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    # editor / pager preferences (harmless)
+    "EDITOR", "VISUAL", "PAGER",
+    # apt in the sandbox
+    "DEBIAN_FRONTEND",
+    # python / uv runtime (the bot's toolchain)
+    "PYTHONUNBUFFERED", "VIRTUAL_ENV",
+    "UV", "UV_LINK_MODE", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON_INSTALL_DIR", "UV_RUN_RECURSION_DEPTH",
+    # git identity (not secrets; needed for commits in the sandbox).
+    # The GIT_CONFIG_{COUNT,KEY_n,VALUE_n} triplet is deliberately NOT
+    # inherited: its values can carry secrets (e.g. http.*.extraheader),
+    # and identity is already covered by the GIT_AUTHOR_*/GIT_COMMITTER_*
+    # names above. A caller that needs injected git config passes it
+    # explicitly through the tool's ``env`` parameter.
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+    "GIT_TERMINAL_PROMPT",
+})
 
 
 def shell_environment(session_id: str, extra: dict[str, str] | None = None) -> dict[str, str]:
-    """The environment a tool's subprocess gets: the bot's own credentials stay out; git's token stays in."""
-    env = {k: v for k, v in os.environ.items() if not _SECRET_ENV.match(k)}
+    """The environment a tool's subprocess gets: a strict allowlist of
+    non-secret variables. Secrets (tokens, keys, internal paths, sockets)
+    stay in the bot's process; a caller that genuinely needs one passes it
+    explicitly through the tool's ``env`` parameter."""
+    env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_BASE}
     env.update(extra or {})
     env["DAEDALUS_SESSION_ID"] = session_id
     return env
