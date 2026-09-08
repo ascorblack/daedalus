@@ -1,7 +1,7 @@
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { api, LoopView, ServiceView, SlashCommand, MessageView, Question, SessionDetail } from "../api";
-import { Status, ToolPicker, fmtInt, fmtUsd, loopLabel } from "../components";
+import { api, LoopView, SlashCommand, MessageView, Question, SessionDetail } from "../api";
+import { ServiceRow, Status, ToolPicker, fmtInt, fmtUsd, loopLabel } from "../components";
 import { codeBlock, renderMarkdown } from "../md";
 import { confirmAsync, enterSends, errorText, fmtTok, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
@@ -878,45 +878,6 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function ServiceRow({ s, sessionId, onChange, toast, onLogs }: { s: ServiceView; sessionId: string; onChange: () => void; toast: (t: string) => void; onLogs: (text: string) => void }) {
-  async function stop() {
-    if (!(await confirmAsync(`Stop service "${s.name}"?`))) return;
-    try {
-      await api.post(`/api/sessions/${sessionId}/services/${encodeURIComponent(s.name)}/stop`);
-      toast(`${s.name}: stopped`);
-      onChange();
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }
-  async function logs() {
-    try {
-      const r = await api.get<{ text: string }>(`/api/sessions/${sessionId}/services/${encodeURIComponent(s.name)}/logs?lines=200`);
-      onLogs(r.text);
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }
-  return (
-    <div className={`service-row ${s.status}`}>
-      <span className={`dot ${s.status}`} />
-      <div className="grow" style={{ minWidth: 0 }}>
-        <div className="service-name">
-          {s.name}
-          {s.url && s.status === "running" ? (
-            <a className="service-url" href={s.url} target="_blank" rel="noreferrer">{s.url.replace(/^https?:\/\//, "")}</a>
-          ) : (
-            <span className="sub"> · {s.status}{s.note ? `: ${s.note}` : ""}</span>
-          )}
-        </div>
-        <div className="sub mono service-cmd" title={s.command}>{s.command}</div>
-      </div>
-      <button className="iconbtn small" onClick={logs} title="Log" aria-label="log"><Icon name="file" size={15} /></button>
-      {s.status === "running" && <button className="iconbtn small" onClick={stop} title="Stop" aria-label="stop"><Icon name="stop" size={15} /></button>}
     </div>
   );
 }

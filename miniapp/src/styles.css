@@ -461,3 +461,7 @@ input.field, select.field, textarea.field {
 .service-name { font-size: 13px; font-weight: 600; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .service-url { color: var(--info); font-weight: 400; font-size: 12px; text-decoration: none; }
 .service-cmd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+
+.linkbtn { background: none; border: 0; padding: 0; color: var(--fg); font: inherit; cursor: pointer; text-align: left; }
+.linkbtn:hover { color: var(--info); }
+.tabbar button { font-size: 10.5px; }

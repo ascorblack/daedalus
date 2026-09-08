@@ -107,6 +107,15 @@ class Services:
     async def list(self, session_id: str) -> list[dict[str, Any]]:
         return [self.view(r) for r in await self.rows(session_id)]
 
+    async def list_all(self) -> list[dict[str, Any]]:
+        """Every session's services, each with the session it belongs to."""
+        titles = {row["id"]: row["title"] for row in await self.app.db.fetchall("SELECT id, title FROM sessions")}
+        out = []
+        for r in await self.rows():
+            out.append({**self.view(r), "session_id": r["session_id"], "session_title": titles.get(r["session_id"], "(deleted session)")})
+        out.sort(key=lambda s: (s["status"] != "running", s["session_title"], s["name"]))
+        return out
+
     async def get(self, session_id: str, name: str) -> dict[str, Any] | None:
         row = await self.app.db.fetchone("SELECT * FROM services WHERE session_id = ? AND name = ?", (session_id, name))
         return dict(row) if row else None

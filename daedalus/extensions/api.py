@@ -869,6 +869,12 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             out.append({"name": t.name, "description": desc[:160], "group": _tool_group(t.name)})
         return out
 
+    @api.get("/api/services")
+    async def all_services(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        """Every hosted service with the session it belongs to."""
+        services = app.extensions.get("services")
+        return await services.list_all() if services is not None else []
+
     @api.get("/api/sessions/{session_id}/services")
     async def session_services(session_id: str, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
         services = app.extensions.get("services")

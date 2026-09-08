@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import { api, LoopView, ToolInfo } from "./api";
+import { api, LoopView, ServiceView, ToolInfo } from "./api";
+import { Icon } from "./icons";
+import { confirmAsync, errorText } from "./ui";
 
 export type Status = "idle" | "running" | "waiting" | "failed" | "done";
 
@@ -113,3 +115,44 @@ export function fmtUsd(value: number | null | undefined): string {
 export function fmtInt(value: number | null | undefined): string {
   return (value ?? 0).toLocaleString();
 }
+
+/** One hosted service: status, address, log and stop. Shared by the session screen and the Services tab. */
+export function ServiceRow({ s, sessionId, onChange, toast, onLogs }: { s: ServiceView; sessionId: string; onChange: () => void; toast: (t: string) => void; onLogs: (text: string) => void }) {
+  async function stop() {
+    if (!(await confirmAsync(`Stop service "${s.name}"?`))) return;
+    try {
+      await api.post(`/api/sessions/${sessionId}/services/${encodeURIComponent(s.name)}/stop`);
+      toast(`${s.name}: stopped`);
+      onChange();
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
+  async function logs() {
+    try {
+      const r = await api.get<{ text: string }>(`/api/sessions/${sessionId}/services/${encodeURIComponent(s.name)}/logs?lines=200`);
+      onLogs(r.text);
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
+  return (
+    <div className={`service-row ${s.status}`}>
+      <span className={`dot ${s.status}`} />
+      <div className="grow" style={{ minWidth: 0 }}>
+        <div className="service-name">
+          {s.name}
+          {s.url && s.status === "running" ? (
+            <a className="service-url" href={s.url} target="_blank" rel="noreferrer">{s.url.replace(/^https?:\/\//, "")}</a>
+          ) : (
+            <span className="sub"> · {s.status}{s.note ? `: ${s.note}` : ""}</span>
+          )}
+        </div>
+        <div className="sub mono service-cmd" title={s.command}>{s.command}</div>
+      </div>
+      <button className="iconbtn small" onClick={logs} title="Log" aria-label="log"><Icon name="file" size={15} /></button>
+      {s.status === "running" && <button className="iconbtn small" onClick={stop} title="Stop" aria-label="stop"><Icon name="stop" size={15} /></button>}
+    </div>
+  );
+}
+
