@@ -1509,7 +1509,10 @@ class TelegramFront:
         await renderer.handle(event)
         if event.type is EventType.COMPACTION_COMPLETED:
             p = event.payload
-            outbox = await self.outbox_for_session(session_id)
+            before, after = int(p.get("tokens_before") or 0), int(p.get("tokens_after") or 0)
+            summarised = int(p.get("tier2_summarised") or 0) + int(p.get("tier3_folded") or 0)
+            # A pass that changed nothing is not news; the events keep the record.
+            outbox = await self.outbox_for_session(session_id) if summarised or (before and before - after >= 0.05 * before) else None
             if outbox is not None:
                 try:
                     await outbox.send_html(
