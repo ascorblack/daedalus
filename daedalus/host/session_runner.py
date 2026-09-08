@@ -1080,6 +1080,7 @@ class SessionManager:
             bot_repo=self.settings.bot_repo_dir,
             core_repo=self.settings.core_repo_dir,
             governance_path=self.governance_path,
+            github_org=self.settings.daedalus_github_org,
         )
         mode_name = str(state.metadata.get("mode") or "")
         mode = self.config.modes.get(mode_name) if mode_name else None

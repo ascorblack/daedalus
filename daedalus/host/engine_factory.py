@@ -33,6 +33,7 @@ class EngineDeps:
     bot_repo: Path
     core_repo: Path
     governance_path: Path
+    github_org: str = ""
 
 
 def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_tokens: int, thinking: bool, mode: ModeConfig | None = None) -> Any:
@@ -121,6 +122,7 @@ def build_engine(
             model=model,
             extra_notes=extra_notes,
             sandboxed=config.tools.exec.sandbox != "off",
+            github_org=deps.github_org,
         ),
     )
     engine_config = QueryEngineConfig(

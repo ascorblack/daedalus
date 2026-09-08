@@ -58,7 +58,7 @@ class DoctorContext:
 
 async def run_checks(ctx: DoctorContext) -> list[Check]:
     checks: list[Check] = []
-    for probe in (_config, _telegram, _state, _git_probe, _supervisor, _runtime, _providers):
+    for probe in (_config, _telegram, _state, _git_probe, _supervisor, _runtime, _providers, _github_org):
         try:
             checks.extend(await probe(ctx))
         except Exception as exc:  # noqa: BLE001 — one broken probe must not hide the others
@@ -221,6 +221,27 @@ def _git_cmd(repo: Path, *args: str) -> tuple[int, str]:
         return proc.returncode, (proc.stdout + proc.stderr).strip()
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, str(exc)
+
+
+async def _github_org(ctx: DoctorContext) -> list[Check]:
+    """Whether the agent's own organisation is reachable and its token may create repositories there."""
+    org = ctx.settings.daedalus_github_org.strip()
+    token = ctx.settings.github_daedalus_token.strip()
+    if not org and not token:
+        return []
+    if not org or not token:
+        return [Check("github org", False, "DAEDALUS_GITHUB_ORG and GITHUB_DAEDALUS_TOKEN go together; one is missing", "warn", "set both in .env")]
+    try:
+        async with httpx.AsyncClient(timeout=ctx.config.ops.doctor_probe_timeout_seconds) as client:
+            headers = {"authorization": f"Bearer {token}", "accept": "application/vnd.github+json"}
+            # An empty name is refused with 422 once the token is allowed to create; without the right it is 403 first.
+            response = await client.post(f"https://api.github.com/orgs/{org}/repos", headers=headers, json={"name": ""})
+    except httpx.HTTPError as exc:
+        return [Check("github org", False, f"{org}: {type(exc).__name__}", "warn", "network or GitHub down")]
+    if response.status_code == 422:
+        return [Check("github org", True, f"{org}: the token may create repositories", "ok")]
+    needed = response.headers.get("x-accepted-github-permissions", "")
+    return [Check("github org", False, f"{org}: HTTP {response.status_code}; needs {needed or 'administration=write on the organisation'}", "warn", f"issue the token with resource owner {org} and Administration: write")]
 
 
 async def _git_probe(ctx: DoctorContext) -> list[Check]:

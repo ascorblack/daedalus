@@ -98,7 +98,7 @@ _SAFE_ENV_BASE = frozenset({
     # git authentication: the supervisor's credential helper reads GH_TOKEN, and gh reads it too.
     # Kept on purpose: the operator wants the shell able to fetch, push and use gh; the token is
     # the agent's own (a fine-grained PAT scoped to its repositories).
-    "GH_TOKEN",
+    "GH_TOKEN", "GH_ORG_TOKEN",
 })
 """Names inherited by a tool's subprocess. Prefixes in :data:`_SAFE_ENV_PREFIXES` are inherited as well."""
 

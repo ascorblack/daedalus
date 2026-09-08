@@ -163,6 +163,7 @@ def environment_section(
     model: str,
     extra_notes: str = "",
     sandboxed: bool = False,
+    github_org: str = "",
 ) -> str:
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
@@ -175,6 +176,12 @@ def environment_section(
         f"- Your core repository: {core_repo}",
         f"- Current model: {model}",
     ]
+    if github_org:
+        lines.append(
+            f"- Your GitHub organisation: {github_org}. Repositories for your own work live there and are yours to create, "
+            f"push to, configure and delete (`GH_TOKEN=$GH_ORG_TOKEN gh repo create {github_org}/<name> …`; git uses the right "
+            "token by itself). The operator's repositories (your host and core) change only through SelfPropose."
+        )
     if sandboxed:
         lines.append("- Exec and Verify run in a sandbox: the filesystem is read-only outside the workspace, /tmp is private, and background processes end with the command")
     if extra_notes:

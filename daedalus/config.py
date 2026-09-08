@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     vllm_base_url: str = ""
     vllm_api_key: str = ""
     github_token: str = ""
+    github_daedalus_token: str = ""
+    """A token for the agent's own GitHub organisation (repositories it creates for its work)."""
+    daedalus_github_org: str = ""
+    """That organisation's login; empty = the agent has no organisation of its own."""
     telegram_api_hash: str = ""
     """Only the local Bot API server needs it; the bot reads it so the redactor can mask it."""
 

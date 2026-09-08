@@ -69,12 +69,18 @@ def bot_env() -> dict[str, str]:
     for key, value in (("GIT_AUTHOR_NAME", "Daedalus"), ("GIT_AUTHOR_EMAIL", "daedalus@localhost"), ("GIT_COMMITTER_NAME", "Daedalus"), ("GIT_COMMITTER_EMAIL", "daedalus@localhost")):
         env.setdefault(key, value)
     token = env.get("GITHUB_TOKEN")
-    if token:
-        # Private repositories: git authenticates with the fine-grained token, never with a stored password.
-        env["GH_TOKEN"] = token
+    org_token = env.get("GITHUB_DAEDALUS_TOKEN", "")
+    org = env.get("DAEDALUS_GITHUB_ORG", "").strip()
+    if token or org_token:
+        # git authenticates with a token, never with a stored password. Two tokens when the agent has an
+        # organisation of its own: the helper answers with the organisation's token for that owner's
+        # repositories and with the operator's token for everything else.
+        env["GH_TOKEN"] = token or org_token
+        if org_token:
+            env["GH_ORG_TOKEN"] = org_token
         env["GIT_CONFIG_COUNT"] = "1"
         env["GIT_CONFIG_KEY_0"] = "credential.helper"
-        env["GIT_CONFIG_VALUE_0"] = "!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f"
+        env["GIT_CONFIG_VALUE_0"] = f"!{Path(__file__).parent / 'git-credential-daedalus'}"
     env.update(
         {
             "BOT_REPO_DIR": str(BOT_REPO),
@@ -266,7 +272,7 @@ class Supervisor:
                         self._checkout(previous["bot"], previous["core"])
                         return
                 changed = self._changed_files(previous["bot"], head(BOT_REPO))
-                if any(path in changed for path in REBUILD_TRIGGER_FILES):
+                if any(path in changed for path in REBUILD_TRIGGER_FILES) or any(path.startswith("launcher/") for path in changed):
                     if self._request_image_rebuild():
                         outcome = "image rebuild requested; the container will be replaced by the rebuilder"
                         return
