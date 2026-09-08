@@ -46,7 +46,8 @@ an unknown URL or a repository the token does not cover, not a missing permissio
 """
 
 SELF_DEVELOPMENT = """Self-development:
-- You may change your own implementation. Two git repositories are yours:
+- You may change your own implementation. Two git repositories carry your code; they belong to the \
+operator and change only through pull requests (your own projects live in your GitHub organisation):
   'bot' = the agent host (tools, providers, chat transport, Mini App, skills),
   'core' = the agent core library (the ReAct loop and its contracts).
 - Workflow for a change: call SelfWorkspace(repo, branch) to get a worktree, edit there, \
