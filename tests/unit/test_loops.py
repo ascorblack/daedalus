@@ -146,3 +146,23 @@ async def test_persisted_loop_for_deleted_session_is_gated_not_fired(app: Any) -
     assert len(app.submitted) == 1  # no new prompt went anywhere
     loop = await loops.get(sid)
     assert loop is not None and loop["status"] == "stopped" and "no longer exists" in loop["stop_reason"]
+
+
+async def test_loop_cannot_be_created_for_a_nonexistent_session(app: Any) -> None:
+    """A loop must not be created for a session that does not exist in the store.
+
+    Pins the class-1 invariant from the shared defect catalogue ("foreign prompt
+    succeeds"): the gate is at CREATION time, not only at fire time. ``loops.create``
+    requires ``get_state(session_id) is not None``, else ``KeyError`` — so a loop can
+    never be attached to a dead or foreign session id. In the single-agent architecture a
+    loop is structurally bound to its own ``session_id`` (no retargeting surface), and
+    creation is gated on the session existing locally; this test locks that in.
+    Complements ``test_persisted_loop_for_deleted_session_is_gated_not_fired`` (class 2).
+    """
+    loops = Loops(app)
+    with pytest.raises(KeyError) as excinfo:
+        await loops.create("no-such-session", instruction="watch", interval_seconds=600)
+    # The gate fires before any write and names the offending session id.
+    assert excinfo.value.args == ("no-such-session",)
+    assert await app.db.fetchone("SELECT * FROM loops WHERE session_id = ?", ("no-such-session",)) is None
+    assert app.submitted == []
