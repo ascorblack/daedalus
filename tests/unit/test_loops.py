@@ -197,17 +197,26 @@ async def test_loops_do_not_inject_across_live_sessions(app: Any) -> None:
     # Each session gets its own loop (the first iteration fires at once, into its own session).
     await loops.create(sid_a, instruction="owner work", interval_seconds=600)
     await loops.create(sid_b, instruction="foreign work", interval_seconds=600)
+    # The create calls above already fired iteration 1 into each session, so the probe
+    # must attribute the POSITIVES to the tick fires, not the create fires: snapshot the
+    # submission log, then require exactly two NEW fires from tick (a no-op tick would
+    # leave this at zero and the test would fail — the vacuous-pass hole the create-time
+    # rows would otherwise mask).
+    before = len(app.submitted)
     # Make both due and drive the active-set loader (all_active -> _fire), not just create.
     due = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
     await app.db.execute("UPDATE loops SET next_run_at = ? WHERE session_id = ?", (due, sid_a))
     await app.db.execute("UPDATE loops SET next_run_at = ? WHERE session_id = ?", (due, sid_b))
     await loops.tick()
 
-    def texts_for(sid: str) -> list[str]:
-        return [text for (s, text, origin) in app.submitted if s == sid and origin == "loop"]
+    # tick fired exactly one new iteration per session.
+    new = app.submitted[before:]
+    assert len(new) == 2
+    new_a = [text for (s, text, origin) in new if s == sid_a and origin == "loop"]
+    new_b = [text for (s, text, origin) in new if s == sid_b and origin == "loop"]
 
-    # Each prompt reached only its owner; neither session received the other's prompt.
-    assert any("owner work" in t for t in texts_for(sid_a))
-    assert any("foreign work" in t for t in texts_for(sid_b))
-    assert not any("foreign work" in t for t in texts_for(sid_a))  # B's prompt did not reach A
-    assert not any("owner work" in t for t in texts_for(sid_b))  # A's prompt did not reach B
+    # Each tick fire reached only its owner, in both directions (the ownership binding).
+    assert any("Loop iteration 2" in t and "owner work" in t for t in new_a)    # A's 2nd iteration -> A
+    assert any("Loop iteration 2" in t and "foreign work" in t for t in new_b)  # B's 2nd iteration -> B
+    assert not any("foreign work" in t for t in new_a)  # B's prompt did not reach A
+    assert not any("owner work" in t for t in new_b)    # A's prompt did not reach B
