@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import logging
 from pathlib import Path
 
@@ -72,6 +74,46 @@ def test_nested_arguments_are_redacted() -> None:
     r = Redactor(["real-secret-value-1"])
     out = r.redact_any({"command": "curl -H 'x: real-secret-value-1'", "env": {"A": ["real-secret-value-1"]}, "n": 3})
     assert out == {"command": f"curl -H 'x: {MASK}'", "env": {"A": [MASK]}, "n": 3}
+
+
+def test_redact_any_uses_dict_key_as_context() -> None:
+    """A credential under a secret-named key must be masked even though the bare value
+    matches no self-contained shape (the JSON-string path catches it via the key)."""
+    r = Redactor()
+    fake = "DEMO_CREDENTIAL_1234567890"
+    assert fake not in r.redact(json.dumps({"api_key": fake}))  # string path already worked
+    assert r.redact_any({"api_key": fake}) == {"api_key": MASK}
+    assert r.redact_any({"config": {"password": fake}}) == {"config": {"password": MASK}}
+    # Conservative: no secret-named key -> not masked; short value -> not credential-looking.
+    assert r.redact_any({"data": fake}) == {"data": fake}
+    assert r.redact_any({"api_key": "test"}) == {"api_key": "test"}
+
+
+def test_logging_filter_masks_exception_text() -> None:
+    """A secret carried by the exception itself (not the log message) must not leak via
+    ``log.exception``: the formatter builds ``exc_text`` after filters run."""
+    fake = "DEMO_CREDENTIAL_1234567890"
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.addFilter(RedactingFilter(Redactor([fake])))
+    logger = logging.Logger("synthetic-review", logging.DEBUG)
+    logger.propagate = False
+    logger.addHandler(handler)
+    try:
+        raise ValueError(fake)
+    except ValueError:
+        logger.exception("synthetic exception")
+    out = buf.getvalue()
+    assert fake not in out
+    assert MASK in out
+
+
+def test_logging_filter_handles_bool_exc_info() -> None:
+    """``exc_info=True`` (the "capture current exception" value) must not crash the filter
+    even when there is no active exception."""
+    record = logging.LogRecord("x", logging.WARNING, __file__, 1, "msg", None, True)
+    assert RedactingFilter(Redactor()).filter(record) is True
+    assert record.getMessage() == "msg"
 
 
 def test_logging_filter_masks_records() -> None:
