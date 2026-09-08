@@ -106,6 +106,9 @@ class SessionState:
     """Consecutive runs that overflowed the context window; recovery stops after a few so a hopeless history cannot loop."""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """Serialises run starts against history rewrites (compaction)."""
+    submit_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    """Serialises the start-or-queue decision: two inputs arriving together (an operator message and a
+    loop tick, say) must become one run plus one steer, never two runs driving one history."""
     history_keys: list[str] = field(default_factory=list)
     """Transcript keys of the working history at the last persist, to see what a compaction removed."""
     persist_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -889,72 +892,73 @@ class SessionManager:
         state = await self.get_state(session_id)
         if state is None:
             raise KeyError(session_id)
-        if self.shutting_down:
-            raise RuntimeError("the bot is stopping; the run starts after the restart")
-        if self.recovering and not state.running:
-            raise RuntimeError("the bot is starting up and first continues the runs it left behind; try again in a moment")
-        body, image_refs = await self._ingest_attachments(state, text, attachments)
-        if state.pending is not None:
-            if as_answer:
-                # Free-text reply to a pending question counts as a custom answer.
-                return await self.answer(session_id, [{"custom": body}])
-            await self.live.enqueue(session_id, "follow_up", new_queued_prompt("follow_up", body).to_dict())
-            await self.sessions.append_transcript(
-                session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up", "daedalus.origin": origin})]
+        async with state.submit_lock:
+            if self.shutting_down:
+                raise RuntimeError("the bot is stopping; the run starts after the restart")
+            if self.recovering and not state.running:
+                raise RuntimeError("the bot is starting up and first continues the runs it left behind; try again in a moment")
+            body, image_refs = await self._ingest_attachments(state, text, attachments)
+            if state.pending is not None:
+                if as_answer:
+                    # Free-text reply to a pending question counts as a custom answer.
+                    return await self.answer(session_id, [{"custom": body}])
+                await self.live.enqueue(session_id, "follow_up", new_queued_prompt("follow_up", body).to_dict())
+                await self.sessions.append_transcript(
+                    session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up", "daedalus.origin": origin})]
+                )
+                return state.run_id or ""
+            exceeded = self.budget_exceeded()
+            if exceeded and not state.running:
+                raise RuntimeError(f"daily budget exceeded ({exceeded}); runs resume tomorrow or after /budget reset")
+            if not state.running:
+                provider_id: str | None = None
+                try:
+                    rungs, _ = self.resolve_model(await self.live.load(session_id))
+                    provider_id = rungs[0][0].endpoint.id if rungs else None
+                except Exception:  # noqa: BLE001 — a model problem surfaces when the run starts, not here
+                    provider_id = None
+                breach = await self.cap_breach(state, provider_id)
+                if breach is not None:
+                    raise RuntimeError(breach[1])
+            if state.running and state.engine is not None and state.engine.is_terminal and state.task is not None:
+                # The loop has settled and the task is only doing bookkeeping: let it finish and start a new turn.
+                try:
+                    await asyncio.shield(state.task)
+                except Exception:  # noqa: BLE001
+                    pass
+            if state.running:
+                # A message sent while the agent works is a steer: the core places it before the
+                # next model call (after the current tool batch). follow_up would wait for the end.
+                kind = "follow_up" if not steer and state.metadata.get("queue_mode") == "follow_up" else "steer"
+                await self.live.enqueue(session_id, kind, {**new_queued_prompt(kind, body).to_dict(), "origin": origin})  # type: ignore[arg-type]
+                # The core folds queued prompts into the model's history later (and compaction may
+                # rewrite them); the transcript keeps the operator's words as sent.
+                await self.sessions.append_transcript(
+                    session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind, "daedalus.origin": origin})]
+                )
+                return state.run_id or ""
+            # A new run starts: hooks may decorate the message (a fired reminder rides along); their
+            # side effects are committed only once the run exists, so a refused start loses nothing.
+            for hook in self.prompt_hooks:
+                try:
+                    body = await hook(session_id, body)
+                except Exception:  # noqa: BLE001
+                    logger.exception("prompt hook failed")
+            message = Message(
+                role=MessageRole.user,
+                content_blocks=[TextBlock(text=body)],
+                metadata={"daedalus.origin": origin, **({"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {})},
             )
-            return state.run_id or ""
-        exceeded = self.budget_exceeded()
-        if exceeded and not state.running:
-            raise RuntimeError(f"daily budget exceeded ({exceeded}); runs resume tomorrow or after /budget reset")
-        if not state.running:
-            provider_id: str | None = None
-            try:
-                rungs, _ = self.resolve_model(await self.live.load(session_id))
-                provider_id = rungs[0][0].endpoint.id if rungs else None
-            except Exception:  # noqa: BLE001 — a model problem surfaces when the run starts, not here
-                provider_id = None
-            breach = await self.cap_breach(state, provider_id)
-            if breach is not None:
-                raise RuntimeError(breach[1])
-        if state.running and state.engine is not None and state.engine.is_terminal and state.task is not None:
-            # The loop has settled and the task is only doing bookkeeping: let it finish and start a new turn.
-            try:
-                await asyncio.shield(state.task)
-            except Exception:  # noqa: BLE001
-                pass
-        if state.running:
-            # A message sent while the agent works is a steer: the core places it before the
-            # next model call (after the current tool batch). follow_up would wait for the end.
-            kind = "follow_up" if not steer and state.metadata.get("queue_mode") == "follow_up" else "steer"
-            await self.live.enqueue(session_id, kind, {**new_queued_prompt(kind, body).to_dict(), "origin": origin})  # type: ignore[arg-type]
-            # The core folds queued prompts into the model's history later (and compaction may
-            # rewrite them); the transcript keeps the operator's words as sent.
-            await self.sessions.append_transcript(
-                session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind, "daedalus.origin": origin})]
-            )
-            return state.run_id or ""
-        # A new run starts: hooks may decorate the message (a fired reminder rides along); their
-        # side effects are committed only once the run exists, so a refused start loses nothing.
-        for hook in self.prompt_hooks:
-            try:
-                body = await hook(session_id, body)
-            except Exception:  # noqa: BLE001
-                logger.exception("prompt hook failed")
-        message = Message(
-            role=MessageRole.user,
-            content_blocks=[TextBlock(text=body)],
-            metadata={"daedalus.origin": origin, **({"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {})},
-        )
-        await self.sessions.append_transcript(session_id, [message])
-        seqs = await self.sessions.transcript_seqs(session_id, [self.sessions.transcript_key(message)])
-        await self.checkpoint(state, kind="before", seq=seqs[0] if seqs else None)
-        run_id = await self._start_run(state, message)
-        for started in self.run_started_hooks:
-            try:
-                await started(session_id, run_id)
-            except Exception:  # noqa: BLE001
-                logger.exception("run-started hook failed")
-        return run_id
+            await self.sessions.append_transcript(session_id, [message])
+            seqs = await self.sessions.transcript_seqs(session_id, [self.sessions.transcript_key(message)])
+            await self.checkpoint(state, kind="before", seq=seqs[0] if seqs else None)
+            run_id = await self._start_run(state, message)
+            for started in self.run_started_hooks:
+                try:
+                    await started(session_id, run_id)
+                except Exception:  # noqa: BLE001
+                    logger.exception("run-started hook failed")
+            return run_id
 
     async def _ingest_attachments(
         self, state: SessionState, text: str, attachments: Sequence[Attachment]
@@ -1198,6 +1202,8 @@ class SessionManager:
     async def _start_run_locked(
         self, state: SessionState, message: Message | None, *, continue_turn: bool = False
     ) -> str:
+        if state.running and not continue_turn:
+            raise RuntimeError("a run is already active in this session")
         state.last_error_kind = ""
         if message is not None:
             state.run_origin = str(message.metadata.get("daedalus.origin") or "operator")

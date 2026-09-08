@@ -323,3 +323,19 @@ async def test_steer_sent_while_running_lands_in_the_transcript(settings: Settin
     assert texts == ["change of plan"]
     state.task.cancel()
     await manager.close()
+
+
+async def test_two_inputs_at_once_start_one_run_and_queue_the_other(settings: Settings, db: Database) -> None:
+    """An operator message and a loop tick in the same instant used to pass the running check together."""
+    provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "sleep 1"}}, {"text": "done"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("t")
+    waiter = asyncio.create_task(_wait_finished(manager))
+    first, second = await asyncio.gather(manager.submit(state.session.id, "from the operator"), manager.submit(state.session.id, "loop tick", origin="loop"))
+    assert first == second
+    runs = await db.fetchall("SELECT id FROM runs WHERE session_id = ?", (state.session.id,))
+    assert len(runs) == 1
+    queued = await manager.live.load(state.session.id)
+    assert [q["text"] for q in queued["steer"]] == ["loop tick"]
+    await waiter
+    await manager.close()
