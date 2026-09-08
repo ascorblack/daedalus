@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import traceback
 from collections.abc import Iterable
 from typing import Any
@@ -157,10 +158,17 @@ class RedactingFilter(logging.Filter):
         # carried by the exception itself (``raise ValueError(secret)``) would otherwise
         # reach the handler unmasked. Build it here, redact it, and let the formatter reuse
         # the cleaned text (it only computes ``exc_text`` when it is still ``None``).
-        if record.exc_info is not None and record.exc_text is None:
-            record.exc_text = self.redactor.redact("".join(traceback.format_exception(record.exc_info[1])))
-        elif record.exc_text:
-            record.exc_text = self.redactor.redact(record.exc_text)
+        # ``exc_info`` may be the bool ``True`` (the "capture current exception" value) when
+        # a record is built by hand; a redaction filter must never raise, so guard it all.
+        try:
+            exc_info = sys.exc_info() if record.exc_info is True else record.exc_info
+            if exc_info is not None and record.exc_text is None:
+                if isinstance(exc_info, tuple) and exc_info[1] is not None:
+                    record.exc_text = self.redactor.redact("".join(traceback.format_exception(*exc_info)))
+            elif record.exc_text:
+                record.exc_text = self.redactor.redact(record.exc_text)
+        except Exception:  # noqa: BLE001 — masking must never take logging down
+            pass
         return True
 
 

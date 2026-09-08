@@ -108,6 +108,14 @@ def test_logging_filter_masks_exception_text() -> None:
     assert MASK in out
 
 
+def test_logging_filter_handles_bool_exc_info() -> None:
+    """``exc_info=True`` (the "capture current exception" value) must not crash the filter
+    even when there is no active exception."""
+    record = logging.LogRecord("x", logging.WARNING, __file__, 1, "msg", None, True)
+    assert RedactingFilter(Redactor()).filter(record) is True
+    assert record.getMessage() == "msg"
+
+
 def test_logging_filter_masks_records() -> None:
     record = logging.LogRecord("x", logging.WARNING, __file__, 1, "key %s", ("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",), None)
     assert RedactingFilter(Redactor()).filter(record) is True
