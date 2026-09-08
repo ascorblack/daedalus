@@ -30,7 +30,9 @@ async def load_skill(context: ToolContext, skill: str) -> ToolResult:
     listing = "\n".join(f"- {f.path} ({f.size_bytes} bytes)" for f in files if f.path != "SKILL.md")
     text = f"# Skill: {bundle.manifest.name}\n{bundle.manifest.description}\n\n{bundle.body}"
     if listing:
-        text += f"\n\nFiles in this skill (under skills/{bundle.manifest.id}/):\n{listing}"
+        root = getattr(store, "root", None)
+        where = f"{root}/{bundle.manifest.id}/" if root else f"skills/{bundle.manifest.id}/"
+        text += f"\n\nFiles in this skill (under {where}; read or run them from there):\n{listing}"
     return ok(context, text, skill_id=bundle.manifest.id)
 
 

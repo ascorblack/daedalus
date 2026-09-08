@@ -20,6 +20,9 @@ def host_env(monkeypatch):  # type: ignore[no-untyped-def]
         "GITHUB_TOKEN": "raw_should_not_leak",
         # unrelated host variables: not inherited either
         "OWNER_USER_ID": "1",
+        # the browser store the skills drive: inherited
+        "PLAYWRIGHT_BROWSERS_PATH": "/opt/pw-browsers",
+        "CHROME_PATH": "/usr/local/bin/chromium",
         "SUPERVISOR_SOCKET": "/tmp/example.sock",
         # what a shell needs
         "PATH": "/usr/bin",
@@ -53,6 +56,11 @@ def test_credentials_stay_out_and_the_toolchain_gets_in(host_env) -> None:  # ty
 def test_git_authentication_is_inherited(host_env) -> None:  # type: ignore[no-untyped-def]
     env = shell_environment("sess-1")
     assert env["GH_TOKEN"] == "github_pat_example"
+
+
+def test_the_browser_store_is_inherited(host_env) -> None:  # type: ignore[no-untyped-def]
+    env = shell_environment("sess-1")
+    assert env["PLAYWRIGHT_BROWSERS_PATH"] == "/opt/pw-browsers" and env["CHROME_PATH"] == "/usr/local/bin/chromium"
     assert env["GIT_CONFIG_COUNT"] == "1" and env["GIT_CONFIG_KEY_0"] == "credential.helper" and "GH_TOKEN" in env["GIT_CONFIG_VALUE_0"]
 
 

@@ -54,6 +54,9 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
         memory_enabled=True,
         # Advertise every registered tool; the registry would otherwise clip the list.
         tool_retrieval_top_k=200,
+        # The skill catalogue (name + when-to-use line per skill) must fit whole: past the budget the core
+        # drops the descriptions, and a bare name is not a reason to load a skill.
+        skill_index_budget_ratio=0.04,
         # Summaries must not be cut mid-JSON: give the summariser room for a full sentence pair.
         compaction_summary_max_output_tokens=2048,
         # A summariser writes sentences whatever it is given: a small tool exchange comes back

@@ -99,6 +99,8 @@ _SAFE_ENV_BASE = frozenset({
     # Kept on purpose: the operator wants the shell able to fetch, push and use gh; the token is
     # the agent's own (a fine-grained PAT scoped to its repositories).
     "GH_TOKEN", "GH_ORG_TOKEN",
+    # The headless Chromium the browser skills drive (Playwright's browser store, Lighthouse's binary).
+    "PLAYWRIGHT_BROWSERS_PATH", "CHROME_PATH",
 })
 """Names inherited by a tool's subprocess. Prefixes in :data:`_SAFE_ENV_PREFIXES` are inherited as well."""
 

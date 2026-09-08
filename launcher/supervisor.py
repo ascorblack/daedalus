@@ -70,7 +70,6 @@ def bot_env() -> dict[str, str]:
         env.setdefault(key, value)
     token = env.get("GITHUB_TOKEN")
     org_token = env.get("GITHUB_DAEDALUS_TOKEN", "")
-    org = env.get("DAEDALUS_GITHUB_ORG", "").strip()
     if token or org_token:
         # git authenticates with a token, never with a stored password. Two tokens when the agent has an
         # organisation of its own: the helper answers with the organisation's token for that owner's

@@ -50,6 +50,10 @@ class DirectorySkillStore(ISkillStore):
         self._root = root
         self._root.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def root(self) -> Path:
+        return self._root
+
     def _dir(self, skill_id: str) -> Path:
         safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", skill_id)
         return self._root / safe

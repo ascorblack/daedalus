@@ -23,6 +23,15 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o 
     && uv python install 3.12 \
     && git config --system --add safe.directory '*'
 
+# Headless Chromium for the browser skills (Playwright's own build, shared by the Python package pinned in
+# pyproject and by `npx lighthouse` through CHROME_PATH). The browser lives outside the virtualenv so a
+# rebuild of the venv never re-downloads it.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN uvx --from playwright==1.62.0 playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s "$(find /opt/pw-browsers -type f -name chrome -path '*chrome-linux*' | head -1)" /usr/local/bin/chromium
+ENV CHROME_PATH=/usr/local/bin/chromium
+
 # The supervisor lives outside the repositories the agent can change.
 COPY launcher /opt/launcher
 
