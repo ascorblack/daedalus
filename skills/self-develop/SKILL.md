@@ -23,7 +23,9 @@ description: How to change your own code (host or core) safely: worktree, tests,
    - a fast path you add does not repeat work already done by the slow path it precedes;
    - the full suite and `ruff check` pass, not only the tests you wrote.
 4. Commit with a message that describes the change on its own terms. The repositories are public:
-   no session or run ids, no trailers or co-author lines, no model or tool names as authors, and
+   no session or run ids, no board-thread, review-round or defect-catalogue references (SelfPropose
+   refuses a branch whose commits carry them), no model or tool names as authors — your own
+   `Co-authored-by: Daedalus <daedalus@localhost>` trailer is fine — and
    nothing about the operator (addresses, hostnames, paths, accounts, workloads, circumstances) in
    commits, pull requests, code comments or docs. What you know about the operator stays in the session.
 5. `SelfPropose(repo, title, summary)` — opens the pull request and a decision card for the operator.

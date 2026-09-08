@@ -36,7 +36,7 @@ OUTPUT_HEAD_CHARS = 2000
         "The receipt's time is the host clock; for time-sensitive claims, name the clock in dependencies."
     ),
 )
-async def verify(context: ToolContext, criterion: str, command: str, cwd: str | None = None, timeout_seconds: int | None = None, dependencies: str | None = None) -> ToolResult:
+async def verify(context: ToolContext, criterion: str, command: str, cwd: str | None = None, timeout_seconds: int | None = None, dependencies: str | None = None, env: dict[str, str] | None = None) -> ToolResult:
     # The criterion must be checkable by reading the command: a reviewer seeing only the command must be able to tell what the criterion asserts.
     services = services_for(context)
     manager = services.extra.get("manager")
@@ -49,7 +49,7 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
     argv, sandboxed = await sandbox_argv("set -o pipefail\n" + command, workdir, services.workspace_dir, tool_config(context).exec)
     proc = await asyncio.create_subprocess_exec(
         *argv, cwd=str(workdir), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env=shell_environment(context.session_id), start_new_session=True,
+        env=shell_environment(context.session_id, env), start_new_session=True,
     )
     # The head feeds two consumers: the OUTPUT_HEAD_CHARS-char DB field and the
     # model-facing clip at services.max_tool_output_chars. Cap the in-memory
@@ -72,6 +72,7 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
                 head.extend(chunk[: head_cap - len(head)])
 
     timed_out = False
+    kill_failed = False
     try:
         await asyncio.wait_for(_pump(), timeout=limit)
         await asyncio.wait_for(proc.wait(), timeout=max(1.0, limit - (time.monotonic() - started)))
@@ -79,9 +80,14 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
         timed_out = True
         try:
             os.killpg(proc.pid, 9)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
             pass
-        await proc.wait()  # a grandchild that escaped the group may still hold the pipe; the direct child is enough
+        except PermissionError:
+            kill_failed = True  # the group is still running; the wait below is bounded so the run is not
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except TimeoutError:
+            kill_failed = True
     exit_code = -1 if timed_out else int(proc.returncode or 0)
     passed = exit_code == 0
     # Digest the raw bytes as they stream (the whole output), not the decoded
@@ -109,7 +115,7 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
             )
             receipt_id = f"v{cursor.lastrowid}"
     deps = (dependencies or "").strip()
-    header = f"{'✅ verified' if passed else '❌ NOT verified'}: {criterion} — exit {exit_code}{' (timed out)' if timed_out else ''} · receipt {receipt_id or 'not recorded'} · digest {digest} · at {at}" + (f" · output {total_bytes} B, first {len(head)} B kept" if truncated else "") + (f" · deps: {deps}" if deps else "") + (" · sandbox=workspace" if sandboxed else "")
+    header = f"{'✅ verified' if passed else '❌ NOT verified'}: {criterion} — exit {exit_code}{' (timed out' + ('; the process group survived the kill' if kill_failed else '') + ')' if timed_out else ''} · receipt {receipt_id or 'not recorded'} · digest {digest} · at {at}" + (f" · output {total_bytes} B, first {len(head)} B kept" if truncated else "") + (f" · deps: {deps}" if deps else "") + (" · sandbox=workspace" if sandboxed else "")
     body = clip(output, services.max_tool_output_chars, note="write the output to a file for the rest")
     text = f"{header}\n{body}" if body.strip() else header
     return ok(context, text, receipt=receipt_id, passed=passed, exit_code=exit_code) if passed else error(context, text, receipt=receipt_id, passed=passed, exit_code=exit_code)

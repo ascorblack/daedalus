@@ -266,7 +266,12 @@ class Loops:
             return False
         state = await manager.get_state(sid)
         if state is None:
-            await self.stop(sid, "the session no longer exists")
+            # get_state answers None for a transient store error too: only a session that is really gone ends the loop.
+            row = await self.app.db.fetchone("SELECT id FROM sessions WHERE id = ?", (sid,))
+            if row is None:
+                await self.stop(sid, "the session no longer exists")
+            else:
+                logger.warning("loop %s: the session could not be loaded this tick; trying again later", sid)
             return False
         if state.running or state.pending is not None:
             return False

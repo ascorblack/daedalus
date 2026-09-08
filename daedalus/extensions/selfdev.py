@@ -156,6 +156,17 @@ class SelfDevelopment:
             raise GitError("the worktree has uncommitted changes; commit them first")
         head_branch = (await self.git(spec, "rev-parse", "--abbrev-ref", "HEAD", cwd=worktree)).strip()
         ahead = (await self.git(spec, "rev-list", "--count", "origin/main..HEAD", cwd=worktree)).strip()
+        messages = await self.git(spec, "log", "--format=%H%x00%B%x1e", "origin/main..HEAD", cwd=worktree)
+        for record in messages.split("\x1e"):
+            sha, _, body = record.strip("\n").partition("\x00")
+            # The agent may sign its own work; everything else public_text() strips has no place in a public history.
+            signed = re.sub(r"(?im)^\s*co-authored-by:.*(?:\n|$)", "", body)
+            if signed.strip() and public_text(signed).strip() != signed.strip():
+                raise GitError(
+                    f"commit {sha[:8]} carries a reference the public repository must not: "
+                    "no session or run ids, board threads, review rounds or defect catalogues (a Co-authored-by line is fine). "
+                    "Amend the message (git commit --amend / rebase) and propose again."
+                )
         if ahead == "0":
             raise GitError("the branch has no commits beyond origin/main")
         await self.git(spec, "push", "-u", "origin", head_branch, "--force-with-lease", cwd=worktree)
@@ -225,7 +236,7 @@ class SelfDevelopment:
             if not row["sandboxed"]:
                 caveats.append("unsandboxed")
             suffix = f" ⚠ {'; '.join(caveats)}" if caveats else ""
-            deps = (row["dependencies"] or "").strip()
+            deps = r.redact((row["dependencies"] or "").strip())
             deps_note = f" · deps: {deps}" if deps else ""
             lines.append(f"- {'✅' if row['passed'] else '❌'} {r.redact(row['criterion'])} — `{shown}` (exit {row['exit_code']}, receipt v{row['id']}){deps_note}{suffix}")
         return "\n\nVerification receipts:\n" + "\n".join(lines)

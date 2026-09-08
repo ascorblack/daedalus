@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -79,35 +80,44 @@ async def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config
 # tool's ``env`` parameter.
 _SAFE_ENV_BASE = frozenset({
     # process basics
-    "PATH", "HOME", "USER", "SHELL", "TERM", "HOSTNAME", "PWD", "SHLVL",
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "HOSTNAME", "PWD", "SHLVL",
     "TMPDIR", "TEMP", "TMP",
     # locale / timezone
-    "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ",
     # editor / pager preferences (harmless)
     "EDITOR", "VISUAL", "PAGER",
     # apt in the sandbox
     "DEBIAN_FRONTEND",
     # python / uv runtime (the bot's toolchain)
-    "PYTHONUNBUFFERED", "VIRTUAL_ENV",
-    "UV", "UV_LINK_MODE", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON_INSTALL_DIR", "UV_RUN_RECURSION_DEPTH",
-    # git identity (not secrets; needed for commits in the sandbox).
-    # The GIT_CONFIG_{COUNT,KEY_n,VALUE_n} triplet is deliberately NOT
-    # inherited: its values can carry secrets (e.g. http.*.extraheader),
-    # and identity is already covered by the GIT_AUTHOR_*/GIT_COMMITTER_*
-    # names above. A caller that needs injected git config passes it
-    # explicitly through the tool's ``env`` parameter.
-    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
-    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
-    "GIT_TERMINAL_PROMPT",
+    "PYTHONUNBUFFERED", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE",
+    # network: a proxy or a private CA the container was given must reach every client
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+    # git over ssh
+    "SSH_AUTH_SOCK",
+    # git authentication: the supervisor's credential helper reads GH_TOKEN, and gh reads it too.
+    # Kept on purpose: the operator wants the shell able to fetch, push and use gh; the token is
+    # the agent's own (a fine-grained PAT scoped to its repositories).
+    "GH_TOKEN",
 })
+"""Names inherited by a tool's subprocess. Prefixes in :data:`_SAFE_ENV_PREFIXES` are inherited as well."""
+
+_SAFE_ENV_PREFIXES = ("GIT_", "UV_", "PIP_", "NPM_CONFIG_", "NODE_", "LC_", "XDG_", "DAEDALUS_", "CARGO_", "GOPATH", "GOFLAGS", "JAVA_")
+"""Variable families a toolchain reads; none of them carries the bot's own credentials."""
+
+_SECRET_ENV = re.compile(r"^(TELEGRAM_.*|KEYPROXY_.*|.*_API_KEY|.*_SECRET|.*_PASSWORD|GITHUB_TOKEN)$")
+"""Never inherited even when a prefix would admit them."""
 
 
 def shell_environment(session_id: str, extra: dict[str, str] | None = None) -> dict[str, str]:
-    """The environment a tool's subprocess gets: a strict allowlist of
-    non-secret variables. Secrets (tokens, keys, internal paths, sockets)
-    stay in the bot's process; a caller that genuinely needs one passes it
-    explicitly through the tool's ``env`` parameter."""
-    env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_BASE}
+    """The environment a tool's subprocess gets: what a shell and its toolchains need, without the bot's own credentials.
+
+    This is hygiene, not containment: the bot's Telegram and provider credentials do not
+    propagate into child processes and their logs, but a shell in the same container can still
+    read the parent's environment through ``/proc``. A caller that needs a specific value passes
+    it through the tool's ``env`` parameter.
+    """
+    env = {k: v for k, v in os.environ.items() if (k in _SAFE_ENV_BASE or k.startswith(_SAFE_ENV_PREFIXES)) and not _SECRET_ENV.match(k)}
     env.update(extra or {})
     env["DAEDALUS_SESSION_ID"] = session_id
     return env
@@ -148,6 +158,8 @@ async def exec_command(
     )
     chunks: list[bytes] = []
     total = 0
+    # Only what the model can see is kept in memory; a process that prints for the whole timeout cannot pump it up.
+    head_cap = services.max_tool_output_chars * 4
 
     async def _pump() -> None:
         nonlocal total
@@ -157,7 +169,8 @@ async def exec_command(
             chunk = await proc.stdout.read(4096)
             if not chunk:
                 return
-            chunks.append(chunk)
+            if total < head_cap:
+                chunks.append(chunk[: head_cap - total])
             total += len(chunk)
             if services.progress is not None and time.monotonic() - last_progress > 2.0:
                 last_progress = time.monotonic()
