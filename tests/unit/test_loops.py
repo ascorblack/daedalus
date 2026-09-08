@@ -121,3 +121,28 @@ async def test_pause_stop_max_runs_and_validation(app: Any) -> None:
     await loops.stop(sid, "enough")
     assert (await loops.get(sid))["stop_reason"] == "enough"
     assert await loops.remove(sid) and "loop" not in state.metadata and await loops.get(sid) is None
+
+
+async def test_persisted_loop_for_deleted_session_is_gated_not_fired(app: Any) -> None:
+    """A loop whose session was deleted must be stopped by the existence gate, not fired into a dead session.
+
+    Regression for the "cross-session execution without an ownership gate" defect class:
+    ``delete_session`` removes the session row but not the ``loops`` row, so a persisted
+    loop can outlive its session. The gate in ``_fire`` (``get_state`` -> None -> ``stop``)
+    must stop it and submit nothing.
+    """
+    loops = Loops(app)
+    state = await app.manager.create_session("doomed")
+    sid = state.session.id
+    loop = await loops.create(sid, instruction="watch", interval_seconds=600)
+    assert loop["status"] == "active" and len(app.submitted) == 1  # the first iteration fired once
+    assert app.submitted[-1][0] == sid and app.submitted[-1][2] == "loop"
+    # The session is deleted; the loop row outlives it (delete_session does not touch `loops`).
+    assert await app.manager.delete_session(sid, delete_workspace=False)
+    assert await app.manager.get_state(sid) is None  # the gate's precondition
+    # Make the loop due, then tick: the gate must stop it and fire nothing.
+    await app.db.execute("UPDATE loops SET next_run_at = ? WHERE session_id = ?", ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), sid))
+    await loops.tick()
+    assert len(app.submitted) == 1  # no new prompt went anywhere
+    loop = await loops.get(sid)
+    assert loop is not None and loop["status"] == "stopped" and "no longer exists" in loop["stop_reason"]
