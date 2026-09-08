@@ -62,3 +62,21 @@ async def test_skill_tool_loads_a_skill_with_the_core_tool_context(tmp_path: Pat
     assert not result.is_error, result.content
     assert "# Skill: webapp-testing" in result.content
     assert f"{SKILLS}/webapp-testing/" in result.content and "scripts/with_server.py" in result.content
+
+
+async def test_skill_tool_folds_a_large_file_listing_by_directory(tmp_path: Path) -> None:
+    from protocore.contracts.tools import ToolContext
+
+    from daedalus.host.services import SessionServices, locator
+    from daedalus.tools.skill import load_skill
+
+    locator.register(SessionServices(session_id="skill-test-2", workspace_dir=tmp_path, extra={"skill_store": DirectorySkillStore(SKILLS)}))
+    try:
+        result = await load_skill().invoke(ToolContext(tenant_id="t", run_id="r", session_id="skill-test-2", metadata={"tool_call_id": "c2"}), {"skill": "frontend-design"})
+    finally:
+        locator.unregister("skill-test-2")
+    assert not result.is_error
+    assert "- styles/ (" in result.content and "- references/libraries.md" not in result.content
+    listing = result.content.split("Files in this skill", 1)[1]
+    assert listing.count("\n- ") <= 6, listing
+    assert "apps/travel-flighty.md" in result.content  # the index in SKILL.md still names every entry
