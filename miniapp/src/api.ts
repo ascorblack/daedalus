@@ -114,7 +114,7 @@ export type LoopView = {
 
 export type ToolInfo = { name: string; description: string; group: string };
 
-export type SubagentView = { session_id: string; name: string | null; running: boolean; status: string; model: string };
+export type SubagentView = { session_id: string; name: string | null; running: boolean; status: string; model: string; kept?: boolean };
 
 export type MessageView = {
   role: "system" | "user" | "assistant" | "tool";

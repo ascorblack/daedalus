@@ -304,7 +304,7 @@ class SelfDevelopment:
         if not session_id or self.app.manager is None:
             return
         try:
-            await self.app.manager.submit(session_id, text, as_answer=False)
+            await self.app.manager.submit(session_id, text, as_answer=False, origin="selfdev")
         except Exception:  # noqa: BLE001
             logger.exception("could not deliver the decision to session %s", session_id)
 

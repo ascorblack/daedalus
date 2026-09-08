@@ -277,12 +277,16 @@ class Loops:
                 nxt: str | None = (now + timedelta(seconds=int(loop["interval_seconds"]))).isoformat()
             else:
                 nxt = None  # the iteration schedules the next one with LoopNext, or the loop ends
+            try:
+                await manager.submit(sid, self._prompt(loop), as_answer=False, origin="loop")
+            except RuntimeError as exc:
+                logger.warning("loop iteration for %s waits: %s", sid, exc)  # stopping or starting up: the wake-up stays due
+                return False
             await self.app.db.execute(
                 "UPDATE loops SET next_run_at = ?, last_run_at = ?, run_count = run_count + 1, updated_at = ? WHERE session_id = ?",
                 (nxt, now.isoformat(), now.isoformat(), sid),
             )
             await self._sync(sid)
-            await manager.submit(sid, self._prompt(loop), as_answer=False, origin="loop")
             return True
         except Exception:  # noqa: BLE001
             logger.exception("loop iteration for %s did not start", sid)

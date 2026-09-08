@@ -4,6 +4,7 @@ import { api, LoopView, SlashCommand, MessageView, Question, SessionDetail } fro
 import { Status, ToolPicker, fmtInt, fmtUsd, loopLabel } from "../components";
 import { codeBlock, renderMarkdown } from "../md";
 import { confirmAsync, enterSends, errorText, fmtTok, haptic } from "../ui";
+import { Icon, IconName } from "../icons";
 
 /** Markdown parsed once per text: a token streaming into one turn must not re-parse every other. */
 const Md = memo(function Md({ text, className }: { text: string; className?: string }) {
@@ -156,6 +157,16 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
   const fileInput = useRef<HTMLInputElement>(null);
   const stick = useRef(true);
   const userScrolling = useRef(false);
+
+  async function loopAction(a: string) {
+    try {
+      await api.post(`/api/sessions/${id}/loop/action`, { action: a });
+      toast(`loop: ${a}`);
+      load(true);
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
 
   async function setMode(mode: string) {
     try {
@@ -513,13 +524,21 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
             {detail?.loop && <span className={`badge loop ${detail.loop.status}`} title={detail.loop.instruction}>{loopLabel(detail.loop)}</span>}
           </div>
         </div>
-        <button className="iconbtn" onClick={() => setMenu((m) => !m)} aria-label="menu">
-          <Icon name="more" />
-        </button>
+        <div className="head-actions">
+          <button className={`iconbtn ${view === "files" ? "on" : ""}`} onClick={() => setView(view === "files" ? "chat" : "files")} aria-label="workspace files" title="Workspace files">
+            <Icon name="folder" />
+          </button>
+          <button className={`iconbtn ${view === "mcp" ? "on" : ""}`} onClick={() => setView(view === "mcp" ? "chat" : "mcp")} aria-label="MCP servers" title="MCP servers">
+            <Icon name="plug" />
+          </button>
+          <button className="iconbtn" onClick={() => setMenu((m) => !m)} aria-label="session settings" title="Session settings">
+            <Icon name="settings" />
+          </button>
+        </div>
       </div>
 
       {detail && detail.subagents && detail.subagents.length > 0 && (
-        <div className="subagents" aria-label="subagents">
+        <div className="subagents phone-only" aria-label="subagents">
           <span className="subagents-label">Subagents</span>
           {detail.subagents.map((s) => (
             <button key={s.session_id} className={"chip subchip " + s.status} onClick={() => onOpen?.(s.session_id)} title={`${s.model} · session ${s.session_id}`}>
@@ -535,8 +554,13 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
         <div className="sheet-backdrop" onClick={() => setMenu(false)}>
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
             <div className="grip" />
-            <h3>Session settings</h3>
+            <div className="sheet-head">
+              <h3>Session settings</h3>
+              <button className="iconbtn small" onClick={() => setMenu(false)} aria-label="close" title="Close"><Icon name="close" size={16} /></button>
+            </div>
             <div className="sheet-body">
+              <section className="sheet-section">
+              <div className="sheet-section-title">Session</div>
               <label className="field">Title</label>
               <input className="field" defaultValue={detail.title} onBlur={(e) => rename(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
               <label className="field">Model</label>
@@ -549,15 +573,25 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                   <option key={m} value={m}>{m}</option>
                 ))}
               </select>
+              </section>
+              <section className="sheet-section">
+              <div className="sheet-section-title">Context</div>
               {detail.context && (
-                <div className="sub" style={{ marginBottom: 8 }}>
-                  Context now: <b>{detail.context.tokens.toLocaleString()}</b>
+                <div className="sub">
+                  <b>{detail.context.tokens.toLocaleString()}</b>
                   {detail.context.window > 0 && ` / ${detail.context.window.toLocaleString()} tokens (${Math.round((100 * detail.context.tokens) / detail.context.window)}%)`} · {detail.context.messages} messages in the working history: {detail.context.summaries} summaries, {detail.context.operator_turns} yours. The header's ↑↓ figures are lifetime totals.
                 </div>
               )}
-              <label className="field">Loop{detail.loop ? ` · ${loopLabel(detail.loop)}` : ""}</label>
+              <div className="btnrow">
+                <button className="btn small" onClick={compact}><Icon name="compact" size={14} /> Compact history</button>
+              </div>
+              </section>
+              <section className="sheet-section">
+              <div className="sheet-section-title"><Icon name="loop" size={14} /> Loop{detail.loop ? ` · ${loopLabel(detail.loop).replace(/^loop · /, "")}` : ""}</div>
               <LoopPanel sessionId={id} loop={detail.loop ?? null} onChange={() => load(true)} toast={toast} />
-              <label className="field">Tools</label>
+              </section>
+              <section className="sheet-section">
+              <div className="sheet-section-title"><Icon name="wrench" size={14} /> Tools</div>
               <ToolPicker
                 off={detail.tools_off ?? []}
                 note="Applies from the agent's next step."
@@ -570,7 +604,10 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                   }
                 }}
               />
-              <label className="field">Brief (standing instructions in this session's system prompt{detail.spawned_by ? `; set by session ${detail.spawned_by}` : ""})</label>
+              </section>
+              <section className="sheet-section">
+              <div className="sheet-section-title"><Icon name="pen" size={14} /> Brief</div>
+              <label className="field">Standing instructions in this session's system prompt{detail.spawned_by ? `; set by session ${detail.spawned_by}` : ""}</label>
               <textarea
                 className="field"
                 rows={4}
@@ -588,7 +625,10 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                   }
                 }}
               />
-              <label className="field">Spend cap for this session (USD, all its runs; empty = global limits only)</label>
+              </section>
+              <section className="sheet-section">
+              <div className="sheet-section-title"><Icon name="chart" size={14} /> Spend</div>
+              <label className="field">Cap for this session (USD, all its runs; empty = global limits only)</label>
               <div className="composer-row">
                 <input
                   className="field"
@@ -613,20 +653,67 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                 />
                 <span className="sub" style={{ whiteSpace: "nowrap" }}>spent {fmtUsd(detail.usage.usd)}</span>
               </div>
-              <div className="btnrow" style={{ marginTop: 12 }}>
-                <button className="btn small" onClick={() => { setMenu(false); setView(view === "files" ? "chat" : "files"); }}>{view === "files" ? "Back to chat" : "Files"}</button>
-                <button className="btn small" onClick={() => { setMenu(false); setView(view === "mcp" ? "chat" : "mcp"); }}>{view === "mcp" ? "Back to chat" : "MCP servers"}</button>
-                <button className="btn small" onClick={compact}>Compact history</button>
+              </section>
+              <section className="sheet-section danger">
+              <div className="sheet-section-title">Danger zone</div>
+              <div className="btnrow" style={{ marginTop: 0 }}>
+                <button className="btn small danger" onClick={remove}><Icon name="trash" size={14} /> Delete session</button>
               </div>
-              <div className="btnrow">
-                <button className="btn small danger" onClick={remove}>Delete session</button>
-              </div>
+              </section>
             </div>
           </div>
         </div>
       )}
 
       <div className={`chat-body ${view === "chat" ? "" : "split"}`}>
+        {detail && (
+          <aside className="session-aside wide-only">
+            <div className="aside-card">
+              <div className="aside-title">Session</div>
+              <div className="aside-row"><Icon name="model" size={16} /><span className="grow" title={detail.model}>{shortModel(detail.model, 30)}</span></div>
+              {detail.context && detail.context.window > 0 && (
+                <div className="aside-row" title={`${detail.context.tokens.toLocaleString()} of ${detail.context.window.toLocaleString()} tokens · ${detail.context.messages} messages`}>
+                  <Icon name="compact" size={16} />
+                  <span className="grow">context {Math.round((100 * detail.context.tokens) / detail.context.window)}%</span>
+                  <i className="ctxbar wide" style={{ ["--fill" as string]: `${Math.min(100, Math.round((100 * detail.context.tokens) / detail.context.window))}%` }} />
+                </div>
+              )}
+              <div className="aside-row"><Icon name="chart" size={16} /><span className="grow">{fmtTok(detail.usage.i)}↑ {fmtTok(detail.usage.o)}↓ · {fmtUsd(detail.usage.usd)}</span></div>
+              {detail.subagent_of && (
+                <button className="aside-row link" onClick={() => onOpen?.(detail.subagent_of!)}>
+                  <Icon name="back" size={16} /><span className="grow">leader: {detail.leader_title ?? detail.subagent_of}</span>
+                </button>
+              )}
+            </div>
+            {detail.loop && (
+              <div className="aside-card">
+                <div className="aside-title"><Icon name="loop" size={14} /> Loop <span className={`badge loop ${detail.loop.status}`}>{detail.loop.status}</span></div>
+                <div className="aside-text">{detail.loop.instruction}</div>
+                <div className="sub">{loopLabel(detail.loop).replace(/^loop · /, "")}{detail.loop.next_run_at && detail.loop.status === "active" ? ` · next ${new Date(detail.loop.next_run_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</div>
+                <div className="btnrow" style={{ marginTop: 8 }}>
+                  {detail.loop.status === "active" ? (
+                    <button className="btn small" onClick={() => loopAction("pause")}><Icon name="pause" size={14} /> pause</button>
+                  ) : (
+                    <button className="btn small primary" onClick={() => loopAction("resume")}><Icon name="play" size={14} /> resume</button>
+                  )}
+                  {detail.loop.status === "active" && <button className="btn small" onClick={() => loopAction("run")}><Icon name="up" size={14} /> run now</button>}
+                </div>
+              </div>
+            )}
+            {detail.subagents && detail.subagents.length > 0 && (
+              <div className="aside-card">
+                <div className="aside-title"><Icon name="spawn" size={14} /> Subagents <span className="sub">{detail.subagents.filter((s) => s.running).length} working</span></div>
+                {detail.subagents.map((s) => (
+                  <button key={s.session_id} className={`aside-row link sub-${s.status}`} onClick={() => onOpen?.(s.session_id)} title={`${s.model} · ${s.session_id}`}>
+                    {s.running ? <span className="live-dot" /> : <span className={"dot " + s.status} />}
+                    <span className="grow name">{s.name || s.session_id}</span>
+                    <span className="sub">{s.running ? "working" : s.status === "failed" ? "failed" : s.kept ? "kept" : "done"}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </aside>
+        )}
         <div className="chat-main">
           <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
             <div className="timeline">
@@ -720,9 +807,9 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
         {view !== "chat" && detail && (
           <aside className="side-pane">
             <div className="side-head">
-              <span className="side-title">{view === "files" ? "Workspace files" : "MCP servers"}</span>
-              <button className="btn small" onClick={() => setView("chat")}>
-                close
+              <span className="side-title"><Icon name={view === "files" ? "folder" : "plug"} size={14} /> {view === "files" ? "Workspace files" : "MCP servers"}</span>
+              <button className="iconbtn small" onClick={() => setView("chat")} aria-label="close" title="Close">
+                <Icon name="close" size={16} />
               </button>
             </div>
             <div className="side-body">{view === "files" ? <Files sessionId={id} /> : <McpPanel sessionId={id} toast={toast} />}</div>
@@ -1191,43 +1278,6 @@ function langOf(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   const map: Record<string, string> = { py: "python", ts: "typescript", tsx: "tsx", js: "javascript", md: "markdown", sh: "bash", json: "json", toml: "toml", yaml: "yaml", yml: "yaml", html: "html", css: "css" };
   return map[ext] ?? ext;
-}
-
-// ── icons ─────────────────────────────────────────────────────────────────────────────────
-
-type IconName = "back" | "more" | "plus" | "up" | "stop" | "model" | "terminal" | "file" | "pen" | "search" | "globe" | "attach" | "image" | "question" | "skill" | "spawn" | "bulb" | "wrench" | "clock" | "plug" | "dot" | "compact";
-
-const PATHS: Record<IconName, string> = {
-  back: "M15 18l-6-6 6-6",
-  more: "M5 12h.01M12 12h.01M19 12h.01",
-  plus: "M12 5v14M5 12h14",
-  up: "M12 19V5M5 12l7-7 7 7",
-  stop: "M7 7h10v10H7z",
-  model: "M4 12l8-8 8 8-8 8-8-8z",
-  terminal: "M4 5h16v14H4zM7 9l3 3-3 3M12 15h5",
-  file: "M6 3h8l4 4v14H6zM14 3v4h4",
-  pen: "M4 20l4-1 11-11-3-3L5 16zM13 6l3 3",
-  search: "M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14zM20 20l-4-4",
-  globe: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18",
-  attach: "M21 12l-8 8a5 5 0 0 1-7-7l9-9a3 3 0 0 1 4 4l-9 9a1 1 0 0 1-2-2l8-8",
-  image: "M4 5h16v14H4zM8 13l3-3 4 4 2-2 3 3",
-  question: "M9 9a3 3 0 1 1 4 3c-1 .5-1 1-1 2M12 17h.01",
-  skill: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
-  spawn: "M12 3v6M12 15v6M3 12h6M15 12h6",
-  bulb: "M9 18h6M10 21h4M12 3a6 6 0 0 0-3 11v1h6v-1a6 6 0 0 0-3-11z",
-  wrench: "M14 4a5 5 0 0 0 6 6l-9 9-3-3 9-9a5 5 0 0 0-3-3z",
-  clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
-  plug: "M9 3v5M15 3v5M6 8h12v4a6 6 0 0 1-12 0zM12 18v3",
-  dot: "M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
-  compact: "M4 7h16M4 12h10M4 17h6",
-};
-
-function Icon({ name }: { name: IconName }) {
-  return (
-    <svg className={`ic ic-${name}`} viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d={PATHS[name]} />
-    </svg>
-  );
 }
 
 // ── questions, files, mcp ─────────────────────────────────────────────────────────────────

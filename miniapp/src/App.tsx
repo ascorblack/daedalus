@@ -10,6 +10,7 @@ import { SchedulesScreen } from "./screens/Schedules";
 import { UsageScreen } from "./screens/Usage";
 import { SettingsScreen } from "./screens/Settings";
 import { LoginScreen } from "./screens/Login";
+import { Icon, IconName } from "./icons";
 
 type Tab = "sessions" | "inbox" | "board" | "proposals" | "schedules" | "usage" | "settings";
 
@@ -33,14 +34,14 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
-const TABS: { id: Tab; label: string; glyph: string }[] = [
-  { id: "sessions", label: "Bots", glyph: "◉" },
-  { id: "inbox", label: "Inbox", glyph: "▣" },
-  { id: "board", label: "Board", glyph: "☰" },
-  { id: "proposals", label: "Changes", glyph: "⑂" },
-  { id: "schedules", label: "Cron", glyph: "◷" },
-  { id: "usage", label: "Usage", glyph: "▤" },
-  { id: "settings", label: "Settings", glyph: "⚙" },
+const TABS: { id: Tab; label: string; icon: IconName }[] = [
+  { id: "sessions", label: "Bots", icon: "bots" },
+  { id: "inbox", label: "Inbox", icon: "inbox" },
+  { id: "board", label: "Board", icon: "board" },
+  { id: "proposals", label: "Changes", icon: "changes" },
+  { id: "schedules", label: "Cron", icon: "clock" },
+  { id: "usage", label: "Usage", icon: "chart" },
+  { id: "settings", label: "Settings", icon: "settings" },
 ];
 
 export function App() {
@@ -161,8 +162,8 @@ export function App() {
           <nav className="tabbar">
             {TABS.map((t) => (
               <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
-                <span className="glyph" style={{ position: "relative" }}>
-                  {t.glyph}
+                <span className="glyph">
+                  <Icon name={t.icon} size={22} />
                   {t.id === "inbox" && unread > 0 && <span className="tab-badge">{unread > 99 ? "99+" : unread}</span>}
                 </span>
                 {t.label}

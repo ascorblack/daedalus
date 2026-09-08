@@ -166,15 +166,21 @@ class SessionManager:
         self.run_started_hooks: list[Callable[[str, str], Awaitable[None]]] = []
         """``(session_id, run_id)`` after a run was actually created — the point where a prompt hook's side effects may be committed."""
         self.shutting_down = False
+        self.recovering = True
+        """True from construction until boot recovery has decided the fate of every run the previous process left behind."""
         self.budget_flag = settings.state_dir / "BUDGET_EXCEEDED"
         self._capped_runs: set[str] = set()
         """Runs already stopped at the per-run cap (the stop is cooperative; the notice fires once)."""
 
     # -- lifecycle ------------------------------------------------------------------
 
-    async def start(self) -> None:
+    async def start(self, *, recovering: bool | None = None) -> None:
+        """Open the stores; ``recovering`` (default: whether a previous process left runs behind) gates new runs until resume_unfinished()."""
         await self.memory.load()
         await self.workspace_units.load()
+        # New runs wait until resume_unfinished() has continued what the previous process left behind;
+        # a process that finds nothing to resume (tests, a first start) opens the gate at once.
+        self.recovering = recovering if recovering is not None else bool(await self.events.unfinished_snapshots())
         for tool in discover_tools():
             self.tools.register(tool)
         for tool in build_memory_tools(self.memory):
@@ -494,7 +500,7 @@ class SessionManager:
     async def _maybe_auto_compact(self, state: SessionState) -> None:
         """After a run: when the last prompt filled ``compaction.auto_ratio`` of the window, compact before the next one."""
         cfg = self.config.compaction
-        if cfg.auto_ratio <= 0 or state.pending is not None:
+        if cfg.auto_ratio <= 0 or state.pending is not None or self.shutting_down:
             return
         status = await self.context_status(state)
         if not status["window"] or status["tokens"] < cfg.auto_ratio * status["window"] or status["messages"] < cfg.min_messages:
@@ -875,6 +881,10 @@ class SessionManager:
         state = await self.get_state(session_id)
         if state is None:
             raise KeyError(session_id)
+        if self.shutting_down:
+            raise RuntimeError("the bot is stopping; the run starts after the restart")
+        if self.recovering and not state.running:
+            raise RuntimeError("the bot is starting up and first continues the runs it left behind; try again in a moment")
         body, image_refs = await self._ingest_attachments(state, text, attachments)
         if state.pending is not None:
             if as_answer:
@@ -1274,6 +1284,8 @@ class SessionManager:
 
     async def _recover_from_overflow(self, state: SessionState) -> None:
         """A run the provider refused for size is not the end of the task: shrink the history and drive the turn again."""
+        if self.shutting_down:
+            return  # the interrupted run resumes after the restart; recovery would start a run into a closing process
         if state.overflow_streak >= 2:
             logger.warning("session %s: overflowed %d times in a row; not retrying", state.session.id, state.overflow_streak)
             return
@@ -1545,50 +1557,78 @@ class SessionManager:
         resumed: list[str] = []
         if self.budget_exceeded():
             logger.warning("budget exceeded; unfinished runs stay parked until the cap is lifted")
+            self.recovering = False
             return resumed
-        for entry in await self.events.unfinished_snapshots():
-            session_id = entry["session_id"] or entry["snapshot"].get("session_id")
-            state = await self.get_state(session_id)
-            if state is None:
-                await self.events.delete_snapshot(entry["run_id"])
-                continue
-            try:
-                engine = await self._build_engine(state, entry["run_id"])
-                await engine.resume_from_snapshot(entry["snapshot"])
-            except Exception:  # noqa: BLE001
-                logger.exception("could not resume run %s", entry["run_id"])
-                await self.events.delete_snapshot(entry["run_id"])
-                continue
-            state.engine = engine
-            state.run_id = entry["run_id"]
-            state.history_keys = [self.sessions.transcript_key(m) for m in engine.history]
-            if engine.state is LoopState.AWAITING:
-                row = await self.db.fetchone("SELECT * FROM pending_questions WHERE session_id = ?", (session_id,))
-                if row is None:
+        try:
+            seen: set[str] = set()
+            for entry in await self.events.unfinished_snapshots():  # newest first
+                session_id = str(entry["session_id"] or entry["snapshot"].get("session_id") or "")
+                if session_id in seen:
+                    # An older snapshot of a session whose newer run is resumed: a leftover, not a second run.
                     await self.events.delete_snapshot(entry["run_id"])
                     continue
-                state.pending = PendingQuestion(
-                    session_id=session_id,
-                    run_id=row["run_id"],
-                    tool_call_id=row["tool_call_id"],
-                    kind=row["kind"],
-                    payload=json.loads(row["payload"]),
-                )
-                for callback in self._pending_restored:
-                    try:
-                        await callback(session_id, state.pending)
-                    except Exception:  # noqa: BLE001
-                        logger.exception("pending-restored callback failed")
-                continue
-            if not engine.history:
-                await self.events.delete_snapshot(entry["run_id"])
-                continue
-            if engine.state is not LoopState.RUNNING:
-                engine.transition_to(LoopState.RUNNING)
-            state.task = asyncio.create_task(self._drive(state, engine, None, True), name=f"resume:{entry['run_id']}")
-            state.task.add_done_callback(_log_task_failure)
-            resumed.append(entry["run_id"])
+                seen.add(session_id)
+                await self._resume_one(entry, resumed)
+            await self._settle_stale_runs(resumed)
+        finally:
+            self.recovering = False
         return resumed
+
+    async def _settle_stale_runs(self, resumed: list[str]) -> None:
+        """A run row still 'running' that nobody drives is a leftover of the previous process: closed as cancelled."""
+        active = set(resumed) | self.running_run_ids()
+        rows = await self.db.fetchall("SELECT id FROM runs WHERE status = ?", (RunStatus.running.value,))
+        for row in rows:
+            if row["id"] in active:
+                continue
+            await self.runs.update_status(row["id"], TENANT, RunStatus.cancelled)
+            await self.events.delete_snapshot(row["id"])
+            logger.warning("run %s was left running by the previous process and could not be resumed; closed as cancelled", row["id"])
+
+    async def _resume_one(self, entry: dict[str, Any], resumed: list[str]) -> None:
+        session_id = entry["session_id"] or entry["snapshot"].get("session_id")
+        state = await self.get_state(session_id)
+        if state is None:
+            await self.events.delete_snapshot(entry["run_id"])
+            return
+        if state.running:
+            return  # something in this process already drives the session; its own run owns the snapshot
+        try:
+            engine = await self._build_engine(state, entry["run_id"])
+            await engine.resume_from_snapshot(entry["snapshot"])
+        except Exception:  # noqa: BLE001
+            logger.exception("could not resume run %s", entry["run_id"])
+            await self.events.delete_snapshot(entry["run_id"])
+            return
+        state.engine = engine
+        state.run_id = entry["run_id"]
+        state.history_keys = [self.sessions.transcript_key(m) for m in engine.history]
+        if engine.state is LoopState.AWAITING:
+            row = await self.db.fetchone("SELECT * FROM pending_questions WHERE session_id = ?", (session_id,))
+            if row is None:
+                await self.events.delete_snapshot(entry["run_id"])
+                return
+            state.pending = PendingQuestion(
+                session_id=session_id,
+                run_id=row["run_id"],
+                tool_call_id=row["tool_call_id"],
+                kind=row["kind"],
+                payload=json.loads(row["payload"]),
+            )
+            for callback in self._pending_restored:
+                try:
+                    await callback(session_id, state.pending)
+                except Exception:  # noqa: BLE001
+                    logger.exception("pending-restored callback failed")
+            return
+        if not engine.history:
+            await self.events.delete_snapshot(entry["run_id"])
+            return
+        if engine.state is not LoopState.RUNNING:
+            engine.transition_to(LoopState.RUNNING)
+        state.task = asyncio.create_task(self._drive(state, engine, None, True), name=f"resume:{entry['run_id']}")
+        state.task.add_done_callback(_log_task_failure)
+        resumed.append(entry["run_id"])
 
 
 SUMMARY_SECTIONS = ("Goal", "Constraints", "State", "Discoveries", "Open", "Next steps", "Unknowns", "Identifiers")

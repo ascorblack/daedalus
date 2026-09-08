@@ -495,8 +495,8 @@ class SqliteEventStream(IEventStream):
 
     async def unfinished_snapshots(self) -> list[dict[str, Any]]:
         rows = await self._db.fetchall(
-            "SELECT run_id, session_id, state, snapshot FROM snapshots"
-            " WHERE state IN ('running', 'compacting', 'pending', 'awaiting')"
+            "SELECT run_id, session_id, state, snapshot, updated_at FROM snapshots"
+            " WHERE state IN ('running', 'compacting', 'pending', 'awaiting') ORDER BY updated_at DESC"
         )
         return [
             {
@@ -504,6 +504,7 @@ class SqliteEventStream(IEventStream):
                 "session_id": r["session_id"],
                 "state": r["state"],
                 "snapshot": json.loads(r["snapshot"]),
+                "updated_at": r["updated_at"],
             }
             for r in rows
         ]
