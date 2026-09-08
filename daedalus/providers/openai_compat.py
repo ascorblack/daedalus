@@ -351,7 +351,8 @@ class OpenAICompatibleProvider(ILLMProvider):
         return self.endpoint.base_url.rstrip("/") + path
 
     def _headers(self) -> dict[str, str]:
-        headers = {"content-type": "application/json", **self.endpoint.extra_headers}
+        # The key proxy meters calls that do not carry this mark (a shell's curl); the bot records its own.
+        headers = {"content-type": "application/json", "x-daedalus-metered": "1", **self.endpoint.extra_headers}
         if self.endpoint.api_key:
             headers["authorization"] = f"Bearer {self.endpoint.api_key}"
         return headers

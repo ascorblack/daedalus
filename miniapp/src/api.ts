@@ -97,6 +97,8 @@ export type SessionSummary = {
   metadata?: { subagent_of?: string; subagent_name?: string; [k: string]: unknown };
 };
 
+export type ToolInfo = { name: string; description: string; group: string };
+
 export type SubagentView = { session_id: string; name: string | null; running: boolean; status: string; model: string };
 
 export type MessageView = {
@@ -126,6 +128,7 @@ export type SessionDetail = {
   usd_cap?: number | null;
   brief?: string;
   spawned_by?: string | null;
+  tools_off?: string[];
   subagent_of?: string | null;
   subagent_name?: string | null;
   leader_title?: string | null;

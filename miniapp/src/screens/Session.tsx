@@ -1,7 +1,7 @@
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { api, SlashCommand, MessageView, Question, SessionDetail } from "../api";
-import { Status, fmtInt, fmtUsd } from "../components";
+import { Status, ToolPicker, fmtInt, fmtUsd } from "../components";
 import { codeBlock, renderMarkdown } from "../md";
 import { confirmAsync, enterSends, errorText, fmtTok, haptic } from "../ui";
 
@@ -554,6 +554,19 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                   {detail.context.window > 0 && ` / ${detail.context.window.toLocaleString()} tokens (${Math.round((100 * detail.context.tokens) / detail.context.window)}%)`} · {detail.context.messages} messages in the working history: {detail.context.summaries} summaries, {detail.context.operator_turns} yours. The header's ↑↓ figures are lifetime totals.
                 </div>
               )}
+              <label className="field">Tools</label>
+              <ToolPicker
+                off={detail.tools_off ?? []}
+                note="Applies from the agent's next step."
+                onChange={async (off) => {
+                  try {
+                    await api.post(`/api/sessions/${id}/tools`, { tools_off: off });
+                    load(true);
+                  } catch (e) {
+                    toast(errorText(e));
+                  }
+                }}
+              />
               <label className="field">Brief (standing instructions in this session's system prompt{detail.spawned_by ? `; set by session ${detail.spawned_by}` : ""})</label>
               <textarea
                 className="field"

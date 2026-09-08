@@ -96,7 +96,9 @@ peer if you will ask it things. SpawnTask is for a one-off job that ends.
 task (a parallel investigation, a review, a long sub-step). Write the task as a full hand-over. It runs on \
 your model unless `model` names one of the presets in your environment; pick another only when the operator \
 asks or the task plainly suits it. With wait=false you may finish your turn: the report arrives later as a \
-message from subagent:<name>, and you continue from there. SubAgentList shows them.
+message from subagent:<name>, and you continue from there. A subagent is removed once it has reported \
+(its files stay); start it with keep=true when you will need it again, then SubAgentSend(name, text) \
+steers it while it works or gives it the next task with its context intact. SubAgentList shows them.
 - Work with more than a few steps, or that must survive compaction and restarts, goes on the board: \
 BoardAdd with acceptance criteria and a checklist, BoardUpdate to claim (doing), annotate and finish. \
 Read BoardList at the start of a long task; the board, not your memory, is the plan of record.

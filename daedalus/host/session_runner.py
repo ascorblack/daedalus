@@ -291,7 +291,7 @@ class SessionManager:
         state.session.metadata["mcp_enabled"] = current
         await self.sessions.update_metadata(session_id, state.session.metadata)
         if state.engine is not None:
-            blocked = blocked_for(self.mcp, current)
+            blocked = blocked_for(self.mcp, current) | self.tools_off(state)
             state.engine.config = replace(
                 state.engine.config,
                 tool_visibility_policy=ToolVisibilityPolicy(
@@ -1092,7 +1092,7 @@ class SessionManager:
             context_window=state.context_window or preset.context_window,
             max_output_tokens=preset.max_output_tokens,
             extra_notes=self.notes_for(state),
-            blocked_tools=blocked_for(self.mcp, enabled),
+            blocked_tools=blocked_for(self.mcp, enabled) | self.tools_off(state),
         )
         self._attach_hooks(engine, state)
         return engine
@@ -1378,6 +1378,29 @@ class SessionManager:
         summaries = sum(1 for m in history if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY))
         operator = sum(1 for m in history if m.role is MessageRole.user and m.metadata.get("daedalus.origin") not in (None, "core") and not m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY))
         return {"tokens": tokens, "window": window, "messages": len(history), "summaries": summaries, "operator_turns": operator}
+
+    def tools_off(self, state: SessionState) -> set[str]:
+        """Tools the operator switched off for this session (``metadata["tools_off"]``); unknown names are ignored."""
+        known = {t.name for t in self.tools.list_all()}
+        return {str(n) for n in (state.metadata.get("tools_off") or ()) if str(n) in known}
+
+    async def set_tools_off(self, session_id: str, names: list[str]) -> list[str]:
+        """Switch tools off (or back on, by omission) for a session; applies from the next model call."""
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        known = {t.name for t in self.tools.list_all()}
+        chosen = sorted({str(n) for n in names if str(n) in known})
+        for meta in (state.metadata, state.session.metadata):
+            if chosen:
+                meta["tools_off"] = chosen
+            else:
+                meta.pop("tools_off", None)
+        await self.sessions.update_metadata(session_id, state.session.metadata)
+        if state.engine is not None:
+            blocked = blocked_for(self.mcp, self.mcp_enabled(state)) | set(chosen)
+            state.engine.config = replace(state.engine.config, tool_visibility_policy=ToolVisibilityPolicy(pinned=known - blocked, blocked=blocked))
+        return chosen
 
     def notes_for(self, state: SessionState) -> str:
         """What the system prompt says about this session beyond the environment: the brief it was created with."""

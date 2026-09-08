@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -73,6 +74,17 @@ async def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config
     return argv + ["bash", "-lc", command], True
 
 
+_SECRET_ENV = re.compile(r"^(TELEGRAM_BOT_TOKEN|TELEGRAM_API_HASH|TELEGRAM_API_ID|KEYPROXY_.*|.*_API_KEY|.*_SECRET|.*_PASSWORD)$")
+
+
+def shell_environment(session_id: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment a tool's subprocess gets: the bot's own credentials stay out; git's token stays in."""
+    env = {k: v for k, v in os.environ.items() if not _SECRET_ENV.match(k)}
+    env.update(extra or {})
+    env["DAEDALUS_SESSION_ID"] = session_id
+    return env
+
+
 @tool(
     name="Exec",
     description=(
@@ -95,7 +107,7 @@ async def exec_command(
     if not workdir.exists():
         return error(context, f"working directory does not exist: {workdir}")
     limit = float(timeout_seconds or services.tool_timeout_seconds)
-    environment = {**os.environ, **(env or {}), "DAEDALUS_SESSION_ID": context.session_id}
+    environment = shell_environment(context.session_id, env)
     started = time.monotonic()
     argv, sandboxed = await sandbox_argv(command, workdir, services.workspace_dir, tool_config(context).exec)
     proc = await asyncio.create_subprocess_exec(

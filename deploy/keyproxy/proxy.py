@@ -64,6 +64,12 @@ HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "kee
 DROP_RESPONSE_HEADERS = {"content-length", "transfer-encoding", "connection", "content-encoding"}
 """The body is streamed decoded, so the upstream's framing and encoding headers no longer describe it."""
 _spend_cache: tuple[float, float] = (0.0, 0.0)
+_token_cache: tuple[float, str] = (0.0, "")
+METERED_HEADER = "x-daedalus-metered"
+"""The bot marks its own calls: it records their usage itself. A call without the mark (a shell's curl) is metered here."""
+AGENT_API = os.environ.get("KEYPROXY_AGENT_API", "").rstrip("/")
+COMPLETION_TAILS = (("chat", "completions"), ("completions",), ("responses",), ("messages",))
+CAPTURE_LIMIT = 8 * 1024 * 1024
 CODEX_AUTH = CodexAuth(Path(os.environ.get("KEYPROXY_CODEX_AUTH", os.path.expanduser("~/.codex/auth.json"))))
 GROK_AUTH = GrokAuth(Path(os.environ.get("KEYPROXY_GROK_AUTH", os.path.expanduser("~/.grok/auth.json"))))
 """The operator's subscriptions: served as ``/codex/v1/...`` and ``/grok/v1/...`` with the CLIs' own logins."""
@@ -104,6 +110,94 @@ def spent_today() -> float:
             logger.warning("spend query failed: %s", exc)
     _spend_cache = (time.monotonic(), value)
     return value
+
+
+def agent_api_token() -> str:
+    """The bot's API token, read from its database (read-only) so a metered call can be reported back."""
+    global _token_cache
+    at, value = _token_cache
+    if value and time.monotonic() - at < 300:
+        return value
+    if BUDGET_DB.exists():
+        try:
+            conn = sqlite3.connect(f"file:{BUDGET_DB}?mode=ro", uri=True, timeout=2.0)
+            try:
+                row = conn.execute("SELECT value FROM kv WHERE key = 'api_token'").fetchone()
+            finally:
+                conn.close()
+            value = str(json.loads(row[0])) if row else ""
+        except (sqlite3.Error, ValueError) as exc:
+            logger.warning("api token read failed: %s", exc)
+    _token_cache = (time.monotonic(), value)
+    return value
+
+
+def is_completion(rest: str) -> bool:
+    segments = tuple(s for s in rest.strip("/").split("/") if s)
+    if segments and segments[0] == "v1":
+        segments = segments[1:]
+    return any(segments[-len(tail):] == tail for tail in COMPLETION_TAILS if len(segments) >= len(tail))
+
+
+def parse_usage(body: bytes, content_type: str) -> tuple[str, dict[str, int]] | None:
+    """``(model, tokens)`` from a completion response, streamed or not; None when it carries no usage."""
+    candidates: list[dict[str, Any]] = []
+    if "text/event-stream" in content_type:
+        for line in body.decode("utf-8", "replace").splitlines():
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                candidates.append(json.loads(payload))
+            except ValueError:
+                continue
+    else:
+        try:
+            candidates.append(json.loads(body))
+        except ValueError:
+            return None
+    model = ""
+    usage: dict[str, Any] | None = None
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        inner = item.get("response") if isinstance(item.get("response"), dict) else item  # Responses API wraps the final object
+        model = inner.get("model") or model
+        if isinstance(inner.get("usage"), dict):
+            usage = inner["usage"]
+    if usage is None:
+        return None
+    details_in = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+    details_out = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
+    tokens = {
+        "input_tokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
+        "cache_read_tokens": int(usage.get("prompt_cache_hit_tokens") or usage.get("cache_read_input_tokens") or (details_in.get("cached_tokens") if isinstance(details_in, dict) else 0) or 0),
+        "reasoning_tokens": int((details_out.get("reasoning_tokens") if isinstance(details_out, dict) else 0) or 0),
+    }
+    return model, tokens
+
+
+async def report_direct_usage(client: httpx.AsyncClient, provider_id: str, request_model: str, body: bytes, content_type: str, started: float) -> None:
+    """Tell the bot about a metered call so its spend counters and caps see it."""
+    parsed = parse_usage(body, content_type)
+    if parsed is None:
+        logger.warning("direct call to %s carried no usage; not recorded", provider_id)
+        return
+    model, tokens = parsed
+    token = agent_api_token()
+    if not token:
+        logger.warning("direct call to %s not recorded: no api token", provider_id)
+        return
+    payload = {"provider_id": provider_id, "model": model or request_model, **tokens, "duration_ms": int((time.monotonic() - started) * 1000)}
+    try:
+        response = await client.post(f"{AGENT_API}/api/usage/direct", json=payload, headers={"x-daedalus-token": token}, timeout=10.0)
+        if response.status_code >= 300:
+            logger.warning("direct usage not recorded: HTTP %s %s", response.status_code, response.text[:200])
+    except httpx.HTTPError as exc:
+        logger.warning("direct usage not recorded: %s", type(exc).__name__)
 
 
 def budget_exceeded() -> bool:
@@ -249,6 +343,15 @@ async def handle(request: web.Request) -> web.StreamResponse:
         if key:
             headers["authorization"] = f"Bearer {key}"
     body = await request.read()
+    meter = bool(AGENT_API) and METERED_HEADER not in request.headers and request.method == "POST" and is_completion(rest)
+    request_model = ""
+    if meter:
+        try:
+            request_model = str(json.loads(body).get("model") or "")
+        except (ValueError, AttributeError):
+            request_model = ""
+    started = time.monotonic()
+    captured = bytearray()
     try:
         upstream = client.build_request(request.method, target_url(base, rest, request.query_string), headers=headers, content=body)
         response = await client.send(upstream, stream=True)
@@ -262,12 +365,16 @@ async def handle(request: web.Request) -> web.StreamResponse:
     try:
         # aiter_bytes() decodes gzip/br on the way through; aiter_raw() would hand the client compressed bytes with the header gone.
         async for chunk in response.aiter_bytes():
+            if meter and len(captured) < CAPTURE_LIMIT:
+                captured.extend(chunk)
             await out.write(chunk)
         await out.write_eof()
     except (ConnectionResetError, asyncio.CancelledError):
         pass  # the caller went away mid-stream
     finally:
         await response.aclose()
+    if meter and response.status_code < 300:
+        asyncio.create_task(report_direct_usage(client, name, request_model, bytes(captured), response.headers.get("content-type", ""), started))
     return out
 
 

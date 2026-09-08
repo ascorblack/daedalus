@@ -377,3 +377,15 @@ input.field, select.field, textarea.field {
   .chat-head, .chat-scroll, .composer { padding-left: 40px; padding-right: 40px; }
   .app > .screen, .app > .topbar { padding-left: 40px; padding-right: 40px; }
 }
+
+/* tool picker */
+.toolpicker { margin: 8px 0; }
+.toolpicker-head { background: none; border: 1px solid var(--line); border-radius: 10px; color: var(--fg); padding: 9px 12px; font: inherit; font-size: 14px; cursor: pointer; width: 100%; text-align: left; display: flex; align-items: center; gap: 6px; min-height: 40px; }
+.toolpicker-head .chev { color: var(--muted); display: inline-block; transition: transform .15s; }
+.toolpicker-head .chev.down { transform: rotate(90deg); }
+.toolpicker-body { border: 1px solid var(--line); border-top: 0; border-radius: 0 0 10px 10px; padding: 8px 12px 4px; max-height: 46vh; overflow-y: auto; }
+.toolgroup { margin-bottom: 8px; }
+.toolrow { display: grid; grid-template-columns: auto minmax(0, max-content) minmax(0, 1fr); align-items: center; gap: 8px; padding: 6px 0; min-height: 36px; font-size: 14px; cursor: pointer; }
+.toolrow.head { font-weight: 600; border-bottom: 1px solid var(--line); }
+.toolrow input { width: 18px; height: 18px; margin: 0; accent-color: var(--info); }
+.toolrow .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

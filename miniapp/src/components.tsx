@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { api, ToolInfo } from "./api";
 
 export type Status = "idle" | "running" | "waiting" | "failed" | "done";
 
@@ -30,6 +31,53 @@ export function useToast(): [string | null, (t: string) => void] {
     return () => clearTimeout(id);
   }, [toast]);
   return [toast, setToast];
+}
+
+/** Checkboxes for the host tools, grouped, all on by default; collapsed until the operator opens it. */
+export function ToolPicker({ off, onChange, note }: { off: string[]; onChange: (off: string[]) => void; note?: string }) {
+  const [tools, setTools] = useState<ToolInfo[] | null>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open || tools !== null) return;
+    api.get<ToolInfo[]>("/api/tools").then(setTools).catch(() => setTools([]));
+  }, [open, tools]);
+  const offSet = new Set(off);
+  const groups = new Map<string, ToolInfo[]>();
+  for (const t of tools ?? []) groups.set(t.group, [...(groups.get(t.group) ?? []), t]);
+  const toggle = (name: string) => onChange(offSet.has(name) ? off.filter((n) => n !== name) : [...off, name]);
+  const toggleGroup = (items: ToolInfo[]) => {
+    const allOn = items.every((t) => !offSet.has(t.name));
+    const names = items.map((t) => t.name);
+    onChange(allOn ? [...off, ...names.filter((n) => !offSet.has(n))] : off.filter((n) => !names.includes(n)));
+  };
+  return (
+    <div className="toolpicker">
+      <button type="button" className="toolpicker-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <span className={`chev ${open ? "down" : ""}`}>›</span> Tools{off.length ? ` · ${off.length} off` : " · all on"}
+      </button>
+      {open && tools === null && <div className="sub">Loading…</div>}
+      {open && tools !== null && (
+        <div className="toolpicker-body">
+          {note && <div className="sub" style={{ marginBottom: 6 }}>{note}</div>}
+          {[...groups.entries()].map(([group, items]) => (
+            <div key={group} className="toolgroup">
+              <label className="toolrow head">
+                <input type="checkbox" checked={items.every((t) => !offSet.has(t.name))} ref={(el) => { if (el) el.indeterminate = items.some((t) => offSet.has(t.name)) && !items.every((t) => offSet.has(t.name)); }} onChange={() => toggleGroup(items)} />
+                <span>{group}</span>
+              </label>
+              {items.map((t) => (
+                <label key={t.name} className="toolrow" title={t.description}>
+                  <input type="checkbox" checked={!offSet.has(t.name)} onChange={() => toggle(t.name)} />
+                  <span className="mono">{t.name}</span>
+                  <span className="sub">{t.description}</span>
+                </label>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function timeAgo(iso: string | null | undefined): string {

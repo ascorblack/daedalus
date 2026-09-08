@@ -84,6 +84,7 @@ services:
       KEYPROXY_PORT: "3200"
       KEYPROXY_BUDGET_FLAG: /srv/state/BUDGET_EXCEEDED
       KEYPROXY_BUDGET_DB: /srv/state/daedalus.sqlite
+      KEYPROXY_AGENT_API: http://daedalus:${API_PORT:-8765}
       KEYPROXY_CODEX_AUTH: /home/keyproxy/.codex/auth.json
       KEYPROXY_GROK_AUTH: /home/keyproxy/.grok/auth.json
     volumes:

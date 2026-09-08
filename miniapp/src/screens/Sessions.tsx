@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, SessionSummary } from "../api";
-import { Avatar, Pill, Status, timeAgo } from "../components";
+import { Avatar, Pill, Status, ToolPicker, timeAgo } from "../components";
 
 export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void; toast: (t: string) => void }) {
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [toolsOff, setToolsOff] = useState<string[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -25,10 +26,11 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
   async function create() {
     if (!title.trim()) return;
     try {
-      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined });
+      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff });
       setCreating(false);
       setTitle("");
       setPrompt("");
+      setToolsOff([]);
       onOpen(created.id);
     } catch (e) {
       toast((e as Error).message);
@@ -69,6 +71,7 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
           <input className="field" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="what is this session about" />
           <label className="field">First task (optional)</label>
           <textarea className="field" rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+          <ToolPicker off={toolsOff} onChange={setToolsOff} note="Untick what this agent must not have (self-development, spawning agents, the shell…). Everything is on by default." />
           <div className="btnrow">
             <button className="btn primary" onClick={create} disabled={!title.trim()}>
               Create

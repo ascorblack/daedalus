@@ -19,7 +19,7 @@ from protocore.tools.decorator import tool
 
 from daedalus.security import redact
 from daedalus.tools._common import clip, error, ok, services_for, tool_config
-from daedalus.tools.shell import sandbox_argv
+from daedalus.tools.shell import sandbox_argv, shell_environment
 
 OUTPUT_HEAD_CHARS = 2000
 
@@ -47,7 +47,7 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
     argv, sandboxed = await sandbox_argv("set -o pipefail\n" + command, workdir, services.workspace_dir, tool_config(context).exec)
     proc = await asyncio.create_subprocess_exec(
         *argv, cwd=str(workdir), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env={**os.environ, "DAEDALUS_SESSION_ID": context.session_id}, start_new_session=True,
+        env=shell_environment(context.session_id), start_new_session=True,
     )
     chunks: list[bytes] = []
 

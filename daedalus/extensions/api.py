@@ -39,6 +39,7 @@ from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import Attachment
+from daedalus.providers.openai_compat import UsageRecord
 from daedalus.security import redact
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
@@ -83,6 +84,12 @@ class AnswerBody(BaseModel):
 class NewSessionBody(BaseModel):
     title: str
     prompt: str | None = None
+    tools_off: list[str] = Field(default_factory=list)
+    """Tools this session does not get (by name); everything else stays on."""
+
+
+class ToolsOffBody(BaseModel):
+    tools_off: list[str] = Field(default_factory=list)
 
 
 class DecisionBody(BaseModel):
@@ -452,6 +459,24 @@ def message_view(message: Message) -> dict[str, Any]:
     }
 
 
+_TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Self-development", ("Self", "LearningReport")),
+    ("Agents & peers", ("SubAgent", "SpawnAgent", "SpawnTask", "AskPeer", "PeerList", "Delegate")),
+    ("Scheduling & board", ("Schedule", "Board", "Intent", "StaySilent")),
+    ("MCP", ("Mcp",)),
+    ("Memory & history", ("Remember", "Recall", "Forget", "History", "Skill")),
+    ("Web", ("Web",)),
+    ("Files & shell", ("Exec", "Read", "Write", "Edit", "Find", "Search", "SendFile", "ImageView", "Verify")),
+)
+
+
+def _tool_group(name: str) -> str:
+    for group, prefixes in _TOOL_GROUPS:
+        if any(name.startswith(p) for p in prefixes):
+            return group
+    return "Other"
+
+
 def build_app(app: Application, api_token: str) -> FastAPI:
     api = FastAPI(title="Daedalus", docs_url=None, redoc_url=None)
     manager = app.manager
@@ -485,15 +510,16 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/sessions")
     async def new_session(body: NewSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         front = app.front
+        metadata = {"tools_off": sorted(set(body.tools_off))} if body.tools_off else None
         if front is not None:
             try:
-                state, _binding = await front.create_session_topic(body.title)
+                state, _binding = await front.create_session_topic(body.title, metadata=metadata)
             except TelegramBusy as exc:
                 raise HTTPException(429, f"Telegram asks to wait {exc.retry_after}s before creating another topic (session {exc.session_id} exists without a topic)") from exc
             except TelegramRefused as exc:
                 raise HTTPException(502, f"Telegram refused to create the topic: {exc}") from exc
         else:
-            state = await manager.create_session(body.title)
+            state = await manager.create_session(body.title, metadata=metadata)
         if body.prompt:
             await manager.submit(state.session.id, body.prompt)
         return {"id": state.session.id, "title": body.title}
@@ -537,6 +563,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "usd_cap": state.metadata.get("usd_cap"),
             "brief": state.metadata.get("brief") or "",
             "spawned_by": state.metadata.get("spawned_by"),
+            "tools_off": sorted(manager.tools_off(state)),
             "subagent_of": state.metadata.get("subagent_of"),
             "subagent_name": state.metadata.get("subagent_name"),
             "leader_title": leader.session.title if leader is not None else None,
@@ -715,6 +742,24 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         spent, _ = await manager.spend(session_id=session_id)
         return {"usd_cap": cap, "spent_usd": round(spent, 4)}
+
+    @api.get("/api/tools")
+    async def list_tools(_: dict[str, Any] = Depends(auth)) -> list[dict[str, str]]:
+        """Every host tool with a one-line description and a group, for the tool checkboxes."""
+        out = []
+        for t in sorted(manager.tools.list_all(), key=lambda t: t.name):
+            if t.name.startswith("Mcp_"):
+                continue  # MCP tools come and go with their servers; they are switched per server
+            desc = " ".join((t.definition.description or "").split())
+            out.append({"name": t.name, "description": desc[:160], "group": _tool_group(t.name)})
+        return out
+
+    @api.post("/api/sessions/{session_id}/tools")
+    async def set_session_tools(session_id: str, body: ToolsOffBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            return {"tools_off": await manager.set_tools_off(session_id, body.tools_off)}
+        except KeyError as exc:
+            raise HTTPException(404, "no such session") from exc
 
     @api.post("/api/sessions/{session_id}/brief")
     async def set_brief(session_id: str, body: BriefBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -988,6 +1033,25 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         )
 
     # -- usage / balance / status ---------------------------------------------------
+
+    @api.post("/api/usage/direct")
+    async def record_direct_usage(body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """A model call that bypassed the bot (curl against the key proxy) is booked like any other, at the provider's prices."""
+        provider_id = str(body.get("provider_id") or "")
+        model = str(body.get("model") or "")
+        if not provider_id or not model:
+            raise HTTPException(422, "provider_id and model are required")
+        tokens = {k: int(body.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_read_tokens", "reasoning_tokens")}
+        cost: float | None = None
+        try:
+            pricing = manager.providers.get(provider_id).endpoint.pricing_for(model)
+            cost = pricing.cost(tokens) if pricing is not None else None
+        except KeyError:
+            cost = None
+        await manager.usage.record(
+            UsageRecord(provider_id=provider_id, model=model, purpose="direct", raw=dict(body), normalized={**tokens, "cost_usd": cost}, cost_usd=cost, duration_ms=int(body.get("duration_ms") or 0), run_id=None, session_id=None)
+        )
+        return {"recorded": True, "cost_usd": cost}
 
     @api.get("/api/usage")
     async def usage(days: int = 7, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

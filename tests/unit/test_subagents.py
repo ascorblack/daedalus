@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -92,3 +93,46 @@ async def test_subagent_model_choice_depth_and_limits(app: Any) -> None:
         await subs.spawn(leader_id=child.session.id, task="deeper")
     with pytest.raises(ValueError, match="empty"):
         await subs.spawn(leader_id=leader.session.id, task="   ")
+
+
+async def test_subagent_is_removed_after_reporting_unless_kept(app: Any) -> None:
+
+    manager: SessionManager = app.manager
+    subs = Subagents(app)
+    leader = await manager.create_session("lead")
+    submitted = _capture(manager)
+    gone = await subs.spawn(leader_id=leader.session.id, task="one-off", name="tmp")
+    kept = await subs.spawn(leader_id=leader.session.id, task="stay", name="helper", keep=True)
+    (leader.workspace / "shared.txt").write_text("keep me")
+    for sid in (gone["session_id"], kept["session_id"]):
+        await manager.sessions.append_transcript(sid, [Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="done")])])
+        await subs.on_run_finished(sid, "r", "completed")
+    await asyncio.gather(*subs._removals)
+    assert await manager.get_state(gone["session_id"]) is None
+    assert await manager.get_state(kept["session_id"]) is not None
+    assert (leader.workspace / "shared.txt").read_text() == "keep me"
+    reports = [t for _, t, o in submitted if o.startswith("subagent:")]
+    assert any("has been removed" in t for t in reports) and any("SubAgentSend('helper'" in t for t in reports)
+
+
+async def test_subagent_send_steers_a_running_one_and_restarts_a_kept_one(app: Any) -> None:
+    manager: SessionManager = app.manager
+    subs = Subagents(app)
+    leader = await manager.create_session("lead")
+    submitted = _capture(manager)
+    kept = await subs.spawn(leader_id=leader.session.id, task="stay", name="helper", keep=True)
+    twin = await subs.spawn(leader_id=leader.session.id, task="stay", name="helper", keep=True)
+    assert twin["name"] == "helper-2"
+    with pytest.raises(ValueError, match="no subagent named"):
+        await subs.send(leader_id=leader.session.id, name="nobody", text="hi")
+    result = await subs.send(leader_id=leader.session.id, name="helper", text="next task")
+    assert result["delivered"] == "run" and submitted[-1][0] == kept["session_id"] and "next task" in submitted[-1][1]
+    state = await manager.get_state(kept["session_id"])
+    assert state is not None
+    state.task = asyncio.get_running_loop().create_future()  # type: ignore[assignment]  # looks like a run in flight
+    try:
+        result = await subs.send(leader_id=leader.session.id, name="helper", text="also this")
+        assert result["delivered"] == "steer"
+    finally:
+        state.task.cancel()  # type: ignore[union-attr]
+        state.task = None
