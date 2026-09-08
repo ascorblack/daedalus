@@ -23,10 +23,10 @@ async def load_skill(context: ToolContext, skill: str) -> ToolResult:
     if store is None:
         return error(context, "skills are not available in this session")
     try:
-        bundle = await store.load(context.account_id or context.tenant_id, skill)
+        bundle = await store.load(context.tenant_id, skill)
     except (SkillNotFoundError, KeyError):
         return error(context, f"no skill named {skill!r}")
-    files = await store.list_files(context.account_id or context.tenant_id, bundle.manifest.id)
+    files = await store.list_files(context.tenant_id, bundle.manifest.id)
     listing = "\n".join(f"- {f.path} ({f.size_bytes} bytes)" for f in files if f.path != "SKILL.md")
     text = f"# Skill: {bundle.manifest.name}\n{bundle.manifest.description}\n\n{bundle.body}"
     if listing:

@@ -45,3 +45,20 @@ async def test_catalogue_keeps_descriptions_at_the_smallest_configured_window() 
 async def test_browser_and_canvas_skills_name_the_installed_tooling(skill: str) -> None:
     body = (SKILLS / skill / "SKILL.md").read_text(encoding="utf-8")
     assert "playwright" in body.lower() or "PIL" in body
+
+
+async def test_skill_tool_loads_a_skill_with_the_core_tool_context(tmp_path: Path) -> None:
+    """The core's ToolContext carries tenant_id, run_id and session_id only; the tool must not ask for more."""
+    from protocore.contracts.tools import ToolContext
+
+    from daedalus.host.services import SessionServices, locator
+    from daedalus.tools.skill import load_skill
+
+    locator.register(SessionServices(session_id="skill-test", workspace_dir=tmp_path, extra={"skill_store": DirectorySkillStore(SKILLS)}))
+    try:
+        result = await load_skill().invoke(ToolContext(tenant_id="t", run_id="r", session_id="skill-test", metadata={"tool_call_id": "c1"}), {"skill": "webapp-testing"})
+    finally:
+        locator.unregister("skill-test")
+    assert not result.is_error, result.content
+    assert "# Skill: webapp-testing" in result.content
+    assert f"{SKILLS}/webapp-testing/" in result.content and "scripts/with_server.py" in result.content
