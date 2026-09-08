@@ -32,10 +32,12 @@ OUTPUT_HEAD_CHARS = 2000
         "that back a statement such as 'tests pass' or 'the service answers': a receipt is what "
         "the operator sees on a change proposal, a sentence is not. Exit code 0 = verified. "
         "Pass dependencies to name the shared channels the observation rests on "
-        "(e.g. 'container shell + provider API'), so a reviewer can see what the receipt does not cover."
+        "(e.g. 'container shell + provider API'), so a reviewer can see what the receipt does not cover. "
+        "The receipt's time is the host clock; for time-sensitive claims, name the clock in dependencies."
     ),
 )
 async def verify(context: ToolContext, criterion: str, command: str, cwd: str | None = None, timeout_seconds: int | None = None, dependencies: str | None = None) -> ToolResult:
+    # The criterion must be checkable by reading the command: a reviewer seeing only the command must be able to tell what the criterion asserts.
     services = services_for(context)
     manager = services.extra.get("manager")
     workdir = services.resolve(cwd)
@@ -49,12 +51,25 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
         *argv, cwd=str(workdir), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         env=shell_environment(context.session_id), start_new_session=True,
     )
-    chunks: list[bytes] = []
+    # The head feeds two consumers: the OUTPUT_HEAD_CHARS-char DB field and the
+    # model-facing clip at services.max_tool_output_chars. Cap the in-memory
+    # head at the worst-case UTF-8 size of the larger (4 bytes/char), so a
+    # talkative grandchild that outlives the direct child cannot pump memory
+    # for the whole timeout window; the digest is streamed over the whole
+    # output regardless.
+    head_cap = max(OUTPUT_HEAD_CHARS, services.max_tool_output_chars) * 4
+    hasher = hashlib.sha256()
+    head = bytearray()
+    total_bytes = 0
 
     async def _pump() -> None:
+        nonlocal total_bytes
         assert proc.stdout is not None
         while chunk := await proc.stdout.read(4096):
-            chunks.append(chunk)
+            hasher.update(chunk)
+            total_bytes += len(chunk)
+            if len(head) < head_cap:
+                head.extend(chunk[: head_cap - len(head)])
 
     timed_out = False
     try:
@@ -64,17 +79,18 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
         timed_out = True
         try:
             os.killpg(proc.pid, 9)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         await proc.wait()  # a grandchild that escaped the group may still hold the pipe; the direct child is enough
-    raw_output = b"".join(chunks)
     exit_code = -1 if timed_out else int(proc.returncode or 0)
     passed = exit_code == 0
-    # Digest the raw bytes, not the decoded string: decode("replace") turns
-    # invalid UTF-8 into U+FFFD, and re-encoding that would make the receipt
-    # hash a lossy copy instead of what the process actually printed.
-    full_digest = hashlib.sha256(raw_output).hexdigest()
-    output = raw_output.decode("utf-8", "replace")
+    # Digest the raw bytes as they stream (the whole output), not the decoded
+    # string: decode("replace") turns invalid UTF-8 into U+FFFD, and re-encoding
+    # that would make the receipt hash a lossy copy instead of what the process
+    # actually printed.
+    full_digest = hasher.hexdigest()
+    truncated = total_bytes > len(head)
+    output = bytes(head).decode("utf-8", "replace")
     digest = full_digest[:16]
     at = datetime.now(UTC).isoformat()
     receipt_id = ""
@@ -93,7 +109,7 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
             )
             receipt_id = f"v{cursor.lastrowid}"
     deps = (dependencies or "").strip()
-    header = f"{'✅ verified' if passed else '❌ NOT verified'}: {criterion} — exit {exit_code}{' (timed out)' if timed_out else ''} · receipt {receipt_id or 'not recorded'} · digest {digest} · at {at}" + (f" · deps: {deps}" if deps else "") + (" · sandbox=workspace" if sandboxed else "")
+    header = f"{'✅ verified' if passed else '❌ NOT verified'}: {criterion} — exit {exit_code}{' (timed out)' if timed_out else ''} · receipt {receipt_id or 'not recorded'} · digest {digest} · at {at}" + (f" · output {total_bytes} B, first {len(head)} B kept" if truncated else "") + (f" · deps: {deps}" if deps else "") + (" · sandbox=workspace" if sandboxed else "")
     body = clip(output, services.max_tool_output_chars, note="write the output to a file for the rest")
     text = f"{header}\n{body}" if body.strip() else header
     return ok(context, text, receipt=receipt_id, passed=passed, exit_code=exit_code) if passed else error(context, text, receipt=receipt_id, passed=passed, exit_code=exit_code)

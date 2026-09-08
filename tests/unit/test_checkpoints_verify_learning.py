@@ -259,3 +259,35 @@ async def test_verify_receipt_records_time_and_dependencies(settings: Settings, 
     row2 = await db.fetchone("SELECT dependencies FROM verifications WHERE session_id = ? AND criterion = 'plain'", (state.session.id,))
     assert row2["dependencies"] == ""
     await manager.close()
+
+
+async def test_verify_large_output_streams_digest_and_caps_head(settings: Settings, db: Database) -> None:
+    """The digest must cover the whole output while the kept head is capped.
+
+    Output used to be collected into a list of chunks before hashing, so a
+    talkative grandchild that outlived the direct child could pump memory for
+    the whole timeout window. The digest now streams over the raw bytes and
+    only the first head_cap bytes are retained; the header says so.
+
+    This is a contract test (digest over the whole output, head capped, header
+    reports both) — it does not bound memory, since the cap is enforced in
+    _pump by construction.
+    """
+    import hashlib
+
+    from daedalus.tools.verify import OUTPUT_HEAD_CHARS
+
+    manager = await _manager(settings, db)
+    state = await manager.create_session("verify-big")
+    state.services.extra["manager"] = manager  # type: ignore[union-attr]
+    ctx = ToolContext(tenant_id="daedalus", run_id="r1", session_id=state.session.id)
+    size = 300 * 1024
+    result = await verify().invoke(ctx, {"criterion": "big output", "command": f"head -c {size} /dev/zero"})
+    assert not result.is_error
+    expected = hashlib.sha256(b"\x00" * size).hexdigest()
+    row = await db.fetchone("SELECT output_digest, output_head FROM verifications WHERE session_id = ?", (state.session.id,))
+    assert row["output_digest"] == expected
+    assert len(row["output_head"]) <= OUTPUT_HEAD_CHARS
+    head_cap = max(OUTPUT_HEAD_CHARS, state.services.max_tool_output_chars) * 4
+    assert f"output {size} B, first {min(size, head_cap)} B kept" in result.content
+    await manager.close()
