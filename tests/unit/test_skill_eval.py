@@ -9,8 +9,9 @@ NEC, BEN, INV, SEL = 0, 1, 2, 3
 
 
 def ok(exit_code: int = 0, artifact: object = None, invoked: bool = False, cost: float = 0.0, diff=(),
-       pre_state: bytes | None = None, post_state: bytes | None = None, cas_failed: bool = False) -> RunResult:
-    return RunResult(exit_code, artifact, invoked, cost, tuple(diff), pre_state, post_state, cas_failed)
+       pre_state: bytes | None = None, post_state: bytes | None = None, cas_failed: bool = False,
+       state_metered: bool = False) -> RunResult:
+    return RunResult(exit_code, artifact, invoked, cost, tuple(diff), pre_state, post_state, cas_failed, state_metered)
 
 
 class ScriptedRunner:
@@ -197,7 +198,7 @@ def _attr_table(pre_state: bytes | None, post_state: bytes | None, **kw) -> dict
     """passing_table with the P-with-skill run metering byte-level state."""
     table = passing_table()
     table[("P", True)] = ok(0, artifact="A", invoked=True, diff=("out/index.html",),
-                            pre_state=pre_state, post_state=post_state, **kw)
+                            pre_state=pre_state, post_state=post_state, state_metered=True, **kw)
     return table
 
 
@@ -262,8 +263,33 @@ def test_attribution_fails_when_frame_not_bytes() -> None:
     # State was metered but the artifact is not a byte frame: cannot verify.
     table = passing_table()
     table[("P", True)] = ok(0, artifact={"k": 1}, invoked=True, diff=("out/index.html",),
-                            pre_state=None, post_state=b"something")
+                            pre_state=None, post_state=b"something", state_metered=True)
     h = SkillEvalHarness(ScriptedRunner(table))
     rep = h.evaluate("P", "N1", "canary", declared_artifacts=["out/index.html"])
     assert rep.failed() == ["invariance"]
     assert "cannot form byte frame" in rep.outcomes[INV].detail
+
+
+def test_attribution_fails_on_empty_frame_replay() -> None:
+    # The remaining replay hole: the skill reads a pre-existing target and
+    # reports an empty artifact (frame b""). A plain append would be
+    # pre + b"" == pre, which matches post — the empty-frame guard fails it.
+    table = passing_table()
+    table[("P", True)] = ok(0, artifact="", invoked=True, diff=("out/index.html",),
+                            pre_state=b"A", post_state=b"A", state_metered=True)
+    h = SkillEvalHarness(ScriptedRunner(table))
+    rep = h.evaluate("P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert rep.failed() == ["invariance"]
+    assert "empty frame" in rep.outcomes[INV].detail
+
+
+def test_attribution_fails_on_metered_create_no_write() -> None:
+    # Metered run, target absent before and after, but an artifact was claimed:
+    # a failed create must not be skipped as unmetered.
+    table = passing_table()
+    table[("P", True)] = ok(0, artifact="A", invoked=True, diff=("out/index.html",),
+                            pre_state=None, post_state=None, state_metered=True)
+    h = SkillEvalHarness(ScriptedRunner(table))
+    rep = h.evaluate("P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert rep.failed() == ["invariance"]
+    assert "create mismatch" in rep.outcomes[INV].detail

@@ -26,10 +26,11 @@ A skill earns registration only if it passes all four checks in a single run:
       reads an artifact that was already there produces no append, so the
       check fails. A failed compare-and-swap on ``H0`` (a concurrent writer
       changed the pre-state between snapshot and write) fails the run — the
-      race is part of the verification, not a side channel.
-      When the runner does not meter ``pre_state``/``post_state`` (the CI mock
-      and legacy runners), this sub-clause is skipped, exactly as the cost
-      clause is skipped when the baseline is unmetered.
+      race is part of the verification, not a side channel. An empty frame on a
+      pre-existing target (a read-only replay) also fails. When the runner does
+      not meter ``pre_state``/``post_state`` (``state_metered`` is ``False`` —
+      the CI mock and legacy runners), this sub-clause is skipped, exactly as
+      the cost clause is skipped when the baseline is unmetered.
 4. **Selectivity** — a lexically similar near-miss ``N1`` does NOT trigger the
    skill and costs no more than the no-skill baseline plus a small allowance.
    When the no-skill baseline cost is zero (not metered) the cost clause is
@@ -47,8 +48,9 @@ CI with a deterministic mock; the host supplies the real runner. The canary's
 comparable value for the canary task. For the append-attribution sub-clause the
 runner must, for the decisive ``P``-with-skill run, report ``pre_state``/
 ``post_state`` (bytes of the artifact target before/after the run, ``None`` if
-the target did not exist) and set ``cas_failed`` if a compare-and-swap on the
-pre-state hash lost to a concurrent writer.
+the target did not exist), set ``state_metered=True`` to say it actually metered
+that state, and set ``cas_failed`` if a compare-and-swap on the pre-state hash
+lost to a concurrent writer.
 """
 
 from __future__ import annotations
@@ -69,9 +71,15 @@ class RunResult:
 
     ``pre_state``/``post_state`` are the bytes of the decisive artifact target
     before/after this run (``None`` if the target did not exist). They feed the
-    invariance append-attribution sub-clause; leave them ``None`` when the run
-    does not meter byte-level state. ``cas_failed`` is set by the runner when a
-    compare-and-swap on the pre-state hash lost to a concurrent writer.
+    invariance append-attribution sub-clause. ``state_metered`` tells the
+    harness that this run actually metered byte-level state: when it is
+    ``False`` (the default, for legacy and CI mock runners) the sub-clause is
+    skipped and reported as unmetered, even if ``pre_state``/``post_state`` are
+    both ``None``. A runner that meters and reports the target absent both
+    before and after a claimed artifact therefore sets ``state_metered=True``
+    and is caught as a create mismatch, not silently skipped. ``cas_failed``
+    is set by the runner when a compare-and-swap on the pre-state hash lost to
+    a concurrent writer; it is honoured only when ``state_metered`` is set.
     """
 
     exit_code: int
@@ -82,6 +90,7 @@ class RunResult:
     pre_state: bytes | None = None
     post_state: bytes | None = None
     cas_failed: bool = False
+    state_metered: bool = False
 
 
 class AgentRunner(Protocol):
@@ -123,6 +132,18 @@ def _frame_bytes(artifact: object) -> bytes:
     raise TypeError(f"artifact must be bytes or str for append attribution, got {type(artifact).__name__}")
 
 
+def _state_desc(state: bytes | None) -> str:
+    """A short, non-leaking description of a byte state for detail strings.
+
+    Reports length and a 12-hex SHA-256 prefix — enough to debug a mismatch
+    without dumping the full artifact bytes (which may be large or sensitive)
+    into the report.
+    """
+    if state is None:
+        return "None"
+    return f"len={len(state)} sha256={hashlib.sha256(state).hexdigest()[:12]}"
+
+
 class SkillEvalHarness:
     """Runs the four checks once and returns an :class:`EvalReport`.
 
@@ -142,9 +163,13 @@ class SkillEvalHarness:
         ``post_state`` must equal ``pre_state + frame`` (exact append), or just
         ``frame`` when the target did not pre-exist. Keyed on ``H0 =
         SHA256(pre_state)``; a failed CAS (concurrent writer) fails the run.
-        Skipped (treated as passing) when the runner does not meter state.
+        Skipped (treated as passing) only when the runner does not meter state
+        (``state_metered`` is ``False``); a metered run with the target absent
+        both before and after a claimed artifact is a create mismatch. An empty
+        frame on a pre-existing target is a replay and fails. Detail strings
+        report lengths and hash prefixes, never full state bytes.
         """
-        if p_yes.pre_state is None and p_yes.post_state is None:
+        if not p_yes.state_metered:
             return True, "attribution unmetered"
         if p_yes.cas_failed:
             return False, "CAS failed: concurrent writer changed the pre-state"
@@ -155,18 +180,21 @@ class SkillEvalHarness:
         except TypeError as e:
             return False, f"cannot form byte frame: {e}"
         if p_yes.pre_state is None:
+            # Create: target did not pre-exist; post must be exactly the frame.
             expected = frame
             h0: str | None = None
             mode = "create"
         else:
+            if not frame:
+                return False, "empty frame: no bytes appended (replay of pre-existing target)"
             expected = p_yes.pre_state + frame
             h0 = hashlib.sha256(p_yes.pre_state).hexdigest()
             mode = "append"
         if p_yes.post_state == expected:
             return True, f"{mode} verified (H0={h0[:12] if h0 else 'n/a'})"
         return False, (
-            f"{mode} mismatch: expected {expected!r} got {p_yes.post_state!r} "
-            f"(H0={h0[:12] if h0 else 'n/a'})"
+            f"{mode} mismatch: expected {_state_desc(expected)} got "
+            f"{_state_desc(p_yes.post_state)} (H0={h0[:12] if h0 else 'n/a'})"
         )
 
     def evaluate(
