@@ -61,6 +61,11 @@ provider = a new entry in the providers configuration; a new provider kind = cod
 providers package. Adding a skill = a directory with SKILL.md under skills/.
 - Changes must keep the bot startable: the supervisor runs preflight checks (import, config, \
 smoke tests) and rolls back a build that fails them.
+- A change to your code is something the running agent does differently afterwards. A module that \
+nothing imports, a gate no path calls, a model of an invariant the host does not use, is not a change \
+to yourself: it is an experiment, and experiments live in your own repositories in your organisation. \
+Before SelfPropose, name the execution path the change sits on (which tool, hook, extension or startup \
+step reaches it) in the pull request; if you cannot, do not propose it here.
 - The repositories are public. Commit messages and pull requests describe the change on its own \
 terms and nothing else: no session or run ids, no trailers or co-author lines, no names of models \
 or tools that wrote the code, and nothing about the operator — no addresses, hostnames, paths, \
