@@ -56,7 +56,7 @@ lost to a concurrent writer.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from posixpath import normpath
 from typing import Protocol
@@ -292,4 +292,48 @@ class SkillEvalHarness:
         )
 
 
-__all__ = ["AgentRunner", "CheckOutcome", "EvalReport", "RunResult", "SkillEvalHarness"]
+@dataclass(frozen=True)
+class GatedResult:
+    """Outcome of one gated registration attempt.
+
+    ``report`` is the four-check :class:`EvalReport`; ``registered`` is True
+    only when every check passed and the caller's ``register`` action ran.
+    """
+
+    report: EvalReport
+    registered: bool
+
+
+class GatedSkillRegistration:
+    """Applies the four-check policy at the registration boundary.
+
+    A skill earns registration only if all four checks pass in a single run.
+    The helper is store-agnostic: it takes an :class:`AgentRunner` (the host
+    supplies the real runner; CI supplies a deterministic mock) and an async
+    ``action`` callable that performs the actual registration (e.g. the
+    store's ``create``, closed over the skill identity). ``action`` is
+    invoked only when the harness passes; a failing check blocks registration
+    and the :class:`GatedResult` carries the report so the caller can surface
+    which check failed. If ``action`` itself raises, the exception
+    propagates — that is a registration error, not a gate failure.
+    """
+
+    def __init__(self, runner: AgentRunner, *, cost_allowance: float = 0.15, cost_floor: float = 0.0) -> None:
+        self._harness = SkillEvalHarness(runner, cost_allowance=cost_allowance, cost_floor=cost_floor)
+
+    async def register(
+        self,
+        action: Callable[[], Awaitable[None]],
+        decisive_p: str,
+        near_miss_n1: str,
+        canary_c: str,
+        declared_artifacts: Sequence[str] = (),
+    ) -> GatedResult:
+        report = self._harness.evaluate(decisive_p, near_miss_n1, canary_c, declared_artifacts)
+        if not report.passed:
+            return GatedResult(report=report, registered=False)
+        await action()
+        return GatedResult(report=report, registered=True)
+
+
+__all__ = ["AgentRunner", "CheckOutcome", "EvalReport", "GatedResult", "GatedSkillRegistration", "RunResult", "SkillEvalHarness"]

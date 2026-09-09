@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from daedalus.host.skill_eval import RunResult, SkillEvalHarness
+import pytest
+
+from daedalus.host.skill_eval import GatedSkillRegistration, RunResult, SkillEvalHarness
 
 # Outcomes are reported in execution order: necessity, benefit, invariance, selectivity.
 NEC, BEN, INV, SEL = 0, 1, 2, 3
@@ -293,3 +295,143 @@ def test_attribution_fails_on_metered_create_no_write() -> None:
     rep = h.evaluate("P", "N1", "canary", declared_artifacts=["out/index.html"])
     assert rep.failed() == ["invariance"]
     assert "create mismatch" in rep.outcomes[INV].detail
+
+
+# --- Gated registration: the four-check policy at the registration boundary ---
+
+
+class RecordingRegister:
+    """An async register action that records that it was invoked."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self) -> None:
+        self.calls += 1
+
+
+async def test_gated_registration_registers_when_all_pass() -> None:
+    action = RecordingRegister()
+    gate = GatedSkillRegistration(ScriptedRunner(passing_table()))
+    result = await gate.register(action, "P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert result.registered
+    assert result.report.passed
+    assert action.calls == 1
+
+
+async def test_gated_registration_blocks_when_necessity_fails() -> None:
+    table = passing_table()
+    table[("P", False)] = ok(0, artifact="A")  # base agent already solves P
+    action = RecordingRegister()
+    gate = GatedSkillRegistration(ScriptedRunner(table))
+    result = await gate.register(action, "P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert not result.registered
+    assert result.report.failed() == ["necessity"]
+    assert action.calls == 0
+
+
+async def test_gated_registration_blocks_when_benefit_fails() -> None:
+    table = passing_table()
+    table[("P", True)] = ok(0, artifact=None, invoked=True)  # no valid artifact
+    action = RecordingRegister()
+    gate = GatedSkillRegistration(ScriptedRunner(table))
+    result = await gate.register(action, "P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert not result.registered
+    assert result.report.failed() == ["benefit"]
+    assert action.calls == 0
+
+
+async def test_gated_registration_blocks_when_selectivity_fails() -> None:
+    table = passing_table()
+    table[("N1", True)] = ok(0, invoked=True, cost=11.0)  # triggered on a near-miss
+    action = RecordingRegister()
+    gate = GatedSkillRegistration(ScriptedRunner(table))
+    result = await gate.register(action, "P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert not result.registered
+    assert result.report.failed() == ["selectivity"]
+    assert action.calls == 0
+
+
+async def test_gated_registration_blocks_when_invariance_fails() -> None:
+    table = passing_table()
+    table[("P", True)] = ok(0, artifact="A", invoked=True, diff=("out/index.html", "rogue.tmp"))
+    action = RecordingRegister()
+    gate = GatedSkillRegistration(ScriptedRunner(table))
+    result = await gate.register(action, "P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert not result.registered
+    assert result.report.failed() == ["invariance"]
+    assert action.calls == 0
+
+
+async def test_gated_registration_blocks_on_attribution_replay() -> None:
+    # The H0 binding: a skill that merely reads a pre-existing artifact
+    # (no append) must not be registered.
+    table = _attr_table(pre_state=b"A", post_state=b"A")
+    action = RecordingRegister()
+    gate = GatedSkillRegistration(ScriptedRunner(table))
+    result = await gate.register(action, "P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert not result.registered
+    assert result.report.failed() == ["invariance"]
+    assert action.calls == 0
+
+
+async def test_gated_registration_propagates_register_error() -> None:
+    # A store failure is a registration error, not a gate failure: it must
+    # propagate, not be swallowed into registered=False.
+    async def broken() -> None:
+        raise RuntimeError("store down")
+
+    gate = GatedSkillRegistration(ScriptedRunner(passing_table()))
+    with pytest.raises(RuntimeError, match="store down"):
+        await gate.register(broken, "P", "N1", "canary", declared_artifacts=["out/index.html"])
+
+
+async def test_gated_registration_forwards_cost_allowance() -> None:
+    # N1 costs 120% of baseline: over the default 15% allowance, within 50%.
+    table = passing_table()
+    table[("N1", False)] = ok(0, cost=10.0)
+    table[("N1", True)] = ok(0, invoked=False, cost=12.0)
+    strict = GatedSkillRegistration(ScriptedRunner(table))
+    assert not (await strict.register(RecordingRegister(), "P", "N1", "canary", declared_artifacts=["out/index.html"])).registered
+    lenient = GatedSkillRegistration(ScriptedRunner(table), cost_allowance=0.5)
+    assert (await lenient.register(RecordingRegister(), "P", "N1", "canary", declared_artifacts=["out/index.html"])).registered
+
+
+async def test_gated_registration_forwards_cost_floor() -> None:
+    # Tiny baseline: the 15% headroom is noise, so a floor of 0.5 admits it.
+    table = passing_table()
+    table[("N1", False)] = ok(0, cost=0.1)
+    table[("N1", True)] = ok(0, invoked=False, cost=0.2)
+    strict = GatedSkillRegistration(ScriptedRunner(table))
+    assert not (await strict.register(RecordingRegister(), "P", "N1", "canary", declared_artifacts=["out/index.html"])).registered
+    floored = GatedSkillRegistration(ScriptedRunner(table), cost_floor=0.5)
+    assert (await floored.register(RecordingRegister(), "P", "N1", "canary", declared_artifacts=["out/index.html"])).registered
+
+
+async def test_gated_registration_wires_into_directory_skill_store(tmp_path) -> None:
+    from daedalus.host.skills import DirectorySkillStore
+    from protocore.contracts.skills import SkillUpsertInput
+
+    store = DirectorySkillStore(tmp_path / "skills")
+    payload = SkillUpsertInput(name="Tide Pool", description="d", body_md="body")
+    calls = {"n": 0}
+
+    async def action() -> None:
+        calls["n"] += 1
+        await store.create("t", payload)
+
+    # A passing skill is registered in the store exactly once.
+    gate = GatedSkillRegistration(ScriptedRunner(passing_table()))
+    result = await gate.register(action, "P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert result.registered
+    assert calls["n"] == 1
+    assert [e.id for e in await store.list("t")] == ["tide-pool"]
+
+    # A failing skill is NOT registered: the register action is never invoked.
+    table = passing_table()
+    table[("P", False)] = ok(0, artifact="A")
+    gate2 = GatedSkillRegistration(ScriptedRunner(table))
+    result2 = await gate2.register(action, "P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert not result2.registered
+    assert calls["n"] == 1  # unchanged: the failing attempt never called register
+    assert [e.id for e in await store.list("t")] == ["tide-pool"]
