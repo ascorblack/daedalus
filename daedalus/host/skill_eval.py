@@ -12,8 +12,10 @@ A skill earns registration only if it passes all four checks in a single run:
 3. **Invariance** — after running ``P`` the workspace diff, minus the skill's
    *declared* artifacts, is empty (no pollution), and a neutral canary task
    ``C`` is unchanged before vs after ``P`` (exit code, artifact and workspace
-   diff all match). The canary is run immediately after ``P``-with-skill, so it
-   reflects ``P``'s context poisoning specifically — a later near-miss cannot
+   diff all match). The canary baseline is captured immediately before
+   ``P``-with-skill (after the base run) and the canary is re-run immediately
+   after ``P``-with-skill, so the comparison isolates exactly what the skill
+   run did to the context — neither the base run nor a later near-miss can
    mask or mix into it.
 4. **Selectivity** — a lexically similar near-miss ``N1`` does NOT trigger the
    skill and costs no more than the no-skill baseline plus a small allowance.
@@ -107,21 +109,22 @@ class SkillEvalHarness:
     ) -> EvalReport:
         declared = frozenset(normpath(d) for d in declared_artifacts)
 
-        # Canary baseline: capture C's behaviour before the skill has run.
-        c_pre = self._run(canary_c, with_skill=False)
-
         # 1. Necessity: the base agent must not solve P without the skill.
         p_no = self._run(decisive_p, with_skill=False)
         solves_p = p_no.exit_code == 0 and p_no.artifact is not None
         necessity = not solves_p
+
+        # Canary baseline immediately before P-with-skill, so c_post vs c_pre
+        # isolates exactly what the skill run did to the context.
+        c_pre = self._run(canary_c, with_skill=False)
 
         # 2. Benefit: with the skill, P must produce a valid artifact.
         p_yes = self._run(decisive_p, with_skill=True)
         benefit = p_yes.exit_code == 0 and p_yes.artifact is not None
 
         # 3. Invariance: no undeclared pollution, and C is unchanged after P.
-        #    c_post runs immediately after p_yes so it reflects P's context
-        #    poisoning specifically (a later near-miss cannot mask or mix in).
+        #    c_post runs immediately after p_yes (before the near-miss), so it
+        #    reflects P's context poisoning specifically.
         unexpected = tuple(d for d in p_yes.workspace_diff if normpath(d) not in declared)
         c_post = self._run(canary_c, with_skill=False)
         canary_stable = (

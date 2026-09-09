@@ -36,11 +36,22 @@ def passing_table() -> dict:
 
 
 def test_all_four_pass() -> None:
-    h = SkillEvalHarness(ScriptedRunner(passing_table()))
+    runner = ScriptedRunner(passing_table())
+    h = SkillEvalHarness(runner)
     rep = h.evaluate("P", "N1", "canary", declared_artifacts=["out/index.html"])
     assert rep.passed
     assert rep.summary().startswith("PASS")
     assert rep.failed() == []
+    # Lock the run order: c_pre immediately before P-with-skill, c_post
+    # immediately after it, and the near-miss last.
+    assert runner.calls == [
+        ("P", False),      # necessity
+        ("canary", False), # c_pre
+        ("P", True),       # benefit
+        ("canary", False), # c_post
+        ("N1", False),     # baseline
+        ("N1", True),      # selectivity
+    ]
 
 
 def test_necessity_fails_when_base_solves_p() -> None:
