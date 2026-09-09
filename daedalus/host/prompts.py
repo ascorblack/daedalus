@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -155,6 +156,32 @@ def language_section(answer_language: str) -> str:
     return f"Always answer the operator in {answer_language}, whatever language they write in.\n"
 
 
+def ssh_hosts(config: Path) -> list[tuple[str, str]]:
+    """The ``Host`` entries of an ssh config with the comment written above each one.
+
+    The operator describes a server in a comment block right above its ``Host`` line (what it is,
+    what it is for, what is open); wildcard entries are skipped.
+    """
+    try:
+        text = config.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    hosts: list[tuple[str, str]] = []
+    comment: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("#"):
+            comment.append(line.lstrip("#").strip())
+            continue
+        if line.lower().startswith("host ") or line.lower().startswith("host\t"):
+            names = [n for n in line.split()[1:] if not any(c in n for c in "*?!")]
+            about = " ".join(part for part in comment if part)
+            hosts.extend((name, about) for name in names)
+        if line:
+            comment = []
+    return hosts
+
+
 def environment_section(
     *,
     workspace: Path,
@@ -165,6 +192,7 @@ def environment_section(
     extra_notes: str = "",
     sandboxed: bool = False,
     github_org: str = "",
+    ssh_hosts: Sequence[tuple[str, str]] = (),
 ) -> str:
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
@@ -183,6 +211,9 @@ def environment_section(
             f"push to, configure and delete (`GH_TOKEN=$GH_ORG_TOKEN gh repo create {github_org}/<name> …`; git uses the right "
             "token by itself). The operator's repositories (your host and core) change only through SelfPropose."
         )
+    if ssh_hosts:
+        lines.append("- Servers you can reach with ssh (`~/.ssh/config`, keys installed):")
+        lines.extend(f"  - `ssh {host}` — {about}" if about else f"  - `ssh {host}`" for host, about in ssh_hosts)
     if sandboxed:
         lines.append("- Exec and Verify run in a sandbox: the filesystem is read-only outside the workspace, /tmp is private, and background processes end with the command")
     if extra_notes:

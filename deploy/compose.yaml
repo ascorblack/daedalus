@@ -60,6 +60,10 @@ services:
       - ../GOVERNANCE.md:/srv/daedalus/GOVERNANCE.md:ro
       - daedalus-state:/srv/state
       - daedalus-workspaces:/srv/workspaces
+      # SSH material for servers the agent may use (keys, config, known_hosts), kept outside every repository;
+      # the supervisor copies it into /root/.ssh with the permissions ssh insists on. Describe each host in a
+      # comment above its `Host` line: the description goes into the agent's system prompt.
+      - ${DAEDALUS_SSH_DIR:-../../daedalus-secrets/ssh}:/srv/ssh:ro
       - telegram-bot-api-data:/var/lib/telegram-bot-api
       - rebuild-trigger:/run/daedalus-rebuild
     ports:

@@ -96,6 +96,26 @@ def bot_env() -> dict[str, str]:
     return env
 
 
+SSH_SOURCE = Path(os.environ.get("DAEDALUS_SSH_SOURCE", "/srv/ssh"))
+SSH_HOME = Path(os.environ.get("DAEDALUS_SSH_HOME", str(Path.home() / ".ssh")))
+
+
+def install_ssh() -> None:
+    """Copy the mounted ssh material into ~/.ssh: the mount is read-only and owned by the host user,
+    and ssh refuses a private key it can read too widely, so the copy carries the modes ssh wants."""
+    if not SSH_SOURCE.is_dir():
+        return
+    try:
+        SSH_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(SSH_HOME, 0o700)
+        for src in sorted(p for p in SSH_SOURCE.iterdir() if p.is_file()):
+            target = SSH_HOME / src.name
+            target.write_bytes(src.read_bytes())
+            os.chmod(target, 0o644 if src.name.endswith(".pub") or src.name in ("config", "known_hosts") else 0o600)
+    except OSError as exc:
+        log(f"ssh material not installed: {exc}")
+
+
 def run(cmd: list[str], *, cwd: Path | None = None, timeout: int = 1800) -> tuple[int, str]:
     try:
         proc = subprocess.run(
@@ -187,6 +207,7 @@ class Supervisor:
     # -- child lifecycle ------------------------------------------------------------
 
     async def start_child(self) -> None:
+        install_ssh()
         self.child = await asyncio.create_subprocess_exec(
             "bash", "-lc", BOT_CMD, cwd=str(BOT_REPO), env=bot_env(), start_new_session=True
         )

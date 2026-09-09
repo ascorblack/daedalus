@@ -34,6 +34,8 @@ class EngineDeps:
     core_repo: Path
     governance_path: Path
     github_org: str = ""
+    ssh_config: Path | None = None
+    """The ssh config whose described hosts the prompt lists; ``None`` lists nothing."""
 
 
 def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_tokens: int, thinking: bool, mode: ModeConfig | None = None) -> Any:
@@ -126,6 +128,7 @@ def build_engine(
             extra_notes=extra_notes,
             sandboxed=config.tools.exec.sandbox != "off",
             github_org=deps.github_org,
+            ssh_hosts=prompts.ssh_hosts(deps.ssh_config) if deps.ssh_config else (),
         ),
     )
     engine_config = QueryEngineConfig(

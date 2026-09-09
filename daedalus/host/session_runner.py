@@ -1085,6 +1085,7 @@ class SessionManager:
             core_repo=self.settings.core_repo_dir,
             governance_path=self.governance_path,
             github_org=self.settings.daedalus_github_org,
+            ssh_config=Path.home() / ".ssh" / "config",
         )
         mode_name = str(state.metadata.get("mode") or "")
         mode = self.config.modes.get(mode_name) if mode_name else None
