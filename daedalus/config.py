@@ -468,6 +468,9 @@ class RuntimeConfig(BaseModel):
             "grok.grok-4.6": ModelPresetConfig(provider="grok", model="grok-4.6", label="Grok 4.6 (SuperGrok subscription)", thinking=True, images=False, context_window=500_000),
             "codex.gpt-5.6-terra": ModelPresetConfig(provider="codex", model="gpt-5.6-terra", label="GPT-5.6 Terra (ChatGPT subscription)", thinking=True, reasoning_effort="medium", images=True, context_window=400_000),
             "codex.gpt-5.6-luna": ModelPresetConfig(provider="codex", model="gpt-5.6-luna", label="GPT-5.6 Luna (ChatGPT subscription, cheapest)", thinking=True, reasoning_effort="low", images=True, context_window=400_000),
+            "claude.sonnet-5": ModelPresetConfig(provider="claude", model="claude-sonnet-5", label="Claude Sonnet 5 (Claude Code subscription)", thinking=True, reasoning_effort="high", images=True, context_window=200_000),
+            "claude.opus-5": ModelPresetConfig(provider="claude", model="claude-opus-5", label="Claude Opus 5 (Claude Code subscription)", thinking=True, reasoning_effort="medium", images=True, context_window=1_000_000),
+            "claude.fable-5.1": ModelPresetConfig(provider="claude", model="claude-fable-5-1", label="Claude Fable 5.1 (Claude Code subscription)", thinking=True, reasoning_effort="medium", images=True, context_window=1_000_000),
         }
     )
     """Named models keyed by id; the operator adds more in the Mini App."""
@@ -478,6 +481,7 @@ class RuntimeConfig(BaseModel):
             "vllm": ProviderConfig(kind="vllm", base_url=""),
             "grok": ProviderConfig(kind="openai_compat", base_url="http://keyproxy:3200/grok/v1", timeout_seconds=900.0, pricing={"grok": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
             "codex": ProviderConfig(kind="openai_compat", base_url="http://keyproxy:3200/codex/v1", timeout_seconds=900.0, pricing={"gpt": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
+            "claude": ProviderConfig(kind="openai_compat", base_url="http://keyproxy:3200/claude/v1", timeout_seconds=900.0, pricing={"claude": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
         }
     )
     prompt: PromptConfig = Field(default_factory=PromptConfig)
@@ -626,9 +630,36 @@ def _seed_presets(raw: dict[str, Any]) -> bool:
     return True
 
 
+def _seed_claude_subscription(raw: dict[str, Any]) -> bool:
+    """Add the Claude Code subscription endpoint and presets when an older config lacks them."""
+    changed = False
+    providers = raw.setdefault("providers", {})
+    presets = raw.setdefault("presets", {})
+    if isinstance(providers, dict) and "claude" not in providers:
+        providers["claude"] = {
+            "kind": "openai_compat",
+            "base_url": "http://keyproxy:3200/claude/v1",
+            "timeout_seconds": 900.0,
+            "pricing": {"claude": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}},
+        }
+        changed = True
+    seeds = {
+        "claude.sonnet-5": {"provider": "claude", "model": "claude-sonnet-5", "label": "Claude Sonnet 5 (Claude Code subscription)", "thinking": True, "reasoning_effort": "high", "images": True, "context_window": 200_000},
+        "claude.opus-5": {"provider": "claude", "model": "claude-opus-5", "label": "Claude Opus 5 (Claude Code subscription)", "thinking": True, "reasoning_effort": "medium", "images": True, "context_window": 1_000_000},
+        "claude.fable-5.1": {"provider": "claude", "model": "claude-fable-5-1", "label": "Claude Fable 5.1 (Claude Code subscription)", "thinking": True, "reasoning_effort": "medium", "images": True, "context_window": 1_000_000},
+    }
+    if isinstance(presets, dict):
+        for pid, spec in seeds.items():
+            if pid not in presets:
+                presets[pid] = spec
+                changed = True
+    return changed
+
+
 def _migrate(raw: dict[str, Any]) -> bool:
     """Rewrite config shapes older versions wrote; returns True when something changed."""
     changed = _seed_presets(raw)
+    changed = _seed_claude_subscription(raw) or changed
     for provider in (raw.get("providers") or {}).values():
         pricing = provider.get("pricing") if isinstance(provider, dict) else None
         if not isinstance(pricing, dict):

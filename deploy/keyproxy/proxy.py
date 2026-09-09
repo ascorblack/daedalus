@@ -31,6 +31,14 @@ from typing import Any
 
 import httpx
 from aiohttp import web
+from claude import (
+    CLAUDE_API,
+    CLAUDE_FALLBACK_MODELS,
+    ClaudeAuth,
+    chat_to_messages,
+    claude_usage_view,
+    messages_events_to_chunks,
+)
 from subscriptions import (
     CODEX_BASE,
     CODEX_FALLBACK_MODELS,
@@ -72,7 +80,8 @@ COMPLETION_TAILS = (("chat", "completions"), ("completions",), ("responses",), (
 CAPTURE_LIMIT = 8 * 1024 * 1024
 CODEX_AUTH = CodexAuth(Path(os.environ.get("KEYPROXY_CODEX_AUTH", os.path.expanduser("~/.codex/auth.json"))))
 GROK_AUTH = GrokAuth(Path(os.environ.get("KEYPROXY_GROK_AUTH", os.path.expanduser("~/.grok/auth.json"))))
-"""The operator's subscriptions: served as ``/codex/v1/...`` and ``/grok/v1/...`` with the CLIs' own logins."""
+CLAUDE_AUTH = ClaudeAuth(Path(os.environ.get("KEYPROXY_CLAUDE_AUTH", os.path.expanduser("~/.claude/.credentials.json"))))
+"""The operator's subscriptions: served as ``/codex/v1``, ``/grok/v1`` and ``/claude/v1`` with the CLIs' own logins."""
 _usage_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 USAGE_CACHE_SECONDS = 60.0
 
@@ -218,12 +227,67 @@ def target_url(base: str, rest: str, query: str) -> str:
 
 
 def subscriptions_status() -> dict[str, Any]:
-    return {"codex": {"logged_in": CODEX_AUTH.available()}, "grok": {"logged_in": GROK_AUTH.available()}}
+    return {"codex": {"logged_in": CODEX_AUTH.available()}, "grok": {"logged_in": GROK_AUTH.available()}, "claude": {"logged_in": CLAUDE_AUTH.available()}}
 
 
 async def _sse_lines(response: httpx.Response) -> Any:
     async for line in response.aiter_lines():
         yield line
+
+
+async def handle_claude(request: web.Request, rest: str) -> web.StreamResponse:
+    """Anthropic Messages behind the Claude Code login, presented as chat completions."""
+    client: httpx.AsyncClient = request.app["client"]
+    tail = rest.strip("/").removeprefix("v1/")
+    try:
+        headers = await CLAUDE_AUTH.headers(client)
+    except SubscriptionError as exc:
+        return web.json_response({"error": {"message": str(exc), "type": "subscription_error"}}, status=502)
+    if tail == "models":
+        models = list(CLAUDE_FALLBACK_MODELS)
+        try:
+            response = await client.get(CLAUDE_API + "/v1/models", headers={**headers, "accept": "application/json"})
+            if response.status_code == 200:
+                models = sorted({str(m.get("id") or "") for m in (response.json().get("data") or []) if isinstance(m, dict) and m.get("id")} | set(models))
+        except (httpx.HTTPError, ValueError, AttributeError):
+            pass
+        return web.json_response({"object": "list", "data": [{"id": m, "object": "model", "owned_by": "anthropic"} for m in models if m]})
+    if tail != "chat/completions":
+        return web.json_response({"error": {"message": f"claude serves chat/completions and models, not {tail!r}", "type": "invalid_request_error"}}, status=404)
+    try:
+        body = await request.json()
+    except ValueError:
+        return web.json_response({"error": {"message": "body must be JSON", "type": "invalid_request_error"}}, status=400)
+    model = str(body.get("model") or "")
+    stream = bool(body.get("stream", False))
+    payload, names = chat_to_messages(body)
+    upstream = client.build_request("POST", CLAUDE_API + "/v1/messages?beta=true", json=payload, headers={**headers, "accept": "text/event-stream", "content-type": "application/json"})
+    try:
+        response = await client.send(upstream, stream=True)
+    except httpx.HTTPError as exc:
+        return web.json_response({"error": {"message": f"upstream unreachable: {type(exc).__name__}", "type": "proxy_error"}}, status=502)
+    if response.status_code >= 400:
+        raw = (await response.aread()).decode("utf-8", "replace")
+        await response.aclose()
+        try:
+            payload_err = json.loads(raw)
+        except ValueError:
+            payload_err = {"error": {"message": raw[:400], "type": "upstream_error"}}
+        return web.json_response(payload_err, status=response.status_code)
+    chunks = messages_events_to_chunks(_sse_lines(response), model=model, names=names)
+    try:
+        if not stream:
+            return web.json_response(await collect_completion(chunks, model=model))
+        out = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+        await out.prepare(request)
+        async for chunk in chunks:
+            await out.write(chunk.encode("utf-8"))
+        await out.write_eof()
+        return out
+    except (ConnectionResetError, asyncio.CancelledError):
+        return web.Response(status=499)
+    finally:
+        await response.aclose()
 
 
 async def handle_codex(request: web.Request, rest: str) -> web.StreamResponse:
@@ -303,11 +367,30 @@ async def _grok_usage(client: httpx.AsyncClient, headers: dict[str, str]) -> dic
     return view
 
 
+async def _claude_usage(client: httpx.AsyncClient, headers: dict[str, str]) -> dict[str, Any]:
+    cached = _usage_cache.get("claude")
+    if cached and time.monotonic() - cached[0] < USAGE_CACHE_SECONDS:
+        return cached[1]
+    usage = await client.get(CLAUDE_API + "/api/oauth/usage", headers={**headers, "accept": "application/json"})
+    if usage.status_code != 200:
+        raise SubscriptionError(f"claude usage: HTTP {usage.status_code}")
+    profile: dict[str, Any] = {}
+    try:
+        pr = await client.get(CLAUDE_API + "/api/oauth/profile", headers={**headers, "accept": "application/json"})
+        if pr.status_code == 200:
+            profile = pr.json()
+    except (httpx.HTTPError, ValueError):
+        profile = {}
+    view = claude_usage_view(usage.json(), profile)
+    _usage_cache["claude"] = (time.monotonic(), view)
+    return view
+
+
 async def handle_subscriptions_usage(request: web.Request) -> web.Response:
-    """Both subscriptions' quota windows, for the Usage screen; a missing login is reported, not an error."""
+    """Subscription quota windows, for the Usage screen; a missing login is reported, not an error."""
     client: httpx.AsyncClient = request.app["client"]
     out: dict[str, Any] = {}
-    for name, auth, fetch in (("codex", CODEX_AUTH, _codex_usage), ("grok", GROK_AUTH, _grok_usage)):
+    for name, auth, fetch in (("codex", CODEX_AUTH, _codex_usage), ("grok", GROK_AUTH, _grok_usage), ("claude", CLAUDE_AUTH, _claude_usage)):
         if not auth.available():
             out[name] = {"provider": name, "logged_in": False}
             continue
@@ -323,6 +406,8 @@ async def handle(request: web.Request) -> web.StreamResponse:
     rest = request.match_info.get("rest", "")
     if name == "codex":
         return await handle_codex(request, rest)
+    if name == "claude":
+        return await handle_claude(request, rest)
     table = upstreams()
     client: httpx.AsyncClient = request.app["client"]
     headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS}

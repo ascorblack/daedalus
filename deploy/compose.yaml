@@ -98,11 +98,13 @@ services:
       KEYPROXY_AGENT_API: http://daedalus:${API_PORT:-8765}
       KEYPROXY_CODEX_AUTH: /home/keyproxy/.codex/auth.json
       KEYPROXY_GROK_AUTH: /home/keyproxy/.grok/auth.json
+      KEYPROXY_CLAUDE_AUTH: /home/keyproxy/.claude/.credentials.json
     volumes:
       - daedalus-state:/srv/state:ro
-      # Subscriptions (Codex = ChatGPT plan, Grok = SuperGrok): the CLIs' logins, served as /codex/v1 and /grok/v1.
+      # Subscriptions: the CLIs' logins, served as /codex/v1, /grok/v1 and /claude/v1.
       - ${DAEDALUS_HARNESS_HOME:-~}/.codex:/home/keyproxy/.codex
       - ${DAEDALUS_HARNESS_HOME:-~}/.grok:/home/keyproxy/.grok
+      - ${DAEDALUS_HARNESS_HOME:-~}/.claude:/home/keyproxy/.claude
     networks: [keys]
 
   # The only container that can talk to Docker. It rebuilds and replaces the agent container when

@@ -26,6 +26,7 @@ def _load(name: str) -> Any:
 
 
 subs = _load("subscriptions")
+claude_mod = _load("claude")
 proxy = _load("proxy")
 
 
@@ -85,6 +86,34 @@ def test_usage_views() -> None:
     assert codex["limit_reached"] and [w["name"] for w in codex["windows"]] == ["5h", "weekly"] and codex["models"] == ["gpt-5.6-terra", "gpt-6-astra"]
     grok = subs.grok_usage_view({"config": {"currentPeriod": {"end": "2026-09-10T02:13:38+00:00"}, "creditUsagePercent": 59.0, "productUsage": [{"product": "GrokBuild", "usagePercent": 59.0}]}})
     assert grok["windows"][0]["used_percent"] == 59.0 and grok["products"][0]["product"] == "GrokBuild" and not grok["limit_reached"]
+    claude = claude_mod.claude_usage_view(
+        {"five_hour": {"utilization": 3.0, "resets_at": "2026-09-10T00:20:00+00:00"}, "seven_day": {"utilization": 12.0, "resets_at": "2026-09-14T20:00:00+00:00"}, "extra_usage": {"is_enabled": False}, "limits": [{"kind": "weekly_scoped", "percent": 21, "scope": {"model": {"display_name": "Fable"}}}]},
+        {"organization": {"rate_limit_tier": "default_claude_max_20x"}},
+    )
+    assert claude["plan"] == "default_claude_max_20x" and claude["windows"][0]["name"] == "5h" and claude["windows"][2]["name"] == "Fable" and not claude["extra_usage"]
+
+
+def test_claude_chat_body_becomes_messages() -> None:
+    body = {
+        "model": "claude-opus-5",
+        "max_tokens": 4096,
+        "reasoning_effort": "medium",
+        "messages": [
+            {"role": "system", "content": "You are Daedalus."},
+            {"role": "user", "content": "open x"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "Read", "arguments": "{\"path\": \"x\"}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "contents"},
+        ],
+        "tools": [{"type": "function", "function": {"name": "Read", "description": "read", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}}],
+    }
+    out, names = claude_mod.chat_to_messages(body)
+    assert out["model"] == "claude-opus-5" and out["stream"] is True and out["thinking"]["type"] == "enabled" and out["thinking"]["budget_tokens"] >= 1024
+    assert out["system"][0]["text"].startswith("x-anthropic-billing-header:") and "Claude Agent SDK" in out["system"][1]["text"]
+    assert names["mcp_Read"] == "Read" and out["tools"][0]["name"] == "mcp_Read"
+    items = out["messages"]
+    assert items[0]["role"] == "user" and "system-reminder" in items[0]["content"][0]["text"]
+    assert items[1]["content"][0]["name"] == "mcp_Read"
+    assert items[2]["content"][0]["type"] == "tool_result" and items[2]["content"][0]["tool_use_id"] == "c1"
 
 
 async def test_proxy_routes_codex_and_grok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -111,6 +140,7 @@ async def test_proxy_routes_codex_and_grok(monkeypatch: pytest.MonkeyPatch, tmp_
     grok_file.write_text(json.dumps({"https://auth.x.ai::c": {"key": "grok-token", "refresh_token": "r", "expires_at": "2999-01-01T00:00:00Z", "oidc_client_id": "c"}}))
     monkeypatch.setattr(proxy, "CODEX_AUTH", subs.CodexAuth(codex_file))
     monkeypatch.setattr(proxy, "GROK_AUTH", subs.GrokAuth(grok_file))
+    monkeypatch.setattr(proxy, "CLAUDE_AUTH", claude_mod.ClaudeAuth(tmp_path / "missing-claude.json"))
     monkeypatch.setattr(subs, "_jwt_claims", lambda token: {"exp": 4102444800, "https://api.openai.com/auth": {"chatgpt_account_id": "acct"}})
     app = proxy.make_app()
     await app["client"].aclose()
@@ -132,4 +162,48 @@ async def test_proxy_routes_codex_and_grok(monkeypatch: pytest.MonkeyPatch, tmp_
         assert echoed["authorization"] == "Bearer grok-token" and echoed["x-grok-client-identifier"] == "grok-shell" and echoed["x-xai-token-auth"] == "xai-grok-cli"
         assert str([r for r in seen if "grok.com" in str(r.url)][0].url) == "https://cli-chat-proxy.grok.com/v1/models"
         usage = await (await client.get("/subscriptions/usage")).json()
-        assert usage["codex"]["plan"] == "plus" and usage["grok"]["logged_in"] is True
+        assert usage["codex"]["plan"] == "plus" and usage["grok"]["logged_in"] is True and usage["claude"]["logged_in"] is False
+
+
+async def test_proxy_routes_claude(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        url = str(request.url)
+        if url.endswith("/v1/messages") or "/v1/messages?" in url:
+            sse = "\n".join([
+                "event: content_block_delta", "data: " + json.dumps({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "PONG"}}), "",
+                "event: message_delta", "data: " + json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}), "",
+                "event: message_start", "data: " + json.dumps({"type": "message_start", "message": {"usage": {"input_tokens": 5}}}), "",
+            ])
+            return httpx.Response(200, content=sse.encode(), headers={"content-type": "text/event-stream"})
+        if url.endswith("/v1/models"):
+            return httpx.Response(200, json={"data": [{"id": "claude-opus-5"}]})
+        if url.endswith("/api/oauth/usage"):
+            return httpx.Response(200, json={"five_hour": {"utilization": 3}, "seven_day": {"utilization": 12}, "extra_usage": {"is_enabled": False}})
+        if url.endswith("/api/oauth/profile"):
+            return httpx.Response(200, json={"organization": {"rate_limit_tier": "default_claude_max_20x"}})
+        return httpx.Response(404)
+
+    cred = tmp_path / ".credentials.json"
+    cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat-test", "refreshToken": "r", "expiresAt": 4102444800000}}))
+    monkeypatch.setattr(proxy, "CLAUDE_AUTH", claude_mod.ClaudeAuth(cred))
+    monkeypatch.setattr(proxy, "CODEX_AUTH", subs.CodexAuth(tmp_path / "no-codex.json"))
+    monkeypatch.setattr(proxy, "GROK_AUTH", subs.GrokAuth(tmp_path / "no-grok.json"))
+    app = proxy.make_app()
+    await app["client"].aclose()
+    app["client"] = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    async with TestClient(TestServer(app)) as client:
+        plain = await client.post("/claude/v1/chat/completions", json={"model": "claude-opus-5", "messages": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "hi"}], "tools": [{"type": "function", "function": {"name": "Read", "parameters": {"type": "object", "properties": {}}}}]})
+        data = await plain.json()
+        assert data["choices"][0]["message"]["content"] == "PONG"
+        sent = [r for r in seen if "/v1/messages" in str(r.url)][0]
+        payload = json.loads(sent.content)
+        assert sent.headers["authorization"] == "Bearer sk-ant-oat-test" and sent.headers["x-app"] == "cli"
+        assert payload["system"][0]["text"].startswith("x-anthropic-billing-header:") and payload["tools"][0]["name"] == "mcp_Read"
+        assert "system-reminder" in payload["messages"][0]["content"][0]["text"]
+        models = await (await client.get("/claude/v1/models")).json()
+        assert "claude-opus-5" in {m["id"] for m in models["data"]}
+        usage = await (await client.get("/subscriptions/usage")).json()
+        assert usage["claude"]["plan"] == "default_claude_max_20x" and usage["claude"]["windows"][0]["used_percent"] == 3.0

@@ -38,11 +38,11 @@ function SubscriptionsCard({ subs }: { subs: Record<string, Subscription> }) {
   return (
     <div className="card">
       <div className="section-title" style={{ marginTop: 0 }}>Subscriptions</div>
-      <div className="sub">Quota windows of the ChatGPT (Codex) and SuperGrok logins the key proxy holds; they are not billed per token.</div>
+      <div className="sub">Quota windows of the ChatGPT (Codex), SuperGrok and Claude Code logins the key proxy holds; they are not billed per token.</div>
       {entries.map(([name, s]) => (
         <div key={name} style={{ marginTop: 10 }}>
           <div className="title">
-            {name === "codex" ? "Codex · ChatGPT" : "Grok · SuperGrok"} {s.plan && <span className="badge">{s.plan}</span>} {s.limit_reached && <span className="badge" style={{ color: "var(--bad)" }}>limit reached</span>}
+            {name === "codex" ? "Codex · ChatGPT" : name === "claude" ? "Claude · Max" : "Grok · SuperGrok"} {s.plan && <span className="badge">{s.plan}</span>} {s.limit_reached && <span className="badge" style={{ color: "var(--bad)" }}>limit reached</span>}
           </div>
           {!s.logged_in && <div className="sub">not logged in on the host</div>}
           {s.error && <div className="sub" style={{ color: "var(--bad)" }}>{s.error}</div>}

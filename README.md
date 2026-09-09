@@ -57,11 +57,11 @@ chmod 600 ../daedalus-secrets/keyproxy.env   # provider keys go HERE, outside th
 docker compose -f deploy/compose.yaml --env-file .env up -d --build
 ```
 
-Your ChatGPT (Codex) and SuperGrok logins can serve as model providers: the key proxy
-reads the CLIs' own login files (`~/.codex/auth.json`, `~/.grok/auth.json`), refreshes them, and
-exposes them as `codex` and `grok` providers; the Usage screen shows their quota windows. This
+Your ChatGPT (Codex), SuperGrok, and Claude Code logins can serve as model providers: the key proxy
+reads the CLIs' own login files (`~/.codex/auth.json`, `~/.grok/auth.json`, `~/.claude/.credentials.json`), refreshes them, and
+exposes them as `codex`, `grok` and `claude` providers; the Usage screen shows their quota windows. This
 follows the practice of pi and OpenCode — OpenAI documents ChatGPT sign-in for Codex clients and
-xAI books such use under its own "API product" category. Claude is deliberately not bridged.
+xAI books such use under its own "API product" category. Claude Code is bridged the same way from `~/.claude/.credentials.json` (the `claude` provider).
 
 Provider keys never enter the agent container: a small key-proxy container holds them and injects
 them into upstream calls (`http://keyproxy:3200/deepseek`, `…/openrouter`, `…/openai`, plus any

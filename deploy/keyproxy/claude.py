@@ -1,0 +1,414 @@
+"""Claude Code login as a key-proxy upstream.
+
+The CLI stores OAuth tokens in ``~/.claude/.credentials.json``. This module
+reads them, refreshes them the way the CLI does (and writes the new pair back
+so the CLI keeps working), and translates OpenAI chat completions into
+Anthropic ``/v1/messages`` using the CLI's identity headers and system prefix.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+import uuid
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlencode
+
+import httpx
+from subscriptions import SubscriptionError, _write_json
+
+logger = logging.getLogger("keyproxy.claude")
+
+CLAUDE_API = "https://api.anthropic.com"
+CLAUDE_TOKEN_URL = "https://claude.ai/v1/oauth/token"
+CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CLAUDE_CLI_VERSION = os.environ.get("KEYPROXY_CLAUDE_CLI_VERSION", "2.1.266")
+CLAUDE_VERSION_HASH = os.environ.get("KEYPROXY_CLAUDE_VERSION_HASH", "9d8")
+CLAUDE_ENTRYPOINT = os.environ.get("KEYPROXY_CLAUDE_ENTRYPOINT", "sdk-cli")
+CLAUDE_BETAS = (
+    "oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,"
+    "context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219,"
+    "extended-cache-ttl-2025-04-11"
+)
+CLAUDE_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+CLAUDE_FALLBACK_MODELS = ("claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-5", "claude-fable-5-1")
+REFRESH_SKEW_SECONDS = 300
+TOOL_PREFIX = "mcp_"
+EFFORT_BUDGET = {"low": 2048, "medium": 8192, "high": 16384, "xhigh": 31999, "max": 31999}
+EFFORT_MODELS = ("claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-fable-5-1", "claude-opus-4-8", "claude-sonnet-4-6")
+MAX_OUTPUT = 32000
+
+
+def _cli_headers() -> dict[str, str]:
+    return {
+        "User-Agent": f"claude-cli/{CLAUDE_CLI_VERSION} (external, {CLAUDE_ENTRYPOINT})",
+        "x-app": "cli",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": CLAUDE_BETAS,
+        "anthropic-dangerous-direct-browser-access": "true",
+        "X-Stainless-Lang": "js",
+        "X-Stainless-OS": "Linux",
+        "X-Stainless-Arch": "x64",
+        "X-Stainless-Package-Version": "0.112.1",
+        "X-Stainless-Runtime": "node",
+        "X-Stainless-Runtime-Version": "v26.3.0",
+    }
+
+
+def _billing_header() -> str:
+    return f"x-anthropic-billing-header: cc_version={CLAUDE_CLI_VERSION}.{CLAUDE_VERSION_HASH}; cc_entrypoint={CLAUDE_ENTRYPOINT};"
+
+
+class ClaudeAuth:
+    """``~/.claude/.credentials.json``: the Claude Code OAuth pair."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = asyncio.Lock()
+
+    def available(self) -> bool:
+        if not self.path.is_file():
+            return False
+        try:
+            return bool((self._load().get("claudeAiOauth") or {}).get("accessToken"))
+        except (OSError, ValueError, SubscriptionError):
+            return False
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise SubscriptionError(f"claude login unreadable at {self.path}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise SubscriptionError("claude: not logged in (run `claude auth login` on the host)")
+        return data
+
+    async def token(self, client: httpx.AsyncClient) -> str:
+        data = self._load()
+        oauth = dict(data.get("claudeAiOauth") or {})
+        access = str(oauth.get("accessToken") or "")
+        if not access:
+            raise SubscriptionError("claude: not logged in (run `claude auth login` on the host)")
+        exp_ms = int(oauth.get("expiresAt") or 0)
+        if exp_ms and exp_ms / 1000 - REFRESH_SKEW_SECONDS > time.time():
+            return access
+        async with self._lock:
+            data = self._load()
+            oauth = dict(data.get("claudeAiOauth") or {})
+            access = str(oauth.get("accessToken") or "")
+            exp_ms = int(oauth.get("expiresAt") or 0)
+            if exp_ms and exp_ms / 1000 - REFRESH_SKEW_SECONDS > time.time():
+                return access
+            refresh = str(oauth.get("refreshToken") or "")
+            if not refresh:
+                raise SubscriptionError("claude: login expired (run `claude auth login` on the host)")
+            response = await client.post(
+                CLAUDE_TOKEN_URL,
+                content=urlencode({"grant_type": "refresh_token", "refresh_token": refresh, "client_id": CLAUDE_CLIENT_ID}),
+                headers={
+                    "content-type": "application/x-www-form-urlencoded",
+                    "accept": "application/json",
+                    **_cli_headers(),
+                },
+            )
+            if response.status_code != 200:
+                raise SubscriptionError(f"claude token refresh failed: HTTP {response.status_code} {response.text[:160]}")
+            fresh = response.json()
+            oauth["accessToken"] = str(fresh.get("access_token") or access)
+            if fresh.get("refresh_token"):
+                oauth["refreshToken"] = str(fresh["refresh_token"])
+            if fresh.get("expires_in"):
+                oauth["expiresAt"] = int((time.time() + int(fresh["expires_in"])) * 1000)
+            if fresh.get("refresh_token_expires_in"):
+                oauth["refreshTokenExpiresAt"] = int((time.time() + int(fresh["refresh_token_expires_in"])) * 1000)
+            data["claudeAiOauth"] = oauth
+            _write_json(self.path, data)
+            logger.warning("claude token refreshed")
+            return str(oauth["accessToken"])
+
+    async def headers(self, client: httpx.AsyncClient) -> dict[str, str]:
+        return {"authorization": f"Bearer {await self.token(client)}", **_cli_headers()}
+
+
+def _text_of(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(str(block.get("text") or ""))
+    return "\n".join(parts)
+
+
+def _user_content(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    out: list[dict[str, Any]] = []
+    for block in content or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            out.append({"type": "text", "text": str(block.get("text") or "")})
+        elif block.get("type") == "image_url":
+            url = block.get("image_url", {}).get("url") if isinstance(block.get("image_url"), dict) else block.get("image_url")
+            if isinstance(url, str) and url.startswith("data:") and "," in url:
+                header, data = url.split(",", 1)
+                media = header[5:].split(";")[0] or "image/png"
+                out.append({"type": "image", "source": {"type": "base64", "media_type": media, "data": data}})
+            elif url:
+                out.append({"type": "image", "source": {"type": "url", "url": str(url)}})
+    return out or [{"type": "text", "text": ""}]
+
+
+def _wire_tool_name(name: str) -> str:
+    name = str(name or "")
+    if not name or name.startswith(TOOL_PREFIX) or name.startswith("mcp__"):
+        return name
+    return TOOL_PREFIX + name
+
+
+def _parse_args(raw: Any) -> Any:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {"_raw": raw}
+    return {}
+
+
+def chat_to_messages(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    """OpenAI chat-completions body → Anthropic ``/v1/messages`` plus wire-name → original-name."""
+    instructions: list[str] = []
+    items: list[dict[str, Any]] = []
+    names: dict[str, str] = {}
+    pending_results: list[dict[str, Any]] = []
+
+    def flush_results() -> None:
+        if pending_results:
+            items.append({"role": "user", "content": list(pending_results)})
+            pending_results.clear()
+
+    for message in body.get("messages") or []:
+        role = message.get("role")
+        if role == "system":
+            text = _text_of(message.get("content"))
+            if text.strip():
+                instructions.append(text)
+        elif role == "user":
+            flush_results()
+            items.append({"role": "user", "content": _user_content(message.get("content"))})
+        elif role == "assistant":
+            flush_results()
+            content: list[dict[str, Any]] = []
+            text = _text_of(message.get("content"))
+            if text:
+                content.append({"type": "text", "text": text})
+            for call in message.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                original = str(fn.get("name") or "")
+                wire = _wire_tool_name(original)
+                if original:
+                    names[wire] = original
+                content.append({"type": "tool_use", "id": str(call.get("id") or ""), "name": wire, "input": _parse_args(fn.get("arguments"))})
+            if content:
+                items.append({"role": "assistant", "content": content})
+        elif role == "tool":
+            pending_results.append({"type": "tool_result", "tool_use_id": str(message.get("tool_call_id") or ""), "content": _text_of(message.get("content"))})
+    flush_results()
+
+    if instructions:
+        reminder = {"type": "text", "text": "<system-reminder>\n" + "\n\n".join(instructions) + "\n</system-reminder>\n"}
+        if items and items[0].get("role") == "user":
+            content = items[0]["content"]
+            items[0]["content"] = [reminder] + (content if isinstance(content, list) else [{"type": "text", "text": str(content)}])
+        else:
+            items.insert(0, {"role": "user", "content": [reminder]})
+    if not items:
+        items.append({"role": "user", "content": [{"type": "text", "text": ""}]})
+
+    model = str(body.get("model") or "")
+    max_tokens = min(int(body.get("max_tokens") or 8192), MAX_OUTPUT)
+    effort = str(body.get("reasoning_effort") or "")
+    if effort:
+        budget = max(1024, EFFORT_BUDGET.get(effort, 8192))
+        if max_tokens <= budget:
+            max_tokens = min(MAX_OUTPUT, budget + 1024)
+    out: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max(1, max_tokens),
+        "stream": True,
+        "system": [
+            {"type": "text", "text": _billing_header()},
+            {"type": "text", "text": CLAUDE_IDENTITY, "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+        ],
+        "messages": items,
+    }
+    tools = []
+    for tool in body.get("tools") or []:
+        fn = tool.get("function") or {}
+        original = str(fn.get("name") or tool.get("name") or "")
+        if not original:
+            continue
+        wire = _wire_tool_name(original)
+        names[wire] = original
+        tools.append({"name": wire, "description": fn.get("description") or tool.get("description") or "", "input_schema": fn.get("parameters") or tool.get("input_schema") or {"type": "object", "properties": {}}})
+    if tools:
+        out["tools"] = tools
+    choice = body.get("tool_choice")
+    forced = isinstance(choice, dict) and (choice.get("function") or {}).get("name")
+    if forced:
+        out["tool_choice"] = {"type": "tool", "name": _wire_tool_name(choice["function"]["name"])}
+    elif isinstance(choice, str) and choice in ("auto", "none", "any", "required"):
+        out["tool_choice"] = {"type": "any"} if choice == "required" else {"type": choice}
+    if effort and not forced:
+        budget = max(1024, EFFORT_BUDGET.get(effort, 8192))
+        out["thinking"] = {"type": "enabled", "budget_tokens": min(budget, max_tokens - 1), "display": "omitted"}
+        if any(model.startswith(prefix) for prefix in EFFORT_MODELS) and effort in EFFORT_BUDGET:
+            out["output_config"] = {"effort": effort}
+    return out, names
+
+
+def _chunk(completion_id: str, model: str, delta: dict[str, Any], finish: str | None = None, usage: dict[str, Any] | None = None) -> str:
+    payload: dict[str, Any] = {"id": completion_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": model, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+    if usage is not None:
+        payload["usage"] = usage
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _usage(input_tokens: int, output_tokens: int, cache_read: int = 0, cache_write: int = 0) -> dict[str, Any]:
+    return {
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "prompt_tokens_details": {"cached_tokens": cache_read},
+        "completion_tokens_details": {"reasoning_tokens": 0},
+        "cache_creation_input_tokens": cache_write,
+        "cache_read_input_tokens": cache_read,
+    }
+
+
+async def messages_events_to_chunks(lines: AsyncIterator[str], *, model: str, names: dict[str, str] | None = None) -> AsyncIterator[str]:
+    """Anthropic Messages SSE → chat-completion chunks."""
+    names = names or {}
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    calls: dict[int, int] = {}
+    finish = "stop"
+    input_tokens = output_tokens = cache_read = cache_write = 0
+    failed: str | None = None
+    event_name = ""
+    async for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("event:"):
+            event_name = line[6:].strip()
+            continue
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data:
+            continue
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        kind = event.get("type") or event_name
+        if kind == "error":
+            err = event.get("error") or event
+            failed = str(err.get("message") or err or "the backend reported a failure")
+        elif kind == "message_start":
+            usage = (event.get("message") or {}).get("usage") or {}
+            input_tokens = int(usage.get("input_tokens") or 0)
+            cache_read = int(usage.get("cache_read_input_tokens") or 0)
+            cache_write = int(usage.get("cache_creation_input_tokens") or 0)
+        elif kind == "content_block_start":
+            block = event.get("content_block") or {}
+            if block.get("type") == "tool_use":
+                index = int(event.get("index") or len(calls))
+                calls[index] = index
+                original = names.get(str(block.get("name") or ""), str(block.get("name") or ""))
+                finish = "tool_calls"
+                yield _chunk(completion_id, model, {"tool_calls": [{"index": index, "id": str(block.get("id") or ""), "type": "function", "function": {"name": original, "arguments": ""}}]})
+        elif kind == "content_block_delta":
+            delta = event.get("delta") or {}
+            dtype = delta.get("type")
+            if dtype == "text_delta" and delta.get("text"):
+                yield _chunk(completion_id, model, {"role": "assistant", "content": delta["text"]})
+            elif dtype == "thinking_delta" and delta.get("thinking"):
+                yield _chunk(completion_id, model, {"reasoning_content": delta["thinking"]})
+            elif dtype == "input_json_delta" and delta.get("partial_json"):
+                index = int(event.get("index") or (len(calls) - 1 if calls else 0))
+                yield _chunk(completion_id, model, {"tool_calls": [{"index": index, "function": {"arguments": delta["partial_json"]}}]})
+        elif kind == "message_delta":
+            usage = event.get("usage") or {}
+            if usage.get("output_tokens") is not None:
+                output_tokens = int(usage.get("output_tokens") or 0)
+            if usage.get("input_tokens") is not None:
+                input_tokens = int(usage.get("input_tokens") or input_tokens)
+            reason = (event.get("delta") or {}).get("stop_reason")
+            if reason == "max_tokens":
+                finish = "length"
+            elif reason == "tool_use":
+                finish = "tool_calls"
+            elif reason in ("end_turn", "stop_sequence"):
+                finish = "stop"
+        elif kind in ("error",) or event_name == "error":
+            err = event.get("error") or event
+            failed = str(err.get("message") or err or "the backend reported a failure")
+    if failed:
+        yield f"data: {json.dumps({'error': {'message': failed, 'type': 'upstream_error'}})}\n\n"
+    else:
+        yield _chunk(completion_id, model, {}, finish=finish, usage=_usage(input_tokens, output_tokens, cache_read, cache_write))
+    yield "data: [DONE]\n\n"
+
+
+def _iso_to_unix(value: Any) -> Any:
+    if not isinstance(value, str) or not value:
+        return value
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return value
+
+
+def claude_usage_view(data: dict[str, Any], profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    windows = []
+    for name, key in (("5h", "five_hour"), ("weekly", "seven_day")):
+        w = data.get(key) or {}
+        if isinstance(w, dict) and w:
+            windows.append({"name": name, "used_percent": float(w.get("utilization") or 0), "resets_at": _iso_to_unix(w.get("resets_at"))})
+    for limit in data.get("limits") or []:
+        if not isinstance(limit, dict) or limit.get("kind") == "session" or limit.get("kind") == "weekly_all":
+            continue
+        scope = ((limit.get("scope") or {}).get("model") or {}).get("display_name")
+        if scope:
+            windows.append({"name": str(scope), "used_percent": float(limit.get("percent") or 0), "resets_at": _iso_to_unix(limit.get("resets_at"))})
+    org = (profile or {}).get("organization") or {}
+    extra = data.get("extra_usage") or {}
+    reached = any(float(w.get("used_percent") or 0) >= 100 for w in windows)
+    return {
+        "provider": "claude",
+        "plan": org.get("rate_limit_tier") or org.get("organization_type") or "claude",
+        "limit_reached": reached,
+        "windows": windows,
+        "extra_usage": bool(extra.get("is_enabled")),
+    }
+
+
+__all__ = [
+    "CLAUDE_API",
+    "CLAUDE_FALLBACK_MODELS",
+    "ClaudeAuth",
+    "chat_to_messages",
+    "claude_usage_view",
+    "messages_events_to_chunks",
+]

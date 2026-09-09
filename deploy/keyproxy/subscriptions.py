@@ -6,9 +6,7 @@ refreshed tokens are written back so the CLIs keep working), sends the identity 
 each backend expects, and — for Codex, whose backend speaks only the Responses API —
 translates an OpenAI chat completion into a Responses request and the streamed answer back.
 
-Practice established by pi and OpenCode: OpenAI documents ChatGPT sign-in for Codex-style
-clients, and xAI books such use as its own "API product" category. Anthropic forbids the
-equivalent, so there is no Claude entry here.
+Claude Code is handled in ``claude.py`` the same way (``~/.claude/.credentials.json``).
 """
 
 from __future__ import annotations

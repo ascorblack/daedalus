@@ -1280,7 +1280,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         }
 
     async def subscription_usage() -> dict[str, Any]:
-        """Quota windows of the Codex and Grok subscriptions, read from the key proxy that holds their logins."""
+        """Quota windows of the Codex, Grok and Claude subscriptions, read from the key proxy that holds their logins."""
         origin = ""
         for provider in app.config.providers.values():
             if "keyproxy" in provider.base_url:
