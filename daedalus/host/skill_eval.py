@@ -1,36 +1,49 @@
 """Skill evaluation harness — the four-check minimal validation loop.
 
-A skill earns registration only if it passes all four checks in a single run:
+A skill earns registration only if it passes all four checks in one evaluation:
 
-1. **Necessity** — the base agent, WITHOUT the skill, does not solve the
-   decisive task ``P``. "Solves ``P``" is the benefit predicate (exit 0 with a
-   valid artifact), so necessity is its negation: if the base model already
-   produces a valid artifact, the skill is redundant — a placebo that only
-   parasitises the base model's own ability.
-2. **Benefit** — WITH the skill, ``P`` yields a valid artifact (exit 0 and a
-   non-None artifact, not merely a "loaded" status).
-3. **Invariance** — three sub-clauses, all must hold:
-   a. *No undeclared pollution*: after running ``P`` the workspace diff, minus
-      the skill's *declared* artifacts, is empty.
+1. **Necessity** — the base agent, WITHOUT the skill, does not solve any case
+   of the decisive battery. "Solves a case" is the benefit predicate (exit 0
+   with an artifact matching the case's expected value), so necessity is its
+   negation: if the base model already produces the expected artifact, the
+   skill is redundant — a placebo that only parasitises the base model's own
+   ability.
+2. **Benefit** — WITH the skill, every case of the decisive battery yields its
+   expected artifact (exit 0 and an artifact matching the case's expected
+   value, not merely a "loaded" status). The battery is a set of diverse
+   decisive inputs, each with its expected artifact. A single input cannot
+   rule out a *constant-output* mutant: a skill that ignores its input and
+   returns the memorised answer for one input passes every check on that input
+   while its rule is inert. A battery of cases with *differing* expected
+   artifacts rules that out — the constant mutant fails on any case whose
+   expected artifact differs from the one it memorised. (A lookup-table mutant
+   that memorises every battery input still passes a closed battery; held-out
+   cases would rule it out, which this API does not provide.)
+3. **Invariance** — three sub-clauses, all must hold across the battery:
+   a. *No undeclared pollution*: after every case of the battery, the union of
+      the workspace diffs, minus the skill's *declared* artifacts, is empty.
    b. *Canary stability*: a neutral canary task ``C`` is unchanged before vs
-      after ``P`` (exit code, artifact and workspace diff all match). The
-      canary baseline is captured immediately before ``P``-with-skill (after
-      the base run) and the canary is re-run immediately after, so the
-      comparison isolates exactly what the skill run did to the context.
-   c. *Append attribution*: the decisive artifact is attributable to THIS run.
-      The runner reports the artifact target's ``pre_state`` and ``post_state``
-      bytes; the harness checks ``post_state == pre_state + frame`` (exact
-      append), or ``post_state == frame`` when the target did not pre-exist
-      (``pre_state is None``). Keyed on ``H0 = SHA256(pre_state)``. This rules
-      out replay, reordering and pre-existing duplicates: a skill that merely
-      reads an artifact that was already there produces no append, so the
-      check fails. A failed compare-and-swap on ``H0`` (a concurrent writer
-      changed the pre-state between snapshot and write) fails the run — the
-      race is part of the verification, not a side channel. An empty frame on a
-      pre-existing target (a read-only replay) also fails. When the runner does
-      not meter ``pre_state``/``post_state`` (``state_metered`` is ``False`` —
-      the CI mock and legacy runners), this sub-clause is skipped, exactly as
-      the cost clause is skipped when the baseline is unmetered.
+      after the battery (exit code, artifact and workspace diff all match). The
+      canary baseline is captured immediately before the battery and the canary
+      is re-run immediately after, so the comparison isolates the battery's net
+      effect on the context. (The canary is battery-scoped: a case that poisons
+      and a later case that unpoisons cancel in the net; per-case isolation is
+      not claimed.)
+   c. *Append attribution*: each decisive artifact is attributable to its own
+      run. The runner reports the artifact target's ``pre_state`` and
+      ``post_state`` bytes; the harness checks ``post_state == pre_state + frame``
+      (exact append), or ``post_state == frame`` when the target did not
+      pre-exist (``pre_state is None``). Keyed on ``H0 = SHA256(pre_state)``.
+      This rules out replay, reordering and pre-existing duplicates: a skill
+      that merely reads an artifact that was already there produces no append,
+      so the check fails. A failed compare-and-swap on ``H0`` (a concurrent
+      writer changed the pre-state between snapshot and write) fails the run —
+      the race is part of the verification, not a side channel. An empty frame
+      on a pre-existing target (a read-only replay) also fails. When the runner
+      does not meter ``pre_state``/``post_state`` (``state_metered`` is ``False``
+      — the CI mock and legacy runners), this sub-clause is skipped for that
+      case, exactly as the cost clause is skipped when the baseline is
+      unmetered.
 4. **Selectivity** — a lexically similar near-miss ``N1`` does NOT trigger the
    skill and costs no more than the no-skill baseline plus a small allowance.
    When the no-skill baseline cost is zero (not metered) the cost clause is
@@ -132,6 +145,45 @@ def _frame_bytes(artifact: object) -> bytes:
     raise TypeError(f"artifact must be bytes or str for append attribution, got {type(artifact).__name__}")
 
 
+def _matches(artifact: object | None, expected: object) -> bool:
+    """Whether a produced artifact satisfies a case's expectation.
+
+    ``expected`` is either a fixed value (the artifact must equal it exactly)
+    or a validator callable (``expected(artifact)`` is truthy). A ``None``
+    artifact never satisfies any expectation. A fixed value is the right
+    expectation for deterministic skills; a validator is the right expectation
+    for a skill whose output has valid variety (e.g. a design skill that may
+    emit any well-formed page) — in that case the validator encodes the shape
+    the skill is trusted to produce, which a mere ``is not None`` check does
+    not.
+
+    Two footguns, both handled here:
+
+    * A *type* is callable, so ``expected=str`` is treated as a validator
+      (``bool(str(artifact))``), NOT as "the artifact equals the class ``str``".
+      Pass a lambda for a type check (``lambda a: isinstance(a, str)``); do not
+      pass a bare type as a value to compare against.
+    * A validator that *raises* fails the match (the case is not solved)
+      rather than letting the exception escape ``evaluate`` — a malformed
+      artifact that the validator cannot parse is a benefit failure, not a
+      harness crash.
+    """
+    if artifact is None:
+        return False
+    if callable(expected):
+        try:
+            return bool(expected(artifact))
+        except Exception:
+            return False
+    return artifact == expected
+
+
+def _solves(result: RunResult, expected: object) -> bool:
+    """The benefit predicate for one case: exit 0 with an artifact that
+    matches the case's expectation."""
+    return result.exit_code == 0 and _matches(result.artifact, expected)
+
+
 def _state_desc(state: bytes | None) -> str:
     """A short, non-leaking description of a byte state for detail strings.
 
@@ -199,38 +251,44 @@ class SkillEvalHarness:
 
     def evaluate(
         self,
-        decisive_p: str,
+        decisive_cases: Sequence[tuple[str, object]],
         near_miss_n1: str,
         canary_c: str,
         declared_artifacts: Sequence[str] = (),
     ) -> EvalReport:
         declared = frozenset(normpath(d) for d in declared_artifacts)
+        cases = list(decisive_cases)
+        if not cases:
+            # An empty battery would make necessity, benefit and attribution
+            # vacuously True (all([]) is True) and register a skill that was
+            # never actually tested. Fail closed.
+            raise ValueError("decisive_cases must be non-empty: an empty battery vacuously passes the four checks")
 
-        # 1. Necessity: the base agent must not solve P without the skill.
-        p_no = self._run(decisive_p, with_skill=False)
-        solves_p = p_no.exit_code == 0 and p_no.artifact is not None
-        necessity = not solves_p
+        # 1. Necessity: the base agent must not solve ANY case without the skill.
+        p_no = [self._run(inp, with_skill=False) for inp, _exp in cases]
+        necessity = all(not _solves(r, exp) for r, (_inp, exp) in zip(p_no, cases))
 
-        # Canary baseline immediately before P-with-skill, so c_post vs c_pre
-        # isolates exactly what the skill run did to the context.
+        # Canary baseline immediately before the battery, so c_post vs c_pre
+        # isolates exactly what the skill runs did to the context.
         c_pre = self._run(canary_c, with_skill=False)
 
-        # 2. Benefit: with the skill, P must produce a valid artifact.
-        p_yes = self._run(decisive_p, with_skill=True)
-        benefit = p_yes.exit_code == 0 and p_yes.artifact is not None
+        # 2. Benefit: with the skill, every case must yield its expected artifact.
+        p_yes = [self._run(inp, with_skill=True) for inp, _exp in cases]
+        benefit = all(_solves(r, exp) for r, (_inp, exp) in zip(p_yes, cases))
 
-        # 3. Invariance: no undeclared pollution, C unchanged after P, and the
-        #    decisive artifact is attributable to this run (append on H0).
-        #    c_post runs immediately after p_yes (before the near-miss), so it
-        #    reflects P's context poisoning specifically.
-        unexpected = tuple(d for d in p_yes.workspace_diff if normpath(d) not in declared)
+        # 3. Invariance: no undeclared pollution (across every case), C unchanged
+        #    after the battery, and each decisive artifact is attributable to its
+        #    run (append on H0). c_post runs immediately after the battery (before
+        #    the near-miss), so it reflects the battery's context poisoning.
+        unexpected = tuple(d for r in p_yes for d in r.workspace_diff if normpath(d) not in declared)
         c_post = self._run(canary_c, with_skill=False)
         canary_stable = (
             c_pre.exit_code == c_post.exit_code
             and c_pre.artifact == c_post.artifact
             and c_pre.workspace_diff == c_post.workspace_diff
         )
-        attribution_ok, attribution_desc = self._check_attribution(p_yes)
+        attributions = [self._check_attribution(r) for r in p_yes]
+        attribution_ok = all(ok for ok, _desc in attributions)
         invariance = (not unexpected) and canary_stable and attribution_ok
 
         # 4. Selectivity: N1 must not trigger the skill and must stay cheap.
@@ -257,7 +315,7 @@ class SkillEvalHarness:
                 f"canary pre={c_pre.exit_code}/{c_pre.artifact!r}/{c_pre.workspace_diff} "
                 f"post={c_post.exit_code}/{c_post.artifact!r}/{c_post.workspace_diff}"
             )
-        inv_parts.append(attribution_desc)
+        inv_parts.append("attribution: " + " | ".join(desc for _ok, desc in attributions))
         invariance_detail = "; ".join(inv_parts)
 
         return EvalReport(
@@ -265,16 +323,16 @@ class SkillEvalHarness:
                 CheckOutcome(
                     "necessity",
                     necessity,
-                    "base agent does not solve P without the skill"
+                    "base agent does not solve any decisive case without the skill"
                     if necessity
-                    else "base agent already solves P — skill is redundant",
+                    else "base agent already solves a decisive case — skill is redundant",
                 ),
                 CheckOutcome(
                     "benefit",
                     benefit,
-                    "P with the skill yields a valid artifact"
+                    "every decisive case yields its expected artifact with the skill"
                     if benefit
-                    else "P with the skill failed or produced no artifact",
+                    else "a decisive case failed or produced the wrong artifact",
                 ),
                 CheckOutcome("invariance", invariance, invariance_detail),
                 CheckOutcome(
@@ -324,12 +382,12 @@ class GatedSkillRegistration:
     async def register(
         self,
         action: Callable[[], Awaitable[None]],
-        decisive_p: str,
+        decisive_cases: Sequence[tuple[str, object]],
         near_miss_n1: str,
         canary_c: str,
         declared_artifacts: Sequence[str] = (),
     ) -> GatedResult:
-        report = self._harness.evaluate(decisive_p, near_miss_n1, canary_c, declared_artifacts)
+        report = self._harness.evaluate(decisive_cases, near_miss_n1, canary_c, declared_artifacts)
         if not report.passed:
             return GatedResult(report=report, registered=False)
         await action()
