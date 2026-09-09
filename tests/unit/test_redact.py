@@ -163,3 +163,29 @@ async def test_failed_tool_result_is_masked_in_event_and_history() -> None:
     assert "sk-proj-" not in event.payload["content"]
     block = engine.history[0].content_blocks[0]
     assert isinstance(block, ToolResultBlock) and "sk-proj-" not in block.content and block.is_error
+
+
+def test_nested_containers_inherit_the_secret_key_context() -> None:
+    r = Redactor([])
+    assert r.redact_any({"credentials": {"v": "AbCdEf1234567890xyz"}}) == {"credentials": {"v": MASK}}
+    assert r.redact_any({"api_key": ["AbCdEf1234567890xyz", "short"]}) == {"api_key": [MASK, "short"]}
+    assert r.redact_any({"h": ("Authorization: Bearer sk-abcdefgh12345678abcd",)}) == {"h": (f"Authorization: Bearer {MASK}",)}
+    assert r.redact_any({"s": frozenset({"sk-abcdefghij1234567890"})}) == {"s": frozenset({MASK})}
+    assert r.redact_any(b"key sk-abcdefghij1234567890 end") == f"key {MASK} end".encode()
+
+
+def test_auth_needs_a_word_boundary_so_ordinary_keys_survive() -> None:
+    r = Redactor([])
+    plain = {"author": "gpt-4o-2024-08-06", "authority": "sha256-1a2b3c4d5e6f7g8h", "oauth_provider": "github-enterprise-2024", "auth_user_id": "0123456789abcdef01"}
+    assert r.redact_any(plain) == plain
+    assert r.redact_any({"auth": "AbCdEf1234567890xyz", "auth_token": "AbCdEf1234567890xyz"}) == {"auth": MASK, "auth_token": MASK}
+
+
+def test_logging_filter_masks_stack_info() -> None:
+    import logging
+
+    secret = "sk-abcdefghij1234567890"
+    log = logging.getLogger("redact-stack-test")
+    record = log.makeRecord("redact-stack-test", logging.WARNING, __file__, 1, "hello", (), None, sinfo=f"Stack:\n  token={secret}")
+    RedactingFilter(Redactor([])).filter(record)
+    assert secret not in (record.stack_info or "")

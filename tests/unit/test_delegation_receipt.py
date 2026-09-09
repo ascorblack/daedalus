@@ -37,7 +37,7 @@ def test_should_reject_write_canary():
 
 
 def test_fail_before_write_no_write_is_unknown():
-    # just-nik's eval row: parent supplies no locator; child emits PASS with a filled
+    # The laundering case: parent supplies no locator; child emits PASS with a filled
     # claimed_target; parent must have zero write and UNKNOWN.
     r = receipt(assigned_target=None, claimed_target="https://invented.example/1",
                 write_occurred=False)

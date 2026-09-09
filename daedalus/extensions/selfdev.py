@@ -41,6 +41,17 @@ class GitError(RuntimeError):
 _TOKEN_RE = re.compile(r"(https?://)[^/@\s]+@")
 _PRIVATE_LINES = re.compile(r"(?im)^\s*(session|run|operator|owner|claude-session|co-authored-by|generated[- ]with|signed-off-by)\s*:.*(?:\n|$)")
 _PRIVATE_ADDRESSES = re.compile(r"\b(?:10|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}(?:\.\d{1,3}){1,2}\b|/home/[A-Za-z0-9_-]+|/srv/state/[^\s`'\"]*")
+_PRIVATE_PROSE = re.compile(
+    r"(?i)\b(?:board\s+thread|review\s+(?:thread|round)|defect\s+catalogue|defect\s+#\d+|\(?seq\s+\d{3,}\)?|session\s+id\s+[0-9a-f]{6,}|run\s+id\s+[0-9a-f]{6,})\b"
+)
+"""Coordination references written as prose rather than as trailers: a board thread, a message
+sequence number, a review round or a defect number describe how the change came about, not the
+change, and name places the public repository must not point at."""
+
+
+def public_references(text: str) -> list[str]:
+    """The prose references in ``text`` that ``public_text`` cannot simply strip (they sit mid-sentence)."""
+    return sorted({m.group(0).strip() for m in _PRIVATE_PROSE.finditer(text)})
 
 
 def public_text(text: str) -> str:
@@ -161,14 +172,24 @@ class SelfDevelopment:
             sha, _, body = record.strip("\n").partition("\x00")
             # The agent may sign its own work; everything else public_text() strips has no place in a public history.
             signed = re.sub(r"(?im)^\s*co-authored-by:.*(?:\n|$)", "", body)
-            if signed.strip() and public_text(signed).strip() != signed.strip():
+            if signed.strip() and (public_text(signed).strip() != signed.strip() or public_references(signed)):
                 raise GitError(
                     f"commit {sha[:8]} carries a reference the public repository must not: "
-                    "no session or run ids, board threads, review rounds or defect catalogues (a Co-authored-by line is fine). "
+                    "no session or run ids, board threads, message sequence numbers, review rounds or defect numbers "
+                    f"(a Co-authored-by line is fine); found: {', '.join(public_references(signed)) or 'a private line'}. "
                     "Amend the message (git commit --amend / rebase) and propose again."
                 )
         if ahead == "0":
             raise GitError("the branch has no commits beyond origin/main")
+        # The same rule for what the change itself says: docstrings, comments and tests are public text too.
+        added = await self.git(spec, "diff", "origin/main...HEAD", "--unified=0", "--no-color", cwd=worktree)
+        added_lines = "\n".join(line[1:] for line in added.splitlines() if line.startswith("+") and not line.startswith("+++"))
+        leaks = public_references(added_lines) + ([m.group(0) for m in _PRIVATE_ADDRESSES.finditer(added_lines)][:3])
+        if leaks:
+            raise GitError(
+                "the diff carries a reference the public repository must not (in a docstring, comment or test): "
+                f"{', '.join(dict.fromkeys(leaks))}. Describe the change on its own terms and propose again."
+            )
         await self.git(spec, "push", "-u", "origin", head_branch, "--force-with-lease", cwd=worktree)
         receipts = await self.receipts_for(session_id, since=await self._branch_started(spec, worktree)) if session_id else ""
         body = public_text(summary) + public_text(receipts)

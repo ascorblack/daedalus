@@ -266,7 +266,7 @@ class SkillEvalHarness:
 
         # 1. Necessity: the base agent must not solve ANY case without the skill.
         p_no = [self._run(inp, with_skill=False) for inp, _exp in cases]
-        necessity = all(not _solves(r, exp) for r, (_inp, exp) in zip(p_no, cases))
+        necessity = all(not _solves(r, exp) for r, (_inp, exp) in zip(p_no, cases, strict=True))
 
         # Canary baseline immediately before the battery, so c_post vs c_pre
         # isolates exactly what the skill runs did to the context.
@@ -274,7 +274,7 @@ class SkillEvalHarness:
 
         # 2. Benefit: with the skill, every case must yield its expected artifact.
         p_yes = [self._run(inp, with_skill=True) for inp, _exp in cases]
-        benefit = all(_solves(r, exp) for r, (_inp, exp) in zip(p_yes, cases))
+        benefit = all(_solves(r, exp) for r, (_inp, exp) in zip(p_yes, cases, strict=True))
 
         # 3. Invariance: no undeclared pollution (across every case), C unchanged
         #    after the battery, and each decisive artifact is attributable to its
