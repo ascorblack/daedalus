@@ -2,38 +2,51 @@
 
 A skill earns registration only if it passes all four checks in a single run:
 
-1. **Necessity** — the base agent, WITHOUT the skill, fails the decisive task
-   ``P``. If the base model already solves ``P``, the skill is redundant: a
-   placebo that only parasitises the base model's own ability.
-2. **Benefit** — WITH the skill, ``P`` yields a valid artifact (a real object,
-   not merely a "loaded" status).
-3. **Selectivity** — a lexically similar near-miss ``N1`` does NOT trigger the
-   skill and costs no more than the no-skill baseline plus a small allowance.
-4. **Invariance** — after running ``P`` the workspace diff, minus the skill's
+1. **Necessity** — the base agent, WITHOUT the skill, does not solve the
+   decisive task ``P``. "Solves ``P``" is the benefit predicate (exit 0 with a
+   valid artifact), so necessity is its negation: if the base model already
+   produces a valid artifact, the skill is redundant — a placebo that only
+   parasitises the base model's own ability.
+2. **Benefit** — WITH the skill, ``P`` yields a valid artifact (exit 0 and a
+   non-None artifact, not merely a "loaded" status).
+3. **Invariance** — after running ``P`` the workspace diff, minus the skill's
    *declared* artifacts, is empty (no pollution), and a neutral canary task
-   ``C`` behaves the same as before the skill ran (no context poisoning /
-   sticky steering).
-
-The harness takes an injected ``run_agent`` callable so it can be exercised in
-CI with a deterministic mock; the host supplies the real runner. The canary is
-run before and after the decisive ``P``-with-skill run so a skill that leaves a
-directive in the context window is caught even when its artifact is correct.
+   ``C`` is unchanged before vs after ``P`` (exit code, artifact and workspace
+   diff all match). The canary is run immediately after ``P``-with-skill, so it
+   reflects ``P``'s context poisoning specifically — a later near-miss cannot
+   mask or mix into it.
+4. **Selectivity** — a lexically similar near-miss ``N1`` does NOT trigger the
+   skill and costs no more than the no-skill baseline plus a small allowance.
+   When the no-skill baseline cost is zero (not metered) the cost clause is
+   skipped and only the trigger clause is checked.
 
 The invariance check compares against the declared artifacts, not against an
 empty tree: a skill whose job is to create files (a design skill writing
-``index.html``) is not pollution for doing so.
+``index.html``) is not pollution for doing so. Declared artifacts and the
+runner's diff entries are normalised with ``posixpath.normpath`` before
+comparison, so ``./out/index.html`` and ``out/index.html`` match.
+
+The harness takes an injected ``run_agent`` callable so it can be exercised in
+CI with a deterministic mock; the host supplies the real runner. The canary's
+``artifact`` is compared with ``==`` across runs, so the runner must return a
+comparable value for the canary task.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Callable
+from posixpath import normpath
+from typing import Protocol
 
 
 @dataclass(frozen=True)
 class RunResult:
-    """The outcome of one agent run of a task, with or without the skill."""
+    """The outcome of one agent run of a task, with or without the skill.
+
+    ``artifact`` is compared with ``==`` across runs in the canary check, so the
+    runner should return a value with a meaningful ``__eq__`` for that task.
+    """
 
     exit_code: int
     artifact: object | None = None
@@ -42,8 +55,10 @@ class RunResult:
     workspace_diff: tuple[str, ...] = ()
 
 
-# A runner maps ``(task, *, with_skill=...)`` to a :class:`RunResult`.
-AgentRunner = Callable[..., RunResult]
+class AgentRunner(Protocol):
+    """Maps ``(task, *, with_skill=...)`` to a :class:`RunResult`."""
+
+    def __call__(self, task: str, *, with_skill: bool) -> RunResult: ...
 
 
 @dataclass(frozen=True)
@@ -90,37 +105,52 @@ class SkillEvalHarness:
         canary_c: str,
         declared_artifacts: Sequence[str] = (),
     ) -> EvalReport:
-        declared = frozenset(declared_artifacts)
+        declared = frozenset(normpath(d) for d in declared_artifacts)
 
         # Canary baseline: capture C's behaviour before the skill has run.
         c_pre = self._run(canary_c, with_skill=False)
 
-        # 1. Necessity: the base agent must fail P without the skill.
+        # 1. Necessity: the base agent must not solve P without the skill.
         p_no = self._run(decisive_p, with_skill=False)
-        necessity = p_no.exit_code != 0
+        solves_p = p_no.exit_code == 0 and p_no.artifact is not None
+        necessity = not solves_p
 
         # 2. Benefit: with the skill, P must produce a valid artifact.
         p_yes = self._run(decisive_p, with_skill=True)
         benefit = p_yes.exit_code == 0 and p_yes.artifact is not None
 
-        # 3. Selectivity: N1 must not trigger the skill and must stay cheap.
+        # 3. Invariance: no undeclared pollution, and C is unchanged after P.
+        #    c_post runs immediately after p_yes so it reflects P's context
+        #    poisoning specifically (a later near-miss cannot mask or mix in).
+        unexpected = tuple(d for d in p_yes.workspace_diff if normpath(d) not in declared)
+        c_post = self._run(canary_c, with_skill=False)
+        canary_stable = (
+            c_pre.exit_code == c_post.exit_code
+            and c_pre.artifact == c_post.artifact
+            and c_pre.workspace_diff == c_post.workspace_diff
+        )
+        invariance = (not unexpected) and canary_stable
+
+        # 4. Selectivity: N1 must not trigger the skill and must stay cheap.
         base_n1 = self._run(near_miss_n1, with_skill=False)
         n1_yes = self._run(near_miss_n1, with_skill=True)
-        budget = max(base_n1.cost * (1.0 + self._cost_allowance), self._cost_floor)
-        selectivity = (not n1_yes.skill_invoked) and n1_yes.cost <= budget
-
-        # 4. Invariance: no undeclared pollution, and C is unchanged after P.
-        unexpected = tuple(d for d in p_yes.workspace_diff if d not in declared)
-        c_post = self._run(canary_c, with_skill=False)
-        canary_stable = c_pre.exit_code == c_post.exit_code and c_pre.artifact == c_post.artifact
-        invariance = (not unexpected) and canary_stable
+        triggered = n1_yes.skill_invoked
+        if base_n1.cost <= 0:
+            # Baseline not metered: only the trigger clause is meaningful.
+            cost_ok = True
+            cost_desc = "baseline unmetered"
+        else:
+            budget = max(base_n1.cost * (1.0 + self._cost_allowance), self._cost_floor)
+            cost_ok = n1_yes.cost <= budget
+            cost_desc = f"cost {n1_yes.cost:.3f} <= budget {budget:.3f}"
+        selectivity = (not triggered) and cost_ok
 
         return EvalReport(
             outcomes=[
                 CheckOutcome(
                     "necessity",
                     necessity,
-                    "base agent fails P without the skill"
+                    "base agent does not solve P without the skill"
                     if necessity
                     else "base agent already solves P — skill is redundant",
                 ),
@@ -132,21 +162,25 @@ class SkillEvalHarness:
                     else "P with the skill failed or produced no artifact",
                 ),
                 CheckOutcome(
-                    "selectivity",
-                    selectivity,
-                    f"N1 quiet and within budget (cost {n1_yes.cost:.3f} <= {budget:.3f})"
-                    if selectivity
-                    else f"N1 triggered={n1_yes.skill_invoked}, cost {n1_yes.cost:.3f} > budget {budget:.3f}",
-                ),
-                CheckOutcome(
                     "invariance",
                     invariance,
                     "workspace clean modulo declared artifacts; canary unchanged"
                     if invariance
                     else (
                         f"undeclared diff={list(unexpected)}; "
-                        f"canary pre={c_pre.exit_code}/{c_pre.artifact!r} "
-                        f"post={c_post.exit_code}/{c_post.artifact!r}"
+                        f"canary pre={c_pre.exit_code}/{c_pre.artifact!r}/{c_pre.workspace_diff} "
+                        f"post={c_post.exit_code}/{c_post.artifact!r}/{c_post.workspace_diff}"
+                    ),
+                ),
+                CheckOutcome(
+                    "selectivity",
+                    selectivity,
+                    f"N1 quiet and within budget ({cost_desc})"
+                    if selectivity
+                    else (
+                        "N1 triggered the skill on a near-miss"
+                        if triggered
+                        else f"N1 over budget ({cost_desc})"
                     ),
                 ),
             ]
