@@ -9,6 +9,7 @@ from daedalus.host.resume_boundary import (
     TRANSITION_ID,
     UNRESOLVED_ID,
     ResumeBoundary,
+    ResumeStatus,
 )
 from daedalus.host.session_store import Record, SessionStore, SessionStoreError
 
@@ -78,8 +79,10 @@ def test_read_none_without_transition() -> None:
     store = SessionStore(session="s")
     boundary = ResumeBoundary(store)
     assert boundary.read() is None
+    assert boundary.status() is ResumeStatus.ABSENT
     store.put(GOAL_ID, {"kind": "completed_goal", "text": "orphan"})
     assert boundary.read() is None
+    assert boundary.status() is ResumeStatus.DEGRADED
 
 
 def test_overwrite_updates_contract() -> None:
@@ -123,6 +126,7 @@ def test_foreign_transition_not_readable() -> None:
     boundary = ResumeBoundary(store)
     assert boundary.read() is None
     assert boundary.can_resume() is False
+    assert boundary.status() is ResumeStatus.ABSENT
 
 
 def test_broken_graph_missing_leaf() -> None:
@@ -131,6 +135,31 @@ def test_broken_graph_missing_leaf() -> None:
     boundary.mark_done("goal", "unk")
     del store._data[GOAL_ID]
     assert boundary.read() is None
+    assert boundary.can_resume() is False
+    assert boundary.status() is ResumeStatus.DEGRADED
+
+
+def test_crash_after_transition_delete_leaves_degraded() -> None:
+    """Simulate crash mid-clear: transition gone, orphan leaves remain."""
+    store = SessionStore(session="s")
+    boundary = ResumeBoundary(store)
+    boundary.mark_done("goal", "unk")
+    assert boundary.status() is ResumeStatus.READY
+    store.delete(TRANSITION_ID)
+    assert boundary.read() is None
+    assert boundary.can_resume() is False
+    assert boundary.status() is ResumeStatus.DEGRADED
+    # clear still sweeps orphans
+    boundary.clear()
+    assert boundary.status() is ResumeStatus.ABSENT
+
+
+def test_status_absent_ready() -> None:
+    store = SessionStore(session="s")
+    boundary = ResumeBoundary(store)
+    assert boundary.status() is ResumeStatus.ABSENT
+    boundary.mark_done("g", "u")
+    assert boundary.status() is ResumeStatus.READY
 
 
 def test_clear_rejects_foreign() -> None:

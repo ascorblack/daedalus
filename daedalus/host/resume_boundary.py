@@ -13,17 +13,36 @@ any write so a rejected call cannot leave a new session-owned leaf. Leaves
 are written first so transition refs close (clause 3). While the transition
 stands, leaf delete is rejected (clause 5). The transition payload is the
 canonical source for the two lines; leaf records are existence anchors.
+
+``status()`` exposes a three-way register (absent / ready / degraded) so
+orphan leaves after a mid-clear crash are not collapsed into absent.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 from daedalus.host.session_store import Record, SessionStore, SessionStoreError
 
 GOAL_ID = "resume:goal"
 UNRESOLVED_ID = "resume:unresolved"
 TRANSITION_ID = "resume:transition"
+
+
+class ResumeStatus(StrEnum):
+    """Three-way resume register (not collapsed into a boolean).
+
+    ``absent`` — no session-owned resume records.
+    ``ready`` — transition + both leaves present under this session.
+    ``degraded`` — some session-owned resume records exist, but the
+    contract is incomplete (e.g. orphan leaves after a crash mid-clear,
+    or a transition whose leaf anchors are gone).
+    """
+
+    ABSENT = "absent"
+    READY = "ready"
+    DEGRADED = "degraded"
 
 
 @dataclass(frozen=True)
@@ -114,8 +133,24 @@ class ResumeBoundary:
         )
 
     def can_resume(self) -> bool:
-        """True only when both boundary lines are restatable from the store."""
-        return self.read() is not None
+        """True only when status is ``ready`` (not degraded, not absent)."""
+        return self.status() is ResumeStatus.READY
+
+    def status(self) -> ResumeStatus:
+        """Return absent / ready / degraded without collapsing orphans to absent.
+
+        Orphan leaves after a crash between deleting the transition and the
+        leaves are ``degraded``: ``can_resume`` stays False, but callers can
+        tell garbage from an empty store.
+        """
+        transition = self._session_record(TRANSITION_ID)
+        goal = self._session_record(GOAL_ID)
+        unresolved = self._session_record(UNRESOLVED_ID)
+        if transition is None and goal is None and unresolved is None:
+            return ResumeStatus.ABSENT
+        if self.read() is not None:
+            return ResumeStatus.READY
+        return ResumeStatus.DEGRADED
 
     def clear(self) -> None:
         """Drop the transition first, then the leaves (inbound-ref order).
