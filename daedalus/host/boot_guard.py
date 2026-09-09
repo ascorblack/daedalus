@@ -42,7 +42,7 @@ def _atomic_write(path: Path, text: str) -> None:
     otherwise leave the destination as a 0-byte file — exactly the crash the
     guard counts. A failed write removes its orphaned temp file.
 
-    Cross-platform durability (Defect #7): on Windows ``os.replace`` maps to
+    Cross-platform durability: on Windows ``os.replace`` maps to
     ``MoveFileExW(MOVEFILE_REPLACE_EXISTING)`` and can transiently raise
     ``PermissionError`` (WinError 5/32) while a concurrent reader holds the
     target, so the replace is retried with a short backoff; on POSIX the
@@ -148,7 +148,9 @@ class BootGuard:
                     except (ValueError, OverflowError):
                         logger.warning("boot history record %r unparseable; dropped", t)
             cutoff = now - timedelta(minutes=self.window_minutes)
-            recent = [t for t in times if t >= cutoff]
+            # A record from the future (a clock step back, a naive timestamp read as UTC) would
+            # never age out of the window and could pin recovery off for good: it is not evidence.
+            recent = [t for t in times if cutoff <= t <= now]
             if unclean:
                 recent.append(now)
             self.unclean_boots = len(recent)

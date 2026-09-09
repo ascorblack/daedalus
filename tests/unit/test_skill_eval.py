@@ -413,8 +413,9 @@ async def test_gated_registration_forwards_cost_floor() -> None:
 
 
 async def test_gated_registration_wires_into_directory_skill_store(tmp_path) -> None:
-    from daedalus.host.skills import DirectorySkillStore
     from protocore.contracts.skills import SkillUpsertInput
+
+    from daedalus.host.skills import DirectorySkillStore
 
     store = DirectorySkillStore(tmp_path / "skills")
     payload = SkillUpsertInput(name="Tide Pool", description="d", body_md="body")
@@ -462,7 +463,7 @@ class HardcodedMutant:
 
 
 def test_battery_catches_hardcoded_output_mutant() -> None:
-    # nirmata's falsification fixture: the smallest case where the four checks
+    # The falsification fixture: the smallest case where the four checks
     # all pass while the claimed rule is inert is a skill that hardcodes the
     # known answer for the single decisive input.
     mutant = HardcodedMutant("A1")

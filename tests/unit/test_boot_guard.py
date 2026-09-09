@@ -99,7 +99,7 @@ def test_atomic_write_fsyncs_before_replace(tmp_path: Path, monkeypatch) -> None
 
 
 def test_replace_retries_on_windows_sharing_violation(tmp_path: Path, monkeypatch) -> None:
-    """On Windows a transient PermissionError on replace is retried, not fatal (Defect #7)."""
+    """On Windows a transient PermissionError on replace is retried, not fatal."""
     target = tmp_path / "marker"
     monkeypatch.setattr(boot_guard.os, "name", "nt")
     monkeypatch.setattr(boot_guard.time, "sleep", lambda s: None)
@@ -225,3 +225,14 @@ def test_non_list_history_does_not_poison_count(tmp_path: Path) -> None:
     assert results == [(1, False), (2, False), (3, True)]
     # The non-list payload must have been replaced by a rewritten list.
     assert json.loads((tmp_path / "boot-history.json").read_text(encoding="utf-8")) is not None
+
+
+def test_a_record_from_the_future_is_not_evidence(tmp_path: Path) -> None:
+    """A clock step or a naive stamp read as UTC must not pin recovery off for good."""
+    future = (datetime.now(UTC) + timedelta(hours=3)).isoformat()
+    (tmp_path / "boot-history.json").write_text(json.dumps([future, future, future]), encoding="utf-8")
+    (tmp_path / "RUNNING").write_text("x", encoding="utf-8")  # an unclean boot
+    guard = BootGuard(tmp_path, window_minutes=10, threshold=3)
+    guard.on_boot()
+    assert guard.unclean_boots == 1 and guard.skip_recovery is False
+    assert json.loads((tmp_path / "boot-history.json").read_text(encoding="utf-8")) != [future, future, future]

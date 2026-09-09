@@ -1,6 +1,6 @@
 """Pull-request text never carries session ids, trailers, private addresses or credentials."""
 
-from daedalus.extensions.selfdev import public_text
+from daedalus.extensions.selfdev import public_references, public_text
 from daedalus.security.redact import MASK
 
 
@@ -15,3 +15,10 @@ def test_public_text_strips_private_lines_addresses_and_secrets() -> None:
     assert "ghp_" not in out and MASK in out
     assert out.startswith("Fix the thing.") and "Verified on http://<redacted>:9000" in out
     assert public_text("plain summary\n\nVerification receipts: none") == "plain summary\n\nVerification receipts: none"
+
+
+def test_prose_references_to_coordination_are_named() -> None:
+    body = "Requested in board thread cee13cb5 (seq 26929); review thread 16b1e0e5 round 2. Defect #7 fixed."
+    found = public_references(body)
+    assert "board thread" in found and "seq 26929" in found and "review thread" in found and "Defect #7" in found
+    assert public_references("Split the target field so a child cannot launder a locator; sequence of 3 retries.") == []

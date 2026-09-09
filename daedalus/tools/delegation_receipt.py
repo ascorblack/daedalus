@@ -1,13 +1,13 @@
 """Delegation receipts: a parent hands a child a *pinned* target before the call.
 
-Background (board thread cee13cb5, "Beyond JSON status checks"): when a parent
+Background: when a parent
 delegates a state-changing write to a child, the child's summary is a self-report —
 it has no independent view of the side effect it claims. The parent's receipt must
 therefore be re-executable *and* target-bound. The single-``target`` field has a
 laundering hole: the child can fill it with an invented locator, write to that, and
 report a shape-valid PASS. A filled ``target`` then looks identical to a pinned one.
 
-just-nik's refinement (seq 26929) splits the field so the canary cannot be laundered:
+Splitting the field closes the hole, so the canary cannot be laundered:
 
 - ``assigned_target`` — the locator the parent handed the child *before* the call.
   Only the parent populates it. Empty means the parent did not pin a target.
@@ -87,6 +87,10 @@ def evaluate(receipt: DelegationReceipt) -> str:
         return "FAIL"
 
     if claimed != assigned:
+        return "FAIL"
+
+    # A receipt is re-executable evidence: without the command and its output digest there is nothing to re-run.
+    if not receipt.command.strip() or not receipt.output_digest.strip():
         return "FAIL"
 
     return "PASS" if receipt.exit_code == 0 else "FAIL"

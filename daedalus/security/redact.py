@@ -35,7 +35,8 @@ MASK = "•••"
 MIN_VALUE_LENGTH = 8
 """Configured values shorter than this are not masked: they are too likely to collide with ordinary text."""
 
-_SECRET_NAME = r"(?:API_?KEY|APIKEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIALS?|PRIVATE_?KEY|ACCESS_?KEY|AUTH)"
+_SECRET_NAME = r"(?:API_?KEY|APIKEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIALS?|PRIVATE_?KEY|ACCESS_?KEY|(?<![A-Za-z])AUTH(?![A-Za-z_]))"
+"""``AUTH`` needs boundaries: ``author``, ``oauth_provider`` and ``auth_user_id`` are not secret names."""
 _CRED_VALUE = r"(?=[^\s\"'`,;]*\d)(?=[^\s\"'`,;]*[A-Za-z])[A-Za-z0-9_\-./+=~:]{16,}"
 """An unbroken run of at least 16 credential characters containing both a letter and a digit.
 Bare words, integers, dotted attribute chains and anything with brackets do not qualify."""
@@ -108,31 +109,39 @@ class Redactor:
                 out = pattern.sub(MASK, out)
         return out
 
-    def redact_any(self, value: Any) -> Any:
-        """Redact strings nested in dicts and lists (tool arguments, JSON payloads)."""
+    def redact_any(self, value: Any, *, secret_context: bool = False) -> Any:
+        """Redact strings nested in containers (tool arguments, JSON payloads).
+
+        ``secret_context`` says an enclosing key was secret-named (``{"api_key": [...]}``):
+        credential-looking strings anywhere below it are masked even when no shape matches.
+        """
         if isinstance(value, str):
-            return self.redact(value)
+            out = self.redact(value)
+            if out == value and secret_context and _CRED_VALUE_RE.search(value):
+                out = MASK
+            return out
+        if isinstance(value, bytes):
+            text = value.decode("utf-8", errors="surrogateescape")
+            return self.redact_any(text, secret_context=secret_context).encode("utf-8", errors="surrogateescape")
         if isinstance(value, dict):
-            return {k: self._redact_member(k, v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [self.redact_any(v) for v in value]
+            return {k: self._redact_member(k, v, secret_context) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set, frozenset)):
+            items = [self.redact_any(v, secret_context=secret_context) for v in value]
+            return type(value)(items) if not isinstance(value, list) else items
         return value
 
-    def _redact_member(self, key: Any, value: Any) -> Any:
+    def _redact_member(self, key: Any, value: Any, secret_context: bool = False) -> Any:
         """Redact a dict value, using its key as context for the key-name-based shapes.
 
         ``redact`` alone sees only the value, so a credential sitting under a secret-named
         key (``{"api_key": "…"}``) is missed — the JSON-string path catches it because the
         key is present in the text. Passing the key here keeps the structured path as safe
         as the string path, without over-masking (both a secret-named key AND a
-        credential-looking value are required).
+        credential-looking value are required). The context is inherited by nested
+        containers, so ``{"credentials": {"v": "…"}}`` is as covered as the flat form.
         """
-        if isinstance(value, str):
-            out = self.redact(value)
-            if out == value and isinstance(key, str) and _SECRET_NAME_RE.search(key) and _CRED_VALUE_RE.search(value):
-                out = MASK
-            return out
-        return self.redact_any(value)
+        named = secret_context or (isinstance(key, str) and bool(_SECRET_NAME_RE.search(key)))
+        return self.redact_any(value, secret_context=named)
 
     def contains_secret(self, text: str) -> bool:
         return self.redact(text) != text
@@ -167,6 +176,9 @@ class RedactingFilter(logging.Filter):
                     record.exc_text = self.redactor.redact("".join(traceback.format_exception(*exc_info)))
             elif record.exc_text:
                 record.exc_text = self.redactor.redact(record.exc_text)
+            # ``stack_info=True`` appends the captured source lines after the message.
+            if record.stack_info:
+                record.stack_info = self.redactor.redact(record.stack_info)
         except Exception:  # noqa: BLE001 — masking must never take logging down
             pass
         return True
