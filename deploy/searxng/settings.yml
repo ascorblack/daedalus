@@ -1,0 +1,84 @@
+# SearXNG behind the agent's WebSearch tool. Reachable only over the private "search" network, so the bot
+# limiter stays off (it would cap JSON clients at a few requests an hour) and JSON output is on.
+# Merged over the image's own settings.yml: https://docs.searxng.org/admin/settings/
+use_default_settings:
+  engines:
+    # An explicit allow-list instead of the ~80 engines of the default "general" category: fewer dead
+    # engines per query, lower latency, and a short, honest unresponsive_engines list. Chosen from what
+    # actually answers a home connection in 2026 (verified at setup): startpage and qwant hand out
+    # CAPTCHAs, yandex's scraper is broken ("parsing error"), mojeek answers nothing.
+    keep_only:
+      - google          # works since the 2026.9 browser-impersonation stack; rate-limits only after hundreds of back-to-back hits
+      - google cse      # Google through the Programmable Search endpoint: a second, independently throttled route to the same index
+      - duckduckgo      # Bing-backed; time_range supported
+      - bing            # ru-RU market works; no time_range, no paging
+      - brave           # own index; a 429 from a home IP only suspends it for 180 s
+      - yahoo           # Bing-backed, answers reliably
+      - wikipedia
+      - wikidata
+
+general:
+  debug: false
+  instance_name: "daedalus-search"
+  enable_metrics: true          # keeps /stats and /stats/errors: the operator's view of engine health
+
+server:
+  # secret_key comes from SEARXNG_SECRET, limiter from SEARXNG_LIMITER (compose).
+  public_instance: false
+  image_proxy: false            # the agent never renders images
+  method: "GET"
+
+search:
+  safe_search: 0
+  autocomplete: ""              # an API-only instance has no use for suggestions and the outbound call they cost
+  favicon_resolver: ""
+  default_lang: "auto"          # the query's language decides unless the tool passes one
+  max_page: 3
+  formats:
+    - html                      # /search and /preferences stay usable from the LAN for a look
+    - json                      # the tool's format; without it /search?format=json answers 403
+  suspended_times:
+    SearxEngineAccessDenied: 180
+    SearxEngineCaptcha: 900     # a home IP usually cools off within minutes; the default hour throws away too much
+    SearxEngineTooManyRequests: 180
+
+outgoing:
+  request_timeout: 4.0          # Google and Bing over a home line need 3-5 s; the tool itself waits longer
+  max_request_timeout: 12.0
+  pool_connections: 100
+  enable_http2: true
+  retries: 0                    # a 403/429 retried at once only deepens the block; the tool falls back instead
+
+plugins:
+  # Answer-box plugins produce noise for a model, and self_info would echo container facts into results.
+  searx.plugins.calculator.SXNGPlugin:
+    active: false
+  searx.plugins.hash_plugin.SXNGPlugin:
+    active: false
+  searx.plugins.self_info.SXNGPlugin:
+    active: false
+  searx.plugins.unit_converter.SXNGPlugin:
+    active: false
+  searx.plugins.time_zone.SXNGPlugin:
+    active: false
+  searx.plugins.tracker_url_remover.SXNGPlugin:
+    active: true                # cleaner URLs, better de-duplication across engines
+
+engines:
+  - name: google
+    disabled: false
+    timeout: 5.0
+    weight: 1.2
+  - name: google cse
+    timeout: 5.0
+  - name: duckduckgo
+    timeout: 5.0
+  - name: bing
+    disabled: false
+    weight: 0.7
+  - name: brave
+    timeout: 4.0
+    weight: 0.8
+  - name: yahoo
+    disabled: false
+    weight: 0.5

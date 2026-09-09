@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import html
 import re
-from urllib.parse import parse_qs, urlparse
 
 import httpx
 from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
+from daedalus.tools import websearch
 from daedalus.tools._common import clip, error, ok, services_for, tool_config
 
 _TAG_RE = re.compile(r"<(script|style|noscript)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
@@ -54,34 +54,36 @@ async def web_fetch(context: ToolContext, url: str, max_chars: int | None = None
     return ok(context, f"HTTP {response.status_code} {url}\n\n{clip(body, limit)}", status=response.status_code)
 
 
-_RESULT_RE = re.compile(
-    r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>.*?'
-    r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
-    re.DOTALL,
+@tool(
+    name="WebSearch",
+    description=(
+        "Search the web and return the top results with snippets. Optional: language (ISO code such as 'ru' or 'en'), "
+        "time_range ('day', 'week', 'month' or 'year'), domains (comma-separated sites to search within)."
+    ),
 )
-
-
-@tool(name="WebSearch", description="Search the web and return the top results with snippets.")
-async def web_search(context: ToolContext, query: str, limit: int | None = None) -> ToolResult:
+async def web_search(
+    context: ToolContext, query: str, limit: int | None = None, language: str | None = None, time_range: str | None = None, domains: str | None = None
+) -> ToolResult:
     web = tool_config(context).web
-    limit = limit or web.search_results
-    try:
-        async with httpx.AsyncClient(
-            follow_redirects=True, timeout=web.search_timeout_seconds, headers={"user-agent": web.user_agent}, proxy=web.proxy or None
-        ) as client:
-            response = await client.post(web.search_url, data={"q": query, "kl": web.search_region})
-    except httpx.HTTPError as exc:
-        return error(context, f"search failed: {exc}")
-    results: list[str] = []
-    for href, title, snippet in _RESULT_RE.findall(response.text):
-        parsed = urlparse(html.unescape(href))
-        target = parse_qs(parsed.query).get("uddg", [html.unescape(href)])[0]
-        results.append(f"- {html_to_text(title)}\n  {target}\n  {html_to_text(snippet)}")
-        if len(results) >= limit:
-            break
-    if not results:
-        return ok(context, "(no results)", count=0)
-    return ok(context, "\n".join(results), count=len(results))
+    if time_range and time_range not in websearch.TIME_RANGES:
+        return error(context, f"time_range must be one of {', '.join(websearch.TIME_RANGES)}")
+    request = websearch.SearchQuery(
+        text=query.strip(),
+        limit=min(limit or web.search.results, 30),
+        language=(language or "").strip().lower()[:5],
+        time_range=time_range or "",
+        domains=tuple(d.strip().lower() for d in (domains or "").split(",") if d.strip()),
+    )
+    if not request.text:
+        return error(context, "query is empty")
+    outcome = await websearch.search(request, web)
+    tried = [{"backend": a.backend, "hits": a.hits, "error": a.error, "ms": a.ms} for a in outcome.attempts]
+    if not outcome.hits:
+        reasons = "; ".join(f"{a.backend}: {a.error or 'no results'}" for a in outcome.attempts)
+        if all(a.error for a in outcome.attempts):
+            return error(context, f"search failed ({reasons})", backend="", attempts=tried)
+        return ok(context, "(no results)", count=0, backend=outcome.backend, attempts=tried)
+    return ok(context, websearch.render(outcome.hits), count=len(outcome.hits), backend=outcome.backend, fallback_used=outcome.fallback_used, attempts=tried)
 
 
 TOOLS = [web_fetch, web_search]

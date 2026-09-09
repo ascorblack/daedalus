@@ -67,6 +67,12 @@ Provider keys never enter the agent container: a small key-proxy container holds
 them into upstream calls (`http://keyproxy:3200/deepseek`, `…/openrouter`, `…/openai`, plus any
 `KEYPROXY_UPSTREAM_<NAME>` you add). The proxy also refuses model calls once the daily budget is spent.
 
+Web search is a self-hosted [SearXNG](https://docs.searxng.org/) container (`deploy/searxng/settings.yml`:
+Bing, Brave, DuckDuckGo, Google CSE, Mojeek and Wikipedia merged, JSON API, private network only),
+with DuckDuckGo's HTML page as the no-install fallback. Paid search APIs (Serper, Keenable, Tavily,
+Exa, Perplexity) plug in as key-proxy upstreams (`deploy/keyproxy.env.example`) and are switched in
+the Mini App; the `WebSearch` tool keeps the same contract whichever backend answers.
+
 Then, in Telegram:
 
 1. Send `/start` to the bot in a private chat. That chat is a single session on its own.
@@ -132,7 +138,8 @@ reasoning_effort, images, context_window, max_output_tokens; `[model] preset` an
 the default and the fallbacks), the working rules of the system prompt
 (`[prompt] rules`, empty = built-in default), fallback chain, approval mode, spend limits,
 balance thresholds, scheduler behaviour, per-model pricing overrides (DeepSeek list prices with
-their peak/off-peak schedule are built in), the vision model, and MCP servers:
+their peak/off-peak schedule are built in), the vision model, the web search backend
+(`[tools.web.search] backend` and `fallback`, with a subsection per backend), and MCP servers:
 
 ```toml
 [mcp.servers.filesystem]

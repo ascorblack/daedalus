@@ -120,7 +120,7 @@ thinking on/off + `reasoning_effort`, по умолчанию on/medium),
 ## 6. Инструменты (стартовый набор)
 
 `exec` (bash, без ограничений, с потоковым выводом в статус), `read`, `write`, `edit`,
-`find`, `search` (rg), `web_fetch`, `web_search`, `send_file` (в текущий топик),
+`find`, `search` (rg), `web_fetch`, `web_search` (сменные бэкенды: SearXNG по умолчанию, DuckDuckGo, платные API через key proxy), `send_file` (в текущий топик),
 `ask_user`, `remember/recall/forget`, `spawn_task` (новая сессия/топик), `self.restart`,
 `self.rollback`, `self.rebuild`, `schedule` (создать/изменить/удалить задачу планировщика,
 с прикреплением файлов из текущего workspace), `skill` (загрузка SKILL.md). Тулы — обычные `@tool`-функции в

@@ -3,6 +3,7 @@
 # Secrets: provider keys do NOT belong in .env — .env sits inside the checkout, which is bind-mounted
 # into the agent container. Put them in ../../daedalus-secrets/keyproxy.env (outside every mount, chmod 600):
 #   DEEPSEEK_API_KEY=…  OPENROUTER_API_KEY=…  OPENAI_API_KEY=…  KEYPROXY_UPSTREAM_<NAME>=…  KEYPROXY_KEY_<NAME>=…
+#   Search APIs (Serper, Keenable, Tavily, Exa, Perplexity) are upstreams too: see deploy/keyproxy.env.example.
 #   KEYPROXY_USD_PER_DAY=20   (the proxy's own daily cap, read from the database; independent of the supervisor's flag)
 # What the key proxy does and does not buy: the agent process never holds a provider key, so a leak through a
 # log line, a header echo or a careless tool result cannot happen. It is not a wall against a deliberate
@@ -15,6 +16,8 @@
 #   daedalus-state        -> /srv/state         database, blobs, secrets, known-good history
 #   daedalus-workspaces   -> /srv/workspaces    per-session working directories
 #   telegram-bot-api-data -> /var/lib/telegram-bot-api  files the local Bot API server stores
+#
+# Networks: "telegram" (bot ⇄ local Bot API), "keys" (bot ⇄ key proxy), "search" (bot ⇄ SearXNG).
 services:
   daedalus:
     stop_grace_period: 40s  # the supervisor drains the bot for 25 s before killing it; Docker must wait longer
@@ -71,12 +74,32 @@ services:
       # Services the agent hosts (ServiceStart) listen in this range; published on every interface so the
       # operator reaches them from the LAN at SERVICES_PUBLIC_HOST:<port>.
       - "${SERVICES_PORT_RANGE:-8100-8119}:${SERVICES_PORT_RANGE:-8100-8119}"
-    networks: [telegram, keys]
+    networks: [telegram, keys, search]
     depends_on:
       telegram-bot-api:
         condition: service_started
       keyproxy:
         condition: service_healthy
+      searxng:
+        condition: service_started
+
+  # The default backend of the WebSearch tool: a metasearch over Bing, Brave, DuckDuckGo, Google (CSE), Mojeek and
+  # Wikipedia with a JSON API, reachable only from the agent container. Settings in deploy/searxng/settings.yml;
+  # the agent picks another backend (or a paid API through the key proxy) in the Mini App.
+  searxng:
+    image: searxng/searxng:2026.9.8-3fdc6d753
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-daedalus-searxng}
+      SEARXNG_LIMITER: "false"
+      SEARXNG_PUBLIC_INSTANCE: "false"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      # Engine session tokens (DuckDuckGo's VQD and the like) live here; keeping them across restarts makes
+      # the first query after a restart look like the hundredth, not like a new bot.
+      - searxng-cache:/var/cache/searxng
+    networks: [search]
 
   # Holds the provider keys and injects them into upstream calls; refuses model calls once the daily
   # budget is spent (the supervisor's flag or its own read of the database). Reachable only from the
@@ -146,9 +169,11 @@ services:
 networks:
   telegram:
   keys:
+  search:
 
 volumes:
   daedalus-state:
   daedalus-workspaces:
   telegram-bot-api-data:
   rebuild-trigger:
+  searxng-cache:

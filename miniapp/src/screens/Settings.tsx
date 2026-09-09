@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, telegram, HeartbeatStatus, Preset, ProviderConf, Settings } from "../api";
+import { api, telegram, HeartbeatStatus, Preset, ProviderConf, SearchBackendInfo, SearchCheck, Settings } from "../api";
 import { numInput } from "../ui";
 import { timeAgo } from "../components";
 
@@ -375,6 +375,138 @@ function TextField({ label, value, placeholder, onSave, hint }: { label: string;
   );
 }
 
+function SearchBlock({ s, save }: { s: Settings; save: (patch: any) => Promise<void> }) {
+  const search = s.tools.web.search;
+  const backends = s.search_backends ?? [];
+  const [check, setCheck] = useState<SearchCheck | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState("");
+  const saveSearch = (patch: any) => save({ tools: { web: { search: patch } } });
+  const info = (id: string) => backends.find((b) => b.id === id);
+  const usable = (b: SearchBackendInfo) => !b.needs_key || b.available !== false;
+  const optionLabel = (b: SearchBackendInfo) => `${b.label}${b.needs_key ? (b.available === false ? " — no key in the key proxy" : b.available == null ? " — key proxy not reachable" : "") : ""}`;
+  const runCheck = async (backend: string) => {
+    setChecking(true);
+    setCheckError("");
+    try {
+      setCheck(await api.post<SearchCheck>("/api/settings/search-check", { backend }));
+    } catch (e) {
+      setCheck(null);
+      setCheckError((e as Error).message);
+    } finally {
+      setChecking(false);
+    }
+  };
+  const fallbackIds = search.fallback ?? [];
+  return (
+    <div className="card">
+      <div className="section-title" style={{ marginTop: 0 }}>WebSearch</div>
+      <div className="sub">One tool, switchable backends: the free self-hosted SearXNG by default, DuckDuckGo as the no-install fallback, paid APIs through the key proxy once their key is in keyproxy.env. The tool's contract does not change with the backend.</div>
+      <label className="field">Backend</label>
+      <select className="field" value={search.backend} onChange={(e) => saveSearch({ backend: e.target.value })}>
+        {backends.map((b) => (
+          <option key={b.id} value={b.id} disabled={!usable(b)}>{optionLabel(b)}</option>
+        ))}
+        {!backends.some((b) => b.id === search.backend) && <option value={search.backend}>{search.backend}</option>}
+      </select>
+      <label className="field">Fallbacks (tried in order when the backend fails or returns nothing)</label>
+      <div className="btnrow">
+        {backends.filter((b) => b.id !== search.backend).map((b) => {
+          const on = fallbackIds.includes(b.id);
+          return (
+            <button
+              key={b.id}
+              className={`btn small ${on ? "primary" : ""}`}
+              disabled={!on && !usable(b)}
+              title={optionLabel(b)}
+              onClick={() => saveSearch({ fallback: on ? fallbackIds.filter((x) => x !== b.id) : [...fallbackIds, b.id] })}
+            >
+              {on ? `${fallbackIds.indexOf(b.id) + 1}. ` : ""}{b.id}
+            </button>
+          );
+        })}
+      </div>
+      <div className="grid2">
+        <NumField label="Results per search" value={search.results} min={1} onSave={(v) => saveSearch({ results: v })} />
+        <NumField label="Search timeout (s)" value={search.timeout_seconds} min={1} onSave={(v) => saveSearch({ timeout_seconds: v })} />
+      </div>
+      {search.backend === "searxng" || fallbackIds.includes("searxng") ? (
+        <>
+          <div className="section-title">SearXNG</div>
+          <TextField label="URL" value={search.searxng.url} onSave={(v) => saveSearch({ searxng: { url: v } })} />
+          <TextField label="Engines (comma-separated; empty = the instance's defaults)" value={search.searxng.engines} placeholder="google,duckduckgo,bing" onSave={(v) => saveSearch({ searxng: { engines: v } })} />
+          <div className="grid2">
+            <TextField label="Categories" value={search.searxng.categories} placeholder="general" onSave={(v) => saveSearch({ searxng: { categories: v } })} />
+            <NumField label="Safe search (0–2)" value={search.searxng.safesearch} min={0} onSave={(v) => saveSearch({ searxng: { safesearch: Math.min(2, v) } })} />
+          </div>
+        </>
+      ) : null}
+      {search.backend === "duckduckgo" || fallbackIds.includes("duckduckgo") ? (
+        <>
+          <div className="section-title">DuckDuckGo</div>
+          <div className="grid2">
+            <TextField label="HTML endpoint" value={search.duckduckgo.url} onSave={(v) => saveSearch({ duckduckgo: { url: v } })} />
+            <TextField label="Region" value={search.duckduckgo.region} placeholder="wt-wt, ru-ru, us-en" onSave={(v) => saveSearch({ duckduckgo: { region: v } })} />
+          </div>
+        </>
+      ) : null}
+      {search.backend === "serper" || fallbackIds.includes("serper") ? (
+        <>
+          <div className="section-title">Serper (Google)</div>
+          <div className="grid2">
+            <TextField label="Country (gl, empty = Google's default)" value={search.serper.gl} placeholder="ru, us" onSave={(v) => saveSearch({ serper: { gl: v } })} />
+            <TextField label="Language (hl, empty = per query)" value={search.serper.hl} placeholder="ru, en" onSave={(v) => saveSearch({ serper: { hl: v } })} />
+          </div>
+        </>
+      ) : null}
+      {search.backend === "keenable" || fallbackIds.includes("keenable") ? (
+        <>
+          <div className="section-title">Keenable</div>
+          <NumField label="Snippet length (chars)" value={search.keenable.snippet_max_length} min={180} step={60} onSave={(v) => saveSearch({ keenable: { snippet_max_length: v } })} />
+        </>
+      ) : null}
+      {search.backend === "tavily" || fallbackIds.includes("tavily") ? (
+        <>
+          <div className="section-title">Tavily</div>
+          <label className="field">Search depth</label>
+          <select className="field" value={search.tavily.depth} onChange={(e) => saveSearch({ tavily: { depth: e.target.value } })}>
+            {["basic", "advanced", "fast", "ultra-fast"].map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+        </>
+      ) : null}
+      {search.backend === "exa" || fallbackIds.includes("exa") ? (
+        <>
+          <div className="section-title">Exa</div>
+          <label className="field">Search type</label>
+          <select className="field" value={search.exa.type} onChange={(e) => saveSearch({ exa: { type: e.target.value } })}>
+            {["auto", "instant", "fast", "deep"].map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+        </>
+      ) : null}
+      <div className="btnrow" style={{ marginTop: 12 }}>
+        <button className="btn small primary" disabled={checking} onClick={() => runCheck("")}>{checking ? "checking…" : "Check the configured chain"}</button>
+        <button className="btn small" disabled={checking || !info(search.backend)} onClick={() => runCheck(search.backend)}>Check {search.backend} alone</button>
+      </div>
+      {checkError && <div className="sub" style={{ color: "var(--bad)" }}>{checkError}</div>}
+      {check && (
+        <div className="sub" style={{ marginTop: 8 }}>
+          {check.attempts.map((a) => (
+            <div key={a.backend}>
+              {a.backend}: {a.error ? `error — ${a.error}` : `${a.hits} results`} ({a.ms} ms)
+            </div>
+          ))}
+          {check.hits.slice(0, 3).map((h) => (
+            <div key={h.url} style={{ marginTop: 4 }}>
+              <div>{h.title}{h.source ? ` · ${h.source}` : ""}</div>
+              <div style={{ wordBreak: "break-all" }}>{h.url}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ToolsTab({ s, save }: { s: Settings; save: (patch: any) => Promise<void> }) {
   const web = s.tools.web;
   const asr = s.asr;
@@ -421,20 +553,16 @@ function ToolsTab({ s, save }: { s: Settings; save: (patch: any) => Promise<void
       </div>
 
       <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>WebFetch & WebSearch</div>
+        <div className="section-title" style={{ marginTop: 0 }}>WebFetch</div>
         <div className="grid2">
           <NumField label="Fetch timeout (s)" value={web.fetch_timeout_seconds} min={1} onSave={(v) => save({ tools: { web: { fetch_timeout_seconds: v } } })} />
-          <NumField label="Search timeout (s)" value={web.search_timeout_seconds} min={1} onSave={(v) => save({ tools: { web: { search_timeout_seconds: v } } })} />
           <NumField label="Fetch max chars" value={web.fetch_max_chars} min={1000} step={1000} onSave={(v) => save({ tools: { web: { fetch_max_chars: v } } })} />
-          <NumField label="Search results" value={web.search_results} min={1} onSave={(v) => save({ tools: { web: { search_results: v } } })} />
         </div>
-        <TextField label="Proxy (http/https/socks5 URL, empty = direct)" value={web.proxy} placeholder="socks5://127.0.0.1:1080" onSave={(v) => save({ tools: { web: { proxy: v } } })} />
+        <TextField label="Proxy (http/https/socks5 URL, empty = direct)" value={web.proxy} placeholder="socks5://127.0.0.1:1080" hint="Used by WebFetch and by the directly scraped search backend (DuckDuckGo); SearXNG and the key proxy are reached directly." onSave={(v) => save({ tools: { web: { proxy: v } } })} />
         <TextField label="User agent" value={web.user_agent} onSave={(v) => save({ tools: { web: { user_agent: v } } })} />
-        <div className="grid2">
-          <TextField label="Search endpoint (DuckDuckGo HTML)" value={web.search_url} onSave={(v) => save({ tools: { web: { search_url: v } } })} />
-          <TextField label="Search region" value={web.search_region} placeholder="wt-wt, ru-ru, us-en" onSave={(v) => save({ tools: { web: { search_region: v } } })} />
-        </div>
       </div>
+
+      <SearchBlock s={s} save={save} />
 
       <div className="card">
         <div className="section-title" style={{ marginTop: 0 }}>Exec, Read, Find</div>

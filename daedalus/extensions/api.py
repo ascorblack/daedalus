@@ -42,6 +42,7 @@ from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import Attachment
 from daedalus.providers.openai_compat import UsageRecord
 from daedalus.security import redact
+from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
 
@@ -267,6 +268,14 @@ class SettingsBody(BaseModel):
     ops: dict[str, Any] | None = None
     compaction: dict[str, Any] | None = None
     answer_language: str | None = None
+
+
+class SearchCheckBody(BaseModel):
+    """The Mini App's "check" button for the WebSearch backends."""
+
+    backend: str = ""
+    """One backend to try on its own; empty = the configured backend and its fallbacks."""
+    query: str = "searxng json api"
 
 
 class ProviderPatch(BaseModel):
@@ -1281,11 +1290,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     async def subscription_usage() -> dict[str, Any]:
         """Quota windows of the Codex, Grok and Claude subscriptions, read from the key proxy that holds their logins."""
-        origin = ""
-        for provider in app.config.providers.values():
-            if "keyproxy" in provider.base_url:
-                origin = provider.base_url.split("/", 3)[0] + "//" + provider.base_url.split("/", 3)[2]
-                break
+        origin = _keyproxy_origin()
         if not origin:
             return {}
         try:
@@ -1471,11 +1476,50 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         data["providers_available"] = list(manager.providers.available())
         data["usd_per_day"] = settings.usd_per_day
         data["prompt"]["default_rules"] = DEFAULT_RULES.strip()
+        data["search_backends"] = websearch.catalogue()
         return mask_provider_keys(data)
+
+    def _keyproxy_origin() -> str:
+        for provider in app.config.providers.values():
+            if "keyproxy" in provider.base_url:
+                parts = provider.base_url.split("/", 3)
+                return parts[0] + "//" + parts[2]
+        return ""
+
+    async def keyproxy_upstreams() -> list[str] | None:
+        """Upstream names the key proxy holds a key for; None when it cannot be asked."""
+        origin = _keyproxy_origin()
+        if not origin:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(origin + "/healthz")
+            names = response.json().get("upstreams") if response.status_code == 200 else None
+        except (httpx.HTTPError, ValueError):
+            return None
+        return [str(n) for n in names] if isinstance(names, list) else None
 
     @api.get("/api/settings")
     async def get_settings(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        return _settings_view()
+        view = _settings_view()
+        keyed = await keyproxy_upstreams()
+        for entry in view["search_backends"]:
+            entry["available"] = True if not entry["needs_key"] else (None if keyed is None else entry["id"] in keyed)
+        return view
+
+    @api.post("/api/settings/search-check")
+    async def search_check(body: SearchCheckBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Run one query through a search backend and report what came back; the Mini App's "check" button."""
+        if body.backend and body.backend not in websearch.BACKENDS:
+            raise HTTPException(400, f"unknown backend {body.backend!r}")
+        query = websearch.SearchQuery(text=body.query.strip() or "searxng json api", limit=5)
+        outcome = await websearch.search(query, app.config.tools.web, chain=[body.backend] if body.backend else None)
+        return {
+            "backend": outcome.backend,
+            "count": len(outcome.hits),
+            "attempts": [{"backend": a.backend, "hits": a.hits, "error": a.error, "ms": a.ms} for a in outcome.attempts],
+            "hits": [{"title": h.title, "url": h.url, "source": h.source, "published": h.published} for h in outcome.hits],
+        }
 
     @api.put("/api/settings")
     async def put_settings(body: SettingsBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

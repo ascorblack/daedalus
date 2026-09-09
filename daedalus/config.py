@@ -162,18 +162,84 @@ class VisionConfig(BaseModel):
     max_output_tokens: int = Field(default=2000, ge=100, le=32_000)
 
 
+class SearxngSearchConfig(BaseModel):
+    """A self-hosted SearXNG instance (``deploy/searxng``), reached over the private network."""
+
+    url: str = "http://searxng:8080"
+    engines: str = ""
+    """Comma-separated engine names sent with every query; empty = the instance's own defaults
+    (``deploy/searxng/settings.yml`` already narrows them to the engines that answer)."""
+    categories: str = "general"
+    safesearch: int = Field(default=0, ge=0, le=2)
+
+
+class DuckDuckGoSearchConfig(BaseModel):
+    """DuckDuckGo's HTML page, scraped directly; the fallback that needs nothing installed."""
+
+    url: str = "https://html.duckduckgo.com/html/"
+    region: str = "wt-wt"
+
+
+class SerperSearchConfig(BaseModel):
+    """Google results through serper.dev; the key lives in the key proxy (``KEYPROXY_KEY_SERPER``)."""
+
+    base_url: str = "http://keyproxy:3200/serper"
+    gl: str = ""
+    """Country code for Google (``ru``, ``us``); empty = Google's default."""
+    hl: str = ""
+    """Interface language when the query names none."""
+
+
+class KeenableSearchConfig(BaseModel):
+    base_url: str = "http://keyproxy:3200/keenable"
+    snippet_max_length: int = Field(default=600, ge=180, le=10_000)
+
+
+class TavilySearchConfig(BaseModel):
+    base_url: str = "http://keyproxy:3200/tavily"
+    depth: Literal["basic", "advanced", "fast", "ultra-fast"] = "basic"
+
+
+class ExaSearchConfig(BaseModel):
+    base_url: str = "http://keyproxy:3200/exa"
+    type: Literal["auto", "instant", "fast", "deep"] = "auto"
+
+
+class PerplexitySearchConfig(BaseModel):
+    base_url: str = "http://keyproxy:3200/perplexity"
+
+
+class WebSearchConfig(BaseModel):
+    """Which search backend answers ``WebSearch`` and what to try when it fails.
+
+    Every backend maps onto the same tool contract, so switching here changes nothing the
+    model sees. Keyed backends point at the key proxy and stay unavailable until the key
+    is in ``keyproxy.env``.
+    """
+
+    backend: str = "searxng"
+    fallback: list[str] = Field(default_factory=lambda: ["duckduckgo"])
+    """Tried in order when the backend errors or returns nothing."""
+    results: int = Field(default=8, ge=1, le=30)
+    timeout_seconds: float = Field(default=30.0, ge=1, le=600)
+    searxng: SearxngSearchConfig = Field(default_factory=SearxngSearchConfig)
+    duckduckgo: DuckDuckGoSearchConfig = Field(default_factory=DuckDuckGoSearchConfig)
+    serper: SerperSearchConfig = Field(default_factory=SerperSearchConfig)
+    keenable: KeenableSearchConfig = Field(default_factory=KeenableSearchConfig)
+    tavily: TavilySearchConfig = Field(default_factory=TavilySearchConfig)
+    exa: ExaSearchConfig = Field(default_factory=ExaSearchConfig)
+    perplexity: PerplexitySearchConfig = Field(default_factory=PerplexitySearchConfig)
+
+
 class WebToolsConfig(BaseModel):
     """WebFetch / WebSearch behaviour."""
 
     fetch_timeout_seconds: float = Field(default=60.0, ge=1, le=600)
-    search_timeout_seconds: float = Field(default=30.0, ge=1, le=600)
     proxy: str = ""
-    """HTTP(S)/SOCKS proxy URL for both tools, e.g. ``socks5://127.0.0.1:1080``; empty = direct."""
+    """HTTP(S)/SOCKS proxy URL for WebFetch and the directly scraped search backends, e.g. ``socks5://127.0.0.1:1080``; empty = direct."""
     user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) Daedalus/0.1"
     fetch_max_chars: int = Field(default=40_000, ge=1_000, le=500_000)
-    search_url: str = "https://html.duckduckgo.com/html/"
-    search_region: str = "wt-wt"
-    search_results: int = Field(default=8, ge=1, le=30)
+    search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
 
 SANDBOX_NEVER_WRITABLE = frozenset({"/srv/state", "/srv/daedalus", "/srv/protocore-exp", "/opt/launcher", "/run/daedalus", "/run/daedalus-rebuild", "/etc/ssl", "/usr/local", "/var/lib"})
@@ -656,10 +722,33 @@ def _seed_claude_subscription(raw: dict[str, Any]) -> bool:
     return changed
 
 
+def _migrate_web_search(raw: dict[str, Any]) -> bool:
+    """The DuckDuckGo-only fields of ``[tools.web]`` became the ``search`` section with a backend choice."""
+    web = (raw.get("tools") or {}).get("web")
+    if not isinstance(web, dict) or not any(k in web for k in ("search_url", "search_region", "search_results", "search_timeout_seconds")):
+        return False
+    search = web.get("search")
+    if not isinstance(search, dict):
+        search = web["search"] = {}
+    ddg = search.get("duckduckgo")
+    if not isinstance(ddg, dict):
+        ddg = search["duckduckgo"] = {}
+    if "search_url" in web:
+        ddg["url"] = web.pop("search_url")
+    if "search_region" in web:
+        ddg["region"] = web.pop("search_region")
+    if "search_results" in web:
+        search["results"] = web.pop("search_results")
+    if "search_timeout_seconds" in web:
+        search["timeout_seconds"] = web.pop("search_timeout_seconds")
+    return True
+
+
 def _migrate(raw: dict[str, Any]) -> bool:
     """Rewrite config shapes older versions wrote; returns True when something changed."""
     changed = _seed_presets(raw)
     changed = _seed_claude_subscription(raw) or changed
+    changed = _migrate_web_search(raw) or changed
     for provider in (raw.get("providers") or {}).values():
         pricing = provider.get("pricing") if isinstance(provider, dict) else None
         if not isinstance(pricing, dict):
@@ -695,6 +784,7 @@ __all__ = [
     "TelegramConfig",
     "ToolsConfig",
     "WebToolsConfig",
+    "WebSearchConfig",
     "ExecToolsConfig",
     "AsrConfig",
     "BoardConfig",

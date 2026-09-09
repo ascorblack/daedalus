@@ -88,6 +88,30 @@ export const api = {
   authHeaders,
 };
 
+export type WebSearchConf = {
+  backend: string;
+  fallback: string[];
+  results: number;
+  timeout_seconds: number;
+  searxng: { url: string; engines: string; categories: string; safesearch: number };
+  duckduckgo: { url: string; region: string };
+  serper: { base_url: string; gl: string; hl: string };
+  keenable: { base_url: string; snippet_max_length: number };
+  tavily: { base_url: string; depth: string };
+  exa: { base_url: string; type: string };
+  perplexity: { base_url: string };
+};
+
+/** One WebSearch backend: `available` is null when the key proxy could not be asked. */
+export type SearchBackendInfo = { id: string; label: string; needs_key: boolean; available?: boolean | null };
+
+export type SearchCheck = {
+  backend: string;
+  count: number;
+  attempts: { backend: string; hits: number; error: string; ms: number }[];
+  hits: { title: string; url: string; source: string; published: string }[];
+};
+
 export type SessionSummary = {
   id: string;
   title: string;
@@ -241,7 +265,7 @@ export type Settings = {
   vision: { preset: string; max_output_tokens: number };
   asr: { url: string; api_key: string; api_key_set?: boolean; model: string; language: string; timeout_seconds: number; max_seconds: number; autosend: boolean };
   tools: {
-    web: { fetch_timeout_seconds: number; search_timeout_seconds: number; proxy: string; user_agent: string; fetch_max_chars: number; search_url: string; search_region: string; search_results: number };
+    web: { fetch_timeout_seconds: number; proxy: string; user_agent: string; fetch_max_chars: number; search: WebSearchConf };
     exec: { max_output_chars: number };
   };
   self_change: { approval: string; auto_rebuild: boolean };
@@ -261,6 +285,7 @@ export type Settings = {
     photo_caption_wait_seconds: number;
   };
   providers_available: string[];
+  search_backends?: SearchBackendInfo[];
 };
 
 export function telegram() {
