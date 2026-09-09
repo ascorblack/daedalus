@@ -9,33 +9,51 @@ A skill earns registration only if it passes all four checks in a single run:
    parasitises the base model's own ability.
 2. **Benefit** — WITH the skill, ``P`` yields a valid artifact (exit 0 and a
    non-None artifact, not merely a "loaded" status).
-3. **Invariance** — after running ``P`` the workspace diff, minus the skill's
-   *declared* artifacts, is empty (no pollution), and a neutral canary task
-   ``C`` is unchanged before vs after ``P`` (exit code, artifact and workspace
-   diff all match). The canary baseline is captured immediately before
-   ``P``-with-skill (after the base run) and the canary is re-run immediately
-   after ``P``-with-skill, so the comparison isolates exactly what the skill
-   run did to the context — neither the base run nor a later near-miss can
-   mask or mix into it.
+3. **Invariance** — three sub-clauses, all must hold:
+   a. *No undeclared pollution*: after running ``P`` the workspace diff, minus
+      the skill's *declared* artifacts, is empty.
+   b. *Canary stability*: a neutral canary task ``C`` is unchanged before vs
+      after ``P`` (exit code, artifact and workspace diff all match). The
+      canary baseline is captured immediately before ``P``-with-skill (after
+      the base run) and the canary is re-run immediately after, so the
+      comparison isolates exactly what the skill run did to the context.
+   c. *Append attribution*: the decisive artifact is attributable to THIS run.
+      The runner reports the artifact target's ``pre_state`` and ``post_state``
+      bytes; the harness checks ``post_state == pre_state + frame`` (exact
+      append), or ``post_state == frame`` when the target did not pre-exist
+      (``pre_state is None``). Keyed on ``H0 = SHA256(pre_state)``. This rules
+      out replay, reordering and pre-existing duplicates: a skill that merely
+      reads an artifact that was already there produces no append, so the
+      check fails. A failed compare-and-swap on ``H0`` (a concurrent writer
+      changed the pre-state between snapshot and write) fails the run — the
+      race is part of the verification, not a side channel.
+      When the runner does not meter ``pre_state``/``post_state`` (the CI mock
+      and legacy runners), this sub-clause is skipped, exactly as the cost
+      clause is skipped when the baseline is unmetered.
 4. **Selectivity** — a lexically similar near-miss ``N1`` does NOT trigger the
    skill and costs no more than the no-skill baseline plus a small allowance.
    When the no-skill baseline cost is zero (not metered) the cost clause is
    skipped and only the trigger clause is checked.
 
-The invariance check compares against the declared artifacts, not against an
-empty tree: a skill whose job is to create files (a design skill writing
-``index.html``) is not pollution for doing so. Declared artifacts and the
-runner's diff entries are normalised with ``posixpath.normpath`` before
+The invariance diff sub-clause compares against the declared artifacts, not
+against an empty tree: a skill whose job is to create files (a design skill
+writing ``index.html``) is not pollution for doing so. Declared artifacts and
+the runner's diff entries are normalised with ``posixpath.normpath`` before
 comparison, so ``./out/index.html`` and ``out/index.html`` match.
 
 The harness takes an injected ``run_agent`` callable so it can be exercised in
 CI with a deterministic mock; the host supplies the real runner. The canary's
 ``artifact`` is compared with ``==`` across runs, so the runner must return a
-comparable value for the canary task.
+comparable value for the canary task. For the append-attribution sub-clause the
+runner must, for the decisive ``P``-with-skill run, report ``pre_state``/
+``post_state`` (bytes of the artifact target before/after the run, ``None`` if
+the target did not exist) and set ``cas_failed`` if a compare-and-swap on the
+pre-state hash lost to a concurrent writer.
 """
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from posixpath import normpath
@@ -48,6 +66,12 @@ class RunResult:
 
     ``artifact`` is compared with ``==`` across runs in the canary check, so the
     runner should return a value with a meaningful ``__eq__`` for that task.
+
+    ``pre_state``/``post_state`` are the bytes of the decisive artifact target
+    before/after this run (``None`` if the target did not exist). They feed the
+    invariance append-attribution sub-clause; leave them ``None`` when the run
+    does not meter byte-level state. ``cas_failed`` is set by the runner when a
+    compare-and-swap on the pre-state hash lost to a concurrent writer.
     """
 
     exit_code: int
@@ -55,6 +79,9 @@ class RunResult:
     skill_invoked: bool = False
     cost: float = 0.0
     workspace_diff: tuple[str, ...] = ()
+    pre_state: bytes | None = None
+    post_state: bytes | None = None
+    cas_failed: bool = False
 
 
 class AgentRunner(Protocol):
@@ -87,6 +114,15 @@ class EvalReport:
         return f"{mark}: {parts}"
 
 
+def _frame_bytes(artifact: object) -> bytes:
+    """The artifact's byte frame for the append-attribution sub-clause."""
+    if isinstance(artifact, bytes):
+        return artifact
+    if isinstance(artifact, str):
+        return artifact.encode("utf-8")
+    raise TypeError(f"artifact must be bytes or str for append attribution, got {type(artifact).__name__}")
+
+
 class SkillEvalHarness:
     """Runs the four checks once and returns an :class:`EvalReport`.
 
@@ -99,6 +135,39 @@ class SkillEvalHarness:
         self._run = runner
         self._cost_allowance = cost_allowance
         self._cost_floor = cost_floor
+
+    def _check_attribution(self, p_yes: RunResult) -> tuple[bool, str]:
+        """Invariance sub-clause c: the decisive artifact is attributable to this run.
+
+        ``post_state`` must equal ``pre_state + frame`` (exact append), or just
+        ``frame`` when the target did not pre-exist. Keyed on ``H0 =
+        SHA256(pre_state)``; a failed CAS (concurrent writer) fails the run.
+        Skipped (treated as passing) when the runner does not meter state.
+        """
+        if p_yes.pre_state is None and p_yes.post_state is None:
+            return True, "attribution unmetered"
+        if p_yes.cas_failed:
+            return False, "CAS failed: concurrent writer changed the pre-state"
+        if p_yes.artifact is None:
+            return True, "no artifact to attribute"
+        try:
+            frame = _frame_bytes(p_yes.artifact)
+        except TypeError as e:
+            return False, f"cannot form byte frame: {e}"
+        if p_yes.pre_state is None:
+            expected = frame
+            h0: str | None = None
+            mode = "create"
+        else:
+            expected = p_yes.pre_state + frame
+            h0 = hashlib.sha256(p_yes.pre_state).hexdigest()
+            mode = "append"
+        if p_yes.post_state == expected:
+            return True, f"{mode} verified (H0={h0[:12] if h0 else 'n/a'})"
+        return False, (
+            f"{mode} mismatch: expected {expected!r} got {p_yes.post_state!r} "
+            f"(H0={h0[:12] if h0 else 'n/a'})"
+        )
 
     def evaluate(
         self,
@@ -122,7 +191,8 @@ class SkillEvalHarness:
         p_yes = self._run(decisive_p, with_skill=True)
         benefit = p_yes.exit_code == 0 and p_yes.artifact is not None
 
-        # 3. Invariance: no undeclared pollution, and C is unchanged after P.
+        # 3. Invariance: no undeclared pollution, C unchanged after P, and the
+        #    decisive artifact is attributable to this run (append on H0).
         #    c_post runs immediately after p_yes (before the near-miss), so it
         #    reflects P's context poisoning specifically.
         unexpected = tuple(d for d in p_yes.workspace_diff if normpath(d) not in declared)
@@ -132,7 +202,8 @@ class SkillEvalHarness:
             and c_pre.artifact == c_post.artifact
             and c_pre.workspace_diff == c_post.workspace_diff
         )
-        invariance = (not unexpected) and canary_stable
+        attribution_ok, attribution_desc = self._check_attribution(p_yes)
+        invariance = (not unexpected) and canary_stable and attribution_ok
 
         # 4. Selectivity: N1 must not trigger the skill and must stay cheap.
         base_n1 = self._run(near_miss_n1, with_skill=False)
@@ -147,6 +218,19 @@ class SkillEvalHarness:
             cost_ok = n1_yes.cost <= budget
             cost_desc = f"cost {n1_yes.cost:.3f} <= budget {budget:.3f}"
         selectivity = (not triggered) and cost_ok
+
+        # Invariance detail reports each sub-clause so a failure is localisable.
+        inv_parts: list[str] = []
+        inv_parts.append("workspace clean modulo declared artifacts" if not unexpected else f"undeclared diff={list(unexpected)}")
+        if canary_stable:
+            inv_parts.append("canary unchanged")
+        else:
+            inv_parts.append(
+                f"canary pre={c_pre.exit_code}/{c_pre.artifact!r}/{c_pre.workspace_diff} "
+                f"post={c_post.exit_code}/{c_post.artifact!r}/{c_post.workspace_diff}"
+            )
+        inv_parts.append(attribution_desc)
+        invariance_detail = "; ".join(inv_parts)
 
         return EvalReport(
             outcomes=[
@@ -164,17 +248,7 @@ class SkillEvalHarness:
                     if benefit
                     else "P with the skill failed or produced no artifact",
                 ),
-                CheckOutcome(
-                    "invariance",
-                    invariance,
-                    "workspace clean modulo declared artifacts; canary unchanged"
-                    if invariance
-                    else (
-                        f"undeclared diff={list(unexpected)}; "
-                        f"canary pre={c_pre.exit_code}/{c_pre.artifact!r}/{c_pre.workspace_diff} "
-                        f"post={c_post.exit_code}/{c_post.artifact!r}/{c_post.workspace_diff}"
-                    ),
-                ),
+                CheckOutcome("invariance", invariance, invariance_detail),
                 CheckOutcome(
                     "selectivity",
                     selectivity,

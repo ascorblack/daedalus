@@ -8,8 +8,9 @@ from daedalus.host.skill_eval import RunResult, SkillEvalHarness
 NEC, BEN, INV, SEL = 0, 1, 2, 3
 
 
-def ok(exit_code: int = 0, artifact: object = None, invoked: bool = False, cost: float = 0.0, diff=()) -> RunResult:
-    return RunResult(exit_code, artifact, invoked, cost, tuple(diff))
+def ok(exit_code: int = 0, artifact: object = None, invoked: bool = False, cost: float = 0.0, diff=(),
+       pre_state: bytes | None = None, post_state: bytes | None = None, cas_failed: bool = False) -> RunResult:
+    return RunResult(exit_code, artifact, invoked, cost, tuple(diff), pre_state, post_state, cas_failed)
 
 
 class ScriptedRunner:
@@ -187,3 +188,82 @@ def test_summary_marks_fail() -> None:
     assert not rep.passed
     assert rep.summary().startswith("FAIL")
     assert "benefit=FAIL" in rep.summary()
+
+
+# --- Invariance sub-clause c: append attribution (H0 + exact append-frame) ---
+
+
+def _attr_table(pre_state: bytes | None, post_state: bytes | None, **kw) -> dict:
+    """passing_table with the P-with-skill run metering byte-level state."""
+    table = passing_table()
+    table[("P", True)] = ok(0, artifact="A", invoked=True, diff=("out/index.html",),
+                            pre_state=pre_state, post_state=post_state, **kw)
+    return table
+
+
+def test_attribution_passes_pure_creation() -> None:
+    # Target did not pre-exist: post must be exactly the frame.
+    table = _attr_table(pre_state=None, post_state=b"A")
+    h = SkillEvalHarness(ScriptedRunner(table))
+    rep = h.evaluate("P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert rep.passed
+    assert "create verified" in rep.outcomes[INV].detail
+
+
+def test_attribution_passes_exact_append() -> None:
+    # Target pre-existed: post must be exactly pre + frame, keyed on H0.
+    table = _attr_table(pre_state=b"existing", post_state=b"existingA")
+    h = SkillEvalHarness(ScriptedRunner(table))
+    rep = h.evaluate("P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert rep.passed
+    assert "append verified" in rep.outcomes[INV].detail
+    assert "H0=" in rep.outcomes[INV].detail
+
+
+def test_attribution_fails_on_replay_pre_existing() -> None:
+    # The hole the H0 binding closes: the artifact pre-existed and the run
+    # appended nothing (post == pre). A diff-only or "artifact is not None"
+    # check would pass this; the exact append-frame check must fail it.
+    table = _attr_table(pre_state=b"A", post_state=b"A")
+    h = SkillEvalHarness(ScriptedRunner(table))
+    rep = h.evaluate("P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert rep.failed() == ["invariance"]
+    assert "append mismatch" in rep.outcomes[INV].detail
+
+
+def test_attribution_fails_on_wrong_frame() -> None:
+    # Target did not pre-exist but the run wrote something other than the frame.
+    table = _attr_table(pre_state=None, post_state=b"wrong")
+    h = SkillEvalHarness(ScriptedRunner(table))
+    rep = h.evaluate("P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert rep.failed() == ["invariance"]
+    assert "create mismatch" in rep.outcomes[INV].detail
+
+
+def test_attribution_fails_on_cas() -> None:
+    # A concurrent writer changed the pre-state between snapshot and write:
+    # even if post matched, the lost CAS makes the run invalid.
+    table = _attr_table(pre_state=b"existing", post_state=b"existingA", cas_failed=True)
+    h = SkillEvalHarness(ScriptedRunner(table))
+    rep = h.evaluate("P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert rep.failed() == ["invariance"]
+    assert "CAS failed" in rep.outcomes[INV].detail
+
+
+def test_attribution_skipped_when_unmetered() -> None:
+    # Legacy/CI mock: no byte-level state metered -> sub-clause skipped, passes.
+    h = SkillEvalHarness(ScriptedRunner(passing_table()))
+    rep = h.evaluate("P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert rep.passed
+    assert "attribution unmetered" in rep.outcomes[INV].detail
+
+
+def test_attribution_fails_when_frame_not_bytes() -> None:
+    # State was metered but the artifact is not a byte frame: cannot verify.
+    table = passing_table()
+    table[("P", True)] = ok(0, artifact={"k": 1}, invoked=True, diff=("out/index.html",),
+                            pre_state=None, post_state=b"something")
+    h = SkillEvalHarness(ScriptedRunner(table))
+    rep = h.evaluate("P", "N1", "canary", declared_artifacts=["out/index.html"])
+    assert rep.failed() == ["invariance"]
+    assert "cannot form byte frame" in rep.outcomes[INV].detail
