@@ -207,3 +207,39 @@ async def test_proxy_routes_claude(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
         assert "claude-opus-5" in {m["id"] for m in models["data"]}
         usage = await (await client.get("/subscriptions/usage")).json()
         assert usage["claude"]["plan"] == "default_claude_max_20x" and usage["claude"]["windows"][0]["used_percent"] == 3.0
+
+
+async def test_claude_usage_429_falls_back_to_profile_and_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    hits = {"usage": 0}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("/api/oauth/usage"):
+            hits["usage"] += 1
+            if hits["usage"] == 1:
+                return httpx.Response(200, json={"five_hour": {"utilization": 7}, "seven_day": {"utilization": 12}, "extra_usage": {"is_enabled": False}})
+            return httpx.Response(429, json={"error": {"type": "rate_limit_error", "message": "Rate limited"}}, headers={"Retry-After": "0"})
+        if url.endswith("/api/oauth/profile"):
+            return httpx.Response(200, json={"organization": {"rate_limit_tier": "default_claude_max_20x"}})
+        return httpx.Response(404)
+
+    cred = tmp_path / ".credentials.json"
+    cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat-test", "refreshToken": "r", "expiresAt": 4102444800000}}))
+    monkeypatch.setattr(proxy, "CLAUDE_AUTH", claude_mod.ClaudeAuth(cred))
+    monkeypatch.setattr(proxy, "CODEX_AUTH", subs.CodexAuth(tmp_path / "no-codex.json"))
+    monkeypatch.setattr(proxy, "GROK_AUTH", subs.GrokAuth(tmp_path / "no-grok.json"))
+    monkeypatch.setattr(proxy, "USAGE_CACHE_SECONDS", 0.0)
+    monkeypatch.setattr(proxy, "_usage_cache", {})
+    monkeypatch.setattr(proxy, "_claude_usage_retry_at", 0.0)
+    app = proxy.make_app()
+    await app["client"].aclose()
+    app["client"] = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    async with TestClient(TestServer(app)) as client:
+        first = await (await client.get("/subscriptions/usage")).json()
+        assert first["claude"]["windows"][0]["used_percent"] == 7.0 and "error" not in first["claude"]
+        second = await (await client.get("/subscriptions/usage")).json()
+        assert second["claude"]["windows"][0]["used_percent"] == 7.0 and "error" not in second["claude"]
+        assert hits["usage"] == 2
+        # backoff: a third call must not hit the usage endpoint again
+        third = await (await client.get("/subscriptions/usage")).json()
+        assert third["claude"]["windows"][0]["used_percent"] == 7.0 and hits["usage"] == 2

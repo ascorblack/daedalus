@@ -134,6 +134,17 @@ class ClaudeAuth:
     async def headers(self, client: httpx.AsyncClient) -> dict[str, str]:
         return {"authorization": f"Bearer {await self.token(client)}", **_cli_headers()}
 
+    async def usage_headers(self, client: httpx.AsyncClient) -> dict[str, str]:
+        """Quota endpoints 429 when sent the full inference beta list; keep this to OAuth identity."""
+        return {
+            "authorization": f"Bearer {await self.token(client)}",
+            "User-Agent": f"claude-cli/{CLAUDE_CLI_VERSION} (external, {CLAUDE_ENTRYPOINT})",
+            "x-app": "cli",
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "oauth-2025-04-20",
+            "accept": "application/json",
+        }
+
 
 def _text_of(content: Any) -> str:
     if isinstance(content, str):

@@ -9,7 +9,9 @@ refused here — below the agent, where a self-modification cannot reach.
 Upstreams: ``deepseek`` → https://api.deepseek.com, ``openrouter`` → https://openrouter.ai/api/v1,
 ``openai`` → https://api.openai.com/v1. Keys: ``DEEPSEEK_API_KEY``, ``OPENROUTER_API_KEY``,
 ``OPENAI_API_KEY``. Extra upstreams: ``KEYPROXY_UPSTREAM_<NAME>=https://host/base`` with
-``KEYPROXY_KEY_<NAME>=…``.
+``KEYPROXY_KEY_<NAME>=…`` and, for an API that does not take ``Authorization: Bearer``,
+``KEYPROXY_AUTH_<NAME>=<header name>`` (``X-API-KEY`` for Serper, ``x-api-key`` for Exa…);
+the key is sent as that header's value.
 
 The budget is checked in two independent ways: the supervisor's flag file, and — when
 ``KEYPROXY_USD_PER_DAY`` is set — the proxy's own read of today's spend from the read-only
@@ -84,6 +86,11 @@ CLAUDE_AUTH = ClaudeAuth(Path(os.environ.get("KEYPROXY_CLAUDE_AUTH", os.path.exp
 """The operator's subscriptions: served as ``/codex/v1``, ``/grok/v1`` and ``/claude/v1`` with the CLIs' own logins."""
 _usage_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 USAGE_CACHE_SECONDS = 60.0
+_claude_usage_retry_at = 0.0
+CLAUDE_USAGE_BACKOFF_SECONDS = 120.0
+
+
+BEARER = "bearer"
 
 
 def upstreams() -> dict[str, tuple[str, str]]:
@@ -98,6 +105,20 @@ def upstreams() -> dict[str, tuple[str, str]]:
             name = var[len("KEYPROXY_UPSTREAM_"):].lower()
             out[name] = (value.rstrip("/"), os.environ.get(f"KEYPROXY_KEY_{name.upper()}", ""))
     return out
+
+
+def auth_scheme(name: str) -> str:
+    """How an upstream takes its key: ``bearer`` (``Authorization: Bearer <key>``) or the name of a header that carries the bare key."""
+    scheme = os.environ.get(f"KEYPROXY_AUTH_{name.upper()}", "").strip()
+    return scheme if scheme and scheme.lower() != BEARER else BEARER
+
+
+def inject_key(headers: dict[str, str], name: str, key: str) -> None:
+    scheme = auth_scheme(name)
+    if scheme == BEARER:
+        headers["authorization"] = f"Bearer {key}"
+    else:
+        headers[scheme] = key
 
 
 def spent_today() -> float:
@@ -367,22 +388,45 @@ async def _grok_usage(client: httpx.AsyncClient, headers: dict[str, str]) -> dic
     return view
 
 
-async def _claude_usage(client: httpx.AsyncClient, headers: dict[str, str]) -> dict[str, Any]:
-    cached = _usage_cache.get("claude")
-    if cached and time.monotonic() - cached[0] < USAGE_CACHE_SECONDS:
-        return cached[1]
-    usage = await client.get(CLAUDE_API + "/api/oauth/usage", headers={**headers, "accept": "application/json"})
-    if usage.status_code != 200:
-        raise SubscriptionError(f"claude usage: HTTP {usage.status_code}")
-    profile: dict[str, Any] = {}
+async def _claude_profile(client: httpx.AsyncClient, headers: dict[str, str]) -> dict[str, Any]:
     try:
         pr = await client.get(CLAUDE_API + "/api/oauth/profile", headers={**headers, "accept": "application/json"})
         if pr.status_code == 200:
-            profile = pr.json()
+            return pr.json()
     except (httpx.HTTPError, ValueError):
-        profile = {}
-    view = claude_usage_view(usage.json(), profile)
-    _usage_cache["claude"] = (time.monotonic(), view)
+        return {}
+    return {}
+
+
+async def _claude_usage(client: httpx.AsyncClient, headers: dict[str, str]) -> dict[str, Any]:
+    """Quota for the Usage screen. The usage endpoint rate-limits independently of inference;
+    a 429 is served from the last good snapshot (or profile) instead of hammering it."""
+    global _claude_usage_retry_at
+    cached = _usage_cache.get("claude")
+    now = time.monotonic()
+    if cached and now - cached[0] < USAGE_CACHE_SECONDS:
+        return cached[1]
+    if now < _claude_usage_retry_at and cached:
+        return cached[1]
+    light = await CLAUDE_AUTH.usage_headers(client)
+    if now < _claude_usage_retry_at:
+        profile = await _claude_profile(client, light)
+        return claude_usage_view({}, profile)
+    usage = await client.get(CLAUDE_API + "/api/oauth/usage", headers=light)
+    if usage.status_code == 429:
+        retry = usage.headers.get("retry-after")
+        try:
+            wait = max(CLAUDE_USAGE_BACKOFF_SECONDS, float(retry or 0))
+        except ValueError:
+            wait = CLAUDE_USAGE_BACKOFF_SECONDS
+        _claude_usage_retry_at = now + wait
+        if cached:
+            return cached[1]
+        return claude_usage_view({}, await _claude_profile(client, light))
+    if usage.status_code != 200:
+        raise SubscriptionError(f"claude usage: HTTP {usage.status_code}")
+    view = claude_usage_view(usage.json(), await _claude_profile(client, light))
+    _usage_cache["claude"] = (now, view)
     return view
 
 
@@ -426,7 +470,7 @@ async def handle(request: web.Request) -> web.StreamResponse:
         if budget_exceeded() and not budget_exempt(rest):
             return web.json_response({"error": {"message": "daily budget exceeded; refused by the key proxy", "type": "budget_exceeded"}}, status=402)
         if key:
-            headers["authorization"] = f"Bearer {key}"
+            inject_key(headers, name, key)
     body = await request.read()
     meter = bool(AGENT_API) and METERED_HEADER not in request.headers and request.method == "POST" and is_completion(rest)
     request_model = ""
