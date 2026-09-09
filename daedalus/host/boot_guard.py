@@ -100,6 +100,20 @@ def _fsync_dir(directory: Path) -> None:
         os.close(fd)
 
 
+def _aware_utc(dt: datetime) -> datetime:
+    """Normalize a parsed timestamp to aware UTC.
+
+    The guard's writer always emits aware UTC (``datetime.now(UTC).isoformat()``),
+    so a naive value in the history is anomalous (a manual edit or a future writer
+    change). ``datetime.fromisoformat`` accepts a naive ISO string and returns a
+    naive datetime; comparing it against the aware cutoff in ``on_boot`` raises
+    ``TypeError`` and, because that comparison sits outside the parse ``except``,
+    trips the outer fail-open before the history is ever rewritten — so one naive
+    record would poison the count forever. Assume UTC rather than letting it do that.
+    """
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
 class BootGuard:
     def __init__(self, state_dir: Path, *, window_minutes: int = WINDOW_MINUTES, threshold: int = THRESHOLD) -> None:
         self.marker = state_dir / "RUNNING"
@@ -119,10 +133,20 @@ class BootGuard:
             times: list[datetime] = []
             if self.history.exists():
                 try:
-                    times = [datetime.fromisoformat(t) for t in json.loads(self.history.read_text(encoding="utf-8")) if isinstance(t, str)]
+                    raw = json.loads(self.history.read_text(encoding="utf-8"))
                 except (OSError, ValueError, TypeError):
                     logger.warning("boot history unreadable; starting the count fresh", exc_info=True)
-                    times = []
+                    raw = []
+                if not isinstance(raw, list):
+                    logger.warning("boot history is not a list (%s); starting the count fresh", type(raw).__name__)
+                    raw = []
+                for t in raw:
+                    if not isinstance(t, str):
+                        continue
+                    try:
+                        times.append(_aware_utc(datetime.fromisoformat(t)))
+                    except (ValueError, OverflowError):
+                        logger.warning("boot history record %r unparseable; dropped", t)
             cutoff = now - timedelta(minutes=self.window_minutes)
             recent = [t for t in times if t >= cutoff]
             if unclean:

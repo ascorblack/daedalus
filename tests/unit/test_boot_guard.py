@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 import daedalus.host.boot_guard as boot_guard
-from daedalus.host.boot_guard import _atomic_write
+from daedalus.host.boot_guard import BootGuard, _atomic_write
 
 
 def test_atomic_write_replaces_content_and_leaves_no_temp(tmp_path: Path) -> None:
@@ -156,3 +158,70 @@ def test_replace_retries_exhaust_then_reraise(tmp_path: Path, monkeypatch) -> No
     assert calls["n"] == 15  # bounded
     assert not target.exists()
     assert [p.name for p in tmp_path.iterdir()] == []  # temp cleaned up
+
+
+def test_naive_iso_date_does_not_poison_history(tmp_path: Path) -> None:
+    """A parseable naive ISO date must not poison the unclean-boot count.
+
+    Regression for the reviewer finding: ``datetime.fromisoformat`` accepts a
+    naive ISO string and returns a naive datetime; comparing it against the
+    aware cutoff raised ``TypeError`` outside the parse ``except``, tripping the
+    outer fail-open before the history was ever rewritten. One naive record
+    would then poison the count forever.
+    """
+    (tmp_path / "RUNNING").write_text("synthetic previous process")
+    (tmp_path / "boot-history.json").write_text('["2026-01-01T12:00:00"]')  # naive, outside window
+    results = []
+    for _ in range(3):
+        g = BootGuard(tmp_path)
+        g.on_boot()
+        results.append((g.unclean_boots, g.skip_recovery))
+    # The count must accumulate and trip the threshold, not fail open every time.
+    assert results == [(1, False), (2, False), (3, True)]
+    # The poisoned naive record must be gone (the history was rewritten).
+    assert "2026-01-01T12:00:00" not in (tmp_path / "boot-history.json").read_text(encoding="utf-8")
+
+
+def test_mixed_history_preserves_aware_records(tmp_path: Path) -> None:
+    """A naive record is normalized to UTC and kept alongside aware records."""
+    now = datetime.now(UTC)
+    aware_recent = (now - timedelta(minutes=1)).isoformat()
+    naive_recent = (now - timedelta(minutes=1)).replace(tzinfo=None).isoformat()
+    (tmp_path / "RUNNING").write_text("synthetic previous process")
+    (tmp_path / "boot-history.json").write_text(json.dumps([aware_recent, naive_recent]))
+    g = BootGuard(tmp_path)
+    g.on_boot()
+    # Both seeded records fall in the window and are counted, plus this boot.
+    assert g.unclean_boots == 3
+
+
+def test_unparseable_record_dropped_but_valid_kept(tmp_path: Path) -> None:
+    """One garbage record is dropped; the valid aware records are not reset."""
+    now = datetime.now(UTC)
+    aware_recent = (now - timedelta(minutes=1)).isoformat()
+    (tmp_path / "RUNNING").write_text("synthetic previous process")
+    (tmp_path / "boot-history.json").write_text(json.dumps([aware_recent, "not-a-date"]))
+    g = BootGuard(tmp_path)
+    g.on_boot()
+    # The aware record survives and is counted (with this boot); the garbage is dropped.
+    assert g.unclean_boots == 2
+
+
+def test_non_list_history_does_not_poison_count(tmp_path: Path) -> None:
+    """A history file that is valid JSON but not a list must not fail-open.
+
+    Regression for the reviewer finding: after the per-record rewrite, only
+    ``json.loads`` was inside the parse ``except``, so ``json.loads("null")`` ->
+    ``None`` then ``for t in None`` raised ``TypeError`` outside it and tripped
+    the outer fail-open before the history was rewritten.
+    """
+    (tmp_path / "RUNNING").write_text("synthetic previous process")
+    (tmp_path / "boot-history.json").write_text("null")
+    results = []
+    for _ in range(3):
+        g = BootGuard(tmp_path)
+        g.on_boot()
+        results.append((g.unclean_boots, g.skip_recovery))
+    assert results == [(1, False), (2, False), (3, True)]
+    # The non-list payload must have been replaced by a rewritten list.
+    assert json.loads((tmp_path / "boot-history.json").read_text(encoding="utf-8")) is not None
