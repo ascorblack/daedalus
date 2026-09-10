@@ -89,6 +89,25 @@ class SecretVault:
         return value
 
 
+REF_HINT = "A «ref:…» placeholder from this server's earlier result is accepted here as is; the host puts the real value in."
+
+
+def loosen_for_refs(properties: dict[str, Any]) -> dict[str, Any]:
+    """The schema the model sees: a string property that demands a format or a pattern (``uuid``, a hex shape)
+    would make the model refuse to pass a ``«ref:…»`` placeholder, so the constraint is dropped and the
+    description says a placeholder is fine. The server still validates what it receives after resolution."""
+    out: dict[str, Any] = {}
+    for name, prop in properties.items():
+        if isinstance(prop, dict) and prop.get("type") == "string" and ("format" in prop or "pattern" in prop):
+            loose = {k: v for k, v in prop.items() if k not in ("format", "pattern")}
+            expected = prop.get("format") or "the documented shape"
+            loose["description"] = f"{prop.get('description', '').strip()} ({expected}). {REF_HINT}".strip()
+            out[name] = loose
+        else:
+            out[name] = prop
+    return out
+
+
 class McpToolProxy(Tool):
     """A core ``Tool`` that forwards to a remote MCP tool."""
 
@@ -239,7 +258,7 @@ class McpConnection:
         definition = ToolDefinition(
             name=mcp_tool_name(self.name, remote.name),
             description=f"[MCP {self.name}] {remote.description or remote.name}",
-            parameters=ToolParameterSchema(properties=dict(schema.get("properties") or {}), required=list(schema.get("required") or [])),
+            parameters=ToolParameterSchema(properties=loosen_for_refs(dict(schema.get("properties") or {})), required=list(schema.get("required") or [])),
         )
         return McpToolProxy(self, remote.name, definition)
 

@@ -102,3 +102,13 @@ async def test_proxy_round_trips_a_server_token_through_the_vault() -> None:
     for shape in (f"«{ref}»", f'"{ref}"', ref.strip("«»"), f" {ref} "):
         await edit.invoke(context, {"edit_token": shape})
         assert calls[-1][1]["edit_token"] == "tok9a8b7c6d5e4f3a2b1", shape
+
+
+def test_schema_constraints_that_would_block_a_placeholder_are_dropped() -> None:
+    from daedalus.mcp.manager import REF_HINT, loosen_for_refs
+
+    props = {"id": {"type": "string"}, "edit_token": {"type": "string", "format": "uuid", "description": "the token"}, "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "n": {"type": "integer", "format": "int32"}}
+    out = loosen_for_refs(props)
+    assert out["id"] == {"type": "string"} and out["n"] == props["n"]
+    assert "format" not in out["edit_token"] and out["edit_token"]["description"] == f"the token (uuid). {REF_HINT}"
+    assert "pattern" not in out["sha"] and REF_HINT in out["sha"]["description"]
