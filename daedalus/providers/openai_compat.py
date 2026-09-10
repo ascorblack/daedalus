@@ -292,6 +292,8 @@ class OpenAICompatibleProvider(ILLMProvider):
         finish = (data.get("choices") or [{}])[0].get("finish_reason") or "stop"
         parsed = parse_json_text(text)
         if parsed is None:
+            # The head and the tail are what tell a summary that outgrew its cap from a refusal or a loop.
+            logger.warning("%s: structured reply unusable (finish=%s, %s chars): head=%r tail=%r", self.endpoint.id, finish, len(text), text[:160], text[-160:])
             raise LLMProviderError(
                 f"{self.endpoint.id}: structured response is not JSON"
                 + (" (output truncated by max_tokens)" if finish == "length" else "")

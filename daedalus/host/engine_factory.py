@@ -90,8 +90,9 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
         # The skill catalogue (name + when-to-use line per skill) must fit whole: past the budget the core
         # drops the descriptions, and a bare name is not a reason to load a skill.
         skill_index_budget_ratio=0.04,
-        # Summaries must not be cut mid-JSON: give the summariser room for a full sentence pair.
-        compaction_summary_max_output_tokens=2048,
+        # Summaries must not be cut mid-JSON: the word budget the summariser is asked for is sized to this cap
+        # at four tokens a word, so a Cyrillic summary of a large unit still fits.
+        compaction_summary_max_output_tokens=4096,
         # A summariser writes sentences whatever it is given: a small tool exchange comes back
         # no smaller, so units under this size are kept as they are instead of paid for.
         compaction_summary_min_unit_tokens=1500,

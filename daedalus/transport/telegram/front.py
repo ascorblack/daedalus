@@ -1603,8 +1603,10 @@ class TelegramFront:
         renderer = await self._renderer_for(session_id, event.run_id)
         if renderer is None:
             return
-        if event.type is EventType.STATE_CHANGED and event.payload.get("to") in ("running", "compacting"):
-            self.set_topic_status(session_id, str(event.payload["to"]))
+        if event.type is EventType.STATE_CHANGED and event.payload.get("to") == "running":
+            # A compaction pass is a moment inside a run, not a state of the topic: renaming the topic there and
+            # back is two chat notices per pass. The status message shows it instead.
+            self.set_topic_status(session_id, "running")
         await renderer.handle(event)
         if event.type is EventType.COMPACTION_COMPLETED:
             p = event.payload

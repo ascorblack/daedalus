@@ -1041,6 +1041,10 @@ class SessionManager:
                 content_blocks=[TextBlock(text=body)],
                 metadata={"daedalus.origin": origin, **({"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {})},
             )
+            # A model with a smaller window than the last prompt was built for, or a history that grew past
+            # the ratio without a run boundary: the whole-history compaction runs now, before the run, rather
+            # than the core's per-iteration passes running every turn of it.
+            await self._maybe_auto_compact(state)
             await self.sessions.append_transcript(session_id, [message])
             seqs = await self.sessions.transcript_seqs(session_id, [self.sessions.transcript_key(message)])
             await self.checkpoint(state, kind="before", seq=seqs[0] if seqs else None)
