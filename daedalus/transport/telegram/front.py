@@ -6,6 +6,7 @@ import asyncio
 import html
 import logging
 import mimetypes
+import re
 import shutil
 import time
 import uuid
@@ -295,6 +296,10 @@ class TelegramOutbox(Outbox):
         except TelegramBadRequest as exc:
             logger.warning("drafts unavailable in chat %s: %s", self.chat_id, exc)
             return False
+
+
+APPROVAL_KEY_RE = re.compile(r"Approval key: ([0-9a-f]{12})")
+"""How a policy refusal names its key in the tool result; the button under it grants exactly that call."""
 
 
 class TelegramFront:
@@ -795,6 +800,28 @@ class TelegramFront:
                 await self.bot.close_forum_topic(binding.chat_id, binding.thread_id)
             except TelegramBadRequest:
                 pass
+
+    async def _on_policy_decision(self, query: CallbackQuery, data: list[str]) -> None:
+        """The operator lets a refused call through once, from the button under the refusal."""
+        if len(data) != 3:
+            await query.answer("stale button")
+            return
+        _, session_id, key = data
+        if key == "no":
+            await query.answer("left refused")
+            if query.message is not None:
+                await query.message.edit_text("Left refused.", reply_markup=None)
+            return
+        try:
+            result = await self.manager.grant(session_id, key)
+        except (KeyError, ValueError) as exc:
+            await query.answer(str(exc)[:180])
+            return
+        approves = result.get("approves")
+        what = f"{approves['tool']}: {approves['text']}" if approves else "the refused call"
+        await query.answer("granted once")
+        if query.message is not None:
+            await query.message.edit_text(f"✅ Allowed once ({key}): {what}. The agent retries it on its next step; the grant expires in {result['expires_in_minutes']} minutes.", reply_markup=None)
 
     async def _on_close_decision(self, query: CallbackQuery, data: list[str]) -> None:
         if len(data) != 3:
@@ -1415,6 +1442,9 @@ class TelegramFront:
         if data[0] == "cu":
             await self._on_cleanup_decision(query, data)
             return
+        if data[0] == "pa":
+            await self._on_policy_decision(query, data)
+            return
         if data[0] == "hc":
             await self._on_clear_decision(query, data)
             return
@@ -1594,6 +1624,19 @@ class TelegramFront:
         if event.type is EventType.TOOL_CALL_PENDING and event.payload.get("kind") == "ask_user":
             await renderer.flush()
             await self._ask(session_id, dict(event.payload.get("ask_user_payload") or {}))
+        if event.type is EventType.TOOL_RESULT and event.payload.get("is_error"):
+            content = str(event.payload.get("content") or "")
+            match = APPROVAL_KEY_RE.search(content)
+            if match:
+                outbox = await self.outbox_for_session(session_id)
+                state = await self.manager.get_state(session_id)
+                pending = (state.metadata.get("policy_pending") or {}).get(match.group(1)) if state is not None else None
+                what = f"{pending['tool']}: {pending['text']}" if pending else "a call the policy wants approved"
+                if outbox is not None:
+                    try:
+                        await self.send_choice(outbox, f"🛂 The policy stopped {what}\n\nAllow it once? The agent retries on its next step.", [[("✅ Allow once", f"pa:{session_id}:{match.group(1)}"), ("✖ Leave refused", f"pa:{session_id}:no")]])
+                    except Exception:  # noqa: BLE001
+                        logger.warning("could not post the approval buttons", exc_info=True)
 
     async def _on_pending_restored(self, session_id: str, pending: Any) -> None:
         """After a restart, post the open question again with a fresh keyboard."""
