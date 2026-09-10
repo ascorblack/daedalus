@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, SessionSummary } from "../api";
+import { api, SessionSummary, Workspace } from "../api";
 import { Avatar, Pill, Status, ToolPicker, loopLabel, timeAgo } from "../components";
+import { Icon } from "../icons";
+import { FilePreview, PreviewSource, workspaceBase } from "../preview";
+import { confirmAsync, errorText, fmtBytes } from "../ui";
+import { Files } from "./Session";
 
 export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void; toast: (t: string) => void }) {
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
@@ -13,6 +17,15 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
   const [loopMode, setLoopMode] = useState<"interval" | "dynamic">("interval");
   const [loopMinutes, setLoopMinutes] = useState("10");
   const [loopMax, setLoopMax] = useState("");
+  const [workspace, setWorkspace] = useState("");
+  const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
+  const [showWorkspaces, setShowWorkspaces] = useState(false);
+  const loadWorkspaces = useCallback(() => {
+    api.get<Workspace[]>("/api/workspaces").then(setWorkspaces).catch(() => setWorkspaces([]));
+  }, []);
+  useEffect(() => {
+    if (creating || showWorkspaces) loadWorkspaces();
+  }, [creating, showWorkspaces, loadWorkspaces]);
 
   const load = useCallback(async () => {
     try {
@@ -34,13 +47,14 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
       const loop = loopOn && loopText.trim()
         ? { instruction: loopText.trim(), mode: loopMode, interval_minutes: loopMode === "interval" ? Math.max(1, Number(loopMinutes) || 10) : null, max_runs: loopMax.trim() ? Math.max(1, Number(loopMax) || 1) : null }
         : undefined;
-      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff, loop });
+      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff, loop, workspace: workspace || undefined });
       setCreating(false);
       setTitle("");
       setPrompt("");
       setToolsOff([]);
       setLoopOn(false);
       setLoopText("");
+      setWorkspace("");
       onOpen(created.id);
     } catch (e) {
       toast((e as Error).message);
@@ -74,13 +88,28 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
         <button className="btn primary" onClick={() => setCreating((v) => !v)}>
           {creating ? "Cancel" : "+ New bot"}
         </button>
+        <button className={`btn ${showWorkspaces ? "primary" : ""}`} onClick={() => setShowWorkspaces((v) => !v)} title="The directories sessions work in">
+          <Icon name="folder" size={15} /> Workspaces
+        </button>
       </div>
+      {showWorkspaces && <WorkspacesPanel workspaces={workspaces} onChange={loadWorkspaces} onOpen={onOpen} toast={toast} />}
       {creating && (
         <div className="card">
           <label className="field">Title</label>
           <input className="field" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="what is this session about" />
           <label className="field">First task (optional)</label>
           <textarea className="field" rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+          <label className="field">Workspace</label>
+          <select className="field" value={workspace} onChange={(e) => setWorkspace(e.target.value)}>
+            <option value="">a directory of its own</option>
+            {(workspaces ?? []).map((w) => (
+              <option key={w.name} value={w.name}>
+                {w.own_session ? `${w.sessions.find((s) => s.id === w.name)?.title ?? w.name} (session workspace)` : w.name}
+                {w.sessions.length ? ` · ${w.sessions.length} session${w.sessions.length === 1 ? "" : "s"}` : " · unused"} · {w.files} files
+              </option>
+            ))}
+          </select>
+          <div className="sub">Several sessions can work in one directory: each keeps its own history, model and brief, and sees the same files. The directory outlives any one of them.</div>
           <label className="toggle-row">
             <input type="checkbox" checked={loopOn} onChange={(e) => setLoopOn(e.target.checked)} />
             <span>Loop agent</span>
@@ -137,6 +166,84 @@ function Row({ s, onOpen, child }: { s: SessionSummary; onOpen: (id: string) => 
         </div>
       </div>
       <Pill status={s.status} />
+    </div>
+  );
+}
+
+
+/** The directories under the workspaces root: who works in each, what is in it; make one, fill it, browse it, drop an unused one. */
+function WorkspacesPanel({ workspaces, onChange, onOpen, toast }: { workspaces: Workspace[] | null; onChange: () => void; onOpen: (id: string) => void; toast: (t: string) => void }) {
+  const [name, setName] = useState("");
+  const [browsing, setBrowsing] = useState<Workspace | null>(null);
+  const [preview, setPreview] = useState<PreviewSource | null>(null);
+  async function create() {
+    const n = name.trim();
+    if (!n) return;
+    try {
+      await api.post("/api/workspaces", { name: n });
+      toast(`workspace ${n} created`);
+      setName("");
+      onChange();
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
+  async function remove(w: Workspace) {
+    if (!(await confirmAsync(`Delete the workspace "${w.name}" and its ${w.files} file${w.files === 1 ? "" : "s"}?`))) return;
+    try {
+      await api.delete(`/api/workspaces/${encodeURIComponent(w.name)}`);
+      toast("workspace deleted");
+      onChange();
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
+  return (
+    <div className="card workspaces">
+      <div className="section-title" style={{ marginTop: 0 }}>Workspaces</div>
+      <div className="composer-row" style={{ marginTop: 0, marginBottom: 8 }}>
+        <input className="field" placeholder="new workspace name (letters, digits, - _ .)" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && create()} />
+        <button className="btn primary" disabled={!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name.trim())} onClick={create}>Create</button>
+      </div>
+      {workspaces === null && <div className="sub">Loading…</div>}
+      {workspaces?.length === 0 && <div className="sub">No workspaces yet.</div>}
+      {workspaces?.map((w) => (
+        <div key={w.name} className="ws-row">
+          <span aria-hidden>📁</span>
+          <div className="grow" style={{ minWidth: 0 }}>
+            <div className="ws-name">
+              {w.name}
+              {w.kind === "session" && <span className="badge" title="created with a session; it stays while anyone works in it">session</span>}
+              {w.kind === "schedule" && <span className="badge" title={`the scheduled task ${w.schedule} runs here`}>cron: {w.schedule}</span>}
+              {w.kind === "heartbeat" && <span className="badge">heartbeat</span>}
+              {w.kind === "named" && w.sessions.length === 0 && <span className="badge">unused</span>}
+            </div>
+            <div className="sub ws-meta">
+              {w.files} file{w.files === 1 ? "" : "s"} · {fmtBytes(w.size)} · {timeAgo(new Date(w.mtime * 1000).toISOString())}
+              {w.sessions.map((s) => (
+                <button key={s.id} className="linkbtn sub" onClick={() => onOpen(s.id)} title="open the session"> · {s.title}</button>
+              ))}
+            </div>
+          </div>
+          <button className="iconbtn small" onClick={() => setBrowsing(w)} title="Browse and upload files" aria-label="browse"><Icon name="folder" size={15} /></button>
+          {w.sessions.length === 0 && w.kind === "named" && <button className="iconbtn small" onClick={() => remove(w)} title="Delete" aria-label="delete"><Icon name="trash" size={15} /></button>}
+        </div>
+      ))}
+      {browsing && (
+        <div className="sheet-backdrop" onClick={() => setBrowsing(null)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={`workspace ${browsing.name}`}>
+            <div className="grip" />
+            <div className="sheet-head">
+              <h3><span aria-hidden>📁</span> {browsing.name}</h3>
+              <button className="iconbtn small" onClick={() => setBrowsing(null)} aria-label="close"><Icon name="close" size={16} /></button>
+            </div>
+            <div className="sheet-body">
+              <Files base={workspaceBase(browsing.name)} uploadUrl={`${workspaceBase(browsing.name)}/upload`} onPreview={setPreview} toast={toast} />
+            </div>
+          </div>
+        </div>
+      )}
+      {preview && <FilePreview src={preview} onClose={() => setPreview(null)} />}
     </div>
   );
 }

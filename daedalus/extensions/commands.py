@@ -34,6 +34,7 @@ class CommandSpec:
 
 COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("compact", "[focus]", "replace this session's history with a summary", confirm=True),
+    CommandSpec("clear", "", "start over with an empty history; the workspace, brief and settings stay", confirm=True),
     CommandSpec("stop", "", "stop the current run"),
     CommandSpec("model", "[preset | provider/model | default]", "the model for this session (no argument: list)"),
     CommandSpec("thinking", "on|off|low|medium|high", "thinking for this session"),
@@ -131,6 +132,11 @@ async def run_command(app: Application, session_id: str, line: str) -> str:
             return "Stop the run first."
         summary = await manager.compact(session_id, args)
         return "🗜 History compacted. The session continues from this summary.\n\n" + summary
+    if name == "clear":
+        if state.running:
+            return "Stop the run first."
+        result = await manager.clear_history(session_id)
+        return f"🧹 History cleared: {result['dropped']} message(s) left the working history. The workspace, the brief and the session's settings stay; the transcript keeps the old turns."
     if name == "cap":
         if args.lower() in ("none", "off", "", "-"):
             await manager.set_session_cap(session_id, None)

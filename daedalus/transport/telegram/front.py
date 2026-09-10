@@ -497,6 +497,7 @@ class TelegramFront:
         r.message.register(self.cmd_close, Command("close"))
         r.message.register(self.cmd_rename, Command("rename"))
         r.message.register(self.cmd_compact, Command("compact"))
+        r.message.register(self.cmd_clear, Command("clear"))
         r.message.register(self.cmd_prompt, Command("prompt"))
         r.message.register(self.cmd_delete, Command("delete"))
         r.message.register(self.cmd_cleanup, Command("cleanup"))
@@ -683,6 +684,46 @@ class TelegramFront:
             "in the workspace as .history-<time>.jsonl." + (f"\nFocus: {focus}" if focus else ""),
             reply_markup=keyboard,
         )
+
+    async def cmd_clear(self, message: Message, command: CommandObject) -> None:
+        if not self._is_owner(message.from_user.id if message.from_user else None):
+            return
+        state = await self._session_for_message(message)
+        if state is None or (self._is_general(message) and message.chat.type != "private"):
+            await message.answer("Use /clear inside a session topic (or the private chat).")
+            return
+        count = len(await self.manager.sessions.list_messages(state.session.id, "daedalus", limit=10_000))
+        if count == 0:
+            await message.answer("The history is already empty.")
+            return
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=f"🧹 Drop {count} messages, keep the workspace", callback_data=f"hc:{state.session.id}:go")],
+                [InlineKeyboardButton(text="Cancel", callback_data=f"hc:{state.session.id}:cancel")],
+            ]
+        )
+        await message.answer("Start over with an empty history? The workspace, the brief and the session's settings stay; the transcript keeps the old turns.", reply_markup=keyboard)
+
+    async def _on_clear_decision(self, query: CallbackQuery, data: list[str]) -> None:
+        if len(data) != 3:
+            await query.answer("stale button")
+            return
+        _, session_id, action = data
+        if action != "go":
+            await query.answer("cancelled")
+            if query.message is not None:
+                await query.message.edit_text("Clear cancelled.", reply_markup=None)
+            return
+        try:
+            result = await self.manager.clear_history(session_id)
+        except Exception as exc:  # noqa: BLE001
+            await query.answer("failed")
+            if query.message is not None:
+                await query.message.edit_text(f"⚠️ clear failed: {exc}", reply_markup=None)
+            return
+        await query.answer("cleared")
+        if query.message is not None:
+            await query.message.edit_text(f"🧹 History cleared: {result['dropped']} message(s) dropped. The workspace and the settings stay.", reply_markup=None)
 
     async def _on_compact_decision(self, query: CallbackQuery, data: list[str]) -> None:
         if len(data) != 3:
@@ -1359,6 +1400,9 @@ class TelegramFront:
             return
         if data[0] == "cu":
             await self._on_cleanup_decision(query, data)
+            return
+        if data[0] == "hc":
+            await self._on_clear_decision(query, data)
             return
         if data[0] == "cm":
             await self._on_compact_decision(query, data)

@@ -180,6 +180,9 @@ export type SessionDetail = {
   status: string;
   run_id: string | null;
   workspace: string;
+  workspace_name?: string;
+  workspace_own?: boolean;
+  workspace_sessions?: { id: string; title: string }[];
   pending: { questions: Question[] } | null;
   model: string;
   provider?: string;
@@ -198,6 +201,12 @@ export type SessionDetail = {
   context?: { tokens: number; window: number; messages: number; summaries: number; operator_turns: number };
   usage: { c?: number; i?: number; o?: number; ch?: number; usd?: number | null };
 };
+
+export type MemoryRecord = { id: string; scope: string; scope_key: string; kind: string; text: string; salience: number; version: number; created_at: string | null; last_accessed_at: string | null };
+export type MemoryBucket = { scope: string; scope_key: string; title: string | null; count: number };
+export type MemoryListing = { records: MemoryRecord[]; buckets: MemoryBucket[]; sessions: Record<string, string> };
+
+export type Workspace = { name: string; path: string; sessions: { id: string; title: string }[]; files: number; size: number; mtime: number; own_session: boolean; kind: "session" | "schedule" | "heartbeat" | "named"; schedule: string | null };
 
 export type AsrStatus = { configured: boolean; reason: string; provider: string; model: string; max_seconds: number; autosend: boolean };
 

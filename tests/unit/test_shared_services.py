@@ -24,7 +24,7 @@ class Upstream(BaseHTTPRequestHandler):
             return
         body = f"hello from {self.path} prefix={self.headers.get('x-forwarded-prefix')}".encode()
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Type", "text/html" if self.path.endswith(".html") else "text/plain")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -96,6 +96,16 @@ def test_public_share_proxies_without_any_login(client: TestClient) -> None:
     assert r.status_code == 201 and r.text == "echo:payload"
     r = client.get("/s/demo-ab12", follow_redirects=False)
     assert r.status_code == 307 and r.headers["location"] == "/s/demo-ab12/"
+
+
+def test_shared_pages_are_kept_out_of_search_engines(client: TestClient) -> None:
+    r = client.get("/s/demo-ab12/page")
+    assert r.headers["x-robots-tag"] == "noindex, nofollow, noarchive"
+    r = client.get("/s/demo-ab12/robots.txt")
+    assert r.status_code == 200 and "Disallow: /" in r.text
+    # a page is never cached: the share can be switched off and the next reload says so
+    assert client.get("/s/demo-ab12/index.html").headers["cache-control"] == "no-store"
+    assert "cache-control" not in client.get("/s/demo-ab12/data.json").headers
 
 
 def test_root_relative_redirects_stay_under_the_slug(client: TestClient) -> None:

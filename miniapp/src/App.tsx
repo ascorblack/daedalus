@@ -9,11 +9,12 @@ import { ProposalsScreen } from "./screens/Proposals";
 import { SchedulesScreen } from "./screens/Schedules";
 import { UsageScreen } from "./screens/Usage";
 import { SettingsScreen } from "./screens/Settings";
+import { MemoryScreen } from "./screens/Memory";
 import { ServicesScreen } from "./screens/Services";
 import { LoginScreen } from "./screens/Login";
 import { Icon, IconName } from "./icons";
 
-type Tab = "sessions" | "inbox" | "board" | "proposals" | "schedules" | "services" | "usage" | "settings";
+type Tab = "sessions" | "inbox" | "board" | "proposals" | "schedules" | "services" | "memory" | "usage" | "settings";
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
@@ -42,6 +43,7 @@ const TABS: { id: Tab; label: string; icon: IconName }[] = [
   { id: "proposals", label: "Changes", icon: "changes" },
   { id: "schedules", label: "Cron", icon: "clock" },
   { id: "services", label: "Services", icon: "globe" },
+  { id: "memory", label: "Memory", icon: "bulb" },
   { id: "usage", label: "Usage", icon: "chart" },
   { id: "settings", label: "Settings", icon: "settings" },
 ];
@@ -175,6 +177,7 @@ export function App() {
               {tab === "proposals" && <ProposalsScreen toast={showToast} />}
               {tab === "schedules" && <SchedulesScreen toast={showToast} onOpen={setSessionId} />}
               {tab === "services" && <ServicesScreen onOpen={setSessionId} toast={showToast} />}
+              {tab === "memory" && <MemoryScreen toast={showToast} onOpen={setSessionId} />}
               {tab === "usage" && <UsageScreen />}
               {tab === "settings" && <SettingsScreen toast={showToast} />}
             </ErrorBoundary>

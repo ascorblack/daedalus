@@ -9,8 +9,11 @@ import { Icon } from "./icons";
 import { renderMarkdown } from "./md";
 import { errorText, fmtBytes } from "./ui";
 
-/** Where the bytes come from: a file in a session's workspace, or a File object from the composer. */
-export type PreviewSource = { sessionId: string; path: string } | { file: File };
+/** Where the bytes come from: a file under an API file root (`/api/sessions/<id>` or `/api/workspaces/<name>`), or a File object from the composer. */
+export type PreviewSource = { base: string; path: string } | { file: File };
+
+export const sessionBase = (sessionId: string) => `/api/sessions/${sessionId}`;
+export const workspaceBase = (name: string) => `/api/workspaces/${encodeURIComponent(name)}`;
 
 export type PreviewKind = "image" | "markdown" | "csv" | "pdf" | "docx" | "sheet" | "audio" | "video" | "text" | "html" | "other";
 
@@ -66,7 +69,7 @@ function sourceName(src: PreviewSource): string {
 
 async function sourceBlob(src: PreviewSource): Promise<Blob> {
   if ("file" in src) return src.file;
-  const res = await fetch(`/api/sessions/${src.sessionId}/download?path=${encodeURIComponent(src.path)}`, { headers: api.authHeaders() });
+  const res = await fetch(`${src.base}/download?path=${encodeURIComponent(src.path)}`, { headers: api.authHeaders() });
   if (!res.ok) throw new Error(res.status === 404 ? "no such file" : `could not load the file (${res.status})`);
   return res.blob();
 }
@@ -74,7 +77,7 @@ async function sourceBlob(src: PreviewSource): Promise<Blob> {
 /** A blob URL for the source, revoked when the component that asked for it goes away. */
 export function useBlobUrl(src: PreviewSource | null): { url: string | null; blob: Blob | null; error: string | null } {
   const [state, setState] = useState<{ url: string | null; blob: Blob | null; error: string | null }>({ url: null, blob: null, error: null });
-  const key = src === null ? "" : "file" in src ? `file:${src.file.name}:${src.file.size}:${src.file.lastModified}` : `${src.sessionId}:${src.path}`;
+  const key = src === null ? "" : "file" in src ? `file:${src.file.name}:${src.file.size}:${src.file.lastModified}` : `${src.base}:${src.path}`;
   useEffect(() => {
     if (!src) return;
     let url: string | null = null;

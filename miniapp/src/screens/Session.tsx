@@ -5,7 +5,7 @@ import { ServiceRow, Status, ToolPicker, fmtInt, fmtUsd, loopLabel, timeAgo } fr
 import { codeBlock, renderMarkdown } from "../md";
 import { confirmAsync, enterSends, errorText, fmtBytes, fmtTok, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
-import { AuthImg, FilePreview, PreviewSource, canPreview, fileGlyph, previewKind } from "../preview";
+import { AuthImg, FilePreview, PreviewSource, canPreview, fileGlyph, previewKind, sessionBase } from "../preview";
 
 /** Markdown parsed once per text: a token streaming into one turn must not re-parse every other. */
 const Md = memo(function Md({ text, className }: { text: string; className?: string }) {
@@ -602,6 +602,22 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     }
   }
 
+  async function clearHistory() {
+    setMenu(false);
+    if (busy) {
+      toast("stop the run first");
+      return;
+    }
+    if (!(await confirmAsync("Start over with an empty history? The workspace, the brief, the model and the loop stay; the transcript keeps the old turns."))) return;
+    try {
+      const r = await api.post<{ dropped: number }>(`/api/sessions/${id}/clear`);
+      toast(`history cleared: ${r.dropped} message(s) dropped`);
+      await load();
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
+
   async function openPicker() {
     try {
       const st = await api.get<any>("/api/settings");
@@ -751,6 +767,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
               )}
               <div className="btnrow">
                 <button className="btn small" onClick={compact}><Icon name="compact" size={14} /> Compact history</button>
+                <button className="btn small" onClick={clearHistory} title="Start over with an empty history; the workspace, the brief and the settings stay"><Icon name="trash" size={14} /> Clear history</button>
               </div>
               </section>
               <section className="sheet-section">
@@ -860,6 +877,16 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                 </div>
               )}
               <div className="aside-row"><Icon name="chart" size={16} /><span className="grow">{fmtTok(detail.usage.i)}↑ {fmtTok(detail.usage.o)}↓ · {fmtUsd(detail.usage.usd)}</span></div>
+              <button className="aside-row link" onClick={() => setView(view === "files" ? "chat" : "files")} title={detail.workspace}>
+                <Icon name="folder" size={16} />
+                <span className="grow name">{detail.workspace_own === false ? `workspace: ${detail.workspace_name}` : "own workspace"}</span>
+                {detail.workspace_sessions && detail.workspace_sessions.length > 0 && <span className="sub" title={detail.workspace_sessions.map((w) => w.title).join(", ")}>+{detail.workspace_sessions.length} session{detail.workspace_sessions.length === 1 ? "" : "s"}</span>}
+              </button>
+              {detail.workspace_sessions && detail.workspace_sessions.length > 0 && detail.workspace_sessions.slice(0, 4).map((w) => (
+                <button key={w.id} className="aside-row link" onClick={() => onOpen?.(w.id)} title="a session working in the same workspace">
+                  <span className="dot" style={{ background: "var(--muted)" }} /><span className="grow name sub">{w.title}</span>
+                </button>
+              ))}
               {detail.subagent_of && (
                 <button className="aside-row link" onClick={() => onOpen?.(detail.subagent_of!)}>
                   <Icon name="back" size={16} /><span className="grow">leader: {detail.leader_title ?? detail.subagent_of}</span>
@@ -1014,7 +1041,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                 <Icon name="close" size={16} />
               </button>
             </div>
-            <div className="side-body">{view === "files" ? <Files sessionId={id} onPreview={setPreview} /> : <McpPanel sessionId={id} toast={toast} />}</div>
+            <div className="side-body">{view === "files" ? <Files base={sessionBase(id)} uploadUrl={`${sessionBase(id)}/files/upload`} onPreview={setPreview} toast={toast} /> : <McpPanel sessionId={id} toast={toast} />}</div>
           </aside>
         )}
       </div>
@@ -1697,7 +1724,7 @@ function ToolAttachment({ item }: { item: ToolItem }) {
   const path = typeof item.args.path === "string" ? item.args.path : "";
   const rel = workspaceRelative(path, workspace);
   if (!rel || !id) return null;
-  const src: PreviewSource = { sessionId: id, path: rel };
+  const src: PreviewSource = { base: sessionBase(id), path: rel };
   const name = rel.split("/").pop() ?? rel;
   if (previewKind(name) === "image") {
     return (
@@ -1799,28 +1826,52 @@ function QuestionCard({ sessionId, questions, onDone, toast }: { sessionId: stri
   );
 }
 
-function Files({ sessionId, onPreview }: { sessionId: string; onPreview: (src: PreviewSource) => void }) {
+/** A file tree under an API root: a session's workspace or a named workspace; uploads go to ``uploadUrl`` when given. */
+export function Files({ base, uploadUrl, onPreview, toast }: { base: string; uploadUrl?: string; onPreview: (src: PreviewSource) => void; toast?: (t: string) => void }) {
   const [path, setPath] = useState("");
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [gen, setGen] = useState(0);
+  const upload = useRef<HTMLInputElement>(null);
   useEffect(() => {
     setError(null);
     api
-      .get(`/api/sessions/${sessionId}/files?path=${encodeURIComponent(path)}`)
+      .get(`${base}/files?path=${encodeURIComponent(path)}`)
       .then(setData)
       .catch((e) => {
         setData(null);
         setError(errorText(e));
       });
-  }, [sessionId, path]);
+  }, [base, path, gen]);
+  async function sendFiles(files: FileList | null) {
+    if (!files?.length || !uploadUrl) return;
+    setUploading(true);
+    try {
+      const form = new FormData();
+      form.append("path", data?.kind === "dir" ? path : path.split("/").slice(0, -1).join("/"));
+      for (const f of Array.from(files)) form.append("files", f, f.name);
+      const res = await fetch(uploadUrl, { method: "POST", headers: api.authHeaders(), body: form });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? res.statusText);
+      const r = (await res.json()) as { files: string[] };
+      toast?.(`${r.files.length} file${r.files.length === 1 ? "" : "s"} added`);
+      setGen((g) => g + 1);
+    } catch (e) {
+      toast?.(errorText(e));
+    } finally {
+      setUploading(false);
+      if (upload.current) upload.current.value = "";
+    }
+  }
   if (error) return <div className="empty">could not read {path || "the workspace"}: {error}</div>;
   if (!data) return <div className="empty">Loading…</div>;
   const crumbs = path ? path.split("/") : [];
   const all: any[] = data.kind === "dir" ? data.entries : [];
   const entries = all.filter((e) => showHidden || !e.name.startsWith("."));
   const hidden = all.length - all.filter((e) => !e.name.startsWith(".")).length;
-  const download = api.downloadUrl(sessionId, path);
+  const token = sessionStorage.getItem("daedalus_token");
+  const download = `${base}/download?path=${encodeURIComponent(path)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
   return (
     <div className="files">
       <div className="crumbs">
@@ -1836,6 +1887,14 @@ function Files({ sessionId, onPreview }: { sessionId: string; onPreview: (src: P
             download{data.size ? ` · ${fmtBytes(data.size)}` : ""}
           </a>
         )}
+        {data.kind === "dir" && uploadUrl && (
+          <>
+            <input ref={upload} type="file" multiple hidden onChange={(e) => sendFiles(e.target.files)} />
+            <button className="btn small" style={{ marginLeft: "auto" }} disabled={uploading} onClick={() => upload.current?.click()} title="Upload files into this folder">
+              <Icon name="up" size={14} /> {uploading ? "uploading…" : "upload"}
+            </button>
+          </>
+        )}
       </div>
       {data.kind === "dir" && entries.length === 0 && <div className="empty">empty</div>}
       {data.kind === "dir" &&
@@ -1846,7 +1905,7 @@ function Files({ sessionId, onPreview }: { sessionId: string; onPreview: (src: P
             onClick={() => {
               const next = path ? `${path}/${e.name}` : e.name;
               // Files with a preview open in the dialog; folders and the rest are walked into as before.
-              if (!e.dir && canPreview(e.name)) onPreview({ sessionId, path: next });
+              if (!e.dir && canPreview(e.name)) onPreview({ base, path: next });
               else setPath(next);
             }}
           >
@@ -1863,10 +1922,10 @@ function Files({ sessionId, onPreview }: { sessionId: string; onPreview: (src: P
       )}
       {data.kind === "file" && data.truncated && <div className="sub" style={{ margin: "6px 0" }}>showing the first 512 KB; download for the whole file</div>}
       {data.kind !== "dir" && canPreview(path) && (
-        <button className="btn small" style={{ marginBottom: 8 }} onClick={() => onPreview({ sessionId, path })}><Icon name="eye" size={14} /> preview</button>
+        <button className="btn small" style={{ marginBottom: 8 }} onClick={() => onPreview({ base, path })}><Icon name="eye" size={14} /> preview</button>
       )}
       {data.kind === "file" && <pre className="filetext">{data.content}</pre>}
-      {data.kind === "binary" && previewKind(path) === "image" && <AuthImg className="preview" src={{ sessionId, path }} alt={path} onClick={() => onPreview({ sessionId, path })} />}
+      {data.kind === "binary" && previewKind(path) === "image" && <AuthImg className="preview" src={{ base, path }} alt={path} onClick={() => onPreview({ base, path })} />}
       {data.kind === "binary" && previewKind(path) !== "image" && <div className="empty">binary file, {fmtBytes(data.size)}</div>}
     </div>
   );

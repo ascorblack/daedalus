@@ -11,6 +11,7 @@ import logging
 import mimetypes
 import re
 import secrets
+import shutil
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,8 +21,9 @@ from urllib.parse import parse_qsl, urlencode
 import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from protocore.contracts.memory import MemoryScope
 from protocore.contracts.types import (
     COMPACTION_SUMMARY_METADATA_KEY,
     Message,
@@ -40,7 +42,7 @@ from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
-from daedalus.host.session_runner import Attachment
+from daedalus.host.session_runner import TENANT, Attachment
 from daedalus.providers.openai_compat import UsageRecord
 from daedalus.security import redact
 from daedalus.tools import websearch
@@ -138,6 +140,8 @@ class AnswerBody(BaseModel):
 class NewSessionBody(BaseModel):
     title: str
     prompt: str | None = None
+    workspace: str | None = None
+    """A workspace directory name to work in (another session's id or a named workspace); empty = a directory of its own."""
     tools_off: list[str] = Field(default_factory=list)
     """Tools this session does not get (by name); everything else stays on."""
     loop: LoopBody | None = None
@@ -146,6 +150,26 @@ class NewSessionBody(BaseModel):
 
 class ToolsOffBody(BaseModel):
     tools_off: list[str] = Field(default_factory=list)
+
+
+class MemoryBody(BaseModel):
+    text: str = Field(min_length=1)
+    kind: str = "fact"
+    scope: str = "global"
+    scope_key: str = ""
+
+
+class MemoryPatch(BaseModel):
+    text: str | None = None
+    kind: str | None = None
+
+
+class MemoryDeleteBody(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class WorkspaceBody(BaseModel):
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class ShareBody(BaseModel):
@@ -642,7 +666,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/sessions")
     async def new_session(body: NewSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         front = app.front
-        metadata = {"tools_off": sorted(set(body.tools_off))} if body.tools_off else None
+        metadata: dict[str, Any] = {"tools_off": sorted(set(body.tools_off))} if body.tools_off else {}
+        if body.workspace:
+            directory = _workspace_dir(body.workspace)
+            if not directory.is_dir():
+                raise HTTPException(404, f"no workspace named {body.workspace!r}")
+            metadata["workspace"] = str(directory)
+        metadata = metadata or None  # type: ignore[assignment]
         if front is not None:
             try:
                 state, _binding = await front.create_session_topic(body.title, metadata=metadata)
@@ -707,6 +737,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "status": status,
             "run_id": state.run_id,
             "workspace": str(state.workspace),
+            "workspace_name": state.workspace.name,
+            "workspace_own": state.workspace == manager.workspace_for(session_id),
+            "workspace_sessions": [u for u in await manager.workspace_users(state.workspace) if u["id"] != session_id],
             "pending": state.pending.payload if state.pending else None,
             "model": await session_model_label(state),
             "provider": await session_provider(state),
@@ -1010,6 +1043,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     hop_headers = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade", "host"}
 
+    @api.get("/s/{slug}/robots.txt")
+    async def shared_robots(slug: str) -> Any:
+        """Crawlers that reach a shared service anyway are told to leave (the proxied pages say the same in a header)."""
+        return PlainTextResponse("User-agent: *\nDisallow: /\n", headers={"X-Robots-Tag": "noindex, nofollow"})
+
     @api.get("/s/{slug}")
     async def shared_root(slug: str, request: Request) -> RedirectResponse:
         return RedirectResponse(f"/s/{slug}/" + (f"?{request.url.query}" if request.url.query else ""))
@@ -1045,14 +1083,19 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except httpx.HTTPError as exc:
             await client.aclose()
             raise HTTPException(502, f"the service did not answer: {exc}") from exc
-        out: dict[str, str] = {}
+        # Nothing under /s/ is for search engines: the address is the only secret of a public share.
+        out: dict[str, str] = {"X-Robots-Tag": "noindex, nofollow, noarchive"}
         for k, v in up.headers.multi_items():
             lk = k.lower()
-            if lk in hop_headers:
+            if lk in hop_headers or lk == "x-robots-tag":
                 continue
             if lk == "location" and v.startswith("/") and not v.startswith(f"/s/{slug}/"):
                 v = f"/s/{slug}{v}"  # a redirect to the service's root stays under the slug
             out[k] = v
+        # A page must not outlive the share in a browser cache: switching a service back to LAN-only takes
+        # effect on the next reload, not when the cached copy expires.
+        if up.headers.get("content-type", "").startswith("text/html"):
+            out["Cache-Control"] = "no-store"
 
         async def body() -> Any:
             try:
@@ -1284,6 +1327,16 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         return {"summary": summary}
 
+    @api.post("/api/sessions/{session_id}/clear")
+    async def clear_session(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Start over with an empty working history; the workspace, the brief and the settings stay."""
+        try:
+            return await manager.clear_history(session_id)
+        except KeyError as exc:
+            raise HTTPException(404, "no such session") from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @api.post("/api/sessions/{session_id}/stop")
     async def stop(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         return {"stopped": await manager.stop(session_id)}
@@ -1339,12 +1392,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(400, "path escapes the workspace")
         return target
 
-    @api.get("/api/sessions/{session_id}/files")
-    async def list_files(session_id: str, path: str = "", _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        state = await manager.get_state(session_id)
-        if state is None:
-            raise HTTPException(404, "no such session")
-        target = _safe_path(state.workspace, path)
+    def _read_path(root: Path, path: str) -> dict[str, Any]:
+        """A directory listing or a file's text at ``path`` under ``root`` (the sessions' and the workspaces' file panes share it)."""
+        target = _safe_path(root, path)
         if target.is_file():
             if target.stat().st_size > 512_000:
                 return {"path": path, "kind": "file", "truncated": True, "content": target.read_text(errors="replace")[:512_000]}
@@ -1362,12 +1412,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             entries.append({"name": child.name, "dir": child.is_dir(), "size": stat.st_size, "mtime": stat.st_mtime})
         return {"path": path, "kind": "dir", "entries": entries}
 
-    @api.get("/api/sessions/{session_id}/download")
-    async def download(session_id: str, path: str, _: dict[str, Any] = Depends(auth)) -> FileResponse:
-        state = await manager.get_state(session_id)
-        if state is None:
-            raise HTTPException(404, "no such session")
-        target = _safe_path(state.workspace, path)
+    def _file_response(root: Path, path: str) -> FileResponse:
+        target = _safe_path(root, path)
         if not target.is_file():
             raise HTTPException(404, "no such file")
         return FileResponse(
@@ -1376,6 +1422,208 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             filename=target.name,
             headers={"Access-Control-Allow-Origin": "https://web.telegram.org"},
         )
+
+    async def _store_uploads(root: Path, files: list[UploadFile], sub: str = "") -> list[str]:
+        """Write uploads under ``root/sub`` without clobbering what is there; returns the names used."""
+        folder = _safe_path(root, sub) if sub else root
+        folder.mkdir(parents=True, exist_ok=True)
+        names: list[str] = []
+        for upload_file in files:
+            name = Path(upload_file.filename or "file").name
+            target = folder / name
+            counter = 1
+            while target.exists():
+                target = folder / f"{Path(name).stem}-{counter}{Path(name).suffix}"
+                counter += 1
+            with target.open("wb") as fh:
+                while chunk := await upload_file.read(1 << 20):
+                    fh.write(chunk)
+            names.append(target.name)
+        return names
+
+    # -- workspaces: directories sessions work in; several sessions may share one ----------
+
+    def _workspace_dir(name: str) -> Path:
+        root = settings.workspaces_dir.resolve()
+        target = (root / name).resolve()
+        if target.parent != root or not name or name.startswith("."):
+            raise HTTPException(400, "a workspace is a directory right under the workspaces root")
+        return target
+
+    def _dir_stats(path: Path) -> tuple[int, int, float]:
+        files = size = 0
+        newest = 0.0
+        try:
+            for f in path.rglob("*"):
+                if f.is_file():
+                    stat = f.stat()
+                    files += 1
+                    size += stat.st_size
+                    newest = max(newest, stat.st_mtime)
+        except OSError:
+            pass
+        return files, size, newest
+
+    @api.get("/api/workspaces")
+    async def list_workspaces(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        """Every workspace directory with the sessions that work in it; a directory nobody uses is a spare."""
+        root = settings.workspaces_dir
+        users: dict[str, list[dict[str, str]]] = {}
+        for row in await app.db.fetchall("SELECT id, title, metadata FROM sessions"):
+            try:
+                named = json.loads(row["metadata"] or "{}").get("workspace")
+            except (ValueError, AttributeError):
+                named = None
+            path = Path(str(named)) if named else manager.workspace_for(row["id"])
+            users.setdefault(str(path.resolve()), []).append({"id": row["id"], "title": row["title"]})
+        scheduled = {str(Path(r["workspace"]).resolve()): r["name"] for r in await app.db.fetchall("SELECT name, workspace FROM schedules") if r["workspace"]}
+        out = []
+        if root.is_dir():
+            for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+                if not entry.is_dir() or entry.name.startswith("."):
+                    continue
+                files, size, newest = await asyncio.to_thread(_dir_stats, entry)
+                sessions = users.get(str(entry.resolve()), [])
+                schedule = scheduled.get(str(entry.resolve()))
+                kind = "schedule" if schedule else "heartbeat" if entry.name == "heartbeat" else "session" if any(u["id"] == entry.name for u in sessions) else "named"
+                out.append({"name": entry.name, "path": str(entry), "sessions": sessions, "files": files, "size": size, "mtime": newest or entry.stat().st_mtime, "own_session": kind == "session", "kind": kind, "schedule": schedule})
+        out.sort(key=lambda w: (-len(w["sessions"]), -(w["mtime"] or 0)))
+        return out
+
+    @api.post("/api/workspaces")
+    async def create_workspace(body: WorkspaceBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        directory = _workspace_dir(body.name)
+        if directory.exists():
+            raise HTTPException(409, f"a workspace named {body.name!r} exists")
+        (directory / "inbox").mkdir(parents=True)
+        return {"name": directory.name, "path": str(directory)}
+
+    @api.delete("/api/workspaces/{name}")
+    async def delete_workspace(name: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        directory = _workspace_dir(name)
+        if not directory.is_dir():
+            raise HTTPException(404, "no such workspace")
+        users = await manager.workspace_users(directory)
+        if users:
+            raise HTTPException(409, f"{len(users)} session(s) work in it: {', '.join(u['title'] for u in users)[:200]}")
+        for row in await app.db.fetchall("SELECT name, workspace FROM schedules"):
+            if row["workspace"] and Path(row["workspace"]).resolve() == directory:
+                raise HTTPException(409, f"the scheduled task {row['name']!r} runs in it")
+        if directory.name == "heartbeat":
+            raise HTTPException(409, "the heartbeat runs in it")
+        await asyncio.to_thread(shutil.rmtree, directory, True)
+        return {"deleted": True}
+
+    @api.get("/api/workspaces/{name}/files")
+    async def workspace_files(name: str, path: str = "", _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        directory = _workspace_dir(name)
+        if not directory.is_dir():
+            raise HTTPException(404, "no such workspace")
+        return _read_path(directory, path)
+
+    @api.get("/api/workspaces/{name}/download")
+    async def workspace_download(name: str, path: str, _: dict[str, Any] = Depends(auth)) -> FileResponse:
+        directory = _workspace_dir(name)
+        if not directory.is_dir():
+            raise HTTPException(404, "no such workspace")
+        return _file_response(directory, path)
+
+    @api.post("/api/workspaces/{name}/upload")
+    async def workspace_upload(name: str, path: str = Form(""), files: list[UploadFile] = File(default=[]), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Put files into a workspace (under ``path`` when given) without sending anything to an agent."""
+        directory = _workspace_dir(name)
+        if not directory.is_dir():
+            raise HTTPException(404, "no such workspace")
+        if not files:
+            raise HTTPException(400, "no files")
+        return {"files": await _store_uploads(directory, files, path)}
+
+    @api.post("/api/sessions/{session_id}/files/upload")
+    async def session_files_upload(session_id: str, path: str = Form(""), files: list[UploadFile] = File(default=[]), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Put files into the session's workspace without a message to the agent."""
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        if not files:
+            raise HTTPException(400, "no files")
+        return {"files": await _store_uploads(state.workspace, files, path)}
+
+    @api.get("/api/sessions/{session_id}/files")
+    async def list_files(session_id: str, path: str = "", _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        return _read_path(state.workspace, path)
+
+    @api.get("/api/sessions/{session_id}/download")
+    async def download(session_id: str, path: str, _: dict[str, Any] = Depends(auth)) -> FileResponse:
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        return _file_response(state.workspace, path)
+
+    # -- memory: what the agent remembered, per session and globally ----------------------
+
+    def _memory_view(record: Any) -> dict[str, Any]:
+        return {
+            "id": record.id,
+            "scope": record.scope.value,
+            "scope_key": record.scope_key,
+            "kind": record.kind,
+            "text": record.text,
+            "salience": record.salience,
+            "version": record.version,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+            "last_accessed_at": record.last_accessed_at.isoformat() if getattr(record, "last_accessed_at", None) else None,
+        }
+
+    @api.get("/api/memory")
+    async def memory_list(scope: str = "", scope_key: str = "", _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Every memory record (or one scope's), with the titles of the sessions the session-scoped ones belong to."""
+        try:
+            wanted = MemoryScope(scope) if scope else None
+        except ValueError as exc:
+            raise HTTPException(422, f"unknown scope {scope!r}") from exc
+        records = manager.memory.records(TENANT, scope=wanted, scope_key=scope_key or None)
+        titles = {row["id"]: row["title"] for row in await app.db.fetchall("SELECT id, title FROM sessions")}
+        buckets: dict[str, dict[str, Any]] = {}
+        for rec in manager.memory.records(TENANT):
+            key = f"{rec.scope.value}:{rec.scope_key}"
+            b = buckets.setdefault(key, {"scope": rec.scope.value, "scope_key": rec.scope_key, "title": titles.get(rec.scope_key) if rec.scope is MemoryScope.session else None, "count": 0})
+            b["count"] += 1
+        return {"records": [_memory_view(r) for r in records], "buckets": sorted(buckets.values(), key=lambda b: (b["scope"] != "global", -b["count"])), "sessions": titles}
+
+    @api.post("/api/memory")
+    async def memory_add(body: MemoryBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            scope = MemoryScope(body.scope)
+        except ValueError as exc:
+            raise HTTPException(422, f"unknown scope {body.scope!r}") from exc
+        if scope is not MemoryScope.global_ and not body.scope_key:
+            raise HTTPException(422, "scope_key is required for a non-global scope")
+        try:
+            result = await manager.memory.write(TENANT, scope, body.scope_key, body.text.strip(), kind=body.kind.strip() or "fact", metadata={"source": "operator"})
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {"decision": result.decision.value if hasattr(result.decision, "value") else str(result.decision), "record": _memory_view(result.record)}
+
+    @api.patch("/api/memory/{memory_id}")
+    async def memory_edit(memory_id: str, body: MemoryPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            return _memory_view(await manager.memory.update(TENANT, memory_id, text=body.text, kind=body.kind))
+        except KeyError as exc:
+            raise HTTPException(404, "no such memory") from exc
+
+    @api.delete("/api/memory/{memory_id}")
+    async def memory_delete(memory_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return {"deleted": await manager.memory.delete(TENANT, memory_id)}
+
+    @api.post("/api/memory/delete")
+    async def memory_delete_many(body: MemoryDeleteBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        deleted = 0
+        for memory_id in body.ids:
+            deleted += int(await manager.memory.delete(TENANT, memory_id))
+        return {"deleted": deleted}
 
     # -- usage / balance / status ---------------------------------------------------
 

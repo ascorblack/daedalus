@@ -612,3 +612,28 @@ body.resizing iframe { pointer-events: none; }
 .roundbtn:disabled { opacity: .4; cursor: default; }
 .chip.recording { border-color: color-mix(in srgb, var(--bad) 60%, transparent); color: var(--bad); font-variant-numeric: tabular-nums; }
 .rec-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); animation: pulse 1s ease-in-out infinite; display: inline-block; }
+
+/* ── memory ────────────────────────────────────────────────────────────────────────────── */
+.memory-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+.memory-toolbar select.field { flex: 1 1 200px; width: auto; }
+.memory-toolbar input.field { flex: 2 1 160px; width: auto; }
+.memory-bulk { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 2px 8px; min-height: 36px; }
+.memory-row { display: flex; gap: 10px; align-items: flex-start; }
+.memory-row.selected { border-color: color-mix(in srgb, var(--info) 45%, var(--line)); }
+.memory-check { width: 18px; height: 18px; margin: 4px 0 0; accent-color: var(--info); flex: none; }
+.memory-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; font-size: 12px; }
+.memory-text { white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
+.memory-actions { display: flex; gap: 4px; flex: none; }
+.badge.kind-decision { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.badge.kind-preference { color: var(--info); border-color: color-mix(in srgb, var(--info) 40%, transparent); }
+.badge.kind-reflection { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+@media (max-width: 480px) {
+  .memory-actions { flex-direction: column; }
+}
+
+/* ── workspaces ────────────────────────────────────────────────────────────────────────── */
+.ws-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+.ws-row:first-of-type { border-top: 0; }
+.ws-name { font-weight: 600; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; overflow-wrap: anywhere; }
+.ws-meta { overflow-wrap: anywhere; }
+.workspaces .sheet .files { min-height: 200px; }

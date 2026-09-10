@@ -380,7 +380,10 @@ class SessionManager:
         metadata: dict[str, Any] | None = None,
     ) -> SessionState:
         sid = session_id or uuid.uuid4().hex[:12]
-        workspace = workspace or self.workspace_for(sid)
+        # A session may work in a directory that is not its own (a subagent in its leader's, a session the
+        # operator attached to an existing workspace): the metadata names it, and get_state reads the same key.
+        named = (metadata or {}).get("workspace")
+        workspace = workspace or (Path(str(named)) if named else self.workspace_for(sid))
         (workspace / "inbox").mkdir(parents=True, exist_ok=True)
         session = Session(id=sid, tenant_id=TENANT, title=title, metadata=dict(metadata or {}))
         await self.sessions.create(session)
@@ -479,10 +482,28 @@ class SessionManager:
             await conn.execute("DELETE FROM verifications WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM learning_records WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        # A subagent shares its leader's workspace: only a session's own directory is ever removed.
+        # A subagent shares its leader's workspace: only a session's own directory is ever removed — and not
+        # while another session (one the operator attached to it) still works there.
         if delete_workspace and state.workspace == self.workspace_for(session_id) and state.workspace.exists() and state.workspace.is_relative_to(self.settings.workspaces_dir):
-            shutil.rmtree(state.workspace, ignore_errors=True)
+            if await self.workspace_users(state.workspace):
+                logger.warning("session %s deleted; its workspace stays, other sessions work in it", session_id)
+            else:
+                shutil.rmtree(state.workspace, ignore_errors=True)
         return True
+
+    async def workspace_users(self, workspace: Path) -> list[dict[str, str]]:
+        """The sessions that work in ``workspace``: their own directory, or one they were attached to."""
+        target = workspace.resolve()
+        out: list[dict[str, str]] = []
+        for row in await self.db.fetchall("SELECT id, title, metadata FROM sessions"):
+            try:
+                named = json.loads(row["metadata"] or "{}").get("workspace")
+            except (ValueError, AttributeError):
+                named = None
+            path = Path(str(named)) if named else self.workspace_for(row["id"])
+            if path.resolve() == target:
+                out.append({"id": row["id"], "title": row["title"]})
+        return out
 
     async def rename_session(self, session_id: str, title: str) -> SessionState:
         state = await self.get_state(session_id)
@@ -731,6 +752,45 @@ class SessionManager:
             )
             await self.sessions.append_transcript(session_id, [marker])
             return {"dropped": dropped, "workspace_restored": restored, "untouched": untouched, "kept": len(kept)}
+
+    async def clear_history(self, session_id: str) -> dict[str, Any]:
+        """Start the session over with an empty working history: the workspace, the brief, the model, the
+        loop and every other setting stay; the transcript keeps the old turns and a marker says they are gone.
+        """
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        async with state.lock:
+            if state.running or state.pending is not None:
+                raise RuntimeError("the session is busy; stop the run (or answer the question) first")
+            pending = [t for t in state.persist_tasks if not t.done()]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            history = list(state.engine.history) if state.engine is not None else list(await self.sessions.list_messages(session_id, TENANT, limit=10_000))
+            if history:
+                backup = state.workspace / f".history-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.jsonl"
+                try:
+                    backup.write_text("\n".join(m.model_dump_json() for m in history) + "\n", encoding="utf-8")
+                except OSError:
+                    logger.warning("could not write the history backup %s", backup, exc_info=True)
+                await self.sessions.append_transcript(session_id, history, from_history=True)
+            state.persist_gen += 1
+            if state.engine is not None:
+                state.engine.history = []
+                state.engine.last_observed_prompt_tokens = 0
+                state.engine.compaction_state = CompactionState()
+            state.history_keys = []
+            await self.sessions.replace_messages(session_id, TENANT, [])
+            await self.live.save_queues(session_id, [], [])
+            for run in await self.db.fetchall("SELECT id FROM runs WHERE session_id = ?", (session_id,)):
+                await self.events.delete_snapshot(run["id"])
+            marker = Message(
+                role=MessageRole.user,
+                content_blocks=[TextBlock(text=f"[history cleared: {len(history)} message(s) left the working history; the workspace and the session's settings stay]")],
+                metadata={"daedalus.origin": "clear", "daedalus.clear": {"dropped": len(history)}},
+            )
+            await self.sessions.append_transcript(session_id, [marker])
+            return {"dropped": len(history)}
 
     async def fork_into(self, source_id: str, seq: int, target: SessionState) -> dict[str, Any]:
         """Give ``target`` the source's history before transcript ``seq`` and a copy of its workspace as of then.

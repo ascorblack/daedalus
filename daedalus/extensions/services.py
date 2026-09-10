@@ -170,9 +170,10 @@ class Services:
             raise ValueError("a service without a port cannot be shared")
         slug = row.get("share_slug")
         if not slug:
-            slug = f"{name}-{secrets.token_urlsafe(4).lower().replace('_', 'x').replace('-', 'y')}"
+            # The slug is the only secret of a public share: long enough that it cannot be guessed or crawled into.
+            slug = f"{name}-{secrets.token_hex(12)}"
             while await self.by_slug(slug) is not None:
-                slug = f"{name}-{secrets.token_urlsafe(4).lower().replace('_', 'x').replace('-', 'y')}"
+                slug = f"{name}-{secrets.token_hex(12)}"
         key = row.get("share_key")
         if mode == "key" and (not key or rotate_key):
             key = secrets.token_urlsafe(18)

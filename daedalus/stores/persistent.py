@@ -52,6 +52,33 @@ class PersistentMemory(InMemoryMemory):
             )
         return deleted
 
+    def records(self, tenant_id: str, *, scope: MemoryScope | None = None, scope_key: str | None = None) -> list[MemoryRecord]:
+        """Every record of the tenant, newest first; narrowed to one scope (and one bucket) when asked."""
+        out = [
+            rec
+            for (t, _), rec in self._store.items()
+            if t == tenant_id and (scope is None or rec.scope is scope) and (scope_key is None or rec.scope_key == scope_key)
+        ]
+        out.sort(key=lambda r: (r.created_at.isoformat() if r.created_at else "", r.id), reverse=True)
+        return out
+
+    async def update(self, tenant_id: str, memory_id: str, *, text: str | None = None, kind: str | None = None) -> MemoryRecord:
+        """Rewrite a record in place (the operator's edit): its id, scope and history stay, the version steps."""
+        record = self._store.get((tenant_id, memory_id))
+        if record is None:
+            raise KeyError(memory_id)
+        changes: dict[str, Any] = {}
+        if text is not None and text.strip():
+            changes["text"] = text.strip()
+        if kind is not None and kind.strip():
+            changes["kind"] = kind.strip()
+        if not changes:
+            return record
+        updated = record.model_copy(update={**changes, "version": record.version + 1})
+        self._store[(tenant_id, memory_id)] = updated
+        await self._persist(updated)
+        return updated
+
     async def recall(self, tenant_id: str, query: str, **kwargs: Any):  # type: ignore[override]
         hits = await super().recall(tenant_id, query, **kwargs)
         for hit in hits:
