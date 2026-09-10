@@ -4,6 +4,13 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-10
 
+- **Reasoning that outruns the output cap.** The core no longer keeps a reasoning block the cap cut, and no
+  longer asks the model to resume it: the retry sends the same prompt with the effort lowered, then with thinking
+  off, at most twice, and the knobs return afterwards. DeepSeek presets send the effort names DeepSeek knows
+  (`medium` is its default `high`). Size a DeepSeek preset's `max_output_tokens` at the vendor's thinking-mode
+  default, 64K: at 32K the model ran out of budget while still reasoning on hard tasks.
+- **Bench.** Memory tools are off in benchmark sessions; an Exec that hits its timeout says how to run the
+  command in the background; a task that declares GPUs is excluded with `-x` rather than aborting the job.
 - **Self-development gates.** `SelfPropose` takes an `execution_path`; a host-module change is refused when nothing
   reaches it, when no passing Verify receipt names the changed code, or when a large change does not say what it
   replaces. The preflight asserts every module is reachable from the entry points.

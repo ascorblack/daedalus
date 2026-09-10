@@ -292,3 +292,12 @@ async def test_core_tier2_keeps_operator_turns_verbatim() -> None:
     assert result.turns_summarised > 0
     texts = [m.text for m in history if m.role is MessageRole.user]
     assert "remove the model-name field, keep only the global default" in texts
+
+
+async def test_deepseek_gets_the_effort_names_it_knows() -> None:
+    """``medium`` is DeepSeek's default ``high``; an unknown name would silently mean ``high`` for ``minimal`` too."""
+    for asked, sent_as in (("medium", "high"), ("minimal", "low"), ("xhigh", "max"), ("low", "low")):
+        provider = _provider(_sse([_chunk({"content": "ok"}), _chunk({}, finish="stop")]))
+        async for _ in provider.stream_with_tools(_request(enable_thinking=True, reasoning_effort=asked)):
+            pass
+        assert provider.captured["json"]["reasoning_effort"] == sent_as  # type: ignore[attr-defined]

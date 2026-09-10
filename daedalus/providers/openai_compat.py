@@ -47,6 +47,11 @@ _CONTEXT_ERROR_MARKERS = (
 )
 
 
+DEEPSEEK_EFFORTS = {"minimal": "low", "low": "low", "medium": "high", "high": "high", "xhigh": "max"}
+"""DeepSeek knows ``low``, ``high`` and ``max`` and treats anything else as ``high``: a preset that asks for
+``medium`` means the model's default, and ``minimal`` is the step below it, so both are sent as what they mean."""
+
+
 def apply_cache_control(messages: list[dict[str, Any]], breakpoints: Any, *, index_map: list[int] | None = None) -> None:
     """Translate the core's cache breakpoints into OpenRouter's ``cache_control`` blocks.
 
@@ -351,7 +356,7 @@ class OpenAICompatibleProvider(ILLMProvider):
         if kind == "deepseek":
             body["thinking"] = {"type": "enabled" if thinking else "disabled"}
             if thinking:
-                body["reasoning_effort"] = effort
+                body["reasoning_effort"] = DEEPSEEK_EFFORTS.get(effort, effort)
         elif kind == "openrouter":
             body["reasoning"] = {"effort": effort} if thinking else {"enabled": False}
             body["usage"] = {"include": True}
