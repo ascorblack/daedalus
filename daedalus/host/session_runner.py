@@ -64,6 +64,9 @@ from daedalus.stores.sqlite import (
 from daedalus.tools import discover_tools
 
 logger = logging.getLogger(__name__)
+
+RECOVERY_REASONS = frozenset({"transient_llm_error_retry", "model_fallback_triggered", "soft_stop_notified", "llm_context_window_exceeded", "context_window_recovered", "reasoning_length_cut_retry", "continue_prompt_injected", "max_output_token_recovery"})
+"""The state changes worth a log line: each is a round the run had to recover from, and the log is where the reason survives."""
 BRIEF_MAX_CHARS = 12_000
 """A spawned agent's brief lives in its system prompt; longer hand-overs belong in files."""
 WORKSPACE_NOTES_CHARS = 6000
@@ -1495,6 +1498,9 @@ class SessionManager:
             p["message"] = self.redactor.redact(p["message"])
             state.last_error_kind = str(p.get("kind") or state.last_error_kind)
             logger.warning("run error in session %s (%s): %s", getattr(getattr(state, "session", None), "id", "?"), p.get("kind") or "-", p["message"][:500])
+        elif event.type is EventType.STATE_CHANGED and p.get("reason") in RECOVERY_REASONS:
+            detail = {k: v for k, v in p.items() if k not in ("from", "to", "reason")}
+            logger.warning("run recovery in session %s: %s %s", getattr(getattr(state, "session", None), "id", "?"), p.get("reason"), self.redactor.redact(json.dumps(detail, ensure_ascii=False, default=str)[:400]))
 
     @staticmethod
     def _redact_history_result(state: SessionState, tool_call_id: str, cleaned: str) -> None:
