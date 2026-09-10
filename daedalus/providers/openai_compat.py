@@ -9,6 +9,7 @@ the reasoning stream, and how usage is shaped.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -34,6 +35,8 @@ from daedalus.providers.dsml import DsmlGuard
 from daedalus.providers.pricing import ModelPricing
 from daedalus.providers.wire import messages_to_wire, parse_json_arguments, tools_to_wire
 
+logger = logging.getLogger(__name__)
+
 ImageLoader = Callable[[str], Awaitable[tuple[bytes, str]]]
 
 _CONTEXT_ERROR_MARKERS = (
@@ -45,6 +48,18 @@ _CONTEXT_ERROR_MARKERS = (
     "prompt is too long",
     "exceeds the model",
 )
+
+
+def message_shape(messages: list[dict[str, Any]]) -> str:
+    """One token per wire message — role, and for an assistant turn whether it has text, tool calls and
+    reasoning — so a rejected request can be read from the log without its content."""
+    parts = []
+    for m in messages:
+        role = str(m.get("role"))[0]
+        if m.get("role") == "assistant":
+            role += ("t" if m.get("content") else "") + ("c" if m.get("tool_calls") else "") + ("r" if m.get("reasoning_content") else ("R" if "reasoning_content" in m else ""))
+        parts.append(role)
+    return " ".join(parts)
 
 
 DEEPSEEK_EFFORTS = {"minimal": "low", "low": "low", "medium": "high", "high": "high", "xhigh": "max"}
@@ -162,6 +177,8 @@ class OpenAICompatibleProvider(ILLMProvider):
             ) as response:
                 if response.status_code >= 400:
                     raw = await response.aread()
+                    if response.status_code == 400:
+                        logger.warning("%s rejected a request; message shape: %s", self.endpoint.id, message_shape(body["messages"]))
                     self._raise_for_status(response.status_code, raw.decode("utf-8", "replace"))
                 async for data in _sse_data(response):
                     if data == "[DONE]":
@@ -344,12 +361,20 @@ class OpenAICompatibleProvider(ILLMProvider):
         effort = str(extra.get("reasoning_effort") or "medium")
         self._apply_thinking(body, thinking=thinking, effort=effort)
         if thinking and self.endpoint.kind == "deepseek":
-            # DeepSeek refuses a thinking-mode request whose earlier tool-call turns carry no
+            # DeepSeek refuses a thinking-mode request whose earlier assistant turns carry no
             # reasoning_content; a turn produced with thinking off (a recovery retry, an operator
-            # toggle) has none, and an empty one is accepted.
+            # toggle) has none, and an empty one is accepted. An assistant turn with nothing but
+            # reasoning — the partial the core keeps when a stream dies mid-thought — is not a turn
+            # DeepSeek can use (reasoning is only read back on a completed tool-call turn), so it
+            # is left off the wire.
+            kept: list[dict[str, Any]] = []
             for entry in wire:
-                if entry.get("role") == "assistant" and entry.get("tool_calls") and "reasoning_content" not in entry:
-                    entry["reasoning_content"] = ""
+                if entry.get("role") == "assistant":
+                    if not entry.get("content") and not entry.get("tool_calls"):
+                        continue
+                    entry.setdefault("reasoning_content", "")
+                kept.append(entry)
+            body["messages"] = wire = kept
         breakpoints = extra.get("cache_breakpoints")
         if breakpoints and self.endpoint.kind == "openrouter":
             apply_cache_control(body["messages"], breakpoints, index_map=wire_index)

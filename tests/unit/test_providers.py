@@ -319,3 +319,22 @@ async def test_deepseek_thinking_request_gives_every_tool_call_turn_a_reasoning_
     sent = provider.captured["json"]["messages"]  # type: ignore[attr-defined]
     turn = next(m for m in sent if m["role"] == "assistant" and m.get("tool_calls"))
     assert turn["reasoning_content"] == ""
+
+
+async def test_deepseek_thinking_request_leaves_a_reasoning_only_turn_off_the_wire() -> None:
+    """The partial the core keeps when a stream dies mid-thought has no text and no call: DeepSeek gets nothing for it."""
+    from protocore.contracts.types import Message, MessageRole, TextBlock, ToolResultBlock, ToolUseBlock
+
+    provider = _provider(_sse([_chunk({"content": "ok"}), _chunk({}, finish="stop")]))
+    request = _request(enable_thinking=True, reasoning_effort="low")
+    request = request.model_copy(update={"messages": [
+        *request.messages,
+        Message(role=MessageRole.assistant, content_blocks=[ToolUseBlock(tool_call_id="c1", name="t", arguments_json="{}")], reasoning_content="why"),
+        Message(role=MessageRole.tool, content_blocks=[ToolResultBlock(tool_call_id="c1", content="hello")]),
+        Message(role=MessageRole.assistant, content_blocks=[], reasoning_content="half a thought"),
+    ]})
+    async for _ in provider.stream_with_tools(request):
+        pass
+    sent = provider.captured["json"]["messages"]  # type: ignore[attr-defined]
+    assert [m["role"] for m in sent][-2:] == ["assistant", "tool"]
+    assert all("reasoning_content" in m for m in sent if m["role"] == "assistant")
