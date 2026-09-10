@@ -118,7 +118,7 @@ export function UsageScreen() {
           <span className="sub">tokens today</span>
           <b>{fmtTok(sum(todayRows, "input_tokens") + sum(todayRows, "output_tokens"))}</b>
           <span className="sub">
-            {fmtTok(sum(todayRows, "cache_read_tokens"))} cached · {fmtTok(sum(todayRows, "reasoning_tokens"))} reasoning
+            {fmtTok(sum(todayRows, "cache_read_tokens"))} cached{sum(todayRows, "input_tokens") ? ` (${Math.round((100 * sum(todayRows, "cache_read_tokens")) / sum(todayRows, "input_tokens"))}% of input)` : ""} · {fmtTok(sum(todayRows, "reasoning_tokens"))} reasoning
           </span>
         </div>
       </div>

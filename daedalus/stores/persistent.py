@@ -10,14 +10,23 @@ semantics stay the core's own.
 from __future__ import annotations
 
 import json
+import math
+import re
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any
 
-from protocore.contracts.memory import MemoryRecord, MemoryScope, MemoryWriteResult
+from protocore.contracts.memory import MemoryHit, MemoryRecord, MemoryScope, MemoryWriteResult
 from protocore.contracts.workspace import WorkspaceUnit, WorkspaceWriteOutcome
 from protocore.tests_support.adapters import InMemoryMemory, InMemoryWorkspace
 
 from daedalus.stores.database import Database
+
+_WORD = re.compile(r"[\w][\w'-]*", re.UNICODE)
+
+
+def _tokens(text: str) -> list[str]:
+    return [w.lower() for w in _WORD.findall(text or "") if len(w) > 1]
 
 
 class PersistentMemory(InMemoryMemory):
@@ -83,6 +92,62 @@ class PersistentMemory(InMemoryMemory):
         hits = await super().recall(tenant_id, query, **kwargs)
         for hit in hits:
             await self._persist(hit.record)
+        return hits
+
+    def _rank(self, tenant_id: str, query: str, scopes: Any, scope_keys: Any, kinds: Any, limit: int) -> list[MemoryHit]:  # type: ignore[override]
+        """Ranked recall: BM25 over the record texts, a bonus for the phrase itself, a tie-break on recency
+        and on how often the record was useful before. The reference store scores by token overlap alone,
+        which ranks a long note that shares two common words above a short one that names the thing."""
+        from protocore.contracts.memory import (  # Lazy: keeps the store's import list to the contract it implements
+            DEFAULT_RECALL_SCOPES,
+            MemoryScope,
+        )
+
+        eff_scopes = tuple(scopes) if scopes else DEFAULT_RECALL_SCOPES
+        keys = scope_keys or {}
+        kind_set = set(kinds) if kinds else None
+        pool: list[MemoryRecord] = []
+        for (t, _), rec in self._store.items():
+            if t != tenant_id or rec.scope not in eff_scopes or (kind_set is not None and rec.kind not in kind_set):
+                continue
+            if rec.scope is not MemoryScope.global_ and keys.get(rec.scope) != rec.scope_key:
+                continue
+            pool.append(rec)
+        q_tokens = _tokens(query)
+        if not q_tokens:
+            pool.sort(key=lambda r: r.updated_at.timestamp(), reverse=True)
+            scored = [(r.updated_at.timestamp(), r) for r in pool]
+        else:
+            docs = [_tokens(r.text) for r in pool]
+            avg = (sum(len(d) for d in docs) / len(docs)) if docs else 1.0
+            n = len(docs)
+            df = {tok: sum(1 for d in docs if tok in d) for tok in set(q_tokens)}
+            phrase = " ".join(q_tokens)
+            scored = []
+            for rec, doc in zip(pool, docs, strict=True):
+                if not doc:
+                    continue
+                score = 0.0
+                for tok in q_tokens:
+                    tf = doc.count(tok)
+                    if not tf:
+                        continue
+                    idf = math.log(1 + (n - df[tok] + 0.5) / (df[tok] + 0.5))
+                    score += idf * (tf * 2.2) / (tf + 1.2 * (0.25 + 0.75 * len(doc) / avg))
+                if score <= 0:
+                    continue
+                if phrase in " ".join(doc):
+                    score *= 1.5
+                age_days = max(0.0, (datetime.now(UTC) - rec.updated_at).total_seconds() / 86400)
+                score *= 1 + 0.15 * min(rec.access_count, 10) / 10 + (0.1 if age_days < 7 else 0.0)
+                scored.append((score, rec))
+            scored.sort(key=lambda pair: (pair[0], pair[1].updated_at.timestamp()), reverse=True)
+        now = datetime.now(UTC)
+        hits: list[MemoryHit] = []
+        for score, rec in scored[:limit]:
+            reinforced = rec.model_copy(update={"access_count": rec.access_count + 1, "last_accessed_at": now})
+            self._store[(tenant_id, rec.id)] = reinforced
+            hits.append(MemoryHit(record=reinforced, score=float(score)))
         return hits
 
 

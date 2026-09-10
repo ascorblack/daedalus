@@ -47,6 +47,29 @@ _CONTEXT_ERROR_MARKERS = (
 )
 
 
+def apply_cache_control(messages: list[dict[str, Any]], breakpoints: Any) -> None:
+    """Translate the core's cache breakpoints into OpenRouter's ``cache_control`` blocks.
+
+    OpenRouter forwards ``cache_control`` to Anthropic (and ignores it elsewhere); DeepSeek and vLLM cache
+    prefixes on their own and need nothing. A breakpoint names a message index; the message's text content
+    becomes a content-part list whose last part carries the marker.
+    """
+    for bp in breakpoints:
+        index = getattr(bp, "message_index", None)
+        if index is None or not (0 <= index < len(messages)):
+            continue
+        entry = messages[index]
+        content = entry.get("content")
+        if isinstance(content, str):
+            if not content:
+                continue
+            entry["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+        elif isinstance(content, list) and content:
+            last = content[-1]
+            if isinstance(last, dict) and last.get("type") == "text":
+                last["cache_control"] = {"type": "ephemeral"}
+
+
 @dataclass(slots=True)
 class ProviderEndpoint:
     id: str
@@ -303,6 +326,9 @@ class OpenAICompatibleProvider(ILLMProvider):
         thinking = bool(extra.get("enable_thinking", False))
         effort = str(extra.get("reasoning_effort") or "medium")
         self._apply_thinking(body, thinking=thinking, effort=effort)
+        breakpoints = extra.get("cache_breakpoints")
+        if breakpoints and self.endpoint.kind == "openrouter":
+            apply_cache_control(body["messages"], breakpoints)
         return body
 
     def accepts_images(self, model: str) -> bool:

@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import time
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -130,9 +132,10 @@ def shell_environment(session_id: str, extra: dict[str, str] | None = None) -> d
     description=(
         "Run a shell command with bash. The working directory defaults to the session "
         "workspace. Output (stdout and stderr, interleaved) is returned; very long output "
-        "is clipped, so prefer writing large results to a file and reading it in parts. "
-        "Long-running processes should be started in the background with nohup and "
-        "redirected output (inside the sandbox, if one is on, they end with the command)."
+        "is clipped to its head and tail and the whole of it is kept in a file the result names. "
+        "background=true starts the command as a job and returns at once with a job id: "
+        "JobOutput reads its output, JobKill stops it, JobList shows the jobs; use it for servers, "
+        "builds and anything longer than a few minutes instead of holding this call open."
     ),
 )
 async def exec_command(
@@ -141,11 +144,18 @@ async def exec_command(
     cwd: str | None = None,
     timeout_seconds: int | None = None,
     env: dict[str, str] | None = None,
+    background: bool = False,
 ) -> ToolResult:
     services = services_for(context)
     workdir = services.resolve(cwd)
     limit = float(timeout_seconds or services.tool_timeout_seconds)
     started = time.monotonic()
+    if background:
+        if services.exec_backend is not None:
+            return error(context, "background jobs are not available when commands run on another machine; start the process with nohup and redirect its output")
+        if not workdir.exists():
+            return error(context, f"working directory does not exist: {workdir}")
+        return await _start_job(context, services, command, workdir, env)
     if services.exec_backend is not None:
         outcome = await services.exec_backend.run(command, cwd=str(workdir), env=env, timeout=limit)
         elapsed = time.monotonic() - started
@@ -168,20 +178,42 @@ async def exec_command(
         start_new_session=True,
     )
     chunks: list[bytes] = []
+    tail_chunks: deque[bytes] = deque()
+    tail_size = 0
     total = 0
-    # Only what the model can see is kept in memory; a process that prints for the whole timeout cannot pump it up.
+    # Only what the model can see is kept in memory: the head and a ring of the tail. A process that
+    # prints for the whole timeout cannot pump it up; the whole output goes to a file when it is clipped.
     head_cap = services.max_tool_output_chars * 4
+    tail_cap = services.max_tool_output_chars
+    spill = _spill_path(services, context)
+    spill_fh = None
 
     async def _pump() -> None:
-        nonlocal total
+        nonlocal total, tail_size, spill_fh
         assert proc.stdout is not None
         last_progress = time.monotonic()
         while True:
             chunk = await proc.stdout.read(4096)
             if not chunk:
                 return
+            if total + len(chunk) > head_cap:
+                if spill_fh is None:
+                    # The file starts with everything kept so far (whole chunks only), then follows the stream.
+                    try:
+                        spill.parent.mkdir(parents=True, exist_ok=True)
+                        spill_fh = spill.open("wb")
+                        spill_fh.write(b"".join(chunks))
+                    except OSError:
+                        spill_fh = None
+                if spill_fh is not None:
+                    spill_fh.write(chunk)
             if total < head_cap:
                 chunks.append(chunk[: head_cap - total])
+            else:
+                tail_chunks.append(chunk)
+                tail_size += len(chunk)
+                while tail_size > tail_cap and len(tail_chunks) > 1:
+                    tail_size -= len(tail_chunks.popleft())
             total += len(chunk)
             if services.progress is not None and time.monotonic() - last_progress > 2.0:
                 last_progress = time.monotonic()
@@ -201,9 +233,18 @@ async def exec_command(
         except ProcessLookupError:
             pass
         await proc.wait()
-    output = b"".join(chunks).decode("utf-8", "replace")
+    if spill_fh is not None:
+        spill_fh.close()
+    head = b"".join(chunks).decode("utf-8", "replace")
     elapsed = time.monotonic() - started
-    body = clip(output, services.max_tool_output_chars, note="write to a file for the full output")
+    if tail_chunks:
+        tail_text = b"".join(tail_chunks).decode("utf-8", "replace")
+        dropped = total - len(b"".join(chunks)) - tail_size
+        note = f"full output in {spill}" if spill_fh is not None else "output beyond this point was not kept"
+        output = head + f"\n\n[... {max(dropped, 0)} bytes omitted — {note} ...]\n\n" + tail_text
+        body = clip(output, services.max_tool_output_chars, note=note)
+    else:
+        body = clip(head, services.max_tool_output_chars, note=f"full output in {spill}" if spill_fh is not None else "write to a file for the full output")
     header = f"exit_code={proc.returncode} elapsed={elapsed:.1f}s cwd={workdir}" + (" sandbox=workspace" if sandboxed else "")
     if timed_out:
         header += f" TIMED OUT after {limit:.0f}s (process group killed)"
@@ -213,6 +254,100 @@ async def exec_command(
     return ok(context, text, exit_code=proc.returncode)
 
 
-TOOLS = [exec_command]
+def _spill_path(services: Any, context: ToolContext) -> Path:
+    call = re.sub(r"[^A-Za-z0-9_-]", "", str(context.metadata.get("tool_call_id") or "")) or f"{int(time.time())}"
+    return services.workspace_dir / ".exec" / f"{call}.log"
 
-__all__ = ["TOOLS", "exec_command"]
+
+@dataclass(slots=True)
+class Job:
+    id: str
+    command: str
+    cwd: Path
+    log: Path
+    process: asyncio.subprocess.Process
+    started: float
+
+    @property
+    def running(self) -> bool:
+        return self.process.returncode is None
+
+
+def _jobs(services: Any) -> dict[str, Job]:
+    return services.extra.setdefault("jobs", {})
+
+
+async def _start_job(context: ToolContext, services: Any, command: str, workdir: Path, env: dict[str, str] | None) -> ToolResult:
+    jobs = _jobs(services)
+    job_id = f"job-{len(jobs) + 1}-{int(time.time()) % 100000}"
+    log = services.workspace_dir / ".jobs" / f"{job_id}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    fh = log.open("wb")
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "bash", "-lc", command, cwd=str(workdir), stdout=fh, stderr=subprocess.STDOUT, env=shell_environment(context.session_id, env), start_new_session=True
+        )
+    finally:
+        fh.close()
+    jobs[job_id] = Job(id=job_id, command=command, cwd=workdir, log=log, process=process, started=time.monotonic())
+    await asyncio.sleep(0.3)  # long enough for an immediate failure (a typo, a missing binary) to show up in the answer
+    status = f"running (pid {process.pid})" if process.returncode is None else f"already exited with code {process.returncode}"
+    head = log.read_text(encoding="utf-8", errors="replace")[:1500]
+    return ok(context, f"{job_id}: {status}; output in {log}\n{head}".rstrip(), job_id=job_id, pid=process.pid)
+
+
+def _tail(path: Path, lines: int) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    return "\n".join(data.decode("utf-8", "replace").splitlines()[-max(1, lines):])
+
+
+@tool(name="JobOutput", description="The latest output of a background job started with Exec(background=true): its status and the last lines of its log.")
+async def job_output(context: ToolContext, job_id: str, tail_lines: int = 100) -> ToolResult:
+    services = services_for(context)
+    job = _jobs(services).get(job_id)
+    if job is None:
+        return error(context, f"no job {job_id!r}; JobList shows the jobs of this session")
+    status = "running" if job.running else f"exited with code {job.process.returncode}"
+    elapsed = time.monotonic() - job.started
+    text = f"{job.id}: {status} after {elapsed:.0f}s — `{job.command[:200]}`\n{_tail(job.log, tail_lines)}"
+    return ok(context, clip(text, services.max_tool_output_chars), running=job.running, exit_code=job.process.returncode)
+
+
+@tool(name="JobKill", description="Stop a background job (its whole process group). Returns the job's final status.")
+async def job_kill(context: ToolContext, job_id: str) -> ToolResult:
+    services = services_for(context)
+    job = _jobs(services).get(job_id)
+    if job is None:
+        return error(context, f"no job {job_id!r}")
+    if job.running:
+        try:
+            os.killpg(job.process.pid, 15)
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(job.process.wait(), timeout=5)
+        except TimeoutError:
+            try:
+                os.killpg(job.process.pid, 9)
+            except ProcessLookupError:
+                pass
+            await job.process.wait()
+    return ok(context, f"{job.id}: exited with code {job.process.returncode}; log in {job.log}", exit_code=job.process.returncode)
+
+
+@tool(name="JobList", description="The background jobs of this session: id, status, age, command.")
+async def job_list(context: ToolContext) -> ToolResult:
+    services = services_for(context)
+    jobs = _jobs(services)
+    if not jobs:
+        return ok(context, "no background jobs in this session")
+    lines = [f"- {j.id}: {'running' if j.running else f'exited {j.process.returncode}'}, {time.monotonic() - j.started:.0f}s, `{j.command[:120]}` → {j.log}" for j in jobs.values()]
+    return ok(context, "\n".join(lines), count=len(jobs))
+
+
+TOOLS = [exec_command, job_output, job_kill, job_list]
+
+__all__ = ["TOOLS", "exec_command", "job_kill", "job_list", "job_output"]

@@ -335,12 +335,27 @@ class LimitsConfig(BaseModel):
     """The same kind of cap per provider id (e.g. ``{"deepseek": 20}``); 0 or absent = none."""
     total_since: str = ""
     """ISO timestamp the total counters start from (Settings → reset); empty = every recorded call."""
+    max_run_minutes: int = Field(default=0, ge=0)
+    """Wall-clock cap for one run; the run is stopped after the model call that crosses it. 0 = no cap."""
+    max_run_tokens: int = Field(default=0, ge=0)
+    """Cap on tokens (input + output, every call) for one run; a runaway loop stops here even on a free model. 0 = no cap."""
 
 
 class BalanceConfig(BaseModel):
     enabled: bool = True
     poll_seconds: int = 60
     thresholds_usd: list[float] = Field(default_factory=lambda: [5.0, 2.0, 0.5])
+
+
+class MemoryConfig(BaseModel):
+    """What the host does with memory beyond the Remember/Recall tools."""
+
+    extract_after_run: bool = False
+    """After a run of at least ``extract_min_messages`` messages, ask the model for the durable facts it learned
+    (decisions, preferences, identifiers, how-tos) and store them as memories. A paid call per run."""
+    extract_min_messages: int = Field(default=12, ge=2)
+    extract_preset: str = ""
+    """Preset id for the extraction call; empty = the session's own model."""
 
 
 class CompactionConfig(BaseModel):
@@ -366,6 +381,8 @@ class CompactionConfig(BaseModel):
     """One summariser call may take this long; a stalled call is retried once, then the compaction waits for the next run."""
     core_trigger_ratio: float = Field(default=0.85, gt=0.0, lt=1.0)
     """Where the core's own mid-run compaction starts; above the host's ratio so runs boundaries compact first."""
+    preset: str = ""
+    """Preset id the summariser runs on; empty = the session's own model. A cheaper model here saves on every long session."""
 
 
 class SchedulerConfig(BaseModel):
@@ -410,10 +427,27 @@ class ModeConfig(BaseModel):
     verbosity: int | None = Field(default=None, ge=0, le=2)
     prompt: str = ""
     """Extra rules appended to the system prompt while the mode is active."""
+    tools_off: list[str] = Field(default_factory=list)
+    """Tools the session does not get while the mode is active (a plan mode blocks everything that changes state)."""
     description: str = ""
 
 
+PLAN_MODE_TOOLS_OFF = ["Write", "Edit", "MultiEdit", "Exec", "JobKill", "SendFile", "SelfPropose", "SelfRebuild", "SelfRollback", "ServiceStart", "ServiceStop", "SubAgent", "SubAgentSend", "SpawnAgent", "ScheduleCreate", "ScheduleDelete", "Forget", "BoardUpdate"]
+"""What a plan may not do: change files, run commands, send anything, start anything."""
+
 DEFAULT_MODES: dict[str, ModeConfig] = {
+    "plan": ModeConfig(
+        max_iterations=60,
+        usd_per_run=1.0,
+        tools_off=PLAN_MODE_TOOLS_OFF,
+        description="read and plan only; nothing is changed until the operator switches the mode",
+        prompt=(
+            "Mode: plan. You may read files, search, fetch and think; the tools that change anything are off. "
+            "Investigate, then reply with a plan the operator can approve: the goal, the steps in order with the files each touches, "
+            "what you will verify and how, the risks, and the open questions. End by asking the operator to switch the mode "
+            "(/mode default or another mode) to carry it out; do not attempt work-arounds for the blocked tools."
+        ),
+    ),
     "quick": ModeConfig(max_iterations=25, usd_per_run=0.5, description="short answers, few tool calls, cheap", prompt="Mode: quick. Answer briefly, prefer a direct answer over investigation, at most a handful of tool calls."),
     "deep": ModeConfig(max_iterations=400, usd_per_run=15.0, description="long autonomous work with a high budget", prompt="Mode: deep. Work autonomously to completion; verify with Verify; ask only when a choice is genuinely the operator's."),
     "careful": ModeConfig(max_iterations=100, description="ask before anything irreversible", prompt="Mode: careful. Before any irreversible action (deleting, pushing, sending, paying, changing configuration) ask with AskUser and wait."),
@@ -566,6 +600,7 @@ class RuntimeConfig(BaseModel):
     balance: BalanceConfig = Field(default_factory=BalanceConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)
     asr: AsrConfig = Field(default_factory=AsrConfig)

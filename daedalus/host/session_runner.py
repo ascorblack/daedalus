@@ -63,6 +63,8 @@ from daedalus.tools import discover_tools
 
 logger = logging.getLogger(__name__)
 BRIEF_MAX_CHARS = 12_000
+WORKSPACE_NOTES_CHARS = 6000
+"""How much of the workspace AGENTS.md rides along in the prompt; the rest is one Read away."""
 """A spawned agent's brief lives in its system prompt; longer hand-overs belong in files."""
 
 EventSink = Callable[[str, TurnEvent], Awaitable[None]]
@@ -576,7 +578,12 @@ class SessionManager:
         if not history:
             raise RuntimeError("nothing to compact: the whole history is inside the kept tail")
         rungs, _ = self.resolve_model(await self.live.load(session_id))
-        provider, model = rungs[0]  # the session's own model summarises its own history
+        provider, model = rungs[0]  # the session's own model summarises its own history …
+        if self.config.compaction.preset and self.config.compaction.preset in self.config.presets:
+            try:
+                provider, model = self.providers.rungs_for(self.config, self.config.compaction.preset)[0]  # … unless a cheaper one is configured for it
+            except Exception:  # noqa: BLE001 — an unusable compaction preset falls back to the session's model
+                logger.warning("compaction preset %r is not usable; summarising with the session's model", self.config.compaction.preset)
         language = self.config.answer_language if self.config.answer_language != "auto" else operator_language(history)
         observability = LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, run_id=state.run_id, call_purpose="compaction", call_category="compaction")
         summary = await self._summarise_history(provider, model, history, language=language, instructions=instructions, observability=observability)
@@ -1179,8 +1186,8 @@ class SessionManager:
             reasoning_effort=overrides.get("reasoning_effort") or preset.reasoning_effort,
             context_window=state.context_window or preset.context_window,
             max_output_tokens=preset.max_output_tokens,
-            extra_notes=self.notes_for(state),
-            blocked_tools=blocked_for(self.mcp, enabled) | self.tools_off(state),
+            extra_notes=self.notes_for(state) + await self.workspace_notes(state),
+            blocked_tools=blocked_for(self.mcp, enabled) | self.tools_off(state) | ({str(n) for n in mode.tools_off} if mode is not None else set()),
         )
         self._attach_hooks(engine, state)
         return engine
@@ -1542,6 +1549,35 @@ class SessionManager:
             parts.append("- Your brief" + (f" (from session {origin})" if origin else "") + ", the standing instructions for this session:\n" + brief)
         return "\n".join(parts)
 
+    async def workspace_notes(self, state: SessionState) -> str:
+        """What the workspace and the board say about the work in progress: read at every run start, so a run
+        begins from the plan of record rather than from memory of it.
+
+        ``AGENTS.md`` (or ``CLAUDE.md``) in the workspace root is the agent's own project memory; the open
+        board tasks of this session are its plan. Both are volatile text: they change between runs and
+        sit after the static prompt sections.
+        """
+        parts: list[str] = []
+        for name in ("AGENTS.md", "CLAUDE.md"):
+            path = state.workspace / name
+            try:
+                if path.is_file():
+                    text = path.read_text(encoding="utf-8", errors="replace").strip()
+                    if text:
+                        if len(text) > WORKSPACE_NOTES_CHARS:
+                            text = text[:WORKSPACE_NOTES_CHARS] + f"\n[… {name} continues; Read it for the rest]"
+                        parts.append(f"- {name} in the workspace (your project memory; keep it current):\n{text}")
+                    break
+            except OSError:
+                continue
+        try:
+            rows = await self.db.fetchall("SELECT id, title, status, priority FROM board_tasks WHERE session_id = ? AND status NOT IN ('done', 'cancelled') ORDER BY priority, updated_at DESC LIMIT 8", (state.session.id,))
+        except Exception:  # noqa: BLE001 — the board is optional
+            rows = []
+        if rows:
+            parts.append("- Your open board tasks (BoardGet for details; update them as you go):\n" + "\n".join(f"  - [{r['status']}] {r['id']}: {r['title']}" for r in rows))
+        return ("\n" + "\n".join(parts)) if parts else ""
+
     async def set_brief(self, session_id: str, brief: str) -> str:
         state = await self.get_state(session_id)
         if state is None:
@@ -1610,7 +1646,21 @@ class SessionManager:
         spent, unmetered = await self.spend(run_id=run_id)
         note: str | None = None
         kind = "run_cap"
-        if (run_cap > 0 or mode_cap is not None) and spent >= run_cap:
+        limits = self.config.limits
+        if limits.max_run_tokens > 0:
+            row = await self.db.fetchone("SELECT sum(input_tokens + output_tokens) t FROM usage_events WHERE run_id = ?", (run_id,))
+            used = int(row["t"] or 0) if row else 0
+            if used >= limits.max_run_tokens:
+                kind, note = "run_tokens", f"⏱ token cap reached: {used:,} tokens in this run of {limits.max_run_tokens:,} (limits.max_run_tokens); stopping this run. Send a message to continue in a new run."
+        if note is None and limits.max_run_minutes > 0:
+            row = await self.db.fetchone("SELECT created_at FROM runs WHERE id = ?", (run_id,))
+            if row and row["created_at"]:
+                minutes = (datetime.now(UTC) - datetime.fromisoformat(row["created_at"])).total_seconds() / 60
+                if minutes >= limits.max_run_minutes:
+                    kind, note = "run_minutes", f"⏱ time cap reached: {minutes:.0f} min in this run of {limits.max_run_minutes} (limits.max_run_minutes); stopping this run. Send a message to continue in a new run."
+        if note is not None:
+            pass
+        elif (run_cap > 0 or mode_cap is not None) and spent >= run_cap:
             note = f"💸 per-run cap reached: ${spent:.2f} spent of ${run_cap:.2f} (limits.usd_per_run); stopping this run. Send a message to continue in a new run."
             if unmetered:
                 note += f" {unmetered} call(s) had no known price and are not counted."

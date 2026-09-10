@@ -12,13 +12,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from protocore.contracts.types import MessageRole, TextBlock, ToolResultBlock, ToolUseBlock
+from protocore.contracts.llm import LLMObservabilityContext, LLMRequest
+from protocore.contracts.memory import MemoryScope
+from protocore.contracts.types import Message, MessageRole, TextBlock, ToolResultBlock, ToolUseBlock
 
 from daedalus.host.prompts import split_headline
+from daedalus.host.session_runner import TENANT, transcript_for_summary
 
 if TYPE_CHECKING:
     from daedalus.app import Application
@@ -28,6 +32,14 @@ logger = logging.getLogger(__name__)
 CHECK_EVERY_SECONDS = 3600
 ERROR_PREFIX_CHARS = 60
 ASK_PREFIX_CHARS = 40
+
+
+EXTRACT_PROMPT = """From the transcript below, list the facts worth remembering in a later, unrelated session of the same agent:
+decisions the operator made, preferences the operator stated, identifiers (repositories, hosts, ids, paths that
+will be needed again), and how-tos that took effort to find. Not: the task itself, intermediate results, anything
+already obvious from files, or anything that only matters for this task. Each fact is one self-contained sentence
+naming its subject. Answer with a JSON list only: [{"kind": "decision|preference|identifier|howto|fact", "text": "..."}].
+An empty list is a fine answer."""
 
 
 class Learning:
@@ -80,6 +92,63 @@ class Learning:
             )
         except Exception:  # noqa: BLE001 — observation must never affect the run
             logger.warning("learning record failed", exc_info=True)
+        if self.app.config.memory.extract_after_run and status == "completed":
+            try:
+                await self.extract_memories(session_id, run_id)
+            except Exception:  # noqa: BLE001 — a failed extraction costs a log line, not the run
+                logger.warning("memory extraction failed for run %s", run_id, exc_info=True)
+
+    async def extract_memories(self, session_id: str, run_id: str) -> int:
+        """Ask the model which durable facts this run established and store them as memories.
+
+        Durable means useful in a later, unrelated session: a decision, a preference the operator
+        stated, an identifier (repo, host, id), a how-to that took effort to find. The transcript of
+        the run alone is the input; the model answers with a JSON list, each item becoming one
+        memory (the store merges near-duplicates).
+        """
+        manager = self.app.manager
+        assert manager is not None
+        state = await manager.get_state(session_id)
+        if state is None or state.engine is None:
+            return 0
+        cfg = self.app.config.memory
+        history = list(state.engine.history)[min(state.run_history_start, len(state.engine.history)):]
+        if len(history) < cfg.extract_min_messages:
+            return 0
+        rungs, _ = manager.resolve_model(await manager.live.load(session_id))
+        provider, model = rungs[0]
+        if cfg.extract_preset and cfg.extract_preset in self.app.config.presets:
+            provider, model = manager.providers.rungs_for(self.app.config, cfg.extract_preset)[0]
+        request = LLMRequest(
+            model=model,
+            messages=[Message(role=MessageRole.user, content_blocks=[TextBlock(text=EXTRACT_PROMPT + "\n\n" + transcript_for_summary(history, result_chars=300)[:60_000])])],
+            max_tokens=1500,
+            temperature=0.1,
+            extra={"enable_thinking": False},
+            observability=LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, run_id=run_id, call_purpose="memory_extraction", call_category="memory"),
+        )
+        response = await asyncio.wait_for(provider.complete_text(request), timeout=90)
+        text = "".join(b.text for b in response.message.content_blocks if isinstance(b, TextBlock))
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if not match:
+            return 0
+        try:
+            items = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return 0
+        stored = 0
+        for item in items[:8]:
+            if not isinstance(item, dict):
+                continue
+            fact = str(item.get("text") or "").strip()
+            kind = str(item.get("kind") or "fact").strip()[:32]
+            if len(fact) < 12 or len(fact) > 600:
+                continue
+            await manager.memory.write(TENANT, MemoryScope.global_, "", fact, kind=kind, source_refs=[f"session:{session_id}", f"run:{run_id}"])
+            stored += 1
+        if stored:
+            logger.warning("memory extraction: %d fact(s) from run %s", stored, run_id)
+        return stored
 
     async def report(self, days: int = 7) -> dict[str, Any]:
         since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
