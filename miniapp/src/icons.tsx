@@ -3,7 +3,8 @@
 export type IconName =
   | "back" | "more" | "plus" | "up" | "stop" | "model" | "terminal" | "file" | "pen" | "search" | "globe" | "attach" | "image"
   | "question" | "skill" | "spawn" | "bulb" | "wrench" | "clock" | "plug" | "dot" | "compact"
-  | "folder" | "settings" | "bots" | "inbox" | "board" | "changes" | "chart" | "loop" | "pause" | "play" | "trash" | "check" | "close" | "send";
+  | "folder" | "settings" | "bots" | "inbox" | "board" | "changes" | "chart" | "loop" | "pause" | "play" | "trash" | "check" | "close" | "send"
+  | "download" | "share" | "split" | "key" | "link" | "down" | "copy" | "columns" | "eye" | "mic";
 
 const PATHS: Record<IconName, string> = {
   back: "M15 18l-6-6 6-6",
@@ -42,6 +43,16 @@ const PATHS: Record<IconName, string> = {
   check: "M5 12l5 5 9-11",
   close: "M6 6l12 12M18 6L6 18",
   send: "M4 12l16-8-6 16-2-6z",
+  download: "M12 4v12M6 10l6 6 6-6M4 20h16",
+  share: "M4 12v8h16v-8M12 3v12M7 8l5-5 5 5",
+  split: "M4 5h16v14H4zM12 5v14",
+  key: "M15 3a6 6 0 1 0 0 12 6 6 0 0 0 0-12zM10 14l-7 7M6 18l2 2M9 15l2 2",
+  link: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
+  down: "M12 5v14M5 12l7 7 7-7",
+  copy: "M8 8h12v12H8zM16 8V4H4v12h4",
+  columns: "M3 5h18v14H3zM12 5v14",
+  eye: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
+  mic: "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM6 11a6 6 0 0 0 12 0M12 17v4M9 21h6",
 };
 
 export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {

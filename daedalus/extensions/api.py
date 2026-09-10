@@ -15,7 +15,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlencode
 
 import httpx
 import uvicorn
@@ -38,6 +38,7 @@ from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
+from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import Attachment
 from daedalus.providers.openai_compat import UsageRecord
@@ -45,6 +46,13 @@ from daedalus.security import redact
 from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
+from daedalus.transport.telegram.voice import (
+    TranscriptionError,
+    asr_configured,
+    effective_asr,
+    transcribe,
+    voice_note_text,
+)
 
 if TYPE_CHECKING:
     from daedalus.app import Application
@@ -138,6 +146,11 @@ class NewSessionBody(BaseModel):
 
 class ToolsOffBody(BaseModel):
     tools_off: list[str] = Field(default_factory=list)
+
+
+class ShareBody(BaseModel):
+    mode: str = Field(pattern="^(local|public|key)$")
+    rotate_key: bool = False
 
 
 class LoopBody(BaseModel):
@@ -660,6 +673,16 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         pid, preset = app.config.preset()
         return preset.display(pid)
 
+    async def session_provider(state: Any) -> str:
+        """The provider id the session's next call goes to (for the usage card beside the chat)."""
+        overrides = await manager.live.load(state.session.id)
+        if overrides.get("preset") and overrides["preset"] in app.config.presets:
+            return app.config.presets[overrides["preset"]].provider
+        if overrides.get("provider"):
+            return str(overrides["provider"])
+        _, preset = app.config.preset()
+        return preset.provider
+
     @api.get("/api/sessions/{session_id}")
     async def get_session(session_id: str, tail: int = 600, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         state = await manager.get_state(session_id)
@@ -686,6 +709,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "workspace": str(state.workspace),
             "pending": state.pending.payload if state.pending else None,
             "model": await session_model_label(state),
+            "provider": await session_provider(state),
             "mode": state.metadata.get("mode") or "",
             "usd_cap": state.metadata.get("usd_cap"),
             "brief": state.metadata.get("brief") or "",
@@ -799,6 +823,48 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {"run_id": run_id, "files": [a.path.name for a in attachments]}
+
+    @api.get("/api/asr")
+    async def asr_status(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Whether the site may offer a microphone: speech-to-text is configured and its endpoint resolves."""
+        asr = app.config.asr
+        ready = asr_configured(asr)
+        reason = ""
+        if ready:
+            try:
+                effective_asr(asr, manager)
+            except TranscriptionError as exc:
+                ready, reason = False, str(exc)
+        return {"configured": ready, "reason": reason, "provider": asr.provider, "model": asr.model, "max_seconds": asr.max_seconds, "autosend": asr.autosend}
+
+    @api.post("/api/sessions/{session_id}/transcribe")
+    async def transcribe_audio(session_id: str, audio: UploadFile = File(...), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """A recording from the site's microphone → its words, marked as a transcript, for the composer."""
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        if not asr_configured(app.config.asr):
+            raise HTTPException(409, "speech-to-text is not configured (Settings → Tools → Voice notes)")
+        suffix = Path(audio.filename or "").suffix or mimetypes.guess_extension((audio.content_type or "").split(";")[0]) or ".webm"
+        inbox = state.workspace / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        target = inbox / f".recording-{secrets.token_hex(4)}{suffix}"
+        size = 0
+        with target.open("wb") as fh:
+            while chunk := await audio.read(1 << 20):
+                size += len(chunk)
+                if size > 50 << 20:
+                    fh.close()
+                    target.unlink(missing_ok=True)
+                    raise HTTPException(413, "recording is over 50 MB")
+                fh.write(chunk)
+        try:
+            transcript = await transcribe(target, effective_asr(app.config.asr, manager))
+        except TranscriptionError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        finally:
+            target.unlink(missing_ok=True)
+        return {"transcript": transcript, "text": voice_note_text(transcript), "autosend": app.config.asr.autosend}
 
     @api.post("/api/sessions/{session_id}/answer")
     async def answer(session_id: str, body: AnswerBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -925,6 +991,78 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             return {"text": await services.logs(session_id, name, lines)}
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
+
+    @api.post("/api/sessions/{session_id}/services/{name}/share")
+    async def session_service_share(session_id: str, name: str, body: ShareBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """local: LAN only · public: anyone through the site · key: whoever opens the link that carries the key."""
+        services = app.extensions.get("services")
+        if services is None:
+            raise HTTPException(503, "services are not installed")
+        try:
+            return await services.share(session_id, name, body.mode, rotate_key=body.rotate_key)  # type: ignore[attr-defined]
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    # -- shared services: the site proxies /s/<slug>/… to the service's port --------------
+    # The reverse proxy in front of the API already makes the site public; a shared service rides on the
+    # same address instead of a port of its own. No auth dependency here: public mode is open to anyone,
+    # key mode to whoever presents the key (once in the query, then in a cookie scoped to the slug).
+
+    hop_headers = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade", "host"}
+
+    @api.get("/s/{slug}")
+    async def shared_root(slug: str, request: Request) -> RedirectResponse:
+        return RedirectResponse(f"/s/{slug}/" + (f"?{request.url.query}" if request.url.query else ""))
+
+    @api.api_route("/s/{slug}/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+    async def shared_proxy(slug: str, path: str, request: Request) -> Any:
+        services = app.extensions.get("services")
+        row = await services.by_slug(slug) if services is not None else None  # type: ignore[attr-defined]
+        if row is None or (row.get("share_mode") or "local") not in SHARE_MODES[1:]:
+            raise HTTPException(404, "nothing is shared here")
+        cookie_name = SHARE_COOKIE_PREFIX + slug
+        presented = request.query_params.get("key")
+        if row["share_mode"] == "key" and presented is not None:
+            if not services.share_allows(row, presented):  # type: ignore[attr-defined]
+                raise HTTPException(403, "wrong key")
+            # The key moves from the address into a cookie, so the link people copy afterwards does not carry it.
+            rest = [(k, v) for k, v in request.query_params.multi_items() if k != "key"]
+            response: Any = RedirectResponse(f"/s/{slug}/{path}" + (f"?{urlencode(rest)}" if rest else ""), status_code=303)
+            response.set_cookie(cookie_name, presented, httponly=True, samesite="lax", path=f"/s/{slug}", max_age=30 * 86400, secure=request.url.scheme == "https")
+            return response
+        if not services.share_allows(row, request.cookies.get(cookie_name) or request.headers.get("x-share-key")):  # type: ignore[attr-defined]
+            raise HTTPException(403, "this service needs its key: open the link that carries ?key=…")
+        if row["status"] != "running" or not pid_alive(row.get("pid")) or not row.get("port"):
+            raise HTTPException(503, "the service is not running")
+        upstream = f"http://127.0.0.1:{row['port']}/{path}" + (f"?{request.url.query}" if request.url.query else "")
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in hop_headers}
+        headers["x-forwarded-prefix"] = f"/s/{slug}"
+        headers["x-forwarded-host"] = request.headers.get("host", "")
+        headers["x-forwarded-proto"] = request.url.scheme
+        client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
+        try:
+            up = await client.send(client.build_request(request.method, upstream, headers=headers, content=await request.body()), stream=True)
+        except httpx.HTTPError as exc:
+            await client.aclose()
+            raise HTTPException(502, f"the service did not answer: {exc}") from exc
+        out: dict[str, str] = {}
+        for k, v in up.headers.multi_items():
+            lk = k.lower()
+            if lk in hop_headers:
+                continue
+            if lk == "location" and v.startswith("/") and not v.startswith(f"/s/{slug}/"):
+                v = f"/s/{slug}{v}"  # a redirect to the service's root stays under the slug
+            out[k] = v
+
+        async def body() -> Any:
+            try:
+                async for chunk in up.aiter_raw():
+                    yield chunk
+            finally:
+                await up.aclose()
+                await client.aclose()
+
+        return StreamingResponse(body(), status_code=up.status_code, headers=out)
 
     @api.post("/api/sessions/{session_id}/loop")
     async def set_session_loop(session_id: str, body: LoopBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -1287,6 +1425,20 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "sessions": [dict(r) for r in by_session],
             "subscriptions": await subscription_usage(),
         }
+
+    @api.get("/api/usage/provider/{provider_id}")
+    async def usage_provider(provider_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """One provider's day so far, its subscription windows when it is a login, its balance when it is metered."""
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        row = await app.db.fetchone(
+            "SELECT count(*) calls, sum(input_tokens) input_tokens, sum(output_tokens) output_tokens, sum(cache_read_tokens) cache_read_tokens,"
+            " sum(cost_usd) cost_usd, sum(cost_usd IS NULL) unmetered FROM usage_events WHERE provider_id = ? AND at >= ?",
+            (provider_id, today),
+        )
+        monitor = app.extensions.get("balance")
+        balances = await monitor.current() if monitor is not None else {}  # type: ignore[attr-defined]
+        subscriptions = await subscription_usage()
+        return {"provider": provider_id, "today": dict(row) if row else {}, "subscription": subscriptions.get(provider_id), "balance": balances.get(provider_id)}
 
     async def subscription_usage() -> dict[str, Any]:
         """Quota windows of the Codex, Grok and Claude subscriptions, read from the key proxy that holds their logins."""

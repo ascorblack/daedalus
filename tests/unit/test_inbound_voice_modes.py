@@ -290,3 +290,29 @@ async def test_key_proxy_decodes_compressed_upstreams_and_replaces_credentials(m
         assert seen["auth"] == "Bearer real-key" and seen["cookie"] is None and seen["url"] == "https://api.deepseek.com/v1/models?x=1"
         assert (await client.get("/nowhere/models")).status == 404
     assert proxy.budget_exempt("v1/user/balance") and proxy.budget_exempt("models") and not proxy.budget_exempt("chat/completions") and not proxy.budget_exempt("models_delete")
+
+
+async def test_asr_can_borrow_a_configured_provider(tmp_path: Path) -> None:
+    from daedalus.transport.telegram.voice import VOICE_NOTE_PREFIX, asr_configured, effective_asr, voice_note_text
+
+    class Endpoint:
+        base_url = "http://keys.local/openrouter/v1"
+        api_key = "proxied"
+
+    class Registry:
+        def get(self, provider_id: str) -> Any:
+            if provider_id != "openrouter":
+                raise KeyError(provider_id)
+            return SimpleNamespace(endpoint=Endpoint())
+
+    manager = SimpleNamespace(providers=Registry())
+    plain = AsrConfig(url="http://asr.local/v1", api_key="k")
+    assert effective_asr(plain, manager) is plain
+    borrowed = effective_asr(AsrConfig(provider="openrouter", model="whisper-large-v3"), manager)
+    assert borrowed.url == "http://keys.local/openrouter/v1" and borrowed.api_key == "proxied" and borrowed.model == "whisper-large-v3"
+    with pytest.raises(TranscriptionError, match="not configured"):
+        effective_asr(AsrConfig(provider="nope"), manager)
+    assert not asr_configured(AsrConfig()) and asr_configured(AsrConfig(provider="openrouter")) and asr_configured(AsrConfig(url="http://x"))
+    # what the agent reads: the words, marked as a transcript, after the caption when there is one
+    assert voice_note_text(" hello ") == f"{VOICE_NOTE_PREFIX}\nhello"
+    assert voice_note_text("hello", "see the photo") == f"see the photo\n\n{VOICE_NOTE_PREFIX}\nhello"

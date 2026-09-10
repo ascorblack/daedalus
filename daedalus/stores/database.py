@@ -362,6 +362,13 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX services_port ON services(port);
     """,
+    # 17 — a service can be shared through the bot's public address: to anyone, or to whoever holds its key
+    """
+    ALTER TABLE services ADD COLUMN share_mode TEXT NOT NULL DEFAULT 'local';
+    ALTER TABLE services ADD COLUMN share_slug TEXT;
+    ALTER TABLE services ADD COLUMN share_key TEXT;
+    CREATE INDEX services_share_slug ON services(share_slug);
+    """,
 ]
 
 

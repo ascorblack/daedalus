@@ -8,6 +8,11 @@ processes are children of the bot; a bot restart leaves them running (they are
 reparented, the table remembers them), a container rebuild does not — at boot
 what the table says was running and is not is started again when it was
 marked ``restart``, and reported otherwise.
+
+Sharing: a service is reachable on the LAN at ``SERVICES_PUBLIC_HOST:<port>``; the operator can
+also open it through the bot's public address (``MINIAPP_PUBLIC_URL``, the reverse-proxied site)
+under ``/s/<slug>/`` — to anyone (``public``) or to whoever presents its key (``key``); the API
+proxies those requests to the service's port.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import signal
 import socket
 import subprocess
@@ -32,6 +38,8 @@ logger = logging.getLogger(__name__)
 NAME_MAX = 32
 LOG_DIR = ".services"
 STOP_GRACE_SECONDS = 5.0
+SHARE_MODES = ("local", "public", "key")
+SHARE_COOKIE_PREFIX = "dshare-"
 
 
 def _now() -> str:
@@ -73,6 +81,7 @@ class Services:
         self.app = app
         self.lo, self.hi = parse_range(app.settings.services_port_range)
         self.public_host = app.settings.services_public_host.strip()
+        self.public_base = app.settings.miniapp_public_url.strip().rstrip("/").removesuffix("/app")
         self._procs: dict[tuple[str, str], subprocess.Popen[bytes]] = {}
 
     # -- views ----------------------------------------------------------------------
@@ -82,9 +91,29 @@ class Services:
             return None
         return f"http://{self.public_host or '<host>'}:{port}"
 
+    def share_url(self, row: dict[str, Any], *, with_key: bool = True) -> str | None:
+        """The public address of a shared service: through the bot's site, with the key in the query when it has one."""
+        mode = row.get("share_mode") or "local"
+        slug = row.get("share_slug")
+        if mode == "local" or not slug or not row.get("port"):
+            return None
+        base = self.public_base or "<public-url>"
+        url = f"{base}/s/{slug}/"
+        if mode == "key" and with_key and row.get("share_key"):
+            url += f"?key={row['share_key']}"
+        return url
+
     def view(self, row: dict[str, Any]) -> dict[str, Any]:
         alive = row["status"] == "running" and pid_alive(row.get("pid"))
+        mode = row.get("share_mode") or "local"
         return {
+            "share": {
+                "mode": mode,
+                "slug": row.get("share_slug"),
+                "key": row.get("share_key") if mode == "key" else None,
+                "url": self.share_url(row),
+                "public_base": self.public_base,
+            },
             "name": row["name"],
             "command": row["command"],
             "cwd": row["cwd"],
@@ -119,6 +148,45 @@ class Services:
     async def get(self, session_id: str, name: str) -> dict[str, Any] | None:
         row = await self.app.db.fetchone("SELECT * FROM services WHERE session_id = ? AND name = ?", (session_id, name))
         return dict(row) if row else None
+
+    async def by_slug(self, slug: str) -> dict[str, Any] | None:
+        row = await self.app.db.fetchone("SELECT * FROM services WHERE share_slug = ?", (slug,))
+        return dict(row) if row else None
+
+    # -- sharing --------------------------------------------------------------------
+
+    async def share(self, session_id: str, name: str, mode: str, *, rotate_key: bool = False) -> dict[str, Any]:
+        """Switch how the service is reached from outside: LAN only, anyone through the site, or key holders.
+
+        The slug is minted once and kept across mode changes, so a link stays valid when the key is
+        dropped; the key is minted when key mode is first chosen and replaced only on ``rotate_key``.
+        """
+        if mode not in SHARE_MODES:
+            raise ValueError(f"share mode must be one of {', '.join(SHARE_MODES)}")
+        row = await self.get(session_id, name)
+        if row is None:
+            raise ValueError(f"no service named {name!r}")
+        if mode != "local" and not row.get("port"):
+            raise ValueError("a service without a port cannot be shared")
+        slug = row.get("share_slug")
+        if not slug:
+            slug = f"{name}-{secrets.token_urlsafe(4).lower().replace('_', 'x').replace('-', 'y')}"
+            while await self.by_slug(slug) is not None:
+                slug = f"{name}-{secrets.token_urlsafe(4).lower().replace('_', 'x').replace('-', 'y')}"
+        key = row.get("share_key")
+        if mode == "key" and (not key or rotate_key):
+            key = secrets.token_urlsafe(18)
+        await self.app.db.execute("UPDATE services SET share_mode = ?, share_slug = ?, share_key = ? WHERE session_id = ? AND name = ?", (mode, slug, key, session_id, name))
+        return self.view(await self.get(session_id, name) or {})
+
+    def share_allows(self, row: dict[str, Any], presented_key: str | None) -> bool:
+        """Whether a request from outside may reach the service: public, or key mode with the right key."""
+        mode = row.get("share_mode") or "local"
+        if mode == "public":
+            return True
+        if mode == "key" and row.get("share_key") and presented_key:
+            return secrets.compare_digest(str(row["share_key"]), presented_key)
+        return False
 
     # -- ports ----------------------------------------------------------------------
 
@@ -289,6 +357,8 @@ class Services:
             return await self.list(sid)
         if op == "logs":
             return await self.logs(sid, kwargs["name"], int(kwargs.get("lines") or 60))
+        if op == "share":
+            return await self.share(sid, kwargs["name"], kwargs.get("mode") or "local")
         raise ValueError(op)
 
 

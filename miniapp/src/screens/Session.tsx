@@ -1,10 +1,11 @@
 import { Component, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { api, LoopView, SlashCommand, MessageView, Question, SessionDetail } from "../api";
-import { ServiceRow, Status, ToolPicker, fmtInt, fmtUsd, loopLabel } from "../components";
+import { api, AsrStatus, LoopView, ProviderUsage, Schedule, SlashCommand, MessageView, Question, SessionDetail } from "../api";
+import { ServiceRow, Status, ToolPicker, fmtInt, fmtUsd, loopLabel, timeAgo } from "../components";
 import { codeBlock, renderMarkdown } from "../md";
-import { confirmAsync, enterSends, errorText, fmtTok, haptic } from "../ui";
+import { confirmAsync, enterSends, errorText, fmtBytes, fmtTok, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
+import { AuthImg, FilePreview, PreviewSource, canPreview, fileGlyph, previewKind } from "../preview";
 
 /** Markdown parsed once per text: a token streaming into one turn must not re-parse every other. */
 const Md = memo(function Md({ text, className }: { text: string; className?: string }) {
@@ -137,7 +138,18 @@ function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Tu
 
 // ── screen ────────────────────────────────────────────────────────────────────────────────
 
-export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBack: () => void; onOpen?: (id: string) => void; toast: (t: string) => void }) {
+export type SessionScreenProps = {
+  id: string;
+  onBack: () => void;
+  onOpen?: (id: string) => void;
+  toast: (t: string) => void;
+  /** Two sessions side by side (wide screens): which half this one is. */
+  pane?: "left" | "right";
+  /** Open another session beside this one; absent when the screen cannot split. */
+  onSplit?: () => void;
+};
+
+export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: SessionScreenProps) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [live, setLive] = useState<LiveState>(EMPTY_LIVE);
   const [draft, setDraft] = useState("");
@@ -157,6 +169,15 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
   const fileInput = useRef<HTMLInputElement>(null);
   const stick = useRef(true);
   const userScrolling = useRef(false);
+  const [atBottom, setAtBottom] = useState(true);
+  const [preview, setPreview] = useState<PreviewSource | null>(null);
+  const [dragging, setDragging] = useState(0);
+  const [providerUsage, setProviderUsage] = useState<ProviderUsage | null>(null);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [asideOpen, setAsideOpen] = useState(() => pane === undefined);
+  const [asr, setAsr] = useState<AsrStatus | null>(null);
+  const [asideWidth, setAsideWidth] = usePaneWidth("aside", 272, 200, 520);
+  const [paneWidth, setPaneWidth] = usePaneWidth("pane", 420, 280, 900);
 
   async function loopAction(a: string) {
     try {
@@ -218,7 +239,88 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
     load();
     api.get<Record<string, unknown>>("/api/modes").then((m) => setModes(Object.keys(m))).catch(() => setModes([]));
     api.get<SlashCommand[]>("/api/commands").then(setCommands).catch(() => setCommands([]));
+    api.get<AsrStatus>("/api/asr").then(setAsr).catch(() => setAsr(null));
   }, [load]);
+
+  // A recording from the microphone becomes text in the composer (or goes straight out with autosend).
+  const [transcribing, setTranscribing] = useState(false);
+  async function onRecording(blob: Blob, seconds: number) {
+    if (asr && seconds > asr.max_seconds) {
+      toast(`recording is ${seconds}s, the limit is ${asr.max_seconds}s`);
+      return;
+    }
+    setTranscribing(true);
+    try {
+      const ext = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
+      const form = new FormData();
+      form.append("audio", blob, `recording.${ext}`);
+      const res = await fetch(`/api/sessions/${id}/transcribe`, { method: "POST", headers: api.authHeaders(), body: form });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? `transcription failed (${res.status})`);
+      const r = (await res.json()) as { transcript: string; text: string; autosend: boolean };
+      if (r.autosend && !draft.trim()) {
+        await api.post(`/api/sessions/${id}/messages`, { text: r.text });
+        toast(`sent: ${r.transcript.slice(0, 80)}`);
+        stick.current = true;
+        load();
+      } else {
+        setDraft((d) => (d.trim() ? `${d.trimEnd()}\n\n${r.text}` : r.text));
+        textarea.current?.focus();
+        haptic("success");
+      }
+    } catch (e) {
+      toast(errorText(e));
+    } finally {
+      setTranscribing(false);
+    }
+  }
+
+  // The scheduled tasks that belong to this session: created from it, aimed at it, or running in it now.
+  const loadSchedules = useCallback(() => {
+    api
+      .get<Schedule[]>("/api/schedules")
+      .then((all) => setSchedules(all.filter((x) => x.target_session === id || x.created_by_session === id || x.active_session_id === id)))
+      .catch(() => undefined);
+  }, [id]);
+  useEffect(() => {
+    loadSchedules();
+    const t = setInterval(loadSchedules, 60000);
+    return () => clearInterval(t);
+  }, [loadSchedules]);
+
+  // Usage of the provider the session talks to: a subscription's windows, or the day's metered spend.
+  const provider = detail?.provider ?? "";
+  useEffect(() => {
+    if (!provider) return;
+    let gone = false;
+    const pull = () =>
+      api
+        .get<ProviderUsage>(`/api/usage/provider/${encodeURIComponent(provider)}`)
+        .then((u) => !gone && setProviderUsage(u))
+        .catch(() => undefined);
+    pull();
+    const t = setInterval(pull, 60000);
+    return () => {
+      gone = true;
+      clearInterval(t);
+    };
+  }, [provider, detail?.usage.c]);
+
+  async function scheduleAction(sc: Schedule, action: "run" | "delete") {
+    try {
+      if (action === "delete") {
+        if (!(await confirmAsync(`Delete the scheduled task "${sc.name}"?`))) return;
+        await api.delete(`/api/schedules/${sc.id}`);
+        toast("task deleted");
+      } else {
+        const r = await api.post<{ session_id: string }>(`/api/schedules/${sc.id}/run`);
+        toast(r.session_id === id ? "running here" : "started in its own session");
+        if (r.session_id !== id) onOpen?.(r.session_id);
+      }
+      loadSchedules();
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
 
   const status = (detail?.status ?? "idle") as Status;
   const busy = status === "running" || status === "waiting";
@@ -311,6 +413,33 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
     if (el && stick.current && !userScrolling.current) el.scrollTop = el.scrollHeight;
   }, [turns]);
 
+  // The first paint of a long history lands mid-way once images and code blocks take their height:
+  // pin the bottom again after layout settles.
+  const firstLoad = useRef(true);
+  useEffect(() => {
+    if (!detail || !firstLoad.current) return;
+    firstLoad.current = false;
+    const el = scroller.current;
+    if (!el) return;
+    const pin = () => {
+      if (stick.current) el.scrollTop = el.scrollHeight;
+    };
+    const raf = requestAnimationFrame(pin);
+    const timers = [120, 400, 1000].map((ms) => window.setTimeout(pin, ms));
+    return () => {
+      cancelAnimationFrame(raf);
+      timers.forEach(clearTimeout);
+    };
+  }, [detail]);
+
+  function jumpToBottom() {
+    const el = scroller.current;
+    if (!el) return;
+    stick.current = true;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    setAtBottom(true);
+  }
+
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
@@ -339,7 +468,35 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
   function onScroll() {
     const el = scroller.current;
     if (!el) return;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stick.current = gap < 48;
+    setAtBottom(gap < 160);
+  }
+
+  // Files from the clipboard (a screenshot, a copied file) and files dropped on the chat join the draft.
+  function addFiles(files: Iterable<File>) {
+    const named = Array.from(files).map((f) => {
+      // A pasted screenshot arrives as "image.png" every time: give each one a name of its own.
+      if (!/^(image|blob|file)(\.[a-z0-9]+)?$/i.test(f.name)) return f;
+      const ext = f.name.includes(".") ? f.name.slice(f.name.lastIndexOf(".")) : f.type.startsWith("image/") ? `.${f.type.slice(6).replace("jpeg", "jpg")}` : "";
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
+      return new File([f], `${f.type.startsWith("image/") ? "screenshot" : "pasted"}-${stamp}${ext}`, { type: f.type, lastModified: f.lastModified });
+    });
+    if (named.length) setPending((p) => [...p, ...named]);
+  }
+  function onPaste(e: React.ClipboardEvent) {
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const files = items.filter((it) => it.kind === "file").map((it) => it.getAsFile()).filter((f): f is File => !!f);
+    if (!files.length) return;
+    // Text pasted alongside (rich-text editors add an HTML rendering of the image) is not wanted.
+    e.preventDefault();
+    addFiles(files);
+    haptic("light");
+  }
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragging(0);
+    if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
   }
 
   const paletteQuery = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).split(" ")[0].toLowerCase() : null;
@@ -478,11 +635,13 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
   }
 
   void tick;
+  const sessionCtx = useMemo(() => ({ id, workspace: detail?.workspace ?? "", preview: setPreview }), [id, detail?.workspace]);
   return (
-    <div className="chat">
+    <div className={`chat ${pane ? `pane pane-${pane}` : ""}`} onDragEnter={(e) => { if (e.dataTransfer?.types.includes("Files")) setDragging((d) => d + 1); }} onDragLeave={() => setDragging((d) => Math.max(0, d - 1))} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
+      {dragging > 0 && <div className="dropzone"><Icon name="attach" size={28} /> Drop files to attach</div>}
       <div className="chat-head">
-        <button className="iconbtn" onClick={onBack} aria-label="back">
-          <Icon name="back" />
+        <button className="iconbtn" onClick={onBack} aria-label={pane === "right" ? "close this pane" : "back"} title={pane === "right" ? "Close this pane" : "Back"}>
+          <Icon name={pane === "right" ? "close" : "back"} />
         </button>
         <div className="grow" style={{ minWidth: 0 }}>
           {editingTitle !== null ? (
@@ -525,6 +684,14 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
           </div>
         </div>
         <div className="head-actions">
+          <button className={`iconbtn wide-only ${asideOpen ? "on" : ""}`} onClick={() => setAsideOpen((v) => !v)} aria-label="session panel" title="Session panel (usage, loop, cron, services)">
+            <Icon name="columns" />
+          </button>
+          {onSplit && (
+            <button className="iconbtn wide-only" onClick={onSplit} aria-label="open another session beside this one" title="Open another session beside this one">
+              <Icon name="split" />
+            </button>
+          )}
           <button className={`iconbtn ${view === "files" ? "on" : ""}`} onClick={() => setView(view === "files" ? "chat" : "files")} aria-label="workspace files" title="Workspace files">
             <Icon name="folder" />
           </button>
@@ -596,6 +763,12 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                   {detail.services.map((s) => (
                     <ServiceRow key={s.name} s={s} sessionId={id} onChange={() => load(true)} toast={toast} onLogs={(text) => { setMenu(false); setCommandResult({ line: `service ${s.name} · log`, text }); }} />
                   ))}
+                </section>
+              )}
+              {schedules.length > 0 && (
+                <section className="sheet-section">
+                  <div className="sheet-section-title"><Icon name="clock" size={14} /> Cron · {schedules.length}</div>
+                  {schedules.map((sc) => <ScheduleRow key={sc.id} sc={sc} sessionId={id} onAction={scheduleAction} />)}
                 </section>
               )}
               <section className="sheet-section">
@@ -673,8 +846,8 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
         </div>
       )}
 
-      <div className={`chat-body ${view === "chat" ? "" : "split"}`}>
-        {detail && (
+      <div className={`chat-body ${view === "chat" ? "" : "split"} ${asideOpen ? "" : "no-aside"}`} style={{ ["--aside-w" as string]: `${asideWidth}px`, ["--pane-w" as string]: `${paneWidth}px` }}>
+        {detail && asideOpen && (
           <aside className="session-aside wide-only">
             <div className="aside-card">
               <div className="aside-title">Session</div>
@@ -693,6 +866,13 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                 </button>
               )}
             </div>
+            {provider && <ProviderUsageCard provider={provider} usage={providerUsage} />}
+            {schedules.length > 0 && (
+              <div className="aside-card">
+                <div className="aside-title"><Icon name="clock" size={14} /> Cron <span className="sub">{schedules.filter((x) => x.enabled).length} on</span></div>
+                {schedules.map((sc) => <ScheduleRow key={sc.id} sc={sc} sessionId={id} onAction={scheduleAction} />)}
+              </div>
+            )}
             {detail.loop && (
               <div className="aside-card">
                 <div className="aside-title"><Icon name="loop" size={14} /> Loop <span className={`badge loop ${detail.loop.status}`}>{detail.loop.status}</span></div>
@@ -730,29 +910,30 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
             )}
           </aside>
         )}
+        {detail && asideOpen && <PaneHandle side="left" onDrag={(dx) => setAsideWidth(asideWidth + dx)} />}
         <div className="chat-main">
           <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
             <div className="timeline">
               {turns.map((t, i) => (
                 <Safe key={t.key}>
-                  <SessionIdContext.Provider value={id}>
+                  <SessionContext.Provider value={sessionCtx}>
                     <TurnView turn={t} live={busy && i === turns.length - 1} onTurnAction={turnAction} />
-                  </SessionIdContext.Provider>
+                  </SessionContext.Provider>
                 </Safe>
               ))}
               {detail?.pending && <QuestionCard key={detail.pending.questions.map((q) => q.question).join("|")} sessionId={id} questions={detail.pending.questions} onDone={() => load()} toast={toast} />}
             </div>
           </div>
+          {!atBottom && (
+            <button className="jump-down" onClick={jumpToBottom} aria-label="scroll to the latest message" title="To the latest message">
+              <Icon name="down" size={18} />
+            </button>
+          )}
           <div className="composer">
             {pending.length > 0 && (
-              <div className="attachments">
+              <div className="attachments" aria-label="attachments">
                 {pending.map((f, i) => (
-                  <span key={i} className="pill">
-                    {f.name} ({Math.ceil(f.size / 1024)} KB)
-                    <button className="x" onClick={() => setPending((p) => p.filter((_, j) => j !== i))}>
-                      ×
-                    </button>
-                  </span>
+                  <AttachmentCard key={`${f.name}-${f.size}-${f.lastModified}-${i}`} file={f} onOpen={() => setPreview({ file: f })} onRemove={() => setPending((p) => p.filter((_, j) => j !== i))} />
                 ))}
               </div>
             )}
@@ -778,6 +959,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                 }}
                 placeholder={status === "running" ? "Steer the agent (applies before its next step)" : "Ask anything"}
                 rows={1}
+                onPaste={onPaste}
                 onKeyDown={(e) => {
                   if (e.key === "Tab" && paletteItems.length > 0) {
                     e.preventDefault();
@@ -804,6 +986,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                 <button className="roundbtn" title="attach files" onClick={() => fileInput.current?.click()} aria-label="attach">
                   <Icon name="plus" />
                 </button>
+                {asr?.configured && <MicButton onRecording={onRecording} busy={transcribing} />}
                 <button className="chip" onClick={openPicker} title="model for this session">
                   <Icon name="model" /> {shortModel(detail?.model)}
                 </button>
@@ -822,6 +1005,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
             </div>
           </div>
         </div>
+        {view !== "chat" && detail && <PaneHandle side="right" onDrag={(dx) => setPaneWidth(paneWidth - dx)} />}
         {view !== "chat" && detail && (
           <aside className="side-pane">
             <div className="side-head">
@@ -830,7 +1014,7 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
                 <Icon name="close" size={16} />
               </button>
             </div>
-            <div className="side-body">{view === "files" ? <Files sessionId={id} /> : <McpPanel sessionId={id} toast={toast} />}</div>
+            <div className="side-body">{view === "files" ? <Files sessionId={id} onPreview={setPreview} /> : <McpPanel sessionId={id} toast={toast} />}</div>
           </aside>
         )}
       </div>
@@ -846,6 +1030,8 @@ export function SessionScreen({ id, onBack, onOpen, toast }: { id: string; onBac
           </div>
         </div>
       )}
+
+      {preview && <FilePreview src={preview} onClose={() => setPreview(null)} />}
 
       {picker && (
         <div className="sheet-backdrop" onClick={() => setPicker(null)}>
@@ -954,6 +1140,211 @@ function LoopPanel({ sessionId, loop, onChange, toast }: { sessionId: string; lo
         </>
       )}
     </div>
+  );
+}
+
+// ── side panels: widths, usage, cron, attachments ─────────────────────────────────────────
+
+/** A pane width the operator dragged, remembered per browser. */
+function usePaneWidth(key: string, initial: number, min: number, max: number): [number, (w: number) => void] {
+  const storageKey = `daedalus.width.${key}`;
+  const [width, setWidth] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem(storageKey));
+      return v >= min && v <= max ? v : initial;
+    } catch {
+      return initial;
+    }
+  });
+  const set = useCallback(
+    (w: number) => {
+      const clamped = Math.round(Math.min(max, Math.max(min, w)));
+      setWidth(clamped);
+      try {
+        localStorage.setItem(storageKey, String(clamped));
+      } catch {
+        /* private mode */
+      }
+    },
+    [storageKey, min, max],
+  );
+  return [width, set];
+}
+
+/** The strip between two panes: drag it to resize (pointer events, so mouse and touch alike). */
+function PaneHandle({ side, onDrag }: { side: "left" | "right"; onDrag: (dx: number) => void }) {
+  const last = useRef<number | null>(null);
+  return (
+    <div
+      className={`pane-handle wide-only ${side}`}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="resize"
+      onPointerDown={(e) => {
+        last.current = e.clientX;
+        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        document.body.classList.add("resizing");
+      }}
+      onPointerMove={(e) => {
+        if (last.current === null) return;
+        const dx = e.clientX - last.current;
+        last.current = e.clientX;
+        if (dx) onDrag(dx);
+      }}
+      onPointerUp={(e) => {
+        last.current = null;
+        (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+        document.body.classList.remove("resizing");
+      }}
+      onPointerCancel={() => {
+        last.current = null;
+        document.body.classList.remove("resizing");
+      }}
+    />
+  );
+}
+
+const SUBSCRIPTION_LABEL: Record<string, string> = { codex: "Codex · ChatGPT", claude: "Claude · Max", grok: "Grok · SuperGrok" };
+
+function resetIn(at: number | string | null | undefined): string {
+  if (!at) return "";
+  const d = typeof at === "number" ? new Date(at * 1000) : new Date(at);
+  if (Number.isNaN(d.getTime())) return "";
+  const mins = Math.max(0, Math.round((d.getTime() - Date.now()) / 60000));
+  return mins < 60 ? `${mins}m` : mins < 48 * 60 ? `${Math.round(mins / 60)}h` : `${Math.round(mins / 1440)}d`;
+}
+
+/** What the session's provider has left: a subscription's windows, or the day's metered spend and balance. */
+function ProviderUsageCard({ provider, usage }: { provider: string; usage: ProviderUsage | null }) {
+  const sub = usage?.subscription;
+  const today = usage?.today ?? {};
+  return (
+    <div className="aside-card">
+      <div className="aside-title">
+        <Icon name="chart" size={14} /> {SUBSCRIPTION_LABEL[provider] ?? provider}
+        {sub?.plan && <span className="badge">{sub.plan}</span>}
+        {sub?.limit_reached && <span className="badge" style={{ color: "var(--bad)" }}>limit</span>}
+      </div>
+      {!usage && <div className="sub">…</div>}
+      {sub && !sub.logged_in && <div className="sub">not logged in on the host</div>}
+      {sub?.error && <div className="sub" style={{ color: "var(--bad)" }}>{sub.error}</div>}
+      {(sub?.windows ?? []).map((w) => (
+        <div key={w.name} className="quota">
+          <div className="sub quota-line">
+            <span className="grow">{w.name}</span>
+            <span>{Math.round(w.used_percent)}%{w.resets_at ? ` · resets in ${resetIn(w.resets_at)}` : ""}</span>
+          </div>
+          <div className="quota-bar">
+            <i style={{ width: `${Math.min(100, Math.max(0, w.used_percent))}%`, background: w.used_percent >= 100 ? "var(--bad)" : w.used_percent >= 80 ? "var(--warn)" : "var(--ok)" }} />
+          </div>
+        </div>
+      ))}
+      {usage && (
+        <div className="sub" style={{ marginTop: sub ? 6 : 0 }}>
+          today: {fmtInt(today.calls)} calls · {fmtTok(today.input_tokens)}↑ {fmtTok(today.output_tokens)}↓
+          {!sub && ` · ${fmtUsd(today.cost_usd)}`}
+          {usage.balance !== undefined && usage.balance !== null && ` · balance ${fmtUsd(usage.balance)}`}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One scheduled task of the session: cadence, next run, and the two things one does with it. */
+function ScheduleRow({ sc, sessionId, onAction }: { sc: Schedule; sessionId: string; onAction: (sc: Schedule, action: "run" | "delete") => void }) {
+  const where = sc.kind === "message" ? "reminder" : sc.kind === "lazy" ? "lazy note" : sc.run_in === "self" || sc.target_session === sessionId ? "runs here" : "own session";
+  return (
+    <div className="sched-row" title={sc.prompt}>
+      <div className="grow" style={{ minWidth: 0 }}>
+        <div className="sched-name">
+          {!sc.enabled && <span title="switched off">⏸ </span>}
+          {sc.name} <span className="badge">{where}</span>
+          {sc.active_session_id === sessionId && <span className="live-dot" title="running now" />}
+        </div>
+        <div className="sub sched-when">
+          {sc.cron ? `cron ${sc.cron}` : `once ${sc.run_at ? new Date(sc.run_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" }) : ""}`}
+          {sc.next_run_at && sc.enabled ? ` · next ${new Date(sc.next_run_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}` : ""}
+          {sc.last_run_at ? ` · last ${timeAgo(sc.last_run_at)}` : ""}
+          {sc.failure_count > 0 && <span style={{ color: "var(--bad)" }}> · {sc.failure_count} failed</span>}
+        </div>
+      </div>
+      <button className="iconbtn small" onClick={() => onAction(sc, "run")} title="Run now" aria-label="run now"><Icon name="play" size={14} /></button>
+      <button className="iconbtn small" onClick={() => onAction(sc, "delete")} title="Delete" aria-label="delete"><Icon name="trash" size={14} /></button>
+    </div>
+  );
+}
+
+/** A file waiting in the composer: a thumbnail for images, a glyph and the size for the rest. */
+function AttachmentCard({ file, onOpen, onRemove }: { file: File; onOpen: () => void; onRemove: () => void }) {
+  const isImage = file.type.startsWith("image/") || previewKind(file.name) === "image";
+  const url = useMemo(() => (isImage ? URL.createObjectURL(file) : null), [file, isImage]);
+  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
+  return (
+    <div className={`attachment ${isImage ? "image" : ""}`}>
+      <button type="button" className="attachment-open" onClick={onOpen} title={canPreview(file.name) ? "preview" : file.name}>
+        {url ? <img src={url} alt={file.name} /> : <span className="attachment-glyph" aria-hidden>{fileGlyph(file.name)}</span>}
+        <span className="attachment-meta">
+          <span className="attachment-name">{file.name}</span>
+          <span className="sub">{fmtBytes(file.size)}</span>
+        </span>
+      </button>
+      <button type="button" className="attachment-x" onClick={onRemove} aria-label={`remove ${file.name}`} title="Remove">
+        <Icon name="close" size={12} />
+      </button>
+    </div>
+  );
+}
+
+/** Hold-free recording: one tap starts, the next stops; the seconds tick while it runs. Disabled where the browser has no microphone API. */
+function MicButton({ onRecording, busy }: { onRecording: (blob: Blob, seconds: number) => void; busy: boolean }) {
+  const [rec, setRec] = useState<MediaRecorder | null>(null);
+  const [seconds, setSeconds] = useState(0);
+  const chunks = useRef<Blob[]>([]);
+  const startedAt = useRef(0);
+  const supported = typeof MediaRecorder !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+  useEffect(() => {
+    if (!rec) return;
+    const t = setInterval(() => setSeconds(Math.round((Date.now() - startedAt.current) / 1000)), 500);
+    return () => clearInterval(t);
+  }, [rec]);
+  useEffect(() => () => rec?.stream.getTracks().forEach((tr) => tr.stop()), [rec]);
+  async function start() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const type = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"].find((t) => MediaRecorder.isTypeSupported(t));
+      const r = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+      chunks.current = [];
+      r.ondataavailable = (e) => e.data.size && chunks.current.push(e.data);
+      r.onstop = () => {
+        stream.getTracks().forEach((tr) => tr.stop());
+        const blob = new Blob(chunks.current, { type: r.mimeType || "audio/webm" });
+        const took = Math.round((Date.now() - startedAt.current) / 1000);
+        setRec(null);
+        setSeconds(0);
+        if (blob.size > 0 && took >= 1) onRecording(blob, took);
+      };
+      startedAt.current = Date.now();
+      r.start(250);
+      setRec(r);
+      haptic("light");
+    } catch {
+      setRec(null);
+    }
+  }
+  function stop() {
+    rec?.stop();
+  }
+  if (rec) {
+    return (
+      <button className="chip recording" onClick={stop} title="stop and transcribe" aria-label="stop recording">
+        <span className="rec-dot" /> {seconds}s · stop
+      </button>
+    );
+  }
+  return (
+    <button className="roundbtn" onClick={start} disabled={!supported || busy} title={!supported ? "no microphone access in this browser" : busy ? "transcribing…" : "record a voice note (transcribed to text)"} aria-label="record a voice note">
+      <Icon name={busy ? "dot" : "mic"} />
+    </button>
   );
 }
 
@@ -1081,7 +1472,7 @@ function describe(t: ToolItem): { verb: string; noun: string; detail: string; ic
     case "SendFile":
       return { verb: r ? "Sending file" : "Sent file", noun: "file", detail: base(str("path")), icon: "attach" };
     case "ImageView":
-      return { verb: r ? "Viewing image" : "Viewed image", noun: "image", detail: base(str("path")), icon: "image" };
+      return { verb: r ? "Viewing image" : "Viewed image", noun: "image", detail: `${base(str("path"))}${str("task") ? " · " + str("task").slice(0, 60) : ""}`, icon: "image" };
     case "AskUser":
       return { verb: "Asked you", noun: "question", detail: "", icon: "question" };
     case "Skill":
@@ -1266,6 +1657,7 @@ function ToolRow({ item, nested }: { item: ToolItem; nested?: boolean }) {
         {d.detail && <span className="detail">{d.detail}</span>}
         <span className={`chev ${expanded ? "down" : ""}`}>›</span>
       </div>
+      {(item.name === "ImageView" || item.name === "SendFile") && !item.running && <ToolAttachment item={item} />}
       {expanded && <ToolCard item={item} />}
     </div>
   );
@@ -1288,10 +1680,43 @@ function ToolCard({ item }: { item: ToolItem }) {
   return <div className="toolcard">{parts}</div>;
 }
 
-const SessionIdContext = createContext("");
+const SessionContext = createContext<{ id: string; workspace: string; preview: (src: PreviewSource) => void }>({ id: "", workspace: "", preview: () => undefined });
+
+/** A tool's path as the workspace knows it: absolute paths inside the workspace become relative, others stay unreachable. */
+function workspaceRelative(path: string, workspace: string): string | null {
+  if (!path) return null;
+  if (!path.startsWith("/")) return path.replace(/^\.\//, "");
+  const root = workspace.replace(/\/+$/, "");
+  if (root && (path === root || path.startsWith(root + "/"))) return path.slice(root.length + 1);
+  return null;
+}
+
+/** The image an ImageView looked at, or the file a SendFile handed over: shown under the step, opened in the preview. */
+function ToolAttachment({ item }: { item: ToolItem }) {
+  const { id, workspace, preview } = useContext(SessionContext);
+  const path = typeof item.args.path === "string" ? item.args.path : "";
+  const rel = workspaceRelative(path, workspace);
+  if (!rel || !id) return null;
+  const src: PreviewSource = { sessionId: id, path: rel };
+  const name = rel.split("/").pop() ?? rel;
+  if (previewKind(name) === "image") {
+    return (
+      <div className="tool-attachment">
+        <AuthImg src={src} alt={name} className="tool-image" onClick={() => preview(src)} />
+      </div>
+    );
+  }
+  return (
+    <div className="tool-attachment">
+      <button type="button" className="file-chip" onClick={() => preview(src)} title={canPreview(name) ? "preview" : "download"}>
+        <span aria-hidden>{fileGlyph(name)}</span> {name}
+      </button>
+    </div>
+  );
+}
 
 function ToolResultText({ item }: { item: ToolItem }) {
-  const sessionId = useContext(SessionIdContext);
+  const { id: sessionId } = useContext(SessionContext);
   const [full, setFull] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const text = full ?? item.result ?? "";
@@ -1374,15 +1799,7 @@ function QuestionCard({ sessionId, questions, onDone, toast }: { sessionId: stri
   );
 }
 
-const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
-
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function Files({ sessionId }: { sessionId: string }) {
+function Files({ sessionId, onPreview }: { sessionId: string; onPreview: (src: PreviewSource) => void }) {
   const [path, setPath] = useState("");
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1423,8 +1840,17 @@ function Files({ sessionId }: { sessionId: string }) {
       {data.kind === "dir" && entries.length === 0 && <div className="empty">empty</div>}
       {data.kind === "dir" &&
         entries.map((e: any) => (
-          <button key={e.name} className="card pressable row filerow" onClick={() => setPath(path ? `${path}/${e.name}` : e.name)}>
-            <span aria-hidden>{e.dir ? "📁" : IMAGE_EXT.test(e.name) ? "🖼" : "📄"}</span>
+          <button
+            key={e.name}
+            className="card pressable row filerow"
+            onClick={() => {
+              const next = path ? `${path}/${e.name}` : e.name;
+              // Files with a preview open in the dialog; folders and the rest are walked into as before.
+              if (!e.dir && canPreview(e.name)) onPreview({ sessionId, path: next });
+              else setPath(next);
+            }}
+          >
+            <span aria-hidden>{fileGlyph(e.name, e.dir)}</span>
             <div className="grow title">{e.name}</div>
             {!e.dir && <span className="sub">{fmtBytes(e.size)}</span>}
             {e.mtime && <span className="sub">{new Date(e.mtime * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}</span>}
@@ -1436,9 +1862,12 @@ function Files({ sessionId }: { sessionId: string }) {
         </button>
       )}
       {data.kind === "file" && data.truncated && <div className="sub" style={{ margin: "6px 0" }}>showing the first 512 KB; download for the whole file</div>}
+      {data.kind !== "dir" && canPreview(path) && (
+        <button className="btn small" style={{ marginBottom: 8 }} onClick={() => onPreview({ sessionId, path })}><Icon name="eye" size={14} /> preview</button>
+      )}
       {data.kind === "file" && <pre className="filetext">{data.content}</pre>}
-      {data.kind === "binary" && IMAGE_EXT.test(path) && <img className="preview" src={download} alt={path} />}
-      {data.kind === "binary" && !IMAGE_EXT.test(path) && <div className="empty">binary file, {fmtBytes(data.size)}</div>}
+      {data.kind === "binary" && previewKind(path) === "image" && <AuthImg className="preview" src={{ sessionId, path }} alt={path} onClick={() => onPreview({ sessionId, path })} />}
+      {data.kind === "binary" && previewKind(path) !== "image" && <div className="empty">binary file, {fmtBytes(data.size)}</div>}
     </div>
   );
 }

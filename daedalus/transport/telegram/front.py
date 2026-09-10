@@ -42,7 +42,13 @@ from daedalus.host.session_runner import Attachment, SessionManager, SessionStat
 from daedalus.stores.sqlite import DeliveryLedger
 from daedalus.transport.telegram.markdown import markdown_to_html, split_message, strip_tags
 from daedalus.transport.telegram.render import Outbox, RunRenderer, RunView
-from daedalus.transport.telegram.voice import TranscriptionError, transcribe
+from daedalus.transport.telegram.voice import (
+    TranscriptionError,
+    asr_configured,
+    effective_asr,
+    transcribe,
+    voice_note_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1051,7 +1057,7 @@ class TelegramFront:
         if self.config.telegram.reactions:
             await TelegramOutbox(self.bot, message.chat.id, None).react(message.message_id, RUN_REACTIONS["received"])
         attachment = await self._download(message, state)  # may take a while for big files
-        if attachment is not None and (message.voice or (message.audio and (message.audio.mime_type or "") in SPEECH_MIME_TYPES)) and self.config.asr.url:
+        if attachment is not None and (message.voice or (message.audio and (message.audio.mime_type or "") in SPEECH_MIME_TYPES)) and asr_configured(self.config.asr):
             if await self._voice_to_text(message, state, attachment, text):
                 return
         buffer = self._buffers.setdefault(key, InboundBuffer())
@@ -1074,14 +1080,16 @@ class TelegramFront:
             await message.reply(f"🎙 {duration}s is over the transcription limit ({self.config.asr.max_seconds}s); the file is attached as is.")
             return False
         try:
-            transcript = await transcribe(attachment.path, self.config.asr)
+            transcript = await transcribe(attachment.path, effective_asr(self.config.asr, self.manager))
         except TranscriptionError as exc:
             await message.reply(f"🎙 could not transcribe ({exc}); the file is attached as is.")
             return False
-        text = (caption.strip() + "\n\n" if caption.strip() else "") + transcript
+        # The agent reads the words, marked as a transcript; the audio itself does not travel with them.
+        text = voice_note_text(transcript, caption)
         if self.config.asr.autosend:
             await message.reply(f"🎙 {transcript[:1000]}")
-            await self._enqueue_text(state, message, text, attachment)
+            self._discard_audio(state, attachment)
+            await self._enqueue_text(state, message, text, None)
             return True
         token = uuid.uuid4().hex[:8]
         now = time.monotonic()
@@ -1093,6 +1101,15 @@ class TelegramFront:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✓ Send to the agent", callback_data=f"vc:{token}:go"), InlineKeyboardButton(text="✗ Discard", callback_data=f"vc:{token}:no")]])
         await message.reply(f"🎙 I heard:\n\n{transcript[:3500]}", reply_markup=keyboard)
         return True
+
+    @staticmethod
+    def _discard_audio(state: SessionState | None, attachment: Attachment) -> None:
+        """A transcribed voice note has served its purpose: the file leaves the inbox."""
+        try:
+            if state is not None and attachment.path.is_relative_to(state.workspace):
+                attachment.path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     async def _enqueue_text(self, state: SessionState, message: Message, text: str, attachment: Attachment | None) -> None:
         key = (message.chat.id, message.message_thread_id or 0)
@@ -1115,12 +1132,7 @@ class TelegramFront:
             return
         session_id, text, attachment, chat_id, thread_id, _ = pending
         if action != "go":
-            state = await self.manager.get_state(session_id)
-            try:
-                if state is not None and attachment.path.is_relative_to(state.workspace):
-                    attachment.path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            self._discard_audio(await self.manager.get_state(session_id), attachment)
             await query.answer("discarded (the audio file was removed)")
             if query.message is not None:
                 try:
@@ -1137,10 +1149,10 @@ class TelegramFront:
         state = await self.manager.get_state(session_id)
         if state is None:
             return
+        self._discard_audio(state, attachment)
         key = (chat_id, thread_id)
         buffer = self._buffers.setdefault(key, InboundBuffer())
         buffer.text.append(text)
-        buffer.attachments.append(attachment)
         if buffer.task is not None:
             buffer.task.cancel()
         buffer.task = asyncio.create_task(self._flush_inbound(key, state, 0.1))

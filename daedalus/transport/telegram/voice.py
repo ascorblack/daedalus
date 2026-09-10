@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -12,8 +13,36 @@ from daedalus.config import AsrConfig
 logger = logging.getLogger(__name__)
 
 
+VOICE_NOTE_PREFIX = "🎙 Voice note, transcribed automatically (wording may be imperfect):"
+
+
 class TranscriptionError(RuntimeError):
     pass
+
+
+def asr_configured(config: AsrConfig) -> bool:
+    """Whether voice notes are transcribed at all: a provider or an endpoint is named."""
+    return bool(config.provider or config.url)
+
+
+def effective_asr(config: AsrConfig, manager: Any) -> AsrConfig:
+    """The endpoint to call: a configured provider's base URL and key when ``provider`` is set, else ``url``/``api_key``."""
+    if not config.provider:
+        return config
+    registry = getattr(manager, "providers", None)
+    try:
+        endpoint = registry.get(config.provider).endpoint if registry is not None else None
+    except KeyError:
+        endpoint = None
+    if endpoint is None or not endpoint.base_url:
+        raise TranscriptionError(f"speech-to-text provider {config.provider!r} is not configured")
+    return config.model_copy(update={"url": endpoint.base_url, "api_key": endpoint.api_key})
+
+
+def voice_note_text(transcript: str, caption: str = "") -> str:
+    """What the agent reads instead of the audio: the words, marked as a transcript."""
+    head = (caption.strip() + "\n\n") if caption.strip() else ""
+    return f"{head}{VOICE_NOTE_PREFIX}\n{transcript.strip()}"
 
 
 async def transcribe(path: Path, config: AsrConfig, *, client: httpx.AsyncClient | None = None) -> str:
@@ -46,4 +75,4 @@ async def transcribe(path: Path, config: AsrConfig, *, client: httpx.AsyncClient
     return text
 
 
-__all__ = ["TranscriptionError", "transcribe"]
+__all__ = ["VOICE_NOTE_PREFIX", "TranscriptionError", "asr_configured", "effective_asr", "transcribe", "voice_note_text"]

@@ -514,15 +514,26 @@ function ToolsTab({ s, save }: { s: Settings; save: (patch: any) => Promise<void
     <>
       <div className="card">
         <div className="section-title" style={{ marginTop: 0 }}>Voice notes (speech-to-text)</div>
-        <div className="sub">Any OpenAI-compatible /audio/transcriptions endpoint (OpenAI, a local whisper server). Empty URL = voice notes are attached as files only. The transcript is shown with ✓ Send / ✗ Discard before it reaches the agent.</div>
-        <label className="field">Endpoint base URL</label>
-        <input className="field" defaultValue={asr.url} placeholder="https://api.openai.com/v1" onBlur={(e) => save({ asr: { ...asr, api_key: "", url: e.target.value.trim() } })} />
-        <label className="field">API key {asr.api_key_set ? "(set — leave empty to keep)" : ""}</label>
-        <input className="field" type="password" defaultValue="" placeholder={asr.api_key_set ? "••••••" : ""} onBlur={(e) => e.target.value && save({ asr: { ...asr, api_key: e.target.value } })} />
+        <div className="sub">Any OpenAI-compatible /audio/transcriptions endpoint: one of the configured providers (OpenRouter, a vLLM with a Whisper model — its key stays in the key proxy) or a URL of its own. Nothing configured = voice notes are attached as files only and the site has no microphone. The agent receives the words marked as a transcript, never the audio; in Telegram the transcript is shown with ✓ Send / ✗ Discard first.</div>
+        <label className="field">Provider</label>
+        <select className="field" value={asr.provider || ""} onChange={(e) => save({ asr: { ...asr, api_key: "", provider: e.target.value } })}>
+          <option value="">custom endpoint (URL + key below)</option>
+          {Object.keys(s.providers).map((pid) => (
+            <option key={pid} value={pid}>{pid}{s.providers[pid].base_url ? ` · ${s.providers[pid].base_url.replace(/^https?:\/\//, "")}` : ""}</option>
+          ))}
+        </select>
+        {!asr.provider && (
+          <>
+            <label className="field">Endpoint base URL</label>
+            <input className="field" defaultValue={asr.url} placeholder="https://api.openai.com/v1" onBlur={(e) => save({ asr: { ...asr, api_key: "", url: e.target.value.trim() } })} />
+            <label className="field">API key {asr.api_key_set ? "(set — leave empty to keep)" : ""}</label>
+            <input className="field" type="password" defaultValue="" placeholder={asr.api_key_set ? "••••••" : ""} onBlur={(e) => e.target.value && save({ asr: { ...asr, api_key: e.target.value } })} />
+          </>
+        )}
         <div className="grid2">
           <div>
             <label className="field">Model</label>
-            <input className="field" defaultValue={asr.model} onBlur={(e) => save({ asr: { ...asr, api_key: "", model: e.target.value.trim() } })} />
+            <input className="field" defaultValue={asr.model} placeholder={asr.provider === "openrouter" ? "openai/whisper-1" : "whisper-1"} onBlur={(e) => save({ asr: { ...asr, api_key: "", model: e.target.value.trim() } })} />
           </div>
           <div>
             <label className="field">Language hint (empty = auto)</label>

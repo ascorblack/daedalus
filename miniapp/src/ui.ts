@@ -2,11 +2,24 @@
 
 import { telegram } from "./api";
 
+/** The Telegram bridge only when the app really runs inside Telegram: the script also loads in a plain
+ *  browser, where it reports version 6.0 and rejects every method (showConfirm → WebAppMethodUnsupported). */
+function insideTelegram() {
+  const tg = telegram();
+  return tg && tg.initData ? tg : null;
+}
+
 /** Ask before a destructive action: Telegram's own dialog inside the app, the browser's outside it. */
 export function confirmAsync(text: string): Promise<boolean> {
-  const tg = telegram();
-  if (tg?.showConfirm) {
-    return new Promise((resolve) => tg.showConfirm!(text, (ok) => resolve(!!ok)));
+  const tg = insideTelegram();
+  if (tg?.showConfirm && (tg.isVersionAtLeast?.("6.2") ?? true)) {
+    return new Promise((resolve) => {
+      try {
+        tg.showConfirm!(text, (ok) => resolve(!!ok));
+      } catch {
+        resolve(window.confirm(text));
+      }
+    });
   }
   try {
     return Promise.resolve(window.confirm(text));
@@ -18,16 +31,27 @@ export function confirmAsync(text: string): Promise<boolean> {
 
 /** Whether Enter should send: desktop clients send, phones insert a newline. */
 export function enterSends(): boolean {
-  const platform = telegram()?.platform;
-  if (platform) return !["ios", "android", "android_x"].includes(platform);
-  return !("ontouchstart" in window);
+  const platform = insideTelegram()?.platform;
+  if (platform && platform !== "unknown") return !["ios", "android", "android_x"].includes(platform);
+  return !("ontouchstart" in window) || window.matchMedia?.("(pointer: fine)").matches;
 }
 
 export function haptic(kind: "light" | "medium" | "success" | "error" = "light"): void {
-  const h = telegram()?.HapticFeedback;
+  const h = insideTelegram()?.HapticFeedback;
   if (!h) return;
-  if (kind === "success" || kind === "error") h.notificationOccurred(kind);
-  else h.impactOccurred(kind);
+  try {
+    if (kind === "success" || kind === "error") h.notificationOccurred(kind);
+    else h.impactOccurred(kind);
+  } catch {
+    /* an old client without haptics */
+  }
+}
+
+/** Bytes as people read them: 950 B, 12 KB, 1.4 MB. */
+export function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** Compact token counts: 71.1M, 28k, 950. */

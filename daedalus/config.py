@@ -380,6 +380,9 @@ class SchedulerConfig(BaseModel):
 class AsrConfig(BaseModel):
     """Speech-to-text for voice notes: any OpenAI-compatible ``/audio/transcriptions`` endpoint."""
 
+    provider: str = ""
+    """A configured provider id (``openrouter``, a ``vllm`` endpoint with a Whisper model, …): its base URL and
+    key are used, so the key stays where the provider keeps it; empty = ``url``/``api_key`` below."""
     url: str = ""
     """Base URL (``https://api.openai.com/v1``, a local faster-whisper server, …); empty = voice notes arrive as files only."""
     api_key: str = ""

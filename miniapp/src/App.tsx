@@ -1,6 +1,6 @@
 import { Component, type ReactNode, useEffect, useState } from "react";
-import { api, telegram } from "./api";
-import { useToast } from "./components";
+import { api, SessionSummary, telegram } from "./api";
+import { Pill, useToast } from "./components";
 import { SessionsScreen } from "./screens/Sessions";
 import { InboxScreen } from "./screens/Inbox";
 import { BoardScreen } from "./screens/Board";
@@ -49,6 +49,10 @@ const TABS: { id: Tab; label: string; icon: IconName }[] = [
 export function App() {
   const [tab, setTab] = useState<Tab>("sessions");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // A second session beside the first (wide screens only); the picker chooses which.
+  const [secondId, setSecondId] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
+  const wide = useWide();
   const [toast, showToast] = useToast();
   const [unread, setUnread] = useState(0);
   // Inside Telegram every request carries initData; outside, the browser needs a token or the session cookie.
@@ -129,6 +133,10 @@ export function App() {
     return () => tg.BackButton?.offClick(back);
   }, [sessionId]);
 
+  useEffect(() => {
+    if (!wide) setSecondId(null);
+  }, [wide]);
+
   if (authed === null) return <div className="app"><div className="empty">Loading…</div></div>;
   if (authed === false) {
     return (
@@ -140,9 +148,18 @@ export function App() {
 
   return (
     <div className="app">
-      {sessionId ? (
+      {sessionId && secondId && wide ? (
+        <div className="dual">
+          <ErrorBoundary key={sessionId}>
+            <SessionScreen id={sessionId} pane="left" onBack={() => { setSessionId(secondId); setSecondId(null); }} onOpen={setSessionId} toast={showToast} onSplit={() => setPicking(true)} />
+          </ErrorBoundary>
+          <ErrorBoundary key={secondId}>
+            <SessionScreen id={secondId} pane="right" onBack={() => setSecondId(null)} onOpen={setSecondId} toast={showToast} />
+          </ErrorBoundary>
+        </div>
+      ) : sessionId ? (
         <ErrorBoundary key={sessionId}>
-          <SessionScreen id={sessionId} onBack={() => setSessionId(null)} onOpen={setSessionId} toast={showToast} />
+          <SessionScreen id={sessionId} onBack={() => setSessionId(null)} onOpen={setSessionId} toast={showToast} onSplit={wide ? () => setPicking(true) : undefined} />
         </ErrorBoundary>
       ) : (
         <>
@@ -175,7 +192,55 @@ export function App() {
           </nav>
         </>
       )}
+      {picking && <SessionPicker exclude={sessionId} onPick={(id) => { setSecondId(id); setPicking(false); }} onClose={() => setPicking(false)} />}
       {toast && <div className="toast" role="status" aria-live="polite">{toast}</div>}
+    </div>
+  );
+}
+
+/** Whether the layout is the wide one (rail beside the screen): the same breakpoint as the stylesheet. */
+function useWide(): boolean {
+  const query = "(min-width: 1024px)";
+  const [wide, setWide] = useState(() => window.matchMedia?.(query).matches ?? false);
+  useEffect(() => {
+    const mq = window.matchMedia?.(query);
+    if (!mq) return;
+    const on = () => setWide(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return wide;
+}
+
+/** Which session to open beside the current one. */
+function SessionPicker({ exclude, onPick, onClose }: { exclude: string | null; onPick: (id: string) => void; onClose: () => void }) {
+  const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
+  const [filter, setFilter] = useState("");
+  useEffect(() => {
+    api.get<SessionSummary[]>("/api/sessions").then(setSessions).catch(() => setSessions([]));
+  }, []);
+  const q = filter.trim().toLowerCase();
+  const items = (sessions ?? []).filter((s) => s.id !== exclude && (!q || s.title.toLowerCase().includes(q) || s.id.includes(q)));
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="open a session beside this one">
+        <div className="grip" />
+        <div className="sheet-head">
+          <h3>Open beside</h3>
+          <button className="iconbtn small" onClick={onClose} aria-label="close"><Icon name="close" size={16} /></button>
+        </div>
+        <input className="field" autoFocus placeholder="filter by title" value={filter} onChange={(e) => setFilter(e.target.value)} style={{ marginBottom: 8 }} />
+        <div className="sheet-body">
+          {sessions === null && <div className="empty">Loading…</div>}
+          {sessions !== null && items.length === 0 && <div className="empty">No other sessions.</div>}
+          {items.map((s) => (
+            <button key={s.id} className="menu-item" onClick={() => onPick(s.id)}>
+              <span className="grow" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.title}</span>
+              <Pill status={s.status} />
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

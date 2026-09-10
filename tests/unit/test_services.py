@@ -80,3 +80,38 @@ async def test_reconcile_restarts_or_reports_after_a_rebuild(app: Any) -> None:
     assert any("gone" in e["title"] for e in entries)
     await services.stop_all(sid)
     await asyncio.sleep(0)
+
+
+async def test_sharing_mints_a_slug_once_and_a_key_only_for_key_mode(app: Any) -> None:
+    app.settings.miniapp_public_url = "https://daedalus.example.com/app/"
+    services = Services(app)
+    state = await app.manager.create_session("host")
+    sid = state.session.id
+    s = await services.start(sid, name="site", command="sleep 30")
+    assert s["share"] == {"mode": "local", "slug": None, "key": None, "url": None, "public_base": "https://daedalus.example.com"}
+    public = await services.share(sid, "site", "public")
+    slug = public["share"]["slug"]
+    assert slug and slug.startswith("site-") and public["share"]["key"] is None
+    assert public["share"]["url"] == f"https://daedalus.example.com/s/{slug}/"
+    keyed = await services.share(sid, "site", "key")
+    key = keyed["share"]["key"]
+    assert keyed["share"]["slug"] == slug and key and keyed["share"]["url"] == f"https://daedalus.example.com/s/{slug}/?key={key}"
+    assert (await services.share(sid, "site", "key"))["share"]["key"] == key
+    assert (await services.share(sid, "site", "key", rotate_key=True))["share"]["key"] != key
+    row = await services.by_slug(slug)
+    assert row is not None and services.share_allows(row, row["share_key"]) and not services.share_allows(row, "wrong") and not services.share_allows(row, None)
+    back = await services.share(sid, "site", "local")
+    assert back["share"]["mode"] == "local" and back["share"]["url"] is None and back["share"]["key"] is None
+    assert not services.share_allows(await services.by_slug(slug) or {}, row["share_key"])
+    with pytest.raises(ValueError, match="one of"):
+        await services.share(sid, "site", "everyone")
+    await services.stop_all(sid)
+
+
+async def test_a_service_without_a_port_cannot_be_shared(app: Any) -> None:
+    services = Services(app)
+    state = await app.manager.create_session("host")
+    await services.start(state.session.id, name="worker", command="sleep 30", port="none")
+    with pytest.raises(ValueError, match="without a port"):
+        await services.share(state.session.id, "worker", "public")
+    await services.stop_all(state.session.id)

@@ -17,6 +17,7 @@ declare global {
         platform?: string;
         isExpanded?: boolean;
         showConfirm?: (text: string, cb: (ok: boolean) => void) => void;
+        isVersionAtLeast?: (v: string) => boolean;
         disableVerticalSwipes?: () => void;
         enableVerticalSwipes?: () => void;
         enableClosingConfirmation?: () => void;
@@ -86,6 +87,13 @@ export const api = {
     return `/api/sessions/${sessionId}/download?path=${encodeURIComponent(path)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
   },
   authHeaders,
+  /** A workspace file as a blob URL: <img>/<iframe> cannot send the auth header, so the bytes are fetched here. */
+  fetchBlob: async (sessionId: string, path: string): Promise<{ url: string; type: string; size: number }> => {
+    const res = await fetch(`/api/sessions/${sessionId}/download?path=${encodeURIComponent(path)}`, { headers: authHeaders() });
+    if (!res.ok) throw new ApiError(res.status, res.status === 404 ? "no such file" : `could not load the file (${res.status})`);
+    const blob = await res.blob();
+    return { url: URL.createObjectURL(blob), type: blob.type, size: blob.size };
+  },
 };
 
 export type WebSearchConf = {
@@ -136,7 +144,17 @@ export type LoopView = {
   instruction: string;
 };
 
-export type ServiceView = { name: string; command: string; cwd: string; port: number | null; url: string | null; pid: number | null; status: "running" | "stopped" | "dead"; restart: boolean; note: string | null; started_at: string; stopped_at: string | null };
+export type ShareMode = "local" | "public" | "key";
+export type ShareView = { mode: ShareMode; slug: string | null; key: string | null; url: string | null; public_base: string };
+export type ServiceView = { name: string; command: string; cwd: string; port: number | null; url: string | null; pid: number | null; status: "running" | "stopped" | "dead"; restart: boolean; note: string | null; started_at: string; stopped_at: string | null; share?: ShareView };
+
+/** One provider's usage for the card beside the chat: a subscription's windows, or the day's metered spend. */
+export type ProviderUsage = {
+  provider: string;
+  today: { calls?: number; input_tokens?: number | null; output_tokens?: number | null; cache_read_tokens?: number | null; cost_usd?: number | null; unmetered?: number | null };
+  subscription: { logged_in: boolean; plan?: string; limit_reached?: boolean; windows?: { name: string; used_percent: number; resets_at?: number | string | null }[]; error?: string } | null;
+  balance: number | null | undefined;
+};
 
 export type ToolInfo = { name: string; description: string; group: string };
 
@@ -164,6 +182,7 @@ export type SessionDetail = {
   workspace: string;
   pending: { questions: Question[] } | null;
   model: string;
+  provider?: string;
   messages: MessageView[];
   mode?: string;
   usd_cap?: number | null;
@@ -179,6 +198,8 @@ export type SessionDetail = {
   context?: { tokens: number; window: number; messages: number; summaries: number; operator_turns: number };
   usage: { c?: number; i?: number; o?: number; ch?: number; usd?: number | null };
 };
+
+export type AsrStatus = { configured: boolean; reason: string; provider: string; model: string; max_seconds: number; autosend: boolean };
 
 export type SlashCommand = { name: string; args: string; description: string; scope: string; confirm: boolean };
 
@@ -216,6 +237,8 @@ export type Schedule = {
   last_summary: string | null;
   kind: "agent" | "message" | "lazy";
   target_session: string | null;
+  created_by_session?: string | null;
+  active_session_id?: string | null;
   failure_count: number;
   last_error: string | null;
 };
@@ -263,7 +286,7 @@ export type Settings = {
   provider_kinds?: string[];
   prompt: { rules: string; default_rules?: string };
   vision: { preset: string; max_output_tokens: number };
-  asr: { url: string; api_key: string; api_key_set?: boolean; model: string; language: string; timeout_seconds: number; max_seconds: number; autosend: boolean };
+  asr: { provider: string; url: string; api_key: string; api_key_set?: boolean; model: string; language: string; timeout_seconds: number; max_seconds: number; autosend: boolean };
   tools: {
     web: { fetch_timeout_seconds: number; proxy: string; user_agent: string; fetch_max_chars: number; search: WebSearchConf };
     exec: { max_output_chars: number };
