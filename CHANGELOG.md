@@ -2,6 +2,15 @@
 
 Notable changes, newest first. The repository's `main` is the released version.
 
+## 2026-09-11
+
+- **OpenCode Go.** A provider kind `opencode` for the OpenCode Go / Zen gateway: the key proxy knows the upstream
+  (`OPENCODE_API_KEY`), every request carries the session id the gateway routes and caches by, thinking goes out
+  in DeepSeek's shape, and presets for its models carry the gateway's list prices so the metered spend tracks the
+  subscription's allowance. Prices for the gateway's models are refreshed daily from models.dev (the operator's own
+  entries win), and the Usage screen shows the subscription's 5-hour, weekly and monthly allowance windows next
+  to the Codex, Grok and Claude ones.
+
 ## 2026-09-10
 
 - **Reasoning that outruns the output cap.** The core no longer keeps a reasoning block the cap cut, and no

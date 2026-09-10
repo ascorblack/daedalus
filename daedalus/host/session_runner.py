@@ -211,6 +211,9 @@ class SessionManager:
         locator.default = None
         self._backfill_task = asyncio.create_task(self._backfill_index(), name="transcript-index")
         self._backfill_task.add_done_callback(_log_task_failure)
+        # Its own task, not a background write: the flush that waits for those would wait for a day.
+        self._price_task = asyncio.create_task(self._refresh_prices_daily(), name="price-refresh")
+        self._price_task.add_done_callback(_log_task_failure)
         logger.warning("tools registered: %s", ", ".join(sorted(t.name for t in self.tools.list_all())))
 
     async def _backfill_index(self) -> None:
@@ -231,10 +234,10 @@ class SessionManager:
             await asyncio.gather(*pending, return_exceptions=True)  # the last history write must land
         await self.flush_background()
         await self.hooks.aclose()
-        backfill = getattr(self, "_backfill_task", None)
-        if backfill is not None and not backfill.done():
-            backfill.cancel()
-            await asyncio.gather(backfill, return_exceptions=True)
+        for task in (getattr(self, "_backfill_task", None), getattr(self, "_price_task", None)):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         await self.mcp.close()
         await self.providers.aclose()
 
@@ -1712,6 +1715,19 @@ class SessionManager:
         """Wait for the fire-and-forget writes (timing rows, egress rows, grant updates) to land."""
         if self._background:
             await asyncio.gather(*list(self._background), return_exceptions=True)
+
+    async def _refresh_prices_daily(self) -> None:
+        """Gateways that publish no prices get them from models.dev: once at start, then once a day."""
+        from daedalus.providers.modelsdev import REFRESH_SECONDS  # Lazy: the provider package imports the host's config
+
+        while True:
+            try:
+                priced = await self.providers.refresh_prices(self.db)
+                if priced:
+                    logger.warning("model prices refreshed from models.dev: %s models", priced)
+            except Exception:  # noqa: BLE001
+                logger.warning("model price refresh failed", exc_info=True)
+            await asyncio.sleep(REFRESH_SECONDS)
 
     def _spawn_background(self, coro: Any, name: str) -> None:
         task = asyncio.create_task(coro, name=name)

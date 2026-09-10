@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -338,3 +339,24 @@ async def test_deepseek_thinking_request_leaves_a_reasoning_only_turn_off_the_wi
     sent = provider.captured["json"]["messages"]  # type: ignore[attr-defined]
     assert [m["role"] for m in sent][-2:] == ["assistant", "tool"]
     assert all("reasoning_content" in m for m in sent if m["role"] == "assistant")
+
+
+async def test_opencode_sends_the_session_id_and_deepseek_shaped_thinking() -> None:
+    """OpenCode Go routes and caches by conversation and passes DeepSeek's thinking fields through as they are."""
+    from protocore.contracts.llm import LLMObservabilityContext
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = dict(request.headers)
+        captured["json"] = json.loads(request.content)
+        return httpx.Response(200, text=_sse([_chunk({"content": "ok"}), _chunk({}, finish="stop")]), headers={"content-type": "text/event-stream"})
+
+    endpoint = ProviderEndpoint(id="opencode", kind="opencode", base_url="https://x.test", api_key="k")
+    provider = OpenAICompatibleProvider(endpoint, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), usage_sink=RecordingSink())
+    request = _request(enable_thinking=True, reasoning_effort="medium").model_copy(update={"observability": LLMObservabilityContext(session_id="sess-42", run_id="run-1")})
+    async for _ in provider.stream_with_tools(request):
+        pass
+    assert captured["headers"]["x-opencode-session"] == "sess-42"
+    assert captured["headers"]["user-agent"].startswith("daedalus/")
+    assert captured["json"]["thinking"] == {"type": "enabled"} and captured["json"]["reasoning_effort"] == "high"

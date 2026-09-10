@@ -43,6 +43,12 @@ timeout_seconds = 600.0
 
 [providers.openrouter.pricing]
 
+# OpenCode Go (https://opencode.ai/go): OPENCODE_API_KEY in keyproxy.env, one key for all of its models.
+[providers.opencode]
+kind = "opencode"
+base_url = "http://keyproxy:3200/opencode"
+timeout_seconds = 900.0
+
 [providers.vllm]
 kind = "vllm"
 base_url = ""            # empty = use VLLM_BASE_URL from the environment

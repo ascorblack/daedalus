@@ -3,7 +3,7 @@ import { api, telegram, HeartbeatStatus, Preset, ProviderConf, SearchBackendInfo
 import { numInput } from "../ui";
 import { timeAgo } from "../components";
 
-const DEFAULT_KINDS = ["deepseek", "openrouter", "vllm", "openai_compat"];
+const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "openai_compat"];
 
 function RulesEditor({ rules, fallback, onSave }: { rules: string; fallback: string; onSave: (rules: string) => void }) {
   const [text, setText] = useState(rules || fallback);

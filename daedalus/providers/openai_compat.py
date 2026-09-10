@@ -31,6 +31,7 @@ from protocore.contracts.llm import (
 )
 from protocore.contracts.types import Message, MessageRole, StopReason, TextBlock
 
+from daedalus import __version__
 from daedalus.providers.dsml import DsmlGuard
 from daedalus.providers.pricing import ModelPricing
 from daedalus.providers.wire import messages_to_wire, parse_json_arguments, tools_to_wire
@@ -61,6 +62,10 @@ def message_shape(messages: list[dict[str, Any]]) -> str:
         parts.append(role)
     return " ".join(parts)
 
+
+DEEPSEEK_SHAPED = ("deepseek", "opencode")
+"""Endpoints that speak DeepSeek's thinking dialect: the ``thinking`` object, ``reasoning_effort`` in DeepSeek's
+names, ``reasoning_content`` on every assistant turn of a tool-call round."""
 
 DEEPSEEK_EFFORTS = {"minimal": "low", "low": "low", "medium": "high", "high": "high", "xhigh": "max"}
 """DeepSeek knows ``low``, ``high`` and ``max`` and treats anything else as ``high``: a preset that asks for
@@ -173,7 +178,7 @@ class OpenAICompatibleProvider(ILLMProvider):
         guard = DsmlGuard()
         try:
             async with self._client.stream(
-                "POST", self._url("/chat/completions"), json=body, headers=self._headers()
+                "POST", self._url("/chat/completions"), json=body, headers=self._headers(request)
             ) as response:
                 if response.status_code >= 400:
                     raw = await response.aread()
@@ -279,7 +284,7 @@ class OpenAICompatibleProvider(ILLMProvider):
         body = await self._build_body(request, stream=False)
         body["response_format"] = {"type": "json_object"}
         started = time.monotonic()
-        data = await self._post(body)
+        data = await self._post(body, request)
         text = _message_text(data)
         usage_raw = data.get("usage") or {}
         normalized = normalize_usage(usage_raw)
@@ -305,7 +310,7 @@ class OpenAICompatibleProvider(ILLMProvider):
     async def complete_text(self, request: LLMRequest) -> LLMResponse:
         body = await self._build_body(request, stream=False)
         started = time.monotonic()
-        data = await self._post(body)
+        data = await self._post(body, request)
         text = _message_text(data)
         usage_raw = data.get("usage") or {}
         normalized = normalize_usage(usage_raw)
@@ -360,7 +365,7 @@ class OpenAICompatibleProvider(ILLMProvider):
         thinking = bool(extra.get("enable_thinking", False))
         effort = str(extra.get("reasoning_effort") or "medium")
         self._apply_thinking(body, thinking=thinking, effort=effort)
-        if thinking and self.endpoint.kind == "deepseek":
+        if thinking and self.endpoint.kind in DEEPSEEK_SHAPED:
             # DeepSeek refuses a thinking-mode request whose earlier assistant turns carry no
             # reasoning_content; a turn produced with thinking off (a recovery retry, an operator
             # toggle) has none, and an empty one is accepted. An assistant turn with nothing but
@@ -385,7 +390,8 @@ class OpenAICompatibleProvider(ILLMProvider):
 
     def _apply_thinking(self, body: dict[str, Any], *, thinking: bool, effort: str) -> None:
         kind = self.endpoint.kind
-        if kind == "deepseek":
+        if kind in DEEPSEEK_SHAPED:
+            # OpenCode Go passes DeepSeek's fields through unchanged; its other models take the same shape.
             body["thinking"] = {"type": "enabled" if thinking else "disabled"}
             if thinking:
                 body["reasoning_effort"] = DEEPSEEK_EFFORTS.get(effort, effort)
@@ -398,10 +404,10 @@ class OpenAICompatibleProvider(ILLMProvider):
             if thinking:
                 body["reasoning_effort"] = effort
 
-    async def _post(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def _post(self, body: dict[str, Any], request: LLMRequest | None = None) -> dict[str, Any]:
         try:
             response = await self._client.post(
-                self._url("/chat/completions"), json=body, headers=self._headers()
+                self._url("/chat/completions"), json=body, headers=self._headers(request)
             )
         except httpx.TimeoutException as exc:
             raise LLMTimeoutError(f"{self.endpoint.id}: {exc}") from exc
@@ -427,11 +433,17 @@ class OpenAICompatibleProvider(ILLMProvider):
     def _url(self, path: str) -> str:
         return self.endpoint.base_url.rstrip("/") + path
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, request: LLMRequest | None = None) -> dict[str, str]:
         # The key proxy meters calls that do not carry this mark (a shell's curl); the bot records its own.
         headers = {"content-type": "application/json", "x-daedalus-metered": "1", **self.endpoint.extra_headers}
         if self.endpoint.api_key:
             headers["authorization"] = f"Bearer {self.endpoint.api_key}"
+        if self.endpoint.kind == "opencode":
+            # The gateway routes and caches by conversation: one stable id per session, and a client name.
+            headers["user-agent"] = f"daedalus/{__version__}"
+            obs = request.observability if request is not None else None
+            session = (obs.session_id if obs is not None else None) or (obs.run_id if obs is not None else None)
+            headers["x-opencode-session"] = session or self.endpoint.id
         return headers
 
     def _close_tools(

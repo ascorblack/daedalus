@@ -7,8 +7,8 @@ the daily-budget flag exists on the shared state volume, calls to model upstream
 refused here — below the agent, where a self-modification cannot reach.
 
 Upstreams: ``deepseek`` → https://api.deepseek.com, ``openrouter`` → https://openrouter.ai/api/v1,
-``openai`` → https://api.openai.com/v1. Keys: ``DEEPSEEK_API_KEY``, ``OPENROUTER_API_KEY``,
-``OPENAI_API_KEY``. Extra upstreams: ``KEYPROXY_UPSTREAM_<NAME>=https://host/base`` with
+``openai`` → https://api.openai.com/v1, ``opencode`` → https://opencode.ai/zen/go/v1 (OpenCode Go). Keys:
+``DEEPSEEK_API_KEY``, ``OPENROUTER_API_KEY``, ``OPENAI_API_KEY``, ``OPENCODE_API_KEY``. Extra upstreams: ``KEYPROXY_UPSTREAM_<NAME>=https://host/base`` with
 ``KEYPROXY_KEY_<NAME>=…`` and, for an API that does not take ``Authorization: Bearer``,
 ``KEYPROXY_AUTH_<NAME>=<header name>`` (``X-API-KEY`` for Serper, ``x-api-key`` for Exa…);
 the key is sent as that header's value.
@@ -45,13 +45,16 @@ from subscriptions import (
     CODEX_BASE,
     CODEX_FALLBACK_MODELS,
     GROK_BASE,
+    OPENCODE_GO_BASE,
     CodexAuth,
     GrokAuth,
+    OpencodeAuth,
     SubscriptionError,
     chat_to_responses,
     codex_usage_view,
     collect_completion,
     grok_usage_view,
+    opencode_usage_view,
     responses_events_to_chunks,
 )
 
@@ -62,6 +65,7 @@ DEFAULT_UPSTREAMS = {
     "deepseek": ("https://api.deepseek.com", "DEEPSEEK_API_KEY"),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
     "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
+    "opencode": ("https://opencode.ai/zen/go/v1", "OPENCODE_API_KEY"),
 }
 BUDGET_FLAG = Path(os.environ.get("KEYPROXY_BUDGET_FLAG", "/srv/state/BUDGET_EXCEEDED"))
 BUDGET_DB = Path(os.environ.get("KEYPROXY_BUDGET_DB", "/srv/state/daedalus.sqlite"))
@@ -82,6 +86,7 @@ COMPLETION_TAILS = (("chat", "completions"), ("completions",), ("responses",), (
 CAPTURE_LIMIT = 8 * 1024 * 1024
 CODEX_AUTH = CodexAuth(Path(os.environ.get("KEYPROXY_CODEX_AUTH", os.path.expanduser("~/.codex/auth.json"))))
 GROK_AUTH = GrokAuth(Path(os.environ.get("KEYPROXY_GROK_AUTH", os.path.expanduser("~/.grok/auth.json"))))
+OPENCODE_AUTH = OpencodeAuth()
 CLAUDE_AUTH = ClaudeAuth(Path(os.environ.get("KEYPROXY_CLAUDE_AUTH", os.path.expanduser("~/.claude/.credentials.json"))))
 """The operator's subscriptions: served as ``/codex/v1``, ``/grok/v1`` and ``/claude/v1`` with the CLIs' own logins."""
 _usage_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -388,6 +393,18 @@ async def _grok_usage(client: httpx.AsyncClient, headers: dict[str, str]) -> dic
     return view
 
 
+async def _opencode_usage(client: httpx.AsyncClient, headers: dict[str, str]) -> dict[str, Any]:
+    cached = _usage_cache.get("opencode")
+    if cached and time.monotonic() - cached[0] < USAGE_CACHE_SECONDS:
+        return cached[1]
+    response = await client.get(OPENCODE_GO_BASE + "/usage", headers={**headers, "accept": "application/json"})
+    if response.status_code != 200:
+        raise SubscriptionError(f"opencode usage: HTTP {response.status_code}")
+    view = opencode_usage_view(response.json())
+    _usage_cache["opencode"] = (time.monotonic(), view)
+    return view
+
+
 async def _claude_profile(client: httpx.AsyncClient, headers: dict[str, str]) -> dict[str, Any]:
     try:
         pr = await client.get(CLAUDE_API + "/api/oauth/profile", headers={**headers, "accept": "application/json"})
@@ -434,7 +451,7 @@ async def handle_subscriptions_usage(request: web.Request) -> web.Response:
     """Subscription quota windows, for the Usage screen; a missing login is reported, not an error."""
     client: httpx.AsyncClient = request.app["client"]
     out: dict[str, Any] = {}
-    for name, auth, fetch in (("codex", CODEX_AUTH, _codex_usage), ("grok", GROK_AUTH, _grok_usage), ("claude", CLAUDE_AUTH, _claude_usage)):
+    for name, auth, fetch in (("codex", CODEX_AUTH, _codex_usage), ("grok", GROK_AUTH, _grok_usage), ("claude", CLAUDE_AUTH, _claude_usage), ("opencode", OPENCODE_AUTH, _opencode_usage)):
         if not auth.available():
             out[name] = {"provider": name, "logged_in": False}
             continue

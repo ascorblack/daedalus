@@ -25,8 +25,10 @@ ReasoningEffort = Literal["low", "medium", "high"]
 ApprovalMode = Literal["manual", "auto"]
 ScheduleTopicMode = Literal["per_task", "per_run"]
 
-ProviderKind = Literal["deepseek", "openrouter", "vllm", "openai_compat"]
-PROVIDER_KINDS: tuple[ProviderKind, ...] = ("deepseek", "openrouter", "vllm", "openai_compat")
+ProviderKind = Literal["deepseek", "openrouter", "opencode", "vllm", "openai_compat"]
+PROVIDER_KINDS: tuple[ProviderKind, ...] = ("deepseek", "openrouter", "opencode", "vllm", "openai_compat")
+"""``opencode`` is the OpenCode Go / Zen gateway: OpenAI-compatible, wants a stable session id per conversation in
+``x-opencode-session`` for routing and prompt caching, and passes DeepSeek's thinking fields through as they are."""
 
 
 class Settings(BaseSettings):
@@ -601,6 +603,36 @@ class TelegramConfig(BaseModel):
     draft_interval_seconds: float = 0.35
 
 
+OPENCODE_GO_PRICING: dict[str, dict[str, float]] = {
+    # OpenCode Go list prices (USD per 1M tokens, opencode.ai/docs/go): the subscription is prepaid, the metered
+    # spend is what counts against its $12 / 5 h, $30 / week and $60 / month allowance.
+    "deepseek-v4.1-flash": {"input": 0.30, "output": 1.20, "cache_hit": 0.006},
+    "deepseek-v4-flash": {"input": 0.30, "output": 1.20, "cache_hit": 0.006},
+    "deepseek-flash": {"input": 0.30, "output": 1.20, "cache_hit": 0.006},
+    "deepseek-v4-pro": {"input": 1.32, "output": 3.96, "cache_hit": 0.044},
+    "glm-5.3-flash": {"input": 0.15, "output": 0.50, "cache_hit": 0.03},
+    "glm-5": {"input": 1.40, "output": 4.40, "cache_hit": 0.26},
+    "kimi-k3": {"input": 3.00, "output": 15.00, "cache_hit": 0.30},
+    "kimi-k2.7-code": {"input": 0.95, "output": 4.00, "cache_hit": 0.19},
+    "kimi-k2.6": {"input": 0.95, "output": 4.00, "cache_hit": 0.16},
+    "qwen3.8-max": {"input": 2.00, "output": 6.00, "cache_hit": 0.25},
+    "qwen3.8-flash": {"input": 0.15, "output": 0.47, "cache_hit": 0.016},
+    "qwen3.7-max": {"input": 2.50, "output": 7.50, "cache_hit": 0.50},
+    "qwen3.7-plus": {"input": 0.40, "output": 1.60, "cache_hit": 0.04},
+    "qwen3.6-plus": {"input": 0.50, "output": 3.00, "cache_hit": 0.05},
+    "minimax-m3": {"input": 0.30, "output": 1.20, "cache_hit": 0.06},
+    "minimax-m2.7": {"input": 0.30, "output": 1.20, "cache_hit": 0.06},
+    "mimo-v2.5-pro": {"input": 0.435, "output": 0.87, "cache_hit": 0.003625},
+    "mimo-v2.5": {"input": 0.14, "output": 0.28, "cache_hit": 0.0028},
+    "longcat-2.0": {"input": 0.30, "output": 1.20, "cache_hit": 0.006},
+    "hy4-preview": {"input": 0.834, "output": 2.501, "cache_hit": 0.042},
+    "hy3": {"input": 0.14, "output": 0.58, "cache_hit": 0.035},
+    "grok-4.6": {"input": 4.00, "output": 12.00, "cache_hit": 1.00},
+    "gpt-5.6-luna": {"input": 0.40, "output": 1.80, "cache_hit": 0.04},
+    "muse-spark": {"input": 0.10, "output": 0.20, "cache_hit": 0.002},
+}
+
+
 class RuntimeConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     presets: dict[str, ModelPresetConfig] = Field(
@@ -616,6 +648,11 @@ class RuntimeConfig(BaseModel):
             "claude.sonnet-5": ModelPresetConfig(provider="claude", model="claude-sonnet-5", label="Claude Sonnet 5 (Claude Code subscription)", thinking=True, reasoning_effort="high", images=True, context_window=200_000),
             "claude.opus-5": ModelPresetConfig(provider="claude", model="claude-opus-5", label="Claude Opus 5 (Claude Code subscription)", thinking=True, reasoning_effort="medium", images=True, context_window=1_000_000),
             "claude.fable-5.1": ModelPresetConfig(provider="claude", model="claude-fable-5-1", label="Claude Fable 5.1 (Claude Code subscription)", thinking=True, reasoning_effort="medium", images=True, context_window=1_000_000),
+            "opencode.deepseek-v4.1-flash": ModelPresetConfig(provider="opencode", model="deepseek-v4.1-flash", label="DeepSeek V4.1 Flash (OpenCode Go)", thinking=True, reasoning_effort="high", images=False, context_window=256_000, max_output_tokens=65_536),
+            "opencode.glm-5.3-flash": ModelPresetConfig(provider="opencode", model="glm-5.3-flash", label="GLM-5.3 Flash (OpenCode Go)", thinking=True, reasoning_effort="high", images=False, context_window=200_000),
+            "opencode.kimi-k3": ModelPresetConfig(provider="opencode", model="kimi-k3", label="Kimi K3 (OpenCode Go)", thinking=True, reasoning_effort="high", images=False, context_window=256_000),
+            "opencode.qwen3.8-max": ModelPresetConfig(provider="opencode", model="qwen3.8-max", label="Qwen3.8 Max (OpenCode Go)", thinking=True, reasoning_effort="high", images=False, context_window=256_000),
+            "opencode.gpt-5.6-luna": ModelPresetConfig(provider="opencode", model="gpt-5.6-luna", label="GPT-5.6 Luna (OpenCode Go)", thinking=True, reasoning_effort="low", images=False, context_window=400_000),
         }
     )
     """Named models keyed by id; the operator adds more in the Mini App."""
@@ -627,6 +664,7 @@ class RuntimeConfig(BaseModel):
             "grok": ProviderConfig(kind="openai_compat", base_url="http://keyproxy:3200/grok/v1", timeout_seconds=900.0, pricing={"grok": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
             "codex": ProviderConfig(kind="openai_compat", base_url="http://keyproxy:3200/codex/v1", timeout_seconds=900.0, pricing={"gpt": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
             "claude": ProviderConfig(kind="openai_compat", base_url="http://keyproxy:3200/claude/v1", timeout_seconds=900.0, pricing={"claude": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
+            "opencode": ProviderConfig(kind="opencode", base_url="http://keyproxy:3200/opencode", timeout_seconds=900.0, pricing=OPENCODE_GO_PRICING),
         }
     )
     prompt: PromptConfig = Field(default_factory=PromptConfig)

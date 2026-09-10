@@ -418,3 +418,34 @@ __all__ = [
     "grok_usage_view",
     "responses_events_to_chunks",
 ]
+
+
+OPENCODE_GO_BASE = "https://opencode.ai/zen/go/v1"
+
+
+class OpencodeAuth:
+    """OpenCode Go: a plain API key from the environment, no login to refresh."""
+
+    def __init__(self, env_var: str = "OPENCODE_API_KEY") -> None:
+        self.env_var = env_var
+
+    def available(self) -> bool:
+        return bool(os.environ.get(self.env_var, ""))
+
+    async def headers(self, client: httpx.AsyncClient) -> dict[str, str]:
+        return {"authorization": f"Bearer {os.environ.get(self.env_var, '')}"}
+
+
+def opencode_usage_view(data: dict[str, Any]) -> dict[str, Any]:
+    """``GET /zen/go/v1/usage`` → the three allowance windows (5 h rolling, weekly, monthly) as percent used."""
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else data
+    names = (("rolling", "5 h"), ("weekly", "weekly"), ("monthly", "monthly"))
+    windows = []
+    for key, name in names:
+        w = usage.get(key) if isinstance(usage, dict) else None
+        if not isinstance(w, dict):
+            continue
+        windows.append({"name": name, "used_percent": float(w.get("percent") or 0), "resets_at": w.get("resetsAt"), "status": w.get("status")})
+    reached = any(w["used_percent"] >= 100 or (w.get("status") not in (None, "ok")) for w in windows)
+    return {"provider": "opencode", "plan": "OpenCode Go", "limit_reached": reached, "windows": windows}
+

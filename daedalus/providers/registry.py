@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Sequence
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -14,9 +17,11 @@ from daedalus.providers.openai_compat import (
     ProviderEndpoint,
     UsageSink,
 )
-from daedalus.providers.pricing import pricing_table
+from daedalus.providers.pricing import ModelPricing, pricing_table
 
-VENDOR_HOSTS = {"deepseek": "api.deepseek.com", "openrouter": "openrouter.ai"}
+logger = logging.getLogger(__name__)
+
+VENDOR_HOSTS = {"deepseek": "api.deepseek.com", "openrouter": "openrouter.ai", "opencode": "opencode.ai"}
 
 
 def _is_vendor_host(kind: str, base_url: str) -> bool:
@@ -40,6 +45,8 @@ class ProviderRegistry:
         self._image_loader = image_loader
         self._providers: dict[str, OpenAICompatibleProvider] = {}
         self._retired: list[OpenAICompatibleProvider] = []
+        self._fetched: dict[str, dict[str, ModelPricing]] = {}
+        """Prices fetched from models.dev, by provider kind; under the operator's own entries."""
         self.reload(config)
 
     def _images_for(self, provider_id: str, model: str) -> bool:
@@ -98,7 +105,7 @@ class ProviderRegistry:
         api_key = pc.api_key or env_keys.get(pc.kind, "")
         if not base_url:
             return None
-        if pc.kind in ("deepseek", "openrouter") and not api_key and _is_vendor_host(pc.kind, base_url):
+        if pc.kind in ("deepseek", "openrouter", "opencode") and not api_key and _is_vendor_host(pc.kind, base_url):
             return None  # the vendor itself needs a key; a key proxy in front of it does not
         return ProviderEndpoint(
             id=provider_id,
@@ -107,9 +114,48 @@ class ProviderRegistry:
             api_key=api_key,
             timeout_seconds=pc.timeout_seconds,
             extra_headers=headers,
-            pricing=pricing_table(pc.kind, pc.pricing),
+            pricing={**self._fetched.get(pc.kind, {}), **pricing_table(pc.kind, pc.pricing)},
             temperature=pc.temperature,
         )
+
+    async def refresh_prices(self, db: Any | None = None, *, force: bool = False) -> int:
+        """Bring the fetched price tables up to date and put them under every live endpoint of their kind.
+
+        The catalogue is read from the database when it is younger than a day, from models.dev otherwise; a
+        fetch that fails leaves whatever table was there. Returns how many models got a price this way.
+        """
+        from daedalus.providers import modelsdev  # Lazy: keeps the catalogue client out of every registry import
+
+        cached = await db.kv_get(modelsdev.KV_KEY, None) if db is not None else None
+        now = time.time()
+        tables: dict[str, dict[str, ModelPricing]] = {}
+        fresh = isinstance(cached, dict) and now - float(cached.get("at") or 0) < modelsdev.REFRESH_SECONDS
+        if fresh and not force:
+            tables = {kind: modelsdev.table_from_entries(entries) for kind, entries in (cached.get("tables") or {}).items() if isinstance(entries, dict)}
+        else:
+            try:
+                catalog = await modelsdev.fetch_catalog()
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.warning("models.dev prices not refreshed: %s", exc)
+                if isinstance(cached, dict):
+                    tables = {kind: modelsdev.table_from_entries(entries) for kind, entries in (cached.get("tables") or {}).items() if isinstance(entries, dict)}
+            else:
+                tables = {kind: modelsdev.prices_from_catalog(catalog, ids) for kind, ids in modelsdev.SOURCES.items()}
+                if db is not None:
+                    await db.kv_set(modelsdev.KV_KEY, {"at": now, "tables": {kind: modelsdev.entries_from_table(table) for kind, table in tables.items()}})
+        if not tables:
+            return 0
+        self._fetched = tables
+        config = getattr(self, "_config", None)
+        for provider_id, provider in self._providers.items():
+            table = tables.get(provider.endpoint.kind)
+            if not table:
+                continue
+            configured = set((config.providers[provider_id].pricing if config and provider_id in config.providers else {}))
+            for model, price in table.items():
+                if model not in configured:
+                    provider.endpoint.pricing[model] = price
+        return sum(len(table) for table in tables.values())
 
     def get(self, provider_id: str) -> OpenAICompatibleProvider:
         try:

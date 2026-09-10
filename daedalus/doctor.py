@@ -114,7 +114,7 @@ async def _config(ctx: DoctorContext) -> list[Check]:
         else:
             env_key = {"deepseek": st.deepseek_api_key, "openrouter": st.openrouter_api_key, "vllm": st.vllm_api_key}.get(provider.kind, "")
             has_key = bool(provider.api_key or env_key)
-            via_proxy = provider.kind in ("deepseek", "openrouter") and not _is_vendor_host(provider.kind, provider.base_url)
+            via_proxy = provider.kind in ("deepseek", "openrouter", "opencode") and not _is_vendor_host(provider.kind, provider.base_url)
             out.append(Check("default provider key", has_key or via_proxy or provider.kind in ("vllm", "openai_compat"), "configured" if has_key else ("held by the key proxy" if via_proxy else "no API key (fine for a keyless self-hosted endpoint)"), "ok" if has_key or via_proxy else "warn", "set the key in Settings → Models → provider"))
             try:
                 table = pricing_table(provider.kind, provider.pricing)

@@ -34,7 +34,7 @@ def test_mask_provider_keys_replaces_with_flag_and_lists_kinds() -> None:
     assert out["providers"]["vllm"]["api_key"] == ""
     assert out["providers"]["vllm"]["api_key_set"] is True
     assert "hunter2" not in str(out)
-    assert out["provider_kinds"] == ["deepseek", "openrouter", "vllm", "openai_compat"]
+    assert out["provider_kinds"] == ["deepseek", "openrouter", "opencode", "vllm", "openai_compat"]
     assert out["nested"] == "kept"
 
 

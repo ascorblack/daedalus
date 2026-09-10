@@ -243,3 +243,12 @@ async def test_claude_usage_429_falls_back_to_profile_and_cache(monkeypatch: pyt
         # backoff: a third call must not hit the usage endpoint again
         third = await (await client.get("/subscriptions/usage")).json()
         assert third["claude"]["windows"][0]["used_percent"] == 7.0 and hits["usage"] == 2
+
+
+def test_opencode_usage_view_reads_the_three_windows() -> None:
+    subs = _load("subscriptions")
+    view = subs.opencode_usage_view({"usage": {"rolling": {"status": "ok", "percent": 12.5, "resetsAt": "2026-09-11T01:24:47.169Z"}, "weekly": {"status": "ok", "percent": 3, "resetsAt": "2026-09-14T00:00:00.169Z"}, "monthly": {"status": "exceeded", "percent": 100, "resetsAt": "2026-10-10T20:19:58.169Z"}}})
+    assert view["provider"] == "opencode" and view["plan"] == "OpenCode Go"
+    assert [w["name"] for w in view["windows"]] == ["5 h", "weekly", "monthly"]
+    assert view["windows"][0]["used_percent"] == 12.5 and view["windows"][0]["resets_at"].startswith("2026-09-11")
+    assert view["limit_reached"] is True

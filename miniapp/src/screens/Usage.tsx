@@ -38,13 +38,13 @@ function SubscriptionsCard({ subs }: { subs: Record<string, Subscription> }) {
   return (
     <div className="card">
       <div className="section-title" style={{ marginTop: 0 }}>Subscriptions</div>
-      <div className="sub">Quota windows of the ChatGPT (Codex), SuperGrok and Claude Code logins the key proxy holds; they are not billed per token.</div>
+      <div className="sub">Quota windows of the ChatGPT (Codex), SuperGrok and Claude Code logins and the OpenCode Go key the key proxy holds; the logins are not billed per token, OpenCode Go counts its list prices against a prepaid allowance.</div>
       {entries.map(([name, s]) => (
         <div key={name} style={{ marginTop: 10 }}>
           <div className="title">
-            {name === "codex" ? "Codex · ChatGPT" : name === "claude" ? "Claude · Max" : "Grok · SuperGrok"} {s.plan && <span className="badge">{s.plan}</span>} {s.limit_reached && <span className="badge" style={{ color: "var(--bad)" }}>limit reached</span>}
+            {name === "codex" ? "Codex · ChatGPT" : name === "claude" ? "Claude · Max" : name === "opencode" ? "OpenCode · Go" : "Grok · SuperGrok"} {s.plan && <span className="badge">{s.plan}</span>} {s.limit_reached && <span className="badge" style={{ color: "var(--bad)" }}>limit reached</span>}
           </div>
-          {!s.logged_in && <div className="sub">not logged in on the host</div>}
+          {!s.logged_in && <div className="sub">{name === "opencode" ? "no OPENCODE_API_KEY in the key proxy" : "not logged in on the host"}</div>}
           {s.error && <div className="sub" style={{ color: "var(--bad)" }}>{s.error}</div>}
           {(s.windows ?? []).map((w) => (
             <div key={w.name} style={{ marginTop: 6 }}>
