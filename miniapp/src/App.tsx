@@ -37,7 +37,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 }
 
 const TABS: { id: Tab; label: string; icon: IconName }[] = [
-  { id: "sessions", label: "Bots", icon: "bots" },
+  { id: "sessions", label: "Agents", icon: "bots" },
   { id: "inbox", label: "Inbox", icon: "inbox" },
   { id: "board", label: "Board", icon: "board" },
   { id: "proposals", label: "Changes", icon: "changes" },

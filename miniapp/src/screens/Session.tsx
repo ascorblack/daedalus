@@ -209,7 +209,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
           toast(`reverted: ${r.dropped} message(s) removed${ws}`);
         } else {
           const r = await api.post<{ id: string; title: string; messages: number }>(`/api/sessions/${id}/fork`, { seq });
-          toast(`forked into "${r.title}" (${r.messages} messages) — open it from the Bots tab`);
+          toast(`forked into "${r.title}" (${r.messages} messages) — open it from the Agents tab`);
         }
         load();
       } catch (e) {

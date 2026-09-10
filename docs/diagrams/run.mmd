@@ -1,0 +1,17 @@
+sequenceDiagram
+    autonumber
+    actor You
+    participant S as 🤖 Session
+    participant M as 🧠 Model
+    participant T as 🧰 Tools
+    You->>S: message · files · a voice note
+    Note over S: history + system prompt<br/>rules · brief · skills index · memory
+    S->>M: prompt
+    loop until the answer
+        M->>T: Exec / Read / Edit / WebSearch / ImageView / SubAgent …
+        T-->>M: result — clipped, secrets masked
+        You-->>S: a steer lands before the next step
+    end
+    M-->>S: answer (Markdown)
+    S-->>You: streamed to Telegram and the app
+    Note over S: snapshot · usage booked ·<br/>compacted when the window fills

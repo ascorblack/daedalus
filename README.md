@@ -45,7 +45,7 @@ Each forum topic is a session with its own workspace. Files in, files out, voice
 <td width="33%" valign="top">
 
 **🖥️ A real web app**<br/>
-Roster, live transcripts, file browser with previews (images, Markdown, CSV, PDF, Word, Excel), two sessions side by side, drag-and-drop and clipboard attachments, a microphone. Installable as a PWA.
+Agents, live transcripts, file browser with previews (images, Markdown, CSV, PDF, Word, Excel), two sessions side by side, drag-and-drop and clipboard attachments, a microphone. Installable as a PWA.
 
 </td>
 <td width="33%" valign="top">
@@ -81,11 +81,11 @@ Provider keys live in a key-proxy container that injects them into upstream call
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/bots.png" alt="The roster: active sessions, subagents under their leaders, loops" /></td>
+<td width="50%"><img src="docs/screenshots/bots.png" alt="Agents: active sessions, subagents under their leaders, loops" /></td>
 <td width="50%"><img src="docs/screenshots/dual.png" alt="Two sessions side by side on a wide screen" /></td>
 </tr>
 <tr>
-<td align="center"><sub>The roster — subagents under their leader, loop agents with their cadence</sub></td>
+<td align="center"><sub>Agents — subagents under their leader, loop agents with their cadence</sub></td>
 <td align="center"><sub>Two sessions side by side; each pane has its own files and settings</sub></td>
 </tr>
 <tr>
@@ -107,7 +107,7 @@ Provider keys live in a key-proxy container that injects them into upstream call
 </table>
 
 <p align="center">
-  <img src="docs/screenshots/phone-bots.png" width="30%" alt="Phone: the roster" />
+  <img src="docs/screenshots/phone-bots.png" width="30%" alt="Phone: agents" />
   <img src="docs/screenshots/phone-session.png" width="30%" alt="Phone: a session" />
   <img src="docs/screenshots/phone-memory.png" width="30%" alt="Phone: memory" />
 </p>
@@ -115,70 +115,21 @@ Provider keys live in a key-proxy container that injects them into upstream call
 
 ## How it is put together
 
-```mermaid
-flowchart LR
-    Op([Operator]) -- Telegram --> TG[telegram-bot-api<br/>local Bot API]
-    Op -- HTTPS --> RP[reverse proxy<br/>your domain]
-    TG --> D
-    RP --> D
+<p align="center"><img src="docs/diagrams/containers.png" alt="Containers: operator → Telegram / reverse proxy → the agent container (supervisor, bot, tools, workspaces, state), key proxy, SearXNG, rebuilder" width="100%" /></p>
 
-    subgraph host["Docker host"]
-        subgraph agent["daedalus container"]
-            SV[supervisor<br/>PID 1 · read-only to the agent] --> D[bot + API + Mini App]
-            D --> T[tools: shell · files · web · vision · MCP · services]
-            T --> WS[(workspaces volume)]
-            D --> ST[(state volume<br/>SQLite · blobs · snapshots)]
-        end
-        KP[key proxy<br/>holds provider keys · daily budget] --> UP[(model providers)]
-        SX[SearXNG<br/>metasearch]
-        RB[rebuilder<br/>only container with the docker socket]
-    end
-
-    D -- "no keys inside" --> KP
-    T --> SX
-    SV -- "trigger file" --> RB
-    RB -- "git reset · build · restart" --> agent
-    T -- "ServiceStart · ports 8100-8119" --> Op
-```
+<sub>Diagram sources: <code>docs/diagrams/</code> is rendered from the mermaid text kept beside the README.</sub>
 
 Five containers, one job each. The agent container has no provider keys and no docker socket; the supervisor and the governance rules are mounted read-only. Services the agent hosts (a demo site, a dev server) listen on a published port range and can be shared through your domain — to anyone, or to whoever holds a key — without opening another port.
 
 ## A run, step by step
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant You
-    participant S as Session
-    participant M as Model
-    participant T as Tools
-    You->>S: message, files, a voice note
-    S->>M: history + system prompt (rules, brief, skills index, memory)
-    loop until the answer
-        M->>T: Exec / Read / Edit / WebSearch / ImageView / SubAgent …
-        T-->>M: result (clipped, secrets masked)
-        You-->>S: a steer lands before the next step
-    end
-    M-->>S: answer (Markdown)
-    S-->>You: streamed to Telegram and the app
-    S->>S: snapshot · usage booked · compact when the window fills
-```
+<p align="center"><img src="docs/diagrams/run.png" alt="A run: the message, the prompt, the tool loop with steers, the streamed answer, the snapshot and compaction" width="88%" /></p>
 
 What makes long sessions work: the **transcript** keeps everything, the **working history** the model sees is compacted into summaries when it grows (with `HistoryExpand` to read the originals back), a **revert** restores the history *and* the workspace to any earlier turn, a **fork** starts a new session from one, and `/clear` starts over while keeping the files.
 
 ## Self-development
 
-```mermaid
-flowchart LR
-    A[SelfWorkspace<br/>git worktree on a branch] --> B[edit · test · commit]
-    B --> C[SelfPropose<br/>pull request]
-    C --> D{You, in the chat}
-    D -- approve --> E[merge]
-    D -- reject + reason --> A
-    E --> F[SelfRebuild when idle<br/>git reset · preflight · restart]
-    F -- preflight fails --> G[rollback to the last known-good build]
-    F -- ok --> H[new build running]
-```
+<p align="center"><img src="docs/diagrams/selfdev.png" alt="Self-development: worktree → edit → pull request → your approval in the chat → merge → rebuild → rollback on a failed preflight" width="100%" /></p>
 
 The PR text passes a public-text gate (nothing about your machine leaks into a public repository), the diff is checked for references it must not carry, and `GOVERNANCE.md` — the rules the agent always sees and can never edit — is mounted read-only. Approval is manual by default; `/approval auto` hands it over when you trust it.
 

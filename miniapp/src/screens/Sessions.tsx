@@ -86,7 +86,7 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
     <>
       <div className="btnrow" style={{ marginTop: 0, marginBottom: 12 }}>
         <button className="btn primary" onClick={() => setCreating((v) => !v)}>
-          {creating ? "Cancel" : "+ New bot"}
+          {creating ? "Cancel" : "+ New agent"}
         </button>
         <button className={`btn ${showWorkspaces ? "primary" : ""}`} onClick={() => setShowWorkspaces((v) => !v)} title="The directories sessions work in">
           <Icon name="folder" size={15} /> Workspaces
@@ -139,7 +139,7 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
         </div>
       )}
       {sessions === null && <div className="empty">Loading…</div>}
-      {sessions !== null && sessions.length === 0 && <div className="empty">No sessions yet. Create one, or write to the bot in Telegram.</div>}
+      {sessions !== null && sessions.length === 0 && <div className="empty">No agents yet. Create one, or write to the bot in Telegram.</div>}
       {active.length > 0 && <div className="section-title">Active</div>}
       {active.map(group)}
       {rest.length > 0 && <div className="section-title">Roster</div>}

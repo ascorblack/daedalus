@@ -1,0 +1,43 @@
+flowchart LR
+    Op([👤 Operator])
+    TG[✈️ telegram-bot-api<br/><small>local Bot API · files up to 2 GB</small>]
+    RP[🌐 reverse proxy<br/><small>your domain · TLS</small>]
+    subgraph host [" Docker host "]
+        direction LR
+        subgraph agent [" daedalus container "]
+            direction TB
+            SV[🛡️ supervisor<br/><small>PID 1 · read-only to the agent · budget flag</small>]
+            D[🤖 bot + API + web app]
+            T[🧰 tools<br/><small>shell · files · web · vision · MCP · services</small>]
+            WS[(📁 workspaces)]
+            ST[(🗄️ state<br/><small>SQLite · blobs · snapshots</small>)]
+            SVC[📡 hosted services<br/><small>ServiceStart · ports 8100–8119</small>]
+            SV --> D --> T
+            T --> WS
+            D --> ST
+            T --> SVC
+        end
+        KP[🔑 key proxy<br/><small>holds provider keys · meters spend · daily budget</small>]
+        SX[🔎 SearXNG<br/><small>self-hosted metasearch</small>]
+        RB[🔁 rebuilder<br/><small>the only container with the docker socket</small>]
+    end
+    UP[(☁️ model providers<br/><small>DeepSeek · OpenRouter · vLLM · ChatGPT · Claude · Grok</small>)]
+    Op -- Telegram --> TG --> D
+    Op -- HTTPS --> RP --> D
+    D -. no keys inside .-> KP --> UP
+    T --> SX
+    SV -. trigger file .-> RB
+    RB -. git reset · build · restart .-> agent
+    RP -. "/s/‹slug›/ · public or by key" .-> SVC
+    classDef op fill:#1d1d1f,stroke:#e7e7e7,color:#f4f4f5,stroke-width:1.5px
+    classDef core fill:#16213a,stroke:#60a5fa,color:#e8efff
+    classDef guard fill:#1f2a1f,stroke:#4ade80,color:#e6ffe9
+    classDef store fill:#2a2418,stroke:#fbbf24,color:#fff4d6
+    classDef edge fill:#1a1a1c,stroke:#8b8d93,color:#ececec
+    class Op op
+    class D,T,SVC core
+    class SV,KP,RB guard
+    class WS,ST,UP store
+    class TG,RP,SX edge
+    style host fill:#0e0e0f,stroke:#3a3a3d,color:#8b8d93
+    style agent fill:#141416,stroke:#60a5fa,stroke-dasharray:4 3,color:#a9c4ff
