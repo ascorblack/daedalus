@@ -301,3 +301,21 @@ async def test_deepseek_gets_the_effort_names_it_knows() -> None:
         async for _ in provider.stream_with_tools(_request(enable_thinking=True, reasoning_effort=asked)):
             pass
         assert provider.captured["json"]["reasoning_effort"] == sent_as  # type: ignore[attr-defined]
+
+
+async def test_deepseek_thinking_request_gives_every_tool_call_turn_a_reasoning_content() -> None:
+    """A tool-call turn made with thinking off has no reasoning; DeepSeek wants the key present anyway."""
+    from protocore.contracts.types import Message, MessageRole, TextBlock, ToolResultBlock, ToolUseBlock
+
+    provider = _provider(_sse([_chunk({"content": "ok"}), _chunk({}, finish="stop")]))
+    request = _request(enable_thinking=True, reasoning_effort="low")
+    request = request.model_copy(update={"messages": [
+        *request.messages,
+        Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="Reading."), ToolUseBlock(tool_call_id="c1", name="t", arguments_json="{}")]),
+        Message(role=MessageRole.tool, content_blocks=[ToolResultBlock(tool_call_id="c1", content="hello")]),
+    ]})
+    async for _ in provider.stream_with_tools(request):
+        pass
+    sent = provider.captured["json"]["messages"]  # type: ignore[attr-defined]
+    turn = next(m for m in sent if m["role"] == "assistant" and m.get("tool_calls"))
+    assert turn["reasoning_content"] == ""

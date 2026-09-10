@@ -343,6 +343,13 @@ class OpenAICompatibleProvider(ILLMProvider):
         thinking = bool(extra.get("enable_thinking", False))
         effort = str(extra.get("reasoning_effort") or "medium")
         self._apply_thinking(body, thinking=thinking, effort=effort)
+        if thinking and self.endpoint.kind == "deepseek":
+            # DeepSeek refuses a thinking-mode request whose earlier tool-call turns carry no
+            # reasoning_content; a turn produced with thinking off (a recovery retry, an operator
+            # toggle) has none, and an empty one is accepted.
+            for entry in wire:
+                if entry.get("role") == "assistant" and entry.get("tool_calls") and "reasoning_content" not in entry:
+                    entry["reasoning_content"] = ""
         breakpoints = extra.get("cache_breakpoints")
         if breakpoints and self.endpoint.kind == "openrouter":
             apply_cache_control(body["messages"], breakpoints, index_map=wire_index)
