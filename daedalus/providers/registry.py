@@ -151,7 +151,7 @@ class ProviderRegistry:
             table = tables.get(provider.endpoint.kind)
             if not table:
                 continue
-            configured = set((config.providers[provider_id].pricing if config and provider_id in config.providers else {}))
+            configured = set(config.providers[provider_id].pricing if config and provider_id in config.providers else {})
             for model, price in table.items():
                 if model not in configured:
                     provider.endpoint.pricing[model] = price
