@@ -166,6 +166,8 @@ async def exec_command(
         elapsed = time.monotonic() - started
         body = clip(outcome.output, services.max_tool_output_chars, note="write to a file for the full output")
         header = f"exit_code={outcome.exit_code} elapsed={elapsed:.1f}s cwd={workdir}" + (f" TIMED OUT after {limit:.0f}s" if outcome.timed_out else "")
+        if outcome.timed_out:
+            header += REMOTE_TIMEOUT_HINT
         text = f"{header}\n{body}" if body else header
         if outcome.timed_out or outcome.exit_code != 0:
             return error(context, text, exit_code=outcome.exit_code, timed_out=outcome.timed_out)
@@ -272,12 +274,15 @@ async def exec_command(
         body = head_text
     header = f"exit_code={proc.returncode} elapsed={elapsed:.1f}s cwd={workdir}" + (" sandbox=workspace" if sandboxed else "")
     if timed_out:
-        header += f" TIMED OUT after {limit:.0f}s (process group killed)"
+        header += f" TIMED OUT after {limit:.0f}s (process group killed)" + LOCAL_TIMEOUT_HINT
     text = f"{header}\n{body}" if body else header
     if timed_out or (proc.returncode or 0) != 0:
         return error(context, text, exit_code=proc.returncode, timed_out=timed_out)
     return ok(context, text, exit_code=proc.returncode)
 
+
+LOCAL_TIMEOUT_HINT = " — waiting this long in the foreground is the mistake, not the command: start it again with background=true and read it with JobOutput, or pass a larger timeout_seconds if it must block"
+REMOTE_TIMEOUT_HINT = " — waiting this long in the foreground is the mistake, not the command: start it again with `nohup … > /tmp/job.log 2>&1 &` and poll the log with later calls, or pass a larger timeout_seconds if it must block"
 
 SPILL_MAX_BYTES = 20 * 1024 * 1024
 """The most of one command's output kept on disk; beyond it the file says it was capped."""

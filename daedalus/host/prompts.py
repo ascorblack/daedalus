@@ -223,6 +223,7 @@ def environment_section(
     if ssh_hosts:
         lines.append("- Servers you can reach with ssh (`~/.ssh/config`, keys installed):")
         lines.extend(f"  - `ssh {host}` — {about}" if about else f"  - `ssh {host}`" for host, about in ssh_hosts)
+    lines.append("- Exec kills a command at its timeout (the result names it) and the wait is lost: a build, a solver, a test suite or a server that may run longer starts with background=true and is read with JobOutput; where jobs are unavailable, `nohup … > log 2>&1 &` and poll the log")
     if sandboxed:
         lines.append("- Exec and Verify run in a sandbox: the filesystem is read-only outside the workspace, /tmp is private, and background processes end with the command")
     if extra_notes:
