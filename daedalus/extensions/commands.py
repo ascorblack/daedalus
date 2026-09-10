@@ -41,6 +41,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("mode", "[quick|deep|careful|default]", "limits and rules for this session (no argument: list)"),
     CommandSpec("rename", "<title>", "rename this session and its topic"),
     CommandSpec("cap", "<usd | none>", "spend cap for this session over all of its runs"),
+    CommandSpec("allow", "<key>", "let one call the policy refused through (the key is in the refusal)"),
     CommandSpec("brief", "[text]", "the standing brief in this session's system prompt (no argument: show)"),
     CommandSpec("usage", "", "spend today and in this session"),
     CommandSpec("status", "", "what is running", scope="global"),
@@ -148,6 +149,12 @@ async def run_command(app: Application, session_id: str, line: str) -> str:
         await manager.set_session_cap(session_id, cap)
         spent, _ = await manager.spend(session_id=session_id)
         return f"Session cap: ${cap:.2f} (spent so far ${spent:.2f})."
+    if name == "allow":
+        try:
+            grants = await manager.grant(session_id, args)
+        except ValueError as exc:
+            return f"usage: /allow <key> — {exc}"
+        return f"Granted {args.strip()}: the same call passes once. Open grants: {', '.join(grants)}."
     if name == "loop":
         loops = app.extensions.get("loops")
         if loops is None:

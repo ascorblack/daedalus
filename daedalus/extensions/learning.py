@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -33,6 +32,8 @@ CHECK_EVERY_SECONDS = 3600
 ERROR_PREFIX_CHARS = 60
 ASK_PREFIX_CHARS = 40
 
+
+MEMORY_KINDS = ("decision", "preference", "identifier", "howto", "fact")
 
 EXTRACT_PROMPT = """From the transcript below, list the facts worth remembering in a later, unrelated session of the same agent:
 decisions the operator made, preferences the operator stated, identifiers (repositories, hosts, ids, paths that
@@ -127,21 +128,27 @@ class Learning:
             extra={"enable_thinking": False},
             observability=LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, run_id=run_id, call_purpose="memory_extraction", call_category="memory"),
         )
-        response = await asyncio.wait_for(provider.complete_text(request), timeout=90)
+        response = await asyncio.wait_for(provider.complete_text(request), timeout=45)
         text = "".join(b.text for b in response.message.content_blocks if isinstance(b, TextBlock))
-        match = re.search(r"\[.*\]", text, re.DOTALL)
-        if not match:
+        start = text.find("[")
+        if start < 0:
+            logger.warning("memory extraction for run %s: the model returned no list", run_id)
             return 0
         try:
-            items = json.loads(match.group(0))
+            items, _ = json.JSONDecoder().raw_decode(text[start:])
         except json.JSONDecodeError:
+            logger.warning("memory extraction for run %s: the model's list was not JSON", run_id)
+            return 0
+        if not isinstance(items, list):
             return 0
         stored = 0
         for item in items[:8]:
             if not isinstance(item, dict):
                 continue
             fact = str(item.get("text") or "").strip()
-            kind = str(item.get("kind") or "fact").strip()[:32]
+            kind = str(item.get("kind") or "fact").strip().lower()
+            if kind not in MEMORY_KINDS:
+                kind = "fact"
             if len(fact) < 12 or len(fact) > 600:
                 continue
             await manager.memory.write(TENANT, MemoryScope.global_, "", fact, kind=kind, source_refs=[f"session:{session_id}", f"run:{run_id}"])

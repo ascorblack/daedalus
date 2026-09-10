@@ -94,6 +94,12 @@ class PersistentMemory(InMemoryMemory):
             await self._persist(hit.record)
         return hits
 
+    async def search(self, tenant_id: str, query: str, **kwargs: Any):  # type: ignore[override]
+        hits = await super().search(tenant_id, query, **kwargs)
+        for hit in hits:
+            await self._persist(hit.record)
+        return hits
+
     def _rank(self, tenant_id: str, query: str, scopes: Any, scope_keys: Any, kinds: Any, limit: int) -> list[MemoryHit]:  # type: ignore[override]
         """Ranked recall: BM25 over the record texts, a bonus for the phrase itself, a tie-break on recency
         and on how often the record was useful before. The reference store scores by token overlap alone,

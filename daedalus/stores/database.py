@@ -369,6 +369,32 @@ MIGRATIONS: list[str] = [
     ALTER TABLE services ADD COLUMN share_key TEXT;
     CREATE INDEX services_share_slug ON services(share_slug);
     """,
+    # 18 — one row per tool call (the waterfall of a run) and one per network host a call reached
+    """
+    CREATE TABLE tool_calls (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        run_id TEXT,
+        tool_call_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        at TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        ok INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX tool_calls_by_session ON tool_calls(session_id);
+    CREATE INDEX tool_calls_by_run ON tool_calls(run_id);
+    CREATE TABLE egress_log (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        run_id TEXT,
+        tool TEXT NOT NULL,
+        host TEXT NOT NULL,
+        action TEXT NOT NULL
+    );
+    CREATE INDEX egress_log_by_session ON egress_log(session_id);
+    CREATE INDEX usage_events_by_run ON usage_events(run_id);
+    """,
 ]
 
 

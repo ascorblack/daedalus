@@ -28,6 +28,10 @@ PROBE_RETRY_SECONDS = 300.0
 """A failed probe is repeated after this long; a successful one is kept for the life of the process."""
 
 
+class SandboxUnavailable(RuntimeError):
+    """The configured sandbox cannot be created here; commands do not run unsandboxed instead."""
+
+
 def bwrap_status() -> str:
     """Whether bubblewrap can create namespaces in this container (Docker's default seccomp profile forbids it).
 
@@ -64,9 +68,10 @@ async def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config
     status = await asyncio.to_thread(bwrap_status)
     if status != "ok":
         if not _warned_missing_bwrap:
-            logging.getLogger(__name__).warning("tools.exec.sandbox=workspace but the sandbox is unavailable (%s); running unsandboxed", status)
+            logging.getLogger(__name__).warning("tools.exec.sandbox=workspace but the sandbox is unavailable (%s); commands are refused until it is", status)
             _warned_missing_bwrap = True
-        return plain, False
+        # Fail closed: a sandbox the operator asked for and did not get is not a warning, it is a missing wall.
+        raise SandboxUnavailable(f"the sandbox is configured (tools.exec.sandbox=workspace) but unavailable: {status}. The operator can switch it off in Settings → Tools or enable namespaces for the container.")
     bwrap = shutil.which("bwrap") or "bwrap"
     argv = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--unshare-pid", "--die-with-parent", "--new-session"]
     writable = [workspace, *[Path(p) for p in getattr(exec_config, "sandbox_extra_writable", [])]]
@@ -168,7 +173,10 @@ async def exec_command(
     if not workdir.exists():
         return error(context, f"working directory does not exist: {workdir}")
     environment = shell_environment(context.session_id, env)
-    argv, sandboxed = await sandbox_argv(command, workdir, services.workspace_dir, tool_config(context).exec)
+    try:
+        argv, sandboxed = await sandbox_argv(command, workdir, services.workspace_dir, tool_config(context).exec)
+    except SandboxUnavailable as exc:
+        return error(context, str(exc))
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=str(workdir),
@@ -177,19 +185,19 @@ async def exec_command(
         env=environment,
         start_new_session=True,
     )
+    limit_chars = services.max_tool_output_chars
+    head_cap = int(limit_chars * 0.7) * 4  # bytes; the model sees at most limit_chars characters, UTF-8 needs up to 4 bytes each
+    tail_cap = int(limit_chars * 0.25) * 4
     chunks: list[bytes] = []
     tail_chunks: deque[bytes] = deque()
     tail_size = 0
     total = 0
-    # Only what the model can see is kept in memory: the head and a ring of the tail. A process that
-    # prints for the whole timeout cannot pump it up; the whole output goes to a file when it is clipped.
-    head_cap = services.max_tool_output_chars * 4
-    tail_cap = services.max_tool_output_chars
     spill = _spill_path(services, context)
     spill_fh = None
+    spill_written = 0
 
     async def _pump() -> None:
-        nonlocal total, tail_size, spill_fh
+        nonlocal total, tail_size, spill_fh, spill_written
         assert proc.stdout is not None
         last_progress = time.monotonic()
         while True:
@@ -197,16 +205,28 @@ async def exec_command(
             if not chunk:
                 return
             if total + len(chunk) > head_cap:
-                if spill_fh is None:
-                    # The file starts with everything kept so far (whole chunks only), then follows the stream.
+                # Past the head: the whole stream goes to a file (up to a cap) and a ring keeps the tail for the answer.
+                if spill_fh is None and spill_written == 0:
                     try:
                         spill.parent.mkdir(parents=True, exist_ok=True)
+                        _prune_spills(spill.parent)
                         spill_fh = spill.open("wb")
                         spill_fh.write(b"".join(chunks))
+                        spill_written = sum(len(c) for c in chunks)
                     except OSError:
                         spill_fh = None
                 if spill_fh is not None:
-                    spill_fh.write(chunk)
+                    if spill_written + len(chunk) <= SPILL_MAX_BYTES:
+                        try:
+                            spill_fh.write(chunk)
+                            spill_written += len(chunk)
+                        except OSError:
+                            spill_fh.close()
+                            spill_fh = None
+                    else:
+                        spill_fh.write(b"\n[... spill capped at %d bytes ...]\n" % SPILL_MAX_BYTES)
+                        spill_fh.close()
+                        spill_fh = None
             if total < head_cap:
                 chunks.append(chunk[: head_cap - total])
             else:
@@ -223,28 +243,33 @@ async def exec_command(
 
     timed_out = False
     try:
-        await asyncio.wait_for(_pump(), timeout=limit)
-        remaining = max(1.0, limit - (time.monotonic() - started))
-        await asyncio.wait_for(proc.wait(), timeout=remaining)
-    except TimeoutError:
-        timed_out = True
         try:
-            os.killpg(proc.pid, 9)
-        except ProcessLookupError:
-            pass
-        await proc.wait()
-    if spill_fh is not None:
-        spill_fh.close()
-    head = b"".join(chunks).decode("utf-8", "replace")
+            await asyncio.wait_for(_pump(), timeout=limit)
+            remaining = max(1.0, limit - (time.monotonic() - started))
+            await asyncio.wait_for(proc.wait(), timeout=remaining)
+        except TimeoutError:
+            timed_out = True
+    finally:
+        if proc.returncode is None:
+            # A timeout, a cancelled run or a failed write: the process group never outlives the call.
+            try:
+                os.killpg(proc.pid, 9)
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+        if spill_fh is not None:
+            spill_fh.close()
+    head_text = b"".join(chunks).decode("utf-8", "replace")
     elapsed = time.monotonic() - started
-    if tail_chunks:
+    kept = sum(len(c) for c in chunks) + tail_size
+    if total > kept:
         tail_text = b"".join(tail_chunks).decode("utf-8", "replace")
-        dropped = total - len(b"".join(chunks)) - tail_size
-        note = f"full output in {spill}" if spill_fh is not None else "output beyond this point was not kept"
-        output = head + f"\n\n[... {max(dropped, 0)} bytes omitted — {note} ...]\n\n" + tail_text
-        body = clip(output, services.max_tool_output_chars, note=note)
+        where = f"full output in {spill}" if spill_written else "the rest was not kept; write the output to a file"
+        if spill_written and spill_written < total:
+            where = f"the first {spill_written} bytes are in {spill}; write the output to a file for the rest"
+        body = head_text + f"\n\n[... {total - kept} of {total} bytes omitted — {where} ...]\n\n" + tail_text
     else:
-        body = clip(head, services.max_tool_output_chars, note=f"full output in {spill}" if spill_fh is not None else "write to a file for the full output")
+        body = head_text
     header = f"exit_code={proc.returncode} elapsed={elapsed:.1f}s cwd={workdir}" + (" sandbox=workspace" if sandboxed else "")
     if timed_out:
         header += f" TIMED OUT after {limit:.0f}s (process group killed)"
@@ -252,6 +277,21 @@ async def exec_command(
     if timed_out or (proc.returncode or 0) != 0:
         return error(context, text, exit_code=proc.returncode, timed_out=timed_out)
     return ok(context, text, exit_code=proc.returncode)
+
+
+SPILL_MAX_BYTES = 20 * 1024 * 1024
+"""The most of one command's output kept on disk; beyond it the file says it was capped."""
+SPILL_KEEP_FILES = 30
+"""How many spill files a workspace keeps; older ones go when a new one is opened."""
+
+
+def _prune_spills(directory: Path) -> None:
+    try:
+        files = sorted((p for p in directory.iterdir() if p.suffix == ".log"), key=lambda p: p.stat().st_mtime)
+        for old in files[: max(0, len(files) - SPILL_KEEP_FILES + 1)]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _spill_path(services: Any, context: ToolContext) -> Path:
@@ -267,6 +307,7 @@ class Job:
     log: Path
     process: asyncio.subprocess.Process
     started: float
+    sandboxed: bool = False
 
     @property
     def running(self) -> bool:
@@ -279,21 +320,26 @@ def _jobs(services: Any) -> dict[str, Job]:
 
 async def _start_job(context: ToolContext, services: Any, command: str, workdir: Path, env: dict[str, str] | None) -> ToolResult:
     jobs = _jobs(services)
-    job_id = f"job-{len(jobs) + 1}-{int(time.time()) % 100000}"
+    job_id = f"job-{len(jobs) + 1}-{int(time.time() * 1000) % 1000000}"
     log = services.workspace_dir / ".jobs" / f"{job_id}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        argv, sandboxed = await sandbox_argv(command, workdir, services.workspace_dir, tool_config(context).exec)
+    except SandboxUnavailable as exc:
+        return error(context, str(exc))
     fh = log.open("wb")
     try:
         process = await asyncio.create_subprocess_exec(
-            "bash", "-lc", command, cwd=str(workdir), stdout=fh, stderr=subprocess.STDOUT, env=shell_environment(context.session_id, env), start_new_session=True
+            *argv, cwd=str(workdir), stdout=fh, stderr=subprocess.STDOUT, env=shell_environment(context.session_id, env), start_new_session=True
         )
     finally:
         fh.close()
-    jobs[job_id] = Job(id=job_id, command=command, cwd=workdir, log=log, process=process, started=time.monotonic())
+    jobs[job_id] = Job(id=job_id, command=command, cwd=workdir, log=log, process=process, started=time.monotonic(), sandboxed=sandboxed)
     await asyncio.sleep(0.3)  # long enough for an immediate failure (a typo, a missing binary) to show up in the answer
     status = f"running (pid {process.pid})" if process.returncode is None else f"already exited with code {process.returncode}"
     head = log.read_text(encoding="utf-8", errors="replace")[:1500]
-    return ok(context, f"{job_id}: {status}; output in {log}\n{head}".rstrip(), job_id=job_id, pid=process.pid)
+    where = " in the sandbox" if sandboxed else ""
+    return ok(context, f"{job_id}: {status}{where}; output in {log} (jobs do not survive a restart of the bot; the log does)\n{head}".rstrip(), job_id=job_id, pid=process.pid)
 
 
 def _tail(path: Path, lines: int) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import os
 import shlex
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
 from daedalus.tools._common import clip, error, ok, services_for
+from daedalus.tools.shell import shell_environment
 
 _MAX_LINE_CHARS = 2000
 
@@ -104,12 +106,8 @@ class EditMiss(ValueError):
     """The old text is not in the file; the message shows the nearest lines so the next attempt can be exact."""
 
 
-def _match_loose(text: str, old: str) -> tuple[str, int, str]:
-    """Find ``old`` in ``text`` ignoring trailing whitespace on each line, then ignoring indentation.
-
-    Returns ``(exact_slice_in_text, count, how)`` or raises :class:`EditMiss`; the slice is the text's own
-    bytes for the first match, so the replacement keeps the file's indentation and line endings.
-    """
+def _loose_hits(text: str, old: str) -> tuple[list[int], int, str]:
+    """Line indices where ``old`` occurs ignoring trailing whitespace, then ignoring indentation: ``(hits, n_lines, how)``."""
     lines = text.splitlines(keepends=True)
     old_lines = old.splitlines()
     if not old_lines:
@@ -118,22 +116,36 @@ def _match_loose(text: str, old: str) -> tuple[str, int, str]:
         wanted = [norm(line) for line in old_lines]
         hits = [i for i in range(len(lines) - len(wanted) + 1) if [norm(line.rstrip("\r\n")) for line in lines[i : i + len(wanted)]] == wanted]
         if hits:
-            i = hits[0]
-            block = "".join(lines[i : i + len(wanted)])
-            if old.endswith("\n") is False and block.endswith("\n"):
-                block = block[:-1] if not block.endswith("\r\n") else block[:-2]
-            return block, len(hits), how
+            return hits, len(wanted), how
     raise EditMiss("old_string not found in file" + nearest_window(text, old))
 
 
+NEAREST_MAX_LINES = 40_000
+"""Files longer than this get no "closest lines" hint: scoring windows of a huge file would stall the turn."""
+
+
 def nearest_window(text: str, old: str, *, context_lines: int = 2) -> str:
-    """The lines of the file that look most like ``old``, numbered, so the caller sees what is actually there."""
+    """The lines of the file that look most like ``old``, numbered, so the caller sees what is actually there.
+
+    Bounded: candidate windows are the lines closest to ``old``'s first line (a cheap per-line ratio), and only
+    the best few are scored as whole windows.
+    """
     lines = text.splitlines()
-    size = max(1, len(old.splitlines()))
-    if not lines:
+    old_lines = old.splitlines() or [old]
+    size = max(1, len(old_lines))
+    if not lines or len(lines) > NEAREST_MAX_LINES:
         return ""
+    first = old_lines[0].strip()
+    matcher = difflib.SequenceMatcher(None, "", first)
+    scored: list[tuple[float, int]] = []
+    for i, line in enumerate(lines[: max(1, len(lines) - size + 1)]):
+        matcher.set_seq1(line.strip())
+        if matcher.real_quick_ratio() < 0.5 or matcher.quick_ratio() < 0.5:
+            continue
+        scored.append((matcher.quick_ratio(), i))
+    scored.sort(reverse=True)
     best, best_at = 0.0, 0
-    for i in range(0, max(1, len(lines) - size + 1)):
+    for _, i in scored[:12]:
         ratio = difflib.SequenceMatcher(None, "\n".join(lines[i : i + size]), old).ratio()
         if ratio > best:
             best, best_at = ratio, i
@@ -145,29 +157,40 @@ def nearest_window(text: str, old: str, *, context_lines: int = 2) -> str:
     return f". The closest lines ({best:.0%} similar):\n{shown}"
 
 
+def _reindent(new: str, old: str, block: str) -> str:
+    """The replacement carried to the indentation the file actually has at the matched block."""
+    indent = block[: len(block) - len(block.lstrip())]
+    old_indent = old[: len(old) - len(old.lstrip())]
+    return "\n".join((indent + line[len(old_indent):]) if line.startswith(old_indent) and line.strip() else line for line in new.split("\n"))
+
+
 def apply_edit(text: str, old: str, new: str, *, replace_all: bool = False) -> tuple[str, int, str]:
-    """``(updated_text, replacements, how)``; ``how`` says which matching level found the text."""
+    """``(updated_text, replacements, how)``; ``how`` says which matching level found the text and, for a loose
+    match, at which line."""
     count = text.count(old)
     if count:
         if count > 1 and not replace_all:
             raise EditMiss(f"old_string matches {count} times; make it unique or set replace_all")
         return (text.replace(old, new) if replace_all else text.replace(old, new, 1)), (count if replace_all else 1), "exactly"
-    block, count, how = _match_loose(text, old)
-    if count > 1 and not replace_all:
-        raise EditMiss(f"old_string matches {count} times when {how}; make it unique or set replace_all")
-    # Keep the file's own indentation: re-indent the replacement to the block's first line when the match ignored it.
-    if how == "ignoring indentation":
-        indent = block[: len(block) - len(block.lstrip())]
-        old_indent = old[: len(old) - len(old.lstrip())]
-        new = "\n".join((indent + line[len(old_indent):]) if line.startswith(old_indent) and line.strip() else line for line in new.split("\n"))
-    return (text.replace(block, new) if replace_all else text.replace(block, new, 1)), (count if replace_all else 1), how
+    hits, n, how = _loose_hits(text, old)
+    if len(hits) > 1 and not replace_all:
+        raise EditMiss(f"old_string matches {len(hits)} times when {how} (lines {', '.join(str(h + 1) for h in hits[:8])}); make it unique or set replace_all")
+    lines = text.splitlines(keepends=True)
+    chosen = hits if replace_all else hits[:1]
+    for i in reversed(chosen):  # from the bottom, so earlier indices stay valid
+        block = "".join(lines[i : i + n])
+        ending = "\r\n" if block.endswith("\r\n") else ("\n" if block.endswith("\n") else "")
+        body = block[: len(block) - len(ending)] if ending else block
+        replacement = _reindent(new, old, body) if how == "ignoring indentation" else new
+        lines[i : i + n] = [replacement + ending]
+    return "".join(lines), len(chosen), f"{how} at line {hits[0] + 1}" + (f" and {len(chosen) - 1} more" if len(chosen) > 1 else "")
 
 
 @tool(
     name="MultiEdit",
     description=(
         "Apply several edits to one file atomically: edits is a list of {old_string, new_string[, replace_all]} "
-        "applied in order to the same text; if any edit fails the file is left unchanged and the error names it."
+        "applied in order, each seeing the result of the previous ones; if any edit fails the file is left unchanged and the error names it."
     ),
 )
 async def multi_edit(context: ToolContext, path: str, edits: list[dict[str, Any]]) -> ToolResult:
@@ -197,6 +220,7 @@ async def multi_edit(context: ToolContext, path: str, edits: list[dict[str, Any]
 
 
 _DIAGNOSABLE = {".py"}
+DIAGNOSTICS_TIMEOUT = 20.0
 
 
 async def diagnostics(services: Any, target: Path) -> str:
@@ -208,14 +232,25 @@ async def diagnostics(services: Any, target: Path) -> str:
     if target.suffix not in _DIAGNOSABLE:
         return ""
     quoted = shlex.quote(str(target))
-    command = f"python3 -m py_compile {quoted} && (command -v ruff >/dev/null 2>&1 && ruff check --output-format concise {quoted} || true)"
+    command = (
+        f"python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding=\"utf-8\").read(), sys.argv[1])' {quoted}"
+        f" && (command -v ruff >/dev/null 2>&1 && ruff check --output-format concise --no-cache {quoted} || true)"
+    )
     try:
         if services.exec_backend is not None:
-            outcome = await services.exec_backend.run(command, cwd=None, env=None, timeout=60)
+            outcome = await services.exec_backend.run(command, cwd=None, env=None, timeout=DIAGNOSTICS_TIMEOUT)
             code, out = outcome.exit_code, outcome.output
         else:
-            proc = await asyncio.create_subprocess_exec("bash", "-lc", command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-            raw, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+            proc = await asyncio.create_subprocess_exec("bash", "-lc", command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=shell_environment(services.session_id), start_new_session=True)
+            try:
+                raw, _ = await asyncio.wait_for(proc.communicate(), timeout=DIAGNOSTICS_TIMEOUT)
+            except TimeoutError:
+                try:
+                    os.killpg(proc.pid, 9)
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+                return ""
             code, out = proc.returncode or 0, raw.decode("utf-8", "replace")
     except (OSError, TimeoutError):
         return ""

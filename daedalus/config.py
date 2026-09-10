@@ -347,6 +347,40 @@ class BalanceConfig(BaseModel):
     thresholds_usd: list[float] = Field(default_factory=lambda: [5.0, 2.0, 0.5])
 
 
+class PolicyRuleConfig(BaseModel):
+    """One operator rule: a regular expression over a tool's canonical text (a shell command, a URL, or the
+    arguments as JSON) and what to do on a match. Rules can deny or ask; ``allow`` only lifts an ``ask``."""
+
+    id: str = ""
+    tool: str = "*"
+    pattern: str = ""
+    action: Literal["allow", "ask", "deny"] = "ask"
+    note: str = ""
+
+
+class PolicyConfig(BaseModel):
+    """Tool policy beyond the built-in rules (see ``daedalus.host.policy``)."""
+
+    rules: list[PolicyRuleConfig] = Field(default_factory=list)
+    egress_allow: list[str] = Field(default_factory=list)
+    """Hosts the agent may reach without asking (``example.com`` or ``*.example.com``). Empty = every host, logged."""
+
+
+class HooksConfig(BaseModel):
+    """Operator scripts around the agent's actions: JSON on stdin, verdict by exit code.
+
+    ``pre_tool`` gets ``{"tool_name", "arguments", "session_id", "run_id"}``; exit 2 denies the call with
+    the script's output as the reason, and a JSON object on stdout with ``"arguments"`` replaces them.
+    ``post_tool`` gets the result too and may replace ``"tool_output"``. ``run_finished`` gets the run's
+    status and is not waited for. Scripts run on the bot's host with the shell environment of tools.
+    """
+
+    pre_tool: str = ""
+    post_tool: str = ""
+    run_finished: str = ""
+    timeout_seconds: float = Field(default=20.0, gt=0, le=300)
+
+
 class MemoryConfig(BaseModel):
     """What the host does with memory beyond the Remember/Recall tools."""
 
@@ -428,18 +462,22 @@ class ModeConfig(BaseModel):
     prompt: str = ""
     """Extra rules appended to the system prompt while the mode is active."""
     tools_off: list[str] = Field(default_factory=list)
-    """Tools the session does not get while the mode is active (a plan mode blocks everything that changes state)."""
+    """Tools the session does not get while the mode is active; a trailing ``*`` matches a prefix (``Mcp_*``)."""
+    tools_only: list[str] = Field(default_factory=list)
+    """When set, the only tools the session gets while the mode is active: everything else, including tools added
+    later and every MCP tool, is off. A plan mode is an allow-list, so a new tool is blocked until someone decides."""
     description: str = ""
 
 
-PLAN_MODE_TOOLS_OFF = ["Write", "Edit", "MultiEdit", "Exec", "JobKill", "SendFile", "SelfPropose", "SelfRebuild", "SelfRollback", "ServiceStart", "ServiceStop", "SubAgent", "SubAgentSend", "SpawnAgent", "ScheduleCreate", "ScheduleDelete", "Forget", "BoardUpdate"]
-"""What a plan may not do: change files, run commands, send anything, start anything."""
+PLAN_MODE_TOOLS_ONLY = ["Read", "Find", "Search", "WebFetch", "WebSearch", "HistorySearch", "HistoryExpand", "Recall", "Remember", "Skill", "ImageView", "BoardList", "BoardGet", "ScheduleList", "LoopStatus", "JobOutput", "JobList", "ServiceList", "ServiceLogs", "McpList", "PeerList", "SubAgentList", "IntentList", "LearningReport", "AskUser", "StaySilent"]
+"""What a plan may do: read, search, look, remember and ask. Everything else — files, commands, Verify, sending,
+starting, peers, MCP tools — is off until the operator switches the mode."""
 
 DEFAULT_MODES: dict[str, ModeConfig] = {
     "plan": ModeConfig(
         max_iterations=60,
         usd_per_run=1.0,
-        tools_off=PLAN_MODE_TOOLS_OFF,
+        tools_only=PLAN_MODE_TOOLS_ONLY,
         description="read and plan only; nothing is changed until the operator switches the mode",
         prompt=(
             "Mode: plan. You may read files, search, fetch and think; the tools that change anything are off. "
@@ -601,6 +639,8 @@ class RuntimeConfig(BaseModel):
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)
     asr: AsrConfig = Field(default_factory=AsrConfig)

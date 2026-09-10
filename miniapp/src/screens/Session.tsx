@@ -765,6 +765,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                   {detail.context.window > 0 && ` / ${detail.context.window.toLocaleString()} tokens (${Math.round((100 * detail.context.tokens) / detail.context.window)}%)`} · {detail.context.messages} messages in the working history: {detail.context.summaries} summaries, {detail.context.operator_turns} yours. The header's ↑↓ figures are lifetime totals.
                 </div>
               )}
+              <ToolTiming sessionId={id} />
               <div className="btnrow">
                 <button className="btn small" onClick={compact}><Icon name="compact" size={14} /> Compact history</button>
                 <button className="btn small" onClick={clearHistory} title="Start over with an empty history; the workspace, the brief and the settings stay"><Icon name="trash" size={14} /> Clear history</button>
@@ -1748,6 +1749,20 @@ function ToolAttachment({ item }: { item: ToolItem }) {
   );
 }
 
+function ToolTiming({ sessionId }: { sessionId: string }) {
+  const [rows, setRows] = useState<{ name: string; calls: number; errors: number; total_ms: number; mean_ms: number }[]>([]);
+  useEffect(() => {
+    api.get<{ items: { name: string; calls: number; errors: number; total_ms: number; mean_ms: number }[] }>(`/api/sessions/${sessionId}/tools/timing`).then((r) => setRows(r.items)).catch(() => setRows([]));
+  }, [sessionId]);
+  if (!rows.length) return null;
+  const total = rows.reduce((a, r) => a + r.total_ms, 0);
+  return (
+    <div className="sub">
+      Tool time {Math.round(total / 1000)}s: {rows.slice(0, 5).map((r) => `${r.name} ${Math.round(r.total_ms / 1000)}s/${r.calls}${r.errors ? ` (${r.errors} failed)` : ""}`).join(" · ")}
+    </div>
+  );
+}
+
 function ToolResultText({ item }: { item: ToolItem }) {
   const { id: sessionId } = useContext(SessionContext);
   const [full, setFull] = useState<string | null>(null);
@@ -1765,9 +1780,25 @@ function ToolResultText({ item }: { item: ToolItem }) {
       setLoading(false);
     }
   }
+  const approval = item.error ? /Approval key: ([0-9a-f]{12})/.exec(text) : null;
+  const [granted, setGranted] = useState(false);
+  async function allowOnce() {
+    if (!approval) return;
+    try {
+      await api.post(`/api/sessions/${sessionId}/policy/grant`, { key: approval[1] });
+      setGranted(true);
+    } catch {
+      setGranted(false);
+    }
+  }
   return (
     <>
       <pre className={`result ${item.error ? "error" : ""} ${full !== null ? "full" : ""}`}>{text}</pre>
+      {approval && (
+        <button type="button" className="btn small" onClick={allowOnce} disabled={granted} title="Let this exact call through once; the agent retries it on its next step">
+          {granted ? `Allowed once (${approval[1]})` : `Allow once (${approval[1]})`}
+        </button>
+      )}
       {clipped && (
         <button type="button" className="btn small" onClick={loadAll} disabled={loading}>
           {loading ? "Loading…" : `Show all (${item.length!.toLocaleString()} characters)`}

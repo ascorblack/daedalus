@@ -18,15 +18,19 @@ from daedalus.tools.files import EditMiss, apply_edit, nearest_window
 
 def test_apply_edit_matches_exactly_then_loosely_and_keeps_the_file_indentation() -> None:
     text = "def f():\n    x = 1  \n    return x\n"
-    updated, count, how = apply_edit(text, "    x = 1", "    x = 2")
-    assert (updated, count, how) == ("def f():\n    x = 2  \n    return x\n", 1, "ignoring trailing whitespace") or how == "exactly"
+    updated, count, how = apply_edit(text, "    x = 1\n    return x", "    x = 2\n    return x")
+    assert (updated, count) == ("def f():\n    x = 2\n    return x\n", 1) and how.startswith("ignoring trailing whitespace at line 2")
     updated, count, how = apply_edit(text, "x = 1\nreturn x", "x = 3\nreturn x + 1")
-    assert how == "ignoring indentation" and updated == "def f():\n    x = 3\n    return x + 1\n"
+    assert how.startswith("ignoring indentation at line 2") and updated == "def f():\n    x = 3\n    return x + 1\n"
     with pytest.raises(EditMiss, match="closest lines"):
         apply_edit(text, "    y = 1\n    return y", "z")
     with pytest.raises(EditMiss, match="matches 2 times"):
         apply_edit("a\na\n", "a", "b")
     assert apply_edit("a\na\n", "a", "b", replace_all=True)[0] == "b\nb\n"
+    # a loose replace_all edits every hit, each at its own indentation, and reports the true count
+    loose = "if a:\n  pass \nelse:\n      pass \n"
+    updated, count, how = apply_edit(loose, "        pass", "        continue", replace_all=True)
+    assert updated == "if a:\n  continue\nelse:\n      continue\n" and count == 2 and "and 1 more" in how
     assert "return x" in nearest_window(text, "    return y")
 
 
@@ -56,7 +60,7 @@ async def test_background_jobs_start_report_and_die(tmp_path: Path) -> None:
         started = await exec_command().invoke(ctx, {"command": "for i in 1 2 3; do echo tick $i; sleep 0.2; done; sleep 30", "background": True})
         assert not started.is_error and "running" in started.content
         job_id = str(started.metadata["job_id"])
-        await asyncio.sleep(0.9)
+        await asyncio.sleep(1.6)
         out = await job_output().invoke(ctx, {"job_id": job_id, "tail_lines": 2})
         assert "tick 3" in out.content and out.metadata["running"] is True
         listing = await job_list().invoke(ctx, {})
@@ -82,11 +86,27 @@ async def test_exec_keeps_the_tail_and_spills_the_whole_output(tmp_path: Path) -
         locator.unregister("w2-spill")
 
 
-def test_plan_mode_blocks_everything_that_changes_state() -> None:
+async def test_plan_mode_is_an_allow_list_that_a_settings_toggle_cannot_disarm(settings, db) -> None:  # type: ignore[no-untyped-def]
+    from daedalus.host.session_runner import SessionManager
+
     plan = DEFAULT_MODES["plan"]
-    assert {"Write", "Edit", "MultiEdit", "Exec", "SendFile", "SelfPropose", "SubAgent"} <= set(plan.tools_off)
-    assert "Read" not in plan.tools_off and "Search" not in plan.tools_off and "WebFetch" not in plan.tools_off
-    assert "plan" in RuntimeConfig().modes and RuntimeConfig().modes["plan"].tools_off == plan.tools_off
+    assert {"Read", "Search", "WebFetch", "AskUser"} <= set(plan.tools_only) and "plan" in RuntimeConfig().modes
+    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    await manager.start()
+    try:
+        state = await manager.create_session("plan")
+        known = {t.name for t in manager.tools.list_all()}
+        assert manager.blocked_tools_for(state) == set()
+        await manager.set_mode(state.session.id, "plan")
+        blocked = manager.blocked_tools_for(state)
+        assert {"Exec", "Verify", "Write", "Edit", "MultiEdit", "SendFile", "SelfPropose", "SubAgent", "AskPeer", "McpEnable", "ServiceStart"} <= blocked
+        assert blocked == known - set(plan.tools_only)
+        await manager.set_tools_off(state.session.id, ["WebSearch"])
+        assert "Exec" in manager.blocked_tools_for(state) and "WebSearch" in manager.blocked_tools_for(state)
+        await manager.set_mode(state.session.id, "")
+        assert manager.blocked_tools_for(state) == {"WebSearch"}
+    finally:
+        await manager.close()
 
 
 def test_run_budgets_are_configurable_and_off_by_default() -> None:

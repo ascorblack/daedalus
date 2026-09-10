@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
 import time
@@ -41,8 +42,9 @@ from protocore.tools.memory import build_memory_tools
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.checkpoints import CheckpointError, Checkpoints, workspace_size
-from daedalus.host.engine_factory import TENANT, EngineDeps, build_engine
+from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
 from daedalus.host.hooks import DaedalusHookManager
+from daedalus.host.policy import Decision, Policy, Rule
 from daedalus.host.services import SessionServices, locator
 from daedalus.host.skills import DirectorySkillStore
 from daedalus.mcp.manager import McpManager, blocked_for
@@ -63,9 +65,9 @@ from daedalus.tools import discover_tools
 
 logger = logging.getLogger(__name__)
 BRIEF_MAX_CHARS = 12_000
+"""A spawned agent's brief lives in its system prompt; longer hand-overs belong in files."""
 WORKSPACE_NOTES_CHARS = 6000
 """How much of the workspace AGENTS.md rides along in the prompt; the rest is one Read away."""
-"""A spawned agent's brief lives in its system prompt; longer hand-overs belong in files."""
 
 EventSink = Callable[[str, TurnEvent], Awaitable[None]]
 RunFinished = Callable[[str, str, str], Awaitable[None]]  # session_id, run_id, status
@@ -106,6 +108,11 @@ class SessionState:
     """The kind of the error that ended the current run, from the core's ERROR event (``llm_context_window_exceeded`` …)."""
     overflow_streak: int = 0
     """Consecutive runs that overflowed the context window; recovery stops after a few so a hopeless history cannot loop."""
+    run_active_since: float = 0.0
+    """Monotonic time the current run (re)started driving the model: the time cap counts from here, not from
+    the run's creation, so an hour waiting on the operator's answer is not an hour of run time."""
+    tool_starts: dict[str, tuple[float, str]] = field(default_factory=dict)
+    """Tool calls in flight: ``call_id -> (monotonic start, tool name)``, for the timing rows."""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """Serialises run starts against history rewrites (compaction)."""
     submit_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -151,7 +158,9 @@ class SessionManager:
         self.skills = DirectorySkillStore(settings.skills_dir)
         self.redactor = redact.shared()
         self._configure_redactor(settings, config)
-        self.hooks = DaedalusHookManager(self.redactor)
+        self.hooks = DaedalusHookManager(self.redactor, hooks_config=lambda: self.config.hooks)
+        self._background: set[asyncio.Task[Any]] = set()
+        self._jobs: dict[str, dict[str, Any]] = {}
         self.tools = InMemoryToolRegistry()
         self.providers = ProviderRegistry(
             settings, config, usage_sink=self.usage, image_loader=self._load_image
@@ -307,14 +316,7 @@ class SessionManager:
         state.metadata["mcp_enabled"] = current
         state.session.metadata["mcp_enabled"] = current
         await self.sessions.update_metadata(session_id, state.session.metadata)
-        if state.engine is not None:
-            blocked = blocked_for(self.mcp, current) | self.tools_off(state)
-            state.engine.config = replace(
-                state.engine.config,
-                tool_visibility_policy=ToolVisibilityPolicy(
-                    pinned={t.name for t in self.tools.list_all()} - blocked, blocked=blocked
-                ),
-            )
+        self._apply_tool_visibility(state)
         return current
 
     async def mcp_service(
@@ -469,6 +471,13 @@ class SessionManager:
                 await asyncio.gather(state.task, return_exceptions=True)
         self._states.pop(session_id, None)
         locator.unregister(session_id)
+        for job in self._jobs.pop(session_id, {}).values():
+            process = getattr(job, "process", None)
+            if process is not None and process.returncode is None:
+                try:
+                    os.killpg(process.pid, 9)
+                except (ProcessLookupError, PermissionError):
+                    pass
         runs = await self.db.fetchall("SELECT id FROM runs WHERE session_id = ?", (session_id,))
         async with self.db.transaction() as conn:
             for row in runs:
@@ -934,7 +943,7 @@ class SessionManager:
             self_rebuild=hooks.get("self_rebuild"),
             self_rollback=hooks.get("self_rollback"),
             progress=_bind(hooks.get("progress"), state.session.id),
-            extra={"skill_store": self.skills, "manager": self, "vision": _LiveVision(self)},
+            extra={"skill_store": self.skills, "manager": self, "vision": _LiveVision(self), "jobs": self._jobs.setdefault(state.session.id, {})},
         )
         state.services = services
         locator.register(services)
@@ -1097,6 +1106,7 @@ class SessionManager:
             state.metadata.pop("mode", None)
             state.session.metadata.pop("mode", None)
         await self.sessions.update_metadata(session_id, state.session.metadata)
+        self._apply_tool_visibility(state)  # a running engine takes the mode's tool rules from the next call on
         return name
 
     def mode_for(self, state: SessionState) -> Any:
@@ -1153,6 +1163,7 @@ class SessionManager:
             governance_path=self.governance_path,
             github_org=self.settings.daedalus_github_org,
             ssh_config=Path.home() / ".ssh" / "config",
+            policy_gate=self.policy_gate,
         )
         mode_name = str(state.metadata.get("mode") or "")
         mode = self.config.modes.get(mode_name) if mode_name else None
@@ -1187,7 +1198,7 @@ class SessionManager:
             context_window=state.context_window or preset.context_window,
             max_output_tokens=preset.max_output_tokens,
             extra_notes=self.notes_for(state) + await self.workspace_notes(state),
-            blocked_tools=blocked_for(self.mcp, enabled) | self.tools_off(state) | ({str(n) for n in mode.tools_off} if mode is not None else set()),
+            blocked_tools=self.blocked_tools_for(state),
         )
         self._attach_hooks(engine, state)
         return engine
@@ -1272,6 +1283,7 @@ class SessionManager:
     ) -> str:
         if state.running and not continue_turn:
             raise RuntimeError("a run is already active in this session")
+        state.run_active_since = time.monotonic()
         state.last_error_kind = ""
         if message is not None:
             state.run_origin = str(message.metadata.get("daedalus.origin") or "operator")
@@ -1420,6 +1432,7 @@ class SessionManager:
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 (pending.session_id, pending.run_id, pending.tool_call_id, pending.kind, json.dumps(pending.payload), datetime.now(UTC).isoformat()),
             )
+        self._time_tool(state, event)
         self._redact_event(state, event)
         durable = event.to_event()
         durable.payload.setdefault("tenant_id", TENANT)
@@ -1432,6 +1445,25 @@ class SessionManager:
                 logger.exception("event sink failed")
         if event.type is EventType.MESSAGE_STOP:
             await self._enforce_caps(state, event.run_id)
+
+    def _time_tool(self, state: SessionState, event: TurnEvent) -> None:
+        """One row per tool call: name, when, how long, whether it failed. The waterfall of a run is these rows."""
+        p = event.payload
+        call_id = str(p.get("tool_call_id") or "")
+        if not call_id:
+            return
+        if event.type is EventType.TOOL_USE_START:
+            state.tool_starts[call_id] = (time.monotonic(), str(p.get("tool_name") or ""))
+        elif event.type is EventType.TOOL_RESULT:
+            started = state.tool_starts.pop(call_id, None)
+            if started is None:
+                return
+            duration_ms = int((time.monotonic() - started[0]) * 1000)
+            row = (state.session.id, event.run_id, call_id, started[1], datetime.now(UTC).isoformat(), duration_ms, 0 if p.get("is_error") else 1)
+            task = asyncio.create_task(self.db.execute("INSERT INTO tool_calls(session_id, run_id, tool_call_id, name, at, duration_ms, ok) VALUES (?, ?, ?, ?, ?, ?, ?)", row), name=f"tool-timing:{call_id}")
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
+            p["duration_ms"] = duration_ms
 
     def _redact_event(self, state: SessionState, event: TurnEvent) -> None:
         """Mask secrets the core's hook did not see: failure results, error text, tool arguments.
@@ -1474,6 +1506,14 @@ class SessionManager:
                 engine.history[index] = message.model_copy(update={"content_blocks": blocks})
                 return
 
+    async def spend_with_subagents(self, session_id: str) -> float:
+        """A session's priced spend plus that of every subagent it started: the cap is the leader's."""
+        rows = await self.db.fetchall("SELECT id FROM sessions WHERE metadata LIKE ?", (f'%"subagent_of": "{session_id}"%',))
+        ids = [session_id, *(str(r["id"]) for r in rows)]
+        placeholders = ",".join("?" for _ in ids)
+        row = await self.db.fetchone(f"SELECT sum(cost_usd) usd FROM usage_events WHERE session_id IN ({placeholders})", tuple(ids))
+        return float(row["usd"] or 0.0) if row else 0.0
+
     async def spend(self, *, run_id: str | None = None, session_id: str | None = None, provider_id: str | None = None, since: str | None = None) -> tuple[float, int]:
         """Priced spend in USD (and the number of unpriced calls) over the given slice of usage events."""
         clauses: list[str] = []
@@ -1515,6 +1555,28 @@ class SessionManager:
         known = {t.name for t in self.tools.list_all()}
         return {str(n) for n in (state.metadata.get("tools_off") or ()) if str(n) in known}
 
+    def blocked_tools_for(self, state: SessionState) -> set[str]:
+        """Everything this session may not call right now: disabled MCP servers' tools, the operator's switches,
+        and the mode's rules. One computation for the engine build and for every live update, so a toggle in
+        Settings cannot disarm a mode."""
+        known = {t.name for t in self.tools.list_all()}
+        blocked = blocked_for(self.mcp, self.mcp_enabled(state)) | self.tools_off(state)
+        mode = self.mode_for(state)
+        if mode is not None:
+            if mode.tools_only:
+                blocked |= known - {str(n) for n in mode.tools_only}
+            for entry in mode.tools_off:
+                name = str(entry)
+                blocked |= {t for t in known if t.startswith(name[:-1])} if name.endswith("*") else {name}
+        return blocked
+
+    def _apply_tool_visibility(self, state: SessionState) -> None:
+        if state.engine is None:
+            return
+        known = {t.name for t in self.tools.list_all()}
+        blocked = self.blocked_tools_for(state)
+        state.engine.config = replace(state.engine.config, tool_visibility_policy=ToolVisibilityPolicy(pinned=known - blocked, blocked=blocked))
+
     async def set_tools_off(self, session_id: str, names: list[str]) -> list[str]:
         """Switch tools off (or back on, by omission) for a session; applies from the next model call."""
         state = await self.get_state(session_id)
@@ -1528,9 +1590,7 @@ class SessionManager:
             else:
                 meta.pop("tools_off", None)
         await self.sessions.update_metadata(session_id, state.session.metadata)
-        if state.engine is not None:
-            blocked = blocked_for(self.mcp, self.mcp_enabled(state)) | set(chosen)
-            state.engine.config = replace(state.engine.config, tool_visibility_policy=ToolVisibilityPolicy(pinned=known - blocked, blocked=blocked))
+        self._apply_tool_visibility(state)
         return chosen
 
     def notes_for(self, state: SessionState) -> str:
@@ -1562,11 +1622,11 @@ class SessionManager:
             path = state.workspace / name
             try:
                 if path.is_file():
-                    text = path.read_text(encoding="utf-8", errors="replace").strip()
+                    text = (await asyncio.to_thread(path.read_text, "utf-8", "replace")).strip()
                     if text:
                         if len(text) > WORKSPACE_NOTES_CHARS:
                             text = text[:WORKSPACE_NOTES_CHARS] + f"\n[… {name} continues; Read it for the rest]"
-                        parts.append(f"- {name} in the workspace (your project memory; keep it current):\n{text}")
+                        parts.append(f"- {name} in the workspace (your project memory; keep it current):\n{self.redactor.redact(text)}")
                     break
             except OSError:
                 continue
@@ -1597,6 +1657,75 @@ class SessionManager:
         raw = state.metadata.get("usd_cap")
         return float(raw) if raw is not None else None
 
+    # -- tool policy ---------------------------------------------------------------
+
+    def policy(self) -> Policy:
+        cfg = self.config.policy
+        rules = [Rule(id=r.id or f"config.{i}", tool=r.tool or "*", action=r.action, note=r.note, pattern=r.pattern, source="config") for i, r in enumerate(cfg.rules, 1)]
+        return Policy(protected_paths=(self.governance_path, Path("/opt/launcher"), self.settings.secrets_dir), egress_allow=cfg.egress_allow, rules=rules, workspace_roots=(self.settings.workspaces_dir,))
+
+    def policy_gate(self, session_id: str, run_id: str) -> Any:
+        """The policy bound to one session: grants are the session's, the egress log names the run."""
+        policy = self.policy()
+
+        def decide(tool: str, arguments: dict[str, Any]) -> Decision:
+            state = self._states.get(session_id)
+            grants = set(state.metadata.get("policy_grants") or ()) if state is not None else set()
+            decision = policy.evaluate(tool, arguments, grants=grants)
+            if decision.key and decision.action == "allow" and state is not None:
+                self._consume_grant(state, decision.key)
+            if decision.hosts:
+                self._record_egress(session_id, run_id, tool, decision.hosts, decision.action)
+            if decision.action != "allow":
+                logger.warning("policy %s %s for %s in session %s: %s", decision.action, decision.rule, tool, session_id, decision.reason)
+            return decision
+
+        return PolicyAdapter(decide)
+
+    def _consume_grant(self, state: SessionState, key: str) -> None:
+        for meta in (state.metadata, state.session.metadata):
+            grants = [g for g in (meta.get("policy_grants") or []) if g != key]
+            meta["policy_grants"] = grants
+        task = asyncio.create_task(self.sessions.update_metadata(state.session.id, state.session.metadata), name=f"grant-consume:{state.session.id}")
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    def _record_egress(self, session_id: str, run_id: str, tool: str, hosts: list[str], action: str) -> None:
+        async def _write() -> None:
+            now = datetime.now(UTC).isoformat()
+            await self.db.executemany("INSERT INTO egress_log(at, session_id, run_id, tool, host, action) VALUES (?, ?, ?, ?, ?, ?)", [(now, session_id, run_id, tool, h, action) for h in hosts])
+
+        task = asyncio.create_task(_write(), name=f"egress:{run_id}")
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def grant(self, session_id: str, key: str) -> list[str]:
+        """The operator lets one refused call through: the key from the refusal, valid once."""
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        key = key.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{12}", key):
+            raise ValueError("an approval key is 12 hex characters, as shown in the refusal")
+        for meta in (state.metadata, state.session.metadata):
+            grants = list(meta.get("policy_grants") or [])
+            if key not in grants:
+                grants.append(key)
+            meta["policy_grants"] = grants[-20:]
+        await self.sessions.update_metadata(session_id, state.session.metadata)
+        return list(state.metadata["policy_grants"])
+
+    async def egress(self, session_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        rows = await self.db.fetchall("SELECT at, run_id, tool, host, action FROM egress_log WHERE session_id = ? ORDER BY seq DESC LIMIT ?", (session_id, limit))
+        return [dict(r) for r in rows]
+
+    async def tool_timing(self, session_id: str) -> list[dict[str, Any]]:
+        """Per tool: calls, errors, total and mean time — where a session's wall-clock goes."""
+        rows = await self.db.fetchall(
+            "SELECT name, count(*) calls, sum(ok = 0) errors, sum(duration_ms) total_ms, avg(duration_ms) mean_ms, max(duration_ms) max_ms FROM tool_calls WHERE session_id = ? GROUP BY name ORDER BY total_ms DESC", (session_id,)
+        )
+        return [dict(r) for r in rows]
+
     async def set_session_cap(self, session_id: str, cap: float | None) -> float | None:
         state = await self.get_state(session_id)
         if state is None:
@@ -1622,9 +1751,9 @@ class SessionManager:
         since = limits.total_since or None
         session_cap = self.session_cap(state)
         if session_cap is not None:
-            spent, _ = await self.spend(session_id=state.session.id)
+            spent = await self.spend_with_subagents(state.session.id)
             if spent >= session_cap:
-                return "session_cap", f"session cap reached: ${spent:.2f} spent of ${session_cap:.2f}; raise it in the session settings to continue"
+                return "session_cap", f"session cap reached: ${spent:.2f} spent of ${session_cap:.2f} (subagents included); raise it in the session settings to continue"
         provider_cap = float(limits.usd_total_per_provider.get(provider_id or "", 0) or 0)
         if provider_id and provider_cap > 0:
             spent, _ = await self.spend(provider_id=provider_id, since=since)
@@ -1652,16 +1781,15 @@ class SessionManager:
             used = int(row["t"] or 0) if row else 0
             if used >= limits.max_run_tokens:
                 kind, note = "run_tokens", f"⏱ token cap reached: {used:,} tokens in this run of {limits.max_run_tokens:,} (limits.max_run_tokens); stopping this run. Send a message to continue in a new run."
-        if note is None and limits.max_run_minutes > 0:
-            row = await self.db.fetchone("SELECT created_at FROM runs WHERE id = ?", (run_id,))
-            if row and row["created_at"]:
-                minutes = (datetime.now(UTC) - datetime.fromisoformat(row["created_at"])).total_seconds() / 60
-                if minutes >= limits.max_run_minutes:
-                    kind, note = "run_minutes", f"⏱ time cap reached: {minutes:.0f} min in this run of {limits.max_run_minutes} (limits.max_run_minutes); stopping this run. Send a message to continue in a new run."
+        if note is None and limits.max_run_minutes > 0 and state.run_active_since:
+            minutes = (time.monotonic() - state.run_active_since) / 60
+            if minutes >= limits.max_run_minutes:
+                kind, note = "run_minutes", f"⏱ time cap reached: {minutes:.0f} min of active work in this run of {limits.max_run_minutes} (limits.max_run_minutes); stopping this run. Send a message to continue in a new run."
         if note is not None:
             pass
         elif (run_cap > 0 or mode_cap is not None) and spent >= run_cap:
-            note = f"💸 per-run cap reached: ${spent:.2f} spent of ${run_cap:.2f} (limits.usd_per_run); stopping this run. Send a message to continue in a new run."
+            source = f"mode {state.metadata.get('mode')}" if mode_cap is not None else "limits.usd_per_run"
+            note = f"💸 per-run cap reached: ${spent:.2f} spent of ${run_cap:.2f} ({source}); stopping this run. Send a message to continue in a new run."
             if unmetered:
                 note += f" {unmetered} call(s) had no known price and are not counted."
         else:

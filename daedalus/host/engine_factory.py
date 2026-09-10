@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,12 @@ from protocore.contracts.tool_registry import IToolRegistry, ToolVisibilityPolic
 from protocore.runtime.query_engine import QueryEngine, QueryEngineConfig
 from protocore.runtime.runtime_constants import default_runtime_constants
 from protocore.runtime.tool_dispatch import ToolDispatcher
-from protocore.runtime.tool_permission import ToolPermissionGate
+from protocore.runtime.tool_permission import (
+    PermissionStage,
+    ToolPermissionDecision,
+    ToolPermissionGate,
+    ToolPermissionOutcome,
+)
 
 from daedalus.config import ModeConfig, RuntimeConfig
 from daedalus.host import prompts
@@ -36,6 +42,31 @@ class EngineDeps:
     github_org: str = ""
     ssh_config: Path | None = None
     """The ssh config whose described hosts the prompt lists; ``None`` lists nothing."""
+    policy_gate: Callable[[str, str], Any] | None = None
+    """``(session_id, run_id) -> IToolSafetyPolicy``: the host's tool policy bound to the session; ``None`` = no policy."""
+
+
+class PolicyAdapter:
+    """The host policy as the core's safety policy: every tool, every class; deny with the reason."""
+
+    def __init__(self, decide: Callable[[str, dict[str, Any]], Any]) -> None:
+        self.decide = decide
+
+    def applies_to(self, side_effect_class: str) -> bool:
+        return True
+
+    def evaluate(self, tool: Any, arguments: dict[str, Any], ctx: Any) -> ToolPermissionDecision:
+        decision = self.decide(tool.name, dict(arguments or {}))
+        if decision.action == "allow":
+            return ToolPermissionDecision(outcome=ToolPermissionOutcome.allow)
+        if decision.action == "ask":
+            reason = (
+                f"needs the operator's approval: {decision.reason} (rule {decision.rule}). Approval key: {decision.key}. "
+                "Ask the operator with AskUser, quoting the key; once they grant it (/allow <key>, or the Mini App), the same call passes."
+            )
+        else:
+            reason = f"refused by policy: {decision.reason} (rule {decision.rule}). This is not a question for the operator; do the task another way."
+        return ToolPermissionDecision(outcome=ToolPermissionOutcome.deny, reason=reason, stage=PermissionStage.safety_policy)
 
 
 def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_tokens: int, thinking: bool, mode: ModeConfig | None = None) -> Any:
@@ -157,7 +188,7 @@ def build_engine(
     # The container is the boundary: no shell deny patterns, no path isolation.
     engine._tool_dispatcher = ToolDispatcher(  # type: ignore[attr-defined]
         registry=deps.tool_registry,
-        permission_gate=ToolPermissionGate(policies=[]),
+        permission_gate=ToolPermissionGate(policies=[deps.policy_gate(session_id, run_id)] if deps.policy_gate is not None else []),
         hook_manager=deps.hook_manager,
     )
     deps.event_stream.bind_run(run_id, session_id)

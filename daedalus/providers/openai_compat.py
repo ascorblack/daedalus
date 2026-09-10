@@ -47,7 +47,7 @@ _CONTEXT_ERROR_MARKERS = (
 )
 
 
-def apply_cache_control(messages: list[dict[str, Any]], breakpoints: Any) -> None:
+def apply_cache_control(messages: list[dict[str, Any]], breakpoints: Any, *, index_map: list[int] | None = None) -> None:
     """Translate the core's cache breakpoints into OpenRouter's ``cache_control`` blocks.
 
     OpenRouter forwards ``cache_control`` to Anthropic (and ignores it elsewhere); DeepSeek and vLLM cache
@@ -56,9 +56,17 @@ def apply_cache_control(messages: list[dict[str, Any]], breakpoints: Any) -> Non
     """
     for bp in breakpoints:
         index = getattr(bp, "message_index", None)
-        if index is None or not (0 <= index < len(messages)):
+        if index is None:
+            continue
+        if index_map is not None:
+            if not (0 <= index < len(index_map)):
+                continue
+            index = index_map[index]
+        if not (0 <= index < len(messages)):
             continue
         entry = messages[index]
+        if entry.get("role") == "tool":
+            continue  # a tool result's content must stay a string on the wire
         content = entry.get("content")
         if isinstance(content, str):
             if not content:
@@ -303,13 +311,15 @@ class OpenAICompatibleProvider(ILLMProvider):
     async def _build_body(self, request: LLMRequest, *, stream: bool) -> dict[str, Any]:
         extra = dict(request.extra or {})
         model = request.model
+        wire: list[dict[str, Any]] = []
+        wire_index: list[int] = []  # core message index -> index of its LAST wire entry (a tool message fans out into several)
+        for message in request.messages:
+            entries = await messages_to_wire([message], image_loader=self._image_loader, supports_images=self.accepts_images(model))
+            wire.extend(entries)
+            wire_index.append(len(wire) - 1)
         body: dict[str, Any] = {
             "model": model,
-            "messages": await messages_to_wire(
-                request.messages,
-                image_loader=self._image_loader,
-                supports_images=self.accepts_images(model),
-            ),
+            "messages": wire,
             "max_tokens": request.max_tokens,
             "temperature": self.endpoint.temperature if self.endpoint.temperature is not None else request.temperature,
             "stream": stream,
@@ -328,7 +338,7 @@ class OpenAICompatibleProvider(ILLMProvider):
         self._apply_thinking(body, thinking=thinking, effort=effort)
         breakpoints = extra.get("cache_breakpoints")
         if breakpoints and self.endpoint.kind == "openrouter":
-            apply_cache_control(body["messages"], breakpoints)
+            apply_cache_control(body["messages"], breakpoints, index_map=wire_index)
         return body
 
     def accepts_images(self, model: str) -> bool:

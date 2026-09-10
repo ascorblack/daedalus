@@ -1337,6 +1337,30 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @api.post("/api/sessions/{session_id}/policy/grant")
+    async def policy_grant(session_id: str, body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Let one refused call through: ``{"key": "<approval key from the refusal>"}``."""
+        try:
+            grants = await manager.grant(session_id, str(body.get("key") or ""))
+        except KeyError as exc:
+            raise HTTPException(404, "no such session") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"grants": grants}
+
+    @api.get("/api/sessions/{session_id}/egress")
+    async def session_egress(session_id: str, limit: int = 200, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return {"items": await manager.egress(session_id, limit=limit)}
+
+    @api.get("/api/sessions/{session_id}/tools/timing")
+    async def session_tool_timing(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return {"items": await manager.tool_timing(session_id)}
+
+    @api.get("/api/policy")
+    async def policy_rules(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        policy = manager.policy()
+        return {"rules": policy.describe(), "egress_allow": policy.egress_allow}
+
     @api.post("/api/sessions/{session_id}/stop")
     async def stop(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         return {"stopped": await manager.stop(session_id)}

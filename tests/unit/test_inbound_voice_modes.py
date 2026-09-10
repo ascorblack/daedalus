@@ -152,8 +152,8 @@ async def test_sandbox_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     argv, sandboxed = await shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
     assert sandboxed and argv[0] == "/usr/bin/bwrap" and "--unshare-pid" in argv and argv[argv.index("--bind") + 1] == str(ws) and argv[-3:] == ["bash", "-lc", "ls"]
     monkeypatch.setattr(shell, "_bwrap_state", "bwrap cannot create namespaces here")
-    argv, sandboxed = await shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
-    assert not sandboxed and argv[0] == "bash"
+    with pytest.raises(shell.SandboxUnavailable, match="configured .* but unavailable"):
+        await shell.sandbox_argv("ls", ws, ws, ExecToolsConfig(sandbox="workspace"))
 
 
 def test_key_proxy_routing_and_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

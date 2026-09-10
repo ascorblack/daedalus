@@ -21,7 +21,7 @@ from protocore.tools.decorator import tool
 
 from daedalus.security import redact
 from daedalus.tools._common import clip, error, ok, services_for, tool_config
-from daedalus.tools.shell import sandbox_argv, shell_environment
+from daedalus.tools.shell import SandboxUnavailable, sandbox_argv, shell_environment
 
 OUTPUT_HEAD_CHARS = 2000
 
@@ -53,7 +53,10 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
     if not workdir.exists():
         return error(context, f"working directory does not exist: {workdir}")
     # A failure anywhere in a pipeline fails the check; `pytest | tail` must not pass on tail's exit code.
-    argv, sandboxed = await sandbox_argv("set -o pipefail\n" + command, workdir, services.workspace_dir, tool_config(context).exec)
+    try:
+        argv, sandboxed = await sandbox_argv("set -o pipefail\n" + command, workdir, services.workspace_dir, tool_config(context).exec)
+    except SandboxUnavailable as exc:
+        return error(context, str(exc))
     proc = await asyncio.create_subprocess_exec(
         *argv, cwd=str(workdir), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         env=shell_environment(context.session_id, env), start_new_session=True,
