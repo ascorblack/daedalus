@@ -24,7 +24,7 @@ services:
     # tools.exec.sandbox = workspace (bubblewrap) needs the container to create namespaces, which Docker's
     # default seccomp profile forbids. Opt in by uncommenting; both widen what a process in the container may do.
     cap_add: [SYS_ADMIN]
-    security_opt: ["seccomp=unconfined"]
+    security_opt: ["seccomp=unconfined", "apparmor=unconfined"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile
