@@ -509,7 +509,7 @@ class TelegramFront:
         r.message.register(self.cmd_usage, Command("usage"))
         r.message.register(self.cmd_settings, Command("settings"))
         r.message.register(self.cmd_bind, Command("bind"))
-        r.message.register(self.cmd_operator, Command("rebuild", "rollback", "panic", "schedules", "verbosity", "approval", "balance", "schedule", "inbox", "heartbeat", "doctor", "intents", "board", "peer"))
+        r.message.register(self.cmd_operator, Command("rebuild", "rollback", "panic", "schedules", "verbosity", "approval", "balance", "schedule", "inbox", "heartbeat", "doctor", "intents", "board", "peer", "allow"))
         r.message.register(self.cmd_mode, Command("mode"))
         r.message.register(
             self.on_message,
@@ -1042,6 +1042,20 @@ class TelegramFront:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
         name = command.command
+        if name == "allow":
+            state = await self._session_for_message(message)
+            if state is None:
+                await message.answer("/allow works inside a session's topic or the private chat")
+                return
+            try:
+                result = await self.manager.grant(state.session.id, command.args or "")
+            except ValueError as exc:
+                await message.answer(f"usage: /allow <key> — {exc}")
+                return
+            approves = result.get("approves")
+            what = f"{approves['tool']}: {approves['text']}" if approves else "a call this host has not seen refused yet (the key is taken on trust)"
+            await message.answer(f"Granted {result['key']} for {what}. The same call passes once within {result['expires_in_minutes']} minutes.")
+            return
         if name == "verbosity":
             try:
                 self.config.telegram.verbosity = max(0, min(2, int((command.args or "").strip())))

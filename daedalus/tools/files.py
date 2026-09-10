@@ -173,6 +173,11 @@ def apply_edit(text: str, old: str, new: str, *, replace_all: bool = False) -> t
             raise EditMiss(f"old_string matches {count} times; make it unique or set replace_all")
         return (text.replace(old, new) if replace_all else text.replace(old, new, 1)), (count if replace_all else 1), "exactly"
     hits, n, how = _loose_hits(text, old)
+    kept: list[int] = []
+    for h in hits:  # overlapping windows would edit the same lines twice
+        if not kept or h >= kept[-1] + n:
+            kept.append(h)
+    hits = kept
     if len(hits) > 1 and not replace_all:
         raise EditMiss(f"old_string matches {len(hits)} times when {how} (lines {', '.join(str(h + 1) for h in hits[:8])}); make it unique or set replace_all")
     lines = text.splitlines(keepends=True)

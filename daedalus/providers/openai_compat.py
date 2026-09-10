@@ -62,6 +62,8 @@ def apply_cache_control(messages: list[dict[str, Any]], breakpoints: Any, *, ind
             if not (0 <= index < len(index_map)):
                 continue
             index = index_map[index]
+            if index < 0:
+                continue
         if not (0 <= index < len(messages)):
             continue
         entry = messages[index]
@@ -316,7 +318,7 @@ class OpenAICompatibleProvider(ILLMProvider):
         for message in request.messages:
             entries = await messages_to_wire([message], image_loader=self._image_loader, supports_images=self.accepts_images(model))
             wire.extend(entries)
-            wire_index.append(len(wire) - 1)
+            wire_index.append(len(wire) - 1 if entries else -1)  # -1: this message put nothing on the wire
         body: dict[str, Any] = {
             "model": model,
             "messages": wire,

@@ -44,7 +44,7 @@ from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.checkpoints import CheckpointError, Checkpoints, workspace_size
 from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
 from daedalus.host.hooks import DaedalusHookManager
-from daedalus.host.policy import Decision, Policy, Rule
+from daedalus.host.policy import Decision, Policy, Rule, canonical
 from daedalus.host.services import SessionServices, locator
 from daedalus.host.skills import DirectorySkillStore
 from daedalus.mcp.manager import McpManager, blocked_for
@@ -67,6 +67,8 @@ logger = logging.getLogger(__name__)
 BRIEF_MAX_CHARS = 12_000
 """A spawned agent's brief lives in its system prompt; longer hand-overs belong in files."""
 WORKSPACE_NOTES_CHARS = 6000
+GRANT_TTL_SECONDS = 2 * 3600
+"""How long an approval key stays spendable: long enough for the agent to retry, short enough that a forgotten grant does not wait for a later call."""
 """How much of the workspace AGENTS.md rides along in the prompt; the rest is one Read away."""
 
 EventSink = Callable[[str, TurnEvent], Awaitable[None]]
@@ -224,6 +226,8 @@ class SessionManager:
         pending = [t for s in self._states.values() for t in s.persist_tasks if not t.done()]
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)  # the last history write must land
+        await self.flush_background()
+        await self.hooks.aclose()
         backfill = getattr(self, "_backfill_task", None)
         if backfill is not None and not backfill.done():
             backfill.cancel()
@@ -395,6 +399,10 @@ class SessionManager:
         self._states[sid] = state
         self.register_services(state)
         return state
+
+    def live_state(self, session_id: str) -> SessionState | None:
+        """The state of a session this process already holds; ``None`` for one it would have to load."""
+        return self._states.get(session_id)
 
     async def get_state(self, session_id: str) -> SessionState | None:
         state = self._states.get(session_id)
@@ -933,6 +941,8 @@ class SessionManager:
                 self.governance_path,
                 Path("/opt/launcher"),
                 self.settings.secrets_dir,
+                self.settings.config_path,
+                self.settings.db_path,
             ),
             tool_timeout_seconds=self.config.limits.tool_timeout_seconds,
             max_tool_output_chars=self.config.tools.exec.max_output_chars,
@@ -1460,9 +1470,7 @@ class SessionManager:
                 return
             duration_ms = int((time.monotonic() - started[0]) * 1000)
             row = (state.session.id, event.run_id, call_id, started[1], datetime.now(UTC).isoformat(), duration_ms, 0 if p.get("is_error") else 1)
-            task = asyncio.create_task(self.db.execute("INSERT INTO tool_calls(session_id, run_id, tool_call_id, name, at, duration_ms, ok) VALUES (?, ?, ?, ?, ?, ?, ?)", row), name=f"tool-timing:{call_id}")
-            self._background.add(task)
-            task.add_done_callback(self._background.discard)
+            self._spawn_background(self.db.execute("INSERT INTO tool_calls(session_id, run_id, tool_call_id, name, at, duration_ms, ok) VALUES (?, ?, ?, ?, ?, ?, ?)", row), f"tool-timing:{call_id}")
             p["duration_ms"] = duration_ms
 
     def _redact_event(self, state: SessionState, event: TurnEvent) -> None:
@@ -1662,7 +1670,11 @@ class SessionManager:
     def policy(self) -> Policy:
         cfg = self.config.policy
         rules = [Rule(id=r.id or f"config.{i}", tool=r.tool or "*", action=r.action, note=r.note, pattern=r.pattern, source="config") for i, r in enumerate(cfg.rules, 1)]
-        return Policy(protected_paths=(self.governance_path, Path("/opt/launcher"), self.settings.secrets_dir), egress_allow=cfg.egress_allow, rules=rules, workspace_roots=(self.settings.workspaces_dir,))
+        return Policy(
+            protected_paths=(self.governance_path, Path("/opt/launcher"), self.settings.secrets_dir, self.settings.config_path, self.settings.db_path),
+            egress_allow=cfg.egress_allow, rules=rules, workspace_roots=(self.settings.workspaces_dir,),
+            operator_checkouts=(self.settings.bot_repo_dir, self.settings.core_repo_dir),
+        )
 
     def policy_gate(self, session_id: str, run_id: str) -> Any:
         """The policy bound to one session: grants are the session's, the egress log names the run."""
@@ -1670,10 +1682,17 @@ class SessionManager:
 
         def decide(tool: str, arguments: dict[str, Any]) -> Decision:
             state = self._states.get(session_id)
-            grants = set(state.metadata.get("policy_grants") or ()) if state is not None else set()
+            now = time.time()
+            grants = {k for k, until in (state.metadata.get("policy_grants") or {}).items() if float(until) > now} if state is not None else set()
             decision = policy.evaluate(tool, arguments, grants=grants)
             if decision.key and decision.action == "allow" and state is not None:
                 self._consume_grant(state, decision.key)
+            elif decision.key and state is not None:
+                # The refusal's preimage, so an operator granting the key from chat sees what they approve.
+                pending = dict(state.metadata.get("policy_pending") or {})
+                pending[decision.key] = {"tool": tool, "text": self.redactor.redact(canonical(tool, arguments))[:300], "at": datetime.now(UTC).isoformat()}
+                for meta in (state.metadata, state.session.metadata):
+                    meta["policy_pending"] = dict(list(pending.items())[-20:])
             if decision.hosts:
                 self._record_egress(session_id, run_id, tool, decision.hosts, decision.action)
             if decision.action != "allow":
@@ -1682,38 +1701,54 @@ class SessionManager:
 
         return PolicyAdapter(decide)
 
+    async def flush_background(self) -> None:
+        """Wait for the fire-and-forget writes (timing rows, egress rows, grant updates) to land."""
+        if self._background:
+            await asyncio.gather(*list(self._background), return_exceptions=True)
+
+    def _spawn_background(self, coro: Any, name: str) -> None:
+        task = asyncio.create_task(coro, name=name)
+        self._background.add(task)
+
+        def _done(t: asyncio.Task[Any]) -> None:
+            self._background.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.warning("%s failed: %s", name, t.exception())
+
+        task.add_done_callback(_done)
+
     def _consume_grant(self, state: SessionState, key: str) -> None:
         for meta in (state.metadata, state.session.metadata):
-            grants = [g for g in (meta.get("policy_grants") or []) if g != key]
+            grants = {k: v for k, v in (meta.get("policy_grants") or {}).items() if k != key}
             meta["policy_grants"] = grants
-        task = asyncio.create_task(self.sessions.update_metadata(state.session.id, state.session.metadata), name=f"grant-consume:{state.session.id}")
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
+        self._spawn_background(self.sessions.update_metadata(state.session.id, state.session.metadata), f"grant-consume:{state.session.id}")
 
     def _record_egress(self, session_id: str, run_id: str, tool: str, hosts: list[str], action: str) -> None:
         async def _write() -> None:
             now = datetime.now(UTC).isoformat()
             await self.db.executemany("INSERT INTO egress_log(at, session_id, run_id, tool, host, action) VALUES (?, ?, ?, ?, ?, ?)", [(now, session_id, run_id, tool, h, action) for h in hosts])
 
-        task = asyncio.create_task(_write(), name=f"egress:{run_id}")
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
+        self._spawn_background(_write(), f"egress:{run_id}")
 
-    async def grant(self, session_id: str, key: str) -> list[str]:
-        """The operator lets one refused call through: the key from the refusal, valid once."""
+    async def grant(self, session_id: str, key: str) -> dict[str, Any]:
+        """The operator lets one refused call through: the key from the refusal, valid once, for a limited time.
+
+        Returns what was approved (the refusal's tool and text when the host saw it) and the open grants.
+        """
         state = await self.get_state(session_id)
         if state is None:
             raise KeyError(session_id)
         key = key.strip().lower()
         if not re.fullmatch(r"[0-9a-f]{12}", key):
             raise ValueError("an approval key is 12 hex characters, as shown in the refusal")
+        pending = dict(state.metadata.get("policy_pending") or {})
+        until = time.time() + GRANT_TTL_SECONDS
         for meta in (state.metadata, state.session.metadata):
-            grants = list(meta.get("policy_grants") or [])
-            if key not in grants:
-                grants.append(key)
-            meta["policy_grants"] = grants[-20:]
+            grants = {k: v for k, v in (meta.get("policy_grants") or {}).items() if float(v) > time.time()}
+            grants[key] = until
+            meta["policy_grants"] = dict(list(grants.items())[-20:])
         await self.sessions.update_metadata(session_id, state.session.metadata)
-        return list(state.metadata["policy_grants"])
+        return {"key": key, "approves": pending.get(key), "grants": list(state.metadata["policy_grants"]), "expires_in_minutes": GRANT_TTL_SECONDS // 60}
 
     async def egress(self, session_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
         rows = await self.db.fetchall("SELECT at, run_id, tool, host, action FROM egress_log WHERE session_id = ? ORDER BY seq DESC LIMIT ?", (session_id, limit))
@@ -1856,6 +1891,7 @@ class SessionManager:
             return
         state.engine = engine
         state.run_id = entry["run_id"]
+        state.run_active_since = time.monotonic()  # the time cap counts from the resume, not from the run's creation
         state.history_keys = [self.sessions.transcript_key(m) for m in engine.history]
         if engine.state is LoopState.AWAITING:
             row = await self.db.fetchone("SELECT * FROM pending_questions WHERE session_id = ?", (session_id,))

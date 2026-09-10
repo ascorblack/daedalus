@@ -107,5 +107,11 @@ async def test_the_board_writes_plan_md_into_the_sessions_workspace(settings, db
         assert "Write the adapter" in plan and "- [ ] scaffold" in plan and "done when: harbor run passes hello-world" in plan
         await board.update(task["id"], check=[0], session_id=state.session.id)
         assert "- [x] scaffold" in (state.workspace / "PLAN.md").read_text()
+        await board.update(task["id"], check=[1], session_id=state.session.id)
+        await board.update(task["id"], status="done", session_id=state.session.id)
+        plan = (state.workspace / "PLAN.md").read_text()
+        assert f"- [x] **{task['id']}** Write the adapter — done" in plan  # finishing a task releases it but keeps it on the plan
+        await board.delete(task["id"])
+        assert task["id"] not in (state.workspace / "PLAN.md").read_text()
     finally:
         await manager.close()

@@ -750,9 +750,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
               <button className="menu-item" onClick={() => { setMenu(false); openPicker(); }}>
                 {detail.model || "global default"} <span className="sub">change</span>
               </button>
-              <a className="menu-item" href={api.downloadUrl(id, "").replace(/\/download\?path=.*$/, "/export/download") + (sessionStorage.getItem("daedalus_token") ? `?token=${encodeURIComponent(sessionStorage.getItem("daedalus_token") ?? "")}` : "")} target="_blank" rel="noreferrer">
+              <button className="menu-item" onClick={async () => { try { const res = await fetch(`/api/sessions/${id}/export/download`, { headers: api.authHeaders() }); if (!res.ok) throw new Error(String(res.status)); const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `session-${id}.md`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000); } catch (e) { toast(`export failed: ${String(e)}`); } }}>
                 Export as Markdown <span className="sub">every turn, tool call and the spend</span>
-              </a>
+              </button>
               <label className="field">Mode</label>
               <select className="field" value={detail.mode || "default"} onChange={(e) => setMode(e.target.value)}>
                 {["default", ...modes].map((m) => (

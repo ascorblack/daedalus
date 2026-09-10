@@ -270,7 +270,9 @@ preset = ""                  # a cheaper preset for the summariser; empty = the 
 [memory]
 extract_after_run = false    # store durable facts after a completed run (a paid call)
 
-[modes.plan]                 # built in: read-only tools until you switch the mode; edit or add modes here
+[modes.review]               # your own mode; the built-in ones (quick, deep, careful, plan) stay unless you redefine the whole table
+tools_only = ["Read", "Find", "Search", "WebFetch", "AskUser"]
+prompt = "Mode: review. Read and report; change nothing."
 ```
 
 A refused call comes back to the agent as an error. `refused by policy` is final; `needs the operator's approval`

@@ -323,6 +323,7 @@ async def _start_job(context: ToolContext, services: Any, command: str, workdir:
     job_id = f"job-{len(jobs) + 1}-{int(time.time() * 1000) % 1000000}"
     log = services.workspace_dir / ".jobs" / f"{job_id}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
+    _prune_spills(log.parent)  # the same bound as the spill directory: the newest logs stay
     try:
         argv, sandboxed = await sandbox_argv(command, workdir, services.workspace_dir, tool_config(context).exec)
     except SandboxUnavailable as exc:

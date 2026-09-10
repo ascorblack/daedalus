@@ -94,8 +94,9 @@ async def skill_draft(context: ToolContext, name: str, description: str, body: s
     directory = manager.settings.state_dir / "skill-drafts" / slug
     directory.mkdir(parents=True, exist_ok=True)
     front = f"---\nname: {slug}\ndescription: {description}\n" + (f"params: {params.strip()}\n" if params and params.strip() else "") + "---\n"
-    (directory / "SKILL.md").write_text(front + body.strip() + "\n", encoding="utf-8")
-    return ok(context, f"draft saved at {directory}/SKILL.md (session {context.session_id}). To ship it: SelfWorkspace('bot', 'skill-{slug}'), copy the directory into skills/{slug}/ there, Verify that Skill(skill=\"{slug}\") loads in a check, commit, SelfPropose with execution_path='daedalus.host.skills'.", path=str(directory))
+    body = manager.redactor.redact(body.strip())  # a draft may become public through a pull request: no secrets in it
+    (directory / "SKILL.md").write_text(front + body + "\n", encoding="utf-8")
+    return ok(context, f"draft saved at {directory}/SKILL.md (session {context.session_id}). To ship it: SelfWorkspace('bot', 'skill-{slug}'), copy the directory into skills/{slug}/ there, Verify with `uv run pytest tests/unit/test_skill_catalogue.py -q` from that worktree (the catalogue test loads every skill), commit, SelfPropose with execution_path='daedalus.host.skills'.", path=str(directory))
 
 
 TOOLS = [load_skill, skill_draft]

@@ -287,6 +287,8 @@ class SelfDevelopment:
         added = await self.git(spec, "diff", "origin/main...HEAD", "--unified=0", "--no-color", cwd=worktree)
         added_lines = "\n".join(line[1:] for line in added.splitlines() if line.startswith("+") and not line.startswith("+++"))
         leaks = public_references(added_lines) + ([m.group(0) for m in _PRIVATE_ADDRESSES.finditer(added_lines)][:3])
+        if redact.shared().redact(added_lines) != added_lines:
+            leaks.append("a credential-looking value (masked here)")
         if leaks:
             raise GitError(
                 "the diff carries a reference the public repository must not (in a docstring, comment or test): "

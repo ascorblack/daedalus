@@ -46,7 +46,19 @@ def test_builtin_rules_deny_the_machine_and_the_operators_paths() -> None:
     assert policy.evaluate("Exec", {"command": "dd if=/dev/zero of=/dev/sda"}).action == DENY
     assert policy.evaluate("Exec", {"command": ":(){ :|:& };:"}).action == DENY
     assert policy.evaluate("Verify", {"command": "rm -rf ~"}).action == DENY
+    assert policy.evaluate("ServiceStart", {"command": "rm -rf / ; python -m http.server"}).action == DENY
     assert policy.evaluate("Read", {"path": "/etc/passwd"}).action == "allow"
+    # the same commands behind shell keywords, wrappers, paths and helpers
+    for wrapped in ("if true; then rm -rf /; fi", "while true; do rm -rf /; done", "{ rm -rf /; }", "! rm -rf /", "for f in a; do rm -rf /; done", "then sudo env X=1 rm -rf /", "/bin/rm -rf /", "\\rm -rf /", "busybox rm -rf /", "rm -rf /etc/*", "rm -rf /srv/../", "find / -delete", "find /opt/launcher -exec rm -rf {} \\;"):
+        assert policy.evaluate("Exec", {"command": wrapped}).action == DENY, wrapped
+    assert policy.evaluate("Exec", {"command": "xargs rm -rf < list"}).action == ASK
+    assert policy.evaluate("Exec", {"command": "git -C /srv/daedalus push"}).action == DENY
+    assert policy.evaluate("Exec", {"command": "rm -rf /srv/workspaces"}).action == DENY
+    for write in ("curl -o /opt/launcher/x https://github.com/a", "tee /opt/launcher/z < x", "ln -sf /etc/passwd /opt/launcher/x", "tar -C / -xf x.tar", "unzip -d /usr x.zip", "dd if=x of=/opt/launcher/y", "wget -O /opt/launcher/w http://h/x"):
+        assert policy.evaluate("Exec", {"command": write}).action == DENY, write
+    checkouts = Policy(operator_checkouts=[Path("/home/x/daedalus")])
+    assert checkouts.evaluate("Exec", {"command": "git push", "cwd": "/home/x/daedalus"}).action == DENY
+    assert checkouts.evaluate("Exec", {"command": "git -C /home/x/daedalus/sub push origin main"}).action == DENY
 
 
 def test_egress_allowlist_asks_and_logs_hosts() -> None:
@@ -70,7 +82,9 @@ def test_operator_rules_can_tighten_and_lift_asks_but_never_builtin_denials() ->
     assert policy.evaluate("Exec", {"command": "pip install requests"}).action == DENY
     assert policy.evaluate("Exec", {"command": "docker ps"}).action == ASK
     assert policy.evaluate("Exec", {"command": "rm -rf /"}).action == DENY  # an allow rule cannot lift a built-in denial
-    assert policy.evaluate("Exec", {"command": "git push --force origin x"}).action == "allow"  # but it lifts an ask
+    assert policy.evaluate("Exec", {"command": "git push --force origin x"}).action == ASK  # nor a built-in safety question
+    lifted = Policy(egress_allow=["github.com"], rules=[Rule(id="free-mirror", tool="Exec", action="allow", note="", pattern=r"mirror\.example", source="config")])
+    assert lifted.evaluate("Exec", {"command": "curl https://mirror.example/x"}).action == "allow"  # an egress ask can be lifted
     assert any(r["id"] == "no-pip" and r["source"] == "config" for r in policy.describe())
 
 
@@ -106,7 +120,7 @@ async def test_operator_hook_scripts_deny_rewrite_and_are_ignored_when_broken(tm
     assert result.action == HookActionKind.DENY and "no Exec" in result.reason
     cfg.pre_tool = str(rewrite)
     result = await hooks.invoke(HookEvent.pre_tool_use, {"tool_name": "Exec", "arguments": {"command": "ls"}}, "t")
-    assert result.action == HookActionKind.MODIFY and result.modifications["arguments"] == {"command": "echo replaced"}
+    assert result.action == HookActionKind.MODIFY and result.modifications["tool_input"] == {"command": "echo replaced"}  # the core reads tool_input
     result = await hooks.invoke(HookEvent.post_tool_use, {"tool_name": "Exec", "tool_output": "original"}, "t")
     assert result.action == HookActionKind.MODIFY and result.modifications["tool_output"] == "rewritten output"
     cfg.pre_tool = str(tmp_path / "missing.sh")
@@ -127,16 +141,29 @@ async def test_grants_timing_and_subagent_spend_live_in_the_manager(settings, db
         sid = state.session.id
         with pytest.raises(ValueError):
             await manager.grant(sid, "not-a-key")
-        assert await manager.grant(sid, "0123456789ab") == ["0123456789ab"]
+        granted = await manager.grant(sid, "0123456789ab")
+        assert granted["grants"] == ["0123456789ab"] and granted["approves"] is None
         gate = manager.policy_gate(sid, "run-1")
         decision = gate.decide("Exec", {"command": "curl https://x.example/"})
         assert decision.action == "allow" and decision.hosts == ["x.example"]
-        await asyncio.sleep(0.05)
+        await manager.flush_background()
         assert [e["host"] for e in await manager.egress(sid)] == ["x.example"]
+        # a refusal leaves its preimage, so a later grant says what it approves and is spent once
+        manager.config.policy.egress_allow = ["github.com"]
+        gate = manager.policy_gate(sid, "run-1")
+        refused = gate.decide("Exec", {"command": "curl https://other.example/"})
+        assert refused.action == "ask" and refused.key
+        granted = await manager.grant(sid, refused.key)
+        assert granted["approves"]["tool"] == "Exec" and "other.example" in granted["approves"]["text"]
+        assert gate.decide("Exec", {"command": "curl https://other.example/"}).action == "allow"
+        await manager.flush_background()
+        assert gate.decide("Exec", {"command": "curl https://other.example/"}).action == "ask"
+        assert gate.decide("Exec", {"command": "curl https://other.example/", "cwd": "/tmp"}).key != refused.key
+        manager.config.policy.egress_allow = []
         await manager._dispatch_event(state, TurnEvent(type=EventType.TOOL_USE_START, run_id="run-1", payload={"tool_call_id": "c1", "tool_name": "Read"}))
         await asyncio.sleep(0.02)
         await manager._dispatch_event(state, TurnEvent(type=EventType.TOOL_RESULT, run_id="run-1", payload={"tool_call_id": "c1", "content": "x", "is_error": False}))
-        await asyncio.sleep(0.05)
+        await manager.flush_background()
         timing = await manager.tool_timing(sid)
         assert timing and timing[0]["name"] == "Read" and timing[0]["calls"] == 1 and timing[0]["errors"] == 0
         child = await manager.create_session("[sub] x", metadata={"subagent_of": sid, "subagent_name": "x"})

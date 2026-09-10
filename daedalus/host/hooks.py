@@ -7,8 +7,10 @@ hook; the session runner masks that text when the event reaches it.
 
 The operator's own scripts (``[hooks]`` in config.toml) run at ``pre_tool_use`` (may deny the call or
 rewrite its arguments), ``post_tool_use`` (may rewrite the output) and ``run_finalize`` (fire and forget).
-They get JSON on stdin and answer with an exit code and, optionally, JSON on stdout. A script that fails
-or times out is a log line, not a verdict: the call proceeds as if the script had allowed it.
+They get JSON on stdin (``event``, ``tool_name``, ``arguments``/``tool_output``, and what the core adds)
+and answer with an exit code and, optionally, JSON on stdout. A script that fails or times out is a log
+line, not a verdict: the call proceeds as if the script had allowed it. Scripts run with the same
+environment tools get (credentials stay out), in their own process group, killed on timeout.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -23,6 +26,7 @@ from protocore.contracts.hooks import HookActionKind, HookResult, HookSpec, IHoo
 from protocore.contracts.types import HookEvent
 
 from daedalus.security.redact import Redactor
+from daedalus.tools.shell import shell_environment
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +52,31 @@ class DaedalusHookManager(IHookManager):
         return str(getattr(cfg, name, "") or "").strip(), float(getattr(cfg, "timeout_seconds", 20.0))
 
     async def _run_script(self, script: str, payload: dict[str, Any], timeout: float) -> tuple[int, str] | None:
+        proc = None
         try:
-            proc = await asyncio.create_subprocess_exec("bash", "-lc", script, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            proc = await asyncio.create_subprocess_exec(
+                "bash", "-lc", script, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                env=shell_environment(str(payload.get("session_id") or "hook")), start_new_session=True,
+            )
             out, _ = await asyncio.wait_for(proc.communicate(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")), timeout=timeout)
         except TimeoutError:
             logger.warning("hook script timed out after %.0fs: %s", timeout, script[:80])
+            if proc is not None and proc.returncode is None:
+                try:
+                    os.killpg(proc.pid, 9)
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
             return None
         except OSError as exc:
             logger.warning("hook script could not run (%s): %s", exc, script[:80])
             return None
         return proc.returncode or 0, out.decode("utf-8", "replace")
+
+    async def aclose(self) -> None:
+        """Let the fire-and-forget scripts finish before the process ends."""
+        if self._detached:
+            await asyncio.gather(*self._detached, return_exceptions=True)
 
     async def invoke(self, event: HookEvent, payload: dict[str, Any], tenant_id: str) -> HookResult:
         script, timeout = self._script(event)
@@ -77,8 +96,10 @@ class DaedalusHookManager(IHookManager):
             if code == DENY_EXIT:
                 return HookResult(action=HookActionKind.DENY, reason=("refused by the operator's pre-tool hook: " + out.strip())[:1000])
             replacement = _json_object(out)
-            if replacement and isinstance(replacement.get("arguments"), dict):
-                return HookResult(action=HookActionKind.MODIFY, reason="arguments rewritten by the operator's pre-tool hook", modifications={"arguments": replacement["arguments"]})
+            rewritten = replacement.get("tool_input") if replacement and isinstance(replacement.get("tool_input"), dict) else (replacement.get("arguments") if replacement and isinstance(replacement.get("arguments"), dict) else None)
+            if rewritten is not None:
+                # The core reads ``tool_input``; a script may write either key.
+                return HookResult(action=HookActionKind.MODIFY, reason="arguments rewritten by the operator's pre-tool hook", modifications={"tool_input": rewritten})
             return HookResult(action=HookActionKind.ALLOW)
         if event is not HookEvent.post_tool_use:
             return HookResult(action=HookActionKind.ALLOW)

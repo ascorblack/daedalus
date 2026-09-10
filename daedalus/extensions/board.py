@@ -52,9 +52,9 @@ class Board:
                 raise ValueError(f"unknown dependency {dep}")
         status = "blocked" if await self._has_open_deps(deps) else "todo"
         await self.app.db.execute(
-            "INSERT INTO board_tasks(id, title, status, priority, acceptance, checklist, depends_on, session_id, notes, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (task_id, title[:200], status, max(1, min(int(priority), 5)), acceptance[:2000], json.dumps([{"text": c[:200], "done": False} for c in (checklist or [])]), json.dumps(deps), session_id, notes[:4000], _now(), _now()),
+            "INSERT INTO board_tasks(id, title, status, priority, acceptance, checklist, depends_on, session_id, origin_session_id, notes, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, title[:200], status, max(1, min(int(priority), 5)), acceptance[:2000], json.dumps([{"text": c[:200], "done": False} for c in (checklist or [])]), json.dumps(deps), session_id, session_id, notes[:4000], _now(), _now()),
         )
         await self.export_plan(session_id)
         return await self.get(task_id)
@@ -139,14 +139,16 @@ class Board:
             await self._promote_dependents()
         elif status and task["status"] in ("done", "dropped"):
             await self._demote_dependents()
-        await self.export_plan(session_id or task.get("session_id"))
+        await self.export_plan(task.get("origin_session_id") or session_id or task.get("session_id"))
         return await self.get(task_id)
 
     async def delete(self, task_id: str) -> bool:
         row = await self.app.db.fetchone("SELECT id FROM board_tasks WHERE id = ?", (task_id,))
         if row is None:
             return False
+        owner = await self.app.db.fetchone("SELECT origin_session_id FROM board_tasks WHERE id = ?", (task_id,))
         await self.app.db.execute("DELETE FROM board_tasks WHERE id = ?", (task_id,))
+        await self.export_plan(owner["origin_session_id"] if owner else None)
         for row in await self.app.db.fetchall("SELECT id, depends_on FROM board_tasks WHERE depends_on LIKE ?", (f"%{task_id}%",)):
             deps = [d for d in json.loads(row["depends_on"] or "[]") if d != task_id]
             await self.app.db.execute("UPDATE board_tasks SET depends_on = ? WHERE id = ?", (json.dumps(deps), row["id"]))
@@ -217,12 +219,16 @@ class Board:
         """
         if not session_id or self.app.manager is None:
             return
-        state = await self.app.manager.get_state(session_id)
+        state = self.app.manager.live_state(session_id)  # a session that is not live gets no file; nothing is resurrected for it
         if state is None:
             return
-        rows = await self.app.db.fetchall("SELECT * FROM board_tasks WHERE session_id = ? ORDER BY CASE status WHEN 'doing' THEN 0 WHEN 'review' THEN 1 WHEN 'todo' THEN 2 WHEN 'blocked' THEN 3 WHEN 'done' THEN 4 ELSE 5 END, priority, created_at", (session_id,))
+        # A subagent shares its leader's workspace: the file there lists the whole family's tasks.
+        leader = str(state.metadata.get("subagent_of") or session_id)
+        family = [leader, *(str(r["id"]) for r in await self.app.db.fetchall("SELECT id FROM sessions WHERE metadata LIKE ?", (f'%"subagent_of": "{leader}"%',)))]
+        placeholders = ",".join("?" for _ in family)
+        rows = await self.app.db.fetchall(f"SELECT * FROM board_tasks WHERE origin_session_id IN ({placeholders}) ORDER BY CASE status WHEN 'doing' THEN 0 WHEN 'review' THEN 1 WHEN 'todo' THEN 2 WHEN 'blocked' THEN 3 WHEN 'done' THEN 4 ELSE 5 END, priority, created_at", tuple(family))
         tasks = [self._view(dict(r)) for r in rows]
-        lines = ["# Plan", "", f"Board tasks of session {session_id}; edit them with the Board tools, this file is regenerated.", ""]
+        lines = ["# Plan", "", f"Board tasks created by session {leader}" + (" and its subagents" if len(family) > 1 else "") + "; edit them with the Board tools, this file is regenerated.", ""]
         for t in tasks:
             box = {"done": "x", "dropped": "-"}.get(t["status"], " ")
             deps = f" (after {', '.join(t['depends_on'])})" if t["depends_on"] else ""
@@ -232,7 +238,7 @@ class Board:
             for item in t["checklist"]:
                 lines.append(f"  - [{'x' if item['done'] else ' '}] {item['text']}")
         try:
-            (state.workspace / "PLAN.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            await asyncio.to_thread((state.workspace / "PLAN.md").write_text, "\n".join(lines) + "\n", "utf-8")
         except OSError:
             logger.warning("could not write PLAN.md for session %s", session_id, exc_info=True)
 

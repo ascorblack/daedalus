@@ -395,6 +395,11 @@ MIGRATIONS: list[str] = [
     CREATE INDEX egress_log_by_session ON egress_log(session_id);
     CREATE INDEX usage_events_by_run ON usage_events(run_id);
     """,
+    # 19 — a task remembers the session that created it: the plan file of a workspace lists its own tasks whoever holds them
+    """
+    ALTER TABLE board_tasks ADD COLUMN origin_session_id TEXT;
+    UPDATE board_tasks SET origin_session_id = session_id WHERE origin_session_id IS NULL;
+    """,
 ]
 
 
