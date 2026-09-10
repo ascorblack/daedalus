@@ -189,3 +189,23 @@ def test_logging_filter_masks_stack_info() -> None:
     record = log.makeRecord("redact-stack-test", logging.WARNING, __file__, 1, "hello", (), None, sinfo=f"Stack:\n  token={secret}")
     RedactingFilter(Redactor([])).filter(record)
     assert secret not in (record.stack_info or "")
+
+
+def test_vault_hands_over_foreign_secrets_and_keeps_ours_masked() -> None:
+    from daedalus.security.redact import MASK, REF_RE, Redactor
+
+    r = Redactor(["our-configured-key-123456"])
+    kept: list[str] = []
+
+    def keep(value: str) -> str:
+        kept.append(value)
+        return f"«ref:{len(kept):010x}»"
+
+    text = '{"edit_token": "e9f1a2b3c4d5e6f7a8b9", "author": "someone", "key": "our-configured-key-123456"}\n-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----'
+    out = r.vault(text, keep)
+    assert kept == ["e9f1a2b3c4d5e6f7a8b9"]
+    assert '"edit_token": "«ref:0000000001»"' in out and "our-configured-key-123456" not in out and "BEGIN PRIVATE KEY" not in out
+    assert out.count(MASK) == 2
+    # a placeholder is not a secret: redaction leaves it where it is, whatever key it sits under
+    assert r.redact('{"edit_token": "«ref:0123456789»"}') == '{"edit_token": "«ref:0123456789»"}'
+    assert REF_RE.fullmatch("«ref:0123456789»")

@@ -8,9 +8,11 @@ which sessions actually see them is decided per run by the tool visibility polic
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
+from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,7 @@ from protocore.contracts.types import ToolDefinition, ToolParameterSchema, ToolR
 
 from daedalus.config import McpServerConfig
 from daedalus.mcp.oauth import MCPOAuthClient, NeedsAuthorization
+from daedalus.security import redact
 from daedalus.tools._common import clip
 
 logger = logging.getLogger(__name__)
@@ -34,6 +37,48 @@ def mcp_tool_name(server: str, tool: str) -> str:
     safe_server = re.sub(r"[^A-Za-z0-9]+", "", server.title()) or "Server"
     safe_tool = re.sub(r"[^A-Za-z0-9_]+", "_", tool)
     return f"Mcp_{safe_server}_{safe_tool}"[:64]
+
+
+VAULT_NOTE = "[«ref:…» stands for a value this server returned and the host keeps; pass it back verbatim in this server's tool arguments]"
+
+
+class SecretVault:
+    """Values a server returned that look like credentials (an edit token, a one-time key) — kept here,
+    shown to the model as ``«ref:…»`` placeholders, and put back only into calls to the same server.
+
+    The model never sees the value, so it cannot copy it anywhere else; the transcript and the
+    provider's logs carry the placeholder; the workflow that needs the value round-tripped works.
+    """
+
+    LIMIT = 512
+
+    def __init__(self) -> None:
+        self._values: OrderedDict[str, str] = OrderedDict()
+
+    def keep(self, value: str) -> str:
+        ref = f"«ref:{hashlib.sha256(value.encode()).hexdigest()[:10]}»"
+        self._values[ref] = value
+        self._values.move_to_end(ref)
+        while len(self._values) > self.LIMIT:
+            self._values.popitem(last=False)
+        return ref
+
+    def conceal(self, text: str) -> tuple[str, bool]:
+        """The text with secret-shaped values replaced by placeholders; whether anything was replaced."""
+        out = redact.shared().vault(text, self.keep)
+        return out, out != text
+
+    def resolve(self, value: Any) -> Any:
+        """Arguments with every known placeholder put back — strings, nested containers alike."""
+        if isinstance(value, str):
+            if not self._values or "«ref:" not in value:
+                return value
+            return redact.REF_RE.sub(lambda m: self._values.get(m.group(0), m.group(0)), value)
+        if isinstance(value, dict):
+            return {k: self.resolve(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self.resolve(v) for v in value]
+        return value
 
 
 class McpToolProxy(Tool):
@@ -56,7 +101,7 @@ class McpToolProxy(Tool):
     async def invoke(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         call_id = str(context.metadata.get("tool_call_id") or "")
         try:
-            result = await self._connection.call(self._remote, arguments)
+            result = await self._connection.call(self._remote, self._connection.vault.resolve(arguments))
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call_id, content=f"MCP tool failed: {_describe(exc)}", is_error=True)
         parts: list[str] = []
@@ -70,7 +115,10 @@ class McpToolProxy(Tool):
                 dump = getattr(item, "model_dump", None)
                 parts.append(json.dumps(dump() if dump else str(item), default=str)[:2000])
         content = "\n".join(parts) or "(empty result)"
+        content, concealed = self._connection.vault.conceal(content)
         content = clip(content, _output_limit(context.session_id), note="the MCP tool returned more")
+        if concealed:
+            content += "\n" + VAULT_NOTE
         return ToolResult(tool_call_id=call_id, content=content, is_error=bool(getattr(result, "is_error", None) or getattr(result, "isError", False)))
 
 
@@ -114,6 +162,7 @@ class McpConnection:
     """One server; the transport and session live in a background task."""
 
     def __init__(self, name: str, config: McpServerConfig, oauth: MCPOAuthClient | None = None) -> None:
+        self.vault = SecretVault()
         self.name = name
         self.config = config
         self.oauth = oauth

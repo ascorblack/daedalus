@@ -32,6 +32,8 @@ from collections.abc import Iterable
 from typing import Any
 
 MASK = "•••"
+REF_RE = re.compile(r"«ref:[0-9a-f]{10}»")
+"""A placeholder the host handed out for a value it keeps (see :class:`daedalus.mcp.manager.SecretVault`): never masked."""
 MIN_VALUE_LENGTH = 8
 """Configured values shorter than this are not masked: they are too likely to collide with ordinary text."""
 
@@ -92,21 +94,35 @@ class Redactor:
         return tuple(self._values)
 
     def redact(self, text: str) -> str:
+        return self._apply(text, lambda _name, _value: MASK)
+
+    def vault(self, text: str, keep: Any) -> str:
+        """Like :meth:`redact`, but a secret-shaped value that is not one of ours is handed to ``keep(value)``
+        and replaced by what it returns (a placeholder the host can resolve later). Configured values and
+        private-key blocks are masked outright: they are never handed back to anyone."""
+        return self._apply(text, lambda name, value: MASK if name == "pem" else str(keep(value)))
+
+    def _apply(self, text: str, replacement: Any) -> str:
         if not text:
             return text
         out = text
         for value in self._values:
             if value in out:
                 out = out.replace(value, MASK)
+
+        def sub(name: str, value: str) -> str:
+            # A placeholder the host issued is not a secret, whatever key it sits under.
+            return value if REF_RE.fullmatch(value) else replacement(name, value)
+
         for name, pattern in _SHAPES:
             if name in ("auth_header", "api_header", "bare_member"):
-                out = pattern.sub(lambda m: f"{m.group(1)}{MASK}", out)
+                out = pattern.sub(lambda m, n=name: f"{m.group(1)}{sub(n, m.group(2))}", out)
             elif name == "env_assignment":
-                out = pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}{MASK}{m.group(4)}", out)
+                out = pattern.sub(lambda m, n=name: f"{m.group(1)}{m.group(2)}{sub(n, m.group(3))}{m.group(4)}", out)
             elif name in ("quoted_member", "url_userinfo"):
-                out = pattern.sub(lambda m: f"{m.group(1)}{MASK}{m.group(3)}", out)
+                out = pattern.sub(lambda m, n=name: f"{m.group(1)}{sub(n, m.group(2))}{m.group(3)}", out)
             else:
-                out = pattern.sub(MASK, out)
+                out = pattern.sub(lambda m, n=name: sub(n, m.group(0)), out)
         return out
 
     def redact_any(self, value: Any, *, secret_context: bool = False) -> Any:
@@ -209,4 +225,4 @@ def redact(text: str) -> str:
     return _shared.redact(text)
 
 
-__all__ = ["MASK", "Redactor", "RedactingFilter", "install_logging_filter", "redact", "shared"]
+__all__ = ["MASK", "REF_RE", "Redactor", "RedactingFilter", "install_logging_filter", "redact", "shared"]

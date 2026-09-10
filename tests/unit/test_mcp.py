@@ -63,3 +63,38 @@ async def test_session_toggle_changes_visibility(settings: Settings, db: Databas
     await manager.mcp_service("disable", session_id=state.session.id, server="echo")
     assert manager.mcp_enabled(state) == []
     await manager.close()
+
+
+async def test_proxy_round_trips_a_server_token_through_the_vault() -> None:
+    """A read returns an edit token; the model sees a placeholder; the edit call gets the token back."""
+    from types import SimpleNamespace
+    from typing import Any
+
+    from protocore.contracts.tools import ToolContext
+    from protocore.contracts.types import ToolDefinition, ToolParameterSchema
+
+    from daedalus.mcp.manager import VAULT_NOTE, McpToolProxy, SecretVault
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(tool: str, arguments: dict[str, Any]) -> Any:
+        calls.append((tool, arguments))
+        if tool == "read":
+            return SimpleNamespace(content=[SimpleNamespace(text='{"id": "p1", "edit_token": "tok9a8b7c6d5e4f3a2b1", "author": "host"}')], isError=False)
+        return SimpleNamespace(content=[SimpleNamespace(text="edited")], isError=False)
+
+    connection = SimpleNamespace(name="board", vault=SecretVault(), call=call)
+    definition = ToolDefinition(name="Mcp_Board_read", description="", parameters=ToolParameterSchema(type="object", properties={}))
+    read = McpToolProxy(connection, "read", definition)  # type: ignore[arg-type]
+    edit = McpToolProxy(connection, "edit", ToolDefinition(name="Mcp_Board_edit", description="", parameters=ToolParameterSchema(type="object", properties={})))  # type: ignore[arg-type]
+    context = ToolContext(tenant_id="t", session_id="s", run_id="r", metadata={"tool_call_id": "c1"})
+    shown = await read.invoke(context, {"id": "p1"})
+    assert "tok9a8b7c6d5e4f3a2b1" not in shown.content and '"edit_token": "«ref:' in shown.content and shown.content.endswith(VAULT_NOTE)
+    ref = shown.content.split('"edit_token": "')[1].split('"')[0]
+    result = await edit.invoke(context, {"id": "p1", "edit_token": ref, "body": f"restore with {ref}", "nested": {"tokens": [ref]}})
+    assert result.content == "edited"
+    sent = calls[-1][1]
+    assert sent["edit_token"] == "tok9a8b7c6d5e4f3a2b1" and sent["body"] == "restore with tok9a8b7c6d5e4f3a2b1" and sent["nested"]["tokens"] == ["tok9a8b7c6d5e4f3a2b1"]
+    # a placeholder the vault never issued goes through untouched
+    await edit.invoke(context, {"edit_token": "«ref:0000000000»"})
+    assert calls[-1][1]["edit_token"] == "«ref:0000000000»"
