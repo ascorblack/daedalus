@@ -529,7 +529,7 @@ class RuntimeConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     presets: dict[str, ModelPresetConfig] = Field(
         default_factory=lambda: {
-            DEFAULT_PRESET: ModelPresetConfig(provider="deepseek", model="deepseek-v4-flash"),
+            DEFAULT_PRESET: ModelPresetConfig(provider="deepseek", model="deepseek-flash"),
             "openrouter.deepseek-v4-flash": ModelPresetConfig(provider="openrouter", model="deepseek/deepseek-v4-flash", images=True),
             "openrouter.qwen-qwen3.7-flash": ModelPresetConfig(
                 provider="openrouter", model="qwen/qwen3.7-flash", label="Qwen 3.7 Flash (vision)", thinking=False, images=True, max_output_tokens=4_000

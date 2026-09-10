@@ -107,7 +107,7 @@ merge апстрима в ветку, PR, тесты ядра — тот же п
 ## 5. Провайдеры моделей
 
 Базовый класс `OpenAICompatibleProvider` (SSE `chat/completions` → `ProviderDelta`),
-от него три конфигурации: **DeepSeek** (`api.deepseek.com`, по умолчанию `deepseek-v4-flash` (= DeepSeek-V4-Flash-0731),
+от него три конфигурации: **DeepSeek** (`api.deepseek.com`, по умолчанию `deepseek-flash` (= DeepSeek-V4.1-Flash; прежние имена `deepseek-v4-flash` принимаются и обслуживаются той же моделью),
 thinking on/off + `reasoning_effort`, по умолчанию on/medium),
 **OpenRouter**, **vLLM** (любой самохостный OpenAI-совместимый эндпоинт). Плюс `IProviderChain`
 для fallback-цепочки (DeepSeek → OpenRouter). Смена модели — `/model` и из Mini App,

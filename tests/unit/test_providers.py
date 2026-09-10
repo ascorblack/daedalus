@@ -182,9 +182,9 @@ def test_builtin_pricing_and_peak_windows() -> None:
     peak = datetime(2026, 9, 7, 2, 0, tzinfo=UTC)  # Monday 02:00 UTC
     off = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
     weekend = datetime(2026, 9, 6, 2, 0, tzinfo=UTC)  # Sunday
-    assert price.cost(usage, now=peak) == 0.44
-    assert price.cost(usage, now=off) == 0.22
-    assert price.cost(usage, now=weekend) == 0.22
+    assert price.cost(usage, now=peak) == 0.30
+    assert price.cost(usage, now=off) == 0.15
+    assert price.cost(usage, now=weekend) == 0.15
     override = pricing_table("deepseek", {"deepseek-v4-flash": {"input": 1.0, "output": 2.0, "cache_hit": 0.1}})
     assert override["deepseek-v4-flash"].cost(usage, now=peak) == 1.0
 
@@ -206,7 +206,7 @@ def test_pricing_prefers_the_longest_prefix_and_config_overrides() -> None:
 
     table = pricing_table("deepseek", {"deepseek-v4": {"input": 9.0, "output": 9.0, "cache_hit": 9.0}})
     endpoint = ProviderEndpoint(id="d", kind="deepseek", base_url="x", pricing=table)
-    assert endpoint.pricing_for("deepseek-v4-flash-2027").input == 0.44  # built-in longer prefix wins
+    assert endpoint.pricing_for("deepseek-v4-flash-2027").input == 0.30  # built-in longer prefix wins
     assert endpoint.pricing_for("deepseek-v4-ultra").input == 9.0
 
 
@@ -264,7 +264,7 @@ def test_preset_rungs_put_the_chosen_model_first_then_the_chain() -> None:
     registry = ProviderRegistry(settings, config)
     rungs = registry.rungs_for(config, "vllm.Qwen3.6")
     assert rungs[0][0].endpoint.id == "vllm" and rungs[0][1] == "Qwen3.6"
-    assert [(p.endpoint.id, m) for p, m in rungs[1:]] == [("openrouter", "deepseek/deepseek-v4-flash"), ("deepseek", "deepseek-v4-flash")]
+    assert [(p.endpoint.id, m) for p, m in rungs[1:]] == [("openrouter", "deepseek/deepseek-v4-flash"), ("deepseek", "deepseek-flash")]
     assert registry.rungs_for(config, "nope")[0][0].endpoint.id == "deepseek"  # unknown preset -> default
     assert registry.rungs_for_pair(config, "vllm", "other")[0][1] == "other"
     # image capability is a property of the preset, read through the adapter

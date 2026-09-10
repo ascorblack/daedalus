@@ -2,9 +2,14 @@
 
 The built-in table is the published DeepSeek list; ``[providers.<id>.pricing.<model>]``
 in the config overrides or extends it. Off-peak is everything outside the peak
-windows. DeepSeek's schedule (api-docs.deepseek.com, "Models & Pricing", read 2026-09-06):
+windows. DeepSeek's schedule (api-docs.deepseek.com, "Models & Pricing", read 2026-09-10):
 "Off-peak rates are half of the peak rates. Peak hours are 01:00-04:00 and 06:00-10:00 UTC,
 Monday through Friday (all other hours are off-peak)."
+
+The current model is ``deepseek-flash`` (DeepSeek-V4.1-Flash). The legacy names
+``deepseek-v4-flash`` and ``deepseek-v4-flash-vision-exp`` are still accepted, served by
+V4.1 Flash and billed at the Flash price. ``deepseek-v4-pro`` keeps its own price until
+2026-09-14 12:00 Beijing time, after which it is routed to V4.1 Flash and billed as Flash.
 """
 
 from __future__ import annotations
@@ -96,11 +101,12 @@ def _deepseek(input_: float, cache_hit: float, output: float) -> ModelPricing:
 
 BUILTIN: dict[str, dict[str, ModelPricing]] = {
     "deepseek": {
-        "deepseek-v4-flash": _deepseek(0.44, 0.014, 1.32),
-        "deepseek-v4-flash-vision-exp": _deepseek(0.44, 0.014, 1.32),
+        "deepseek-flash": _deepseek(0.30, 0.006, 1.20),
+        "deepseek-v4-flash": _deepseek(0.30, 0.006, 1.20),
+        "deepseek-v4-flash-vision-exp": _deepseek(0.30, 0.006, 1.20),
         "deepseek-v4-pro": _deepseek(1.32, 0.044, 3.96),
-        "deepseek-chat": _deepseek(0.44, 0.014, 1.32),
-        "deepseek-reasoner": _deepseek(0.44, 0.014, 1.32),
+        "deepseek-chat": _deepseek(0.30, 0.006, 1.20),
+        "deepseek-reasoner": _deepseek(0.30, 0.006, 1.20),
     },
 }
 """Keyed by provider kind, then model name (prefix match at lookup time)."""
