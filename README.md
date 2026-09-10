@@ -286,8 +286,9 @@ loop runs under [Harbor](https://harborframework.com) against Terminal-Bench, Ai
 rest of its adapters: `harbor run -d <dataset> -a daedalus.bench.harbor:DaedalusAgent -m <preset>` with
 `BENCH_STATE_DIR` naming a state directory of its own. Pin a provider's `temperature` in `config.toml` for runs
 that should be comparable. A task that declares GPUs aborts the whole Harbor job on a machine without one, and
-the trials already running with it: exclude such tasks with `-x <task>` (`grep -l 'gpus = [1-9]'` over the
-dataset's `task.toml` files lists them). Benchmark sessions run without the memory tools, so nothing carries from
+the trials already running with it: exclude such tasks with `-x <org>/<task>` — a registry dataset names its
+tasks with the organisation, so a bare task name matches nothing (`grep -l 'gpus = [1-9]'` over the dataset's
+`task.toml` files lists them). Benchmark sessions run without the memory tools, so nothing carries from
 one task to the next.
 
 ## License
