@@ -39,7 +39,13 @@ def mcp_tool_name(server: str, tool: str) -> str:
     return f"Mcp_{safe_server}_{safe_tool}"[:64]
 
 
-VAULT_NOTE = "[«ref:…» stands for a value this server returned and the host keeps; pass it back verbatim in this server's tool arguments]"
+VAULT_NOTE = (
+    "[«ref:…» stands for a value this server returned and the host keeps (a token, a key). To use it, pass that exact "
+    "string — «ref:» and all — as the argument of this server's tools, even where the schema asks for a UUID or "
+    "another format: the host swaps the real value in before the call. Do not guess or reconstruct the value.]"
+)
+LOOSE_REF_RE = re.compile(r"[«\"'`]*\s*«?ref:([0-9a-f]{10})»?\s*[»\"'`]*")
+"""A placeholder as a model may reproduce it: with doubled or missing guillemets, quotes, or spaces around it."""
 
 
 class SecretVault:
@@ -53,15 +59,15 @@ class SecretVault:
     LIMIT = 512
 
     def __init__(self) -> None:
-        self._values: OrderedDict[str, str] = OrderedDict()
+        self._values: OrderedDict[str, str] = OrderedDict()  # keyed by the 10 hex characters
 
     def keep(self, value: str) -> str:
-        ref = f"«ref:{hashlib.sha256(value.encode()).hexdigest()[:10]}»"
-        self._values[ref] = value
-        self._values.move_to_end(ref)
+        key = hashlib.sha256(value.encode()).hexdigest()[:10]
+        self._values[key] = value
+        self._values.move_to_end(key)
         while len(self._values) > self.LIMIT:
             self._values.popitem(last=False)
-        return ref
+        return f"«ref:{key}»"
 
     def conceal(self, text: str) -> tuple[str, bool]:
         """The text with secret-shaped values replaced by placeholders; whether anything was replaced."""
@@ -71,9 +77,11 @@ class SecretVault:
     def resolve(self, value: Any) -> Any:
         """Arguments with every known placeholder put back — strings, nested containers alike."""
         if isinstance(value, str):
-            if not self._values or "«ref:" not in value:
+            if not self._values or "ref:" not in value:
                 return value
-            return redact.REF_RE.sub(lambda m: self._values.get(m.group(0), m.group(0)), value)
+            if (whole := LOOSE_REF_RE.fullmatch(value)) and whole.group(1) in self._values:
+                return self._values[whole.group(1)]  # the argument is the placeholder itself, however it was quoted
+            return redact.REF_RE.sub(lambda m: self._values.get(m.group(0)[5:-1], m.group(0)), value)
         if isinstance(value, dict):
             return {k: self.resolve(v) for k, v in value.items()}
         if isinstance(value, list):

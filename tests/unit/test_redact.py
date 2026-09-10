@@ -209,3 +209,5 @@ def test_vault_hands_over_foreign_secrets_and_keeps_ours_masked() -> None:
     # a placeholder is not a secret: redaction leaves it where it is, whatever key it sits under
     assert r.redact('{"edit_token": "«ref:0123456789»"}') == '{"edit_token": "«ref:0123456789»"}'
     assert REF_RE.fullmatch("«ref:0123456789»")
+    # an API documenting its own request shape: {edit_token} is a slot, not a value to keep
+    assert r.vault('"body": {"edit_token": "{edit_token}"}', keep) == '"body": {"edit_token": "{edit_token}"}' 

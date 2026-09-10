@@ -34,6 +34,8 @@ from typing import Any
 MASK = "•••"
 REF_RE = re.compile(r"«ref:[0-9a-f]{10}»")
 """A placeholder the host handed out for a value it keeps (see :class:`daedalus.mcp.manager.SecretVault`): never masked."""
+_TEMPLATE_RE = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\}$")
+"""``{edit_token}`` in an API's own documentation of its request shape is a slot, not a value."""
 MIN_VALUE_LENGTH = 8
 """Configured values shorter than this are not masked: they are too likely to collide with ordinary text."""
 
@@ -111,8 +113,8 @@ class Redactor:
                 out = out.replace(value, MASK)
 
         def sub(name: str, value: str) -> str:
-            # A placeholder the host issued is not a secret, whatever key it sits under.
-            return value if REF_RE.fullmatch(value) else replacement(name, value)
+            # A placeholder the host issued, or a template slot, is not a secret, whatever key it sits under.
+            return value if REF_RE.fullmatch(value) or _TEMPLATE_RE.fullmatch(value) else replacement(name, value)
 
         for name, pattern in _SHAPES:
             if name in ("auth_header", "api_header", "bare_member"):

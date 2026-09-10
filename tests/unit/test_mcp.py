@@ -98,3 +98,7 @@ async def test_proxy_round_trips_a_server_token_through_the_vault() -> None:
     # a placeholder the vault never issued goes through untouched
     await edit.invoke(context, {"edit_token": "«ref:0000000000»"})
     assert calls[-1][1]["edit_token"] == "«ref:0000000000»"
+    # a model that doubles the guillemets, quotes it, or drops them still gets the value
+    for shape in (f"«{ref}»", f'"{ref}"', ref.strip("«»"), f" {ref} "):
+        await edit.invoke(context, {"edit_token": shape})
+        assert calls[-1][1]["edit_token"] == "tok9a8b7c6d5e4f3a2b1", shape
