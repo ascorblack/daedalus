@@ -323,7 +323,7 @@ async def test_deepseek_thinking_request_gives_every_tool_call_turn_a_reasoning_
 
 async def test_deepseek_thinking_request_leaves_a_reasoning_only_turn_off_the_wire() -> None:
     """The partial the core keeps when a stream dies mid-thought has no text and no call: DeepSeek gets nothing for it."""
-    from protocore.contracts.types import Message, MessageRole, TextBlock, ToolResultBlock, ToolUseBlock
+    from protocore.contracts.types import Message, MessageRole, ToolResultBlock, ToolUseBlock
 
     provider = _provider(_sse([_chunk({"content": "ok"}), _chunk({}, finish="stop")]))
     request = _request(enable_thinking=True, reasoning_effort="low")
