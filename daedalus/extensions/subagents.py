@@ -102,6 +102,7 @@ class Subagents:
         keep: bool = False,
         expects: str | None = None,
         deliverable: str | None = None,
+        persona: str | None = None,
     ) -> dict[str, Any]:
         manager = self.app.manager
         assert manager is not None
@@ -111,6 +112,11 @@ class Subagents:
         task = task.strip()
         if not task:
             raise ValueError("the task is empty")
+        persona_text = ""
+        if persona:
+            persona_text = self.persona(persona)
+            if persona_text is None:
+                raise ValueError(f"unknown persona {persona!r}; available: {', '.join(self.personas()) or 'none'}")
         depth = int(leader.metadata.get("subagent_depth", 0)) + 1
         if depth > self.app.config.subagents.max_depth:
             raise ValueError(f"subagent chain too deep ({depth} > {self.app.config.subagents.max_depth}); do this yourself")
@@ -161,11 +167,27 @@ class Subagents:
                 )
         if wait:
             self._waited.add(cid)
-        run_id = await manager.submit(cid, TASK_HEADER.format(leader=leader_id) + task + contract_text(expects, deliverable), as_answer=False, origin=f"subagent-task:{leader_id}")
+        opening = (f"[persona: {persona}]\n{persona_text}\n\n" if persona_text else "")
+        run_id = await manager.submit(cid, TASK_HEADER.format(leader=leader_id) + opening + task + contract_text(expects, deliverable), as_answer=False, origin=f"subagent-task:{leader_id}")
         result: dict[str, Any] = {"session_id": cid, "run_id": run_id, "name": label, "model": model or "(leader's model)", "answer": None, "kept": bool(keep)}
         if not wait:
             return result
         return await self._collect(cid, result, timeout_minutes)
+
+    def personas(self) -> list[str]:
+        """The named stances a subagent can take: one markdown file each under ``personas/`` in the host repository."""
+        directory = self.app.settings.bot_repo_dir / "personas"
+        return sorted(p.stem for p in directory.glob("*.md")) if directory.is_dir() else []
+
+    def persona(self, name: str) -> str | None:
+        name = name.strip().lower()
+        if not re.fullmatch(r"[a-z0-9_-]{1,40}", name):
+            return None
+        path = self.app.settings.bot_repo_dir / "personas" / f"{name}.md"
+        try:
+            return path.read_text(encoding="utf-8").strip() if path.is_file() else None
+        except OSError:
+            return None
 
     async def _collect(self, cid: str, result: dict[str, Any], timeout_minutes: int | None) -> dict[str, Any]:
         """Wait for the subagent's run to end and put its reply into ``result``; remove it afterwards unless kept."""
@@ -293,6 +315,8 @@ class Subagents:
             return await self.spawn(**kwargs)
         if op == "models":
             return await self.models()
+        if op == "personas":
+            return self.personas()
         if op == "children":
             return await self.children(kwargs["leader_id"])
         if op == "send":

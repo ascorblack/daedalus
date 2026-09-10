@@ -193,6 +193,21 @@ class DirectorySkillStore(ISkillStore):
             )
         return refs
 
+    def params_of(self, skill_id: str) -> list[str]:
+        """The parameters a skill declares in its front matter (``params: name, count``): the ``{{name}}`` placeholders
+        of its body, which the Skill tool fills from ``args`` so a skill can be a recipe rather than only advice."""
+        entry = self._dir(skill_id) / ENTRY
+        if not entry.is_file():
+            loaded = self._by_name(skill_id)
+            if loaded is None:
+                return []
+            entry = self._dir(loaded[0].id) / ENTRY
+        try:
+            meta, _ = parse_skill_markdown(entry.read_text(encoding="utf-8"))
+        except OSError:
+            return []
+        return [p.strip() for p in str(meta.get("params", "")).split(",") if p.strip()]
+
     async def load_file(self, tenant_id: str, skill_id: str, path: str) -> bytes | None:
         skill_dir = self._dir(skill_id)
         target = (skill_dir / path).resolve()

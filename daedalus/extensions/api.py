@@ -20,7 +20,7 @@ from urllib.parse import parse_qsl, urlencode
 
 import httpx
 import uvicorn
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from protocore.contracts.memory import MemoryScope
@@ -1336,6 +1336,30 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such session") from exc
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @api.get("/api/sessions/{session_id}/export/download")
+    async def session_export(session_id: str, _: dict[str, Any] = Depends(auth)) -> Response:
+        """The whole session as one Markdown file: every turn, tool call and result, with the spend at the end."""
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        lines = [f"# {state.session.title}", "", f"Session {session_id}, exported {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}.", ""]
+        for m in await manager.transcript(session_id):
+            view = message_view(m)
+            if view.get("internal"):
+                continue
+            who = {"user": "Operator", "assistant": "Agent", "tool": "Tool", "system": "System"}.get(m.role.value, m.role.value)
+            if view.get("text"):
+                lines += [f"## {who}", "", redact.redact(view["text"]), ""]
+            for call in view.get("tool_calls", []):
+                lines += [f"### → {call['name']}", "", "```json", json.dumps(call["arguments"], ensure_ascii=False, indent=1)[:4000], "```", ""]
+            for result in view.get("tool_results", []):
+                lines += [f"### ← result{' (error)' if result.get('is_error') else ''}", "", "```", result["content"][:4000], "```", ""]
+        usage = await app.db.fetchone("SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cache_read_tokens) ch, sum(cost_usd) usd FROM usage_events WHERE session_id = ?", (session_id,))
+        if usage and usage["c"]:
+            lines += ["## Spend", "", f"{usage['c']} model calls · {int(usage['i'] or 0):,} in ({int(usage['ch'] or 0):,} cached) · {int(usage['o'] or 0):,} out · ${float(usage['usd'] or 0):.4f}", ""]
+        body = "\n".join(lines)
+        return Response(content=body, media_type="text/markdown; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="session-{session_id}.md"'})
 
     @api.post("/api/sessions/{session_id}/policy/grant")
     async def policy_grant(session_id: str, body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

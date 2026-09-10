@@ -156,13 +156,13 @@ Requirements: Docker with Compose, a Telegram bot token, your numeric Telegram u
 
 ```bash
 git clone https://github.com/ascorblack/daedalus
-git clone https://github.com/ascorblack/protocore-exp   # next to it
 cd daedalus
-cp deploy/env.example .env      # fill in the values
-mkdir -p ../daedalus-secrets && cp deploy/keyproxy.env.example ../daedalus-secrets/keyproxy.env
-chmod 600 ../daedalus-secrets/keyproxy.env   # provider keys go HERE, outside the checkout
-docker compose -f deploy/compose.yaml --env-file .env up -d --build
+bash deploy/setup.sh            # asks for the values, writes .env and ../daedalus-secrets/keyproxy.env, starts the stack
 ```
+
+By hand instead: clone `protocore-exp` next to this repository, copy `deploy/env.example` to `.env` and
+`deploy/keyproxy.env.example` to `../daedalus-secrets/keyproxy.env` (provider keys go there, outside the
+checkout, `chmod 600`), then `docker compose -f deploy/compose.yaml --env-file .env up -d --build`.
 
 Then, in Telegram:
 
@@ -243,6 +243,47 @@ headers = { Authorization = "Bearer ..." }
 ```
 
 Every session starts with MCP servers off; the agent enables one with `McpEnable`, you toggle them in the app.
+
+Beyond the app's settings, `config.toml` holds the guard rails:
+
+```toml
+[limits]
+max_run_minutes = 0          # cap on active minutes per run (0 = none)
+max_run_tokens = 0           # cap on tokens per run, every call counted (0 = none)
+
+[policy]                     # tool policy on top of the built-in rules (daedalus/host/policy.py)
+egress_allow = []            # hosts the agent may reach without asking; empty = every host, logged
+[[policy.rules]]
+tool = "Exec"
+pattern = "\\bpip install\\b(?!.*--user)"
+action = "deny"              # deny | ask; an allow only lifts an ask, never a built-in denial
+note = "no global installs"
+
+[hooks]                      # operator scripts: JSON on stdin, exit 2 refuses (pre_tool), JSON on stdout rewrites
+pre_tool = ""
+post_tool = ""
+run_finished = ""
+
+[compaction]
+preset = ""                  # a cheaper preset for the summariser; empty = the session's model
+
+[memory]
+extract_after_run = false    # store durable facts after a completed run (a paid call)
+
+[modes.plan]                 # built in: read-only tools until you switch the mode; edit or add modes here
+```
+
+A refused call comes back to the agent as an error. `refused by policy` is final; `needs the operator's approval`
+carries a key you grant once with `/allow <key>` in chat or the *Allow once* button in the app.
+
+## Evidence
+
+`uv run python -m daedalus --state-dir <dir> bench bench/selfcheck.json --preset <preset>` runs recorded tasks
+headless and writes one record per task (verdict, turns, tokens, cost, wall time) plus its trajectory. The same
+loop runs under [Harbor](https://harborframework.com) against Terminal-Bench, Aider Polyglot, SWE-bench and the
+rest of its adapters: `harbor run -d <dataset> -a daedalus.bench.harbor:DaedalusAgent -m <preset>` with
+`BENCH_STATE_DIR` naming a state directory of its own. Pin a provider's `temperature` in `config.toml` for runs
+that should be comparable.
 
 ## License
 

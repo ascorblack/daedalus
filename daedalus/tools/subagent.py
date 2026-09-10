@@ -27,7 +27,9 @@ def _hook(context: ToolContext):  # type: ignore[no-untyped-def]
         "has reported (its files stay in the workspace); pass keep=true when you will talk to it again "
         "with SubAgentSend — it then keeps its context until you delete it. Make the contract explicit: "
         "`expects` lists what the report must name, comma-separated (the subagent is told; the host checks each "
-        "short item against the report and marks the missing ones), `deliverable` names a workspace-relative file that must exist when it reports "
+        "short item against the report and marks the missing ones), `persona` gives the subagent a stance "
+        "(critic, skeptic, simplifier, security, researcher — an independent reviewer that does not share your "
+        "context is worth more than a second pass of your own), `deliverable` names a workspace-relative file that must exist when it reports "
         "(checked by the host, not by the subagent's word)."
     ),
 )
@@ -41,12 +43,13 @@ async def sub_agent(
     keep: bool = False,
     expects: str | None = None,
     deliverable: str | None = None,
+    persona: str | None = None,
 ) -> ToolResult:
     hook = _hook(context)
     if hook is None:
         return error(context, "subagents are not available")
     try:
-        result = await hook("spawn", leader_id=context.session_id, task=task, model=model, name=name, wait=wait, timeout_minutes=timeout_minutes, keep=keep, expects=expects, deliverable=deliverable)
+        result = await hook("spawn", leader_id=context.session_id, task=task, model=model, name=name, wait=wait, timeout_minutes=timeout_minutes, keep=keep, expects=expects, deliverable=deliverable, persona=persona)
     except (ValueError, RuntimeError) as exc:
         return error(context, str(exc))
     return _report(context, result, started=True)

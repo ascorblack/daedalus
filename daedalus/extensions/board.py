@@ -56,6 +56,7 @@ class Board:
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (task_id, title[:200], status, max(1, min(int(priority), 5)), acceptance[:2000], json.dumps([{"text": c[:200], "done": False} for c in (checklist or [])]), json.dumps(deps), session_id, notes[:4000], _now(), _now()),
         )
+        await self.export_plan(session_id)
         return await self.get(task_id)
 
     async def get(self, task_id: str) -> dict[str, Any]:
@@ -138,6 +139,7 @@ class Board:
             await self._promote_dependents()
         elif status and task["status"] in ("done", "dropped"):
             await self._demote_dependents()
+        await self.export_plan(session_id or task.get("session_id"))
         return await self.get(task_id)
 
     async def delete(self, task_id: str) -> bool:
@@ -206,6 +208,33 @@ class Board:
             except Exception:  # noqa: BLE001
                 logger.exception("board recovery failed")
             await asyncio.sleep(TICK_SECONDS)
+
+    async def export_plan(self, session_id: str | None) -> None:
+        """PLAN.md in the session's workspace: the board's rows for that session as a readable, diffable file.
+
+        The board stays the plan of record (it survives compaction and restarts); the file is its
+        rendering where the operator and the agent read files, regenerated on every change.
+        """
+        if not session_id or self.app.manager is None:
+            return
+        state = await self.app.manager.get_state(session_id)
+        if state is None:
+            return
+        rows = await self.app.db.fetchall("SELECT * FROM board_tasks WHERE session_id = ? ORDER BY CASE status WHEN 'doing' THEN 0 WHEN 'review' THEN 1 WHEN 'todo' THEN 2 WHEN 'blocked' THEN 3 WHEN 'done' THEN 4 ELSE 5 END, priority, created_at", (session_id,))
+        tasks = [self._view(dict(r)) for r in rows]
+        lines = ["# Plan", "", f"Board tasks of session {session_id}; edit them with the Board tools, this file is regenerated.", ""]
+        for t in tasks:
+            box = {"done": "x", "dropped": "-"}.get(t["status"], " ")
+            deps = f" (after {', '.join(t['depends_on'])})" if t["depends_on"] else ""
+            lines.append(f"- [{box}] **{t['id']}** {t['title']} — {t['status']}, priority {t['priority']}{deps}")
+            if t.get("acceptance"):
+                lines.append(f"  - done when: {t['acceptance']}")
+            for item in t["checklist"]:
+                lines.append(f"  - [{'x' if item['done'] else ' '}] {item['text']}")
+        try:
+            (state.workspace / "PLAN.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError:
+            logger.warning("could not write PLAN.md for session %s", session_id, exc_info=True)
 
     def render(self, tasks: list[dict[str, Any]], *, limit: int = 30) -> str:
         icons = {"todo": "▫️", "doing": "🔵", "review": "🟡", "done": "✅", "blocked": "⛔", "dropped": "✖️"}

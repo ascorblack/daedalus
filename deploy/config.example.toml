@@ -66,6 +66,26 @@ auto_rebuild = true
 [limits]
 max_iterations = 200
 tool_timeout_seconds = 900.0
+# max_run_minutes = 0     # active minutes per run, 0 = none
+# max_run_tokens = 0      # tokens per run, every call counted, 0 = none
+
+[policy]
+# Hosts the agent may reach without asking ("example.com" or "*.example.com"); empty = every host, logged.
+egress_allow = []
+# [[policy.rules]]
+# tool = "Exec"
+# pattern = "\\bpip install\\b(?!.*--user)"
+# action = "deny"           # deny | ask; "allow" only lifts an ask, never a built-in denial
+# note = "no global installs"
+
+[hooks]
+# Operator scripts around the agent's actions: JSON on stdin; pre_tool exits 2 to refuse, prints JSON with "arguments" to rewrite.
+pre_tool = ""
+post_tool = ""
+run_finished = ""
+
+[memory]
+extract_after_run = false
 
 [balance]
 enabled = true
