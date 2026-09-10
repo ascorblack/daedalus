@@ -1532,6 +1532,12 @@ function describe(t: ToolItem): { verb: string; noun: string; detail: string; ic
       }
       if (t.name.startsWith("Self")) return { verb: t.name.replace(/^Self/, "Self: "), noun: "step", detail: str("branch") || str("title") || str("repo"), icon: "wrench" };
       if (t.name.startsWith("Schedule")) return { verb: t.name.replace(/^Schedule/, "Schedule: "), noun: "task", detail: str("name") || str("schedule_id"), icon: "clock" };
+      if (t.name.startsWith("Service")) {
+        const what = t.name.replace(/^Service/, "").toLowerCase();
+        const verb = what === "start" ? (r ? "Starting service" : "Started service") : what === "stop" ? (r ? "Stopping service" : "Stopped service") : what === "logs" ? "Read service log" : "Listed services";
+        return { verb, noun: "service", detail: str("name") ? `${str("name")}${str("command") ? " · " + str("command").slice(0, 50) : ""}` : "", icon: "globe" };
+      }
+      if (t.name.startsWith("Loop")) return { verb: t.name.replace(/^Loop/, "Loop: ").toLowerCase().replace(/^l/, "L"), noun: "loop", detail: str("reason") || str("note") || str("instruction").slice(0, 60), icon: "loop" };
       if (t.name.startsWith("Mcp")) {
         // Mcp_Postingboard_read_thread → "postingboard · read thread", with the first string argument as the detail.
         const parts = t.name.replace(/^Mcp_?/, "").split("_");

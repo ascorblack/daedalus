@@ -1,51 +1,207 @@
-# Daedalus
+<p align="center">
+  <img src="docs/brand/avatar-bot.png" width="112" alt="Daedalus" />
+</p>
 
-A personal, self-developing agent that lives in Telegram and runs inside its own Linux
-container. One operator, unrestricted tools inside the container, and the ability to change
-its own code through pull requests you approve from the chat.
+<h1 align="center">Daedalus</h1>
 
-Built on [protocore](https://github.com/ascorblack-labs/protocore-community), the open agent
-core; the copy it runs on is [protocore-exp](https://github.com/ascorblack/protocore-exp).
+<p align="center">
+  A personal, self-developing agent that lives in Telegram and in its own web app,<br/>
+  runs inside a Linux container with real tools, and changes its own code through pull requests you approve from the chat.
+</p>
 
-## What it does
+<p align="center">
+  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
+  <img alt="Python 3.12" src="https://img.shields.io/badge/python-3.12-3776ab.svg" />
+  <img alt="Docker Compose" src="https://img.shields.io/badge/deploy-docker%20compose-2496ed.svg" />
+  <img alt="Telegram" src="https://img.shields.io/badge/chat-Telegram-26a5e4.svg" />
+  <img alt="React" src="https://img.shields.io/badge/app-React%2019-61dafb.svg" />
+  <img alt="tests" src="https://img.shields.io/badge/tests-320%2B-4ade80.svg" />
+</p>
 
-- **Sessions as forum topics.** Each topic in your Telegram group is one agent session with
-  its own workspace. Write to a topic, send files, get files back. Several sessions run in
-  parallel; `/new <title>` opens another.
-- **Follow-ups at any time.** Messages sent while the agent works are queued into the run.
-  Questions from the agent arrive as inline buttons.
-- **Rich replies.** Answers go out as Telegram rich messages: Markdown with headings,
-  tables, code blocks, quotes and collapsible blocks renders natively. In the private chat
-  the answer also streams as a live draft (with a Stop button); everywhere a status message
-  shows the run's vitals with the tool log folded into a collapsible block.
-- **Mini App.** A Telegram Mini App (and plain browser page) with the roster of sessions,
-  live transcripts (kept in full even after the model's context is compacted), change
-  proposals with diffs, scheduled tasks, usage and settings.
-- **Self-development.** The agent edits its host code or its core in a git worktree, opens a
-  pull request, and you approve or reject it (with a reason) in chat. After the merge the
-  supervisor pulls, runs preflight checks and restarts; a bad build rolls back on its own.
-- **Scheduler.** Recurring or one-shot tasks that run in fresh sessions with a persistent
-  workspace and a summary handed from run to run.
-- **Spend visibility.** Every provider response is recorded as reported; balance thresholds
-  alert you in chat; a daily cap is enforced by the supervisor.
-- **Any OpenAI-compatible model.** Clients are endpoints (DeepSeek, OpenRouter, self-hosted
-  vLLM, anything OpenAI-compatible, each with its own base_url, optional key and timeout).
-  Models are named presets on top of them: client, model id, label, thinking mode and effort,
-  image support, context window and output cap, several per client if you like. One preset is
-  the default for new sessions, others can be marked as fallbacks, any session can switch from
-  the chat, and ImageView uses whichever image-capable preset you point it at.
-- **Eyes on demand.** `ImageView` sends an image to a small vision model (OpenRouter,
-  `qwen/qwen3.7-flash` by default) and returns what the agent asked about it, so the main
-  model's context never carries raw pixels.
-- **MCP servers per session.** Configure servers under `[mcp.servers.<name>]`; every session
-  starts with them off. The agent enables one with `McpEnable`, you toggle them in the Mini
-  App; their tools appear as `Mcp_<Server>_<tool>`.
+<p align="center">
+  <img src="docs/screenshots/session.png" alt="A session: the agent's steps, an image it looked at, the answer, and the panel with quota, services and subagents" width="100%" />
+</p>
+
+> Built on [protocore](https://github.com/ascorblack-labs/protocore-community), an open agent core (ReAct loop, tools, context compaction, snapshots and resumable runs, memory, skills). The copy it runs on is [protocore-exp](https://github.com/ascorblack/protocore-exp).
+
+---
+
+## Why
+
+Most agent products are a chat box in someone else's cloud. Daedalus is the opposite: **one operator, one container, everything inside it** — a shell, a browser, git, a filesystem, long-running services on ports you can open, a scheduler, subagents, memory — reachable from the Telegram app you already have open and from a web app that works on a phone and on a desk.
+
+It is built to run for weeks: sessions survive restarts, runs resume from snapshots, context is compacted instead of lost, spend is capped by a supervisor the agent cannot edit, and the agent's own improvements land as pull requests, not as silent edits.
+
+## What you get
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+**💬 Telegram-native**<br/>
+Each forum topic is a session with its own workspace. Files in, files out, voice notes transcribed, questions as inline buttons, answers as rich messages that stream while they are written.
+
+</td>
+<td width="33%" valign="top">
+
+**🖥️ A real web app**<br/>
+Roster, live transcripts, file browser with previews (images, Markdown, CSV, PDF, Word, Excel), two sessions side by side, drag-and-drop and clipboard attachments, a microphone. Installable as a PWA.
+
+</td>
+<td width="33%" valign="top">
+
+**🛠️ Real tools**<br/>
+Shell, files, search, web fetch and search (self-hosted SearXNG), a vision model for images, verification runs, MCP servers per session, skills the agent loads on demand.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**🔁 Autonomy that stays on a leash**<br/>
+Loop agents wake up on an interval or when they say so; cron tasks run in fresh or standing sessions; a heartbeat checks in; a task board and an inbox keep you informed. Every run has turn, spend and time limits.
+
+</td>
+<td valign="top">
+
+**🧬 Self-development**<br/>
+The agent edits its host or its core in a git worktree, opens a PR, you approve or reject with a reason in the chat. The supervisor pulls, runs preflight and restarts — and rolls back a bad build on its own.
+
+</td>
+<td valign="top">
+
+**🔐 Keys it never sees**<br/>
+Provider keys live in a key-proxy container that injects them into upstream calls and stops paying once the daily budget is spent. Your ChatGPT, Claude Code and SuperGrok logins work as providers too, with their quota windows on screen.
+
+</td>
+</tr>
+</table>
+
+## How it looks
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/bots.png" alt="The roster: active sessions, subagents under their leaders, loops" /></td>
+<td width="50%"><img src="docs/screenshots/dual.png" alt="Two sessions side by side on a wide screen" /></td>
+</tr>
+<tr>
+<td align="center"><sub>The roster — subagents under their leader, loop agents with their cadence</sub></td>
+<td align="center"><sub>Two sessions side by side; each pane has its own files and settings</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/usage.png" alt="Usage: spend, subscription quota windows, balances, per-session cost" /></td>
+<td><img src="docs/screenshots/memory.png" alt="Memory: what the agent remembered, global and per session, editable" /></td>
+</tr>
+<tr>
+<td align="center"><sub>Usage — metered spend, subscription windows, balances with alert thresholds</sub></td>
+<td align="center"><sub>Memory — what the agent remembered, global and per session; edit, add, forget in bulk</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/files-preview.png" alt="Workspace files with a Markdown preview" /></td>
+<td><img src="docs/screenshots/board.png" alt="The task board" /></td>
+</tr>
+<tr>
+<td align="center"><sub>Workspace files with previews and uploads</sub></td>
+<td align="center"><sub>The task board the agent keeps</sub></td>
+</tr>
+</table>
+
+<p align="center">
+  <img src="docs/screenshots/phone-bots.png" width="30%" alt="Phone: the roster" />
+  <img src="docs/screenshots/phone-session.png" width="30%" alt="Phone: a session" />
+  <img src="docs/screenshots/phone-memory.png" width="30%" alt="Phone: memory" />
+</p>
+<p align="center"><sub>The same app on a phone — inside Telegram as a Mini App, or in any browser</sub></p>
+
+## How it is put together
+
+```mermaid
+flowchart LR
+    Op([Operator]) -- Telegram --> TG[telegram-bot-api<br/>local Bot API]
+    Op -- HTTPS --> RP[reverse proxy<br/>your domain]
+    TG --> D
+    RP --> D
+
+    subgraph host["Docker host"]
+        subgraph agent["daedalus container"]
+            SV[supervisor<br/>PID 1 · read-only to the agent] --> D[bot + API + Mini App]
+            D --> T[tools: shell · files · web · vision · MCP · services]
+            T --> WS[(workspaces volume)]
+            D --> ST[(state volume<br/>SQLite · blobs · snapshots)]
+        end
+        KP[key proxy<br/>holds provider keys · daily budget] --> UP[(model providers)]
+        SX[SearXNG<br/>metasearch]
+        RB[rebuilder<br/>only container with the docker socket]
+    end
+
+    D -- "no keys inside" --> KP
+    T --> SX
+    SV -- "trigger file" --> RB
+    RB -- "git reset · build · restart" --> agent
+    T -- "ServiceStart · ports 8100-8119" --> Op
+```
+
+Five containers, one job each. The agent container has no provider keys and no docker socket; the supervisor and the governance rules are mounted read-only. Services the agent hosts (a demo site, a dev server) listen on a published port range and can be shared through your domain — to anyone, or to whoever holds a key — without opening another port.
+
+## A run, step by step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant You
+    participant S as Session
+    participant M as Model
+    participant T as Tools
+    You->>S: message, files, a voice note
+    S->>M: history + system prompt (rules, brief, skills index, memory)
+    loop until the answer
+        M->>T: Exec / Read / Edit / WebSearch / ImageView / SubAgent …
+        T-->>M: result (clipped, secrets masked)
+        You-->>S: a steer lands before the next step
+    end
+    M-->>S: answer (Markdown)
+    S-->>You: streamed to Telegram and the app
+    S->>S: snapshot · usage booked · compact when the window fills
+```
+
+What makes long sessions work: the **transcript** keeps everything, the **working history** the model sees is compacted into summaries when it grows (with `HistoryExpand` to read the originals back), a **revert** restores the history *and* the workspace to any earlier turn, a **fork** starts a new session from one, and `/clear` starts over while keeping the files.
+
+## Self-development
+
+```mermaid
+flowchart LR
+    A[SelfWorkspace<br/>git worktree on a branch] --> B[edit · test · commit]
+    B --> C[SelfPropose<br/>pull request]
+    C --> D{You, in the chat}
+    D -- approve --> E[merge]
+    D -- reject + reason --> A
+    E --> F[SelfRebuild when idle<br/>git reset · preflight · restart]
+    F -- preflight fails --> G[rollback to the last known-good build]
+    F -- ok --> H[new build running]
+```
+
+The PR text passes a public-text gate (nothing about your machine leaks into a public repository), the diff is checked for references it must not carry, and `GOVERNANCE.md` — the rules the agent always sees and can never edit — is mounted read-only. Approval is manual by default; `/approval auto` hands it over when you trust it.
+
+## The toolbox
+
+| Area | Tools |
+|---|---|
+| Files & shell | `Exec` (with an optional bubblewrap sandbox), `Read`, `Write`, `Edit`, `Find`, `Search` |
+| Web | `WebFetch`, `WebSearch` — SearXNG by default; Serper, Tavily, Exa, Perplexity, Keenable through the key proxy |
+| Seeing | `ImageView` — a separate vision model answers questions about an image, so the main context never carries pixels |
+| Delegation | `SubAgent`, `SubAgentSend`, `SpawnAgent`, `AskPeer` — helpers in the same workspace, sibling sessions, named peers |
+| Time | `ScheduleCreate`, `LoopNext`, `IntentCreate` — cron, self-paced loops, standing intents on inbound events |
+| Hosting | `ServiceStart` / `ServiceStop` / `ServiceLogs` — processes that outlive the turn, on ports you can reach and share |
+| Memory | `Remember`, `Recall`, `Forget`, `HistorySearch`, `HistoryExpand` |
+| Quality | `Verify` — a check with a criterion, recorded as a receipt; `LearningReport` |
+| Self | `SelfWorkspace`, `SelfPropose`, `SelfRebuild`, `SelfRollback` |
+| Extensions | `Skill` (30 bundled skills: design systems, web QA, writing, scheduling…), `Mcp*` with OAuth, `Board*`, `SendFile`, `StaySilent` |
+
+Every tool can be switched off per session from the app, and a **mode** (`quick`, `deep`, `careful`) bundles limits and extra rules.
 
 ## Run it
 
-Requirements: Docker with Compose, a Telegram bot token, your numeric Telegram user id,
-Telegram API credentials for the local Bot API server (files above 20 MB), and at least one
-model API key.
+Requirements: Docker with Compose, a Telegram bot token, your numeric Telegram user id, Telegram API credentials for the local Bot API server (files above 20 MB), and at least one model API key **or** a ChatGPT / Claude Code / SuperGrok login on the host.
 
 ```bash
 git clone https://github.com/ascorblack/daedalus
@@ -57,32 +213,19 @@ chmod 600 ../daedalus-secrets/keyproxy.env   # provider keys go HERE, outside th
 docker compose -f deploy/compose.yaml --env-file .env up -d --build
 ```
 
-Your ChatGPT (Codex), SuperGrok, and Claude Code logins can serve as model providers: the key proxy
-reads the CLIs' own login files (`~/.codex/auth.json`, `~/.grok/auth.json`, `~/.claude/.credentials.json`), refreshes them, and
-exposes them as `codex`, `grok` and `claude` providers; the Usage screen shows their quota windows. This
-follows the practice of pi and OpenCode — OpenAI documents ChatGPT sign-in for Codex clients and
-xAI books such use under its own "API product" category. Claude Code is bridged the same way from `~/.claude/.credentials.json` (the `claude` provider).
-
-Provider keys never enter the agent container: a small key-proxy container holds them and injects
-them into upstream calls (`http://keyproxy:3200/deepseek`, `…/openrouter`, `…/openai`, plus any
-`KEYPROXY_UPSTREAM_<NAME>` you add). The proxy also refuses model calls once the daily budget is spent.
-
-Web search is a self-hosted [SearXNG](https://docs.searxng.org/) container (`deploy/searxng/settings.yml`:
-Bing, Brave, DuckDuckGo, Google CSE, Mojeek and Wikipedia merged, JSON API, private network only),
-with DuckDuckGo's HTML page as the no-install fallback. Paid search APIs (Serper, Keenable, Tavily,
-Exa, Perplexity) plug in as key-proxy upstreams (`deploy/keyproxy.env.example`) and are switched in
-the Mini App; the `WebSearch` tool keeps the same contract whichever backend answers.
-
 Then, in Telegram:
 
-1. Send `/start` to the bot in a private chat. That chat is a single session on its own.
-2. For parallel sessions, create a supergroup with topics enabled, add the bot as an
-   administrator with *manage topics*, and send `/bind` there. From now on `/new <title>`
-   creates a topic per session; topics you create by hand are adopted too.
-3. Open the Mini App with `/app` (set `MINIAPP_PUBLIC_URL` to an HTTPS address that proxies
-   to port 8765 and register it as the bot's menu button in @BotFather).
+1. Send `/start` to the bot in a private chat — that chat is a session of its own.
+2. For parallel sessions, create a supergroup with topics, add the bot as an administrator with *manage topics*, and send `/bind` there. `/new <title>` now creates a topic per session; topics you create by hand are adopted too.
+3. Open the app with `/app`. Set `MINIAPP_PUBLIC_URL` to an HTTPS address that proxies to port 8765 and register it as the bot's menu button in @BotFather; the same address serves the browser version (sign in with Telegram's login widget) and the shared services under `/s/…`.
 
-Without Docker, for development:
+### Models and keys
+
+Providers are OpenAI-compatible endpoints (DeepSeek, OpenRouter, a self-hosted vLLM, anything else) with their own base URL, key and timeout; **presets** on top of them name a model with its thinking mode, effort, image support, context window and output cap. One preset is the default, others are fallbacks, any session can switch. Speech-to-text and the vision model pick a provider the same way.
+
+Keys never enter the agent container: the **key proxy** injects them (`http://keyproxy:3200/deepseek`, `…/openrouter`, plus any `KEYPROXY_UPSTREAM_<NAME>`), meters the calls, and refuses model calls once the daily budget is spent. Your **ChatGPT (Codex), SuperGrok and Claude Code** logins are read from the CLIs' own auth files, refreshed in place, and exposed as the `codex`, `grok` and `claude` providers — their quota windows show on the Usage screen and beside every session that uses them.
+
+### Without Docker, for development
 
 ```bash
 uv sync --extra dev
@@ -90,6 +233,7 @@ uv run python -m daedalus check                  # configuration and tool regist
 uv run python -m daedalus run -p "say hello"     # one session in the terminal
 uv run python -m daedalus serve                  # the bot
 uv run pytest -q                                 # tests
+(cd miniapp && npm install && npm run build)     # the app, served by the bot from miniapp/dist
 ```
 
 ## Commands
@@ -98,48 +242,41 @@ uv run pytest -q                                 # tests
 |---|---|
 | `/new <title>` | new session (a new topic when a group is bound) |
 | `/stop`, `/close` | stop the current run; close this session's topic |
-| `/rename <title>` | rename the session and its topic (also from the Mini App header) |
-| `/compact [focus]` | replace the session history with a model-written summary (shown collapsed in the Mini App) |
-| `/prompt` | show the working rules of the system prompt (edit them in the Mini App → Settings) |
-| `/sessions`, `/status` | list sessions; what is running |
-| `/model [provider/]name\|default`, `/thinking on\|off\|low\|medium\|high` | model settings (default in General, per session in a topic; the Mini App chat has a model picker too) |
-| `/usage`, `/balance` | spend today and per session; provider balances |
+| `/rename <title>` | rename the session and its topic |
+| `/compact [focus]`, `/clear` | replace the history with a summary; start over with an empty history (files, brief and settings stay) |
+| `/model [preset]`, `/thinking …`, `/mode …` | model, thinking and mode for this session |
+| `/loop [10m] <instruction>` | make this session a loop agent; `status`, `pause`, `resume`, `stop`, `remove` |
+| `/brief [text]`, `/cap <usd>` | standing instructions; spend cap for the session |
+| `/sessions`, `/status`, `/usage`, `/balance` | roster; what is running; spend; provider balances |
 | `/schedules`, `/schedule run\|on\|off\|delete <id>` | scheduled tasks |
-| `/approval manual\|auto`, `/verbosity 0\|1\|2` | self-change approval mode; chat detail |
+| `/board`, `/inbox`, `/intents`, `/peer` | the task board, the inbox, standing intents, peers |
+| `/approval manual\|auto`, `/verbosity 0\|1\|2` | self-change approval; how much of a run the chat shows |
+| `/heartbeat`, `/doctor [fix]`, `/settings`, `/prompt` | the periodic check; health checks; configuration; the working rules |
 | `/rebuild`, `/rollback [n]`, `/panic` | supervisor operations |
-| `/settings`, `/app` | current configuration; Mini App link |
+
+Every session command also works from the app's composer with the same `/` palette.
 
 ## Layout
 
 ```
 daedalus/
-  host/         sessions, engine wiring, prompts, skills store
-  providers/    OpenAI-compatible adapter, fallback chain, registry
-  tools/        one tool per module, PascalCase names: Exec, Read, Write, Edit, Find, Search, WebFetch,
-                WebSearch, ImageView, SendFile, SpawnAgent, SubAgent, AskPeer, Self*, Schedule*, Mcp*
+  host/         sessions, engine wiring, prompts, skills store, checkpoints
+  providers/    OpenAI-compatible adapter, fallback chain, pricing, registry
+  tools/        one tool per module, PascalCase names
   stores/       SQLite stores, blob store, durable memory
-  transport/    Telegram (aiogram 3)
-  extensions/   self-development, scheduler, balance monitor, HTTP API
+  transport/    Telegram (aiogram 3): topics, rich messages, voice, files
+  extensions/   HTTP API + app, self-development, scheduler, loops, subagents,
+                services, board, peers, inbox, heartbeat, balance, MCP
 launcher/       the supervisor (PID 1, never edited by the agent)
-miniapp/        Vite + React Mini App
+miniapp/        Vite + React app (Telegram Mini App and browser)
 skills/         SKILL.md skills the agent can load
-deploy/         Dockerfile, compose, env example
+deploy/         Dockerfile, compose, key proxy, SearXNG settings, env examples
+tests/          unit and integration tests
 ```
-
-The agent's changes land through pull requests in this repository and in `protocore-exp`.
-`GOVERNANCE.md` holds the rules that are always in context and never editable by tools.
 
 ## Configuration
 
-Secrets and machine facts live in `.env` (see `deploy/env.example`). Everything the operator
-may change at runtime lives in `config.toml` on the state volume and is edited through the bot
-commands and the Mini App: model presets (`[presets.<id>]` with provider, model, thinking,
-reasoning_effort, images, context_window, max_output_tokens; `[model] preset` and `chain` pick
-the default and the fallbacks), the working rules of the system prompt
-(`[prompt] rules`, empty = built-in default), fallback chain, approval mode, spend limits,
-balance thresholds, scheduler behaviour, per-model pricing overrides (DeepSeek list prices with
-their peak/off-peak schedule are built in), the vision model, the web search backend
-(`[tools.web.search] backend` and `fallback`, with a subsection per backend), and MCP servers:
+Secrets and machine facts live in `.env` (see `deploy/env.example`). Everything you may change at runtime lives in `config.toml` on the state volume and is edited from the app's Settings: presets and providers, the working rules of the system prompt, spend limits and balance thresholds, compaction, the scheduler, speech-to-text, the vision model, the web-search backend, and MCP servers:
 
 ```toml
 [mcp.servers.filesystem]
@@ -153,6 +290,8 @@ transport = "http"
 url = "https://example.com/mcp"
 headers = { Authorization = "Bearer ..." }
 ```
+
+Every session starts with MCP servers off; the agent enables one with `McpEnable`, you toggle them in the app.
 
 ## License
 
