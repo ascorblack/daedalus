@@ -105,9 +105,15 @@ def relevance_gate(root: Path, changed_files: list[str], execution_path: str | N
     proposed tree and, through the static import graph, reach every changed module. A change that
     touches no host module (tests, docs, skills, the Mini App, deploy files) needs no path.
     """
-    modules = reachability.modules_for_files(root, changed_files)
+    present = [f for f in changed_files if (root / f).is_file()]  # a deleted module needs no path: it is gone
+    modules = reachability.modules_for_files(root, present)
     if not modules:
         return
+    if execution_path and execution_path.split(":", 1)[0].strip() in modules:
+        raise ProposalRefused(
+            f"execution_path {execution_path!r} is the changed module itself. Name the code that runs it — the tool, "
+            "hook, extension or startup step that imports it — not the module being changed."
+        )
     if not execution_path or not execution_path.strip():
         raise ProposalRefused(
             "the change touches host modules (" + ", ".join(modules) + ") but names no execution_path. "
@@ -146,15 +152,27 @@ def evidence_gate(changed_files: list[str], receipts: list[dict[str, Any]], exec
     modules = reachability.modules_for_files(Path("."), changed_files)
     if not modules:
         return
-    stems = {Path(f).stem for f in changed_files} | {m.rsplit(".", 1)[-1] for m in modules}
+    tokens: set[str] = set()
+    for f in changed_files:
+        path = Path(f)
+        if path.suffix == ".py" and path.parts and path.parts[0] == reachability.PACKAGE:
+            tokens.add(f)  # the file itself
+            tokens.add(f"test_{path.stem}")  # its tests by the usual name
+            tokens.add(".".join(path.with_suffix("").parts))  # its module, as `python -m` or an import would name it
     if execution_path:
-        stems.add(execution_path.split(":", 1)[0].rsplit(".", 1)[-1])
-    stems.discard("__init__")
+        module = execution_path.split(":", 1)[0].strip()
+        tokens.add(module)
+        tokens.add(module.replace(".", "/") + ".py")
+        if module.endswith(".__main__"):
+            tokens.add("-m " + module.removesuffix(".__main__"))  # `python -m package` runs package.__main__
+    tokens.discard("")
     commands = " ".join(str(r.get("command") or "") for r in passed)
-    if not any(re.search(r"(?<![A-Za-z0-9_])" + re.escape(stem) + r"(?![A-Za-z0-9])", commands) for stem in stems if stem):
+    # A token is a whole word inside the command: `test_boot_guard` counts as part of `tests/unit/test_boot_guard.py`,
+    # `config` does not count as part of `config.toml` because that token is the full path `daedalus/config.py`.
+    if not any(re.search(r"(?<![A-Za-z0-9_-])" + re.escape(tok) + r"(?![A-Za-z0-9_])", commands) for tok in tokens):
         raise ProposalRefused(
-            "no passing Verify receipt mentions the changed code (" + ", ".join(sorted(stems)) + "). "
-            "Verify a command that runs the changed path — its tests by file name, or the tool/command that uses it."
+            "no passing Verify receipt names the changed code. Verify a command that runs the changed path — its test "
+            "file (tests/…/test_<module>.py), the module (python -m pkg.module or an import), or the file path itself."
         )
 
 
@@ -321,12 +339,18 @@ class SelfDevelopment:
         return f"PR #{pr_number} opened: {pr_url}. Waiting for the operator's decision in chat."
 
     async def _branch_started(self, spec: RepoSpec, worktree: Path) -> str | None:
-        """When the first commit beyond origin/main was made: receipts older than that are not evidence for it."""
+        """When the branch diverged from main: receipts older than that are not evidence for it.
+
+        The merge base's commit date, not the branch's first commit: a Verify run before the first
+        commit still counts, and an amend or rebase (which the leak gate itself asks for) does not
+        move the window.
+        """
         try:
-            dates = (await self.git(spec, "log", "--format=%cI", "origin/main..HEAD", cwd=worktree)).split()
+            base = (await self.git(spec, "merge-base", "origin/main", "HEAD", cwd=worktree)).strip()
+            stamp = (await self.git(spec, "log", "-1", "--format=%cI", base, cwd=worktree)).strip() if base else ""
         except GitError:
             return None
-        return datetime.fromisoformat(dates[-1]).astimezone(UTC).isoformat() if dates else None
+        return datetime.fromisoformat(stamp).astimezone(UTC).isoformat() if stamp else None
 
     async def receipt_rows(self, session_id: str, *, since: str | None = None, hours: int = 24) -> list[dict[str, Any]]:
         since = since or (datetime.now(UTC) - timedelta(hours=hours)).isoformat()

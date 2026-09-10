@@ -33,12 +33,13 @@ def test_static_walk_follows_imports_discovery_and_relative_imports(tmp_path: Pa
         "daedalus/host/runner.py": "from daedalus.host.skills import Store\n",
         "daedalus/host/skills.py": "class Store: ...\n",
         "daedalus/host/orphan.py": "x = 1\n",
-        "daedalus/extensions/__init__.py": "",
+        "daedalus/extensions/__init__.py": "EXTENSIONS = ('daedalus.extensions.loops',)\n",
         "daedalus/extensions/loops.py": "from ..host import runner\n",
+        "daedalus/extensions/forgotten.py": "from ..host import runner\n",
         "daedalus/tools/__init__.py": "",
         "daedalus/tools/shell.py": "TOOLS = []\n",
     })
-    assert reachability.unreachable_modules(root) == ["daedalus.host.orphan", "daedalus.tools", "daedalus.tools.shell"]
+    assert reachability.unreachable_modules(root) == ["daedalus.extensions.forgotten", "daedalus.host.orphan", "daedalus.tools", "daedalus.tools.shell"]
     ok, missing = reachability.path_reaches(root, "daedalus.extensions.loops:install", ["daedalus.host.skills"])
     assert ok and missing == []
     ok, missing = reachability.path_reaches(root, "daedalus.app", ["daedalus.host.orphan"])
@@ -60,6 +61,9 @@ def test_relevance_gate_refuses_an_unwired_module_and_a_wrong_path(tmp_path: Pat
     with pytest.raises(ProposalRefused, match="does not reach: daedalus.host.model"):
         relevance_gate(root, ["daedalus/host/model.py"], "daedalus.host.runner")
     relevance_gate(root, ["tests/unit/test_model.py", "skills/x/SKILL.md", "miniapp/src/App.tsx"], None)  # no host module: no path needed
+    relevance_gate(root, ["daedalus/host/deleted.py"], None)  # a deleted module needs no path
+    with pytest.raises(ProposalRefused, match="is the changed module itself"):
+        relevance_gate(root, ["daedalus/host/model.py"], "daedalus.host.model")
     (root / "daedalus/host/runner.py").write_text("from daedalus.host.model import Invariant\n", encoding="utf-8")
     relevance_gate(root, ["daedalus/host/model.py"], "daedalus.host.runner:Runner")
 
@@ -68,10 +72,15 @@ def test_evidence_gate_wants_a_passing_receipt_that_names_the_change() -> None:
     changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
     with pytest.raises(ProposalRefused, match="no passing Verify receipt recorded"):
         evidence_gate(changed, [{"command": "uv run pytest tests -q", "passed": 0}], None)
-    with pytest.raises(ProposalRefused, match="mentions the changed code"):
+    with pytest.raises(ProposalRefused, match="names the changed code"):
         evidence_gate(changed, [{"command": "uv run pytest tests -q", "passed": 1}], None)
+    with pytest.raises(ProposalRefused, match="names the changed code"):
+        evidence_gate(["daedalus/config.py"], [{"command": "cat config.toml", "passed": 1}], None)
+    with pytest.raises(ProposalRefused, match="names the changed code"):
+        evidence_gate(["daedalus/extensions/api.py"], [{"command": "curl -s http://127.0.0.1:8080/api/health", "passed": 1}], None)
     evidence_gate(changed, [{"command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1}], None)
     evidence_gate(changed, [{"command": "uv run python -c 'import daedalus.host.boot_guard'", "passed": 1}], "daedalus.app:serve")
+    evidence_gate(changed, [{"command": "uv run python -m daedalus check", "passed": 1}], "daedalus.__main__:cmd_check")
     evidence_gate(["docs/DESIGN.md"], [{"command": "true", "passed": 1}], None)
 
 

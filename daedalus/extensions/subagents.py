@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -58,10 +59,21 @@ def contract_verdict(state: Any, answer: str) -> str:
     expects = str(state.metadata.get("subagent_expects") or "")
     notes = []
     if deliverable:
-        target = Path(state.workspace) / deliverable
-        notes.append(f"deliverable {deliverable}: present ({target.stat().st_size} bytes)" if target.is_file() else f"deliverable {deliverable}: MISSING")
+        root = Path(state.workspace).resolve()
+        target = (root / deliverable).resolve()
+        if not target.is_relative_to(root):
+            notes.append(f"deliverable {deliverable}: refused (outside the workspace)")
+        else:
+            notes.append(f"deliverable {deliverable}: present ({target.stat().st_size} bytes)" if target.is_file() else f"deliverable {deliverable}: MISSING")
     if expects:
-        notes.append(f"expected in the report: {expects}")
+        wanted = [part.strip() for part in re.split(r"[;,\n]", expects) if part.strip()]
+        lowered = answer.lower()
+        missing = [w for w in wanted if len(w.split()) <= 6 and w.lower() not in lowered]
+        checkable = [w for w in wanted if len(w.split()) <= 6]
+        if checkable:
+            notes.append(f"expected items named in the report: {len(checkable) - len(missing)}/{len(checkable)}" + (f"; not found: {', '.join(missing)}" if missing else ""))
+        else:
+            notes.append(f"expected in the report (not machine-checked): {expects}")
     return ("[contract] " + "; ".join(notes) + "\n\n" + answer) if notes else answer
 
 

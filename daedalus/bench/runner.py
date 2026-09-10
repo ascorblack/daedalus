@@ -83,6 +83,10 @@ async def _shell(command: str, cwd: Path, timeout: float) -> tuple[int, str]:
     return proc.returncode or 0, out.decode("utf-8", "replace")
 
 
+class _SetupFailed(Exception):
+    """The task's setup command failed; the record says so and the task is not run."""
+
+
 class BenchRunner:
     """Owns one :class:`SessionManager` and runs tasks through it; the state directory is the bench's own."""
 
@@ -138,7 +142,7 @@ class BenchRunner:
                 code, out = await _shell(task.setup, workspace, timeout=600)
                 if code != 0:
                     record.error = f"setup failed ({code}): {out[-2000:]}"
-                    return record
+                    raise _SetupFailed()
             self._done[sid] = asyncio.Event()
             await manager.submit(sid, task.prompt, origin="bench")
             try:
@@ -162,6 +166,8 @@ class BenchRunner:
                 record.model = str(usage["model"] or "")
             (self.out_dir / "trajectories").mkdir(exist_ok=True)
             (self.out_dir / "trajectories" / f"{task.id}.json").write_text(json.dumps({"task": task.id, "session": sid, "steps": trajectory(messages)}, ensure_ascii=False, indent=1), encoding="utf-8")
+        except _SetupFailed:
+            pass
         except Exception as exc:  # noqa: BLE001 — one task's crash is a record, not the end of the run
             logger.exception("task %s crashed", task.id)
             record.status = "error"
@@ -173,10 +179,10 @@ class BenchRunner:
                 await manager.delete_session(sid, delete_workspace=False)
             except Exception:  # noqa: BLE001
                 logger.exception("could not delete bench session %s", sid)
-            if not task.check or record.passed:
-                shutil.rmtree(workspace, ignore_errors=True)  # a failed task keeps its workspace for inspection
-        with (self.out_dir / "records.jsonl").open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+            if record.status == "completed" and (not task.check or record.passed):
+                shutil.rmtree(workspace, ignore_errors=True)  # anything that did not finish cleanly keeps its workspace for inspection
+            with (self.out_dir / "records.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
         return record
 
     async def run(self, manifest: Manifest, *, concurrency: int = 1, only: list[str] | None = None) -> list[TaskRecord]:

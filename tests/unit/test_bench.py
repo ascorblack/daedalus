@@ -62,10 +62,18 @@ async def test_file_tools_and_exec_follow_the_backend(tmp_path: Path) -> None:
     try:
         assert not (await write_file().invoke(ctx, {"path": "a.txt", "content": "hello\nworld\n"})).is_error
         assert (remote / "a.txt").read_text() == "hello\nworld\n"
+        assert any("base64 -d" in c for c in backend.commands), "the write did not go through the backend"
         result = await edit_file().invoke(ctx, {"path": "a.txt", "old_string": "world", "new_string": "there"})
         assert not result.is_error and (remote / "a.txt").read_text() == "hello\nthere\n"
+        backend.commands.clear()
         result = await read_file().invoke(ctx, {"path": "a.txt"})
-        assert "there" in result.content
+        assert "there" in result.content and any("cat " in c for c in backend.commands)
+        big = "x" * 70_000 + "\n" + "y" * 70_000 + "\nend"
+        assert not (await write_file().invoke(ctx, {"path": "big.txt", "content": big})).is_error
+        assert (remote / "big.txt").read_text() == big
+        (remote / "blob.bin").write_bytes(bytes(range(256)) * 4)
+        result = await read_file().invoke(ctx, {"path": "blob.bin"})
+        assert result.is_error and "binary" in result.content
         result = await exec_command().invoke(ctx, {"command": f"cat {shlex.quote(str(remote / 'a.txt'))} && exit 3"})
         assert result.is_error and "exit_code=3" in result.content and "hello" in result.content
         assert any("a.txt" in c for c in backend.commands)
@@ -84,6 +92,8 @@ async def test_bench_runner_records_pass_turns_tokens_and_a_trajectory(settings:
     record = records[0]
     assert record.passed is True and record.status == "completed"
     assert record.turns == 2 and record.tool_calls == 1
+    assert record.cost_usd is None and record.input_tokens == 0  # the scripted provider bypasses the usage sink: unpriced, uncounted
+    assert not (out / "trajectories" / "write-42.json").read_text().count('"name": "Write"') == 0
     lines = (out / "records.jsonl").read_text().splitlines()
     assert len(lines) == 1 and json.loads(lines[0])["task"] == "write-42"
     steps = json.loads((out / "trajectories" / "write-42.json").read_text())["steps"]

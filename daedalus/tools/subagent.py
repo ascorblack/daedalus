@@ -26,8 +26,8 @@ def _hook(context: ToolContext):  # type: ignore[no-untyped-def]
         "as a complete hand-over: the subagent has none of your context. A subagent is removed once it "
         "has reported (its files stay in the workspace); pass keep=true when you will talk to it again "
         "with SubAgentSend — it then keeps its context until you delete it. Make the contract explicit: "
-        "`expects` says what the report must contain (the subagent is told, and the report is marked when "
-        "it does not), `deliverable` names a workspace-relative file that must exist when it reports "
+        "`expects` lists what the report must name, comma-separated (the subagent is told; the host checks each "
+        "short item against the report and marks the missing ones), `deliverable` names a workspace-relative file that must exist when it reports "
         "(checked by the host, not by the subagent's word)."
     ),
 )

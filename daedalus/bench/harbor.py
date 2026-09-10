@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 CONTAINER_WORKSPACE = "/app"
 """Where Harbor tasks keep their files; the session's workspace path inside the container."""
 
+TRIAL_TIMEOUT_SECONDS = 8 * 3600
+"""The longest a trial may run before the adapter stops the session itself (Terminal-Bench's own cap is eight hours)."""
+
 
 class HarborExecBackend:
     """Exec inside the task container through ``environment.exec``."""
@@ -51,7 +54,7 @@ class HarborExecBackend:
             return ExecOutcome(exit_code=124, output=f"timed out after {timeout:.0f}s", timed_out=True)
         output = (result.stdout or "") + (("\n" + result.stderr) if result.stderr else "")
         code = int(result.return_code) if result.return_code is not None else 0
-        return ExecOutcome(exit_code=code, output=output, timed_out=code == 124)
+        return ExecOutcome(exit_code=code, output=output)
 
 
 class _SharedManager:
@@ -114,19 +117,27 @@ class DaedalusAgent(BaseAgent):  # type: ignore[misc]
         assert _shared.db is not None
         backend = HarborExecBackend(environment)
         clock = time.monotonic()
-        state = await manager.create_session("[harbor] task", metadata={"unattended": True, "bench": True, "workspace": CONTAINER_WORKSPACE})
+        # The session's own workspace stays on this machine (host-side artefacts); the tools work in the container.
+        state = await manager.create_session("[harbor] task", metadata={"unattended": True, "bench": True})
         sid = state.session.id
-        if self.model_name:
-            await manager.set_model(sid, preset=self.model_name)
-        await manager.set_tools_off(sid, list(DEFAULT_TOOLS_OFF))
-        services = manager.locator_services(sid)
-        assert services is not None
-        services.exec_backend = backend
         _shared.done[sid] = asyncio.Event()
         try:
+            if self.model_name:
+                if self.model_name not in manager.config.presets:
+                    raise ValueError(f"-m must name a preset id from the bench config.toml; known: {', '.join(manager.config.presets)}")
+                await manager.set_model(sid, preset=self.model_name)
+            await manager.set_tools_off(sid, list(DEFAULT_TOOLS_OFF))
+            services = manager.locator_services(sid)
+            assert services is not None
+            services.exec_backend = backend
+            services.workspace_dir = Path(CONTAINER_WORKSPACE)
             await manager.submit(sid, instruction, origin="bench")
-            await _shared.done[sid].wait()
-            status = _shared.status.get(sid, "error")
+            try:
+                await asyncio.wait_for(_shared.done[sid].wait(), timeout=TRIAL_TIMEOUT_SECONDS)
+                status = _shared.status.get(sid, "error")
+            except TimeoutError:
+                status = "timeout"
+                await manager.stop(sid)
             messages = await manager.transcript(sid)
             turns, calls = count_turns(messages)
             usage = await _shared.db.fetchone("SELECT sum(input_tokens) i, sum(cache_read_tokens) ch, sum(output_tokens) o, sum(cost_usd) usd, sum(cost_usd IS NULL) unmetered FROM usage_events WHERE session_id = ?", (sid,))

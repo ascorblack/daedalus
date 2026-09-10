@@ -12,6 +12,8 @@ import hashlib
 import os
 import time
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
@@ -41,10 +43,15 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
     services = services_for(context)
     manager = services.extra.get("manager")
     workdir = services.resolve(cwd)
-    if not workdir.exists():
-        return error(context, f"working directory does not exist: {workdir}")
     limit = float(timeout_seconds or services.tool_timeout_seconds)
     started = time.monotonic()
+    if services.exec_backend is not None:
+        # The check runs where the work is (a benchmark container); the receipt is recorded the same way.
+        outcome = await services.exec_backend.run("set -o pipefail\n" + command, cwd=str(workdir), env=env, timeout=limit)
+        raw = outcome.output.encode("utf-8", "replace")
+        return await _receipt(context, services, manager, criterion, command, workdir, outcome.exit_code, hashlib.sha256(raw).hexdigest(), raw[: max(OUTPUT_HEAD_CHARS, services.max_tool_output_chars) * 4], len(raw), time.monotonic() - started, outcome.timed_out, False, False, dependencies)
+    if not workdir.exists():
+        return error(context, f"working directory does not exist: {workdir}")
     # A failure anywhere in a pipeline fails the check; `pytest | tail` must not pass on tail's exit code.
     argv, sandboxed = await sandbox_argv("set -o pipefail\n" + command, workdir, services.workspace_dir, tool_config(context).exec)
     proc = await asyncio.create_subprocess_exec(
@@ -89,14 +96,18 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
         except TimeoutError:
             kill_failed = True
     exit_code = -1 if timed_out else int(proc.returncode or 0)
+    return await _receipt(context, services, manager, criterion, command, workdir, exit_code, hasher.hexdigest(), bytes(head), total_bytes, time.monotonic() - started, timed_out, kill_failed, sandboxed, dependencies)
+
+
+async def _receipt(context: ToolContext, services: Any, manager: Any, criterion: str, command: str, workdir: Path, exit_code: int, full_digest: str, head: bytes, total_bytes: int, elapsed: float, timed_out: bool, kill_failed: bool, sandboxed: bool, dependencies: str | None) -> ToolResult:
+    """Record the receipt and shape the answer; the same for a local process and a command run elsewhere."""
+    if timed_out:
+        exit_code = -1
     passed = exit_code == 0
-    # Digest the raw bytes as they stream (the whole output), not the decoded
-    # string: decode("replace") turns invalid UTF-8 into U+FFFD, and re-encoding
-    # that would make the receipt hash a lossy copy instead of what the process
-    # actually printed.
-    full_digest = hasher.hexdigest()
+    # The digest covers the raw bytes of the whole output, not a decoded copy: decode("replace") turns
+    # invalid UTF-8 into U+FFFD, and re-encoding that would make the receipt hash a lossy copy.
     truncated = total_bytes > len(head)
-    output = bytes(head).decode("utf-8", "replace")
+    output = head.decode("utf-8", "replace")
     digest = full_digest[:16]
     at = datetime.now(UTC).isoformat()
     receipt_id = ""
@@ -110,7 +121,7 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     context.session_id, context.run_id, r.redact(criterion)[:300], r.redact(command)[:2000], str(workdir), exit_code, int(passed), full_digest,
-                    r.redact(output[:OUTPUT_HEAD_CHARS]), int((time.monotonic() - started) * 1000), at, int(sandboxed), r.redact(deps)[:300],
+                    r.redact(output[:OUTPUT_HEAD_CHARS]), int(elapsed * 1000), at, int(sandboxed), r.redact(deps)[:300],
                 ),
             )
             receipt_id = f"v{cursor.lastrowid}"

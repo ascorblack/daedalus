@@ -101,6 +101,12 @@ async def cmd_bench(args: argparse.Namespace) -> int:
     from daedalus.bench.manifest import Manifest  # Lazy: each subcommand imports only what it runs
     from daedalus.bench.runner import BenchRunner  # Lazy: each subcommand imports only what it runs
 
+    if not args.state_dir:
+        fallback = Settings().bench_state_dir
+        if fallback is None:
+            print("bench needs its own state directory: pass --state-dir (or set BENCH_STATE_DIR); the bot's database is never used for benchmarks", file=sys.stderr)
+            return 2
+        args.state_dir = str(fallback)
     settings = _settings(args)
     config = RuntimeConfig.load(settings.config_path)
     manifest = Manifest.load(Path(args.manifest))

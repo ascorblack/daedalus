@@ -10,6 +10,7 @@ directly when a backend is present.
 from __future__ import annotations
 
 import asyncio
+import base64
 import fnmatch
 import os
 import shlex
@@ -85,6 +86,11 @@ class LocalFS:
         return proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
 
+BINARY_MARKER = "__DAEDALUS_BINARY__"
+WRITE_CHUNK_CHARS = 60_000
+"""Base64 characters per command when writing through a shell: well under the kernel's 128 KiB per-argument cap."""
+
+
 class ShellFS:
     """The filesystem behind an :class:`ExecBackend`, reached with portable shell commands."""
 
@@ -98,24 +104,30 @@ class ShellFS:
         return await self.backend.run(command, cwd=None, env=None, timeout=self.timeout)
 
     async def read_text(self, path: Path) -> str:
-        outcome = await self._run(f"cat {shlex.quote(str(path))}")
+        quoted = shlex.quote(str(path))
+        outcome = await self._run(f"if grep -qI . {quoted} || [ ! -s {quoted} ]; then cat {quoted}; else echo {BINARY_MARKER}; exit 3; fi")
+        if outcome.exit_code == 3 and BINARY_MARKER in outcome.output:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "binary file")
         if outcome.exit_code != 0:
             raise FileNotFoundError(outcome.output.strip() or str(path))
         return outcome.output
 
     async def write_text(self, path: Path, content: str) -> None:
-        # A heredoc with a quoted delimiter passes the content byte for byte; the delimiter is one the content cannot contain.
-        delimiter = "DAEDALUS_EOF"
-        while delimiter in content:
-            delimiter += "_"
-        parent = shlex.quote(str(path.parent))
+        """Write the content byte for byte: base64 over the shell, in pieces small enough for one argument.
+
+        A heredoc would need a delimiter the content cannot contain and always ends its last line; base64
+        has neither problem, and splitting the encoded text keeps every command under the kernel's
+        per-argument limit (128 KiB on Linux). The first piece replaces the file, the rest append.
+        """
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        pieces = [encoded[i : i + WRITE_CHUNK_CHARS] for i in range(0, len(encoded), WRITE_CHUNK_CHARS)] or [""]
         target = shlex.quote(str(path))
-        # A heredoc always ends its last line; content without a final newline loses that byte again afterwards.
-        body = content if content.endswith("\n") else content + "\n"
-        trailer = "" if content.endswith("\n") else f"\ntruncate -s -1 {target}"
-        outcome = await self._run(f"mkdir -p {parent} && cat > {target} <<'{delimiter}'\n{body}{delimiter}{trailer}")
-        if outcome.exit_code != 0:
-            raise OSError(outcome.output.strip() or f"could not write {path}")
+        for index, piece in enumerate(pieces):
+            lead = f"mkdir -p {shlex.quote(str(path.parent))} && " if index == 0 else ""
+            redirect = ">" if index == 0 else ">>"
+            outcome = await self._run(f"{lead}printf %s {shlex.quote(piece)} | base64 -d {redirect} {target}")
+            if outcome.exit_code != 0:
+                raise OSError(outcome.output.strip() or f"could not write {path}")
 
     async def exists(self, path: Path) -> bool:
         return (await self._run(f"test -e {shlex.quote(str(path))}")).exit_code == 0

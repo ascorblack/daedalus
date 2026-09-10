@@ -24,9 +24,10 @@ ENTRY_POINTS = ("daedalus.__main__", "daedalus.app", "daedalus.bench.harbor")
 """Where a process starts: the CLI, the application, and the Harbor benchmark adapter (loaded by
 ``harbor run -a daedalus.bench.harbor:DaedalusAgent``); everything else is reached from them."""
 
-DISCOVERED_PACKAGES = ("daedalus.tools", "daedalus.extensions", "daedalus.providers", "daedalus.transport", "daedalus.mcp")
-"""Packages whose submodules are loaded by name at runtime (tool discovery, the extension list,
-provider kinds, transports): every module directly inside them is reachable once the package is."""
+DISCOVERED_PACKAGES = ("daedalus.tools",)
+"""Packages whose submodules are loaded by ``pkgutil`` discovery: every module directly inside them is
+reachable once the package is. Extensions are not discovered: they are named one by one in the
+``EXTENSIONS`` tuple, which the walk reads as a list of literal imports."""
 
 
 def module_name(root: Path, path: Path) -> str:
@@ -71,6 +72,10 @@ def imports_of(path: Path, module: str, *, is_package: bool) -> set[str]:
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
             if name == "import_module" and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
                 found.add(node.args[0].value)
+        elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "EXTENSIONS" for t in node.targets):
+            # The extension list: a tuple of dotted names handed to import_module one by one at start-up.
+            if isinstance(node.value, (ast.Tuple, ast.List)):
+                found.update(e.value for e in node.value.elts if isinstance(e, ast.Constant) and isinstance(e.value, str))
     return found
 
 

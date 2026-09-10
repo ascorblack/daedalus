@@ -61,7 +61,10 @@ async def write_file(context: ToolContext, path: str, content: str) -> ToolResul
     target = services.resolve(path)
     if services.is_protected(target):
         return error(context, f"{target} is protected and cannot be written by tools")
-    await services.fs.write_text(target, content)
+    try:
+        await services.fs.write_text(target, content)
+    except OSError as exc:
+        return error(context, f"could not write {target}: {exc}")
     return ok(context, f"wrote {len(content)} characters to {target}" + await diagnostics(services, target), path=str(target))
 
 
@@ -89,7 +92,10 @@ async def edit_file(
         updated, count, how = apply_edit(text, old_string, new_string, replace_all=replace_all)
     except EditMiss as miss:
         return error(context, str(miss))
-    await fs.write_text(target, updated)
+    try:
+        await fs.write_text(target, updated)
+    except OSError as exc:
+        return error(context, f"could not write {target}: {exc}")
     note = f" (matched {how})" if how != "exactly" else ""
     return ok(context, f"edited {target}: {count} replacement(s){note}" + await diagnostics(services, target), path=str(target))
 
@@ -183,7 +189,10 @@ async def multi_edit(context: ToolContext, path: str, edits: list[dict[str, Any]
         except EditMiss as miss:
             return error(context, f"edit {index} of {len(edits)} failed, file unchanged: {miss}")
         total += count
-    await fs.write_text(target, text)
+    try:
+        await fs.write_text(target, text)
+    except OSError as exc:
+        return error(context, f"could not write {target}: {exc}")
     return ok(context, f"edited {target}: {total} replacement(s) in {len(edits)} edits" + await diagnostics(services, target), path=str(target))
 
 
