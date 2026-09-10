@@ -40,7 +40,7 @@ class Manifest:
         return cls(name=str(raw.get("name") or path.stem), tasks=tasks, tools_off=list(raw.get("tools_off", [])), notes=str(raw.get("notes", "")))
 
 
-DEFAULT_TOOLS_OFF = ["SendFile", "SpawnAgent", "ScheduleCreate", "ScheduleDelete", "ScheduleList", "SelfWorkspace", "SelfPropose", "SelfRebuild", "SelfRollback", "AskUser", "AskPeer", "PeerList", "BoardAdd", "BoardUpdate", "BoardList", "BoardGet", "IntentCreate", "IntentList", "IntentDelete", "LoopNext", "LoopStop", "LoopPause", "LoopResume", "LoopStatus", "ServiceStart", "ServiceStop", "ServiceList", "ServiceLogs", "McpList", "McpEnable", "McpDisable", "McpOAuthStatus", "McpOAuthBegin", "McpOAuthFinish", "McpOAuthDisconnect", "StaySilent", "LearningReport"]
-"""What a benchmark session never needs: everything that talks to the operator, the board, or the host's own lifecycle."""
+DEFAULT_TOOLS_OFF = ["SendFile", "ImageView", "SpawnAgent", "ScheduleCreate", "ScheduleDelete", "ScheduleList", "SelfWorkspace", "SelfPropose", "SelfRebuild", "SelfRollback", "AskUser", "AskPeer", "PeerList", "BoardAdd", "BoardUpdate", "BoardList", "BoardGet", "IntentCreate", "IntentList", "IntentDelete", "LoopNext", "LoopStop", "LoopPause", "LoopResume", "LoopStatus", "ServiceStart", "ServiceStop", "ServiceList", "ServiceLogs", "McpList", "McpEnable", "McpDisable", "McpOAuthStatus", "McpOAuthBegin", "McpOAuthFinish", "McpOAuthDisconnect", "StaySilent", "LearningReport"]
+"""What a benchmark session never needs: everything that talks to the operator, the board, or the host's own lifecycle, and the vision model (a benchmark config has none)."""
 
 __all__ = ["DEFAULT_TOOLS_OFF", "Manifest", "Task"]
