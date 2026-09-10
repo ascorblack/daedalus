@@ -144,11 +144,20 @@ async def exec_command(
 ) -> ToolResult:
     services = services_for(context)
     workdir = services.resolve(cwd)
+    limit = float(timeout_seconds or services.tool_timeout_seconds)
+    started = time.monotonic()
+    if services.exec_backend is not None:
+        outcome = await services.exec_backend.run(command, cwd=str(workdir), env=env, timeout=limit)
+        elapsed = time.monotonic() - started
+        body = clip(outcome.output, services.max_tool_output_chars, note="write to a file for the full output")
+        header = f"exit_code={outcome.exit_code} elapsed={elapsed:.1f}s cwd={workdir}" + (f" TIMED OUT after {limit:.0f}s" if outcome.timed_out else "")
+        text = f"{header}\n{body}" if body else header
+        if outcome.timed_out or outcome.exit_code != 0:
+            return error(context, text, exit_code=outcome.exit_code, timed_out=outcome.timed_out)
+        return ok(context, text, exit_code=outcome.exit_code)
     if not workdir.exists():
         return error(context, f"working directory does not exist: {workdir}")
-    limit = float(timeout_seconds or services.tool_timeout_seconds)
     environment = shell_environment(context.session_id, env)
-    started = time.monotonic()
     argv, sandboxed = await sandbox_argv(command, workdir, services.workspace_dir, tool_config(context).exec)
     proc = await asyncio.create_subprocess_exec(
         *argv,

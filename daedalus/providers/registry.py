@@ -108,6 +108,7 @@ class ProviderRegistry:
             timeout_seconds=pc.timeout_seconds,
             extra_headers=headers,
             pricing=pricing_table(pc.kind, pc.pricing),
+            temperature=pc.temperature,
         )
 
     def get(self, provider_id: str) -> OpenAICompatibleProvider:

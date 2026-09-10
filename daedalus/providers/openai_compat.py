@@ -56,6 +56,8 @@ class ProviderEndpoint:
     timeout_seconds: float = 600.0
     extra_headers: dict[str, str] = field(default_factory=dict)
     pricing: dict[str, ModelPricing] = field(default_factory=dict)
+    temperature: float | None = None
+    """When set, every request to this endpoint samples at this temperature (a benchmark pin)."""
 
     def pricing_for(self, model: str) -> ModelPricing | None:
         if model in self.pricing:
@@ -286,7 +288,7 @@ class OpenAICompatibleProvider(ILLMProvider):
                 supports_images=self.accepts_images(model),
             ),
             "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
+            "temperature": self.endpoint.temperature if self.endpoint.temperature is not None else request.temperature,
             "stream": stream,
         }
         if stream:

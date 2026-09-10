@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daedalus import supervisor_client
+from daedalus.host import reachability
 from daedalus.security import redact
 
 if TYPE_CHECKING:
@@ -88,6 +89,89 @@ async def _run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] |
     return text
 
 
+ADDED_LINES_CAP = 200
+NEW_MODULE_LINES_CAP = 150
+_REPLACEMENT_WORDS = re.compile(r"\b(replaces?|replacing|removes?|removing|deletes?|deleting|supersedes?|superseding|folds? into)\b", re.IGNORECASE)
+
+
+class ProposalRefused(GitError):
+    """A proposal gate said no; the message tells the agent what to do instead."""
+
+
+def relevance_gate(root: Path, changed_files: list[str], execution_path: str | None) -> None:
+    """A changed host module must sit on an execution path the agent can name.
+
+    ``execution_path`` is ``pkg.module`` or ``pkg.module:symbol``; the module must exist in the
+    proposed tree and, through the static import graph, reach every changed module. A change that
+    touches no host module (tests, docs, skills, the Mini App, deploy files) needs no path.
+    """
+    modules = reachability.modules_for_files(root, changed_files)
+    if not modules:
+        return
+    if not execution_path or not execution_path.strip():
+        raise ProposalRefused(
+            "the change touches host modules (" + ", ".join(modules) + ") but names no execution_path. "
+            "Pass execution_path='pkg.module' or 'pkg.module:symbol' for the path that runs the changed code "
+            "(a tool, a hook, an extension's install, a startup step). A module nothing reaches is an "
+            "experiment: keep it in your own repository."
+        )
+    ok, missing = reachability.path_reaches(root, execution_path, modules)
+    if not ok:
+        raise ProposalRefused(
+            f"execution_path {execution_path!r} does not reach: " + ", ".join(missing) + ". "
+            "Either the path is wrong or the module is not imported by anything that runs; wire it "
+            "(import it from the tool, hook or extension that uses it) or drop it."
+        )
+    dead = [m for m in reachability.unreachable_modules(root) if m in modules]
+    if dead:
+        raise ProposalRefused(
+            "these changed modules are not reachable from the process entry points (daedalus.__main__, daedalus.app): "
+            + ", ".join(dead) + ". Tests do not count as importers."
+        )
+
+
+def evidence_gate(changed_files: list[str], receipts: list[dict[str, Any]], execution_path: str | None) -> None:
+    """At least one passing Verify receipt in the branch window must exercise the change.
+
+    A receipt exercises the change when its command names a changed file, the stem of a changed
+    module, or the module named by ``execution_path``. ``pytest tests`` alone does not count for a
+    host-module change: it proves the tree is green, not that the changed path ran.
+    """
+    passed = [r for r in receipts if r.get("passed")]
+    if not passed:
+        raise ProposalRefused(
+            "no passing Verify receipt recorded since the branch started. Run the tests and the changed "
+            "path through Verify (not Exec) so the receipts are on the card, then propose again."
+        )
+    modules = reachability.modules_for_files(Path("."), changed_files)
+    if not modules:
+        return
+    stems = {Path(f).stem for f in changed_files} | {m.rsplit(".", 1)[-1] for m in modules}
+    if execution_path:
+        stems.add(execution_path.split(":", 1)[0].rsplit(".", 1)[-1])
+    stems.discard("__init__")
+    commands = " ".join(str(r.get("command") or "") for r in passed)
+    if not any(re.search(r"(?<![A-Za-z0-9_])" + re.escape(stem) + r"(?![A-Za-z0-9])", commands) for stem in stems if stem):
+        raise ProposalRefused(
+            "no passing Verify receipt mentions the changed code (" + ", ".join(sorted(stems)) + "). "
+            "Verify a command that runs the changed path — its tests by file name, or the tool/command that uses it."
+        )
+
+
+def size_gate(added_lines: int, new_modules: dict[str, int], summary: str) -> None:
+    """A large or net-new change must say what it replaces; net-additive self-modification is the pathology."""
+    big_new = {m: n for m, n in new_modules.items() if n > NEW_MODULE_LINES_CAP}
+    if added_lines <= ADDED_LINES_CAP and not big_new:
+        return
+    if _REPLACEMENT_WORDS.search(summary):
+        return
+    what = f"{added_lines} added lines" + (f"; new modules over {NEW_MODULE_LINES_CAP} lines: " + ", ".join(big_new) if big_new else "")
+    raise ProposalRefused(
+        f"large change ({what}) whose summary does not say what it replaces or removes. State the code, "
+        "behaviour or workaround this supersedes (or removes), or split the change; a self-change that only adds is suspect."
+    )
+
+
 class SelfDevelopment:
     def __init__(self, app: Application) -> None:
         self.app = app
@@ -159,7 +243,7 @@ class SelfDevelopment:
 
     # -- proposals ------------------------------------------------------------------
 
-    async def propose(self, *, repo: str, title: str, summary: str, session_id: str | None, branch: str | None = None) -> str:
+    async def propose(self, *, repo: str, title: str, summary: str, session_id: str | None, branch: str | None = None, execution_path: str | None = None) -> str:
         spec = self.repo(repo)
         worktree = await self._worktree_for(spec, branch)
         status = await self.git(spec, "status", "--porcelain", cwd=worktree)
@@ -190,8 +274,20 @@ class SelfDevelopment:
                 "the diff carries a reference the public repository must not (in a docstring, comment or test): "
                 f"{', '.join(dict.fromkeys(leaks))}. Describe the change on its own terms and propose again."
             )
+        since = await self._branch_started(spec, worktree)
+        changed_files = [f for f in (await self.git(spec, "diff", "--name-only", "origin/main...HEAD", cwd=worktree)).split("\n") if f.strip()]
+        if repo == "bot":
+            relevance_gate(worktree, changed_files, execution_path)
+            evidence_gate(changed_files, await self.receipt_rows(session_id, since=since) if session_id else [], execution_path)
+        numstat = await self.git(spec, "diff", "--numstat", "origin/main...HEAD", cwd=worktree)
+        added_total = sum(int(a) for a, _, _ in (line.split("\t", 2) for line in numstat.splitlines() if "\t" in line) if a.isdigit())
+        new_files = [f for f in (await self.git(spec, "diff", "--name-only", "--diff-filter=A", "origin/main...HEAD", cwd=worktree)).split("\n") if f.endswith(".py") and not f.startswith("tests/")]
+        new_modules = {f: sum(1 for _ in (worktree / f).open(encoding="utf-8")) if (worktree / f).is_file() else 0 for f in new_files}
+        size_gate(added_total, new_modules, summary)
         await self.git(spec, "push", "-u", "origin", head_branch, "--force-with-lease", cwd=worktree)
-        receipts = await self.receipts_for(session_id, since=await self._branch_started(spec, worktree)) if session_id else ""
+        receipts = await self.receipts_for(session_id, since=since) if session_id else ""
+        if execution_path:
+            receipts = f"\n\nExecution path: `{execution_path}`" + receipts
         body = public_text(summary) + public_text(receipts)
         existing = (await self.gh("pr", "list", "--head", head_branch, "--json", "number,url", cwd=worktree)).strip()
         try:
@@ -231,6 +327,11 @@ class SelfDevelopment:
         except GitError:
             return None
         return datetime.fromisoformat(dates[-1]).astimezone(UTC).isoformat() if dates else None
+
+    async def receipt_rows(self, session_id: str, *, since: str | None = None, hours: int = 24) -> list[dict[str, Any]]:
+        since = since or (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+        rows = await self.app.db.fetchall("SELECT id, criterion, command, exit_code, passed FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 50", (session_id, since))
+        return [dict(r) for r in rows]
 
     async def receipts_for(self, session_id: str, *, since: str | None = None, hours: int = 24) -> str:
         """Verification receipts the proposing session recorded for this work, as evidence on the card.
@@ -431,9 +532,9 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
         path = await selfdev.workspace(repo, branch)
         return f"worktree ready at {path} (branch agent/{branch.removeprefix('agent/')}, based on origin/main)"
 
-    async def self_propose(*, repo: str, title: str, summary: str, session_id: str | None = None, branch: str | None = None, **_: Any) -> str:
+    async def self_propose(*, repo: str, title: str, summary: str, session_id: str | None = None, branch: str | None = None, execution_path: str | None = None, **_: Any) -> str:
         try:
-            return await selfdev.propose(repo=repo, title=title, summary=summary, session_id=session_id, branch=branch)
+            return await selfdev.propose(repo=repo, title=title, summary=summary, session_id=session_id, branch=branch, execution_path=execution_path)
         except GitError as exc:
             raise RuntimeError(f"proposal failed: {exc}") from exc  # the tool turns it into an error result, not a success that reads like one
 

@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import logging
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from daedalus.config import RuntimeConfig, Settings
@@ -96,6 +97,24 @@ async def cmd_run(args: argparse.Namespace) -> int:
     return await run_terminal_session(settings, config, prompt=args.prompt, title=args.title)
 
 
+async def cmd_bench(args: argparse.Namespace) -> int:
+    from daedalus.bench.manifest import Manifest  # Lazy: each subcommand imports only what it runs
+    from daedalus.bench.runner import BenchRunner  # Lazy: each subcommand imports only what it runs
+
+    settings = _settings(args)
+    config = RuntimeConfig.load(settings.config_path)
+    manifest = Manifest.load(Path(args.manifest))
+    out_dir = Path(args.out) if args.out else settings.state_dir / "bench" / f"{manifest.name}-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
+    only = [t.strip() for t in (args.only or "").split(",") if t.strip()] or None
+    async with BenchRunner(settings, config, preset=args.preset, out_dir=out_dir) as runner:
+        records = await runner.run(manifest, concurrency=args.concurrency, only=only)
+    judged = [r for r in records if r.passed is not None]
+    passed = sum(1 for r in judged if r.passed)
+    cost = sum(r.cost_usd for r in records if r.cost_usd is not None)
+    print(f"{manifest.name}: {passed}/{len(judged)} passed of {len(records)} tasks; cost ${cost:.4f}; records in {out_dir}")
+    return 0
+
+
 async def cmd_serve(args: argparse.Namespace) -> int:
     from daedalus.app import serve  # Lazy: each subcommand imports only what it runs
 
@@ -117,6 +136,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--prompt", "-p", default=None, help="first message; omit for interactive input")
     run.add_argument("--title", default="terminal")
     sub.add_parser("serve", help="run the bot")
+    bench = sub.add_parser("bench", help="run a task manifest headless and record pass/turns/tokens/cost per task")
+    bench.add_argument("manifest", help="JSON manifest: {name, tasks: [{id, prompt, setup, check, files, timeout_minutes, tags}], tools_off}")
+    bench.add_argument("--preset", default=None, help="model preset id for every task (default: the configured default)")
+    bench.add_argument("--concurrency", type=int, default=1)
+    bench.add_argument("--only", default=None, help="comma-separated task ids")
+    bench.add_argument("--out", default=None, help="output directory (default: <state>/bench/<name>-<timestamp>)")
     return parser
 
 
@@ -162,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         handler_.addFilter(_DiagFilter())
     install_logging_filter(shared())
     _install_task_dump()
-    handler = {"check": cmd_check, "run": cmd_run, "serve": cmd_serve, "doctor": cmd_doctor}[args.command]
+    handler = {"check": cmd_check, "run": cmd_run, "serve": cmd_serve, "doctor": cmd_doctor, "bench": cmd_bench}[args.command]
     return asyncio.run(handler(args))
 
 

@@ -39,11 +39,15 @@ async def self_workspace(context: ToolContext, repo: str, branch: str) -> ToolRe
         "the card. The owner reviews the change in chat; on approval it is merged and, if "
         "configured, the agent rebuilds itself. branch defaults to the most recently used "
         "worktree of that repo. The summary describes the change and what you checked — no "
-        "session ids, no operator details, nothing about the machine it runs on."
+        "session ids, no operator details, nothing about the machine it runs on. execution_path names "
+        "the code that runs the change ('pkg.module' or 'pkg.module:symbol' — a tool, a hook, an "
+        "extension's install, a startup step); a host-module change without one is refused, as is one "
+        "with no passing Verify receipt that exercises the changed code, or a large change whose summary "
+        "does not say what it replaces."
     ),
 )
 async def self_propose(
-    context: ToolContext, repo: str, title: str, summary: str, branch: str | None = None
+    context: ToolContext, repo: str, title: str, summary: str, branch: str | None = None, execution_path: str | None = None
 ) -> ToolResult:
     services = services_for(context)
     if services.self_propose is None:
@@ -52,7 +56,7 @@ async def self_propose(
         return error(context, "repo must be 'bot' or 'core'")
     try:
         result = await services.self_propose(
-            repo=repo, title=title, summary=summary, session_id=context.session_id, branch=branch
+            repo=repo, title=title, summary=summary, session_id=context.session_id, branch=branch, execution_path=execution_path
         )
     except RuntimeError as exc:
         hint = " The token cannot push: the operator must grant the GitHub token write access to this repository (Contents: read and write)." if "denied" in str(exc) or "403" in str(exc) else ""

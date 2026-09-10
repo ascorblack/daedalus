@@ -1,0 +1,159 @@
+"""Where a session's files live: on this machine, or behind a shell the session drives.
+
+The file tools (Read, Write, Edit, Find, Search) and Exec normally act on the local filesystem.
+A benchmark harness hands the session a container instead: every command runs there through an
+:class:`ExecBackend`, and the file tools go through the same shell so the model sees one
+consistent world. The tools ask :class:`SessionServices` for ``fs`` and never touch ``Path``
+directly when a backend is present.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import fnmatch
+import os
+import shlex
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+
+@dataclass(slots=True)
+class ExecOutcome:
+    exit_code: int
+    output: str
+    timed_out: bool = False
+
+
+class ExecBackend(Protocol):
+    """Runs one shell command somewhere else and returns its interleaved output."""
+
+    async def run(self, command: str, *, cwd: str | None, env: dict[str, str] | None, timeout: float) -> ExecOutcome: ...
+
+
+class LocalFS:
+    """The local filesystem; the default."""
+
+    remote = False
+
+    async def read_text(self, path: Path) -> str:
+        return await asyncio.to_thread(path.read_text, "utf-8")
+
+    async def write_text(self, path: Path, content: str) -> None:
+        def _write() -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        await asyncio.to_thread(_write)
+
+    async def exists(self, path: Path) -> bool:
+        return path.exists()
+
+    async def is_dir(self, path: Path) -> bool:
+        return path.is_dir()
+
+    async def is_file(self, path: Path) -> bool:
+        return path.is_file()
+
+    async def size(self, path: Path) -> int:
+        return path.stat().st_size
+
+    async def listdir(self, path: Path) -> list[str]:
+        return sorted(os.listdir(path))
+
+    async def find(self, root: Path, pattern: str, limit: int) -> list[str]:
+        matches: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in {".git", "node_modules", ".venv", "__pycache__"}]
+            for name in filenames:
+                rel = os.path.relpath(os.path.join(dirpath, name), root)
+                if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(name, pattern):
+                    matches.append(rel)
+                    if len(matches) >= limit:
+                        return sorted(matches)
+        return sorted(matches)
+
+    async def search(self, root: Path, pattern: str, *, glob: str | None, case_insensitive: bool, limit: int) -> tuple[int, str, str]:
+        args = ["rg", "-n", "--no-heading", "--color", "never", "-m", str(limit)]
+        if case_insensitive:
+            args.append("-i")
+        if glob:
+            args += ["-g", glob]
+        args += ["-e", pattern, str(root)]
+        proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await proc.communicate()
+        return proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+
+class ShellFS:
+    """The filesystem behind an :class:`ExecBackend`, reached with portable shell commands."""
+
+    remote = True
+
+    def __init__(self, backend: ExecBackend, *, timeout: float = 120.0) -> None:
+        self.backend = backend
+        self.timeout = timeout
+
+    async def _run(self, command: str) -> ExecOutcome:
+        return await self.backend.run(command, cwd=None, env=None, timeout=self.timeout)
+
+    async def read_text(self, path: Path) -> str:
+        outcome = await self._run(f"cat {shlex.quote(str(path))}")
+        if outcome.exit_code != 0:
+            raise FileNotFoundError(outcome.output.strip() or str(path))
+        return outcome.output
+
+    async def write_text(self, path: Path, content: str) -> None:
+        # A heredoc with a quoted delimiter passes the content byte for byte; the delimiter is one the content cannot contain.
+        delimiter = "DAEDALUS_EOF"
+        while delimiter in content:
+            delimiter += "_"
+        parent = shlex.quote(str(path.parent))
+        target = shlex.quote(str(path))
+        # A heredoc always ends its last line; content without a final newline loses that byte again afterwards.
+        body = content if content.endswith("\n") else content + "\n"
+        trailer = "" if content.endswith("\n") else f"\ntruncate -s -1 {target}"
+        outcome = await self._run(f"mkdir -p {parent} && cat > {target} <<'{delimiter}'\n{body}{delimiter}{trailer}")
+        if outcome.exit_code != 0:
+            raise OSError(outcome.output.strip() or f"could not write {path}")
+
+    async def exists(self, path: Path) -> bool:
+        return (await self._run(f"test -e {shlex.quote(str(path))}")).exit_code == 0
+
+    async def is_dir(self, path: Path) -> bool:
+        return (await self._run(f"test -d {shlex.quote(str(path))}")).exit_code == 0
+
+    async def is_file(self, path: Path) -> bool:
+        return (await self._run(f"test -f {shlex.quote(str(path))}")).exit_code == 0
+
+    async def size(self, path: Path) -> int:
+        outcome = await self._run(f"wc -c < {shlex.quote(str(path))}")
+        try:
+            return int(outcome.output.strip())
+        except ValueError:
+            return 0
+
+    async def listdir(self, path: Path) -> list[str]:
+        outcome = await self._run(f"ls -1A {shlex.quote(str(path))}")
+        return sorted(line for line in outcome.output.splitlines() if line)
+
+    async def find(self, root: Path, pattern: str, limit: int) -> list[str]:
+        prune = " -o ".join(f"-name {shlex.quote(d)}" for d in (".git", "node_modules", ".venv", "__pycache__"))
+        outcome = await self._run(f"cd {shlex.quote(str(root))} && find . \\( {prune} \\) -prune -o -type f -print 2>/dev/null | sed 's|^\\./||'")
+        matches = [rel for rel in outcome.output.splitlines() if rel and (fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(os.path.basename(rel), pattern))]
+        return sorted(matches)[:limit]
+
+    async def search(self, root: Path, pattern: str, *, glob: str | None, case_insensitive: bool, limit: int) -> tuple[int, str, str]:
+        flags = "-i" if case_insensitive else ""
+        include = f"--include={shlex.quote(glob)}" if glob else ""
+        # ripgrep when the container has it, grep otherwise; both return 1 for "no match".
+        rg = f"rg -n --no-heading --color never -m {limit} {flags} {('-g ' + shlex.quote(glob)) if glob else ''} -e {shlex.quote(pattern)} {shlex.quote(str(root))}"
+        grep = f"grep -rnE {flags} {include} --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv -e {shlex.quote(pattern)} {shlex.quote(str(root))} | head -n {limit}"
+        outcome = await self._run(f"if command -v rg >/dev/null 2>&1; then {rg}; else {grep}; fi")
+        code = outcome.exit_code
+        if code == 0 and not outcome.output.strip():
+            code = 1
+        return code, outcome.output, ""
+
+
+__all__ = ["ExecBackend", "ExecOutcome", "LocalFS", "ShellFS"]

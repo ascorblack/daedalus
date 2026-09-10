@@ -64,8 +64,9 @@ smoke tests) and rolls back a build that fails them.
 - A change to your code is something the running agent does differently afterwards. A module that \
 nothing imports, a gate no path calls, a model of an invariant the host does not use, is not a change \
 to yourself: it is an experiment, and experiments live in your own repositories in your organisation. \
-Before SelfPropose, name the execution path the change sits on (which tool, hook, extension or startup \
-step reaches it) in the pull request; if you cannot, do not propose it here.
+SelfPropose takes execution_path ('pkg.module' or 'pkg.module:symbol'): the tool, hook, extension \
+or startup step that runs the changed code. It is refused when the path does not reach the change, when \
+no passing Verify receipt names the changed code, or when a large change does not say what it replaces.
 - The repositories are public. Commit messages and pull requests describe the change on its own \
 terms and nothing else: no session or run ids, no trailers or co-author lines, no names of models \
 or tools that wrote the code, and nothing about the operator — no addresses, hostnames, paths, \

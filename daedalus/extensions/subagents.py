@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from protocore.contracts.types import MessageRole, TextBlock
@@ -41,6 +42,29 @@ BRIEF = (
 FOLLOW_UP_HEADER = "[message from your leader session {leader} via SubAgentSend — act on it; your final reply is delivered to the leader verbatim]\n\n"
 
 
+def contract_text(expects: str | None, deliverable: str | None) -> str:
+    """What the leader asked for, spelled out to the subagent under its task."""
+    lines = []
+    if expects and expects.strip():
+        lines.append(f"Your final reply must contain: {expects.strip()}")
+    if deliverable and deliverable.strip():
+        lines.append(f"The file {deliverable.strip()} (relative to the workspace) must exist when you finish; the host checks it.")
+    return ("\n\n[contract]\n" + "\n".join(lines)) if lines else ""
+
+
+def contract_verdict(state: Any, answer: str) -> str:
+    """The report with the host's own check of the contract on top: a missing deliverable is a fact, not a claim."""
+    deliverable = str(state.metadata.get("subagent_deliverable") or "")
+    expects = str(state.metadata.get("subagent_expects") or "")
+    notes = []
+    if deliverable:
+        target = Path(state.workspace) / deliverable
+        notes.append(f"deliverable {deliverable}: present ({target.stat().st_size} bytes)" if target.is_file() else f"deliverable {deliverable}: MISSING")
+    if expects:
+        notes.append(f"expected in the report: {expects}")
+    return ("[contract] " + "; ".join(notes) + "\n\n" + answer) if notes else answer
+
+
 class Subagents:
     def __init__(self, app: Application) -> None:
         self.app = app
@@ -64,6 +88,8 @@ class Subagents:
         wait: bool = False,
         timeout_minutes: int | None = None,
         keep: bool = False,
+        expects: str | None = None,
+        deliverable: str | None = None,
     ) -> dict[str, Any]:
         manager = self.app.manager
         assert manager is not None
@@ -97,6 +123,8 @@ class Subagents:
             "subagent_name": label,
             "subagent_depth": depth,
             "subagent_keep": bool(keep),
+            "subagent_expects": (expects or "").strip(),
+            "subagent_deliverable": (deliverable or "").strip(),
             "workspace": str(leader.workspace),
             "brief": BRIEF.format(leader=leader_id),
             "unattended": True,
@@ -121,7 +149,7 @@ class Subagents:
                 )
         if wait:
             self._waited.add(cid)
-        run_id = await manager.submit(cid, TASK_HEADER.format(leader=leader_id) + task, as_answer=False, origin=f"subagent-task:{leader_id}")
+        run_id = await manager.submit(cid, TASK_HEADER.format(leader=leader_id) + task + contract_text(expects, deliverable), as_answer=False, origin=f"subagent-task:{leader_id}")
         result: dict[str, Any] = {"session_id": cid, "run_id": run_id, "name": label, "model": model or "(leader's model)", "answer": None, "kept": bool(keep)}
         if not wait:
             return result
@@ -139,7 +167,7 @@ class Subagents:
                 if state is None:
                     raise RuntimeError("the subagent session disappeared")
                 if not state.running and state.pending is None:
-                    result["answer"] = await self.answer(cid) or NO_ANSWER
+                    result["answer"] = contract_verdict(state, await self.answer(cid) or NO_ANSWER)
                     if not state.metadata.get("subagent_keep"):
                         self._remove_later(cid)
                     return result
@@ -237,7 +265,7 @@ class Subagents:
             return
         name = str(state.metadata.get("subagent_name") or session_id)
         answer = await self.answer(session_id) if status == "completed" else None
-        body = answer or NO_ANSWER
+        body = contract_verdict(state, answer or NO_ANSWER)
         kept = bool(state.metadata.get("subagent_keep"))
         fate = f"It stays for follow-ups: SubAgentSend({name!r}, …)." if kept else "It has been removed; its files are in your workspace."
         report = f"[subagent {name!r} finished: {status}. {fate}]\n\n{body}"

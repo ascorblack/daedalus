@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from daedalus.host.filesystem import ExecBackend, LocalFS, ShellFS
+
 ProgressFn = Callable[[str], Awaitable[None]]
 SendFileFn = Callable[[Path, str | None], Awaitable[str]]
 ScheduleFn = Callable[..., Awaitable[Any]]
@@ -34,7 +36,13 @@ class SessionServices:
     self_rollback: SelfDevFn | None = None
     spawn_agent: Callable[..., Awaitable[str]] | None = None
     """Create a standing agent session with a brief, files and settings (see the SpawnAgent tool)."""
+    exec_backend: ExecBackend | None = None
+    """Where Exec runs and the file tools look when the session drives another machine (a benchmark container)."""
     extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def fs(self) -> LocalFS | ShellFS:
+        return ShellFS(self.exec_backend, timeout=min(self.tool_timeout_seconds, 120.0)) if self.exec_backend is not None else LocalFS()
 
     def resolve(self, path: str | None) -> Path:
         """Resolve a tool path: absolute stays absolute, relative is workspace-relative."""

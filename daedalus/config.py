@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     telegram_bot_token: str = ""
+    bench_state_dir: Path | None = None
+    """State directory the Harbor adapter uses (``BENCH_STATE_DIR``): its own config.toml and database, never the bot's."""
     telegram_api_base: str = "https://api.telegram.org"
     telegram_local_mode: bool = False
     """True when ``telegram_api_base`` points at a local Bot API server (``--local``)."""
@@ -141,6 +143,8 @@ class ProviderConfig(BaseModel):
     (masked in the Mini App, never echoed back). Empty means "no key" for self-hosted
     endpoints and "use the environment key" for the built-in kinds (deepseek, openrouter, vllm)."""
     timeout_seconds: float = 600.0
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    """Sampling temperature sent with every request to this endpoint; ``None`` leaves the core's default. Pin it for benchmarks."""
     pricing: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Per-model USD per 1M tokens overriding the built-in table (``daedalus.providers.pricing``):
     ``{"model": {"input", "output", "cache_hit"[, "*_off_peak", "peak_utc", "peak_weekdays_only"]}}``.
