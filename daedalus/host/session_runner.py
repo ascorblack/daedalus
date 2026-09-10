@@ -1494,6 +1494,7 @@ class SessionManager:
         elif event.type is EventType.ERROR and isinstance(p.get("message"), str):
             p["message"] = self.redactor.redact(p["message"])
             state.last_error_kind = str(p.get("kind") or state.last_error_kind)
+            logger.warning("run error in session %s (%s): %s", getattr(getattr(state, "session", None), "id", "?"), p.get("kind") or "-", p["message"][:500])
 
     @staticmethod
     def _redact_history_result(state: SessionState, tool_call_id: str, cleaned: str) -> None:
