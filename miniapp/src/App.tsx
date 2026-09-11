@@ -42,6 +42,24 @@ export function App() {
   const route = useRoute();
   const wide = useWide();
   const [picking, setPicking] = useState(false);
+  const veryWide = useMedia("(min-width: 1440px)");
+  const [listOpen, setListOpen] = useState(() => {
+    try {
+      return localStorage.getItem("daedalus.sessionList") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const toggleList = () => {
+    setListOpen((v) => {
+      try {
+        localStorage.setItem("daedalus.sessionList", v ? "0" : "1");
+      } catch {
+        /* private mode */
+      }
+      return !v;
+    });
+  };
   const [more, setMore] = useState(false);
   // Inside Telegram every request carries initData; outside, the browser needs a token or the session cookie.
   const [authed, setAuthed] = useState<boolean | null>(() => (telegram()?.initData ? true : null));
@@ -61,9 +79,23 @@ export function App() {
     const tg = telegram();
     migrateLegacyLocation(tg?.initDataUnsafe?.start_param);
     if (!tg?.initData) {
+      // Outside Telegram the system decides, unless the reader picked a scheme (?scheme=dark sticks).
+      const wanted = new URLSearchParams(window.location.search).get("scheme");
+      try {
+        if (wanted === "dark" || wanted === "light") localStorage.setItem("daedalus.scheme", wanted);
+        else if (wanted === "auto") localStorage.removeItem("daedalus.scheme");
+      } catch {
+        /* private mode */
+      }
       const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
       const apply = () => {
-        document.documentElement.dataset.scheme = mq?.matches ? "dark" : "light";
+        let forced: string | null = null;
+        try {
+          forced = localStorage.getItem("daedalus.scheme");
+        } catch {
+          /* private mode */
+        }
+        document.documentElement.dataset.scheme = forced === "dark" || forced === "light" ? forced : mq?.matches ? "dark" : "light";
       };
       apply();
       mq?.addEventListener("change", apply);
@@ -172,10 +204,18 @@ export function App() {
       </div>
     );
   } else if (sessionId) {
+    const showList = veryWide && listOpen;
     content = (
-      <ErrorBoundary key={sessionId}>
-        <SessionScreen id={sessionId} onBack={closeSession} onOpen={open} toast={showToast} onSplit={wide ? () => setPicking(true) : undefined} />
-      </ErrorBoundary>
+      <div className="with-list">
+        {showList && (
+          <div className="session-list-pane">
+            <SessionsScreen onOpen={open} toast={showToast} current={sessionId} compact />
+          </div>
+        )}
+        <ErrorBoundary key={sessionId}>
+          <SessionScreen id={sessionId} onBack={closeSession} onOpen={open} toast={showToast} onSplit={wide ? () => setPicking(true) : undefined} listOpen={showList} onToggleList={veryWide ? toggleList : undefined} />
+        </ErrorBoundary>
+      </div>
     );
   } else {
     content = (
@@ -209,18 +249,21 @@ export function App() {
   );
 }
 
-/** Whether the layout is the wide one (rail beside the screen): the same breakpoint as the stylesheet. */
-export function useWide(): boolean {
-  const query = "(min-width: 1024px)";
-  const [wide, setWide] = useState(() => window.matchMedia?.(query).matches ?? false);
+export function useMedia(query: string): boolean {
+  const [on, setOn] = useState(() => window.matchMedia?.(query).matches ?? false);
   useEffect(() => {
     const mq = window.matchMedia?.(query);
     if (!mq) return;
-    const on = () => setWide(mq.matches);
-    mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
-  }, []);
-  return wide;
+    const update = () => setOn(mq.matches);
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, [query]);
+  return on;
+}
+
+/** Whether the layout is the wide one (rail beside the screen): the same breakpoint as the stylesheet. */
+export function useWide(): boolean {
+  return useMedia("(min-width: 1024px)");
 }
 
 /** Which session to open beside the current one. */

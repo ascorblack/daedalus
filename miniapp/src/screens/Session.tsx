@@ -1,7 +1,9 @@
 import { Component, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { api, AsrStatus, LoopView, ProviderUsage, Schedule, SlashCommand, MessageView, Question, SessionDetail } from "../api";
-import { ServiceRow, Status, ToolPicker, fmtInt, fmtUsd, loopLabel, timeAgo } from "../components";
+import { Dot, STATUS_WORD, ServiceRow, Status, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, timeAgo } from "../components";
+import { OverflowMenu, Sheet, confirmDialog } from "../dialogs";
+import { commandPreview, plainPreview, untilShort } from "../format";
 import { codeBlock, renderMarkdown } from "../md";
 import { confirmAsync, enterSends, errorText, fmtBytes, fmtTok, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
@@ -147,16 +149,19 @@ export type SessionScreenProps = {
   pane?: "left" | "right";
   /** Open another session beside this one; absent when the screen cannot split. */
   onSplit?: () => void;
+  /** The sessions list beside the conversation (wide screens): whether it shows, and the switch. */
+  listOpen?: boolean;
+  onToggleList?: () => void;
 };
 
-export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: SessionScreenProps) {
+export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOpen, onToggleList }: SessionScreenProps) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [live, setLive] = useState<LiveState>(EMPTY_LIVE);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
   const [view, setView] = useState<"chat" | "files" | "mcp">("chat");
-  const [menu, setMenu] = useState(false);
+  const [info, setInfo] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [modes, setModes] = useState<string[]>([]);
   const [commands, setCommands] = useState<SlashCommand[]>([]);
@@ -203,7 +208,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     async (kind: "revert" | "fork", seq: number) => {
       try {
         if (kind === "revert") {
-          if (!(await confirmAsync("Undo this turn and everything after it? The working history is cut and the workspace files are restored where a snapshot exists (nested git repositories stay as they are). The transcript keeps everything."))) return;
+          if (!(await confirmAsync("Revert to this turn?", { body: "Everything after it leaves the working history and the workspace files are restored where a snapshot exists (nested git repositories stay as they are). The transcript keeps everything.", action: "Revert" }))) return;
           const r = await api.post<{ dropped: number; workspace_restored: boolean; untouched: string[] }>(`/api/sessions/${id}/revert`, { seq });
           const ws = r.workspace_restored ? (r.untouched.length ? `, workspace restored (${r.untouched.length} nested repo(s) untouched)` : ", workspace restored") : ", files not restored (no snapshot)";
           toast(`reverted: ${r.dropped} message(s) removed${ws}`);
@@ -565,6 +570,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   }
 
   async function stop() {
+    if (!(await confirmDialog({ title: "Stop the run?", body: "The agent stops after its current step. You can send a new message afterwards.", action: "Stop run", danger: true }))) return;
     try {
       await api.post(`/api/sessions/${id}/stop`);
       haptic("medium");
@@ -586,12 +592,12 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   }
 
   async function compact() {
-    setMenu(false);
+    setInfo(null);
     if (busy) {
       toast("stop the run first");
       return;
     }
-    if (!(await confirmAsync("Replace the whole history with a summary? The agent keeps only the summary."))) return;
+    if (!(await confirmAsync("Compact the history?", { body: "The whole working history is replaced by one structured summary; the agent keeps only that. The transcript stays.", action: "Compact", danger: false }))) return;
     toast("compacting…");
     try {
       await api.post(`/api/sessions/${id}/compact`, { instructions: "" });
@@ -603,12 +609,12 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   }
 
   async function clearHistory() {
-    setMenu(false);
+    setInfo(null);
     if (busy) {
       toast("stop the run first");
       return;
     }
-    if (!(await confirmAsync("Start over with an empty history? The workspace, the brief, the model and the loop stay; the transcript keeps the old turns."))) return;
+    if (!(await confirmAsync("Clear the history?", { body: "The agent starts over with an empty history. The workspace, the brief, the model and the loop stay; the transcript keeps the old turns.", action: "Clear history" }))) return;
     try {
       const r = await api.post<{ dropped: number }>(`/api/sessions/${id}/clear`);
       toast(`history cleared: ${r.dropped} message(s) dropped`);
@@ -640,8 +646,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   }
 
   async function remove() {
-    setMenu(false);
-    if (!(await confirmAsync("Delete this session, its topic and its workspace?"))) return;
+    setInfo(null);
+    if (!(await confirmAsync("Delete this session?", { body: "Its Telegram topic and its workspace go with it. The transcript is not kept.", action: "Delete session" }))) return;
     try {
       await api.delete(`/api/sessions/${id}`);
       onBack();
@@ -650,16 +656,52 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     }
   }
 
+  async function exportMarkdown() {
+    try {
+      const res = await fetch(`/api/sessions/${id}/export/download`, { headers: api.authHeaders() });
+      if (!res.ok) throw new Error(String(res.status));
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `session-${id}.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) {
+      toast(`export failed: ${String(e)}`);
+    }
+  }
+
+  // The step the agent is on right now, for the live bar.
+  const lastTurn = turns[turns.length - 1];
+  const currentStep = (() => {
+    if (!busy || !lastTurn) return "";
+    const items = lastTurn.activity;
+    const running = [...items].reverse().find((a) => a.kind === "tool" && a.running) as ToolItem | undefined;
+    if (running) {
+      const d = describe(running, detail?.workspace);
+      return `${d.verb}${d.detail ? ` ${d.detail}` : ""}`;
+    }
+    if (lastTurn.answer) return "Writing the answer";
+    if (live.thinking) return "Reasoning";
+    return status === "waiting" ? "Waiting for your answer" : "Thinking";
+  })();
+  const steps = lastTurn ? stepCount(lastTurn.activity) : 0;
+  const ctxPct = detail?.context && detail.context.window > 0 ? Math.round((100 * detail.context.tokens) / detail.context.window) : null;
+  const subRunning = (detail?.subagents ?? []).filter((x) => x.running).length;
+
   void tick;
   const sessionCtx = useMemo(() => ({ id, workspace: detail?.workspace ?? "", preview: setPreview }), [id, detail?.workspace]);
   return (
     <div className={`chat ${pane ? `pane pane-${pane}` : ""}`} onDragEnter={(e) => { if (e.dataTransfer?.types.includes("Files")) setDragging((d) => d + 1); }} onDragLeave={() => setDragging((d) => Math.max(0, d - 1))} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
       {dragging > 0 && <div className="dropzone"><Icon name="attach" size={28} /> Drop files to attach</div>}
       <div className="chat-head">
-        <button className="iconbtn" onClick={onBack} aria-label={pane === "right" ? "close this pane" : "back"} title={pane === "right" ? "Close this pane" : "Back"}>
+        <button className="iconbtn" onClick={onBack} aria-label={pane === "right" ? "Close this pane" : "Back"} title={pane === "right" ? "Close this pane" : "Back"}>
           <Icon name={pane === "right" ? "close" : "back"} />
         </button>
-        <div className="grow" style={{ minWidth: 0 }}>
+        <div className="grow chat-identity" style={{ minWidth: 0 }}>
           {editingTitle !== null ? (
             <input
               className="title-edit"
@@ -673,85 +715,75 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
               }}
             />
           ) : (
-            <div className="title" onClick={() => setEditingTitle(detail?.title ?? "")} title="tap to rename">
+            <button className="title chat-title" onClick={() => setInfo("session")} title="Session info">
               {detail?.title ?? "…"}
-            </div>
-          )}
-          {detail?.subagent_of && (
-            <div className="sub leader-link" onClick={() => onOpen?.(detail.subagent_of!)} title="open the leader session">
-              ↳ subagent of <b>{detail.leader_title ?? detail.subagent_of}</b>
-            </div>
+            </button>
           )}
           <div className="sub meta">
-            {busy ? <span className="live-dot" /> : null}
-            <span title={detail?.model}>{shortModel(detail?.model, 28)}</span>
-            <span title={`${fmtInt(detail?.usage.i)} tokens in, ${fmtInt(detail?.usage.o)} out`}>
-              {fmtTok(detail?.usage.i)}↑ {fmtTok(detail?.usage.o)}↓
-            </span>
-            <span>{fmtUsd(detail?.usage.usd)}</span>
-            {detail?.context && detail.context.tokens > 0 && detail.context.window > 0 && (
-              <span className="ctx" title={`context in use: ${detail.context.tokens.toLocaleString()} of ${detail.context.window.toLocaleString()} tokens · ${detail.context.messages} messages (${detail.context.summaries} summaries, ${detail.context.operator_turns} yours)`}>
-                ctx {Math.round((100 * detail.context.tokens) / detail.context.window)}%
-                <i className="ctxbar" style={{ ["--fill" as string]: `${Math.min(100, Math.round((100 * detail.context.tokens) / detail.context.window))}%` }} />
-              </span>
+            {(busy || status === "failed") && <Dot status={status} />}
+            {(busy || status === "failed") && <span className={`word ${status}`}>{STATUS_WORD[status]}</span>}
+            <button className="chip model" onClick={openPicker} title="Model for this session">
+              <Icon name="model" /> {shortModel(detail?.model, 22)}
+            </button>
+            {ctxPct !== null && ctxPct >= 60 && (
+              <button className={`chip ctx ${ctxPct >= 90 ? "bad" : "attn"}`} onClick={() => setInfo("context")} title={`context in use: ${detail!.context!.tokens.toLocaleString()} of ${detail!.context!.window.toLocaleString()} tokens`}>
+                ctx {ctxPct}%
+              </button>
+            )}
+            {detail?.subagents && detail.subagents.length > 0 && (
+              <button className={`chip ${subRunning ? "accent" : ""}`} onClick={() => setInfo("subagents")} title="Subagents">
+                {subRunning ? <Dot status="running" /> : null}
+                {detail.subagents.length} subagent{detail.subagents.length === 1 ? "" : "s"}{subRunning ? ` · ${subRunning} working` : ""}
+              </button>
+            )}
+            {detail?.loop && <button className={`chip loop ${detail.loop.status}`} onClick={() => setInfo("loop")} title={detail.loop.instruction}>{loopLabel(detail.loop).replace(/^loop · /, "loop · ")}</button>}
+            {detail?.subagent_of && (
+              <button className="chip" onClick={() => onOpen?.(detail.subagent_of!)} title="open the leader session">
+                ↳ {detail.leader_title ?? "leader"}
+              </button>
             )}
             {offline && <span className="offline">reconnecting…</span>}
-            {detail?.loop && <span className={`badge loop ${detail.loop.status}`} title={detail.loop.instruction}>{loopLabel(detail.loop)}</span>}
           </div>
         </div>
         <div className="head-actions">
-          <button className={`iconbtn wide-only ${asideOpen ? "on" : ""}`} onClick={() => setAsideOpen((v) => !v)} aria-label="session panel" title="Session panel (usage, loop, cron, services)">
-            <Icon name="columns" />
-          </button>
-          {onSplit && (
-            <button className="iconbtn wide-only" onClick={onSplit} aria-label="open another session beside this one" title="Open another session beside this one">
-              <Icon name="split" />
+          {onToggleList && (
+            <button className={`iconbtn wide-only ${listOpen ? "on" : ""}`} onClick={onToggleList} aria-label="Sessions list" title="Sessions list beside the conversation">
+              <Icon name="board" />
             </button>
           )}
-          <button className={`iconbtn ${view === "files" ? "on" : ""}`} onClick={() => setView(view === "files" ? "chat" : "files")} aria-label="workspace files" title="Workspace files">
+          <button className={`iconbtn wide-only ${asideOpen ? "on" : ""}`} onClick={() => setAsideOpen((v) => !v)} aria-label="Session panel" title="Session panel (usage, loop, cron, services)">
+            <Icon name="columns" />
+          </button>
+          <button className={`iconbtn wide-only ${view === "files" ? "on" : ""}`} onClick={() => setView(view === "files" ? "chat" : "files")} aria-label="Workspace files" title="Workspace files">
             <Icon name="folder" />
           </button>
-          <button className={`iconbtn ${view === "mcp" ? "on" : ""}`} onClick={() => setView(view === "mcp" ? "chat" : "mcp")} aria-label="MCP servers" title="MCP servers">
-            <Icon name="plug" />
-          </button>
-          <button className="iconbtn" onClick={() => setMenu((m) => !m)} aria-label="session settings" title="Session settings">
-            <Icon name="settings" />
-          </button>
+          <OverflowMenu
+            label="Session actions"
+            items={[
+              { label: "Session info", icon: "settings", onSelect: () => setInfo("session") },
+              { label: view === "files" ? "Hide files" : "Workspace files", icon: "folder", onSelect: () => setView(view === "files" ? "chat" : "files") },
+              { label: view === "mcp" ? "Hide MCP servers" : "MCP servers", icon: "plug", onSelect: () => setView(view === "mcp" ? "chat" : "mcp") },
+              ...(onSplit ? [{ label: "Open another beside", icon: "split" as IconName, onSelect: onSplit }] : []),
+              { label: "Rename", icon: "pen", onSelect: () => setEditingTitle(detail?.title ?? "") },
+              { label: "Export as Markdown", icon: "download", onSelect: exportMarkdown },
+              "-",
+              { label: "Compact history", icon: "compact", onSelect: compact, disabled: busy },
+              { label: "Clear history…", icon: "trash", onSelect: clearHistory, disabled: busy, danger: true },
+              { label: "Delete session…", icon: "trash", onSelect: remove, danger: true },
+            ]}
+          />
         </div>
       </div>
 
-      {detail && detail.subagents && detail.subagents.length > 0 && (
-        <div className="subagents phone-only" aria-label="subagents">
-          <span className="subagents-label">Subagents</span>
-          {detail.subagents.map((s) => (
-            <button key={s.session_id} className={"chip subchip " + s.status} onClick={() => onOpen?.(s.session_id)} title={`${s.model} · session ${s.session_id}`}>
-              {s.running ? <span className="live-dot" /> : <span className={"dot " + s.status} />}
-              <span className="name">{s.name || s.session_id}</span>
-              <span className="sub">{s.running ? "working" : s.status === "failed" ? "failed" : "done"}</span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {menu && detail && (
-        <div className="sheet-backdrop" onClick={() => setMenu(false)}>
-          <div className="sheet" onClick={(e) => e.stopPropagation()}>
-            <div className="grip" />
-            <div className="sheet-head">
-              <h3>Session settings</h3>
-              <button className="iconbtn small" onClick={() => setMenu(false)} aria-label="close" title="Close"><Icon name="close" size={16} /></button>
-            </div>
-            <div className="sheet-body">
-              <section className="sheet-section">
+      {info && detail && (
+        <Sheet title="Session info" onClose={() => setInfo(null)} className="session-info">
+              <section className="sheet-section" id="info-session">
               <div className="sheet-section-title">Session</div>
               <label className="field">Title</label>
               <input className="field" defaultValue={detail.title} onBlur={(e) => rename(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
               <label className="field">Model</label>
-              <button className="menu-item" onClick={() => { setMenu(false); openPicker(); }}>
+              <button className="menu-item" onClick={() => { setInfo(null); openPicker(); }}>
                 {detail.model || "global default"} <span className="sub">change</span>
-              </button>
-              <button className="menu-item" onClick={async () => { try { const res = await fetch(`/api/sessions/${id}/export/download`, { headers: api.authHeaders() }); if (!res.ok) throw new Error(String(res.status)); const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `session-${id}.md`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000); } catch (e) { toast(`export failed: ${String(e)}`); } }}>
-                Export as Markdown <span className="sub">every turn, tool call and the spend</span>
               </button>
               <label className="field">Mode</label>
               <select className="field" value={detail.mode || "default"} onChange={(e) => setMode(e.target.value)}>
@@ -760,39 +792,62 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                 ))}
               </select>
               </section>
-              <section className="sheet-section">
-              <div className="sheet-section-title">Context</div>
+              <section className="sheet-section" id="info-usage">
+              <div className="sheet-section-title"><Icon name="chart" size={14} /> Usage</div>
+              <div className="kv"><span>Cost, all runs</span><b>{fmtUsd(detail.usage.usd)}</b></div>
+              <div className="kv"><span>Tokens in</span><b>{fmtInt(detail.usage.i)}</b></div>
+              <div className="kv"><span>Tokens out</span><b>{fmtInt(detail.usage.o)}</b></div>
+              {!!detail.usage.ch && <div className="kv"><span>Cache reads</span><b>{fmtInt(detail.usage.ch)}</b></div>}
+              <div className="kv"><span>Calls</span><b>{fmtInt(detail.usage.c)}</b></div>
+              </section>
+              <section className="sheet-section" id="info-context">
+              <div className="sheet-section-title"><Icon name="compact" size={14} /> Context</div>
               {detail.context && (
-                <div className="sub">
-                  <b>{detail.context.tokens.toLocaleString()}</b>
-                  {detail.context.window > 0 && ` / ${detail.context.window.toLocaleString()} tokens (${Math.round((100 * detail.context.tokens) / detail.context.window)}%)`} · {detail.context.messages} messages in the working history: {detail.context.summaries} summaries, {detail.context.operator_turns} yours. The header's ↑↓ figures are lifetime totals.
-                </div>
+                <>
+                  <div className="kv">
+                    <span>In use</span>
+                    <b>{ctxPct !== null ? `${ctxPct}% · ` : ""}{fmtTok(detail.context.tokens)}{detail.context.window > 0 ? ` / ${fmtTok(detail.context.window)}` : ""}</b>
+                  </div>
+                  {ctxPct !== null && <div className={`bar ${ctxPct >= 90 ? "bad" : ctxPct >= 60 ? "attn" : ""}`} style={{ ["--v" as string]: Math.min(100, ctxPct) }}><i /></div>}
+                  <div className="kv"><span>Working history</span><b>{detail.context.messages} messages · {detail.context.summaries} summaries · {detail.context.operator_turns} yours</b></div>
+                </>
               )}
               <ToolTiming sessionId={id} />
               <div className="btnrow">
-                <button className="btn small" onClick={compact}><Icon name="compact" size={14} /> Compact history</button>
-                <button className="btn small" onClick={clearHistory} title="Start over with an empty history; the workspace, the brief and the settings stay"><Icon name="trash" size={14} /> Clear history</button>
+                <button className="btn small" onClick={compact} disabled={busy}><Icon name="compact" size={14} /> Compact history</button>
               </div>
               </section>
-              <section className="sheet-section">
+              <section className="sheet-section" id="info-loop">
               <div className="sheet-section-title"><Icon name="loop" size={14} /> Loop{detail.loop ? ` · ${loopLabel(detail.loop).replace(/^loop · /, "")}` : ""}</div>
               <LoopPanel sessionId={id} loop={detail.loop ?? null} onChange={() => load(true)} toast={toast} />
               </section>
+              {detail.subagents && detail.subagents.length > 0 && (
+                <section className="sheet-section" id="info-subagents">
+                  <div className="sheet-section-title"><Icon name="spawn" size={14} /> Subagents · {detail.subagents.length}</div>
+                  {detail.subagents.map((sa) => (
+                    <button key={sa.session_id} className="aside-row link" onClick={() => { setInfo(null); onOpen?.(sa.session_id); }} title={`${sa.model} · ${sa.session_id}`}>
+                      <Dot status={sa.running ? "running" : sa.status === "failed" ? "failed" : "done"} />
+                      <span className="grow name">{sa.name || sa.session_id}</span>
+                      <span className="sub">{sa.running ? "working" : sa.status === "failed" ? "failed" : sa.kept ? "kept" : "done"}</span>
+                    </button>
+                  ))}
+                </section>
+              )}
               {detail.services && detail.services.length > 0 && (
-                <section className="sheet-section">
+                <section className="sheet-section" id="info-services">
                   <div className="sheet-section-title"><Icon name="globe" size={14} /> Services</div>
-                  {detail.services.map((s) => (
-                    <ServiceRow key={s.name} s={s} sessionId={id} onChange={() => load(true)} toast={toast} onLogs={(text) => { setMenu(false); setCommandResult({ line: `service ${s.name} · log`, text }); }} />
+                  {detail.services.map((sv) => (
+                    <ServiceRow key={sv.name} s={sv} sessionId={id} onChange={() => load(true)} toast={toast} onLogs={(text) => { setInfo(null); setCommandResult({ line: `service ${sv.name} · log`, text }); }} />
                   ))}
                 </section>
               )}
               {schedules.length > 0 && (
-                <section className="sheet-section">
-                  <div className="sheet-section-title"><Icon name="clock" size={14} /> Cron · {schedules.length}</div>
+                <section className="sheet-section" id="info-cron">
+                  <div className="sheet-section-title"><Icon name="clock" size={14} /> Schedules · {schedules.length}</div>
                   {schedules.map((sc) => <ScheduleRow key={sc.id} sc={sc} sessionId={id} onAction={scheduleAction} />)}
                 </section>
               )}
-              <section className="sheet-section">
+              <section className="sheet-section" id="info-tools">
               <div className="sheet-section-title"><Icon name="wrench" size={14} /> Tools</div>
               <ToolPicker
                 off={detail.tools_off ?? []}
@@ -807,7 +862,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                 }}
               />
               </section>
-              <section className="sheet-section">
+              <section className="sheet-section" id="info-brief">
               <div className="sheet-section-title"><Icon name="pen" size={14} /> Brief</div>
               <label className="field">Standing instructions in this session's system prompt{detail.spawned_by ? `; set by session ${detail.spawned_by}` : ""}</label>
               <textarea
@@ -828,9 +883,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                 }}
               />
               </section>
-              <section className="sheet-section">
-              <div className="sheet-section-title"><Icon name="chart" size={14} /> Spend</div>
-              <label className="field">Cap for this session (USD, all its runs; empty = global limits only)</label>
+              <section className="sheet-section" id="info-spend">
+              <div className="sheet-section-title"><Icon name="chart" size={14} /> Spend cap</div>
+              <label className="field">For this session, USD across all its runs (empty = global limits only)</label>
               <div className="composer-row">
                 <input
                   className="field"
@@ -856,18 +911,135 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                 <span className="sub" style={{ whiteSpace: "nowrap" }}>spent {fmtUsd(detail.usage.usd)}</span>
               </div>
               </section>
+              <section className="sheet-section" id="info-advanced">
+              <div className="sheet-section-title">Advanced</div>
+              <div className="kv"><span>Session id</span><button className="linkbtn mono" onClick={async () => toast((await copyText(id)) ? "id copied" : id)} title="copy">{id}</button></div>
+              <div className="kv"><span>Workspace</span><button className="linkbtn mono truncate" onClick={async () => toast((await copyText(detail.workspace)) ? "path copied" : detail.workspace)} title={detail.workspace}>{detail.workspace_own === false ? detail.workspace_name : detail.workspace}</button></div>
+              {detail.run_id && <div className="kv"><span>Run id</span><span className="mono">{detail.run_id}</span></div>}
+              <div className="btnrow">
+                <button className="btn small" onClick={exportMarkdown}><Icon name="download" size={14} /> Export as Markdown</button>
+              </div>
+              </section>
               <section className="sheet-section danger">
               <div className="sheet-section-title">Danger zone</div>
               <div className="btnrow" style={{ marginTop: 0 }}>
+                <button className="btn small danger" onClick={clearHistory} disabled={busy}><Icon name="trash" size={14} /> Clear history</button>
                 <button className="btn small danger" onClick={remove}><Icon name="trash" size={14} /> Delete session</button>
               </div>
               </section>
-            </div>
-          </div>
-        </div>
+        </Sheet>
       )}
 
       <div className={`chat-body ${view === "chat" ? "" : "split"} ${asideOpen ? "" : "no-aside"}`} style={{ ["--aside-w" as string]: `${asideWidth}px`, ["--pane-w" as string]: `${paneWidth}px` }}>
+        <div className="chat-main">
+          <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
+            <div className="timeline">
+              {turns.map((t, i) => (
+                <Safe key={t.key}>
+                  <SessionContext.Provider value={sessionCtx}>
+                    <TurnView turn={t} live={busy && i === turns.length - 1} onTurnAction={turnAction} />
+                  </SessionContext.Provider>
+                </Safe>
+              ))}
+              {detail?.pending && <QuestionCard key={detail.pending.questions.map((q) => q.question).join("|")} sessionId={id} questions={detail.pending.questions} onDone={() => load()} toast={toast} />}
+            </div>
+          </div>
+          {!atBottom && !busy && (
+            <button className="jump-down" onClick={jumpToBottom} aria-label="scroll to the latest message" title="To the latest message">
+              <Icon name="down" size={18} />
+            </button>
+          )}
+          {busy && (
+            <button className={`livebar ${status}`} onClick={jumpToBottom} role="status" aria-live="polite" title="To the latest step">
+              <Dot status={status} />
+              <b>{status === "waiting" ? "Needs you" : "Working"}</b>
+              {lastTurn && <span className="num">{fmtDuration(Date.now() - lastTurn.startedAt)}</span>}
+              {steps > 0 && <span>· step {steps}</span>}
+              {currentStep && <span className="truncate">· {currentStep}</span>}
+              {!atBottom && <Icon name="down" size={16} />}
+            </button>
+          )}
+          <div className="composer">
+            {pending.length > 0 && (
+              <div className="attachments" aria-label="attachments">
+                {pending.map((f, i) => (
+                  <AttachmentCard key={`${f.name}-${f.size}-${f.lastModified}-${i}`} file={f} onOpen={() => setPreview({ file: f })} onRemove={() => setPending((p) => p.filter((_, j) => j !== i))} />
+                ))}
+              </div>
+            )}
+            {paletteItems.length > 0 && (
+              <div className="palette">
+                {paletteItems.slice(0, 8).map((c) => (
+                  <button key={c.name} className="palette-item" onClick={() => pickCommand(c)}>
+                    <span className="mono">/{c.name} <span className="sub">{c.args}</span></span>
+                    <span className="sub">{c.description}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="composer-box line">
+              <input ref={fileInput} type="file" multiple hidden onChange={(e) => setPending((p) => [...p, ...Array.from(e.target.files ?? [])])} />
+              <button className="roundbtn" title="Attach files" onClick={() => fileInput.current?.click()} aria-label="Attach files">
+                <Icon name="plus" />
+              </button>
+              <textarea
+                ref={textarea}
+                value={draft}
+                onChange={(e) => {
+                  setDraft(e.target.value);
+                  const el = e.target;
+                  el.style.height = "auto";
+                  el.style.height = `${Math.min(el.scrollHeight, Math.max(120, window.innerHeight * 0.4))}px`;
+                }}
+                placeholder={status === "running" ? "Steer the agent…" : status === "waiting" ? "Reply to the agent…" : "Message the agent…"}
+                rows={1}
+                onPaste={onPaste}
+                onKeyDown={(e) => {
+                  if (e.key === "Tab" && paletteItems.length > 0) {
+                    e.preventDefault();
+                    pickCommand(paletteItems[0]);
+                    return;
+                  }
+                  if (e.key === "Escape" && paletteQuery !== null) {
+                    setDraft("");
+                    return;
+                  }
+                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    send();
+                    return;
+                  }
+                  if (e.key === "Enter" && !e.shiftKey && enterSends()) {
+                    e.preventDefault();
+                    send();
+                  }
+                }}
+              />
+              {asr?.configured && !draft.trim() && <MicButton onRecording={onRecording} busy={transcribing} />}
+              {status === "running" && !draft.trim() && pending.length === 0 ? (
+                <button className="roundbtn stop" onClick={stop} aria-label="Stop the run" title="Stop the run">
+                  <Icon name="stop" />
+                </button>
+              ) : (
+                <button className="roundbtn send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)} aria-label={status === "running" ? "Send as a steer" : "Send"} title={status === "running" ? "Send as a steer (applies before the next step)" : "Send"}>
+                  <Icon name="up" />
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+        {view !== "chat" && detail && <PaneHandle side="right" onDrag={(dx) => setPaneWidth(paneWidth - dx)} />}
+        {view !== "chat" && detail && (
+          <aside className="side-pane">
+            <div className="side-head">
+              <span className="side-title"><Icon name={view === "files" ? "folder" : "plug"} size={14} /> {view === "files" ? "Workspace files" : "MCP servers"}</span>
+              <button className="iconbtn small" onClick={() => setView("chat")} aria-label="close" title="Close">
+                <Icon name="close" size={16} />
+              </button>
+            </div>
+            <div className="side-body">{view === "files" ? <Files base={sessionBase(id)} uploadUrl={`${sessionBase(id)}/files/upload`} onPreview={setPreview} toast={toast} /> : <McpPanel sessionId={id} toast={toast} />}</div>
+          </aside>
+        )}
         {detail && asideOpen && (
           <aside className="session-aside wide-only">
             <div className="aside-card">
@@ -908,7 +1080,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
               <div className="aside-card">
                 <div className="aside-title"><Icon name="loop" size={14} /> Loop <span className={`badge loop ${detail.loop.status}`}>{detail.loop.status}</span></div>
                 <div className="aside-text">{detail.loop.instruction}</div>
-                <div className="sub">{loopLabel(detail.loop).replace(/^loop · /, "")}{detail.loop.next_run_at && detail.loop.status === "active" ? ` · next ${new Date(detail.loop.next_run_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</div>
+                <div className="sub">{loopLabel(detail.loop).replace(/^loop · /, "")}{detail.loop.next_run_at && detail.loop.status === "active" ? ` · next ${untilShort(detail.loop.next_run_at)}` : ""}</div>
                 <div className="btnrow" style={{ marginTop: 8 }}>
                   {detail.loop.status === "active" ? (
                     <button className="btn small" onClick={() => loopAction("pause")}><Icon name="pause" size={14} /> pause</button>
@@ -941,113 +1113,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             )}
           </aside>
         )}
-        {detail && asideOpen && <PaneHandle side="left" onDrag={(dx) => setAsideWidth(asideWidth + dx)} />}
-        <div className="chat-main">
-          <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
-            <div className="timeline">
-              {turns.map((t, i) => (
-                <Safe key={t.key}>
-                  <SessionContext.Provider value={sessionCtx}>
-                    <TurnView turn={t} live={busy && i === turns.length - 1} onTurnAction={turnAction} />
-                  </SessionContext.Provider>
-                </Safe>
-              ))}
-              {detail?.pending && <QuestionCard key={detail.pending.questions.map((q) => q.question).join("|")} sessionId={id} questions={detail.pending.questions} onDone={() => load()} toast={toast} />}
-            </div>
-          </div>
-          {!atBottom && (
-            <button className="jump-down" onClick={jumpToBottom} aria-label="scroll to the latest message" title="To the latest message">
-              <Icon name="down" size={18} />
-            </button>
-          )}
-          <div className="composer">
-            {pending.length > 0 && (
-              <div className="attachments" aria-label="attachments">
-                {pending.map((f, i) => (
-                  <AttachmentCard key={`${f.name}-${f.size}-${f.lastModified}-${i}`} file={f} onOpen={() => setPreview({ file: f })} onRemove={() => setPending((p) => p.filter((_, j) => j !== i))} />
-                ))}
-              </div>
-            )}
-            {paletteItems.length > 0 && (
-              <div className="palette">
-                {paletteItems.slice(0, 8).map((c) => (
-                  <button key={c.name} className="palette-item" onClick={() => pickCommand(c)}>
-                    <span className="mono">/{c.name} <span className="sub">{c.args}</span></span>
-                    <span className="sub">{c.description}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="composer-box">
-              <textarea
-                ref={textarea}
-                value={draft}
-                onChange={(e) => {
-                  setDraft(e.target.value);
-                  const el = e.target;
-                  el.style.height = "auto";
-                  el.style.height = `${Math.min(el.scrollHeight, Math.max(120, window.innerHeight * 0.4))}px`;
-                }}
-                placeholder={status === "running" ? "Steer the agent (applies before its next step)" : "Ask anything"}
-                rows={1}
-                onPaste={onPaste}
-                onKeyDown={(e) => {
-                  if (e.key === "Tab" && paletteItems.length > 0) {
-                    e.preventDefault();
-                    pickCommand(paletteItems[0]);
-                    return;
-                  }
-                  if (e.key === "Escape" && paletteQuery !== null) {
-                    setDraft("");
-                    return;
-                  }
-                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                    e.preventDefault();
-                    send();
-                    return;
-                  }
-                  if (e.key === "Enter" && !e.shiftKey && enterSends()) {
-                    e.preventDefault();
-                    send();
-                  }
-                }}
-              />
-              <div className="composer-row">
-                <input ref={fileInput} type="file" multiple hidden onChange={(e) => setPending((p) => [...p, ...Array.from(e.target.files ?? [])])} />
-                <button className="roundbtn" title="attach files" onClick={() => fileInput.current?.click()} aria-label="attach">
-                  <Icon name="plus" />
-                </button>
-                {asr?.configured && <MicButton onRecording={onRecording} busy={transcribing} />}
-                <button className="chip" onClick={openPicker} title="model for this session">
-                  <Icon name="model" /> {shortModel(detail?.model)}
-                </button>
-                <span className="grow" />
-                {status === "running" && (
-                  <button className="roundbtn stop" onClick={stop} aria-label="stop" title="stop the run">
-                    <Icon name="stop" />
-                  </button>
-                )}
-                {(status !== "running" || draft.trim() || pending.length > 0) && (
-                  <button className="roundbtn send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)} aria-label={status === "running" ? "steer" : "send"} title={status === "running" ? "send as a steer" : "send"}>
-                    <Icon name="up" />
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-        {view !== "chat" && detail && <PaneHandle side="right" onDrag={(dx) => setPaneWidth(paneWidth - dx)} />}
-        {view !== "chat" && detail && (
-          <aside className="side-pane">
-            <div className="side-head">
-              <span className="side-title"><Icon name={view === "files" ? "folder" : "plug"} size={14} /> {view === "files" ? "Workspace files" : "MCP servers"}</span>
-              <button className="iconbtn small" onClick={() => setView("chat")} aria-label="close" title="Close">
-                <Icon name="close" size={16} />
-              </button>
-            </div>
-            <div className="side-body">{view === "files" ? <Files base={sessionBase(id)} uploadUrl={`${sessionBase(id)}/files/upload`} onPreview={setPreview} toast={toast} /> : <McpPanel sessionId={id} toast={toast} />}</div>
-          </aside>
-        )}
+        {detail && asideOpen && <PaneHandle side="right" onDrag={(dx) => setAsideWidth(asideWidth - dx)} />}
       </div>
 
       {commandResult && (
@@ -1429,15 +1495,21 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
           <span className="badge">{turn.user.origin}</span>
         </div>
       )}
-      {turn.user && <Md className="msg user" text={turn.user.text} />}
-      {turn.user && turn.user.seq && onTurnAction && !live && (
-        <div className="turn-actions">
-          <button className="btn small" onClick={() => onTurnAction("revert", turn.user!.seq!)} title="undo this turn and everything after it (files too)">
-            ↶ revert here
-          </button>
-          <button className="btn small" onClick={() => onTurnAction("fork", turn.user!.seq!)} title="start a new session from this point">
-            ⑂ fork
-          </button>
+      {turn.user && (
+        <div className="msg-wrap">
+          {turn.user.seq && onTurnAction && !live && (
+            <div className="turn-actions">
+              <OverflowMenu
+                small
+                label="This turn"
+                items={[
+                  { label: "Fork a session from here", icon: "split", onSelect: () => onTurnAction("fork", turn.user!.seq!) },
+                  { label: "Revert to here…", icon: "back", danger: true, onSelect: () => onTurnAction("revert", turn.user!.seq!) },
+                ]}
+              />
+            </div>
+          )}
+          <Md className="msg user" text={turn.user.text} />
         </div>
       )}
       {hasWork && (
@@ -1479,14 +1551,14 @@ function SummaryBlock({ message }: { message: MessageView }) {
 }
 
 /** Verb + noun for a tool, Grok-style ("Ran command", "Read file", "Editing 2 files"). */
-function describe(t: ToolItem): { verb: string; noun: string; detail: string; icon: IconName } {
+function describe(t: ToolItem, workspace?: string): { verb: string; noun: string; detail: string; icon: IconName } {
   const a = t.args;
   const str = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : a[k] === undefined ? "" : JSON.stringify(a[k]));
   const base = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
   const r = t.running;
   switch (t.name) {
     case "Exec":
-      return { verb: r ? "Running command" : "Ran command", noun: "command", detail: str("command").split("\n")[0], icon: "terminal" };
+      return { verb: r ? "Running command" : "Ran command", noun: "command", detail: commandPreview(str("command"), workspace), icon: "terminal" };
     case "Read":
       return { verb: r ? "Reading file" : "Read file", noun: "file", detail: base(str("path")), icon: "file" };
     case "Write":
@@ -1659,7 +1731,7 @@ function SummaryRow({ text, reason }: { text: string; reason: string }) {
       <div className="act" onClick={() => setOpen((o) => !o)}>
         <Icon name="compact" />
         <span className="verb">Context compacted</span>
-        <span className="detail">{reason !== "auto" ? `${reason} · ` : ""}{text.replace(/\s+/g, " ").slice(0, 80)}</span>
+        <span className="detail">{reason !== "auto" ? `${reason} · ` : ""}{plainPreview(text, 100)}</span>
         <span className={`chev ${open ? "down" : ""}`}>›</span>
       </div>
       {open && <Md className="summary-inline" text={text} />}
@@ -1674,7 +1746,7 @@ function ThoughtBlock({ text }: { text: string }) {
       <div className="act" onClick={() => setOpen((o) => !o)}>
         <Icon name="bulb" />
         <span className="verb">Reasoning</span>
-        <span className="detail">{text.replace(/\s+/g, " ").slice(0, 80)}</span>
+        <span className="detail">{plainPreview(text, 100)}</span>
         <span className={`chev ${open ? "down" : ""}`}>›</span>
       </div>
       {open && <div className="thought">{text}</div>}
@@ -1684,7 +1756,8 @@ function ThoughtBlock({ text }: { text: string }) {
 
 function ToolRow({ item, nested }: { item: ToolItem; nested?: boolean }) {
   const [open, setOpen] = useState(false);
-  const d = describe(item);
+  const { workspace } = useContext(SessionContext);
+  const d = describe(item, workspace);
   const expanded = open || (item.running && item.name === "Exec");
   return (
     <div className={`act-wrap ${nested ? "nested" : ""}`}>

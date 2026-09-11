@@ -128,6 +128,8 @@ export type SessionSummary = {
   created_at: string;
   last_message_at: string;
   run_id: string | null;
+  /** The preset label or provider/model the session's next call goes to. */
+  model?: string;
   metadata?: { subagent_of?: string; subagent_name?: string; loop?: LoopView; [k: string]: unknown };
 };
 
