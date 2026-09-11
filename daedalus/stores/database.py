@@ -407,6 +407,12 @@ MIGRATIONS: list[str] = [
     ALTER TABLE verifications ADD COLUMN tests_run INTEGER;
     ALTER TABLE verifications ADD COLUMN tests_skipped INTEGER;
     """,
+    # 21 — a receipt carries the content of the files it ran against, so "the check covered these
+    # bytes" is a comparison of bytes rather than of clock readings, which a formatter or a rebase
+    # moves without changing anything. The digest is taken in the checkout the command ran in.
+    """
+    ALTER TABLE verifications ADD COLUMN file_digests TEXT NOT NULL DEFAULT '';
+    """,
 ]
 
 

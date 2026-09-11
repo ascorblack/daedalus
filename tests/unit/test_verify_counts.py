@@ -12,10 +12,12 @@ import pytest
 
 from daedalus.tools.verify import (
     _command_workdir,
+    _content_digests,
     _counts_from_output,
     _is_test_run,
     _test_counts,
     _tree_state,
+    file_digest,
 )
 
 
@@ -153,3 +155,53 @@ def test_the_tree_marks_a_dirty_checkout(tmp_path: Path) -> None:
     (repo / "a.txt").write_text("two\n")
     dirty = asyncio.run(_tree_state(repo))
     assert dirty.endswith("+worktree"), dirty
+
+
+def _repo(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {"PATH": "/usr/bin:/bin", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com", "HOME": str(tmp_path)}
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env)
+    (repo / "kept.txt").write_text("one\n")
+    subprocess.run(["git", "add", "kept.txt"], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "commit", "-q", "-m", "one"], cwd=repo, check=True, env=env)
+    return repo, env
+
+
+def test_the_fingerprint_names_the_bytes_the_check_ran_against(tmp_path: Path) -> None:
+    """What the gate compares: not the whole tree - something moved is not an answer - but the files the
+    checkout differs by, each with a digest of its content. A committed edit, an uncommitted one and an
+    untracked file are all covered, and the digest moves exactly when the bytes do."""
+    repo, _env = _repo(tmp_path)
+    (repo / "kept.txt").write_text("two\n")            # uncommitted edit
+    (repo / "new.txt").write_text("fresh\n")           # untracked
+    digests = asyncio.run(_content_digests(repo))
+    assert set(digests) == {"kept.txt", "new.txt"}, digests
+    assert digests["kept.txt"] == file_digest(repo / "kept.txt")
+    (repo / "kept.txt").write_text("three\n")
+    assert asyncio.run(_content_digests(repo))["kept.txt"] != digests["kept.txt"]
+    # Files that match the base are not in the mapping: the fingerprint is about the change, not the tree.
+    assert "unchanged.txt" not in digests
+    # A directory that is not a checkout makes no content claim at all - which is not a passing claim.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "x.txt").write_text("x\n")
+    assert asyncio.run(_content_digests(plain)) == {}
+
+
+def test_a_deleted_file_and_a_symlink_have_answers_of_their_own(tmp_path: Path) -> None:
+    """Silence about a path is not a fact about it: a receipt has to be able to say "already gone" and
+    "a link to this" as clearly as it says a digest."""
+    repo, env = _repo(tmp_path)
+    import subprocess
+
+    (repo / "gone.txt").write_text("bye\n")
+    subprocess.run(["git", "add", "gone.txt"], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "commit", "-q", "-m", "add gone"], cwd=repo, check=True, env=env)
+    (repo / "gone.txt").unlink()                       # deleted after the branch point
+    (repo / "link.txt").symlink_to("target-does-not-exist")
+    digests = asyncio.run(_content_digests(repo))
+    assert digests["gone.txt"] == "absent" and digests["link.txt"].startswith("link:"), digests

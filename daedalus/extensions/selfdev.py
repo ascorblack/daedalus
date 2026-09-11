@@ -21,6 +21,7 @@ from daedalus.security import redact
 # says nothing, or says zero, is not evidence that anything was checked. Recognising a runner is not
 # guessing from a word in the string: see `_is_test_run` in daedalus.tools.verify.
 from daedalus.tools.verify import _is_test_run as PYTHON_TEST_RUN
+from daedalus.tools.verify import file_digest as FILE_DIGEST
 
 if TYPE_CHECKING:
     from aiogram.types import CallbackQuery, Message
@@ -184,6 +185,26 @@ def _names(command: str, choices: set[str]) -> bool:
     return any(re.search(r"(?<![A-Za-z0-9_-])" + re.escape(tok) + r"(?![A-Za-z0-9_])", command) for tok in choices)
 
 
+def _recorded_digests(row: dict[str, Any]) -> dict[str, str]:
+    """The content the receipt says it ran against, keyed by path from the repo root.
+
+    A row written before this column existed, an empty one, and one holding something that is not an
+    object all read as "this receipt makes no content claim" — which is what they are. The gate then
+    falls back to the timestamp rule for such a row rather than refusing it: an old receipt is not a
+    wrong one.
+    """
+    raw = row.get("file_digests")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(str(raw))
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): str(value) for key, value in data.items()}
+
+
 def _ran_no_tests(row: dict[str, Any]) -> str | None:
     """Why this passing receipt is worth nothing, or ``None`` when it is worth what it says.
 
@@ -229,18 +250,18 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
     enough: each changed host module then needs a run that counted tests and postdates it, because
     otherwise any unrelated green run launders the empty one and the count rule is undone by arrangement.
 
-    Five limits are known and are named rather than hidden. The receipt's ``tree`` field is shown to a
-    reader and is not read here: a receipt from the right commit on the wrong branch still passes, and
-    closing that needs the tree to be compared against the proposed worktree. The comparison is against
-    modification time, not content, so an edit followed by a timestamp of an earlier date defeats it,
-    and a content-preserving rewrite (a ``touch``, a formatter, a rebase) blocks the change until the
-    check is run again. A deleted file has no bytes left to cover, so a receipt that names it is enough
-    for it — but a symlink whose target is gone is refused, because a path no checkout can read is not
-    a deletion. A receipt that names a file without running it — ``cat`` it, print its path — counts as
-    naming when the window holds no empty test run; where it does, the rule above refuses the change. And
-    a command that runs the tests through a wrapper this module does not recognise is treated as no test
-    run at all, so its count is not read: a runner the receipt cannot parse is not counted, and the cost
-    is that such a receipt has to name the code some other way.
+    Four limits are known and are named rather than hidden. The receipt's ``tree`` field — the commit it
+    ran against — is shown to a reader and is not compared here, because a commit is a name and a rebase
+    renames identical content; what a receipt can be held to is the ``file_digests`` it carries, and the
+    comparison against the proposed worktree is made on those. A row without digests (one written before
+    the column existed) is still judged by modification time: an edit followed by a timestamp of an
+    earlier date defeats that rule, and such a row is the only case where a content-preserving rewrite
+    (a ``touch``, a formatter, a rebase) blocks the change. A deleted file has no bytes left to cover, so
+    a receipt that names it is enough for it — but a symlink whose target is gone is refused, because a
+    path no checkout can read is not a deletion. And a command that runs the tests through a wrapper this
+    module does not recognise is treated as no test run at all, so its count is not read: a runner the
+    receipt cannot parse is not counted, and the cost is that such a receipt has to name the code some
+    other way.
     """
     root = root.resolve()
     green = [r for r in receipts if r.get("passed")]
@@ -286,13 +307,25 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
                 found.append(row)
         return found
 
-    def current(f: str, rows: list[dict[str, Any]]) -> bool:
-        """Whether one of these receipts postdates the file, i.e. covers the bytes in the tree."""
-        path = root / f
-        if not path.exists() and not path.is_symlink():
-            return True  # deleted: no bytes left to cover, and the receipt names it
-        newest = path.stat().st_mtime
-        return any(_postdates(r, newest) for r in rows)
+    def _covers(row: dict[str, Any], f: str, path: Path, newest: float) -> bool:
+        """Whether this receipt covers the file: by its recorded bytes when it has them, else by time.
+
+        A receipt that fingerprinted this file is judged by content alone — the bytes are the claim — and
+        a receipt that did not is judged by the clock, as every receipt was before the column existed.
+        The two are not mixed inside one row: a digest that matches is not rescued by a fresh timestamp,
+        and a row with no digest is not refused for lacking one.
+        """
+        recorded = _recorded_digests(row)
+        if recorded and f in recorded:
+            return recorded[f] == FILE_DIGEST(path)
+        return _postdates(row, newest)
+
+    def _why_stale(f: str, rows: list[dict[str, Any]], path: Path, newest: float) -> str:
+        """Why the receipts that name this file do not cover it: content or clock, said plainly."""
+        if any(f in _recorded_digests(r) and _recorded_digests(r)[f] != FILE_DIGEST(path) for r in rows):
+            return "the receipts ran against content that is not what the file holds now"
+        dates = ", ".join(sorted({str(r.get("at") or "no timestamp") for r in rows}))
+        return f"last written {datetime.fromtimestamp(newest, tz=UTC).isoformat()}; receipts at {dates}"
 
     def _postdates(row: dict[str, Any], newest: float) -> bool:
         when = _receipt_time(row)
@@ -329,17 +362,16 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
         path = root / f
         deleted = not path.exists() and not path.is_symlink()
         newest = None if deleted else path.stat().st_mtime
-        covered = deleted or any(_postdates(r, newest) for r in rows)
+        covered = deleted or any(_covers(r, f, path, newest) for r in rows)
         if not covered:
-            dates = ", ".join(sorted({str(r.get("at") or "no timestamp") for r in rows}))
-            stale.append(f"{f} (last written {datetime.fromtimestamp(newest, tz=UTC).isoformat()}; receipts at {dates})")
+            stale.append(f"{f} ({_why_stale(f, rows, path, newest)})")
             continue
         # A green test run that executed nothing must not be what stands behind a changed module: while
         # such a row is in the window, naming the module is not enough — a run that counted tests has to
         # name it. Without this, any unrelated counted run launders an empty one, and a command that only
         # reads the file reopens the hole the count rule is meant to close.
         if empty and f in must_be_named and not any(
-            counted_tests(r) and (deleted or _postdates(r, newest)) for r in rows
+            counted_tests(r) and (deleted or _covers(r, f, path, newest)) for r in rows
         ):
             unaudited.append(f)
 
@@ -376,10 +408,11 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
         )
     if stale:
         raise ProposalRefused(
-            "the passing receipt names the changed code but was recorded before the file it names was last written: "
+            "the passing receipt names the changed code but does not cover the bytes now in the tree: "
             + "; ".join(stale)
-            + ". A green run does not cover an edit made after it. Run the check again with Verify — after the last "
-            "edit — so the receipt covers the bytes that are in the branch."
+            + ". A green run does not cover an edit made after it, and a receipt that fingerprinted the file is "
+            "read against its content. Run the check again with Verify — after the last edit — so the receipt "
+            "covers the bytes that are in the branch."
         )
 
 
@@ -563,7 +596,7 @@ class SelfDevelopment:
 
     async def receipt_rows(self, session_id: str, *, since: str | None = None, hours: int = 24) -> list[dict[str, Any]]:
         since = since or (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
-        rows = await self.app.db.fetchall("SELECT id, criterion, command, exit_code, passed, at, tree, tests_run, tests_skipped FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 50", (session_id, since))
+        rows = await self.app.db.fetchall("SELECT id, criterion, command, exit_code, passed, at, tree, tests_run, tests_skipped, file_digests FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 50", (session_id, since))
         return [dict(r) for r in rows]
 
     async def receipts_for(self, session_id: str, *, since: str | None = None, hours: int = 24) -> str:
@@ -574,7 +607,7 @@ class SelfDevelopment:
         """
         since = since or (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
         rows = await self.app.db.fetchall(
-            "SELECT id, criterion, command, exit_code, passed, sandboxed, dependencies, tree, tests_run, tests_skipped FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 12", (session_id, since)
+            "SELECT id, criterion, command, exit_code, passed, sandboxed, dependencies, tree, tests_run, tests_skipped, file_digests FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 12", (session_id, since)
         )
         if not rows:
             return "\n\nVerification receipts: none — nothing in this proposal was checked with Verify."
@@ -606,7 +639,9 @@ class SelfDevelopment:
             tree = row["tree"] or ""
             tree_note = f", tree {tree[:12]}{'+dirty' if tree.endswith('+worktree') else ''}" if tree else ""
             run_note = f", {row['tests_run']} tests run" if row["tests_run"] is not None else ""
-            lines.append(f"- {'✅' if row['passed'] else '❌'} {r.redact(row['criterion'])} — `{shown}` (exit {row['exit_code']}, receipt v{row['id']}{tree_note}{run_note}){deps_note}{suffix}")
+            covers = len(_recorded_digests(dict(row)))
+            bytes_note = f", covers {covers} changed file" + ("s" if covers != 1 else "") if covers else ""
+            lines.append(f"- {'✅' if row['passed'] else '❌'} {r.redact(row['criterion'])} — `{shown}` (exit {row['exit_code']}, receipt v{row['id']}{tree_note}{run_note}{bytes_note}){deps_note}{suffix}")
         return "\n\nVerification receipts:\n" + "\n".join(lines)
 
     async def _send_card(self, proposal_id: str, repo: str, title: str, summary: str, pr_url: str, diffstat: str) -> None:
