@@ -7,10 +7,16 @@ actually starts from. Tests are not importers: a module that only its tests impo
 
 The walk is static (``ast``), so it works on a worktree that is not importable in this process,
 and it is deliberately generous: a dynamic import by string (``importlib.import_module(name)``)
-counts when the string is a literal, package-level discovery (``pkgutil.iter_modules``) counts
-every submodule of the package that calls it, and a relative import resolves against the file's
-package. Generosity is the right error: the gate exists to catch modules nothing mentions, not to
-argue about how they are mentioned.
+counts when the string is a literal and the module it names is resolvable from the source — an
+absolute name, or a relative one resolved against the package the source names: a literal
+``package=`` (keyword or positional), the file's own ``__package__``, or its bare ``__name__``. When
+the call names no package at all, the file's own package is used. When the package is an expression
+the source does not name — a variable, another module's attribute — the literal is kept and no edge
+is drawn: a module reached only that way needs a path the walk can see. A relative name that would
+leave the package root keeps its literal form too, since there is no module it could name.
+Package-level discovery (``pkgutil.iter_modules``) counts every submodule of the package that calls
+it, and a relative ``from`` import resolves against the file's package. Generosity is the right
+error: the gate exists to catch modules nothing mentions, not to argue about how they are mentioned.
 """
 
 from __future__ import annotations
@@ -49,9 +55,66 @@ def _resolve_relative(module: str, is_package: bool, level: int, target: str | N
     return ".".join(base + ([target] if target else []))
 
 
+def _package_of(module: str, is_package: bool) -> str:
+    """What ``__package__`` holds inside this file: the file's own package, not its module name."""
+    return module if is_package else module.rsplit(".", 1)[0]
+
+
+def _resolve_from_package(package: str, dotted: str) -> str | None:
+    """Resolve a relative name the way ``importlib.import_module(name, package=...)`` does:
+    ``.mod`` against the package itself, ``..mod`` one level up. ``None`` when it leaves the root."""
+    level = len(dotted) - len(dotted.lstrip("."))
+    rest = dotted[level:]
+    parts = package.split(".")
+    if level > 1:
+        if len(parts) < level - 1:
+            return None
+        parts = parts[: len(parts) - (level - 1)]
+    base = ".".join(parts)
+    if not base:
+        return None
+    return f"{base}.{rest}" if rest else base
+
+
+def _static_package(args: list[ast.expr], keywords: list[ast.keyword], module: str, is_package: bool) -> str | None:
+    """The package a dynamic relative import resolves against, when the source says it.
+
+    ``package=`` may be given by keyword or positionally (``import_module(".x", "pkg")`` is legal).
+    It is knowable when it is a string literal, the file's own ``__package__``, or the bare
+    ``__name__``. Anything else — a variable, a call, another module's attribute — is *not* knowable,
+    and ``None`` is returned so the caller keeps the literal: guessing here is how a live module ends
+    up declared unreached, and the one thing this walk must not do is draw an edge to a module the
+    source never names."""
+    if len(args) > 1 and isinstance(args[1], ast.Constant) and isinstance(args[1].value, str):
+        return args[1].value
+    for kw in keywords:
+        if kw.arg != "package":
+            continue
+        if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+            return kw.value.value
+        if isinstance(kw.value, ast.Name):
+            if kw.value.id == "__package__":
+                return _package_of(module, is_package)
+            if kw.value.id == "__name__":
+                return module
+        if isinstance(kw.value, ast.Attribute):  # bare ``__package__``/``__name__``, not ``other.__name__``
+            if isinstance(kw.value.value, ast.Name) and kw.value.value.id in ("__package__", "__name__"):
+                return _package_of(module, is_package) if kw.value.attr == "__package__" else module
+    return None
+
+
 def imports_of(path: Path, module: str, *, is_package: bool) -> set[str]:
     """Module names ``path`` mentions: static imports, ``from x import y`` (both ``x`` and ``x.y``,
-    since ``y`` may be a submodule) and literal strings handed to ``importlib.import_module``."""
+    since ``y`` may be a submodule) and literal strings handed to ``importlib.import_module``.
+
+    A *relative* literal (``import_module(".feature", package=__package__)``) is resolved against the
+    package the source names: a literal ``package=``, the file's own ``__package__`` or its ``__name__``.
+    When the call names no package at all the file's own package is used — a relative name in this file
+    means something inside this tree. When the package is an expression the source does not name (a
+    variable, another module's attribute), the literal is kept as written and no edge is drawn: the walk
+    cannot tell what it loads, it does not guess, and a module reached only that way needs a path the
+    walk can see. A relative name that would leave the package root is kept as written too — there is no
+    module it could name."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (SyntaxError, UnicodeDecodeError):
@@ -71,7 +134,15 @@ def imports_of(path: Path, module: str, *, is_package: bool) -> set[str]:
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
             if name == "import_module" and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-                found.add(node.args[0].value)
+                literal = node.args[0].value
+                if literal.startswith("."):
+                    given = _static_package(node.args, node.keywords, module, is_package)
+                    if given is None and not node.keywords and len(node.args) < 2:
+                        given = _package_of(module, is_package)
+                    resolved = _resolve_from_package(given, literal) if given else None
+                    found.add(resolved if resolved else literal)
+                else:
+                    found.add(literal)
         elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "EXTENSIONS" for t in node.targets):
             # The extension list: a tuple of dotted names handed to import_module one by one at start-up.
             if isinstance(node.value, (ast.Tuple, ast.List)):
