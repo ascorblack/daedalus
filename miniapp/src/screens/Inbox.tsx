@@ -6,7 +6,7 @@ import { absTime, dayLabel, relTime } from "../format";
 import { Icon, IconName } from "../icons";
 import { navigate, pathFor } from "../router";
 import { PageHeader } from "../shell";
-import { invalidate, prime, useQuery } from "../store";
+import { hold, invalidate, prime, release, useQuery } from "../store";
 import { errorText } from "../ui";
 
 type Entry = {
@@ -58,7 +58,7 @@ const SEV: Record<Entry["severity"], number> = { info: 0, notice: 1, warning: 2,
 
 export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onOpen: (id: string) => void }) {
   const [filter, setFilter] = useState<Filter>("all");
-  const key = "/api/inbox?unread=0&limit=200";
+  const key = `/api/inbox?unread=${filter === "unread" ? 1 : 0}&limit=200`;
   const { data, error, loading, refresh } = useQuery<Listing>(key, { pollMs: 15000, staleMs: 5000 });
   const proposals = useQuery<Proposal[]>("/api/proposals", { pollMs: 60000, staleMs: 30000 });
   const [open, setOpen] = useState<string | null>(null);
@@ -66,11 +66,11 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
 
   const entries = useMemo(() => {
     const all = data?.entries ?? [];
-    if (filter === "unread") return all.filter((e) => !e.read);
     if (filter === "problems") return all.filter((e) => e.severity === "error" || e.severity === "warning");
     return all;
   }, [data, filter]);
   const groups = useMemo(() => groupEntries(entries), [entries]);
+  const openKey = (g: Group) => `${g.key}|${g.entries[0].id}`;
   const pending = (proposals.data ?? []).filter((p) => p.status === "pending");
 
   function patch(fn: (list: Entry[]) => Entry[], unreadDelta = 0) {
@@ -101,7 +101,7 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
   }
 
   function toggle(g: Group) {
-    const next = open === g.key ? null : g.key;
+    const next = open === openKey(g) ? null : openKey(g);
     setOpen(next);
     if (next) void markRead(g.entries.map((e) => e.id));
   }
@@ -109,15 +109,23 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
   function remove(g: Group) {
     const ids = g.entries.map((e) => e.id);
     const before = data;
+    hold(key);
     patch((l) => l.filter((e) => !ids.includes(e.id)), -g.unread);
     setOpen(null);
     deleteWithUndo(
       ids.length === 1 ? "Entry deleted" : `${ids.length} entries deleted`,
       async () => {
-        for (const id of ids) await api.delete(`/api/inbox/${id}`);
-        refresh();
+        try {
+          for (const id of ids) await api.delete(`/api/inbox/${id}`);
+        } finally {
+          release(key);
+          refresh();
+        }
       },
-      () => before && prime(key, before),
+      () => {
+        release(key);
+        if (before) prime(key, before);
+      },
       (e) => toast(errorText(e)),
     );
   }
@@ -160,7 +168,7 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
           return (
             <div key={g.key + g.entries[0].id}>
               {heading && <div className="section-title">{heading}</div>}
-              <InboxRow g={g} open={open === g.key} onToggle={() => toggle(g)} onOpen={onOpen} onRemove={() => remove(g)} onUnread={() => patch((l) => l.map((e) => (g.entries.some((x) => x.id === e.id) ? { ...e, read: 0 } : e)), g.entries.length)} />
+              <InboxRow g={g} open={open === openKey(g)} onToggle={() => toggle(g)} onOpen={onOpen} onRemove={() => remove(g)} onUnread={() => patch((l) => l.map((e) => (g.entries.some((x) => x.id === e.id) ? { ...e, read: 0 } : e)), g.entries.length)} />
             </div>
           );
         })}
@@ -174,7 +182,7 @@ function InboxRow({ g, open, onToggle, onOpen, onRemove, onUnread }: { g: Group;
   const names = many ? g.entries.map((e) => /'([^']*)'/.exec(e.title)?.[1] ?? "").filter(Boolean) : [];
   const title = many ? `${g.entries.length} × ${g.title.replace(/'[^']*'/, "'…'")}` : g.title;
   return (
-    <div className={`erow inbox ${g.unread ? "unread" : ""} sev-${g.severity}`} role="button" tabIndex={0} aria-expanded={open} onClick={onToggle} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}>
+    <div className={`erow inbox ${g.unread ? "unread" : ""} sev-${g.severity}`} role="button" tabIndex={0} aria-expanded={open} onClick={onToggle} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}>
       <span className={`kind ${g.severity}`} aria-label={g.severity}>
         <Icon name={kindIcon(g.kind)} size={16} />
       </span>

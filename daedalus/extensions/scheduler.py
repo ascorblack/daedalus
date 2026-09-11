@@ -191,8 +191,9 @@ class Scheduler:
                 raise ValueError("the prompt cannot be empty")
             sets.append("prompt = ?")
             values.append(prompt)
-        cron = fields.get("cron", current["cron"]) if "cron" in fields else current["cron"]
-        run_at = fields.get("run_at", current["run_at"]) if "run_at" in fields else current["run_at"]
+        # A new moment without a cadence turns a recurring schedule into a one-off; a cadence wins when both are given.
+        cron = fields["cron"] if "cron" in fields else (None if fields.get("run_at") else current["cron"])
+        run_at = fields["run_at"] if "run_at" in fields else current["run_at"]
         if "cron" in fields or "run_at" in fields:
             if cron:
                 if not croniter.is_valid(cron):

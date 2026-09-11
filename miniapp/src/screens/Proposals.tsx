@@ -41,14 +41,14 @@ export function ProposalsScreen({ toast, selected }: { toast: (t: string) => voi
           <ProposalRow key={p.id} p={p} onOpen={() => navigate(pathFor("changes", p.id))} />
         ))}
       </div>
-      {open && <ProposalSheet p={open} toast={toast} onDone={done} onClose={() => navigate(pathFor("changes"), { replace: true })} />}
+      {open && <ProposalSheet key={open.id} p={open} toast={toast} onDone={done} onClose={() => navigate(pathFor("changes"), { replace: true })} />}
     </>
   );
 }
 
 function ProposalRow({ p, onOpen }: { p: Proposal; onOpen: () => void }) {
   return (
-    <div className={`erow proposal ${p.status}`} role="link" tabIndex={0} onClick={onOpen} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}>
+    <div className={`erow proposal ${p.status}`} role="link" tabIndex={0} onClick={onOpen} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}>
       <div className="erow-main">
         <div className="erow-head">
           <span className="erow-title clamp-2">{p.title}</span>

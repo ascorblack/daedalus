@@ -1,6 +1,6 @@
 // Daedalus app shell: hashed assets and icons are cached on first use, the shell itself
 // is served network-first with the cache as the offline fallback, and the API is never cached.
-const CACHE = "daedalus-shell-v1";
+const CACHE = "daedalus-shell-v2";
 const SHELL = ["/app/", "/app/manifest.webmanifest", "/app/icons/icon-192.png", "/app/icons/icon-512.png"];
 
 self.addEventListener("install", (event) => {
@@ -32,8 +32,10 @@ self.addEventListener("fetch", (event) => {
   if (request.mode === "navigate" || url.pathname === "/app/" || url.pathname === "/app/index.html") {
     event.respondWith(
       fetch(request).then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE).then((cache) => cache.put("/app/", copy));
+        if (response.ok) {
+          const copy = response.clone();
+          caches.open(CACHE).then((cache) => cache.put("/app/", copy));
+        }
         return response;
       }).catch(() => caches.match("/app/")),
     );

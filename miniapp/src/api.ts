@@ -32,10 +32,16 @@ declare global {
 }
 
 const tg = () => window.Telegram?.WebApp;
+let memoryToken: string | null = null;
 const query = new URLSearchParams(window.location.search);
 const tokenFromQuery = query.get("token");
 if (tokenFromQuery) {
-  sessionStorage.setItem("daedalus_token", tokenFromQuery);
+  try {
+    sessionStorage.setItem("daedalus_token", tokenFromQuery);
+  } catch {
+    /* a webview without site data: the token lives in memory for this load only */
+    memoryToken = tokenFromQuery;
+  }
   // The token is the credential: it must not stay in the address bar, the history or a Referer;
   // the other parameters stay.
   query.delete("token");
@@ -47,10 +53,18 @@ if (tokenFromQuery) {
   }
 }
 
+export function storedToken(): string | null {
+  try {
+    return sessionStorage.getItem("daedalus_token") ?? memoryToken;
+  } catch {
+    return memoryToken;
+  }
+}
+
 function authHeaders(): Record<string, string> {
   const initData = tg()?.initData;
   if (initData) return { Authorization: `tma ${initData}` };
-  const token = sessionStorage.getItem("daedalus_token");
+  const token = storedToken();
   return token ? { "X-Daedalus-Token": token } : {};
 }
 
@@ -88,7 +102,7 @@ export const api = {
   delete: <T>(path: string) => call<T>("DELETE", path),
   streamUrl: (sessionId: string) => `/api/sessions/${sessionId}/stream`,
   downloadUrl: (sessionId: string, path: string) => {
-    const token = sessionStorage.getItem("daedalus_token");
+    const token = storedToken();
     return `/api/sessions/${sessionId}/download?path=${encodeURIComponent(path)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
   },
   authHeaders,

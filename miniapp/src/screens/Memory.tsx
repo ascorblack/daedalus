@@ -5,7 +5,7 @@ import { Sheet, deleteWithUndo } from "../dialogs";
 import { absTime, relTime } from "../format";
 import { Icon } from "../icons";
 import { PageHeader } from "../shell";
-import { prime, useQuery } from "../store";
+import { hold, prime, release, useQuery } from "../store";
 import { confirmAsync, errorText } from "../ui";
 
 const KINDS = ["fact", "decision", "preference", "reflection", "skill", "note"];
@@ -49,16 +49,24 @@ export function MemoryScreen({ toast, onOpen }: { toast: (t: string) => void; on
   function forget(ids: string[]) {
     if (!ids.length || !data) return;
     const before = data;
+    hold(key);
     prime(key, { ...data, records: data.records.filter((r) => !ids.includes(r.id)) });
     setSelected(new Set());
     setEditing(null);
     deleteWithUndo(
       ids.length === 1 ? "Memory forgotten" : `${ids.length} memories forgotten`,
       async () => {
-        await api.post("/api/memory/delete", { ids });
-        refresh();
+        try {
+          await api.post("/api/memory/delete", { ids });
+        } finally {
+          release(key);
+          refresh();
+        }
       },
-      () => prime(key, before),
+      () => {
+        release(key);
+        prime(key, before);
+      },
       (e) => toast(errorText(e)),
     );
   }
@@ -114,7 +122,7 @@ export function MemoryScreen({ toast, onOpen }: { toast: (t: string) => void; on
             const long = r.text.length > 320 || r.text.split("\n").length > 5;
             const open = expanded.has(r.id);
             return (
-              <div key={r.id} className={`erow memory-card ${selecting ? "selecting" : ""} ${selected.has(r.id) ? "selected" : ""}`} role={selecting ? "checkbox" : "button"} aria-checked={selecting ? selected.has(r.id) : undefined} tabIndex={0} onClick={() => (selecting ? toggle(r.id) : setEditing(r))} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selecting ? toggle(r.id) : setEditing(r); } }}>
+              <div key={r.id} className={`erow memory-card ${selecting ? "selecting" : ""} ${selected.has(r.id) ? "selected" : ""}`} role={selecting ? "checkbox" : "button"} aria-checked={selecting ? selected.has(r.id) : undefined} tabIndex={0} onClick={() => (selecting ? toggle(r.id) : setEditing(r))} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selecting ? toggle(r.id) : setEditing(r); } }}>
                 {selecting && <input type="checkbox" className="memory-check" checked={selected.has(r.id)} onChange={() => toggle(r.id)} onClick={(e) => e.stopPropagation()} aria-label="select" />}
                 <div className="erow-main">
                   <div className="erow-meta">

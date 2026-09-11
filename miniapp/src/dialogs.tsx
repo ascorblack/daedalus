@@ -7,34 +7,50 @@ import { Icon, IconName } from "./icons";
 
 // ── sheet ────────────────────────────────────────────────────────────────────────────────
 
-export function Sheet({ title, onClose, children, size, className, head }: { title?: ReactNode; onClose: () => void; children: ReactNode; size?: "wide" | "narrow" | "full"; className?: string; head?: ReactNode }) {
-  const panel = useRef<HTMLDivElement>(null);
+/** The layers open right now, top last: Escape goes to the top one only. */
+const layers: symbol[] = [];
+function useLayer(onEscape: () => void) {
+  const cb = useRef(onEscape);
+  cb.current = onEscape;
   useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    panel.current?.focus();
+    const me = Symbol("layer");
+    layers.push(me);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
+      if (e.key === "Escape" && layers[layers.length - 1] === me) {
+        e.preventDefault();
+        cb.current();
       }
     };
     document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("keydown", onKey);
+      const i = layers.indexOf(me);
+      if (i >= 0) layers.splice(i, 1);
+    };
+  }, []);
+}
+
+export function Sheet({ title, ariaLabel, onClose, children, size, className, head }: { title?: ReactNode; ariaLabel?: string; onClose: () => void; children: ReactNode; size?: "wide" | "narrow" | "full"; className?: string; head?: ReactNode }) {
+  const panel = useRef<HTMLDivElement>(null);
+  useLayer(onClose);
+  // Focus moves in once, on open, and back to the control that opened the sheet when it closes;
+  // the callback's identity changes on every parent render and must not re-run this.
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    panel.current?.focus();
+    return () => {
       opener?.focus?.();
     };
-  }, [onClose]);
+  }, []);
   return (
     <div className="sheet-backdrop" onClick={onClose}>
-      <div ref={panel} tabIndex={-1} className={`sheet ${size ?? ""} ${className ?? ""}`} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={typeof title === "string" ? title : undefined}>
+      <div ref={panel} tabIndex={-1} className={`sheet ${size ?? ""} ${className ?? ""}`} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={typeof title === "string" ? title : ariaLabel}>
         <div className="grip" />
-        {(title || head) && (
-          <div className="sheet-head">
-            {title && <h3>{title}</h3>}
-            {head}
-            <button className="iconbtn small" onClick={onClose} aria-label="Close" title="Close"><Icon name="close" size={16} /></button>
-          </div>
-        )}
+        <div className="sheet-head">
+          {title && <h3>{title}</h3>}
+          {head}
+          <button className="iconbtn small" onClick={onClose} aria-label="Close" title="Close"><Icon name="close" size={16} /></button>
+        </div>
         <div className="sheet-body">{children}</div>
       </div>
     </div>
@@ -46,7 +62,7 @@ export function Sheet({ title, onClose, children, size, className, head }: { tit
 export type ConfirmOptions = { title: string; body?: ReactNode; action?: string; cancel?: string; danger?: boolean };
 
 type Pending = ConfirmOptions & { resolve: (ok: boolean) => void };
-let pendingSetter: ((p: Pending | null) => void) | null = null;
+let pendingSetter: ((f: (cur: Pending | null) => Pending | null) => void) | null = null;
 
 /** Asks before something irreversible: the title names the action, the body says what it does. */
 export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
@@ -55,7 +71,11 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
       resolve(window.confirm(opts.title));
       return;
     }
-    pendingSetter({ ...opts, resolve });
+    // A second question while one is open answers the first with "no" rather than leaving it hanging.
+    pendingSetter((cur) => {
+      cur?.resolve(false);
+      return { ...opts, resolve };
+    });
   });
 }
 
@@ -68,18 +88,36 @@ export function ConfirmHost() {
     };
   }, []);
   if (!pending) return null;
-  const done = (ok: boolean) => {
-    pending.resolve(ok);
-    setPending(null);
+  return <ConfirmDialog pending={pending} onDone={(ok) => { pending.resolve(ok); setPending(null); }} />;
+}
+
+function ConfirmDialog({ pending, onDone }: { pending: Pending; onDone: (ok: boolean) => void }) {
+  const box = useRef<HTMLDivElement>(null);
+  useLayer(() => onDone(false));
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    // The safe button takes focus when the action destroys something; Tab stays inside the dialog.
+    const buttons = box.current?.querySelectorAll<HTMLButtonElement>("button") ?? [];
+    (pending.danger ? buttons[0] : buttons[1])?.focus();
+    return () => opener?.focus?.();
+  }, [pending.danger]);
+  const trap = (e: React.KeyboardEvent) => {
+    if (e.key !== "Tab") return;
+    const buttons = Array.from(box.current?.querySelectorAll<HTMLButtonElement>("button") ?? []);
+    if (!buttons.length) return;
+    const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const next = e.shiftKey ? buttons[(i - 1 + buttons.length) % buttons.length] : buttons[(i + 1) % buttons.length];
+    next.focus();
+    e.preventDefault();
   };
   return (
-    <div className="sheet-backdrop confirm" onClick={() => done(false)}>
-      <div className="dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" onClick={(e) => e.stopPropagation()}>
+    <div className="sheet-backdrop confirm" onClick={() => onDone(false)}>
+      <div ref={box} className="dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" onClick={(e) => e.stopPropagation()} onKeyDown={trap}>
         <h3 id="confirm-title">{pending.title}</h3>
         {pending.body && <div className="dialog-body">{pending.body}</div>}
         <div className="dialog-actions">
-          <button className="btn ghost" onClick={() => done(false)}>{pending.cancel ?? "Cancel"}</button>
-          <button className={`btn ${pending.danger ? "danger solid" : "primary"}`} autoFocus onClick={() => done(true)} onKeyDown={(e) => e.key === "Escape" && done(false)}>
+          <button className="btn ghost" onClick={() => onDone(false)}>{pending.cancel ?? "Cancel"}</button>
+          <button className={`btn ${pending.danger ? "danger solid" : "primary"}`} onClick={() => onDone(true)}>
             {pending.action ?? "OK"}
           </button>
         </div>
@@ -118,15 +156,19 @@ export function OverflowMenu({ items, label = "More", icon = "more", small, clas
         e.preventDefault();
       }
     };
+    const onScroll = () => setOpen(false);
     document.addEventListener("mousedown", onDown);
     document.addEventListener("touchstart", onDown);
     document.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", () => setOpen(false), { once: true, capture: true });
+    window.addEventListener("scroll", onScroll, { capture: true });
     (menu.current?.querySelector("button:not(:disabled)") as HTMLButtonElement | null)?.focus();
     return () => {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("touchstart", onDown);
       document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, { capture: true });
+      // The menu is gone; a keyboard reader continues from the control that opened it.
+      if (document.activeElement === document.body || !document.activeElement) trigger.current?.focus();
     };
   }, [open]);
   return (
@@ -188,23 +230,28 @@ export function ToastHost() {
   );
 }
 
+const UNDO_MS = 5000;
+
 /**
- * Deletes after a pause: the row disappears at once, the toast offers Undo, and the request
- * goes out only when the pause ends without one.
+ * Deletes after a pause: the row disappears at once, the toast offers Undo for exactly as long as
+ * the request is held back, and the request goes out only when the pause ends without one.
  */
 export function deleteWithUndo(label: string, commit: () => Promise<void>, onUndo: () => void, onFail: (e: unknown) => void): void {
   let undone = false;
-  toast(label, {
-    undo: () => {
-      undone = true;
-      onUndo();
-    },
-  });
-  window.setTimeout(() => {
-    if (undone) return;
+  const timer = window.setTimeout(() => {
+    toastSetter?.((cur) => (cur && cur.text === label ? null : cur));
     commit().catch((e) => {
       onUndo();
       onFail(e);
     });
-  }, 5200);
+  }, UNDO_MS);
+  toast(label, {
+    ms: UNDO_MS,
+    undo: () => {
+      undone = true;
+      window.clearTimeout(timer);
+      onUndo();
+    },
+  });
+  void undone;
 }

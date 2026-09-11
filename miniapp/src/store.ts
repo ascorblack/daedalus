@@ -25,9 +25,21 @@ export function prime<T>(key: string, data: T): void {
   notify(key);
 }
 
+/** Marks every entry under the prefix stale (the data stays so nothing flashes) and asks the mounted readers to refresh. */
 export function invalidate(prefix: string): void {
-  for (const key of cache.keys()) if (key.startsWith(prefix)) inflight.delete(key);
+  for (const [key, entry] of cache) if (key.startsWith(prefix)) cache.set(key, { ...entry, at: 0 });
   for (const key of listeners.keys()) if (key.startsWith(prefix)) notify(`refresh:${key}`);
+}
+
+/** Keys with a local change in flight: a response that lands meanwhile must not overwrite the optimistic copy. */
+const held = new Map<string, number>();
+export function hold(key: string): void {
+  held.set(key, (held.get(key) ?? 0) + 1);
+}
+export function release(key: string): void {
+  const n = (held.get(key) ?? 1) - 1;
+  if (n <= 0) held.delete(key);
+  else held.set(key, n);
 }
 
 async function fetchInto<T>(key: string): Promise<T> {
@@ -36,17 +48,24 @@ async function fetchInto<T>(key: string): Promise<T> {
   const p = api
     .get<T>(key)
     .then((data) => {
-      cache.set(key, { data, at: Date.now(), error: null });
-      notify(key);
+      // Only the newest request for a key writes; a slower, older one has nothing to add.
+      if (inflight.get(key) === p && !held.has(key)) {
+        cache.set(key, { data, at: Date.now(), error: null });
+        notify(key);
+      }
       return data;
     })
     .catch((e: Error) => {
       const prev = cache.get(key);
-      cache.set(key, { data: prev?.data, at: prev?.at ?? 0, error: e.message || "request failed" });
-      notify(key);
+      if (inflight.get(key) === p) {
+        cache.set(key, { data: prev?.data, at: prev?.at ?? 0, error: e.message || "request failed" });
+        notify(key);
+      }
       throw e;
     })
-    .finally(() => inflight.delete(key));
+    .finally(() => {
+      if (inflight.get(key) === p) inflight.delete(key);
+    });
   inflight.set(key, p);
   return p;
 }
@@ -100,6 +119,8 @@ export function useQuery<T>(key: string | null, opts: { pollMs?: number; staleMs
     return () => {
       set.delete(on);
       refreshers.delete(onRefresh);
+      if (!set.size) listeners.delete(key);
+      if (!refreshers.size) listeners.delete(`refresh:${key}`);
       if (timer) window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };

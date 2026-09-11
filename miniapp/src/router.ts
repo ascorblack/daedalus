@@ -52,31 +52,38 @@ function emit() {
   for (const l of listeners) l();
 }
 
+/** Each entry the app pushes carries its depth; the entry the document started on is depth 0. */
+type HistoryState = { d: number } | null;
+let depth = ((window.history.state as HistoryState)?.d ?? 0) as number;
+if ((window.history.state as HistoryState)?.d === undefined) {
+  try {
+    window.history.replaceState({ d: 0 }, "", window.location.href);
+  } catch {
+    /* a sandboxed frame */
+  }
+}
+
 export function navigate(path: string, opts: { replace?: boolean } = {}): void {
   const current = window.location.pathname + window.location.search;
   if (current === path) return;
-  if (opts.replace) window.history.replaceState(null, "", path);
-  else window.history.pushState(null, "", path);
+  if (opts.replace) window.history.replaceState({ d: depth }, "", path);
+  else {
+    depth += 1;
+    window.history.pushState({ d: depth }, "", path);
+  }
   emit();
 }
 
-/** Back when there is somewhere to go back to inside the app; the given fallback otherwise. */
+/** Back when there is an app entry to go back to; the given fallback otherwise (a fresh load, a deep link). */
 export function back(fallback: string): void {
-  if (window.history.length > 1 && (window.history.state as { daedalus?: boolean } | null)?.daedalus !== false && entered > 1) window.history.back();
+  if (depth > 0) window.history.back();
   else navigate(fallback, { replace: true });
 }
 
-/** How many app navigations happened in this document: after a fresh load, Back would leave the app. */
-let entered = 1;
 window.addEventListener("popstate", () => {
-  entered = Math.max(1, entered - 1);
+  depth = (window.history.state as HistoryState)?.d ?? 0;
   emit();
 });
-const push = window.history.pushState.bind(window.history);
-window.history.pushState = (data, unused, url) => {
-  entered += 1;
-  push(data, unused, url);
-};
 
 export function useRoute(): Route {
   const [route, setRoute] = useState<Route>(() => parse());

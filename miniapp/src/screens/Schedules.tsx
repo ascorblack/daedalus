@@ -79,7 +79,7 @@ export function SchedulesScreen({ toast, onOpen, selected }: { toast: (t: string
     const outcome = lastOutcome(s);
     const target = s.target_session ? titles[s.target_session] : undefined;
     return (
-      <div key={s.id} className="erow schedule" role="link" tabIndex={0} onClick={() => navigate(pathFor("schedules", s.id))} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); navigate(pathFor("schedules", s.id)); } }}>
+      <div key={s.id} className="erow schedule" role="link" tabIndex={0} onClick={() => navigate(pathFor("schedules", s.id))} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); navigate(pathFor("schedules", s.id)); } }}>
         <span className={`kind ${s.enabled ? "" : "muted"}`}><Icon name={s.kind === "message" ? "inbox" : s.kind === "lazy" ? "bulb" : "clock"} size={16} /></span>
         <div className="erow-main">
           <div className="erow-head">

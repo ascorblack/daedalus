@@ -2,6 +2,7 @@
 
 import { telegram } from "./api";
 import { confirmDialog } from "./dialogs";
+import { bytes, tokens } from "./format";
 
 /** The Telegram bridge only when the app really runs inside Telegram: the script also loads in a plain
  *  browser, where it reports version 6.0 and rejects every method (showConfirm → WebAppMethodUnsupported). */
@@ -33,20 +34,8 @@ export function haptic(kind: "light" | "medium" | "success" | "error" = "light")
   }
 }
 
-/** Bytes as people read them: 950 B, 12 KB, 1.4 MB. */
-export function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/** Compact token counts: 71.1M, 28k, 950. */
-export function fmtTok(n: number | null | undefined): string {
-  const v = n ?? 0;
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 10_000) return `${Math.round(v / 1000)}k`;
-  return v.toLocaleString();
-}
+export const fmtBytes = bytes;
+export const fmtTok = tokens;
 
 /** A number field's value, or null when it is empty or not a number (then nothing is saved). */
 export function numInput(raw: string, min?: number): number | null {

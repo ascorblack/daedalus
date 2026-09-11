@@ -686,8 +686,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         rows = await manager.list_sessions(limit=200)
         default_id, default_preset = app.config.preset()
         default_label = default_preset.display(default_id)
+        overrides_by_id = await manager.live.load_models([row["id"] for row in rows])
         for row in rows:
-            overrides = await manager.live.load(row["id"])
+            overrides = overrides_by_id.get(row["id"], {})
             if overrides.get("preset") and overrides["preset"] in app.config.presets:
                 row["model"] = app.config.presets[overrides["preset"]].display(overrides["preset"])
             elif overrides.get("provider") and overrides.get("model_name"):

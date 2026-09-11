@@ -571,6 +571,19 @@ class LiveControlStore:
             "reasoning_effort": row["reasoning_effort"],
         }
 
+    async def load_models(self, session_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """The model overrides of many sessions in one query: {session_id: {model_name, provider, preset}} for those that have any."""
+        out: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(session_ids), 400):
+            chunk = session_ids[start : start + 400]
+            if not chunk:
+                continue
+            marks = ",".join("?" for _ in chunk)
+            rows = await self._db.fetchall(f"SELECT session_id, model_name, provider, preset FROM live_control WHERE session_id IN ({marks})", tuple(chunk))
+            for row in rows:
+                out[row["session_id"]] = {"model_name": row["model_name"], "provider": row["provider"], "preset": row["preset"]}
+        return out
+
     async def save_queues(self, session_id: str, steer: list[dict[str, Any]], follow_up: list[dict[str, Any]]) -> None:
         await self._db.execute(
             "INSERT INTO live_control(session_id, steer_queue, follow_up_queue, updated_at) VALUES (?, ?, ?, ?)"

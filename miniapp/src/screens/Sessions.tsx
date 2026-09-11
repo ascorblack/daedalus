@@ -122,7 +122,7 @@ function Row({ s, kids, onOpen, current }: { s: SessionSummary; kids: SessionSum
   const visibleKids = showKids ? kids : kids.slice(0, 3);
   const open = () => onOpen(s.id);
   return (
-    <div className={`erow ${status} ${current ? "current" : ""}`} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
+    <div className={`erow ${status} ${current ? "current" : ""}`} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
       <Avatar status={status} seed={s.id} />
       <div className="erow-main">
         <div className="erow-head">
@@ -303,7 +303,7 @@ function WorkspacesPanel({ onOpen, toast }: { onOpen: (id: string) => void; toas
         </div>
       ))}
       {browsing && (
-        <Sheet title={<><span aria-hidden>📁</span> {browsing.name}</>} onClose={onClose}>
+        <Sheet title={<><span aria-hidden>📁</span> {browsing.name}</>} ariaLabel={`workspace ${browsing.name}`} onClose={onClose}>
           <Files base={workspaceBase(browsing.name)} uploadUrl={`${workspaceBase(browsing.name)}/upload`} onPreview={setPreview} toast={toast} />
         </Sheet>
       )}

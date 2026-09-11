@@ -265,10 +265,6 @@ a { color: var(--accent); text-decoration: none; }
 .chat-head .sub.meta .offline { color:var(--warn); }
 .title-edit { width:100%; font:inherit; font-weight:600; font-size:16px; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:2px 8px; }
 .live-dot { width:7px; height:7px; border-radius:50%; background:var(--info); animation:pulse 1.2s ease-in-out infinite; }
-.iconbtn { width:44px; height:44px; border-radius:50%; border:0; background:var(--card); color:var(--fg); display:flex; align-items:center; justify-content:center; cursor:pointer; flex:none; }
-.iconbtn:active { background:var(--card-2); }
-.iconbtn.on { background:var(--fg); color:var(--bg); }
-.iconbtn.small { width:36px; height:36px; }
 .head-actions { display:flex; gap:6px; flex:none; }
 .menu { position:absolute; right:10px; top:48px; z-index:6; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:6px; min-width:190px; box-shadow:0 12px 30px rgba(0,0,0,.45); display:flex; flex-direction:column; }
 .menu button { background:none; border:0; color:var(--fg); text-align:left; padding:10px 12px; border-radius:9px; font-size:15px; cursor:pointer; }
@@ -381,7 +377,6 @@ a { color: var(--accent); text-decoration: none; }
 .roundbtn.send { background:var(--fg); color:var(--bg); border-color:transparent; }
 .roundbtn.send:disabled { opacity:.35; }
 .roundbtn.stop { background:var(--fg); color:var(--bg); border-color:transparent; }
-.chip { display:inline-flex; align-items:center; gap:6px; padding:8px 12px; border-radius:999px; border:1px solid var(--line); background:var(--card-2); font-size:13px; color:var(--fg); }
 .chip .ic { width:14px; height:14px; }
 .attachments { display:flex; flex-wrap:wrap; gap:6px; margin:0 4px 6px; }
 .attachments .x { background:none; border:0; color:var(--muted); margin-left:4px; cursor:pointer; }
@@ -413,7 +408,6 @@ input.field, select.field, textarea.field {
 .sheet h3 { margin:0 0 10px; font-size:18px; }
 .sheet-body { overflow-y:auto; min-height:0; }
 .menu-item { display:flex; justify-content:space-between; align-items:center; width:100%; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin-bottom:8px; color:var(--fg); font-size:15px; cursor:pointer; text-align:left; }
-.chip { cursor:pointer; }
 .card.row .pill { flex:none; }
 .card.row .avatar { flex:none; }
 

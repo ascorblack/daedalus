@@ -692,6 +692,13 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   const ctxPct = detail?.context && detail.context.window > 0 ? Math.round((100 * detail.context.tokens) / detail.context.window) : null;
   const subRunning = (detail?.subagents ?? []).filter((x) => x.running).length;
 
+  // The chip that opened the sheet names the section it wants; the sheet scrolls there once mounted.
+  useEffect(() => {
+    if (!info || info === "session") return;
+    const t = window.setTimeout(() => document.getElementById(`info-${info}`)?.scrollIntoView({ block: "start" }), 30);
+    return () => window.clearTimeout(t);
+  }, [info]);
+
   void tick;
   const sessionCtx = useMemo(() => ({ id, workspace: detail?.workspace ?? "", preview: setPreview }), [id, detail?.workspace]);
   return (
@@ -1016,11 +1023,12 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
                 }}
               />
               {asr?.configured && !draft.trim() && <MicButton onRecording={onRecording} busy={transcribing} />}
-              {status === "running" && !draft.trim() && pending.length === 0 ? (
+              {status === "running" && (
                 <button className="roundbtn stop" onClick={stop} aria-label="Stop the run" title="Stop the run">
                   <Icon name="stop" />
                 </button>
-              ) : (
+              )}
+              {(status !== "running" || draft.trim() || pending.length > 0) && (
                 <button className="roundbtn send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)} aria-label={status === "running" ? "Send as a steer" : "Send"} title={status === "running" ? "Send as a steer (applies before the next step)" : "Send"}>
                   <Icon name="up" />
                 </button>

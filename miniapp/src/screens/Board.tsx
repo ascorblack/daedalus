@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Skeleton } from "../components";
+import { Skeleton, copyText } from "../components";
 import { OverflowMenu, Sheet } from "../dialogs";
 import { absTime, relTime } from "../format";
 import { Icon } from "../icons";
@@ -82,6 +82,10 @@ export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) =>
   const finished = all.filter((t) => FINISHED.includes(t.status));
   const openCount = all.filter((t) => !FINISHED.includes(t.status)).length;
   const open = selected ? all.find((t) => t.id === selected) ?? null : null;
+  // A link to a finished task widens the filter so the task can be shown.
+  useEffect(() => {
+    if (selected && tasks && !open && !showDone) setShowDone(true);
+  }, [selected, tasks, open, showDone]);
   const column = (status: Status) => all.filter((t) => t.status === status).sort((a, b) => a.priority - b.priority || Date.parse(b.updated_at) - Date.parse(a.updated_at));
   const card = (t: Task) => (
     <TaskRow key={t.id} t={t} owner={t.session_id ? titles[t.session_id] : undefined} onOpen={() => navigate(pathFor("board", t.id))} onDragStart={() => setDragging(t.id)} onDragEnd={() => { setDragging(null); setOver(null); }} dragging={dragging === t.id} />
@@ -92,10 +96,14 @@ export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) =>
       e.preventDefault();
       if (over !== status) setOver(status);
     },
-    onDragLeave: () => over === status && setOver(null),
+    onDragLeave: (e: React.DragEvent) => {
+      if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+      if (over === status) setOver(null);
+    },
     onDrop: (e: React.DragEvent) => {
       e.preventDefault();
-      const t = all.find((x) => x.id === dragging);
+      const id = dragging ?? e.dataTransfer.getData("text/plain");
+      const t = all.find((x) => x.id === id);
       setDragging(null);
       setOver(null);
       if (t) void move(t, status);
@@ -150,7 +158,7 @@ export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) =>
         )}
       </div>
       {creating && <NewTaskSheet onClose={() => setCreating(false)} onCreated={() => { setCreating(false); reload(); }} toast={toast} />}
-      {open && <TaskSheet t={open} owner={open.session_id ? titles[open.session_id] : undefined} onClose={() => navigate(pathFor("board"), { replace: true })} onMove={move} onCheck={check} onRemove={remove} onOpenSession={onOpen} />}
+      {open && <TaskSheet t={open} owner={open.session_id ? titles[open.session_id] : undefined} onClose={() => navigate(pathFor("board"), { replace: true })} onMove={move} onCheck={check} onRemove={remove} onOpenSession={onOpen} toast={toast} />}
     </>
   );
 }
@@ -160,7 +168,7 @@ function TaskRow({ t, owner, onOpen, onDragStart, onDragEnd, dragging }: { t: Ta
   const next = t.checklist.find((c) => !c.done);
   const pct = t.checklist.length ? Math.round((100 * done) / t.checklist.length) : 0;
   return (
-    <div className={`erow task p${Math.min(t.priority, 4)} ${dragging ? "dragging" : ""}`} role="link" tabIndex={0} draggable onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; onDragStart(); }} onDragEnd={onDragEnd} onClick={onOpen} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}>
+    <div className={`erow task p${Math.min(t.priority, 4)} ${dragging ? "dragging" : ""}`} role="link" tabIndex={0} draggable onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", t.id); onDragStart(); }} onDragEnd={onDragEnd} onClick={onOpen} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}>
       <div className="erow-main">
         <div className="erow-head">
           <span className="erow-title clamp-3">{t.title}</span>
@@ -184,7 +192,7 @@ function TaskRow({ t, owner, onOpen, onDragStart, onDragEnd, dragging }: { t: Ta
   );
 }
 
-function TaskSheet({ t, owner, onClose, onMove, onCheck, onRemove, onOpenSession }: { t: Task; owner?: string; onClose: () => void; onMove: (t: Task, s: Status) => void; onCheck: (t: Task, i: number) => void; onRemove: (t: Task) => void; onOpenSession: (id: string) => void }) {
+function TaskSheet({ t, owner, onClose, onMove, onCheck, onRemove, onOpenSession, toast }: { t: Task; owner?: string; onClose: () => void; onMove: (t: Task, s: Status) => void; onCheck: (t: Task, i: number) => void; onRemove: (t: Task) => void; onOpenSession: (id: string) => void; toast: (t: string) => void }) {
   const done = t.checklist.filter((c) => c.done).length;
   return (
     <Sheet
@@ -196,7 +204,7 @@ function TaskSheet({ t, owner, onClose, onMove, onCheck, onRemove, onOpenSession
           label="Task actions"
           items={[
             ...(t.session_id ? [{ label: owner ? `Open ${owner}` : "Open session", icon: "bots" as const, onSelect: () => onOpenSession(t.session_id!) }] : []),
-            { label: "Copy task id", icon: "copy", onSelect: () => navigator.clipboard?.writeText(t.id) },
+            { label: "Copy task id", icon: "copy", onSelect: async () => toast((await copyText(t.id)) ? "task id copied" : t.id) },
             "-",
             { label: "Delete task…", icon: "trash", danger: true, onSelect: () => onRemove(t) },
           ]}

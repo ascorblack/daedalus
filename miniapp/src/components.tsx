@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { relTime } from "./format";
+import { int, relTime, usd } from "./format";
 import { api, LoopView, ServiceView, ShareMode, ToolInfo } from "./api";
 import { Icon } from "./icons";
 import { OverflowMenu, Sheet } from "./dialogs";
@@ -126,16 +126,8 @@ export function timeAgo(iso: string | null | undefined): string {
   return relTime(iso);
 }
 
-export function fmtUsd(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "free";
-  if (value === 0) return "$0";
-  if (value < 0.01) return "< $0.01";
-  return `$${value.toFixed(2)}`;
-}
-
-export function fmtInt(value: number | null | undefined): string {
-  return (value ?? 0).toLocaleString();
-}
+export const fmtUsd = usd;
+export const fmtInt = int;
 
 export async function copyText(text: string): Promise<boolean> {
   try {

@@ -209,8 +209,10 @@ async def test_schedule_update_moves_the_next_run_and_pauses(app: Any) -> None:
     assert changed["next_run_at"].endswith("05:30:00+00:00")
     paused = await scheduler.update(created["id"], enabled=False)
     assert paused["enabled"] == 0
-    once = await scheduler.update(created["id"], cron=None, run_at="2030-01-01T09:00:00Z")
+    once = await scheduler.update(created["id"], run_at="2030-01-01T09:00:00Z")
     assert once["cron"] is None and once["recurring"] == 0 and once["next_run_at"].startswith("2030-01-01T09:00:00")
+    back = await scheduler.update(created["id"], cron="0 4 * * *")
+    assert back["cron"] == "0 4 * * *" and back["run_at"] is None and back["recurring"] == 1
     with pytest.raises(ValueError):
         await scheduler.update(created["id"], cron="not a cron")
     with pytest.raises(KeyError):
