@@ -53,9 +53,15 @@ export function BoardScreen({ toast, onOpen }: { toast: (t: string) => void; onO
     }
   }
   async function toggle(t: Task, i: number) {
-    const done = t.checklist[i].done;
-    await api.put(`/api/board/${t.id}`, done ? { uncheck: [i] } : { check: [i] });
-    load();
+    // The board refuses a checklist edit that would leave a finished task with an item open, or
+    // store a partial update at all; without this catch the refusal would look like a dead button.
+    try {
+      const done = t.checklist[i].done;
+      await api.put(`/api/board/${t.id}`, done ? { uncheck: [i] } : { check: [i] });
+      load();
+    } catch (e) {
+      toast((e as Error).message);
+    }
   }
   async function create() {
     try {
