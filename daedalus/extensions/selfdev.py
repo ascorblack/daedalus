@@ -573,8 +573,11 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     app.extensions["selfdev"] = selfdev
     assert app.manager is not None
 
-    async def self_workspace(*, repo: str, branch: str, **_: Any) -> str:
+    async def self_workspace(*, repo: str, branch: str, session_id: str | None = None, **_: Any) -> str:
         path = await selfdev.workspace(repo, branch)
+        if session_id and app.manager is not None:
+            # The worktree is where this session's changes go: its Exec, Verify and services may write there.
+            await app.manager.open_writable(session_id, path)
         return f"worktree ready at {path} (branch agent/{branch.removeprefix('agent/')}, based on origin/main)"
 
     async def self_propose(*, repo: str, title: str, summary: str, session_id: str | None = None, branch: str | None = None, execution_path: str | None = None, **_: Any) -> str:
