@@ -304,7 +304,7 @@ a { color: var(--accent); text-decoration: none; }
 .act.head { grid-template-columns:18px minmax(0, 1fr) auto; }
 .act.head .chev { grid-column:3; }
 .act .detail { color:var(--fg); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; font-family:var(--mono); font-size:.92em; }
-.act-wrap .act:has(.ic-bulb) .detail, .act-wrap .act:has(.ic-compact) .detail { font-family:var(--font); font-size:1em; color:var(--fg-2); }
+.act.prose .detail { font-family:var(--font); font-size:1em; color:var(--fg-2); }
 .act.running .verb { color:var(--fg); }
 .act.running .ic { animation:pulse 1.2s ease-in-out infinite; }
 .act.error .detail { color:var(--bad); }
@@ -491,7 +491,10 @@ input.field, select.field, textarea.field {
 @media (min-width: 1024px) {
   .app { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); }
   .tabbar { display: none; }
-  .rail { display: flex; flex-direction: column; gap: 2px; padding: 14px 10px; border-right: 1px solid var(--line); background: var(--bg); overflow-y: auto; }
+  /* The rail is fixed rather than a grid item: beside a long conversation, a scrolling rail inside the
+     grid sent Blink into a layout loop that froze the page. The grid keeps a column of its width. */
+  .rail { position: fixed; top: 0; left: 0; bottom: 0; width: var(--rail-w); display: flex; flex-direction: column; gap: 2px; padding: 14px 10px; border-right: 1px solid var(--line); background: var(--bg); overflow-y: auto; z-index: 15; }
+  .main { grid-column: 2; }
   .rail .brand { display: flex; align-items: center; gap: 10px; color: var(--fg); font-weight: 700; font-size: 16px; padding: 6px 10px 16px; letter-spacing: -0.01em; }
   .rail .brand img { border-radius: 7px; }
   .rail-group { display: flex; flex-direction: column; gap: 1px; margin-bottom: 10px; }
@@ -528,7 +531,8 @@ input.field, select.field, textarea.field {
   .menu { right: 24px; }
 }
 @media (min-width: 1600px) {
-  .app { grid-template-columns: 252px minmax(0, 1fr); }
+  :root { --rail-w: 252px; }
+  .app { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
   .chat-head, .chat-scroll, .composer { padding-left: 40px; padding-right: 40px; }
   .screen, .pagehead { padding-left: 40px; padding-right: 40px; }
 }
@@ -927,7 +931,7 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .kanban-empty { display: none; }
 @media (min-width: 1024px) {
   .kanban { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 12px; align-items: start; }
-  .kanban:has(> .kanban-col:nth-child(5)) { grid-template-columns: repeat(5, minmax(200px, 1fr)); }
+  .kanban.five { grid-template-columns: repeat(5, minmax(200px, 1fr)); }
   .kanban-col { min-height: 240px; padding: 4px 8px 8px; border-radius: 12px; border: 1px dashed transparent; }
   .kanban-col.is-empty { display: block; }
   .kanban-col.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
@@ -1016,7 +1020,7 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .palette-row .sub { max-width: 40%; }
 @media (min-width: 1024px) {
   .app.rail-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
-  .rail.collapsed { padding: 14px 8px; }
+  .rail.collapsed { padding: 14px 8px; width: 64px; }
   .rail.collapsed .rail-text, .rail.collapsed .rail-label { display: none; }
   .rail.collapsed .rail-item, .rail.collapsed .brand { justify-content: center; padding-left: 0; padding-right: 0; }
   .rail.collapsed .rail-item .count { position: absolute; top: 4px; right: 4px; margin: 0; }

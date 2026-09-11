@@ -133,7 +133,7 @@ export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) =>
           </div>
         )}
         {tasks && tasks.length > 0 && (
-          <div className="kanban">
+          <div className={`kanban ${showDone ? "five" : ""}`}>
             {COLUMNS.map((col) => {
               const items = column(col.id);
               return (

@@ -1721,7 +1721,7 @@ function SummaryGroup({ group }: { group: SummaryItem[] }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="act-wrap">
-      <div className="act" onClick={() => setOpen((o) => !o)}>
+      <div className="act prose" onClick={() => setOpen((o) => !o)}>
         <Icon name="compact" />
         <span className="verb">Context compacted</span>
         <span className="detail">{group.length} older turns folded into summaries</span>
@@ -1736,7 +1736,7 @@ function SummaryRow({ text, reason }: { text: string; reason: string }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="act-wrap">
-      <div className="act" onClick={() => setOpen((o) => !o)}>
+      <div className="act prose" onClick={() => setOpen((o) => !o)}>
         <Icon name="compact" />
         <span className="verb">Context compacted</span>
         <span className="detail">{reason !== "auto" ? `${reason} · ` : ""}{plainPreview(text, 100)}</span>
@@ -1751,7 +1751,7 @@ function ThoughtBlock({ text }: { text: string }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="act-wrap">
-      <div className="act" onClick={() => setOpen((o) => !o)}>
+      <div className="act prose" onClick={() => setOpen((o) => !o)}>
         <Icon name="bulb" />
         <span className="verb">Reasoning</span>
         <span className="detail">{plainPreview(text, 100)}</span>
