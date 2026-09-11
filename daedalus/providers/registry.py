@@ -186,6 +186,11 @@ class ProviderRegistry:
             raise RuntimeError("no usable model: every preset points at a client without a URL or key")
         return rungs
 
+    @staticmethod
+    def room_for(config: RuntimeConfig) -> dict[tuple[str, str], tuple[int, int]]:
+        """``(provider id, model) → (context_window, max_output_tokens)`` for every preset, for the chain's fit check."""
+        return {(p.provider, p.model): (int(p.context_window), int(p.max_output_tokens)) for p in config.presets.values() if p.model}
+
     def rungs_for_pair(self, config: RuntimeConfig, provider_id: str, model: str) -> list[tuple[OpenAICompatibleProvider, str]]:
         """An ad-hoc provider/model pair first (a manual ``/model vllm/x``), the chain behind it."""
         target = self._providers.get(provider_id)

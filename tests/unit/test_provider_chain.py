@@ -60,3 +60,19 @@ def test_build_chain_needs_two_rungs() -> None:
 def test_empty_chain_is_rejected() -> None:
     with pytest.raises(ValueError):
         ProviderChain([])
+
+
+@pytest.mark.asyncio
+async def test_a_rung_whose_window_cannot_hold_the_prompt_is_skipped_with_that_reason() -> None:
+    big, small, other = _provider("big"), _provider("small"), _provider("other")
+    room = {("big", "m"): (1_000_000, 32_000), ("small", "q"): (165_000, 24_000), ("other", "o"): (256_000, 65_536)}
+    chain = ProviderChain([(big, "m"), (small, "q"), (other, "o")], room=room)
+    chain.bind_prompt_size(lambda: 150_000)
+    assert await chain.advance(reason="llm_stream_idle") is True
+    assert chain.current_model_name() == "o"
+    assert [r for _, r in chain.attempted()] == ["llm_stream_idle", "context window 165000 cannot hold the prompt (150000 tokens) and the reply (24000)"]
+    # With nothing left that fits, the chain is exhausted and the loop retries where it was.
+    chain.bind_prompt_size(lambda: 240_000)
+    chain2 = ProviderChain([(big, "m"), (small, "q"), (other, "o")], room=room, prompt_tokens=lambda: 240_000)
+    assert await chain2.advance(reason="llm_stream_idle") is False
+    assert chain2.current_model_name() == "m" and chain2.attempted() == ()

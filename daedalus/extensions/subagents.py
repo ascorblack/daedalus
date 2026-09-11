@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 POLL_SECONDS = 3.0
 NO_ANSWER = "(the subagent's run ended without a final reply; see its session)"
 
+
+def no_answer(state: Any) -> str:
+    """The missing reply, with the error that ended the run when the host recorded one."""
+    kind = str(getattr(state, "last_error_kind", "") or "")
+    return f"(the subagent's run ended without a final reply: {kind}; see its session)" if kind else NO_ANSWER
+
 TASK_HEADER = (
     "[task from your leader session {leader} via SubAgent — you work in the leader's workspace; "
     "do the task, then put the complete result in your final reply: it is delivered to the leader "
@@ -201,7 +207,7 @@ class Subagents:
                 if state is None:
                     raise RuntimeError("the subagent session disappeared")
                 if not state.running and state.pending is None:
-                    result["answer"] = contract_verdict(state, await self.answer(cid) or NO_ANSWER)
+                    result["answer"] = contract_verdict(state, await self.answer(cid) or no_answer(state))
                     if not state.metadata.get("subagent_keep"):
                         self._remove_later(cid)
                     return result
@@ -299,7 +305,7 @@ class Subagents:
             return
         name = str(state.metadata.get("subagent_name") or session_id)
         answer = await self.answer(session_id) if status == "completed" else None
-        body = contract_verdict(state, answer or NO_ANSWER)
+        body = contract_verdict(state, answer or no_answer(state))
         kept = bool(state.metadata.get("subagent_keep"))
         fate = f"It stays for follow-ups: SubAgentSend({name!r}, …)." if kept else "It has been removed; its files are in your workspace."
         report = f"[subagent {name!r} finished: {status}. {fate}]\n\n{body}"

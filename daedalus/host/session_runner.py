@@ -1202,6 +1202,7 @@ class SessionManager:
                     raise
                 except Exception:  # noqa: BLE001
                     logger.warning("MCP warm-up for %s failed; tools may be unavailable this run", server, exc_info=True)
+        chain = build_chain(rungs, room=self.providers.room_for(self.config))
         engine = build_engine(
             deps=deps,
             config=self.config,
@@ -1211,7 +1212,7 @@ class SessionManager:
             session_title=state.session.title,
             workspace=state.workspace,
             rungs=rungs,
-            provider_chain=build_chain(rungs),
+            provider_chain=chain,
             model_name=rungs[0][1],
             thinking=preset.thinking if overrides.get("thinking_enabled") is None else bool(overrides["thinking_enabled"]),
             reasoning_effort=overrides.get("reasoning_effort") or preset.reasoning_effort,
@@ -1221,6 +1222,9 @@ class SessionManager:
             blocked_tools=self.blocked_tools_for(state),
         )
         self._attach_hooks(engine, state)
+        if chain is not None:
+            # The fit check reads the prompt size the engine last saw; before the first call it is zero and every rung fits.
+            chain.bind_prompt_size(lambda: int(getattr(engine, "last_observed_prompt_tokens", 0) or 0))
         return engine
 
     def _attach_hooks(self, engine: QueryEngine, state: SessionState) -> None:
