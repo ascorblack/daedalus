@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import os
 import pathlib
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -76,20 +78,139 @@ def test_relevance_gate_refuses_an_unwired_module_and_a_wrong_path(tmp_path: Pat
     relevance_gate(root, ["daedalus/host/model.py"], "daedalus.host.runner:Runner")
 
 
-def test_evidence_gate_wants_a_passing_receipt_that_names_the_change() -> None:
+def _evidence_tree(tmp_path: Path, files: dict[str, str]) -> Path:
+    for name, text in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return tmp_path
+
+
+def _at(base: float, offset: float) -> str:
+    return datetime.fromtimestamp(base + offset, tz=UTC).isoformat()
+
+
+def test_evidence_gate_wants_a_passing_receipt_that_names_the_change(tmp_path: Path) -> None:
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
     changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    now = datetime.now(UTC).timestamp()
+    old = _at(now, -3600)
+    fresh = _at(now, 3600)
     with pytest.raises(ProposalRefused, match="no passing Verify receipt recorded"):
-        evidence_gate(changed, [{"command": "uv run pytest tests -q", "passed": 0}], None)
+        evidence_gate(root, changed, [{"command": "uv run pytest tests -q", "passed": 0, "at": fresh}], None)
     with pytest.raises(ProposalRefused, match="names the changed code"):
-        evidence_gate(changed, [{"command": "uv run pytest tests -q", "passed": 1}], None)
+        evidence_gate(root, changed, [{"command": "uv run pytest tests -q", "passed": 1, "at": fresh}], None)
     with pytest.raises(ProposalRefused, match="names the changed code"):
-        evidence_gate(["daedalus/config.py"], [{"command": "cat config.toml", "passed": 1}], None)
+        evidence_gate(root, ["daedalus/config.py"], [{"command": "cat config.toml", "passed": 1, "at": fresh}], None)
     with pytest.raises(ProposalRefused, match="names the changed code"):
-        evidence_gate(["daedalus/extensions/api.py"], [{"command": "curl -s http://127.0.0.1:8080/api/health", "passed": 1}], None)
-    evidence_gate(changed, [{"command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1}], None)
-    evidence_gate(changed, [{"command": "uv run python -c 'import daedalus.host.boot_guard'", "passed": 1}], "daedalus.app:serve")
-    evidence_gate(changed, [{"command": "uv run python -m daedalus check", "passed": 1}], "daedalus.__main__:cmd_check")
-    evidence_gate(["docs/DESIGN.md"], [{"command": "true", "passed": 1}], None)
+        evidence_gate(root, ["daedalus/extensions/api.py"], [{"command": "curl -s http://127.0.0.1:8080/api/health", "passed": 1, "at": fresh}], None)
+    evidence_gate(root, changed, [{"command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "at": fresh}], None)
+    evidence_gate(root, changed, [{"command": "uv run python -c 'import daedalus.host.boot_guard'", "passed": 1, "at": fresh}], "daedalus.app:serve")
+    evidence_gate(root, changed, [{"command": "uv run python -m daedalus check", "passed": 1, "at": fresh}], "daedalus.__main__:cmd_check")
+    evidence_gate(root, ["docs/DESIGN.md"], [{"command": "true", "passed": 1, "at": fresh}], None)
+
+
+def test_the_timestamp_is_what_decides_it(tmp_path: Path) -> None:
+    """The control: one input, one differing field, opposite verdicts. Without this the change could
+    be arity, not judgement — a new parameter would make any old test fail for the wrong reason."""
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    command = "uv run pytest tests/unit/test_boot_guard.py -q"
+    now = datetime.now(UTC).timestamp()
+    evidence_gate(root, changed, [{"id": 1, "command": command, "passed": 1, "at": _at(now, 3600)}], None)
+    with pytest.raises(ProposalRefused, match="before the file it names was last written"):
+        evidence_gate(root, changed, [{"id": 1, "command": command, "passed": 1, "at": _at(now, -3600)}], None)
+    # An edit to the covering test alone is enough: the test is part of what the receipt claims.
+    os.utime(root / "tests/unit/test_boot_guard.py", (now - 7200, now - 7200))
+    os.utime(root / "daedalus/host/boot_guard.py", (now - 7200, now - 7200))
+    evidence_gate(root, changed, [{"id": 1, "command": command, "passed": 1, "at": _at(now, -3600)}], None)
+
+
+def test_a_receipt_without_a_usable_timestamp_is_no_evidence(tmp_path: Path) -> None:
+    """Reported by review: a missing or unreadable timestamp used to satisfy the gate, which is
+    fail-open on the very field the rule is about. receipt_rows selects the column, so the host
+    always supplies it; a row that will not say when it ran cannot be current."""
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    command = "uv run pytest tests/unit/test_boot_guard.py -q"
+    for row in ({"command": command, "passed": 1}, {"command": command, "passed": 1, "at": ""}, {"command": command, "passed": 1, "at": "yesterday"}):
+        with pytest.raises(ProposalRefused, match="before the file it names was last written"):
+            evidence_gate(root, changed, [row], None)
+    # An undated row cannot shadow a dated one either: the dated stale row still fails the gate.
+    with pytest.raises(ProposalRefused, match="before the file it names was last written"):
+        evidence_gate(root, changed, [{"command": command, "passed": 1}, {"command": command, "passed": 1, "at": _at(datetime.now(UTC).timestamp(), -3600)}], None)
+
+
+def test_every_changed_host_module_needs_its_own_current_receipt(tmp_path: Path) -> None:
+    """Reported by review: one current receipt covered the files it named and let the rest of the
+    change ride, and a receipt for a differently named test never reached the module it tests."""
+    now = datetime.now(UTC).timestamp()
+    fresh = _at(now, 3600)
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/first.py": "A = 1\n",
+        "daedalus/host/second.py": "B = 1\n",
+        "tests/unit/test_first.py": "def test_a():\n    assert True\n",
+        "tests/unit/test_second.py": "def test_b():\n    assert True\n",
+    })
+    both = ["daedalus/host/first.py", "daedalus/host/second.py"]
+    # A receipt for the first module only leaves the second unnamed.
+    with pytest.raises(ProposalRefused, match="no passing Verify receipt names the changed code: daedalus/host/second.py"):
+        evidence_gate(root, both, [{"command": "uv run pytest tests/unit/test_first.py -q", "passed": 1, "at": fresh}], None)
+    evidence_gate(root, both, [{"command": "uv run pytest tests/unit/test_first.py tests/unit/test_second.py -q", "passed": 1, "at": fresh}], None)
+    # A test named after something else does not reach the module: the command must name it.
+    root = _evidence_tree(tmp_path, {
+        "daedalus/extensions/selfdev.py": "GATE = 1\n",
+        "tests/unit/test_reachability.py": "def test_gate():\n    assert True\n",
+    })
+    changed = ["daedalus/extensions/selfdev.py", "tests/unit/test_reachability.py"]
+    with pytest.raises(ProposalRefused, match="no passing Verify receipt names the changed code: daedalus/extensions/selfdev.py"):
+        evidence_gate(root, changed, [{"command": "uv run pytest tests/unit/test_reachability.py -q", "passed": 1, "at": fresh}], None)
+    evidence_gate(root, changed, [{"command": "uv run pytest tests/unit/test_reachability.py -q && uv run python -c 'import daedalus.extensions.selfdev'", "passed": 1, "at": fresh}], None)
+
+
+def test_a_deleted_file_is_covered_by_a_naming_receipt(tmp_path: Path) -> None:
+    """A deletion has no bytes left to compare, so naming it is enough - a stated exemption, not a
+    fall-through: the surviving files of the same change still need a current receipt."""
+    now = datetime.now(UTC).timestamp()
+    root = _evidence_tree(tmp_path, {"tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n"})
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    command = "uv run pytest tests/unit/test_boot_guard.py -q"
+    evidence_gate(root, changed, [{"command": command, "passed": 1, "at": _at(now, 3600)}], None)
+    # The receipt names the deleted module too, and a module that is gone needs no timestamp.
+    # But once a surviving changed file is written later, the receipt is stale for it.
+    os.utime(root / "tests/unit/test_boot_guard.py", (now + 7200, now + 7200))
+    with pytest.raises(ProposalRefused, match="tests/unit/test_boot_guard.py"):
+        evidence_gate(root, changed, [{"command": command, "passed": 1, "at": _at(now, 3600)}], None)
+
+
+def test_a_content_preserving_rewrite_blocks_until_the_check_is_rerun(tmp_path: Path) -> None:
+    """A known cost, stated rather than hidden: the gate compares modification time, not content, so
+    anything that restamps a file - a formatter, a rebase, a fresh worktree - makes every receipt look
+    stale until the check is run again. The remedy is the message's, and it is one command."""
+    now = datetime.now(UTC).timestamp()
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    command = "uv run pytest tests/unit/test_boot_guard.py -q"
+    receipt = [{"command": command, "passed": 1, "at": _at(now, -3600)}]
+    for name in changed:
+        os.utime(root / name, (now - 7200, now - 7200))  # verified, then rebased: the bytes are the same
+    evidence_gate(root, changed, receipt, None)
+    for name in changed:  # the bytes are identical; only the timestamps moved
+        os.utime(root / name, (now, now))
+    with pytest.raises(ProposalRefused, match="Run the check again"):
+        evidence_gate(root, changed, receipt, None)
 
 
 def test_size_gate_asks_what_a_large_or_net_new_change_replaces() -> None:

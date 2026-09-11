@@ -155,43 +155,124 @@ def relevance_gate(root: Path, changed_files: list[str], execution_path: str | N
         )
 
 
-def evidence_gate(changed_files: list[str], receipts: list[dict[str, Any]], execution_path: str | None) -> None:
-    """At least one passing Verify receipt in the branch window must exercise the change.
+def _receipt_time(row: dict[str, Any]) -> float | None:
+    """When the receipt was recorded, as a POSIX timestamp, or ``None`` if the row will not say."""
+    raw = row.get("at")
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return stamp.timestamp()
 
-    A receipt exercises the change when its command names a changed file, the stem of a changed
-    module, or the module named by ``execution_path``. ``pytest tests`` alone does not count for a
-    host-module change: it proves the tree is green, not that the changed path ran.
+
+def _names(command: str, choices: set[str]) -> bool:
+    """Whether ``command`` contains one of ``choices`` as a whole word.
+
+    ``test_boot_guard`` counts as part of ``tests/unit/test_boot_guard.py``; ``config`` does not count
+    as part of ``config.toml`` because that token is the whole path ``daedalus/config.py``.
     """
+    return any(re.search(r"(?<![A-Za-z0-9_-])" + re.escape(tok) + r"(?![A-Za-z0-9_])", command) for tok in choices)
+
+
+def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str, Any]], execution_path: str | None) -> None:
+    """Every changed host module must be named by a passing Verify receipt that postdates it.
+
+    ``root`` is the worktree the change lives in: the files are judged as they are there, not as they
+    are in whatever checkout the process happens to be running from.
+
+    A receipt names a changed file when its command mentions the file, the module by its dotted name,
+    ``test_<stem>``, or the module named by ``execution_path``. ``pytest tests`` alone does not count
+    for a host-module change: it proves the tree is green, not that the changed path ran. Every changed
+    host module needs a receipt of its own — one receipt that names one of them says nothing about the
+    rest, and a receipt for a differently named test does not reach the module it tests.
+
+    Naming the change is not enough on its own: the receipt must also have been recorded at or after
+    the last write to the file it names, or it proves something about bytes that are no longer in the
+    tree. A row whose timestamp is missing or unreadable is no evidence at all, not an exemption —
+    ``receipt_rows`` selects the column, so the host always supplies it.
+
+    Three limits are known and are named rather than hidden. The comparison is against modification
+    time, not content, so an edit followed by a timestamp of an earlier date defeats it, and a
+    content-preserving rewrite (a ``touch``, a formatter, a rebase) blocks the change until the check
+    is run again. A deleted file has no bytes left to cover, so a receipt that names it is enough for
+    it. And a receipt that names a file without running it — ``cat`` it, print its path — still counts
+    as naming; the receipt records the command and its output digest, so a reader can see that for what
+    it is, but the gate does not decide it.
+    """
+    root = root.resolve()
     passed = [r for r in receipts if r.get("passed")]
     if not passed:
         raise ProposalRefused(
             "no passing Verify receipt recorded since the branch started. Run the tests and the changed "
             "path through Verify (not Exec) so the receipts are on the card, then propose again."
         )
-    modules = reachability.modules_for_files(Path("."), changed_files)
+    modules = reachability.modules_for_files(root, changed_files)
     if not modules:
         return
-    tokens: set[str] = set()
+
+    tokens_for: dict[str, set[str]] = {}
+    must_be_named: set[str] = set()
     for f in changed_files:
         path = Path(f)
-        if path.suffix == ".py" and path.parts and path.parts[0] == reachability.PACKAGE:
-            tokens.add(f)  # the file itself
-            tokens.add(f"test_{path.stem}")  # its tests by the usual name
-            tokens.add(".".join(path.with_suffix("").parts))  # its module, as `python -m` or an import would name it
+        if path.suffix != ".py" or not path.parts:
+            continue
+        if path.parts[0] == reachability.PACKAGE:
+            tokens_for[f] = {f, f"test_{path.stem}", ".".join(path.with_suffix("").parts)}
+            must_be_named.add(f)
+        else:
+            # A test that was changed along with the code is part of what the receipt claims: a
+            # receipt naming it must also postdate it, or an edit to the covering test slips past.
+            tokens_for[f] = {f}
+    path_tokens: set[str] = set()
     if execution_path:
         module = execution_path.split(":", 1)[0].strip()
-        tokens.add(module)
-        tokens.add(module.replace(".", "/") + ".py")
+        path_tokens = {module, module.replace(".", "/") + ".py"}
         if module.endswith(".__main__"):
-            tokens.add("-m " + module.removesuffix(".__main__"))  # `python -m package` runs package.__main__
-    tokens.discard("")
-    commands = " ".join(str(r.get("command") or "") for r in passed)
-    # A token is a whole word inside the command: `test_boot_guard` counts as part of `tests/unit/test_boot_guard.py`,
-    # `config` does not count as part of `config.toml` because that token is the full path `daedalus/config.py`.
-    if not any(re.search(r"(?<![A-Za-z0-9_-])" + re.escape(tok) + r"(?![A-Za-z0-9_])", commands) for tok in tokens):
+            path_tokens.add("-m " + module.removesuffix(".__main__"))  # `python -m package` runs package.__main__
+
+    def naming(f: str) -> list[dict[str, Any]]:
+        """The passing receipts whose command names this file."""
+        mine = tokens_for[f]
+        found = []
+        for row in passed:
+            command = str(row.get("command") or "")
+            # the declared execution path runs the host modules of the proposal, so it names them too
+            if _names(command, mine) or (f in must_be_named and path_tokens and _names(command, path_tokens)):
+                found.append(row)
+        return found
+
+    unnamed: list[str] = []
+    stale: list[str] = []
+    for f in sorted(tokens_for):
+        rows = naming(f)
+        if not rows:
+            if f in must_be_named:
+                unnamed.append(f)
+            continue
+        path = root / f
+        if not path.is_file():
+            continue  # deleted: no bytes left, and a receipt above names it
+        newest = path.stat().st_mtime
+        if not any((when := _receipt_time(r)) is not None and when >= newest for r in rows):
+            dates = ", ".join(sorted({str(r.get("at") or "no timestamp") for r in rows}))
+            stale.append(f"{f} (last written {datetime.fromtimestamp(newest, tz=UTC).isoformat()}; receipts at {dates})")
+
+    if unnamed:
         raise ProposalRefused(
-            "no passing Verify receipt names the changed code. Verify a command that runs the changed path — its test "
-            "file (tests/…/test_<module>.py), the module (python -m pkg.module or an import), or the file path itself."
+            "no passing Verify receipt names the changed code: " + ", ".join(unnamed) + ". Every changed host module "
+            "needs its own: Verify a command that runs it — its test file, its dotted module (python -m pkg.module or "
+            "an import), or the file path itself."
+        )
+    if stale:
+        raise ProposalRefused(
+            "the passing receipt names the changed code but was recorded before the file it names was last written: "
+            + "; ".join(stale)
+            + ". A green run does not cover an edit made after it. Run the check again with Verify — after the last "
+            "edit — so the receipt covers the bytes that are in the branch."
         )
 
 
@@ -317,7 +398,7 @@ class SelfDevelopment:
         changed_files = [f for f in (await self.git(spec, "diff", "--name-only", "origin/main...HEAD", cwd=worktree)).split("\n") if f.strip()]
         if repo == "bot":
             relevance_gate(worktree, changed_files, execution_path)
-            evidence_gate(changed_files, await self.receipt_rows(session_id, since=since) if session_id else [], execution_path)
+            evidence_gate(worktree, changed_files, await self.receipt_rows(session_id, since=since) if session_id else [], execution_path)
         numstat = await self.git(spec, "diff", "--numstat", "origin/main...HEAD", cwd=worktree)
         added_total = sum(int(a) for a, _, _ in (line.split("\t", 2) for line in numstat.splitlines() if "\t" in line) if a.isdigit())
         new_files = [f for f in (await self.git(spec, "diff", "--name-only", "--diff-filter=A", "origin/main...HEAD", cwd=worktree)).split("\n") if f.endswith(".py") and not f.startswith("tests/")]
@@ -375,7 +456,7 @@ class SelfDevelopment:
 
     async def receipt_rows(self, session_id: str, *, since: str | None = None, hours: int = 24) -> list[dict[str, Any]]:
         since = since or (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
-        rows = await self.app.db.fetchall("SELECT id, criterion, command, exit_code, passed FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 50", (session_id, since))
+        rows = await self.app.db.fetchall("SELECT id, criterion, command, exit_code, passed, at FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 50", (session_id, since))
         return [dict(r) for r in rows]
 
     async def receipts_for(self, session_id: str, *, since: str | None = None, hours: int = 24) -> str:
