@@ -65,8 +65,8 @@ def test_the_last_footer_wins_and_the_window_does_not_hide_it() -> None:
     [
         ("uv run pytest tests/unit -q", True),
         ("python3 -m pytest tests -x", True),
-        ("/srv/venv/bin/pytest tests", True),
-        ("cd /srv/state/worktrees/bot/x && uv run python -m pytest tests/unit -q", True),
+        ("/opt/tools/bin/pytest tests", True),
+        ("cd /work/checkout && uv run python -m pytest tests/unit -q", True),
         ("uv run python -m unittest discover", True),
         ("FOO=1 BAR=2 uv run pytest -q", True),
         ("timeout 600 pytest -q", True),
