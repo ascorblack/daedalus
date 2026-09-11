@@ -171,6 +171,55 @@ class Scheduler:
         self._active_runs.pop(schedule_id, None)
         return True
 
+    async def update(self, schedule_id: str, **fields: Any) -> dict[str, Any]:
+        """Change a schedule in place: its name, prompt, cadence or moment; a new cadence moves the next run."""
+        row = await self.app.db.fetchone("SELECT * FROM schedules WHERE id = ?", (schedule_id,))
+        if row is None:
+            raise KeyError(schedule_id)
+        current = dict(row)
+        sets: list[str] = []
+        values: list[Any] = []
+        if "name" in fields and fields["name"] is not None:
+            name = str(fields["name"]).strip()
+            if not name:
+                raise ValueError("the name cannot be empty")
+            sets.append("name = ?")
+            values.append(name)
+        if "prompt" in fields and fields["prompt"] is not None:
+            prompt = str(fields["prompt"]).strip()
+            if not prompt:
+                raise ValueError("the prompt cannot be empty")
+            sets.append("prompt = ?")
+            values.append(prompt)
+        cron = fields.get("cron", current["cron"]) if "cron" in fields else current["cron"]
+        run_at = fields.get("run_at", current["run_at"]) if "run_at" in fields else current["run_at"]
+        if "cron" in fields or "run_at" in fields:
+            if cron:
+                if not croniter.is_valid(cron):
+                    raise ValueError(f"invalid cron expression: {cron!r}")
+                next_run = croniter(cron, _now()).get_next(datetime)
+                run_at = None
+                recurring = 1
+            else:
+                if not run_at:
+                    raise ValueError("give either cron or run_at")
+                try:
+                    next_run = datetime.fromisoformat(str(run_at).replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise ValueError(f"invalid run_at: {run_at!r} (use ISO 8601)") from exc
+                if next_run.tzinfo is None:
+                    next_run = next_run.replace(tzinfo=UTC)
+                recurring = 0
+            sets += ["cron = ?", "run_at = ?", "recurring = ?", "next_run_at = ?"]
+            values += [cron, run_at, recurring, next_run.isoformat()]
+        if sets:
+            values.append(schedule_id)
+            await self.app.db.execute(f"UPDATE schedules SET {', '.join(sets)} WHERE id = ?", tuple(values))
+        if "enabled" in fields and fields["enabled"] is not None:
+            await self.set_enabled(schedule_id, bool(fields["enabled"]))
+        fresh = await self.app.db.fetchone("SELECT * FROM schedules WHERE id = ?", (schedule_id,))
+        return dict(fresh) if fresh is not None else current
+
     async def set_enabled(self, schedule_id: str, enabled: bool) -> None:
         await self.app.db.execute(
             "UPDATE schedules SET enabled = ?, failure_count = CASE WHEN ? THEN 0 ELSE failure_count END WHERE id = ?",

@@ -219,6 +219,15 @@ class ScheduleBody(BaseModel):
     run_in: str = "new"
 
 
+class SchedulePatchBody(BaseModel):
+    name: str | None = None
+    prompt: str | None = None
+    cron: str | None = None
+    run_at: str | None = None
+    enabled: bool | None = None
+    model_config = {"extra": "forbid"}
+
+
 class InboxReadBody(BaseModel):
     ids: list[int] | None = None
     """Omitted = mark everything read."""
@@ -1935,6 +1944,19 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(503, "scheduler is not installed")
         try:
             return await scheduler.create(name=body.name, prompt=body.prompt, cron=body.cron, run_at=body.run_at, model=body.model, kind=body.kind, target_session=body.target_session, run_in=body.run_in)  # type: ignore[attr-defined]
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @api.patch("/api/schedules/{schedule_id}")
+    async def patch_schedule(schedule_id: str, body: SchedulePatchBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        scheduler = app.extensions.get("scheduler")
+        if scheduler is None:
+            raise HTTPException(503, "scheduler is not installed")
+        fields = body.model_dump(exclude_unset=True)
+        try:
+            return await scheduler.update(schedule_id, **fields)  # type: ignore[attr-defined]
+        except KeyError as exc:
+            raise HTTPException(404, "no such schedule") from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 

@@ -136,7 +136,7 @@ export function App() {
   }, []);
 
   // Telegram's own back button leaves a detail; the vertical swipe must not close the app mid-chat.
-  const inDetail = !!route.session || (route.screen === "settings" && !!route.detail);
+  const inDetail = !!route.session || !!route.detail;
   useEffect(() => {
     const tg = telegram();
     if (!tg?.initData || !tg.BackButton) return;
@@ -222,8 +222,8 @@ export function App() {
       <ErrorBoundary key={route.screen}>
         {route.screen === "agents" && <SessionsScreen onOpen={open} toast={showToast} />}
         {route.screen === "inbox" && <InboxScreen onOpen={open} toast={showToast} />}
-        {route.screen === "board" && <BoardScreen onOpen={open} toast={showToast} />}
-        {route.screen === "changes" && <ProposalsScreen toast={showToast} />}
+        {route.screen === "board" && <BoardScreen onOpen={open} toast={showToast} selected={route.detail} />}
+        {route.screen === "changes" && <ProposalsScreen toast={showToast} selected={route.detail} />}
         {route.screen === "schedules" && <SchedulesScreen toast={showToast} onOpen={open} />}
         {route.screen === "services" && <ServicesScreen onOpen={open} toast={showToast} />}
         {route.screen === "memory" && <MemoryScreen toast={showToast} onOpen={open} />}

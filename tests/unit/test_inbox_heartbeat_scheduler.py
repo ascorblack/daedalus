@@ -198,3 +198,20 @@ async def test_agent_task_can_run_in_its_own_session(app: Any) -> None:
     assert created["id"] not in scheduler._active
     row = await app.db.fetchone("SELECT active_session_id FROM schedules WHERE id = ?", (created["id"],))
     assert row["active_session_id"] is None
+
+
+async def test_schedule_update_moves_the_next_run_and_pauses(app: Any) -> None:
+    scheduler = Scheduler(app)
+    created = await scheduler.create(name="digest", prompt="sum up", cron="0 4 * * *", run_at=None, kind="agent")
+    changed = await scheduler.update(created["id"], name="daily digest", cron="30 5 * * 1-5")
+    assert changed["name"] == "daily digest"
+    assert changed["cron"] == "30 5 * * 1-5"
+    assert changed["next_run_at"].endswith("05:30:00+00:00")
+    paused = await scheduler.update(created["id"], enabled=False)
+    assert paused["enabled"] == 0
+    once = await scheduler.update(created["id"], cron=None, run_at="2030-01-01T09:00:00Z")
+    assert once["cron"] is None and once["recurring"] == 0 and once["next_run_at"].startswith("2030-01-01T09:00:00")
+    with pytest.raises(ValueError):
+        await scheduler.update(created["id"], cron="not a cron")
+    with pytest.raises(KeyError):
+        await scheduler.update("nope", name="x")

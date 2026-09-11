@@ -1,14 +1,20 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "../api";
-import { confirmAsync } from "../ui";
-import { timeAgo } from "../components";
+import { Skeleton } from "../components";
+import { OverflowMenu, Sheet } from "../dialogs";
+import { absTime, relTime } from "../format";
 import { Icon } from "../icons";
+import { navigate, pathFor } from "../router";
 import { PageHeader } from "../shell";
+import { invalidate, useQuery } from "../store";
+import { confirmAsync, errorText } from "../ui";
+import { useSessionTitles } from "./Sessions";
 
+type Status = "todo" | "doing" | "review" | "done" | "blocked" | "dropped";
 type Task = {
   id: string;
   title: string;
-  status: "todo" | "doing" | "review" | "done" | "blocked" | "dropped";
+  status: Status;
   priority: number;
   acceptance: string;
   checklist: { text: string; done: boolean }[];
@@ -19,53 +25,240 @@ type Task = {
   updated_at: string;
 };
 
-const COLUMNS: { id: Task["status"]; label: string }[] = [
+const COLUMNS: { id: Status; label: string }[] = [
+  { id: "todo", label: "To do" },
   { id: "doing", label: "Doing" },
   { id: "review", label: "Review" },
-  { id: "todo", label: "To do" },
   { id: "blocked", label: "Blocked" },
 ];
+const FINISHED: Status[] = ["done", "dropped"];
+const STATUS_LABEL: Record<Status, string> = { todo: "To do", doing: "Doing", review: "Review", done: "Done", blocked: "Blocked", dropped: "Dropped" };
+const NEXT: Record<Status, Status[]> = { todo: ["doing", "blocked", "dropped"], doing: ["review", "done", "blocked", "todo"], review: ["done", "doing"], blocked: ["todo", "doing"], done: ["todo"], dropped: ["todo"] };
 
-export function BoardScreen({ toast, onOpen }: { toast: (t: string) => void; onOpen: (id: string) => void }) {
-  const [tasks, setTasks] = useState<Task[] | null>(null);
+export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) => void; onOpen: (id: string) => void; selected?: string | null }) {
   const [showDone, setShowDone] = useState(false);
-  const [open, setOpen] = useState<string | null>(null);
+  const key = `/api/board?include_done=${showDone ? 1 : 0}`;
+  const { data: tasks, error, loading, refresh } = useQuery<Task[]>(key, { pollMs: 20000, staleMs: 5000 });
+  const titles = useSessionTitles();
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ title: "", acceptance: "", checklist: "", priority: 3 });
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [over, setOver] = useState<Status | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      setTasks(await api.get<Task[]>(`/api/board?include_done=${showDone ? 1 : 0}`));
-    } catch (e) {
-      toast((e as Error).message);
-    }
-  }, [toast, showDone]);
-  useEffect(() => {
-    load();
-    const id = setInterval(load, 20000);
-    return () => clearInterval(id);
-  }, [load]);
-
-  async function move(t: Task, status: Task["status"]) {
+  const reload = () => {
+    refresh();
+    invalidate("/api/board");
+  };
+  async function move(t: Task, status: Status) {
+    if (t.status === status) return;
     try {
       await api.put(`/api/board/${t.id}`, { status });
-      load();
+      reload();
     } catch (e) {
-      toast((e as Error).message);
+      toast(errorText(e));
     }
   }
-  async function toggle(t: Task, i: number) {
-    // The board refuses a checklist edit that would leave a finished task with an item open, or
-    // store a partial update at all; without this catch the refusal would look like a dead button.
+  async function check(t: Task, i: number) {
+    // The board refuses a checklist edit that would leave a finished task with an item open; the
+    // refusal shows as a toast, not as a dead checkbox.
     try {
-      const done = t.checklist[i].done;
-      await api.put(`/api/board/${t.id}`, done ? { uncheck: [i] } : { check: [i] });
-      load();
+      await api.put(`/api/board/${t.id}`, t.checklist[i].done ? { uncheck: [i] } : { check: [i] });
+      reload();
     } catch (e) {
-      toast((e as Error).message);
+      toast(errorText(e));
     }
   }
+  async function remove(t: Task) {
+    if (!(await confirmAsync(`Delete "${t.title}"?`, { body: "The task leaves the board. Sessions that worked on it are not affected.", action: "Delete task" }))) return;
+    try {
+      await api.delete(`/api/board/${t.id}`);
+      if (selected === t.id) navigate(pathFor("board"), { replace: true });
+      reload();
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
+
+  const all = tasks ?? [];
+  const finished = all.filter((t) => FINISHED.includes(t.status));
+  const openCount = all.filter((t) => !FINISHED.includes(t.status)).length;
+  const open = selected ? all.find((t) => t.id === selected) ?? null : null;
+  const column = (status: Status) => all.filter((t) => t.status === status).sort((a, b) => a.priority - b.priority || Date.parse(b.updated_at) - Date.parse(a.updated_at));
+  const card = (t: Task) => (
+    <TaskRow key={t.id} t={t} owner={t.session_id ? titles[t.session_id] : undefined} onOpen={() => navigate(pathFor("board", t.id))} onDragStart={() => setDragging(t.id)} onDragEnd={() => { setDragging(null); setOver(null); }} dragging={dragging === t.id} />
+  );
+  const dropProps = (status: Status) => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (!dragging) return;
+      e.preventDefault();
+      if (over !== status) setOver(status);
+    },
+    onDragLeave: () => over === status && setOver(null),
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      const t = all.find((x) => x.id === dragging);
+      setDragging(null);
+      setOver(null);
+      if (t) void move(t, status);
+    },
+  });
+
+  return (
+    <>
+      <PageHeader
+        title="Board"
+        subtitle={tasks ? `${openCount} open${finished.length && showDone ? ` · ${finished.length} finished` : ""}` : undefined}
+        actions={<button className="iconbtn primary" onClick={() => setCreating(true)} title="New task" aria-label="New task"><Icon name="plus" /></button>}
+      >
+        <div className="chips">
+          <button className="chip select" aria-pressed={!showDone} onClick={() => setShowDone(false)}>Open</button>
+          <button className="chip select" aria-pressed={showDone} onClick={() => setShowDone(true)}>With finished</button>
+        </div>
+      </PageHeader>
+      <div className="screen wide board">
+        {loading && !error && <Skeleton rows={4} />}
+        {error && !tasks && <div className="empty"><b>Could not load the board</b><div>{error}</div><button className="btn" onClick={refresh}>Retry</button></div>}
+        {tasks && tasks.length === 0 && (
+          <div className="empty">
+            <b>No tasks yet</b>
+            <div>The agent keeps this board itself; a task you add here is picked up on its next run.</div>
+            <button className="btn primary" onClick={() => setCreating(true)}>Add task</button>
+          </div>
+        )}
+        {tasks && tasks.length > 0 && (
+          <div className="kanban">
+            {COLUMNS.map((col) => {
+              const items = column(col.id);
+              return (
+                <section key={col.id} className={`kanban-col ${over === col.id ? "over" : ""} ${items.length === 0 ? "is-empty" : ""}`} {...dropProps(col.id)}>
+                  <div className="section-title">
+                    {col.label} <span className="n">{items.length}</span>
+                  </div>
+                  {items.map(card)}
+                  {items.length === 0 && <div className="kanban-empty">—</div>}
+                </section>
+              );
+            })}
+            {showDone && (
+              <section className={`kanban-col ${over === "done" ? "over" : ""}`} {...dropProps("done")}>
+                <div className="section-title">
+                  Finished <span className="n">{finished.length}</span>
+                </div>
+                {finished.map(card)}
+              </section>
+            )}
+          </div>
+        )}
+      </div>
+      {creating && <NewTaskSheet onClose={() => setCreating(false)} onCreated={() => { setCreating(false); reload(); }} toast={toast} />}
+      {open && <TaskSheet t={open} owner={open.session_id ? titles[open.session_id] : undefined} onClose={() => navigate(pathFor("board"), { replace: true })} onMove={move} onCheck={check} onRemove={remove} onOpenSession={onOpen} />}
+    </>
+  );
+}
+
+function TaskRow({ t, owner, onOpen, onDragStart, onDragEnd, dragging }: { t: Task; owner?: string; onOpen: () => void; onDragStart: () => void; onDragEnd: () => void; dragging: boolean }) {
+  const done = t.checklist.filter((c) => c.done).length;
+  const next = t.checklist.find((c) => !c.done);
+  const pct = t.checklist.length ? Math.round((100 * done) / t.checklist.length) : 0;
+  return (
+    <div className={`erow task p${Math.min(t.priority, 4)} ${dragging ? "dragging" : ""}`} role="link" tabIndex={0} draggable onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; onDragStart(); }} onDragEnd={onDragEnd} onClick={onOpen} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}>
+      <div className="erow-main">
+        <div className="erow-head">
+          <span className="erow-title clamp-3">{t.title}</span>
+          <span className="erow-time num" title={absTime(t.updated_at)}>{relTime(t.updated_at)}</span>
+        </div>
+        {t.checklist.length > 0 && (
+          <div className="task-check">
+            <div className={`bar ${pct === 100 ? "ok" : ""}`} style={{ ["--v" as string]: pct }}><i /></div>
+            <span className="num sub">{done}/{t.checklist.length}</span>
+          </div>
+        )}
+        {next && <div className="erow-meta"><span className="faint">next:</span><span>{next.text}</span></div>}
+        <div className="erow-meta">
+          {t.priority <= 2 && <span className={`chip ${t.priority === 1 ? "bad" : "attn"}`}>P{t.priority}</span>}
+          {owner && <span>{owner}</span>}
+          {t.depends_on.length > 0 && owner && <span className="sep">·</span>}
+          {t.depends_on.length > 0 && <span>after {t.depends_on.length} task{t.depends_on.length === 1 ? "" : "s"}</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TaskSheet({ t, owner, onClose, onMove, onCheck, onRemove, onOpenSession }: { t: Task; owner?: string; onClose: () => void; onMove: (t: Task, s: Status) => void; onCheck: (t: Task, i: number) => void; onRemove: (t: Task) => void; onOpenSession: (id: string) => void }) {
+  const done = t.checklist.filter((c) => c.done).length;
+  return (
+    <Sheet
+      title={t.title}
+      onClose={onClose}
+      head={
+        <OverflowMenu
+          small
+          label="Task actions"
+          items={[
+            ...(t.session_id ? [{ label: owner ? `Open ${owner}` : "Open session", icon: "bots" as const, onSelect: () => onOpenSession(t.session_id!) }] : []),
+            { label: "Copy task id", icon: "copy", onSelect: () => navigator.clipboard?.writeText(t.id) },
+            "-",
+            { label: "Delete task…", icon: "trash", danger: true, onSelect: () => onRemove(t) },
+          ]}
+        />
+      }
+    >
+      <div className="erow-meta" style={{ marginBottom: 10 }}>
+        <span className="chip">{STATUS_LABEL[t.status]}</span>
+        <span className={`chip ${t.priority === 1 ? "bad" : t.priority === 2 ? "attn" : ""}`}>P{t.priority}</span>
+        {owner && <span className="sep">·</span>}
+        {owner && <button className="linkbtn" onClick={() => onOpenSession(t.session_id!)}>{owner}</button>}
+        <span className="sep">·</span>
+        <span title={absTime(t.updated_at)}>updated {relTime(t.updated_at)}</span>
+      </div>
+      {t.acceptance && (
+        <section className="sheet-section">
+          <div className="sheet-section-title">Acceptance</div>
+          <div className="proposal-text">{t.acceptance}</div>
+        </section>
+      )}
+      {t.checklist.length > 0 && (
+        <section className="sheet-section">
+          <div className="sheet-section-title">Checklist <span className="sub">{done}/{t.checklist.length}</span></div>
+          {t.checklist.map((c, i) => (
+            <label key={i} className="toggle-row check-row">
+              <input type="checkbox" checked={c.done} onChange={() => onCheck(t, i)} />
+              <span className={c.done ? "done" : ""}>{c.text}</span>
+            </label>
+          ))}
+        </section>
+      )}
+      {t.depends_on.length > 0 && (
+        <section className="sheet-section">
+          <div className="sheet-section-title">Depends on</div>
+          <div className="sub mono">{t.depends_on.join(", ")}</div>
+        </section>
+      )}
+      {t.notes && (
+        <section className="sheet-section">
+          <div className="sheet-section-title">Notes</div>
+          <pre className="inbox-text">{t.notes}</pre>
+        </section>
+      )}
+      <section className="sheet-section">
+        <div className="sheet-section-title">Move to</div>
+        <div className="btnrow" style={{ marginTop: 0 }}>
+          {NEXT[t.status].map((s) => (
+            <button key={s} className={`btn small ${s === "done" ? "primary" : ""}`} onClick={() => onMove(t, s)}>
+              {STATUS_LABEL[s]}
+            </button>
+          ))}
+        </div>
+      </section>
+    </Sheet>
+  );
+}
+
+function NewTaskSheet({ onClose, onCreated, toast }: { onClose: () => void; onCreated: () => void; toast: (t: string) => void }) {
+  const [form, setForm] = useState({ title: "", acceptance: "", checklist: "", priority: 3 });
+  const [busy, setBusy] = useState(false);
   async function create() {
+    setBusy(true);
     try {
       await api.post("/api/board", {
         title: form.title,
@@ -73,161 +266,32 @@ export function BoardScreen({ toast, onOpen }: { toast: (t: string) => void; onO
         priority: form.priority,
         checklist: form.checklist.split("\n").map((l) => l.trim()).filter(Boolean),
       });
-      setCreating(false);
-      setForm({ title: "", acceptance: "", checklist: "", priority: 3 });
-      load();
+      onCreated();
     } catch (e) {
-      toast((e as Error).message);
+      toast(errorText(e));
+    } finally {
+      setBusy(false);
     }
   }
-  async function remove(t: Task) {
-    if (!(await confirmAsync(`Delete task ${t.id} "${t.title}"?`))) return;
-    await api.delete(`/api/board/${t.id}`);
-    load();
-  }
-
-  const finished = (tasks ?? []).filter((t) => t.status === "done" || t.status === "dropped");
-  const openCount = (tasks ?? []).filter((t) => t.status !== "done" && t.status !== "dropped").length;
   return (
-    <>
-      <PageHeader
-        title="Board"
-        subtitle={tasks ? `${openCount} open` : undefined}
-        actions={<button className={`iconbtn ${creating ? "on" : "primary"}`} onClick={() => setCreating((v) => !v)} title={creating ? "Cancel" : "New task"} aria-label={creating ? "Cancel" : "New task"}><Icon name={creating ? "close" : "plus"} /></button>}
-      >
-        <div className="chips">
-          <button className="chip select" aria-pressed={!showDone} onClick={() => setShowDone(false)}>Open</button>
-          <button className="chip select" aria-pressed={showDone} onClick={() => setShowDone(true)}>Finished</button>
-        </div>
-      </PageHeader>
-      <div className="screen narrow">
-      {!tasks && <div className="empty">Loading…</div>}
-      {creating && (
-        <div className="card">
-          <label className="field">Title</label>
-          <input className="field" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
-          <label className="field">Acceptance (how anyone can tell it is done)</label>
-          <textarea className="field" rows={2} value={form.acceptance} onChange={(e) => setForm({ ...form, acceptance: e.target.value })} />
-          <label className="field">Checklist (one item per line)</label>
-          <textarea className="field" rows={3} value={form.checklist} onChange={(e) => setForm({ ...form, checklist: e.target.value })} />
-          <label className="field">Priority (1 = highest)</label>
-          <input className="field" type="number" min={1} max={5} value={form.priority} onChange={(e) => setForm({ ...form, priority: Number(e.target.value) })} />
-          <div className="btnrow">
-            <button className="btn primary" disabled={!form.title.trim()} onClick={create}>
-              Create
-            </button>
-          </div>
-        </div>
-      )}
-      {tasks && tasks.length === 0 && <div className="empty"><b>No tasks yet</b><div>The agent keeps this board itself; a task you add here is picked up on its next run.</div></div>}
-      {COLUMNS.map((col) => {
-        const items = (tasks ?? []).filter((t) => t.status === col.id);
-        if (!items.length) return null;
-        return (
-          <div key={col.id}>
-            <div className="section-title">
-              {col.label} <span className="badge">{items.length}</span>
-            </div>
-            {items.map((t) => (
-              <TaskCard key={t.id} t={t} open={open === t.id} onToggleOpen={() => setOpen(open === t.id ? null : t.id)} onMove={move} onCheck={toggle} onRemove={remove} onOpenSession={onOpen} />
-            ))}
-          </div>
-        );
-      })}
-      {showDone && finished.length > 0 && (
-        <div>
-          <div className="section-title">
-            Finished <span className="badge">{finished.length}</span>
-          </div>
-          {finished.map((t) => (
-            <TaskCard key={t.id} t={t} open={open === t.id} onToggleOpen={() => setOpen(open === t.id ? null : t.id)} onMove={move} onCheck={toggle} onRemove={remove} onOpenSession={onOpen} />
-          ))}
-        </div>
-      )}
+    <Sheet title="New task" onClose={onClose}>
+      <label className="field">Title</label>
+      <input className="field" autoFocus value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
+      <label className="field">Acceptance (how anyone can tell it is done)</label>
+      <textarea className="field" rows={2} value={form.acceptance} onChange={(e) => setForm({ ...form, acceptance: e.target.value })} />
+      <label className="field">Checklist (one item per line)</label>
+      <textarea className="field" rows={3} value={form.checklist} onChange={(e) => setForm({ ...form, checklist: e.target.value })} />
+      <label className="field">Priority</label>
+      <div className="segmented inline" role="radiogroup">
+        {[1, 2, 3, 4, 5].map((p) => (
+          <button key={p} role="radio" aria-checked={form.priority === p} className={form.priority === p ? "on" : ""} onClick={() => setForm({ ...form, priority: p })}>P{p}</button>
+        ))}
       </div>
-    </>
-  );
-}
-
-function TaskCard({
-  t,
-  open,
-  onToggleOpen,
-  onMove,
-  onCheck,
-  onRemove,
-  onOpenSession,
-}: {
-  t: Task;
-  open: boolean;
-  onToggleOpen: () => void;
-  onMove: (t: Task, s: Task["status"]) => void;
-  onCheck: (t: Task, i: number) => void;
-  onRemove: (t: Task) => void;
-  onOpenSession: (id: string) => void;
-}) {
-  const done = t.checklist.filter((c) => c.done).length;
-  const next: Partial<Record<Task["status"], Task["status"][]>> = {
-    todo: ["doing", "dropped"],
-    doing: ["review", "done", "todo"],
-    review: ["done", "doing"],
-    blocked: ["todo"],
-    done: ["todo"],
-    dropped: ["todo"],
-  };
-  return (
-    <div className="card pressable" onClick={onToggleOpen}>
-      <div className="row">
-        <div className="grow" style={{ minWidth: 0 }}>
-          <div className="title">
-            <span className="badge">p{t.priority}</span> {t.title}
-          </div>
-          <div className="sub">
-            {t.id}
-            {t.checklist.length > 0 && ` · ${done}/${t.checklist.length}`}
-            {t.depends_on.length > 0 && ` · after ${t.depends_on.join(", ")}`}
-            {` · ${timeAgo(t.updated_at)}`}
-            {t.session_id && (
-              <>
-                {" · "}
-                <a
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onOpenSession(t.session_id!);
-                  }}
-                >
-                  session
-                </a>
-              </>
-            )}
-          </div>
-        </div>
+      <div className="sub" style={{ marginTop: 4 }}>P1 is the most urgent.</div>
+      <div className="sheet-foot">
+        <button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy || !form.title.trim()} onClick={create}>Create</button>
       </div>
-      {open && (
-        <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 8 }}>
-          {t.acceptance && (
-            <div className="sub" style={{ marginBottom: 6 }}>
-              <b>acceptance:</b> {t.acceptance}
-            </div>
-          )}
-          {t.checklist.map((c, i) => (
-            <label key={i} className="sub" style={{ display: "block", cursor: "pointer" }}>
-              <input type="checkbox" checked={c.done} onChange={() => onCheck(t, i)} /> {c.text}
-            </label>
-          ))}
-          {t.notes && <pre className="diff" style={{ whiteSpace: "pre-wrap", marginTop: 6 }}>{t.notes}</pre>}
-          <div className="btnrow">
-            {(next[t.status] ?? []).map((s) => (
-              <button key={s} className="btn small" onClick={() => onMove(t, s)}>
-                → {s}
-              </button>
-            ))}
-            <button className="btn small danger" onClick={() => onRemove(t)}>
-              delete
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
+    </Sheet>
   );
 }
