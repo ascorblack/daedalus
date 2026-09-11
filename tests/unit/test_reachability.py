@@ -97,17 +97,16 @@ def test_evidence_gate_wants_a_passing_receipt_that_names_the_change(tmp_path: P
     })
     changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
     now = datetime.now(UTC).timestamp()
-    old = _at(now, -3600)
     fresh = _at(now, 3600)
     with pytest.raises(ProposalRefused, match="no passing Verify receipt recorded"):
         evidence_gate(root, changed, [{"command": "uv run pytest tests -q", "passed": 0, "at": fresh}], None)
     with pytest.raises(ProposalRefused, match="names the changed code"):
-        evidence_gate(root, changed, [{"command": "uv run pytest tests -q", "passed": 1, "at": fresh}], None)
+        evidence_gate(root, changed, [{"command": "uv run pytest tests -q", "passed": 1, "tests_run": 5, "at": fresh}], None)
     with pytest.raises(ProposalRefused, match="names the changed code"):
         evidence_gate(root, ["daedalus/config.py"], [{"command": "cat config.toml", "passed": 1, "at": fresh}], None)
     with pytest.raises(ProposalRefused, match="names the changed code"):
         evidence_gate(root, ["daedalus/extensions/api.py"], [{"command": "curl -s http://127.0.0.1:8080/api/health", "passed": 1, "at": fresh}], None)
-    evidence_gate(root, changed, [{"command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "at": fresh}], None)
+    evidence_gate(root, changed, [{"command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "tests_run": 5, "at": fresh}], None)
     evidence_gate(root, changed, [{"command": "uv run python -c 'import daedalus.host.boot_guard'", "passed": 1, "at": fresh}], "daedalus.app:serve")
     evidence_gate(root, changed, [{"command": "uv run python -m daedalus check", "passed": 1, "at": fresh}], "daedalus.__main__:cmd_check")
     evidence_gate(root, ["docs/DESIGN.md"], [{"command": "true", "passed": 1, "at": fresh}], None)
@@ -123,13 +122,13 @@ def test_the_timestamp_is_what_decides_it(tmp_path: Path) -> None:
     changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
     command = "uv run pytest tests/unit/test_boot_guard.py -q"
     now = datetime.now(UTC).timestamp()
-    evidence_gate(root, changed, [{"id": 1, "command": command, "passed": 1, "at": _at(now, 3600)}], None)
+    evidence_gate(root, changed, [{"id": 1, "command": command, "passed": 1, "tests_run": 5, "at": _at(now, 3600)}], None)
     with pytest.raises(ProposalRefused, match="before the file it names was last written"):
-        evidence_gate(root, changed, [{"id": 1, "command": command, "passed": 1, "at": _at(now, -3600)}], None)
+        evidence_gate(root, changed, [{"id": 1, "command": command, "passed": 1, "tests_run": 5, "at": _at(now, -3600)}], None)
     # An edit to the covering test alone is enough: the test is part of what the receipt claims.
     os.utime(root / "tests/unit/test_boot_guard.py", (now - 7200, now - 7200))
     os.utime(root / "daedalus/host/boot_guard.py", (now - 7200, now - 7200))
-    evidence_gate(root, changed, [{"id": 1, "command": command, "passed": 1, "at": _at(now, -3600)}], None)
+    evidence_gate(root, changed, [{"id": 1, "command": command, "passed": 1, "tests_run": 5, "at": _at(now, -3600)}], None)
 
 
 def test_a_receipt_without_a_usable_timestamp_is_no_evidence(tmp_path: Path) -> None:
@@ -142,12 +141,16 @@ def test_a_receipt_without_a_usable_timestamp_is_no_evidence(tmp_path: Path) -> 
     })
     changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
     command = "uv run pytest tests/unit/test_boot_guard.py -q"
-    for row in ({"command": command, "passed": 1}, {"command": command, "passed": 1, "at": ""}, {"command": command, "passed": 1, "at": "yesterday"}):
+    for row in (
+        {"command": command, "passed": 1, "tests_run": 5},  # no timestamp at all
+        {"command": command, "passed": 1, "tests_run": 5, "at": ""},
+        {"command": command, "passed": 1, "tests_run": 5, "at": "yesterday"},
+    ):
         with pytest.raises(ProposalRefused, match="before the file it names was last written"):
             evidence_gate(root, changed, [row], None)
     # An undated row cannot shadow a dated one either: the dated stale row still fails the gate.
     with pytest.raises(ProposalRefused, match="before the file it names was last written"):
-        evidence_gate(root, changed, [{"command": command, "passed": 1}, {"command": command, "passed": 1, "at": _at(datetime.now(UTC).timestamp(), -3600)}], None)
+        evidence_gate(root, changed, [{"command": command, "passed": 1, "tests_run": 5}, {"command": command, "passed": 1, "tests_run": 5, "at": _at(datetime.now(UTC).timestamp(), -3600)}], None)
 
 
 def test_every_changed_host_module_needs_its_own_current_receipt(tmp_path: Path) -> None:
@@ -164,8 +167,8 @@ def test_every_changed_host_module_needs_its_own_current_receipt(tmp_path: Path)
     both = ["daedalus/host/first.py", "daedalus/host/second.py"]
     # A receipt for the first module only leaves the second unnamed.
     with pytest.raises(ProposalRefused, match="no passing Verify receipt names the changed code: daedalus/host/second.py"):
-        evidence_gate(root, both, [{"command": "uv run pytest tests/unit/test_first.py -q", "passed": 1, "at": fresh}], None)
-    evidence_gate(root, both, [{"command": "uv run pytest tests/unit/test_first.py tests/unit/test_second.py -q", "passed": 1, "at": fresh}], None)
+        evidence_gate(root, both, [{"command": "uv run pytest tests/unit/test_first.py -q", "passed": 1, "tests_run": 5, "at": fresh}], None)
+    evidence_gate(root, both, [{"command": "uv run pytest tests/unit/test_first.py tests/unit/test_second.py -q", "passed": 1, "tests_run": 5, "at": fresh}], None)
     # A test named after something else does not reach the module: the command must name it.
     root = _evidence_tree(tmp_path, {
         "daedalus/extensions/selfdev.py": "GATE = 1\n",
@@ -173,8 +176,8 @@ def test_every_changed_host_module_needs_its_own_current_receipt(tmp_path: Path)
     })
     changed = ["daedalus/extensions/selfdev.py", "tests/unit/test_reachability.py"]
     with pytest.raises(ProposalRefused, match="no passing Verify receipt names the changed code: daedalus/extensions/selfdev.py"):
-        evidence_gate(root, changed, [{"command": "uv run pytest tests/unit/test_reachability.py -q", "passed": 1, "at": fresh}], None)
-    evidence_gate(root, changed, [{"command": "uv run pytest tests/unit/test_reachability.py -q && uv run python -c 'import daedalus.extensions.selfdev'", "passed": 1, "at": fresh}], None)
+        evidence_gate(root, changed, [{"command": "uv run pytest tests/unit/test_reachability.py -q", "passed": 1, "tests_run": 5, "at": fresh}], None)
+    evidence_gate(root, changed, [{"command": "uv run pytest tests/unit/test_reachability.py -q && uv run python -c 'import daedalus.extensions.selfdev'", "passed": 1, "tests_run": 5, "at": fresh}], None)
 
 
 def test_a_deleted_file_is_covered_by_a_naming_receipt(tmp_path: Path) -> None:
@@ -184,12 +187,12 @@ def test_a_deleted_file_is_covered_by_a_naming_receipt(tmp_path: Path) -> None:
     root = _evidence_tree(tmp_path, {"tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n"})
     changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
     command = "uv run pytest tests/unit/test_boot_guard.py -q"
-    evidence_gate(root, changed, [{"command": command, "passed": 1, "at": _at(now, 3600)}], None)
+    evidence_gate(root, changed, [{"command": command, "passed": 1, "tests_run": 5, "at": _at(now, 3600)}], None)
     # The receipt names the deleted module too, and a module that is gone needs no timestamp.
     # But once a surviving changed file is written later, the receipt is stale for it.
     os.utime(root / "tests/unit/test_boot_guard.py", (now + 7200, now + 7200))
     with pytest.raises(ProposalRefused, match="tests/unit/test_boot_guard.py"):
-        evidence_gate(root, changed, [{"command": command, "passed": 1, "at": _at(now, 3600)}], None)
+        evidence_gate(root, changed, [{"command": command, "passed": 1, "tests_run": 5, "at": _at(now, 3600)}], None)
 
 
 def test_a_content_preserving_rewrite_blocks_until_the_check_is_rerun(tmp_path: Path) -> None:
@@ -203,7 +206,7 @@ def test_a_content_preserving_rewrite_blocks_until_the_check_is_rerun(tmp_path: 
     })
     changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
     command = "uv run pytest tests/unit/test_boot_guard.py -q"
-    receipt = [{"command": command, "passed": 1, "at": _at(now, -3600)}]
+    receipt = [{"command": command, "passed": 1, "tests_run": 5, "at": _at(now, -3600)}]
     for name in changed:
         os.utime(root / name, (now - 7200, now - 7200))  # verified, then rebased: the bytes are the same
     evidence_gate(root, changed, receipt, None)
@@ -211,6 +214,64 @@ def test_a_content_preserving_rewrite_blocks_until_the_check_is_rerun(tmp_path: 
         os.utime(root / name, (now, now))
     with pytest.raises(ProposalRefused, match="Run the check again"):
         evidence_gate(root, changed, receipt, None)
+
+
+def test_a_passing_run_that_executed_no_tests_is_not_evidence(tmp_path: Path) -> None:
+    """The hole a peer's contract named: a green run proves the runner started, not that anything was
+    checked. Collect-only, a filter that matched nothing, and a receipt too old to carry the count all
+    used to close the evidence."""
+    now = datetime.now(UTC).timestamp()
+    fresh = _at(now, 3600)
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    command = "uv run pytest tests/unit/test_boot_guard.py -q"
+    for count, why in ((0, "executed no tests"), (None, "does not say how many tests it ran")):
+        row = {"command": command, "passed": 1, "at": fresh}
+        if count is not None:
+            row["tests_run"] = count
+        with pytest.raises(ProposalRefused, match=why):
+            evidence_gate(root, changed, [row], None)
+    # A run that executed something is evidence, and a command that is not a Python test run is not
+    # judged by this rule at all: the gate does not guess what another runner's output means.
+    evidence_gate(root, changed, [{"command": command, "passed": 1, "at": fresh, "tests_run": 7}], None)
+    evidence_gate(root, changed, [{"command": "uv run python -c 'import daedalus.host.boot_guard'", "passed": 1, "at": fresh}], "daedalus.app:serve")
+    # The refusal names the command, so the remedy is obvious and the row cannot be confused with a
+    # different one. The match is on the command itself, not on the boilerplate every refusal carries.
+    with pytest.raises(ProposalRefused) as caught:
+        evidence_gate(root, changed, [{"id": 12, "command": "uv run pytest tests/unit/test_boot_guard.py --collect-only -q", "passed": 1, "at": fresh, "tests_run": 0}], None)
+    assert "--collect-only" in str(caught.value) and "receipt 12" in str(caught.value)
+    # A count that is not a number is "does not say", not a crash: a corrupt row must not take down the gate.
+    with pytest.raises(ProposalRefused, match="is not a number"):
+        evidence_gate(root, changed, [{"id": 13, "command": command, "passed": 1, "at": fresh, "tests_run": "abc"}], None)
+    # A command that does not run tests is not judged by the count rule at all.
+    evidence_gate(root, changed, [{"id": 14, "command": "cat tests/unit/test_boot_guard.py", "passed": 1, "at": fresh}], None)
+
+
+def test_an_empty_test_run_cannot_be_what_names_a_file(tmp_path: Path) -> None:
+    """A run that executed nothing must not launder a file's naming, however green: otherwise the
+    rule above is undone by putting a real-looking test command next to a receipt that only reads
+    the file."""
+    now = datetime.now(UTC).timestamp()
+    fresh = _at(now, 3600)
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    empty_run = {"id": 21, "command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "at": fresh, "tests_run": 0}
+    reader = {"id": 22, "command": "cat tests/unit/test_boot_guard.py", "passed": 1, "at": fresh}
+    for other in (reader, {"id": 23, "command": "uv run python -c 'import daedalus.host.boot_guard'", "passed": 1, "at": fresh}):
+        with pytest.raises(ProposalRefused, match="proves nothing"):
+            evidence_gate(root, changed, [empty_run, other], None)
+    # The same empty run alongside a receipt that really counted tests is fine: the file is named by
+    # something that ran, and the empty row costs nothing. A collect-only receipt is exactly this case.
+    evidence_gate(root, changed, [
+        empty_run,
+        {"id": 24, "command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "at": fresh, "tests_run": 5},
+    ], None)
 
 
 def test_size_gate_asks_what_a_large_or_net_new_change_replaces() -> None:
@@ -893,3 +954,59 @@ def test_a_widened_entry_point_tuple_cannot_widen_the_gate(tmp_path: Path, monke
         relevance_gate(root, ["daedalus/parasite.py"], "daedalus.parasite")
     # Control: the module that really is a boot entry point may still name itself.
     relevance_gate(root, ["daedalus/__main__.py"], "daedalus.__main__")
+
+
+def test_an_unrelated_counted_run_does_not_launder_an_empty_one(tmp_path: Path) -> None:
+    """While a test run that executed nothing is on the receipts, a module must be named by a run that
+    counted tests. Otherwise an unrelated green run makes the empty one harmless and a `cat` reopens
+    the hole the count rule closes."""
+    now = datetime.now(UTC).timestamp()
+    fresh = _at(now, 3600)
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py"]
+    empty_run = {"id": 31, "command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "at": fresh, "tests_run": 0}
+    unrelated = {"id": 32, "command": "uv run pytest tests/unit/test_unrelated.py -q", "passed": 1, "at": fresh, "tests_run": 40}
+    reader = {"id": 33, "command": "cat daedalus/host/boot_guard.py", "passed": 1, "at": fresh}
+    with pytest.raises(ProposalRefused, match="only reads it is not enough"):
+        evidence_gate(root, changed, [empty_run, unrelated, reader], None)
+    # A counted run naming the module itself is what closes it — and a stale one is not enough.
+    stale_run = {"id": 34, "command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1,
+                 "at": _at(now, -3600), "tests_run": 5}
+    with pytest.raises(ProposalRefused, match="only reads it is not enough"):
+        evidence_gate(root, changed, [empty_run, stale_run, reader], None)
+    evidence_gate(root, changed, [empty_run, unrelated, reader, {
+        "id": 35, "command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "at": fresh, "tests_run": 5,
+    }], None)
+
+
+def test_a_broken_symlink_is_not_a_deletion(tmp_path: Path) -> None:
+    """The deletion exemption is about bytes that are gone. A link whose target is gone leaves a path a
+    checkout cannot read, and accepting it would make an old receipt enough for a file nobody can open."""
+    now = datetime.now(UTC).timestamp()
+    fresh = _at(now, 3600)
+    root = _evidence_tree(tmp_path, {"daedalus/host/boot_guard.py": "GUARD = 1\n"})
+    link = root / "daedalus/host/vanished.py"
+    link.symlink_to(root / "daedalus/host/never_there.py")
+    with pytest.raises(ProposalRefused, match="points nowhere"):
+        evidence_gate(root, ["daedalus/host/vanished.py"],
+                      [{"id": 41, "command": "cat daedalus/host/vanished.py", "passed": 1, "at": fresh}], None)
+
+
+def test_a_count_of_an_unexpected_type_is_not_a_count(tmp_path: Path) -> None:
+    """The number in a receipt comes from a database column, so its type is not guaranteed. It is read
+    as data: a value that is not a number is not a count, and the receipt is refused as evidence — never
+    raised into the card it is printed on."""
+    now = datetime.now(UTC).timestamp()
+    fresh = _at(now, 3600)
+    root = _evidence_tree(tmp_path, {"daedalus/host/boot_guard.py": "GUARD = 1\n"})
+    changed = ["daedalus/host/boot_guard.py"]
+    empty_run = {"id": 51, "command": "uv run pytest tests/unit -q", "passed": 1, "at": fresh, "tests_run": 0}
+    with pytest.raises(ProposalRefused, match="not a number"):
+        evidence_gate(root, changed, [
+            empty_run,
+            {"id": 52, "command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "at": fresh,
+             "tests_run": "many"},
+        ], None)

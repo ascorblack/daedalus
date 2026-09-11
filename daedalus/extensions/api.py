@@ -1359,7 +1359,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.get("/api/sessions/{session_id}/verifications")
     async def session_verifications(session_id: str, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
-        rows = await app.db.fetchall("SELECT id, run_id, criterion, command, exit_code, passed, output_digest, output_head, duration_ms, at, sandboxed, dependencies FROM verifications WHERE session_id = ? ORDER BY id DESC LIMIT 100", (session_id,))
+        rows = await app.db.fetchall("SELECT id, run_id, criterion, command, exit_code, passed, output_digest, output_head, duration_ms, at, sandboxed, dependencies, tree, tests_run, tests_skipped FROM verifications WHERE session_id = ? ORDER BY id DESC LIMIT 100", (session_id,))
         r = redact.shared()
         return [{**dict(row), "criterion": r.redact(row["criterion"]), "command": r.redact(row["command"]), "output_head": r.redact(row["output_head"] or "")} for row in rows]
 
