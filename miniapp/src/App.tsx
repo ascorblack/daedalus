@@ -1,6 +1,7 @@
-import { Component, type ReactNode, useEffect, useState } from "react";
+import { Component, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, SessionSummary, telegram } from "./api";
-import { Pill, useToast } from "./components";
+import { StatusLabel } from "./components";
+import { ConfirmHost, Sheet, ToastHost, toast as showToast } from "./dialogs";
 import { SessionsScreen } from "./screens/Sessions";
 import { InboxScreen } from "./screens/Inbox";
 import { BoardScreen } from "./screens/Board";
@@ -8,13 +9,13 @@ import { SessionScreen } from "./screens/Session";
 import { ProposalsScreen } from "./screens/Proposals";
 import { SchedulesScreen } from "./screens/Schedules";
 import { UsageScreen } from "./screens/Usage";
-import { SettingsScreen } from "./screens/Settings";
+import { HealthScreen, SettingsScreen } from "./screens/Settings";
 import { MemoryScreen } from "./screens/Memory";
 import { ServicesScreen } from "./screens/Services";
 import { LoginScreen } from "./screens/Login";
-import { Icon, IconName } from "./icons";
-
-type Tab = "sessions" | "inbox" | "board" | "proposals" | "schedules" | "services" | "memory" | "usage" | "settings";
+import { back, migrateLegacyLocation, navigate, pathFor, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
+import { Counts, MoreSheet, Rail, TabBar } from "./shell";
+import { useQuery } from "./store";
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
@@ -25,8 +26,9 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
     if (this.state.error) {
       return (
         <div className="empty">
-          <div>Something broke in this screen: {this.state.error.message}</div>
-          <button className="btn" style={{ marginTop: 12 }} onClick={() => this.setState({ error: null })}>
+          <b>Something broke in this screen</b>
+          <div>{this.state.error.message}</div>
+          <button className="btn" onClick={() => this.setState({ error: null })}>
             Try again
           </button>
         </div>
@@ -36,37 +38,16 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
-const TABS: { id: Tab; label: string; icon: IconName }[] = [
-  { id: "sessions", label: "Agents", icon: "bots" },
-  { id: "inbox", label: "Inbox", icon: "inbox" },
-  { id: "board", label: "Board", icon: "board" },
-  { id: "proposals", label: "Changes", icon: "changes" },
-  { id: "schedules", label: "Cron", icon: "clock" },
-  { id: "services", label: "Services", icon: "globe" },
-  { id: "memory", label: "Memory", icon: "bulb" },
-  { id: "usage", label: "Usage", icon: "chart" },
-  { id: "settings", label: "Settings", icon: "settings" },
-];
-
 export function App() {
-  // The tab lives in the URL hash: a reload keeps the screen, and a link can open one (…/app/#settings).
-  const [tab, setTabState] = useState<Tab>(() => {
-    const wanted = window.location.hash.replace(/^#/, "");
-    return TABS.some((t) => t.id === wanted) ? (wanted as Tab) : "sessions";
-  });
-  const setTab = (next: Tab) => {
-    setTabState(next);
-    if (window.location.hash !== `#${next}`) window.history.replaceState(null, "", `#${next}`);
-  };
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  // A second session beside the first (wide screens only); the picker chooses which.
-  const [secondId, setSecondId] = useState<string | null>(null);
-  const [picking, setPicking] = useState(false);
+  const route = useRoute();
   const wide = useWide();
-  const [toast, showToast] = useToast();
-  const [unread, setUnread] = useState(0);
+  const [picking, setPicking] = useState(false);
+  const [more, setMore] = useState(false);
   // Inside Telegram every request carries initData; outside, the browser needs a token or the session cookie.
   const [authed, setAuthed] = useState<boolean | null>(() => (telegram()?.initData ? true : null));
+  const inbox = useQuery<{ unread: number }>(authed ? "/api/inbox/unread" : null, { pollMs: 20000, staleMs: 5000 });
+  const proposals = useQuery<{ status: string }[]>(authed ? "/api/proposals" : null, { pollMs: 60000, staleMs: 30000 });
+  const counts: Counts = { inbox: inbox.data?.unread ?? 0, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
 
   useEffect(() => {
     if (authed !== null) return;
@@ -77,23 +58,18 @@ export function App() {
   }, [authed]);
 
   useEffect(() => {
-    const poll = () =>
-      api
-        .get<{ unread: number }>("/api/inbox/unread")
-        .then((r) => setUnread(r.unread ?? 0))
-        .catch(() => undefined);
-    poll();
-    const id = setInterval(poll, 20000);
-    return () => clearInterval(id);
-  }, [tab]);
-
-  useEffect(() => {
     const tg = telegram();
+    migrateLegacyLocation(tg?.initDataUnsafe?.start_param);
     if (!tg?.initData) {
-      const dark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
-      document.documentElement.dataset.scheme = dark ? "dark" : "light";
-      return;
+      const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
+      const apply = () => {
+        document.documentElement.dataset.scheme = mq?.matches ? "dark" : "light";
+      };
+      apply();
+      mq?.addEventListener("change", apply);
+      return () => mq?.removeEventListener("change", apply);
     }
+    document.documentElement.dataset.tg = "1";
     tg.ready();
     tg.expand();
     // Reopened from the background, the app may come back collapsed: ask for the full height again.
@@ -127,25 +103,50 @@ export function App() {
     };
   }, []);
 
-  // Telegram's own back button leaves a session; the vertical swipe must not close the app mid-chat.
+  // Telegram's own back button leaves a detail; the vertical swipe must not close the app mid-chat.
+  const inDetail = !!route.session || (route.screen === "settings" && !!route.detail);
   useEffect(() => {
     const tg = telegram();
     if (!tg?.initData || !tg.BackButton) return;
-    if (!sessionId) {
+    if (!inDetail) {
       tg.BackButton.hide();
       tg.enableVerticalSwipes?.();
       return;
     }
-    const back = () => setSessionId(null);
-    tg.BackButton.onClick(back);
+    const onBack = () => back(pathFor(route.screen));
+    tg.BackButton.onClick(onBack);
     tg.BackButton.show();
     tg.disableVerticalSwipes?.();
-    return () => tg.BackButton?.offClick(back);
-  }, [sessionId]);
+    return () => tg.BackButton?.offClick(onBack);
+  }, [inDetail, route.screen]);
+
+  // The list screens come back where the reader left them.
+  const main = useRef<HTMLDivElement>(null);
+  const scrollKey = route.session ? null : `${route.screen}/${route.detail ?? ""}`;
+  const lastKey = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const el = main.current;
+    if (!el) return;
+    if (lastKey.current && lastKey.current !== scrollKey) rememberScroll(lastKey.current, el.scrollTop);
+    if (scrollKey && lastKey.current !== scrollKey) el.scrollTop = recallScroll(scrollKey);
+    lastKey.current = scrollKey;
+  }, [scrollKey]);
+  useEffect(() => {
+    const el = main.current;
+    if (!el) return;
+    const on = () => {
+      if (scrollKey) rememberScroll(scrollKey, el.scrollTop);
+    };
+    el.addEventListener("scroll", on, { passive: true });
+    return () => el.removeEventListener("scroll", on);
+  }, [scrollKey]);
 
   useEffect(() => {
-    if (!wide) setSecondId(null);
-  }, [wide]);
+    setMore(false);
+  }, [route.screen, route.session]);
+
+  const open = (id: string) => navigate(sessionPath(id));
+  const closeSession = () => back(pathFor("agents"));
 
   if (authed === null) return <div className="app"><div className="empty">Loading…</div></div>;
   if (authed === false) {
@@ -156,61 +157,60 @@ export function App() {
     );
   }
 
+  const sessionId = route.session;
+  const secondId = wide ? route.with : null;
+  let content: ReactNode;
+  if (sessionId && secondId) {
+    content = (
+      <div className="dual">
+        <ErrorBoundary key={sessionId}>
+          <SessionScreen id={sessionId} pane="left" onBack={() => navigate(sessionPath(secondId), { replace: true })} onOpen={(id) => navigate(sessionPath(id, secondId))} toast={showToast} onSplit={() => setPicking(true)} />
+        </ErrorBoundary>
+        <ErrorBoundary key={secondId}>
+          <SessionScreen id={secondId} pane="right" onBack={() => navigate(sessionPath(sessionId), { replace: true })} onOpen={(id) => navigate(sessionPath(sessionId, id))} toast={showToast} />
+        </ErrorBoundary>
+      </div>
+    );
+  } else if (sessionId) {
+    content = (
+      <ErrorBoundary key={sessionId}>
+        <SessionScreen id={sessionId} onBack={closeSession} onOpen={open} toast={showToast} onSplit={wide ? () => setPicking(true) : undefined} />
+      </ErrorBoundary>
+    );
+  } else {
+    content = (
+      <ErrorBoundary key={route.screen}>
+        {route.screen === "agents" && <SessionsScreen onOpen={open} toast={showToast} />}
+        {route.screen === "inbox" && <InboxScreen onOpen={open} toast={showToast} />}
+        {route.screen === "board" && <BoardScreen onOpen={open} toast={showToast} />}
+        {route.screen === "changes" && <ProposalsScreen toast={showToast} />}
+        {route.screen === "schedules" && <SchedulesScreen toast={showToast} onOpen={open} />}
+        {route.screen === "services" && <ServicesScreen onOpen={open} toast={showToast} />}
+        {route.screen === "memory" && <MemoryScreen toast={showToast} onOpen={open} />}
+        {route.screen === "usage" && <UsageScreen />}
+        {route.screen === "health" && <HealthScreen toast={showToast} />}
+        {route.screen === "settings" && <SettingsScreen toast={showToast} section={route.detail} />}
+      </ErrorBoundary>
+    );
+  }
+
   return (
     <div className="app">
-      {sessionId && secondId && wide ? (
-        <div className="dual">
-          <ErrorBoundary key={sessionId}>
-            <SessionScreen id={sessionId} pane="left" onBack={() => { setSessionId(secondId); setSecondId(null); }} onOpen={setSessionId} toast={showToast} onSplit={() => setPicking(true)} />
-          </ErrorBoundary>
-          <ErrorBoundary key={secondId}>
-            <SessionScreen id={secondId} pane="right" onBack={() => setSecondId(null)} onOpen={setSecondId} toast={showToast} />
-          </ErrorBoundary>
-        </div>
-      ) : sessionId ? (
-        <ErrorBoundary key={sessionId}>
-          <SessionScreen id={sessionId} onBack={() => setSessionId(null)} onOpen={setSessionId} toast={showToast} onSplit={wide ? () => setPicking(true) : undefined} />
-        </ErrorBoundary>
-      ) : (
-        <>
-          <div className="topbar">
-            <h1>Daedalus</h1>
-            <div className="spacer" />
-          </div>
-          <div className="screen">
-            <ErrorBoundary key={tab}>
-              {tab === "sessions" && <SessionsScreen onOpen={setSessionId} toast={showToast} />}
-              {tab === "inbox" && <InboxScreen onOpen={setSessionId} toast={showToast} onUnread={setUnread} />}
-              {tab === "board" && <BoardScreen onOpen={setSessionId} toast={showToast} />}
-              {tab === "proposals" && <ProposalsScreen toast={showToast} />}
-              {tab === "schedules" && <SchedulesScreen toast={showToast} onOpen={setSessionId} />}
-              {tab === "services" && <ServicesScreen onOpen={setSessionId} toast={showToast} />}
-              {tab === "memory" && <MemoryScreen toast={showToast} onOpen={setSessionId} />}
-              {tab === "usage" && <UsageScreen />}
-              {tab === "settings" && <SettingsScreen toast={showToast} />}
-            </ErrorBoundary>
-          </div>
-          <nav className="tabbar">
-            {TABS.map((t) => (
-              <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
-                <span className="glyph">
-                  <Icon name={t.icon} size={22} />
-                  {t.id === "inbox" && unread > 0 && <span className="tab-badge">{unread > 99 ? "99+" : unread}</span>}
-                </span>
-                {t.label}
-              </button>
-            ))}
-          </nav>
-        </>
-      )}
-      {picking && <SessionPicker exclude={sessionId} onPick={(id) => { setSecondId(id); setPicking(false); }} onClose={() => setPicking(false)} />}
-      {toast && <div className="toast" role="status" aria-live="polite">{toast}</div>}
+      {wide && <Rail screen={route.screen} counts={counts} />}
+      <div ref={main} className={`main ${sessionId ? "chat-open" : ""}`}>
+        {content}
+      </div>
+      {!wide && !sessionId && <TabBar screen={route.screen} counts={counts} onMore={() => setMore((m) => !m)} moreOpen={more} />}
+      {more && <MoreSheet screen={route.screen} counts={counts} onClose={() => setMore(false)} />}
+      {picking && sessionId && <SessionPicker exclude={sessionId} onPick={(id) => { navigate(sessionPath(sessionId, id)); setPicking(false); }} onClose={() => setPicking(false)} />}
+      <ToastHost />
+      <ConfirmHost />
     </div>
   );
 }
 
 /** Whether the layout is the wide one (rail beside the screen): the same breakpoint as the stylesheet. */
-function useWide(): boolean {
+export function useWide(): boolean {
   const query = "(min-width: 1024px)";
   const [wide, setWide] = useState(() => window.matchMedia?.(query).matches ?? false);
   useEffect(() => {
@@ -233,25 +233,16 @@ function SessionPicker({ exclude, onPick, onClose }: { exclude: string | null; o
   const q = filter.trim().toLowerCase();
   const items = (sessions ?? []).filter((s) => s.id !== exclude && (!q || s.title.toLowerCase().includes(q) || s.id.includes(q)));
   return (
-    <div className="sheet-backdrop" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="open a session beside this one">
-        <div className="grip" />
-        <div className="sheet-head">
-          <h3>Open beside</h3>
-          <button className="iconbtn small" onClick={onClose} aria-label="close"><Icon name="close" size={16} /></button>
-        </div>
-        <input className="field" autoFocus placeholder="filter by title" value={filter} onChange={(e) => setFilter(e.target.value)} style={{ marginBottom: 8 }} />
-        <div className="sheet-body">
-          {sessions === null && <div className="empty">Loading…</div>}
-          {sessions !== null && items.length === 0 && <div className="empty">No other sessions.</div>}
-          {items.map((s) => (
-            <button key={s.id} className="menu-item" onClick={() => onPick(s.id)}>
-              <span className="grow" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.title}</span>
-              <Pill status={s.status} />
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
+    <Sheet title="Open beside" onClose={onClose} size="narrow">
+      <input className="field" autoFocus placeholder="filter by title" value={filter} onChange={(e) => setFilter(e.target.value)} style={{ marginBottom: 8 }} />
+      {sessions === null && <div className="empty">Loading…</div>}
+      {sessions !== null && items.length === 0 && <div className="empty">No other sessions.</div>}
+      {items.map((s) => (
+        <button key={s.id} className="menu-item" onClick={() => onPick(s.id)}>
+          <span className="grow truncate">{s.title}</span>
+          <StatusLabel status={s.status} />
+        </button>
+      ))}
+    </Sheet>
   );
 }

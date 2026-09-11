@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, ServiceView } from "../api";
 import { ServiceRow, timeAgo } from "../components";
 import { errorText } from "../ui";
+import { PageHeader } from "../shell";
 
 type Row = ServiceView & { session_id: string; session_title: string };
 
@@ -23,15 +24,16 @@ export function ServicesScreen({ onOpen, toast }: { onOpen: (id: string) => void
     const id = setInterval(load, 10000);
     return () => clearInterval(id);
   }, [load]);
-  if (error && rows === null) return <div className="empty">could not load services: {error} <button className="btn small" onClick={load}>retry</button></div>;
-  if (rows === null) return <div className="empty">Loading…</div>;
-  if (rows.length === 0) return <div className="empty">No services. An agent starts one with ServiceStart (a demo site, a dev server, a worker); it appears here with the address you open it at.</div>;
   const groups = new Map<string, Row[]>();
-  for (const r of rows) groups.set(r.session_id, [...(groups.get(r.session_id) ?? []), r]);
-  const running = rows.filter((r) => r.status === "running").length;
+  for (const r of rows ?? []) groups.set(r.session_id, [...(groups.get(r.session_id) ?? []), r]);
+  const running = (rows ?? []).filter((r) => r.status === "running").length;
   return (
     <>
-      <div className="section-title">{running} running · {rows.length} total</div>
+      <PageHeader title="Services" subtitle={rows ? `${running} running · ${rows.length} total` : undefined} />
+      <div className="screen narrow">
+      {error && rows === null && <div className="empty"><b>Could not load services</b><div>{error}</div><button className="btn" onClick={load}>Retry</button></div>}
+      {rows === null && !error && <div className="empty">Loading…</div>}
+      {rows?.length === 0 && <div className="empty"><b>No running services</b><div>Agents can host local web apps, workers and dev servers; they appear here with the address to open them at.</div></div>}
       {[...groups.entries()].map(([sid, items]) => (
         <div key={sid} className="card">
           <div className="row" style={{ marginBottom: 4 }}>
@@ -54,6 +56,7 @@ export function ServicesScreen({ onOpen, toast }: { onOpen: (id: string) => void
           </div>
         </div>
       )}
+      </div>
     </>
   );
 }

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { api, Schedule } from "../api";
 import { confirmAsync } from "../ui";
 import { timeAgo } from "../components";
+import { Icon } from "../icons";
+import { PageHeader } from "../shell";
 
 export function SchedulesScreen({ toast, onOpen }: { toast: (t: string) => void; onOpen: (id: string) => void }) {
   const [items, setItems] = useState<Schedule[] | null>(null);
@@ -57,11 +59,12 @@ export function SchedulesScreen({ toast, onOpen }: { toast: (t: string) => void;
 
   return (
     <>
-      <div className="btnrow" style={{ marginTop: 0, marginBottom: 12 }}>
-        <button className="btn primary" onClick={() => setCreating((v) => !v)}>
-          {creating ? "Cancel" : "+ New task"}
-        </button>
-      </div>
+      <PageHeader
+        title="Schedules"
+        subtitle={items ? `${items.filter((s) => s.enabled).length} active` : undefined}
+        actions={<button className={`iconbtn ${creating ? "on" : "primary"}`} onClick={() => setCreating((v) => !v)} title={creating ? "Cancel" : "New schedule"} aria-label={creating ? "Cancel" : "New schedule"}><Icon name={creating ? "close" : "plus"} /></button>}
+      />
+      <div className="screen narrow">
       {creating && (
         <div className="card">
           <label className="field">Name</label>
@@ -123,6 +126,7 @@ export function SchedulesScreen({ toast, onOpen }: { toast: (t: string) => void;
           </div>
         </div>
       ))}
+      </div>
     </>
   );
 }

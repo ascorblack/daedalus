@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { confirmAsync } from "../ui";
 import { timeAgo } from "../components";
+import { Icon } from "../icons";
+import { PageHeader } from "../shell";
 
 type Entry = {
   id: number;
@@ -67,14 +69,17 @@ export function InboxScreen({ toast, onOpen, onUnread }: { toast: (t: string) =>
 
   return (
     <>
-      <div className="btnrow" style={{ marginTop: 0, marginBottom: 12 }}>
-        <button className={`btn small ${onlyUnread ? "primary" : ""}`} onClick={() => setOnlyUnread((v) => !v)}>
-          unread only
-        </button>
-        <button className="btn small" onClick={markAll} disabled={unread === 0}>
-          mark all read {unread > 0 ? `(${unread})` : ""}
-        </button>
-      </div>
+      <PageHeader
+        title="Inbox"
+        subtitle={unread > 0 ? `${unread} unread` : undefined}
+        actions={<button className="iconbtn" onClick={markAll} disabled={unread === 0} title="Mark all read" aria-label="Mark all read"><Icon name="check" /></button>}
+      >
+        <div className="chips">
+          <button className="chip select" aria-pressed={!onlyUnread} onClick={() => setOnlyUnread(false)}>All</button>
+          <button className="chip select" aria-pressed={onlyUnread} onClick={() => setOnlyUnread(true)}>Unread{unread > 0 ? ` · ${unread}` : ""}</button>
+        </div>
+      </PageHeader>
+      <div className="screen narrow">
       {entries === null && <div className="empty">Loading…</div>}
       {entries?.length === 0 && <div className="empty">{onlyUnread ? "Nothing unread." : "Nothing happened while you were away."}</div>}
       {entries?.map((e) => (
@@ -113,6 +118,7 @@ export function InboxScreen({ toast, onOpen, onUnread }: { toast: (t: string) =>
           </div>
         </div>
       ))}
+      </div>
     </>
   );
 }

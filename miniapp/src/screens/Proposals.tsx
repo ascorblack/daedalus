@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, Proposal } from "../api";
 import { Pill, timeAgo } from "../components";
+import { PageHeader } from "../shell";
 
 export function ProposalsScreen({ toast }: { toast: (t: string) => void }) {
   const [items, setItems] = useState<Proposal[] | null>(null);
@@ -40,11 +41,14 @@ export function ProposalsScreen({ toast }: { toast: (t: string) => void }) {
     }
   }
 
-  if (items === null) return <div className="empty">Loading…</div>;
-  if (items.length === 0) return <div className="empty">No change proposals yet. The agent opens one when you ask it to change itself.</div>;
+  const pending = (items ?? []).filter((p) => p.status === "pending").length;
   return (
     <>
-      {items.map((p) => (
+      <PageHeader title="Changes" subtitle={items ? (pending ? `${pending} waiting for you` : `${items.length} proposal${items.length === 1 ? "" : "s"}`) : undefined} />
+      <div className="screen narrow">
+      {items === null && <div className="empty">Loading…</div>}
+      {items?.length === 0 && <div className="empty"><b>No change proposals yet</b><div>The agent opens one when it changes its own code.</div></div>}
+      {(items ?? []).map((p) => (
         <div key={p.id} className="card">
           <div className="row">
             <div className="grow">
@@ -84,6 +88,7 @@ export function ProposalsScreen({ toast }: { toast: (t: string) => void }) {
           {open === p.id && <Diff text={diff} />}
         </div>
       ))}
+      </div>
     </>
   );
 }

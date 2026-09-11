@@ -1,5 +1,7 @@
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { navigate, pathFor } from "../router";
+import { PageHeader } from "../shell";
 import { api, telegram, HeartbeatStatus, Preset, ProviderConf, SearchBackendInfo, SearchCheck, Settings } from "../api";
 import { numInput } from "../ui";
 import { timeAgo } from "../components";
@@ -837,15 +839,48 @@ function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void })
   );
 }
 
-export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
+/** The doctor's checks as a screen of their own. */
+export function HealthScreen({ toast }: { toast: (t: string) => void }) {
+  return (
+    <>
+      <PageHeader title="Health" />
+      <div className="screen narrow">
+        <HealthTab toast={toast} />
+        {!telegram()?.initData && (
+          <div className="btnrow">
+            <button
+              className="btn small"
+              onClick={async () => {
+                try {
+                  await api.post("/api/auth/logout");
+                  sessionStorage.removeItem("daedalus_token");
+                } finally {
+                  window.location.reload();
+                }
+              }}
+            >
+              Log out of this browser
+            </button>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+type SettingsTab = "general" | "tools" | "heartbeat";
+const SETTINGS_TABS: SettingsTab[] = ["general", "tools", "heartbeat"];
+
+export function SettingsScreen({ toast, section }: { toast: (t: string) => void; section?: string | null }) {
   const [s, setS] = useState<Settings | null>(null);
   const [status, setStatus] = useState<any>(null);
-  const [tab, setTab] = useState<"general" | "tools" | "heartbeat" | "health">("general");
+  const tab: SettingsTab = (SETTINGS_TABS as string[]).includes(section ?? "") ? (section as SettingsTab) : "general";
+  const setTab = (t: SettingsTab) => navigate(pathFor("settings", t === "general" ? null : t));
   useEffect(() => {
     api.get<Settings>("/api/settings").then(setS).catch((e) => toast((e as Error).message));
     api.get("/api/status").then(setStatus).catch(() => setStatus(null));
   }, [toast]);
-  if (!s) return <div className="empty">Loading…</div>;
+  if (!s) return <><PageHeader title="Settings" /><div className="empty">Loading…</div></>;
 
   async function save(patch: Partial<Settings>) {
     try {
@@ -911,30 +946,14 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
 
   return (
     <>
-      <div className="segmented">
-        <button className={tab === "general" ? "on" : ""} onClick={() => setTab("general")}>General</button>
-        <button className={tab === "tools" ? "on" : ""} onClick={() => setTab("tools")}>Tools</button>
-        <button className={tab === "heartbeat" ? "on" : ""} onClick={() => setTab("heartbeat")}>Heartbeat</button>
-        <button className={tab === "health" ? "on" : ""} onClick={() => setTab("health")}>Health</button>
-      </div>
-      {tab === "health" && <HealthTab toast={toast} />}
-      {tab === "health" && !telegram()?.initData && (
-        <div className="btnrow">
-          <button
-            className="btn small"
-            onClick={async () => {
-              try {
-                await api.post("/api/auth/logout");
-                sessionStorage.removeItem("daedalus_token");
-              } finally {
-                window.location.reload();
-              }
-            }}
-          >
-            Log out of this browser
-          </button>
+      <PageHeader title="Settings">
+        <div className="chips">
+          {SETTINGS_TABS.map((t) => (
+            <button key={t} className="chip select" aria-pressed={tab === t} onClick={() => setTab(t)}>{t[0].toUpperCase() + t.slice(1)}</button>
+          ))}
         </div>
-      )}
+      </PageHeader>
+      <div className="screen narrow">
       {tab === "tools" && <ToolsTab s={s} save={save} />}
       {tab === "heartbeat" && <HeartbeatTab s={s} toast={toast} />}
       {tab === "general" && (
@@ -1088,6 +1107,7 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
       )}
       </>
       )}
+      </div>
     </>
   );
 }

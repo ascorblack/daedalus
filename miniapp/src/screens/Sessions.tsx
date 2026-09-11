@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, SessionSummary, Workspace } from "../api";
 import { Avatar, Pill, Status, ToolPicker, loopLabel, timeAgo } from "../components";
 import { Icon } from "../icons";
+import { PageHeader } from "../shell";
 import { FilePreview, PreviewSource, workspaceBase } from "../preview";
 import { confirmAsync, errorText, fmtBytes } from "../ui";
 import { Files } from "./Session";
@@ -84,14 +85,17 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
 
   return (
     <>
-      <div className="btnrow" style={{ marginTop: 0, marginBottom: 12 }}>
-        <button className="btn primary" onClick={() => setCreating((v) => !v)}>
-          {creating ? "Cancel" : "+ New agent"}
-        </button>
-        <button className={`btn ${showWorkspaces ? "primary" : ""}`} onClick={() => setShowWorkspaces((v) => !v)} title="The directories sessions work in">
-          <Icon name="folder" size={15} /> Workspaces
-        </button>
-      </div>
+      <PageHeader
+        title="Agents"
+        subtitle={sessions ? `${top.length} agent${top.length === 1 ? "" : "s"}${active.length ? ` · ${active.length} active` : ""}` : undefined}
+        actions={
+          <>
+            <button className={`iconbtn ${showWorkspaces ? "on" : ""}`} onClick={() => setShowWorkspaces((v) => !v)} title="Workspaces" aria-label="Workspaces" aria-pressed={showWorkspaces}><Icon name="folder" /></button>
+            <button className={`iconbtn ${creating ? "on" : "primary"}`} onClick={() => setCreating((v) => !v)} title={creating ? "Cancel" : "New agent"} aria-label={creating ? "Cancel" : "New agent"}><Icon name={creating ? "close" : "plus"} /></button>
+          </>
+        }
+      />
+      <div className="screen narrow">
       {showWorkspaces && <WorkspacesPanel workspaces={workspaces} onChange={loadWorkspaces} onOpen={onOpen} toast={toast} />}
       {creating && (
         <div className="card">
@@ -144,6 +148,7 @@ export function SessionsScreen({ onOpen, toast }: { onOpen: (id: string) => void
       {active.map(group)}
       {rest.length > 0 && <div className="section-title">Roster</div>}
       {rest.map(group)}
+      </div>
     </>
   );
 }

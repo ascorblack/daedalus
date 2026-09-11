@@ -34,6 +34,7 @@ from protocore.contracts.types import (
     ToolUseBlock,
 )
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from daedalus.config import PROVIDER_KINDS, HeartbeatConfig, ModelPresetConfig, ProviderConfig
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
@@ -135,6 +136,18 @@ class SendMessageBody(BaseModel):
 
 class AnswerBody(BaseModel):
     answers: list[dict[str, Any]]
+
+
+class SpaFiles(StaticFiles):
+    """The built app with its screens in the URL: a path that is not a file is the app itself."""
+
+    async def get_response(self, path: str, scope: Any) -> Any:
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404 and "." not in path.rsplit("/", 1)[-1]:
+                return await super().get_response("index.html", scope)
+            raise
 
 
 class NewSessionBody(BaseModel):
@@ -661,7 +674,18 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.get("/api/sessions")
     async def list_sessions(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
-        return await manager.list_sessions(limit=200)
+        rows = await manager.list_sessions(limit=200)
+        default_id, default_preset = app.config.preset()
+        default_label = default_preset.display(default_id)
+        for row in rows:
+            overrides = await manager.live.load(row["id"])
+            if overrides.get("preset") and overrides["preset"] in app.config.presets:
+                row["model"] = app.config.presets[overrides["preset"]].display(overrides["preset"])
+            elif overrides.get("provider") and overrides.get("model_name"):
+                row["model"] = f"{overrides['provider']}/{overrides['model_name']}"
+            else:
+                row["model"] = default_label
+        return rows
 
     @api.post("/api/sessions")
     async def new_session(body: NewSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2119,7 +2143,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     dist = settings.bot_repo_dir / "miniapp" / "dist"
     if dist.is_dir():
-        api.mount("/app", StaticFiles(directory=str(dist), html=True), name="miniapp")
+        api.mount("/app", SpaFiles(directory=str(dist), html=True), name="miniapp")
 
         @api.get("/")
         async def root() -> RedirectResponse:

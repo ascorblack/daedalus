@@ -1,6 +1,7 @@
 // Small UI helpers shared by the screens: Telegram bridge, confirmations, formatting.
 
 import { telegram } from "./api";
+import { confirmDialog } from "./dialogs";
 
 /** The Telegram bridge only when the app really runs inside Telegram: the script also loads in a plain
  *  browser, where it reports version 6.0 and rejects every method (showConfirm → WebAppMethodUnsupported). */
@@ -9,24 +10,9 @@ function insideTelegram() {
   return tg && tg.initData ? tg : null;
 }
 
-/** Ask before a destructive action: Telegram's own dialog inside the app, the browser's outside it. */
-export function confirmAsync(text: string): Promise<boolean> {
-  const tg = insideTelegram();
-  if (tg?.showConfirm && (tg.isVersionAtLeast?.("6.2") ?? true)) {
-    return new Promise((resolve) => {
-      try {
-        tg.showConfirm!(text, (ok) => resolve(!!ok));
-      } catch {
-        resolve(window.confirm(text));
-      }
-    });
-  }
-  try {
-    return Promise.resolve(window.confirm(text));
-  } catch {
-    // A sandboxed frame refuses confirm(): fall through to "yes", the caller's button was an explicit tap.
-    return Promise.resolve(true);
-  }
+/** Ask before a destructive action: the app's own dialog, which says what the action does. */
+export function confirmAsync(text: string, opts: { body?: string; action?: string; danger?: boolean } = {}): Promise<boolean> {
+  return confirmDialog({ title: text, body: opts.body, action: opts.action ?? "Confirm", danger: opts.danger ?? true });
 }
 
 /** Whether Enter should send: desktop clients send, phones insert a newline. */

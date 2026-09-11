@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { relTime } from "./format";
 import { api, LoopView, ServiceView, ShareMode, ToolInfo } from "./api";
 import { Icon } from "./icons";
 import { confirmAsync, errorText } from "./ui";
@@ -21,18 +22,42 @@ export function Avatar({ status, seed }: { status: Status; seed: string }) {
   );
 }
 
-export function Pill({ status }: { status: string }) {
-  return <span className={`pill ${status}`}>{status}</span>;
+/** One word for a state, in the one colour that state has everywhere: idle stays grey. */
+export const STATUS_WORD: Record<string, string> = { idle: "Idle", running: "Working", waiting: "Needs you", failed: "Failed", done: "Done", paused: "Paused", stopped: "Stopped", pending: "Pending", merged: "Merged", approved: "Approved", rejected: "Rejected", closed: "Closed", dead: "Died", stopped_: "Stopped" };
+
+export function Dot({ status, className }: { status: string; className?: string }) {
+  return <span className={`dot ${status} ${className ?? ""}`} aria-hidden />;
 }
 
-export function useToast(): [string | null, (t: string) => void] {
-  const [toast, setToast] = useState<string | null>(null);
-  useEffect(() => {
-    if (!toast) return;
-    const id = setTimeout(() => setToast(null), 2400);
-    return () => clearTimeout(id);
-  }, [toast]);
-  return [toast, setToast];
+/** A dot and the word: "● Working", "● Needs you". */
+export function StatusLabel({ status, word }: { status: string; word?: string }) {
+  return (
+    <span className={`status ${status}`}>
+      <span className="dot" aria-hidden />
+      {word ?? STATUS_WORD[status] ?? status}
+    </span>
+  );
+}
+
+export function Pill({ status, children }: { status: string; children?: React.ReactNode }) {
+  return <span className={`pill ${status}`}>{children ?? STATUS_WORD[status] ?? status}</span>;
+}
+
+/** A row of grey lines while the first load is on its way. */
+export function Skeleton({ rows = 4 }: { rows?: number }) {
+  return (
+    <div aria-hidden>
+      {Array.from({ length: rows }, (_, i) => (
+        <div key={i} className="sk-row">
+          <div className="skeleton avatar" />
+          <div>
+            <div className="skeleton line" style={{ width: `${55 + ((i * 17) % 30)}%` }} />
+            <div className="skeleton line" style={{ width: `${30 + ((i * 11) % 25)}%` }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 /** Checkboxes for the host tools, grouped, all on by default; collapsed until the operator opens it. */
@@ -97,12 +122,7 @@ export function loopLabel(loop: LoopView | null | undefined): string {
 }
 
 export function timeAgo(iso: string | null | undefined): string {
-  if (!iso) return "";
-  const delta = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (delta < 60) return "just now";
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  return `${Math.floor(delta / 86400)}d ago`;
+  return relTime(iso);
 }
 
 export function fmtUsd(value: number | null | undefined): string {

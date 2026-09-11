@@ -3,6 +3,7 @@ import { api, MemoryListing, MemoryRecord } from "../api";
 import { timeAgo } from "../components";
 import { Icon } from "../icons";
 import { confirmAsync, errorText } from "../ui";
+import { PageHeader } from "../shell";
 
 const KINDS = ["fact", "decision", "preference", "reflection", "note"];
 
@@ -104,10 +105,17 @@ export function MemoryScreen({ toast, onOpen }: { toast: (t: string) => void; on
     }
   }
 
-  if (!data) return <div className="empty">Loading…</div>;
-  const sessions = Object.entries(data.sessions);
+  const sessions = Object.entries(data?.sessions ?? {});
   return (
     <>
+      <PageHeader
+        title="Memory"
+        subtitle={data ? `${data.records.length} memories` : undefined}
+        actions={<button className={`iconbtn ${adding ? "on" : "primary"}`} onClick={() => setAdding((v) => !v)} title={adding ? "Cancel" : "Remember something"} aria-label={adding ? "Cancel" : "Remember something"}><Icon name={adding ? "close" : "plus"} /></button>}
+      />
+      <div className="screen narrow">
+      {!data && <div className="empty">Loading…</div>}
+      {data && (<>
       <div className="memory-toolbar">
         <select className="field" value={bucket} onChange={(e) => setBucket(e.target.value)} aria-label="scope">
           <option value="all">All · {data.records.length}</option>
@@ -118,7 +126,6 @@ export function MemoryScreen({ toast, onOpen }: { toast: (t: string) => void; on
           ))}
         </select>
         <input className="field" placeholder="search" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="search memories" />
-        <button className="btn primary" onClick={() => setAdding((v) => !v)}>{adding ? "Cancel" : "+ Remember"}</button>
       </div>
       {adding && (
         <div className="card">
@@ -203,6 +210,8 @@ export function MemoryScreen({ toast, onOpen }: { toast: (t: string) => void; on
           )}
         </div>
       ))}
+      </>)}
+      </div>
     </>
   );
 }

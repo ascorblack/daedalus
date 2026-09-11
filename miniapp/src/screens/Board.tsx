@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { confirmAsync } from "../ui";
 import { timeAgo } from "../components";
+import { Icon } from "../icons";
+import { PageHeader } from "../shell";
 
 type Task = {
   id: string;
@@ -84,18 +86,22 @@ export function BoardScreen({ toast, onOpen }: { toast: (t: string) => void; onO
     load();
   }
 
-  if (!tasks) return <div className="empty">Loading…</div>;
-  const finished = tasks.filter((t) => t.status === "done" || t.status === "dropped");
+  const finished = (tasks ?? []).filter((t) => t.status === "done" || t.status === "dropped");
+  const openCount = (tasks ?? []).filter((t) => t.status !== "done" && t.status !== "dropped").length;
   return (
     <>
-      <div className="btnrow" style={{ marginTop: 0, marginBottom: 12 }}>
-        <button className="btn primary" onClick={() => setCreating((v) => !v)}>
-          {creating ? "Cancel" : "+ Task"}
-        </button>
-        <button className={`btn small ${showDone ? "primary" : ""}`} onClick={() => setShowDone((v) => !v)}>
-          finished
-        </button>
-      </div>
+      <PageHeader
+        title="Board"
+        subtitle={tasks ? `${openCount} open` : undefined}
+        actions={<button className={`iconbtn ${creating ? "on" : "primary"}`} onClick={() => setCreating((v) => !v)} title={creating ? "Cancel" : "New task"} aria-label={creating ? "Cancel" : "New task"}><Icon name={creating ? "close" : "plus"} /></button>}
+      >
+        <div className="chips">
+          <button className="chip select" aria-pressed={!showDone} onClick={() => setShowDone(false)}>Open</button>
+          <button className="chip select" aria-pressed={showDone} onClick={() => setShowDone(true)}>Finished</button>
+        </div>
+      </PageHeader>
+      <div className="screen narrow">
+      {!tasks && <div className="empty">Loading…</div>}
       {creating && (
         <div className="card">
           <label className="field">Title</label>
@@ -113,9 +119,9 @@ export function BoardScreen({ toast, onOpen }: { toast: (t: string) => void; onO
           </div>
         </div>
       )}
-      {tasks.length === 0 && <div className="empty">The board is empty. The agent adds tasks with BoardAdd; you can add one above.</div>}
+      {tasks && tasks.length === 0 && <div className="empty"><b>No tasks yet</b><div>The agent keeps this board itself; a task you add here is picked up on its next run.</div></div>}
       {COLUMNS.map((col) => {
-        const items = tasks.filter((t) => t.status === col.id);
+        const items = (tasks ?? []).filter((t) => t.status === col.id);
         if (!items.length) return null;
         return (
           <div key={col.id}>
@@ -138,6 +144,7 @@ export function BoardScreen({ toast, onOpen }: { toast: (t: string) => void; onO
           ))}
         </div>
       )}
+      </div>
     </>
   );
 }

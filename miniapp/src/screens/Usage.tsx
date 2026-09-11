@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { fmtInt, fmtUsd } from "../components";
+import { PageHeader } from "../shell";
 
 type Daily = { day: string; provider_id: string; model: string; calls: number; input_tokens: number; output_tokens: number; cache_read_tokens: number; reasoning_tokens: number; cost_usd: number | null; unmetered: number };
 type Recent = {
@@ -94,7 +95,7 @@ export function UsageScreen() {
   const today = new Date().toISOString().slice(0, 10);
   const todayRows = useMemo(() => (usage?.daily ?? []).filter((d) => d.day === today), [usage, today]);
   const providers = useMemo(() => Array.from(new Set((usage?.recent ?? []).map((r) => r.provider_id))), [usage]);
-  if (!usage) return <div className="empty">Loading…</div>;
+  if (!usage) return <><PageHeader title="Usage" /><div className="empty">Loading…</div></>;
   const sum = (rows: Daily[], key: keyof Daily) => rows.reduce((a, r) => a + ((r[key] as number) ?? 0), 0);
   const todayCost = todayRows.some((r) => r.cost_usd !== null) ? sum(todayRows, "cost_usd") : null;
   const recent = usage.recent.filter((r) => provider === "all" || r.provider_id === provider);
@@ -106,6 +107,8 @@ export function UsageScreen() {
 
   return (
     <>
+      <PageHeader title="Usage" subtitle="last 14 days" />
+      <div className="screen wide">
       <div className="grid4">
         <div className="card stat">
           <span className="sub">spent today</span>
@@ -246,6 +249,7 @@ export function UsageScreen() {
           </div>
         ))}
         {recent.length === 0 && <div className="empty">No calls yet.</div>}
+      </div>
       </div>
     </>
   );
