@@ -1,3 +1,4 @@
+import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, telegram, HeartbeatStatus, Preset, ProviderConf, SearchBackendInfo, SearchCheck, Settings } from "../api";
 import { numInput } from "../ui";
@@ -79,6 +80,15 @@ function ModelsMenu({ load, current, onPick }: { load: () => Promise<string[] | 
   );
 }
 
+function Toggle({ on, onClick, children, title, disabled }: { on: boolean; onClick: () => void; children: React.ReactNode; title?: string; disabled?: boolean }) {
+  return (
+    <button className={`btn small ${on ? "primary" : ""}`} onClick={onClick} title={title} disabled={disabled} aria-pressed={on}>
+      {children}
+    </button>
+  );
+}
+
+/** One model: a compact line to scan, an expanded panel to edit. */
 function PresetRow({ id, p, isDefault, inChain, providers, onDefault, onChain, onPatch, onDelete, onLookup }: {
   id: string;
   p: Preset;
@@ -93,40 +103,73 @@ function PresetRow({ id, p, isDefault, inChain, providers, onDefault, onChain, o
 }) {
   const [label, setLabel] = useState(p.label);
   const [model, setModel] = useState(p.model);
-  const [more, setMore] = useState(false);
+  const [open, setOpen] = useState(false);
   useEffect(() => setLabel(p.label), [p.label]);
   useEffect(() => setModel(p.model), [p.model]);
+  const title = p.label || `${p.provider}/${p.model}`;
   return (
-    <div className={`preset ${isDefault ? "default" : ""}`}>
-      <div className="row" style={{ gap: 8 }}>
-        <button className={`radio ${isDefault ? "on" : ""}`} onClick={onDefault} aria-label="make default" title="default for new sessions" />
-        <input className="field" style={{ flex: 1 }} value={label} placeholder={`${p.provider}/${p.model}`} onChange={(e) => setLabel(e.target.value)} onBlur={() => label.trim() !== p.label && onPatch({ label: label.trim() })} />
-        <button className="btn small" onClick={() => setMore((m) => !m)} title="settings of this model">{more ? "less" : "more"}</button>
-        <DeleteButton label="✕" onDelete={onDelete} />
+    <div className={`mrow ${isDefault ? "default" : ""} ${open ? "open" : ""}`}>
+      <div className="mline">
+        <button className={`radio ${isDefault ? "on" : ""}`} onClick={onDefault} aria-label="make default" title={isDefault ? "default for new sessions" : "make this the default for new sessions"} />
+        <button className="mmain" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+          <span className="mtitle">{title}</span>
+          <span className="mmeta">{p.provider} · {p.model}</span>
+        </button>
+        <div className="mtags">
+          {isDefault && <span className="pill idle">default</span>}
+          {!isDefault && inChain && <span className="pill">fallback</span>}
+          <span className="pill">{p.thinking ? `think ${p.reasoning_effort}` : "no thinking"}</span>
+          {p.images && <span className="pill">images</span>}
+          <span className="pill">{Math.round(p.context_window / 1000)}k</span>
+        </div>
+        <div className="mactions">
+          <button className={`iconbtn small ${open ? "on" : ""}`} onClick={() => setOpen((o) => !o)} title={open ? "close" : "edit"} aria-label="edit"><span className={`chev ${open ? "down" : ""}`}>›</span></button>
+          <DeleteButton label="✕" onDelete={onDelete} />
+        </div>
       </div>
-      <div className="row" style={{ gap: 8, marginTop: 6 }}>
-        <select className="field" style={{ width: 130 }} value={p.provider} onChange={(e) => onPatch({ provider: e.target.value })}>
-          {providers.map((x) => (
-            <option key={x}>{x}</option>
-          ))}
-          {!providers.includes(p.provider) && <option>{p.provider}</option>}
-        </select>
-        <input className="field" style={{ flex: 1 }} value={model} placeholder="model id" onChange={(e) => setModel(e.target.value)} onBlur={() => model.trim() && model.trim() !== p.model && onPatch({ model: model.trim() })} />
-        <ModelsMenu load={() => onLookup(p.provider)} current={p.model} onPick={(m) => onPatch({ model: m })} />
-      </div>
-      <div className="btnrow" style={{ marginTop: 6 }}>
-        <button className={`btn small ${p.thinking ? "primary" : ""}`} onClick={() => onPatch({ thinking: !p.thinking })}>thinking {p.thinking ? "on" : "off"}</button>
-        {["low", "medium", "high"].map((e) => (
-          <button key={e} className={`btn small ${p.reasoning_effort === e ? "primary" : ""}`} disabled={!p.thinking} onClick={() => onPatch({ reasoning_effort: e })}>{e}</button>
-        ))}
-        <button className={`btn small ${p.images ? "primary" : ""}`} onClick={() => onPatch({ images: !p.images })}>images {p.images ? "on" : "off"}</button>
-        {!isDefault && <button className={`btn small ${inChain ? "primary" : ""}`} onClick={onChain} title="use as a fallback when the default fails">{inChain ? "fallback ✓" : "fallback"}</button>}
-        <span className="sub" style={{ marginLeft: "auto", fontFamily: "var(--mono)", fontSize: 11 }}>{id}</span>
-      </div>
-      {more && (
-        <div className="grid2">
-          <NumField label="Context window (tokens)" value={p.context_window} min={8000} step={1000} onSave={(v) => onPatch({ context_window: v })} hint="history kept before compaction" />
-          <NumField label="Max output per reply" value={p.max_output_tokens} min={1024} step={1000} onSave={(v) => onPatch({ max_output_tokens: v })} hint="max_tokens, thinking included" />
+      {open && (
+        <div className="mpanel">
+          <div className="mfields">
+            <label className="mfield">
+              <span>Label</span>
+              <input className="field" value={label} placeholder={`${p.provider}/${p.model}`} onChange={(e) => setLabel(e.target.value)} onBlur={() => label.trim() !== p.label && onPatch({ label: label.trim() })} />
+            </label>
+            <label className="mfield">
+              <span>Client</span>
+              <select className="field" value={p.provider} onChange={(e) => onPatch({ provider: e.target.value })}>
+                {providers.map((x) => (
+                  <option key={x}>{x}</option>
+                ))}
+                {!providers.includes(p.provider) && <option>{p.provider}</option>}
+              </select>
+            </label>
+            <label className="mfield wide">
+              <span>Model id</span>
+              <div className="row" style={{ gap: 8 }}>
+                <input className="field" style={{ flex: 1, minWidth: 0 }} value={model} placeholder="model id" onChange={(e) => setModel(e.target.value)} onBlur={() => model.trim() && model.trim() !== p.model && onPatch({ model: model.trim() })} />
+                <ModelsMenu load={() => onLookup(p.provider)} current={p.model} onPick={(m) => onPatch({ model: m })} />
+              </div>
+            </label>
+            <label className="mfield">
+              <span>Context window (tokens)</span>
+              <input className="field" type="number" min={8000} step={1000} defaultValue={p.context_window} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null && v !== p.context_window) onPatch({ context_window: v }); }} />
+            </label>
+            <label className="mfield">
+              <span>Max output per reply (thinking included)</span>
+              <input className="field" type="number" min={1024} step={1000} defaultValue={p.max_output_tokens} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null && v !== p.max_output_tokens) onPatch({ max_output_tokens: v }); }} />
+            </label>
+          </div>
+          <div className="btnrow">
+            <Toggle on={p.thinking} onClick={() => onPatch({ thinking: !p.thinking })}>thinking {p.thinking ? "on" : "off"}</Toggle>
+            <div className="segmented inline" role="group" aria-label="reasoning effort">
+              {["low", "medium", "high"].map((e) => (
+                <button key={e} className={p.reasoning_effort === e ? "on" : ""} disabled={!p.thinking} onClick={() => onPatch({ reasoning_effort: e })}>{e}</button>
+              ))}
+            </div>
+            <Toggle on={p.images} onClick={() => onPatch({ images: !p.images })} title="the model accepts pictures">images {p.images ? "on" : "off"}</Toggle>
+            {!isDefault && <Toggle on={inChain} onClick={onChain} title="tried after the default when it fails">{inChain ? "fallback ✓" : "use as fallback"}</Toggle>}
+            <span className="sub mono mid">{id}</span>
+          </div>
         </div>
       )}
     </div>
@@ -163,18 +206,29 @@ function AddPresetRow({ providers, onAdd, toast }: { providers: string[]; onAdd:
     setOpen(false); setModel(""); setLabel("");
   }
   return (
-    <div style={{ marginTop: 10 }}>
-      <div className="row" style={{ gap: 8 }}>
-        <select className="field" style={{ width: 130 }} value={provider} onChange={(e) => setProvider(e.target.value)}>
-          {providers.map((x) => (
-            <option key={x}>{x}</option>
-          ))}
-        </select>
-        <input className="field" style={{ flex: 1 }} value={model} placeholder="model id" onChange={(e) => setModel(e.target.value)} />
-        <ModelsMenu load={lookup} current={model} onPick={setModel} />
+    <div className="mpanel add">
+      <div className="mfields">
+        <label className="mfield">
+          <span>Client</span>
+          <select className="field" value={provider} onChange={(e) => setProvider(e.target.value)}>
+            {providers.map((x) => (
+              <option key={x}>{x}</option>
+            ))}
+          </select>
+        </label>
+        <label className="mfield wide">
+          <span>Model id</span>
+          <div className="row" style={{ gap: 8 }}>
+            <input className="field" style={{ flex: 1, minWidth: 0 }} value={model} placeholder="model id" onChange={(e) => setModel(e.target.value)} />
+            <ModelsMenu load={lookup} current={model} onPick={setModel} />
+          </div>
+        </label>
+        <label className="mfield">
+          <span>Label (optional)</span>
+          <input className="field" value={label} placeholder="e.g. Qwen fast" onChange={(e) => setLabel(e.target.value)} />
+        </label>
       </div>
-      <div className="row" style={{ gap: 8, marginTop: 6 }}>
-        <input className="field" style={{ flex: 1 }} value={label} placeholder="label (optional), e.g. Qwen fast" onChange={(e) => setLabel(e.target.value)} />
+      <div className="btnrow">
         <button className="btn small primary" onClick={add}>add</button>
         <button className="btn small" onClick={() => setOpen(false)}>cancel</button>
       </div>
@@ -200,6 +254,7 @@ function DeleteButton({ label, onDelete }: { label: string; onDelete: () => void
   );
 }
 
+/** One client: id, kind and readiness on a line; the address and the key behind it. */
 function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
   id: string;
   p: ProviderConf;
@@ -208,59 +263,77 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
   onPatch: Patch;
   onRemove: (id: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
   const [baseUrl, setBaseUrl] = useState(p.base_url);
   const [keyDraft, setKeyDraft] = useState("");
   useEffect(() => setBaseUrl(p.base_url), [p.base_url]);
   useEffect(() => setKeyDraft(""), [p.api_key_set]);
   return (
-    <div style={{ borderTop: "1px solid var(--line, #333)", paddingTop: 8, marginTop: 8 }}>
-      <div className="row" style={{ cursor: "default" }}>
-        <b style={{ fontFamily: "var(--mono)", fontSize: 13 }}>{id}</b>
-        <select className="field" style={{ flex: 1 }} value={p.kind} onChange={(e) => onPatch(id, { kind: e.target.value })}>
-          {kinds.map((k) => (
-            <option key={k}>{k}</option>
-          ))}
-        </select>
-        <span className="sub">{available ? "ready" : "needs URL/key"}</span>
-        <DeleteButton label="delete" onDelete={() => onRemove(id)} />
-      </div>
-      <div className="grid2">
-        <div>
-          <label className="field">base_url</label>
-          <input
-            className="field"
-            value={baseUrl}
-            placeholder="http://host:9000/v1"
-            onChange={(e) => setBaseUrl(e.target.value)}
-            onBlur={() => baseUrl.trim() !== p.base_url && baseUrl.trim() && onPatch(id, { base_url: baseUrl.trim() })}
-          />
+    <div className={`mrow ${open ? "open" : ""}`}>
+      <div className="mline">
+        <button className="mmain" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+          <span className="mtitle mono">{id}</span>
+          <span className="mmeta">{p.kind} · {p.base_url || "no address"}</span>
+        </button>
+        <div className="mtags">
+          <span className={`pill ${available ? "idle" : "waiting"}`}>{available ? "ready" : "needs URL or key"}</span>
+          {p.api_key_set && <span className="pill">key stored</span>}
         </div>
-        <div>
-          <label className="field">api_key {p.api_key_set ? "(stored)" : "(optional)"}</label>
-          <div className="row" style={{ padding: 0 }}>
-            <input
-              className="field"
-              type="password"
-              autoComplete="new-password"
-              placeholder={p.api_key_set ? "•••• stored — type to replace" : "no key needed"}
-              value={keyDraft}
-              onChange={(e) => setKeyDraft(e.target.value)}
-              onBlur={() => {
-                const v = keyDraft.trim();
-                if (v) {
-                  onPatch(id, { api_key: v });
-                  setKeyDraft("");
-                }
-              }}
-            />
-            {p.api_key_set && (
-              <button className="btn small danger" title="remove stored key" onClick={() => onPatch(id, { api_key: "" })}>
-                ✕
-              </button>
-            )}
+        <div className="mactions">
+          <button className={`iconbtn small ${open ? "on" : ""}`} onClick={() => setOpen((o) => !o)} title={open ? "close" : "edit"} aria-label="edit"><span className={`chev ${open ? "down" : ""}`}>›</span></button>
+          <DeleteButton label="✕" onDelete={() => onRemove(id)} />
+        </div>
+      </div>
+      {open && (
+        <div className="mpanel">
+          <div className="mfields">
+            <label className="mfield">
+              <span>Kind</span>
+              <select className="field" value={p.kind} onChange={(e) => onPatch(id, { kind: e.target.value })}>
+                {kinds.map((k) => (
+                  <option key={k}>{k}</option>
+                ))}
+              </select>
+            </label>
+            <label className="mfield wide">
+              <span>base_url (the API root, usually …/v1)</span>
+              <input
+                className="field"
+                value={baseUrl}
+                placeholder="http://host:9000/v1"
+                onChange={(e) => setBaseUrl(e.target.value)}
+                onBlur={() => baseUrl.trim() !== p.base_url && baseUrl.trim() && onPatch(id, { base_url: baseUrl.trim() })}
+              />
+            </label>
+            <label className="mfield wide">
+              <span>api_key {p.api_key_set ? "(stored)" : "(optional; a key proxy or a self-hosted endpoint needs none)"}</span>
+              <div className="row" style={{ gap: 8 }}>
+                <input
+                  className="field"
+                  style={{ flex: 1, minWidth: 0 }}
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder={p.api_key_set ? "•••• stored — type to replace" : "no key needed"}
+                  value={keyDraft}
+                  onChange={(e) => setKeyDraft(e.target.value)}
+                  onBlur={() => {
+                    const v = keyDraft.trim();
+                    if (v) {
+                      onPatch(id, { api_key: v });
+                      setKeyDraft("");
+                    }
+                  }}
+                />
+                {p.api_key_set && (
+                  <button className="btn small danger" title="remove stored key" onClick={() => onPatch(id, { api_key: "" })}>
+                    forget key
+                  </button>
+                )}
+              </div>
+            </label>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -293,30 +366,28 @@ function AddProviderRow({ kinds, onAdd, toast }: { kinds: string[]; onAdd: (id: 
       </button>
     );
   return (
-    <div className="grid2" style={{ marginTop: 10 }}>
-      <div>
-        <label className="field">new client id</label>
-        <input className="field" value={id} placeholder="local-vllm" onChange={(e) => setId(e.target.value)} />
+    <div className="mpanel add">
+      <div className="mfields">
+        <label className="mfield">
+          <span>Client id</span>
+          <input className="field" value={id} placeholder="local-vllm" onChange={(e) => setId(e.target.value)} />
+        </label>
+        <label className="mfield">
+          <span>Kind</span>
+          <select className="field" value={kind} onChange={(e) => setKind(e.target.value)}>
+            {kinds.map((k) => (
+              <option key={k}>{k}</option>
+            ))}
+          </select>
+        </label>
+        <label className="mfield wide">
+          <span>base_url</span>
+          <input className="field" value={baseUrl} placeholder="http://host:9000/v1" onChange={(e) => setBaseUrl(e.target.value)} />
+        </label>
       </div>
-      <div>
-        <label className="field">kind</label>
-        <select className="field" value={kind} onChange={(e) => setKind(e.target.value)}>
-          {kinds.map((k) => (
-            <option key={k}>{k}</option>
-          ))}
-        </select>
-      </div>
-      <div>
-        <label className="field">base_url</label>
-        <input className="field" value={baseUrl} placeholder="http://host:9000/v1" onChange={(e) => setBaseUrl(e.target.value)} />
-      </div>
-      <div className="btnrow" style={{ marginTop: 22 }}>
-        <button className="btn small primary" onClick={add}>
-          add
-        </button>
-        <button className="btn small" onClick={() => setOpen(false)}>
-          cancel
-        </button>
+      <div className="btnrow">
+        <button className="btn small primary" onClick={add}>add</button>
+        <button className="btn small" onClick={() => setOpen(false)}>cancel</button>
       </div>
     </div>
   );
@@ -872,7 +943,8 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <div className="section-title" style={{ marginTop: 0 }}>
           Models
         </div>
-        <div className="sub">A model is a client plus a model id. The marked one is the default for new sessions; any session can switch from the chip in its chat. Several models may share one client.</div>
+        <div className="sub">A model is a client plus a model id. The marked one opens new sessions; any session can switch from the chip in its chat. Tap a row to edit it.</div>
+        <div className="mlist">
         {Object.entries(s.presets ?? {}).map(([id, p]) => (
           <PresetRow
             key={id}
@@ -888,6 +960,7 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
             onLookup={lookupProviderModels}
           />
         ))}
+        </div>
         {Object.keys(s.presets ?? {}).length === 0 && <div className="sub" style={{ marginTop: 6 }}>No models yet: add one below.</div>}
         <AddPresetRow providers={providerIds} toast={toast} onAdd={(id, p) => void patchPreset(id, p)} />
         <div className="sub" style={{ marginTop: 10 }}>Fallback order: {(s.model.chain ?? []).length ? s.model.chain.join(" → ") : "none"} (tried after the default when it fails).</div>
@@ -897,7 +970,8 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
         <div className="section-title" style={{ marginTop: 0 }}>
           Providers (clients)
         </div>
-        <div className="sub">OpenAI-compatible endpoints. base_url is the API root (…/v1); a self-hosted vLLM needs no key.</div>
+        <div className="sub">OpenAI-compatible endpoints the models run on. Keys stay in the key proxy where one is configured; a self-hosted vLLM needs none.</div>
+        <div className="mlist">
         {providerIds.map((id) => (
           <ProviderBlock
             key={id}
@@ -909,6 +983,7 @@ export function SettingsScreen({ toast }: { toast: (t: string) => void }) {
             onRemove={(pid) => void removeProvider(pid)}
           />
         ))}
+        </div>
         <AddProviderRow kinds={kinds} toast={toast} onAdd={(pid, base, kind) => void patchProvider(pid, { kind, base_url: base })} />
       </div>
 

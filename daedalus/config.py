@@ -634,6 +634,9 @@ OPENCODE_GO_PRICING: dict[str, dict[str, float]] = {
 
 
 class RuntimeConfig(BaseModel):
+    seeded: list[str] = Field(default_factory=list)
+    """Seeds already applied to this file (``claude-subscription`` …). A seed adds a provider or presets once;
+    listed here it is never applied again, so what the operator removes stays removed."""
     model: ModelConfig = Field(default_factory=ModelConfig)
     presets: dict[str, ModelPresetConfig] = Field(
         default_factory=lambda: {
@@ -714,7 +717,8 @@ class RuntimeConfig(BaseModel):
     @classmethod
     def load(cls, path: Path) -> RuntimeConfig:
         if not path.exists():
-            config = cls()
+            # The defaults already carry everything a seed would add: mark every seed applied.
+            config = cls(seeded=list(SEEDS))
             config.save(path)
             return config
         with path.open("rb") as fh:
@@ -816,9 +820,23 @@ def _seed_presets(raw: dict[str, Any]) -> bool:
     return True
 
 
+SEEDS = ("claude-subscription",)
+"""Every seed a config can have had applied, in the order they were introduced."""
+
+
 def _seed_claude_subscription(raw: dict[str, Any]) -> bool:
-    """Add the Claude Code subscription endpoint and presets when an older config lacks them."""
-    changed = False
+    """Add the Claude Code subscription endpoint and presets to a config that has never had them.
+
+    Once: the seed is recorded in ``seeded`` and never applied again, so an operator who removes the
+    presets (or the provider) keeps them removed across restarts.
+    """
+    seeded = raw.setdefault("seeded", [])
+    if not isinstance(seeded, list):
+        seeded = raw["seeded"] = []
+    if "claude-subscription" in seeded:
+        return False
+    seeded.append("claude-subscription")
+    changed = True
     providers = raw.setdefault("providers", {})
     presets = raw.setdefault("presets", {})
     if isinstance(providers, dict) and "claude" not in providers:

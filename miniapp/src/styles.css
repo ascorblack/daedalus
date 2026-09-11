@@ -637,3 +637,42 @@ body.resizing iframe { pointer-events: none; }
 .ws-name { font-weight: 600; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; overflow-wrap: anywhere; }
 .ws-meta { overflow-wrap: anywhere; }
 .workspaces .sheet .files { min-height: 200px; }
+
+/* ── settings: models and clients as rows that expand ─────────────────────────────────── */
+.mlist { margin-top: 8px; border-top: 1px solid var(--line); }
+.mrow { border-bottom: 1px solid var(--line); padding: 4px 0; }
+.mrow.default { box-shadow: inset 3px 0 0 var(--ok); padding-left: 10px; }
+.mrow.open { background: color-mix(in srgb, var(--card-2) 55%, transparent); border-radius: 12px; margin: 4px -8px; padding-left: 8px; padding-right: 8px; }
+.mrow.open.default { padding-left: 10px; }
+.mline { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "radio main actions" "tags tags tags"; align-items: center; gap: 4px 10px; min-height: 48px; }
+.mrow:not(.default) .mline { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "main actions" "tags tags"; }
+.mrow.default .radio, .mrow .radio { grid-area: radio; }
+.mmain { grid-area: main; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; background: none; border: 0; padding: 6px 0; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.mtitle { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.mtitle.mono, .sub.mono { font-family: var(--mono); font-size: 13px; }
+.mmeta { color: var(--muted); font-size: 12.5px; font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.mtags { grid-area: tags; display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 6px; }
+.mactions { grid-area: actions; display: flex; align-items: center; gap: 6px; }
+.mactions .chev { display: inline-block; font-size: 20px; line-height: 1; color: var(--muted); transition: transform .15s; }
+.mactions .chev.down { transform: rotate(90deg); }
+.mactions .iconbtn.on .chev { color: var(--bg); }
+.mpanel { padding: 4px 0 10px; }
+.mpanel.add { margin-top: 10px; border: 1px dashed var(--line); border-radius: 12px; padding: 10px 12px; }
+.mfields { display: grid; grid-template-columns: 1fr; gap: 8px 12px; }
+.mfield { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.mfield > span { color: var(--muted); font-size: 12px; }
+.mfield .field { margin: 0; width: 100%; }
+.segmented.inline { display: inline-flex; margin: 0; }
+.segmented.inline button { flex: none; padding: 6px 12px; font-size: 13px; }
+.btnrow .sub.mid { margin-left: auto; align-self: center; }
+@media (min-width: 720px) {
+  .mline { grid-template-columns: auto minmax(0, 1fr) auto auto; grid-template-areas: "radio main tags actions"; }
+  .mrow:not(.default) .mline { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "main tags actions"; }
+  .mtags { padding: 0; justify-content: flex-end; }
+  .mfields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mfield.wide { grid-column: 1 / -1; }
+}
+@media (min-width: 1200px) {
+  .mfields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .mfield.wide { grid-column: span 2; }
+}

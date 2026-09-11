@@ -4,6 +4,11 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-11
 
+- **Removed models stay removed.** The Claude subscription seed re-added its presets on every start; a seed is
+  now applied once and recorded in the config (`seeded`).
+- **Settings, models and clients.** One line per model and per client — label, client · model, and pills for
+  default, fallback, thinking, images and window — that opens into an editing panel; the same rows stack on a
+  phone and spread on a desktop.
 - **Rebuild without the outage.** The supervisor preflights a merged revision on a candidate checkout while
   the bot keeps serving, and stops it only to sync dependencies and restart; a revision that fails the
   preflight never touches the running bot. Sandbox wrappers the bot leaves behind are reaped.
