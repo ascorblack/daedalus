@@ -98,6 +98,15 @@ class ProposalRefused(GitError):
     """A proposal gate said no; the message tells the agent what to do instead."""
 
 
+# The modules a process may start in, written here rather than read from the tree being audited.
+# These three are the boot set: "python -m daedalus", the app object the supervisor loads, and the
+# benchmark harbor. A new entry point is not a new process start — it is a module reached from one
+# of these — so widening this tuple is a deliberate change to the gate itself, not something a
+# proposed tree can do to itself. ``test_the_gate_carries_its_own_boot_set`` holds the two lists
+# together so drift is a failing test rather than a quiet widening.
+SELF_NAMABLE = ("daedalus.__main__", "daedalus.app", "daedalus.bench.harbor")
+
+
 def relevance_gate(root: Path, changed_files: list[str], execution_path: str | None) -> None:
     """A changed host module must sit on an execution path the agent can name.
 
@@ -106,17 +115,20 @@ def relevance_gate(root: Path, changed_files: list[str], execution_path: str | N
     touches no host module (tests, docs, skills, the Mini App, deploy files) needs no path.
 
     Naming the changed module itself is refused, because a module is not the reason it runs. The
-    exception is a process entry point: it is where the process starts, so naming it is naming the
-    runner rather than the module under it. For an entry point that nothing imports it is also the
-    only name there is — without this, a change to ``daedalus/__main__.py`` has no valid proposal:
-    itself is refused, nothing else reaches it, and no path at all is refused as well.
+    exception is a boot module: it is where the process starts, so naming it is naming the runner
+    rather than the module under it. That set is ``SELF_NAMABLE``, a constant of this module and not
+    the audited tree's copy of it: a rule a proposal can extend is not a rule. The exception applies
+    to every boot module, not only to one nothing imports. For ``daedalus/__main__.py`` it is also
+    the only name there is — itself is refused, nothing else reaches it, and no path at all is
+    refused as well; for ``daedalus.app`` something does reach it, but the reason it runs is still
+    that the process starts there.
     """
     present = [f for f in changed_files if (root / f).is_file()]  # a deleted module needs no path: it is gone
     modules = reachability.modules_for_files(root, present)
     if not modules:
         return
     named = execution_path.split(":", 1)[0].strip() if execution_path else ""
-    if named in modules and named not in reachability.ENTRY_POINTS:
+    if named in modules and named not in SELF_NAMABLE:
         raise ProposalRefused(
             f"execution_path {execution_path!r} is the changed module itself. Name the code that runs it — the tool, "
             "hook, extension or startup step that imports it — not the module being changed."
