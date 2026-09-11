@@ -90,3 +90,23 @@ async def test_the_sandbox_opens_the_paths_the_host_named_for_the_session(tmp_pa
     binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
     # The missing path, the symlink and the duplicate are left out; the sandbox still runs.
     assert binds == [str(workspace), str(worktree)]
+
+
+def test_a_worktree_opens_its_git_metadata_but_not_the_whole_repository(tmp_path) -> None:
+    from daedalus.host.session_runner import worktree_writable_paths
+
+    repo = tmp_path / "repo"
+    (repo / ".git" / "worktrees" / "fix").mkdir(parents=True)
+    (repo / ".git" / "objects").mkdir()
+    wt = tmp_path / "worktrees" / "fix"
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text(f"gitdir: {repo / '.git' / 'worktrees' / 'fix'}\n")
+    paths = worktree_writable_paths(wt)
+    assert paths[0] == wt
+    assert repo / ".git" / "worktrees" / "fix" in paths and repo / ".git" / "objects" in paths
+    assert repo / ".git" / "refs" / "heads" / "agent" in paths and (repo / ".git" / "refs" / "heads" / "agent").is_dir()
+    assert repo / ".git" not in paths and repo / ".git" / "refs" / "heads" not in paths
+    # A plain directory (not a worktree) opens only itself.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert worktree_writable_paths(plain) == [plain]

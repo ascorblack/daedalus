@@ -959,7 +959,7 @@ class SessionManager:
             self_rebuild=hooks.get("self_rebuild"),
             self_rollback=hooks.get("self_rollback"),
             progress=_bind(hooks.get("progress"), state.session.id),
-            writable=[Path(str(p)) for p in (state.session.metadata.get("worktrees") or []) if str(p).startswith("/")],
+            writable=[q for p in (state.session.metadata.get("worktrees") or []) if str(p).startswith("/") for q in worktree_writable_paths(Path(str(p)))],
             extra={"skill_store": self.skills, "manager": self, "vision": _LiveVision(self), "jobs": self._jobs.setdefault(state.session.id, {})},
         )
         state.services = services
@@ -976,8 +976,10 @@ class SessionManager:
             state.session.metadata["worktrees"] = paths
             state.metadata["worktrees"] = paths
             await self.sessions.update_metadata(session_id, state.session.metadata)
-        if state.services is not None and path not in state.services.writable:
-            state.services.writable.append(path)
+        if state.services is not None:
+            for q in worktree_writable_paths(path):
+                if q not in state.services.writable:
+                    state.services.writable.append(q)
 
     # -- input --------------------------------------------------------------------
 
@@ -2214,6 +2216,35 @@ class _LiveVision:
 
     def __bool__(self) -> bool:
         return self._manager._vision() is not None
+
+
+def worktree_writable_paths(worktree: Path) -> list[Path]:
+    """The worktree itself and the parts of its repository a commit there writes.
+
+    A worktree keeps its own HEAD, index and logs under the main repository's ``.git/worktrees/<name>``, and
+    shares that repository's object store and the refs of its branch. A commit writes to all of them, so a
+    session that may write its worktree gets those too — the shared object store (append-only by nature),
+    the ``agent/`` branch refs and their reflogs — and not the rest of the repository's state.
+    """
+    paths = [worktree]
+    dotgit = worktree / ".git"
+    try:
+        text = dotgit.read_text(encoding="utf-8") if dotgit.is_file() else ""
+    except OSError:
+        text = ""
+    if not text.startswith("gitdir:"):
+        return paths
+    gitdir = Path(text.split(":", 1)[1].strip())
+    if gitdir.parent.name != "worktrees":
+        return paths + [gitdir]
+    common = gitdir.parent.parent
+    for extra in (gitdir, common / "objects", common / "refs" / "heads" / "agent", common / "logs" / "refs" / "heads" / "agent"):
+        try:
+            extra.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        paths.append(extra)
+    return paths
 
 
 def _log_task_failure(task: asyncio.Task[None]) -> None:
