@@ -17,6 +17,11 @@ from daedalus import supervisor_client
 from daedalus.host import reachability
 from daedalus.security import redact
 
+# A command that runs Python tests. Such a run prints how many it executed, so a receipt for one that
+# says nothing, or says zero, is not evidence that anything was checked. Recognising a runner is not
+# guessing from a word in the string: see `_is_test_run` in daedalus.tools.verify.
+from daedalus.tools.verify import _is_test_run as PYTHON_TEST_RUN
+
 if TYPE_CHECKING:
     from aiogram.types import CallbackQuery, Message
 
@@ -26,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 REPOS = ("bot", "core")
 RECEIPT_COMMAND_CHARS = 160
+
 
 
 @dataclass(slots=True)
@@ -178,6 +184,28 @@ def _names(command: str, choices: set[str]) -> bool:
     return any(re.search(r"(?<![A-Za-z0-9_-])" + re.escape(tok) + r"(?![A-Za-z0-9_])", command) for tok in choices)
 
 
+def _ran_no_tests(row: dict[str, Any]) -> str | None:
+    """Why this passing receipt is worth nothing, or ``None`` when it is worth what it says.
+
+    A Python test run is evidence only if it executed at least one test: a run that collected nothing,
+    or that the receipt cannot account for, proves the runner started, not that the change was checked.
+    Commands that are not Python test runs are not judged by this rule — the gate does not guess what
+    another runner's output means.
+    """
+    if not PYTHON_TEST_RUN(str(row.get("command") or "")):
+        return None
+    count = row.get("tests_run")
+    if count is None:
+        return "the receipt does not say how many tests it ran"
+    try:
+        ran = int(count)
+    except (TypeError, ValueError):
+        return "the receipt's test count is not a number"
+    if ran < 1:
+        return "the run executed no tests"
+    return None
+
+
 def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str, Any]], execution_path: str | None) -> None:
     """Every changed host module must be named by a passing Verify receipt that postdates it.
 
@@ -195,17 +223,22 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
     tree. A row whose timestamp is missing or unreadable is no evidence at all, not an exemption —
     ``receipt_rows`` selects the column, so the host always supplies it.
 
-    Three limits are known and are named rather than hidden. The comparison is against modification
-    time, not content, so an edit followed by a timestamp of an earlier date defeats it, and a
-    content-preserving rewrite (a ``touch``, a formatter, a rebase) blocks the change until the check
-    is run again. A deleted file has no bytes left to cover, so a receipt that names it is enough for
-    it. And a receipt that names a file without running it — ``cat`` it, print its path — still counts
-    as naming; the receipt records the command and its output digest, so a reader can see that for what
-    it is, but the gate does not decide it.
+    Four limits are known and are named rather than hidden. The receipt's ``tree`` field is shown to a
+    reader and is not read here: a receipt from the right commit on the wrong branch still passes, and
+    closing that needs the tree to be compared against the proposed worktree. The comparison is against
+    modification time, not content, so an edit followed by a timestamp of an earlier date defeats it,
+    and a content-preserving rewrite (a ``touch``, a formatter, a rebase) blocks the change until the
+    check is run again. A deleted file has no bytes left to cover, so a receipt that names it is enough
+    for it. And a receipt that names a file without running it — ``cat`` it, print its path — counts as
+    naming when the window holds no green test run that executed nothing; where it does, the change is
+    refused, because a run that proves nothing sitting beside a command that only reads a file names
+    the code without checking it.
     """
     root = root.resolve()
-    passed = [r for r in receipts if r.get("passed")]
-    if not passed:
+    green = [r for r in receipts if r.get("passed")]
+    passed = [r for r in green if _ran_no_tests(r) is None]
+    empty = [r for r in green if _ran_no_tests(r) is not None]
+    if not green:
         raise ProposalRefused(
             "no passing Verify receipt recorded since the branch started. Run the tests and the changed "
             "path through Verify (not Exec) so the receipts are on the card, then propose again."
@@ -245,6 +278,14 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
                 found.append(row)
         return found
 
+    def current(f: str, rows: list[dict[str, Any]]) -> bool:
+        """Whether one of these receipts postdates the file, i.e. covers the bytes in the tree."""
+        path = root / f
+        if not path.is_file():
+            return True  # deleted: no bytes left to cover, and the receipt names it
+        newest = path.stat().st_mtime
+        return any((when := _receipt_time(r)) is not None and when >= newest for r in rows)
+
     unnamed: list[str] = []
     stale: list[str] = []
     for f in sorted(tokens_for):
@@ -253,14 +294,39 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
             if f in must_be_named:
                 unnamed.append(f)
             continue
+        if current(f, rows):
+            continue  # named by a receipt that postdates it: the bytes in the tree are covered
         path = root / f
-        if not path.is_file():
-            continue  # deleted: no bytes left, and a receipt above names it
         newest = path.stat().st_mtime
-        if not any((when := _receipt_time(r)) is not None and when >= newest for r in rows):
-            dates = ", ".join(sorted({str(r.get("at") or "no timestamp") for r in rows}))
-            stale.append(f"{f} (last written {datetime.fromtimestamp(newest, tz=UTC).isoformat()}; receipts at {dates})")
+        dates = ", ".join(sorted({str(r.get("at") or "no timestamp") for r in rows}))
+        stale.append(f"{f} (last written {datetime.fromtimestamp(newest, tz=UTC).isoformat()}; receipts at {dates})")
 
+    if not passed and empty:
+        raise ProposalRefused(
+            "the only passing receipts prove nothing about the change: "
+            + "; ".join(f"receipt {r.get('id')} — {_ran_no_tests(r)} ({str(r.get('command') or '')[:RECEIPT_COMMAND_CHARS]})" for r in empty)
+            + ". Collect-only, a run with no matching tests, or a receipt too old to carry the count is not a check: run the "
+            "tests the change actually exercises with Verify, after the last edit."
+        )
+    # A green test run that executed nothing must not sit in the window while the change rides on a
+    # receipt that only reads a file: that is the count rule undone by arrangement. If the window holds
+    # such a row and no run that really counted tests, the proposal is refused for what it is.
+    def counted_tests(row: dict[str, Any]) -> bool:
+        if not PYTHON_TEST_RUN(str(row.get("command") or "")):
+            return False
+        try:
+            return int(row.get("tests_run")) >= 1
+        except (TypeError, ValueError):
+            return False
+
+    real_run = any(counted_tests(r) for r in passed)
+    if empty and not real_run:
+        raise ProposalRefused(
+            "the window holds a test run that proves nothing ("
+            + "; ".join(f"receipt {r.get('id')} — {_ran_no_tests(r)} ({str(r.get('command') or '')[:RECEIPT_COMMAND_CHARS]})" for r in empty)
+            + ") and no run that counted any tests, so what names the changed code is a command that only read a file. "
+            "Run the tests the change exercises with Verify, after the last edit."
+        )
     if unnamed:
         raise ProposalRefused(
             "no passing Verify receipt names the changed code: " + ", ".join(unnamed) + ". Every changed host module "
@@ -456,7 +522,7 @@ class SelfDevelopment:
 
     async def receipt_rows(self, session_id: str, *, since: str | None = None, hours: int = 24) -> list[dict[str, Any]]:
         since = since or (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
-        rows = await self.app.db.fetchall("SELECT id, criterion, command, exit_code, passed, at FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 50", (session_id, since))
+        rows = await self.app.db.fetchall("SELECT id, criterion, command, exit_code, passed, at, tree, tests_run, tests_skipped FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 50", (session_id, since))
         return [dict(r) for r in rows]
 
     async def receipts_for(self, session_id: str, *, since: str | None = None, hours: int = 24) -> str:
@@ -467,7 +533,7 @@ class SelfDevelopment:
         """
         since = since or (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
         rows = await self.app.db.fetchall(
-            "SELECT id, criterion, command, exit_code, passed, sandboxed, dependencies FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 12", (session_id, since)
+            "SELECT id, criterion, command, exit_code, passed, sandboxed, dependencies, tree, tests_run, tests_skipped FROM verifications WHERE session_id = ? AND at >= ? ORDER BY id DESC LIMIT 12", (session_id, since)
         )
         if not rows:
             return "\n\nVerification receipts: none — nothing in this proposal was checked with Verify."
@@ -483,10 +549,23 @@ class SelfDevelopment:
                 caveats.append("pipes the output into a filter; read the receipt's output, not only its exit code")
             if not row["sandboxed"]:
                 caveats.append("unsandboxed")
+            if PYTHON_TEST_RUN(command):
+                try:
+                    ran = int(row["tests_run"]) if row["tests_run"] is not None else None
+                except (TypeError, ValueError):
+                    ran = None
+                if ran is None:
+                    caveats.append("a test run whose receipt does not say how many tests it executed")
+                elif ran < 1:
+                    caveats.append("a test run that executed no tests")
             suffix = f" ⚠ {'; '.join(caveats)}" if caveats else ""
             deps = r.redact((row["dependencies"] or "").strip())
             deps_note = f" · deps: {deps}" if deps else ""
-            lines.append(f"- {'✅' if row['passed'] else '❌'} {r.redact(row['criterion'])} — `{shown}` (exit {row['exit_code']}, receipt v{row['id']}){deps_note}{suffix}")
+            # The dirty marker is the part a reader must not lose: a bare hash looks like a clean tree.
+            tree = row["tree"] or ""
+            tree_note = f", tree {tree[:12]}{'+dirty' if tree.endswith('+worktree') else ''}" if tree else ""
+            run_note = f", {row['tests_run']} tests run" if row["tests_run"] is not None else ""
+            lines.append(f"- {'✅' if row['passed'] else '❌'} {r.redact(row['criterion'])} — `{shown}` (exit {row['exit_code']}, receipt v{row['id']}{tree_note}{run_note}){deps_note}{suffix}")
         return "\n\nVerification receipts:\n" + "\n".join(lines)
 
     async def _send_card(self, proposal_id: str, repo: str, title: str, summary: str, pr_url: str, diffstat: str) -> None:

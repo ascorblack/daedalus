@@ -400,6 +400,13 @@ MIGRATIONS: list[str] = [
     ALTER TABLE board_tasks ADD COLUMN origin_session_id TEXT;
     UPDATE board_tasks SET origin_session_id = session_id WHERE origin_session_id IS NULL;
     """,
+    # 20 — a receipt says which tree it ran against and whether it ran any tests: a green run that
+    # executed nothing is not evidence, and a reviewer can see the commit the check belongs to
+    """
+    ALTER TABLE verifications ADD COLUMN tree TEXT NOT NULL DEFAULT '';
+    ALTER TABLE verifications ADD COLUMN tests_run INTEGER;
+    ALTER TABLE verifications ADD COLUMN tests_skipped INTEGER;
+    """,
 ]
 
 
