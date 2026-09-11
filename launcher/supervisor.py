@@ -4,9 +4,9 @@
 Responsibilities, and nothing more:
 
 * start the bot and restart it when it dies (with backoff);
-* on ``rebuild``: move both repositories to ``origin/main``, run preflight in the
-  new tree, and only then restart; roll back to the last known-good revision when
-  preflight fails;
+* on ``rebuild``: preflight ``origin/main`` on a candidate checkout while the bot keeps
+  running, then move both repositories to it and restart; a revision that fails the
+  preflight never touches the running bot;
 * on ``rollback``: check out an earlier known-good revision and restart;
 * on ``panic``: kill the whole process tree immediately;
 * enforce the daily spend cap by reading the bot's usage table.
@@ -47,6 +47,10 @@ LIMIT_FLAG = STATE / "BUDGET_EXCEEDED"
 LOG = STATE / "supervisor.log"
 
 REBUILD_TRIGGER_FILES = ("deploy/Dockerfile", "deploy/compose.yaml", "deploy/apt-packages.txt")
+CANDIDATE = STATE / "preflight"
+"""Detached checkouts of origin/main, one per repository under the names the running checkouts have, so the
+bot repository's ``../protocore-exp`` path dependency resolves to the candidate core. The preflight runs here
+while the bot keeps serving on the old revision; the running checkouts move only once it passes."""
 
 
 def log(message: str) -> None:
@@ -170,6 +174,64 @@ def record_good() -> None:
     log(f"recorded known-good bot={entry['bot'][:10]} core={entry['core'][:10]}")
 
 
+def candidate_dir(repo: Path) -> Path:
+    return CANDIDATE / repo.name
+
+
+def prepare_candidate(repo: Path) -> tuple[bool, str]:
+    """Put a detached checkout of origin/main next to the others under CANDIDATE, reusing its venv and
+    node_modules from last time; the object store is the repository's own (a worktree), so this is a checkout,
+    not a clone."""
+    target = candidate_dir(repo)
+    CANDIDATE.mkdir(parents=True, exist_ok=True)
+    if not (target / ".git").exists():
+        git(repo, "worktree", "prune")
+        code, out = git(repo, "worktree", "add", "--detach", "--force", str(target), "origin/main")
+        return code == 0, out
+    code, out = git(target, "checkout", "--detach", "--force", "origin/main")
+    if code != 0:
+        return False, out
+    code, out = git(target, "clean", "-fd", "--exclude=.venv", "--exclude=node_modules", "--exclude=miniapp/node_modules")
+    return code == 0, out
+
+
+def install_from_candidate(repo: Path) -> tuple[bool, str]:
+    """After the preflight passed on the candidate: the running checkout gets its dependencies synced (a warm
+    cache, seconds) and the app build copied over rather than built again; this is the whole downtime."""
+    code, out = run(["uv", "sync", "--frozen", "--extra", "dev"], cwd=repo, timeout=1200)
+    if code != 0:
+        return False, out
+    built = candidate_dir(repo) / "miniapp" / "dist"
+    if built.is_dir():
+        target = repo / "miniapp" / "dist"
+        shutil.rmtree(target, ignore_errors=True)
+        shutil.copytree(built, target)
+    restore_owner(repo)
+    return True, out
+
+
+def reap_zombies(keep: set[int]) -> int:
+    """Collect children the bot left behind (sandbox wrappers reparented to PID 1) — by pid, never with a
+    wait on any child, so the bot process asyncio itself waits on is not taken from under it."""
+    reaped = 0
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) in keep:
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", encoding="utf-8") as fh:
+                fields = fh.read().rsplit(")", 1)[1].split()
+        except OSError:
+            continue
+        if fields[0] != "Z" or int(fields[1]) != os.getpid():
+            continue
+        try:
+            pid, _status = os.waitpid(int(entry), os.WNOHANG)
+        except ChildProcessError:
+            continue
+        reaped += pid == int(entry)
+    return reaped
+
+
 def preflight(repo: Path) -> tuple[bool, str]:
     """Dependencies, Mini App build, import, config and smoke tests in the tree about to run."""
     steps: list[tuple[list[str], Path]] = [
@@ -279,38 +341,63 @@ class Supervisor:
         return "rebuild started: the bot stops, main is pulled and preflighted, then it restarts (rolled back on failure)"
 
     async def _rebuild(self, reason: str) -> None:
+        """Fetch, preflight the new revision on a candidate checkout while the bot keeps serving, and only then
+        stop it, move the running checkouts and restart. A revision that fails the preflight never touches the
+        running bot: the failure is recorded and the bot goes on as it was."""
         async with self.lock:
             log(f"rebuild requested: {reason}")
             previous = {"bot": head(BOT_REPO), "core": head(CORE_REPO)}
-            await self.stop_child()
             outcome = "unknown"
+            stopped = False
             try:
                 for repo in (BOT_REPO, CORE_REPO):
                     code, out = git(repo, "fetch", "--prune", "origin")
                     if code != 0:
                         outcome = f"fetch failed in {repo}: {out[-500:]}"
                         return
+                code, out = git(BOT_REPO, "rev-parse", "origin/main")
+                incoming = out.strip() if code == 0 else "unknown"
+                changed = self._changed_files(previous["bot"], incoming)
+                if any(path in changed for path in REBUILD_TRIGGER_FILES) or any(path.startswith("launcher/") for path in changed):
+                    # The image itself changes: the rebuilder replaces the container from origin/main.
+                    await self.stop_child()
+                    stopped = True
+                    for repo in (BOT_REPO, CORE_REPO):
+                        git(repo, "reset", "--hard", "origin/main")
+                    if self._request_image_rebuild():
+                        outcome = "image rebuild requested; the container will be replaced by the rebuilder"
+                        return
+                    log("image rebuild needed but no rebuilder is configured; continuing in place")
+                    self._checkout(previous["bot"], previous["core"])
+                for repo in (BOT_REPO, CORE_REPO):
+                    ok, out = await asyncio.to_thread(prepare_candidate, repo)
+                    if not ok:
+                        outcome = f"candidate checkout failed for {repo.name}: {out[-500:]}"
+                        return
+                ok, transcript = await asyncio.to_thread(preflight, candidate_dir(BOT_REPO))
+                if not ok:
+                    log("preflight failed on the candidate; the running bot is untouched")
+                    FAILED.parent.mkdir(parents=True, exist_ok=True)
+                    FAILED.write_text(
+                        f"rebuild ({reason}) failed preflight at {datetime.now(UTC).isoformat()}\n"
+                        f"the bot kept running on bot={previous['bot'][:10]} core={previous['core'][:10]}\n\n{transcript[-6000:]}"
+                    )
+                    outcome = "preflight failed; the running revision was kept"
+                    return
+                await self.stop_child()
+                stopped = True
+                for repo in (BOT_REPO, CORE_REPO):
                     code, out = git(repo, "reset", "--hard", "origin/main")
                     if code != 0:
                         outcome = f"checkout failed in {repo}: {out[-500:]}"
                         self._checkout(previous["bot"], previous["core"])
                         return
-                changed = self._changed_files(previous["bot"], head(BOT_REPO))
-                if any(path in changed for path in REBUILD_TRIGGER_FILES) or any(path.startswith("launcher/") for path in changed):
-                    if self._request_image_rebuild():
-                        outcome = "image rebuild requested; the container will be replaced by the rebuilder"
-                        return
-                    log("image rebuild needed but no rebuilder is configured; continuing in place")
-                ok, transcript = await asyncio.to_thread(preflight, BOT_REPO)
+                ok, out = await asyncio.to_thread(install_from_candidate, BOT_REPO)
                 if not ok:
-                    log("preflight failed; rolling back")
+                    log("dependency sync failed on the new revision; rolling back")
                     self._checkout(previous["bot"], previous["core"])
-                    FAILED.parent.mkdir(parents=True, exist_ok=True)
-                    FAILED.write_text(
-                        f"rebuild ({reason}) failed preflight at {datetime.now(UTC).isoformat()}\n"
-                        f"rolled back to bot={previous['bot'][:10]} core={previous['core'][:10]}\n\n{transcript[-6000:]}"
-                    )
-                    outcome = "preflight failed; rolled back"
+                    await asyncio.to_thread(install_from_candidate, BOT_REPO)
+                    outcome = f"dependency sync failed; rolled back: {out[-500:]}"
                     return
                 FAILED.unlink(missing_ok=True)
                 outcome = f"rebuilt: bot {previous['bot'][:10]}→{head(BOT_REPO)[:10]}, core {previous['core'][:10]}→{head(CORE_REPO)[:10]}"
@@ -318,7 +405,8 @@ class Supervisor:
                 log(f"rebuild outcome: {outcome}")
                 LAST_REBUILD.parent.mkdir(parents=True, exist_ok=True)
                 LAST_REBUILD.write_text(f"{datetime.now(UTC).isoformat()} {reason}: {outcome}\n")
-                self.restart_requested.set()
+                if stopped:
+                    self.restart_requested.set()
 
     def _changed_files(self, old: str, new: str) -> set[str]:
         if old == new or "unknown" in (old, new):
@@ -421,6 +509,16 @@ class Supervisor:
 
     # -- spend cap ------------------------------------------------------------------
 
+    async def reap_loop(self) -> None:
+        """The sandbox wrappers the bot starts die with it and land on PID 1; collect them so they do not pile up."""
+        while True:
+            await asyncio.sleep(30)
+            try:
+                keep = {self.child.pid} if self.child is not None and self.child.returncode is None else set()
+                reap_zombies(keep)
+            except Exception as exc:  # noqa: BLE001
+                log(f"reaping failed: {exc}")
+
     async def budget_loop(self) -> None:
         db_path = STATE / "daedalus.sqlite"
         while True:
@@ -465,6 +563,7 @@ async def main() -> int:
     tasks = [
         asyncio.create_task(supervisor.serve_socket()),
         asyncio.create_task(supervisor.budget_loop()),
+        asyncio.create_task(supervisor.reap_loop()),
     ]
     await supervisor.run_loop()
     for task in tasks:

@@ -4,6 +4,9 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-11
 
+- **Rebuild without the outage.** The supervisor preflights a merged revision on a candidate checkout while
+  the bot keeps serving, and stops it only to sync dependencies and restart; a revision that fails the
+  preflight never touches the running bot. Sandbox wrappers the bot leaves behind are reaped.
 - **Services run inside the sandbox.** `ServiceStart` ran its command outside the wall `Exec` has, and the agent
   used it to write where `Exec` could not. A service now runs under the same sandbox; the worktrees a session
   opens with `SelfWorkspace` are writable for that session's commands, which is where those writes belonged.
