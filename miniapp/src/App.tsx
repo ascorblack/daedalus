@@ -49,7 +49,15 @@ const TABS: { id: Tab; label: string; icon: IconName }[] = [
 ];
 
 export function App() {
-  const [tab, setTab] = useState<Tab>("sessions");
+  // The tab lives in the URL hash: a reload keeps the screen, and a link can open one (…/app/#settings).
+  const [tab, setTabState] = useState<Tab>(() => {
+    const wanted = window.location.hash.replace(/^#/, "");
+    return TABS.some((t) => t.id === wanted) ? (wanted as Tab) : "sessions";
+  });
+  const setTab = (next: Tab) => {
+    setTabState(next);
+    if (window.location.hash !== `#${next}`) window.history.replaceState(null, "", `#${next}`);
+  };
   const [sessionId, setSessionId] = useState<string | null>(null);
   // A second session beside the first (wide screens only); the picker chooses which.
   const [secondId, setSecondId] = useState<string | null>(null);
