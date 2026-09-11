@@ -27,7 +27,7 @@ logger = logging.getLogger("keyproxy.claude")
 CLAUDE_API = "https://api.anthropic.com"
 CLAUDE_TOKEN_URL = "https://claude.ai/v1/oauth/token"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-CLAUDE_CLI_VERSION = os.environ.get("KEYPROXY_CLAUDE_CLI_VERSION", "2.1.266")
+CLAUDE_CLI_VERSION = os.environ.get("KEYPROXY_CLAUDE_CLI_VERSION", "2.1.268")
 CLAUDE_VERSION_HASH = os.environ.get("KEYPROXY_CLAUDE_VERSION_HASH", "9d8")
 CLAUDE_ENTRYPOINT = os.environ.get("KEYPROXY_CLAUDE_ENTRYPOINT", "sdk-cli")
 CLAUDE_BETAS = (
@@ -42,6 +42,9 @@ TOOL_PREFIX = "mcp_"
 EFFORT_BUDGET = {"low": 2048, "medium": 8192, "high": 16384, "xhigh": 31999, "max": 31999}
 EFFORT_MODELS = ("claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-fable-5-1", "claude-opus-4-8", "claude-sonnet-4-6")
 MAX_OUTPUT = 32000
+CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"}
+"""Anthropic prompt-cache marker. Prefix order is tools → system → messages; at most four per request."""
+_UNCACHABLE_BLOCKS = frozenset({"thinking", "redacted_thinking"})
 
 
 def _cli_headers() -> dict[str, str]:
@@ -183,6 +186,47 @@ def _wire_tool_name(name: str) -> str:
     return TOOL_PREFIX + name
 
 
+def _with_cache(block: dict[str, Any]) -> dict[str, Any]:
+    return {**block, "cache_control": dict(CACHE_CONTROL)}
+
+
+def _stampable(message: dict[str, Any]) -> bool:
+    content = message.get("content")
+    if isinstance(content, list) and content:
+        last = content[-1]
+        if isinstance(last, dict) and last.get("type") in _UNCACHABLE_BLOCKS:
+            return False
+        return True
+    return bool(isinstance(content, str) and content)
+
+
+def _stamp_last_block(message: dict[str, Any]) -> None:
+    content = message.get("content")
+    if isinstance(content, list) and content and isinstance(content[-1], dict):
+        content[-1] = _with_cache(content[-1])
+    elif isinstance(content, str) and content:
+        message["content"] = [_with_cache({"type": "text", "text": content})]
+
+
+def _apply_prompt_cache(system: list[dict[str, Any]], tools: list[dict[str, Any]], messages: list[dict[str, Any]]) -> None:
+    """Lock the stable prefix and the conversation tail (≤4 breakpoints).
+
+    The last tool and the identity system block are byte-stable across turns.
+    The harness prompt (system[2]) carries a clock, so it is *not* a breakpoint:
+    a miss there would also drop the conversation cache. The last two stampable
+    messages let a tool-call loop reuse the growing transcript.
+    """
+    if tools:
+        tools[-1] = _with_cache(tools[-1])
+    if len(system) >= 2:
+        system[1] = _with_cache(system[1])
+    elif system:
+        system[-1] = _with_cache(system[-1])
+    stampable = [message for message in messages if _stampable(message)]
+    for message in stampable[-2:]:
+        _stamp_last_block(message)
+
+
 def _parse_args(raw: Any) -> Any:
     if isinstance(raw, dict):
         return raw
@@ -233,14 +277,6 @@ def chat_to_messages(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, st
         elif role == "tool":
             pending_results.append({"type": "tool_result", "tool_use_id": str(message.get("tool_call_id") or ""), "content": _text_of(message.get("content"))})
     flush_results()
-
-    if instructions:
-        reminder = {"type": "text", "text": "<system-reminder>\n" + "\n\n".join(instructions) + "\n</system-reminder>\n"}
-        if items and items[0].get("role") == "user":
-            content = items[0]["content"]
-            items[0]["content"] = [reminder] + (content if isinstance(content, list) else [{"type": "text", "text": str(content)}])
-        else:
-            items.insert(0, {"role": "user", "content": [reminder]})
     if not items:
         items.append({"role": "user", "content": [{"type": "text", "text": ""}]})
 
@@ -251,17 +287,13 @@ def chat_to_messages(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, st
         budget = max(1024, EFFORT_BUDGET.get(effort, 8192))
         if max_tokens <= budget:
             max_tokens = min(MAX_OUTPUT, budget + 1024)
-    out: dict[str, Any] = {
-        "model": model,
-        "max_tokens": max(1, max_tokens),
-        "stream": True,
-        "system": [
-            {"type": "text", "text": _billing_header()},
-            {"type": "text", "text": CLAUDE_IDENTITY, "cache_control": {"type": "ephemeral", "ttl": "1h"}},
-        ],
-        "messages": items,
-    }
-    tools = []
+    system: list[dict[str, Any]] = [
+        {"type": "text", "text": _billing_header()},
+        {"type": "text", "text": CLAUDE_IDENTITY},
+    ]
+    if instructions:
+        system.append({"type": "text", "text": "\n\n".join(instructions)})
+    tools: list[dict[str, Any]] = []
     for tool in body.get("tools") or []:
         fn = tool.get("function") or {}
         original = str(fn.get("name") or tool.get("name") or "")
@@ -270,6 +302,14 @@ def chat_to_messages(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, st
         wire = _wire_tool_name(original)
         names[wire] = original
         tools.append({"name": wire, "description": fn.get("description") or tool.get("description") or "", "input_schema": fn.get("parameters") or tool.get("input_schema") or {"type": "object", "properties": {}}})
+    _apply_prompt_cache(system, tools, items)
+    out: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max(1, max_tokens),
+        "stream": True,
+        "system": system,
+        "messages": items,
+    }
     if tools:
         out["tools"] = tools
     choice = body.get("tool_choice")
@@ -294,10 +334,13 @@ def _chunk(completion_id: str, model: str, delta: dict[str, Any], finish: str | 
 
 
 def _usage(input_tokens: int, output_tokens: int, cache_read: int = 0, cache_write: int = 0) -> dict[str, Any]:
+    """OpenAI-shaped usage. ``prompt_tokens`` is the whole prompt; Anthropic's ``input_tokens`` is sometimes only the uncached tail."""
+    cached = cache_read + cache_write
+    prompt = input_tokens if input_tokens >= cached else input_tokens + cached
     return {
-        "prompt_tokens": input_tokens,
+        "prompt_tokens": prompt,
         "completion_tokens": output_tokens,
-        "total_tokens": input_tokens + output_tokens,
+        "total_tokens": prompt + output_tokens,
         "prompt_tokens_details": {"cached_tokens": cache_read},
         "completion_tokens_details": {"reasoning_tokens": 0},
         "cache_creation_input_tokens": cache_write,

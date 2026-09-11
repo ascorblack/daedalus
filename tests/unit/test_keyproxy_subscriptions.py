@@ -93,6 +93,21 @@ def test_usage_views() -> None:
     assert claude["plan"] == "default_claude_max_20x" and claude["windows"][0]["name"] == "5h" and claude["windows"][2]["name"] == "Fable" and not claude["extra_usage"]
 
 
+def _cache_control_count(payload: dict[str, Any]) -> int:
+    n = 0
+    for block in payload.get("system") or []:
+        n += int(isinstance(block, dict) and "cache_control" in block)
+    for tool in payload.get("tools") or []:
+        n += int(isinstance(tool, dict) and "cache_control" in tool)
+    for message in payload.get("messages") or []:
+        content = message.get("content")
+        if isinstance(content, list):
+            n += sum(1 for block in content if isinstance(block, dict) and "cache_control" in block)
+        elif isinstance(content, dict) and "cache_control" in content:
+            n += 1
+    return n
+
+
 def test_claude_chat_body_becomes_messages() -> None:
     body = {
         "model": "claude-opus-5",
@@ -109,11 +124,72 @@ def test_claude_chat_body_becomes_messages() -> None:
     out, names = claude_mod.chat_to_messages(body)
     assert out["model"] == "claude-opus-5" and out["stream"] is True and out["thinking"]["type"] == "enabled" and out["thinking"]["budget_tokens"] >= 1024
     assert out["system"][0]["text"].startswith("x-anthropic-billing-header:") and "Claude Agent SDK" in out["system"][1]["text"]
+    assert "2.1.268" in out["system"][0]["text"]
+    assert out["system"][2]["text"] == "You are Daedalus." and "cache_control" not in out["system"][2]
+    assert out["system"][1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert "cache_control" not in out["system"][0]
     assert names["mcp_Read"] == "Read" and out["tools"][0]["name"] == "mcp_Read"
+    assert out["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     items = out["messages"]
-    assert items[0]["role"] == "user" and "system-reminder" in items[0]["content"][0]["text"]
+    assert items[0]["role"] == "user" and items[0]["content"][0]["text"] == "open x"
     assert items[1]["content"][0]["name"] == "mcp_Read"
     assert items[2]["content"][0]["type"] == "tool_result" and items[2]["content"][0]["tool_use_id"] == "c1"
+    assert items[-1]["content"][-1]["cache_control"]["type"] == "ephemeral"
+    assert items[-2]["content"][-1]["cache_control"]["type"] == "ephemeral"
+    assert "cache_control" not in items[0]["content"][0]
+    assert _cache_control_count(out) == 4
+
+
+def test_claude_prompt_cache_stays_at_four_breakpoints_on_a_long_thread() -> None:
+    body = {
+        "model": "claude-opus-5",
+        "messages": [
+            {"role": "system", "content": "You are Daedalus."},
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "ok", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "Read", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "a"},
+            {"role": "assistant", "content": "more", "tool_calls": [{"id": "c2", "type": "function", "function": {"name": "Read", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c2", "content": "b"},
+            {"role": "user", "content": "two"},
+        ],
+        "tools": [{"type": "function", "function": {"name": "Read", "parameters": {"type": "object", "properties": {}}}}],
+    }
+    out, _ = claude_mod.chat_to_messages(body)
+    assert _cache_control_count(out) == 4
+    assert "cache_control" not in out["messages"][0]["content"][0]
+    assert out["messages"][-1]["content"][-1]["cache_control"]["type"] == "ephemeral"
+    assert out["messages"][-2]["content"][-1]["cache_control"]["type"] == "ephemeral"
+
+
+async def test_claude_usage_counts_cache_write_inside_prompt_tokens() -> None:
+    events = [
+        {"type": "message_start", "message": {"usage": {"input_tokens": 3, "cache_creation_input_tokens": 4990, "cache_read_input_tokens": 0}}},
+        {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "pong"}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+    ]
+    full = await subs.collect_completion(claude_mod.messages_events_to_chunks(_lines(events), model="m"), model="m")
+    assert full["usage"]["prompt_tokens"] == 4993 and full["usage"]["cache_creation_input_tokens"] == 4990
+    hit = [
+        {"type": "message_start", "message": {"usage": {"input_tokens": 3, "cache_creation_input_tokens": 16, "cache_read_input_tokens": 4990}}},
+        {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "pong"}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+    ]
+    second = await subs.collect_completion(claude_mod.messages_events_to_chunks(_lines(hit), model="m"), model="m")
+    assert second["usage"]["prompt_tokens"] == 5009 and second["usage"]["prompt_tokens_details"]["cached_tokens"] == 4990
+    already_total = [
+        {"type": "message_start", "message": {"usage": {"input_tokens": 67550, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 22078}}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+    ]
+    third = await subs.collect_completion(claude_mod.messages_events_to_chunks(_lines(already_total), model="m"), model="m")
+    assert third["usage"]["prompt_tokens"] == 67550
+
+
+def test_claude_prompt_cache_without_tools_marks_identity_and_the_user_turn() -> None:
+    out, _ = claude_mod.chat_to_messages({"model": "claude-haiku-4-5-20251001", "messages": [{"role": "user", "content": "hi"}]})
+    assert len(out["system"]) == 2
+    assert out["system"][1]["cache_control"]["ttl"] == "1h"
+    assert out["messages"][0]["content"][-1]["cache_control"]["type"] == "ephemeral"
+    assert _cache_control_count(out) == 2
 
 
 async def test_proxy_routes_codex_and_grok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -202,7 +278,9 @@ async def test_proxy_routes_claude(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
         payload = json.loads(sent.content)
         assert sent.headers["authorization"] == "Bearer sk-ant-oat-test" and sent.headers["x-app"] == "cli"
         assert payload["system"][0]["text"].startswith("x-anthropic-billing-header:") and payload["tools"][0]["name"] == "mcp_Read"
-        assert "system-reminder" in payload["messages"][0]["content"][0]["text"]
+        assert payload["system"][2]["text"] == "Be terse."
+        assert payload["tools"][-1]["cache_control"]["type"] == "ephemeral"
+        assert payload["messages"][0]["content"][-1]["cache_control"]["type"] == "ephemeral"
         models = await (await client.get("/claude/v1/models")).json()
         assert "claude-opus-5" in {m["id"] for m in models["data"]}
         usage = await (await client.get("/subscriptions/usage")).json()
