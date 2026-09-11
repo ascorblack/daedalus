@@ -645,8 +645,8 @@ body.resizing iframe { pointer-events: none; }
 .mrow.open { background: color-mix(in srgb, var(--card-2) 55%, transparent); border-radius: 12px; margin: 4px -8px; padding-left: 8px; padding-right: 8px; }
 .mrow.open.default { padding-left: 10px; }
 .mline { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "radio main actions" "tags tags tags"; align-items: center; gap: 4px 10px; min-height: 48px; }
-.mrow:not(.default) .mline { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "main actions" "tags tags"; }
-.mrow.default .radio, .mrow .radio { grid-area: radio; }
+.mline.noradio { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "main actions" "tags tags"; }
+.mline .radio { grid-area: radio; }
 .mmain { grid-area: main; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; background: none; border: 0; padding: 6px 0; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
 .mtitle { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .mtitle.mono, .sub.mono { font-family: var(--mono); font-size: 13px; }
@@ -667,7 +667,7 @@ body.resizing iframe { pointer-events: none; }
 .btnrow .sub.mid { margin-left: auto; align-self: center; }
 @media (min-width: 720px) {
   .mline { grid-template-columns: auto minmax(0, 1fr) auto auto; grid-template-areas: "radio main tags actions"; }
-  .mrow:not(.default) .mline { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "main tags actions"; }
+  .mline.noradio { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "main tags actions"; }
   .mtags { padding: 0; justify-content: flex-end; }
   .mfields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mfield.wide { grid-column: 1 / -1; }

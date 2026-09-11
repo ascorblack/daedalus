@@ -270,7 +270,7 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
   useEffect(() => setKeyDraft(""), [p.api_key_set]);
   return (
     <div className={`mrow ${open ? "open" : ""}`}>
-      <div className="mline">
+      <div className="mline noradio">
         <button className="mmain" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
           <span className="mtitle mono">{id}</span>
           <span className="mmeta">{p.kind} · {p.base_url || "no address"}</span>
