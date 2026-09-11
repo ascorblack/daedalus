@@ -14,7 +14,7 @@ import { MemoryScreen } from "./screens/Memory";
 import { ServicesScreen } from "./screens/Services";
 import { LoginScreen } from "./screens/Login";
 import { back, migrateLegacyLocation, navigate, pathFor, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
-import { Counts, MoreSheet, Rail, TabBar } from "./shell";
+import { Counts, MoreSheet, Rail, TabBar, useMedia } from "./shell";
 import { useQuery } from "./store";
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -224,10 +224,10 @@ export function App() {
         {route.screen === "inbox" && <InboxScreen onOpen={open} toast={showToast} />}
         {route.screen === "board" && <BoardScreen onOpen={open} toast={showToast} selected={route.detail} />}
         {route.screen === "changes" && <ProposalsScreen toast={showToast} selected={route.detail} />}
-        {route.screen === "schedules" && <SchedulesScreen toast={showToast} onOpen={open} />}
+        {route.screen === "schedules" && <SchedulesScreen toast={showToast} onOpen={open} selected={route.detail} />}
         {route.screen === "services" && <ServicesScreen onOpen={open} toast={showToast} />}
         {route.screen === "memory" && <MemoryScreen toast={showToast} onOpen={open} />}
-        {route.screen === "usage" && <UsageScreen />}
+        {route.screen === "usage" && <UsageScreen onOpen={open} />}
         {route.screen === "health" && <HealthScreen toast={showToast} />}
         {route.screen === "settings" && <SettingsScreen toast={showToast} section={route.detail} />}
       </ErrorBoundary>
@@ -249,20 +249,8 @@ export function App() {
   );
 }
 
-export function useMedia(query: string): boolean {
-  const [on, setOn] = useState(() => window.matchMedia?.(query).matches ?? false);
-  useEffect(() => {
-    const mq = window.matchMedia?.(query);
-    if (!mq) return;
-    const update = () => setOn(mq.matches);
-    mq.addEventListener("change", update);
-    return () => mq.removeEventListener("change", update);
-  }, [query]);
-  return on;
-}
-
 /** Whether the layout is the wide one (rail beside the screen): the same breakpoint as the stylesheet. */
-export function useWide(): boolean {
+function useWide(): boolean {
   return useMedia("(min-width: 1024px)");
 }
 

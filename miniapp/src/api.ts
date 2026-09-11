@@ -32,12 +32,16 @@ declare global {
 }
 
 const tg = () => window.Telegram?.WebApp;
-const tokenFromQuery = new URLSearchParams(window.location.search).get("token");
+const query = new URLSearchParams(window.location.search);
+const tokenFromQuery = query.get("token");
 if (tokenFromQuery) {
   sessionStorage.setItem("daedalus_token", tokenFromQuery);
-  // The token is the credential: it must not stay in the address bar, the history or a Referer.
+  // The token is the credential: it must not stay in the address bar, the history or a Referer;
+  // the other parameters stay.
+  query.delete("token");
+  const rest = query.toString();
   try {
-    window.history.replaceState(null, "", window.location.pathname + window.location.hash);
+    window.history.replaceState(null, "", window.location.pathname + (rest ? `?${rest}` : "") + window.location.hash);
   } catch {
     /* ignore */
   }

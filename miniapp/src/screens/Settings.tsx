@@ -1,7 +1,8 @@
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { navigate, pathFor } from "../router";
-import { PageHeader } from "../shell";
+import { Icon, IconName } from "../icons";
+import { pathFor } from "../router";
+import { PageHeader, go, useMedia } from "../shell";
 import { api, telegram, HeartbeatStatus, Preset, ProviderConf, SearchBackendInfo, SearchCheck, Settings } from "../api";
 import { numInput } from "../ui";
 import { timeAgo } from "../components";
@@ -868,19 +869,27 @@ export function HealthScreen({ toast }: { toast: (t: string) => void }) {
   );
 }
 
-type SettingsTab = "general" | "tools" | "heartbeat";
-const SETTINGS_TABS: SettingsTab[] = ["general", "tools", "heartbeat"];
+type Section = "models" | "rules" | "limits" | "tools" | "chat" | "heartbeat" | "about";
+const SECTIONS: { id: Section; label: string; hint: string; icon: IconName }[] = [
+  { id: "models", label: "Models & providers", hint: "which model opens a session, the fallbacks, the clients", icon: "model" },
+  { id: "rules", label: "Working rules", hint: "the standing instructions and how self-changes are approved", icon: "pen" },
+  { id: "limits", label: "Limits & budget", hint: "spend caps, iterations, context compaction, balance alerts", icon: "chart" },
+  { id: "tools", label: "Tools & search", hint: "web search backends, fetch, exec, speech, vision", icon: "wrench" },
+  { id: "chat", label: "Chat & scheduler", hint: "Telegram behaviour and scheduled runs", icon: "inbox" },
+  { id: "heartbeat", label: "Heartbeat", hint: "the periodic check-in run", icon: "loop" },
+  { id: "about", label: "About", hint: "versions, providers, this browser", icon: "settings" },
+];
 
 export function SettingsScreen({ toast, section }: { toast: (t: string) => void; section?: string | null }) {
   const [s, setS] = useState<Settings | null>(null);
   const [status, setStatus] = useState<any>(null);
-  const tab: SettingsTab = (SETTINGS_TABS as string[]).includes(section ?? "") ? (section as SettingsTab) : "general";
-  const setTab = (t: SettingsTab) => navigate(pathFor("settings", t === "general" ? null : t));
+  const wide = useMedia("(min-width: 1024px)");
+  const current: Section | null = SECTIONS.some((x) => x.id === section) ? (section as Section) : null;
+  const shown: Section | null = current ?? (wide ? "models" : null);
   useEffect(() => {
     api.get<Settings>("/api/settings").then(setS).catch((e) => toast((e as Error).message));
     api.get("/api/status").then(setStatus).catch(() => setStatus(null));
   }, [toast]);
-  if (!s) return <><PageHeader title="Settings" /><div className="empty">Loading…</div></>;
 
   async function save(patch: Partial<Settings>) {
     try {
@@ -891,9 +900,6 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
       toast((e as Error).message);
     }
   }
-
-  const kinds = s.provider_kinds ?? DEFAULT_KINDS;
-
   async function patchProvider(id: string, patch: Record<string, unknown>): Promise<Settings | undefined> {
     try {
       const next = await api.put<Settings>(`/api/providers/${encodeURIComponent(id)}`, patch);
@@ -904,7 +910,6 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
       return undefined;
     }
   }
-
   async function patchPreset(id: string, patch: Partial<Preset>) {
     try {
       const next = await api.put<Settings>(`/api/presets/${encodeURIComponent(id)}`, patch);
@@ -913,7 +918,6 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
       toast((e as Error).message);
     }
   }
-
   async function removePreset(id: string) {
     try {
       const next = await api.delete<Settings>(`/api/presets/${encodeURIComponent(id)}`);
@@ -922,7 +926,6 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
       toast((e as Error).message);
     }
   }
-
   async function lookupProviderModels(provider: string): Promise<string[] | null> {
     try {
       return (await api.post<{ models: string[] }>("/api/providers/lookup-models", { provider })).models;
@@ -931,7 +934,6 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
       return null;
     }
   }
-
   async function removeProvider(id: string) {
     try {
       const next = await api.delete<Settings>(`/api/providers/${encodeURIComponent(id)}`);
@@ -942,172 +944,228 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
     }
   }
 
-  const providerIds = Object.keys(s.providers ?? {});
+  const index = (
+    <div className="settings-index">
+      {SECTIONS.map((sec) => (
+        <a key={sec.id} href={pathFor("settings", sec.id)} className={`settings-link ${shown === sec.id ? "active" : ""}`} aria-current={shown === sec.id ? "page" : undefined} onClick={(e) => go(e, pathFor("settings", sec.id))}>
+          <Icon name={sec.icon} size={18} />
+          <span className="settings-link-text">
+            <b>{sec.label}</b>
+            <span className="sub">{sec.hint}</span>
+          </span>
+          <span className="chev">›</span>
+        </a>
+      ))}
+    </div>
+  );
 
+  const body = (sec: Section) => {
+    if (!s) return <div className="empty">Loading…</div>;
+    const kinds = s.provider_kinds ?? DEFAULT_KINDS;
+    const providerIds = Object.keys(s.providers ?? {});
+    switch (sec) {
+      case "models":
+        return (
+          <>
+            <div className="card">
+              <div className="section-title" style={{ marginTop: 0 }}>Models</div>
+              <div className="sub">A model is a client plus a model id. The default one opens new sessions; any session can switch from the chip in its header. Open a row to edit it.</div>
+              <div className="mlist">
+                {Object.entries(s.presets ?? {}).map(([id, p]) => (
+                  <PresetRow
+                    key={id}
+                    id={id}
+                    p={p}
+                    isDefault={s.model.preset === id}
+                    inChain={(s.model.chain ?? []).includes(id)}
+                    providers={providerIds}
+                    onDefault={() => save({ model: { preset: id } as any })}
+                    onChain={() => save({ model: { chain: (s.model.chain ?? []).includes(id) ? s.model.chain.filter((c) => c !== id) : [...(s.model.chain ?? []), id] } as any })}
+                    onPatch={(patch) => void patchPreset(id, patch)}
+                    onDelete={() => void removePreset(id)}
+                    onLookup={lookupProviderModels}
+                  />
+                ))}
+              </div>
+              {Object.keys(s.presets ?? {}).length === 0 && <div className="sub" style={{ marginTop: 6 }}>No models yet: add one below.</div>}
+              <AddPresetRow providers={providerIds} toast={toast} onAdd={(id, p) => void patchPreset(id, p)} />
+              <div className="sub" style={{ marginTop: 10 }}>Fallback order: {(s.model.chain ?? []).length ? s.model.chain.join(" → ") : "none"} (tried after the default when it fails).</div>
+            </div>
+            <div className="card">
+              <div className="section-title" style={{ marginTop: 0 }}>Providers (clients)</div>
+              <div className="sub">OpenAI-compatible endpoints the models run on. Keys stay in the key proxy where one is configured; a self-hosted vLLM needs none.</div>
+              <div className="mlist">
+                {providerIds.map((id) => (
+                  <ProviderBlock key={id} id={id} p={s.providers[id]} kinds={kinds} available={(s.providers_available ?? []).includes(id)} onPatch={patchProvider} onRemove={(pid) => void removeProvider(pid)} />
+                ))}
+              </div>
+              <AddProviderRow kinds={kinds} toast={toast} onAdd={(pid, base, kind) => void patchProvider(pid, { kind, base_url: base })} />
+            </div>
+          </>
+        );
+      case "rules":
+        return (
+          <>
+            <RulesEditor rules={s.prompt.rules} fallback={s.prompt.default_rules ?? ""} onSave={(rules) => save({ prompt: { rules } })} />
+            <div className="card">
+              <div className="section-title" style={{ marginTop: 0 }}>Self-change</div>
+              <div className="sub">How a pull request the agent opens on its own code is handled.</div>
+              <div className="btnrow" style={{ marginTop: 8 }}>
+                {["manual", "auto"].map((m) => (
+                  <button key={m} className={`btn small ${s.self_change.approval === m ? "primary" : ""}`} onClick={() => save({ self_change: { ...s.self_change, approval: m } })}>
+                    {m} approval
+                  </button>
+                ))}
+                <button className={`btn small ${s.self_change.auto_rebuild ? "primary" : ""}`} onClick={() => save({ self_change: { ...s.self_change, auto_rebuild: !s.self_change.auto_rebuild } })}>
+                  auto rebuild {s.self_change.auto_rebuild ? "on" : "off"}
+                </button>
+              </div>
+            </div>
+          </>
+        );
+      case "limits":
+        return (
+          <div className="card">
+            <div className="section-title" style={{ marginTop: 0 }}>Limits & alerts</div>
+            <div className="sub">daily cap: ${(s as any).usd_per_day} — set in the environment, enforced by the supervisor</div>
+            <label className="field">Max iterations per run</label>
+            <input className="field" type="number" defaultValue={s.limits.max_iterations} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ limits: { ...s.limits, max_iterations: v } }); }} />
+            <label className="field">Spend cap per run (USD, 0 = none; calls without a known price do not count)</label>
+            <input className="field" type="number" step="0.5" defaultValue={s.limits.usd_per_run} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ limits: { ...s.limits, usd_per_run: v } }); }} />
+            <TotalCaps s={s} save={save} />
+            <div className="section-title">Context compaction</div>
+            <div className="sub">When a finished run's prompt filled this share of the model window, the history is replaced by one structured summary (fixed headings, your messages quoted verbatim) before the next run. 0 = manual /compact only.</div>
+            <div className="grid2">
+              <NumField label="Compact above (share of window)" value={s.compaction?.auto_ratio ?? 0.5} min={0} step={0.05} onSave={(v) => save({ compaction: { ...s.compaction, auto_ratio: v } })} />
+              <NumField label="Keep recent messages" value={s.compaction?.keep_recent_messages ?? 6} min={0} onSave={(v) => save({ compaction: { ...s.compaction, keep_recent_messages: v } })} />
+              <NumField label="Summary budget (words)" value={s.compaction?.max_words ?? 1200} min={200} step={100} onSave={(v) => save({ compaction: { ...s.compaction, max_words: v } })} />
+              <NumField label="Core mid-run trigger (share)" value={s.compaction?.core_trigger_ratio ?? 0.85} min={0.1} step={0.05} onSave={(v) => save({ compaction: { ...s.compaction, core_trigger_ratio: v } })} hint="the core's own incremental compaction inside a long run" />
+            </div>
+            <label className="field">Balance alert thresholds (USD, comma-separated)</label>
+            <input className="field" defaultValue={s.balance.thresholds_usd.join(", ")} onBlur={(e) => save({ balance: { ...s.balance, thresholds_usd: e.target.value.split(",").map(Number).filter((n) => !Number.isNaN(n)) } })} />
+            <label className="field">Balance poll interval (seconds)</label>
+            <input className="field" type="number" defaultValue={s.balance.poll_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ balance: { ...s.balance, poll_seconds: v } }); }} />
+          </div>
+        );
+      case "tools":
+        return <ToolsTab s={s} save={save} />;
+      case "chat":
+        return (
+          <div className="card">
+            <div className="section-title" style={{ marginTop: 0 }}>Chat & scheduler</div>
+            <label className="field">Telegram verbosity</label>
+            <div className="btnrow" style={{ marginTop: 0 }}>
+              {[0, 1, 2].map((v) => (
+                <button key={v} className={`btn small ${s.telegram.verbosity === v ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, verbosity: v } })}>
+                  {v}
+                </button>
+              ))}
+            </div>
+            <div className="btnrow">
+              <button className={`btn small ${s.telegram.reactions ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, reactions: !s.telegram.reactions } })}>
+                reactions {s.telegram.reactions ? "on" : "off"}
+              </button>
+              <button className={`btn small ${s.telegram.topic_status_emoji ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, topic_status_emoji: !s.telegram.topic_status_emoji } })}>
+                topic status emoji {s.telegram.topic_status_emoji ? "on" : "off"}
+              </button>
+              <button className={`btn small ${s.telegram.forward_unknown_commands ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, forward_unknown_commands: !s.telegram.forward_unknown_commands } })}>
+                unknown /commands → agent {s.telegram.forward_unknown_commands ? "on" : "off"}
+              </button>
+            </div>
+            <label className="field">Ignore messages older than (seconds, 0 = never)</label>
+            <input className="field" type="number" defaultValue={s.telegram.stale_after_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, stale_after_seconds: v } }); }} />
+            <label className="field">Largest accepted file (MB)</label>
+            <input className="field" type="number" defaultValue={s.telegram.max_inbound_file_mb} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, max_inbound_file_mb: v } }); }} />
+            <label className="field">Wait for a caption after a bare photo (seconds)</label>
+            <input className="field" type="number" defaultValue={s.telegram.photo_caption_wait_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, photo_caption_wait_seconds: v } }); }} />
+            <label className="field">Mark a tool call as slow after (seconds)</label>
+            <input className="field" type="number" defaultValue={s.telegram.slow_tool_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, slow_tool_seconds: v } }); }} />
+            <label className="field">Scheduled runs</label>
+            <div className="btnrow" style={{ marginTop: 0 }}>
+              {["per_task", "per_run"].map((m) => (
+                <button key={m} className={`btn small ${s.scheduler.topic_mode === m ? "primary" : ""}`} onClick={() => save({ scheduler: { ...s.scheduler, topic_mode: m } })}>
+                  one topic {m === "per_task" ? "per task" : "per run"}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      case "heartbeat":
+        return <HeartbeatTab s={s} toast={toast} />;
+      case "about":
+        return (
+          <div className="card">
+            <div className="section-title" style={{ marginTop: 0 }}>Runtime</div>
+            {status ? (
+              <>
+                <div className="kv"><span>Providers</span><b>{status.providers?.join(", ")}</b></div>
+                {status.supervisor ? (
+                  <>
+                    <div className="kv"><span>Bot</span><b className="mono">{String(status.supervisor.bot).slice(0, 10)}</b></div>
+                    <div className="kv"><span>Core</span><b className="mono">{String(status.supervisor.core).slice(0, 10)}</b></div>
+                    <div className="kv"><span>Process</span><b>{status.supervisor.child_running ? "running" : "stopped"}</b></div>
+                  </>
+                ) : (
+                  <div className="sub">supervisor: not connected (development mode)</div>
+                )}
+                {status.budget_exceeded && <div className="sub" style={{ color: "var(--bad)" }}>budget exceeded: {status.budget_exceeded}</div>}
+              </>
+            ) : (
+              <div className="sub">status unavailable</div>
+            )}
+            {!telegram()?.initData && (
+              <>
+                <div className="section-title">This browser</div>
+                <div className="btnrow" style={{ marginTop: 0 }}>
+                  <button className="btn small" onClick={() => { try { localStorage.setItem("daedalus.scheme", "dark"); } catch { /* private */ } window.location.reload(); }}>Dark</button>
+                  <button className="btn small" onClick={() => { try { localStorage.setItem("daedalus.scheme", "light"); } catch { /* private */ } window.location.reload(); }}>Light</button>
+                  <button className="btn small" onClick={() => { try { localStorage.removeItem("daedalus.scheme"); } catch { /* private */ } window.location.reload(); }}>Follow the system</button>
+                </div>
+                <div className="btnrow">
+                  <button
+                    className="btn small"
+                    onClick={async () => {
+                      try {
+                        await api.post("/api/auth/logout");
+                        sessionStorage.removeItem("daedalus_token");
+                      } finally {
+                        window.location.reload();
+                      }
+                    }}
+                  >
+                    Log out of this browser
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        );
+    }
+  };
+
+  if (wide) {
+    return (
+      <>
+        <PageHeader title="Settings" />
+        <div className="screen wide settings-split">
+          <aside className="settings-nav">{index}</aside>
+          <div className="settings-body">{shown && body(shown)}</div>
+        </div>
+      </>
+    );
+  }
+  if (!current) {
+    return (
+      <>
+        <PageHeader title="Settings" />
+        <div className="screen narrow">{index}</div>
+      </>
+    );
+  }
   return (
     <>
-      <PageHeader title="Settings">
-        <div className="chips">
-          {SETTINGS_TABS.map((t) => (
-            <button key={t} className="chip select" aria-pressed={tab === t} onClick={() => setTab(t)}>{t[0].toUpperCase() + t.slice(1)}</button>
-          ))}
-        </div>
-      </PageHeader>
-      <div className="screen narrow">
-      {tab === "tools" && <ToolsTab s={s} save={save} />}
-      {tab === "heartbeat" && <HeartbeatTab s={s} toast={toast} />}
-      {tab === "general" && (
-      <>
-      <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>
-          Models
-        </div>
-        <div className="sub">A model is a client plus a model id. The marked one opens new sessions; any session can switch from the chip in its chat. Tap a row to edit it.</div>
-        <div className="mlist">
-        {Object.entries(s.presets ?? {}).map(([id, p]) => (
-          <PresetRow
-            key={id}
-            id={id}
-            p={p}
-            isDefault={s.model.preset === id}
-            inChain={(s.model.chain ?? []).includes(id)}
-            providers={providerIds}
-            onDefault={() => save({ model: { preset: id } as any })}
-            onChain={() => save({ model: { chain: (s.model.chain ?? []).includes(id) ? s.model.chain.filter((c) => c !== id) : [...(s.model.chain ?? []), id] } as any })}
-            onPatch={(patch) => void patchPreset(id, patch)}
-            onDelete={() => void removePreset(id)}
-            onLookup={lookupProviderModels}
-          />
-        ))}
-        </div>
-        {Object.keys(s.presets ?? {}).length === 0 && <div className="sub" style={{ marginTop: 6 }}>No models yet: add one below.</div>}
-        <AddPresetRow providers={providerIds} toast={toast} onAdd={(id, p) => void patchPreset(id, p)} />
-        <div className="sub" style={{ marginTop: 10 }}>Fallback order: {(s.model.chain ?? []).length ? s.model.chain.join(" → ") : "none"} (tried after the default when it fails).</div>
-      </div>
-
-      <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>
-          Providers (clients)
-        </div>
-        <div className="sub">OpenAI-compatible endpoints the models run on. Keys stay in the key proxy where one is configured; a self-hosted vLLM needs none.</div>
-        <div className="mlist">
-        {providerIds.map((id) => (
-          <ProviderBlock
-            key={id}
-            id={id}
-            p={s.providers[id]}
-            kinds={kinds}
-            available={(s.providers_available ?? []).includes(id)}
-            onPatch={patchProvider}
-            onRemove={(pid) => void removeProvider(pid)}
-          />
-        ))}
-        </div>
-        <AddProviderRow kinds={kinds} toast={toast} onAdd={(pid, base, kind) => void patchProvider(pid, { kind, base_url: base })} />
-      </div>
-
-      <RulesEditor rules={s.prompt.rules} fallback={s.prompt.default_rules ?? ""} onSave={(rules) => save({ prompt: { rules } })} />
-
-      <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>
-          Self-change
-        </div>
-        <div className="btnrow" style={{ marginTop: 0 }}>
-          {["manual", "auto"].map((m) => (
-            <button key={m} className={`btn small ${s.self_change.approval === m ? "primary" : ""}`} onClick={() => save({ self_change: { ...s.self_change, approval: m } })}>
-              {m} approval
-            </button>
-          ))}
-          <button className={`btn small ${s.self_change.auto_rebuild ? "primary" : ""}`} onClick={() => save({ self_change: { ...s.self_change, auto_rebuild: !s.self_change.auto_rebuild } })}>
-            auto rebuild {s.self_change.auto_rebuild ? "on" : "off"}
-          </button>
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>
-          Limits & alerts
-        </div>
-        <div className="sub">daily cap: ${(s as any).usd_per_day} — set in the environment, enforced by the supervisor</div>
-        <label className="field">Max iterations per run</label>
-        <input className="field" type="number" defaultValue={s.limits.max_iterations} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ limits: { ...s.limits, max_iterations: v } }); }} />
-        <label className="field">Spend cap per run (USD, 0 = none; calls without a known price do not count)</label>
-        <input className="field" type="number" step="0.5" defaultValue={s.limits.usd_per_run} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ limits: { ...s.limits, usd_per_run: v } }); }} />
-        <TotalCaps s={s} save={save} />
-        <div className="section-title">Context compaction</div>
-        <div className="sub">When a finished run's prompt filled this share of the model window, the history is replaced by one structured summary (fixed headings, your messages quoted verbatim) before the next run. 0 = manual /compact only.</div>
-        <div className="grid2">
-          <NumField label="Compact above (share of window)" value={s.compaction?.auto_ratio ?? 0.5} min={0} step={0.05} onSave={(v) => save({ compaction: { ...s.compaction, auto_ratio: v } })} />
-          <NumField label="Keep recent messages" value={s.compaction?.keep_recent_messages ?? 6} min={0} onSave={(v) => save({ compaction: { ...s.compaction, keep_recent_messages: v } })} />
-          <NumField label="Summary budget (words)" value={s.compaction?.max_words ?? 1200} min={200} step={100} onSave={(v) => save({ compaction: { ...s.compaction, max_words: v } })} />
-          <NumField label="Core mid-run trigger (share)" value={s.compaction?.core_trigger_ratio ?? 0.85} min={0.1} step={0.05} onSave={(v) => save({ compaction: { ...s.compaction, core_trigger_ratio: v } })} hint="the core's own incremental compaction inside a long run" />
-        </div>
-        <label className="field">Balance alert thresholds (USD, comma-separated)</label>
-        <input className="field" defaultValue={s.balance.thresholds_usd.join(", ")} onBlur={(e) => save({ balance: { ...s.balance, thresholds_usd: e.target.value.split(",").map(Number).filter((n) => !Number.isNaN(n)) } })} />
-        <label className="field">Balance poll interval (seconds)</label>
-        <input className="field" type="number" defaultValue={s.balance.poll_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ balance: { ...s.balance, poll_seconds: v } }); }} />
-      </div>
-
-      <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>
-          Chat & scheduler
-        </div>
-        <label className="field">Telegram verbosity</label>
-        <div className="btnrow" style={{ marginTop: 0 }}>
-          {[0, 1, 2].map((v) => (
-            <button key={v} className={`btn small ${s.telegram.verbosity === v ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, verbosity: v } })}>
-              {v}
-            </button>
-          ))}
-        </div>
-        <div className="btnrow">
-          <button className={`btn small ${s.telegram.reactions ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, reactions: !s.telegram.reactions } })}>
-            reactions {s.telegram.reactions ? "on" : "off"}
-          </button>
-          <button className={`btn small ${s.telegram.topic_status_emoji ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, topic_status_emoji: !s.telegram.topic_status_emoji } })}>
-            topic status emoji {s.telegram.topic_status_emoji ? "on" : "off"}
-          </button>
-          <button className={`btn small ${s.telegram.forward_unknown_commands ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, forward_unknown_commands: !s.telegram.forward_unknown_commands } })}>
-            unknown /commands → agent {s.telegram.forward_unknown_commands ? "on" : "off"}
-          </button>
-        </div>
-        <label className="field">Ignore messages older than (seconds, 0 = never)</label>
-        <input className="field" type="number" defaultValue={s.telegram.stale_after_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, stale_after_seconds: v } }); }} />
-        <label className="field">Largest accepted file (MB)</label>
-        <input className="field" type="number" defaultValue={s.telegram.max_inbound_file_mb} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, max_inbound_file_mb: v } }); }} />
-        <label className="field">Wait for a caption after a bare photo (seconds)</label>
-        <input className="field" type="number" defaultValue={s.telegram.photo_caption_wait_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, photo_caption_wait_seconds: v } }); }} />
-        <label className="field">Mark a tool call as slow after (seconds)</label>
-        <input className="field" type="number" defaultValue={s.telegram.slow_tool_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, slow_tool_seconds: v } }); }} />
-        <label className="field">Scheduled runs</label>
-        <div className="btnrow" style={{ marginTop: 0 }}>
-          {["per_task", "per_run"].map((m) => (
-            <button key={m} className={`btn small ${s.scheduler.topic_mode === m ? "primary" : ""}`} onClick={() => save({ scheduler: { ...s.scheduler, topic_mode: m } })}>
-              one topic {m === "per_task" ? "per task" : "per run"}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {status && (
-        <div className="card">
-          <div className="section-title" style={{ marginTop: 0 }}>
-            Runtime
-          </div>
-          <div className="sub">providers: {status.providers?.join(", ")}</div>
-          {status.supervisor ? (
-            <div className="sub">
-              bot {String(status.supervisor.bot).slice(0, 10)} · core {String(status.supervisor.core).slice(0, 10)} · {status.supervisor.child_running ? "running" : "stopped"}
-            </div>
-          ) : (
-            <div className="sub">supervisor: not connected (development mode)</div>
-          )}
-          {status.budget_exceeded && <div className="sub" style={{ color: "var(--bad)" }}>budget exceeded: {status.budget_exceeded}</div>}
-        </div>
-      )}
-      </>
-      )}
-      </div>
+      <PageHeader title={SECTIONS.find((x) => x.id === current)!.label} back={pathFor("settings")} />
+      <div className="screen narrow">{body(current)}</div>
     </>
   );
 }

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { relTime } from "./format";
 import { api, LoopView, ServiceView, ShareMode, ToolInfo } from "./api";
 import { Icon } from "./icons";
+import { OverflowMenu, Sheet } from "./dialogs";
 import { confirmAsync, errorText } from "./ui";
 
 export type Status = "idle" | "running" | "waiting" | "failed" | "done";
@@ -146,12 +147,14 @@ export async function copyText(text: string): Promise<boolean> {
   }
 }
 
-/** One hosted service: status, address, log, stop — and how it is shared beyond the LAN. */
-export function ServiceRow({ s, sessionId, onChange, toast, onLogs }: { s: ServiceView; sessionId: string; onChange: () => void; toast: (t: string) => void; onLogs: (text: string) => void }) {
+const ACCESS_WORD: Record<ShareMode, string> = { local: "Local only", key: "Private link", public: "Public" };
+
+/** One hosted service: what it is, whether it runs, where to open it, and the rest behind a menu. */
+export function ServiceRow({ s, sessionId, onChange, toast, onLogs, card }: { s: ServiceView; sessionId: string; onChange: () => void; toast: (t: string) => void; onLogs: (text: string) => void; card?: boolean }) {
   const [share, setShare] = useState(false);
   const [busy, setBusy] = useState(false);
   async function stop() {
-    if (!(await confirmAsync(`Stop service "${s.name}"?`))) return;
+    if (!(await confirmAsync(`Stop "${s.name}"?`, { body: "The process is ended; the agent can start it again with ServiceStart.", action: "Stop" }))) return;
     try {
       await api.post(`/api/sessions/${sessionId}/services/${encodeURIComponent(s.name)}/stop`);
       toast(`${s.name}: stopped`);
@@ -161,7 +164,7 @@ export function ServiceRow({ s, sessionId, onChange, toast, onLogs }: { s: Servi
     }
   }
   async function remove() {
-    if (!(await confirmAsync(s.status === "running" ? `Stop and remove service "${s.name}"?` : `Remove service "${s.name}" from the list? Its log stays in the workspace.`))) return;
+    if (!(await confirmAsync(s.status === "running" ? `Stop and remove "${s.name}"?` : `Remove "${s.name}" from the list?`, { body: "Its log stays in the workspace.", action: "Remove" }))) return;
     try {
       await api.delete(`/api/sessions/${sessionId}/services/${encodeURIComponent(s.name)}`);
       toast(`${s.name}: removed`);
@@ -179,11 +182,11 @@ export function ServiceRow({ s, sessionId, onChange, toast, onLogs }: { s: Servi
     }
   }
   async function setMode(mode: ShareMode, rotate = false) {
-    if (mode === "public" && s.share?.mode !== "public" && !(await confirmAsync(`Open "${s.name}" to anyone on the internet who has the link?`))) return;
+    if (mode === "public" && s.share?.mode !== "public" && !(await confirmAsync(`Open "${s.name}" to the internet?`, { body: "Anyone with the link reaches it through the site, without a login.", action: "Make public" }))) return;
     setBusy(true);
     try {
       await api.post(`/api/sessions/${sessionId}/services/${encodeURIComponent(s.name)}/share`, { mode, rotate_key: rotate });
-      toast(mode === "local" ? `${s.name}: local network only` : mode === "public" ? `${s.name}: public` : rotate ? `${s.name}: new key` : `${s.name}: shared by key`);
+      toast(mode === "local" ? `${s.name}: local only` : mode === "public" ? `${s.name}: public` : rotate ? `${s.name}: new key` : `${s.name}: private link`);
       onChange();
     } catch (e) {
       toast(errorText(e));
@@ -196,62 +199,80 @@ export function ServiceRow({ s, sessionId, onChange, toast, onLogs }: { s: Servi
   }
   const mode = s.share?.mode ?? "local";
   const shared = mode !== "local" && s.status === "running";
+  const openUrl = shared && s.share?.url ? s.share.url : s.url;
+  const lan = s.url?.replace(/^https?:\/\//, "");
+  const menu = (
+    <OverflowMenu
+      small
+      label={`${s.name} actions`}
+      items={[
+        ...(s.status === "running" && s.port ? [{ label: "Access…", icon: "share" as const, onSelect: () => setShare(true) }] : []),
+        { label: "Log", icon: "file", onSelect: logs },
+        ...(openUrl ? [{ label: "Copy address", icon: "copy" as const, onSelect: () => copy(openUrl, "address") }] : []),
+        "-" as const,
+        ...(s.status === "running" ? [{ label: "Stop", icon: "stop" as const, onSelect: stop }] : []),
+        { label: s.status === "running" ? "Stop and remove…" : "Remove from the list", icon: "trash", danger: true, onSelect: remove },
+      ]}
+    />
+  );
   return (
-    <div className={`service-row ${s.status}`}>
+    <div className={`service-row ${s.status} ${card ? "erow service" : ""}`}>
       <div className="service-line">
         <span className={`dot ${s.status}`} />
         <div className="grow" style={{ minWidth: 0 }}>
           <div className="service-name">
             {s.name}
-            {s.url && s.status === "running" ? (
-              <a className="service-url" href={s.url} target="_blank" rel="noreferrer">{s.url.replace(/^https?:\/\//, "")}</a>
-            ) : (
-              <span className="sub"> · {s.status}{s.note ? `: ${s.note}` : ""}</span>
-            )}
-            {shared && <span className={`badge share ${mode}`} title={mode === "public" ? "anyone with the link" : "whoever has the key"}>{mode === "public" ? "public" : "by key"}</span>}
+            {s.port && <span className="chip mono port">:{s.port}</span>}
+            {shared && <span className={`chip ${mode === "public" ? "bad" : "attn"}`}>{ACCESS_WORD[mode]}</span>}
+          </div>
+          <div className="sub service-meta">
+            {s.status === "running" ? `Running · ${relTime(s.started_at)}` : `${s.status === "dead" ? "Died" : "Stopped"}${s.note ? `: ${s.note}` : ""}${s.stopped_at ? ` · ${relTime(s.stopped_at)}` : ""}`}
+            {s.status === "running" && lan && !shared ? ` · ${lan}` : ""}
           </div>
           <div className="sub mono service-cmd" title={s.command}>{s.command}</div>
         </div>
-        {s.status === "running" && s.port && (
-          <button className={`iconbtn small ${share ? "on" : ""}`} onClick={() => setShare((v) => !v)} title="Share beyond the local network" aria-label="share" aria-expanded={share}><Icon name="share" size={15} /></button>
+        {openUrl && s.status === "running" && (
+          <a className="btn small open" href={openUrl} target="_blank" rel="noreferrer" title={shared ? "opens through the site" : "reachable on the local network only"}>
+            Open
+          </a>
         )}
-        <button className="iconbtn small" onClick={logs} title="Log" aria-label="log"><Icon name="file" size={15} /></button>
-        {s.status === "running" && <button className="iconbtn small" onClick={stop} title="Stop" aria-label="stop"><Icon name="stop" size={15} /></button>}
-        <button className="iconbtn small" onClick={remove} title={s.status === "running" ? "Stop and remove" : "Remove from the list"} aria-label="remove"><Icon name="trash" size={15} /></button>
+        {menu}
       </div>
       {share && s.status === "running" && (
-        <div className="share-panel">
-          <div className="segmented" style={{ marginBottom: 8 }}>
-            {(["local", "public", "key"] as ShareMode[]).map((m) => (
-              <button key={m} className={mode === m ? "on" : ""} disabled={busy} onClick={() => setMode(m)}>
-                {m === "local" ? "LAN" : m === "public" ? "Public" : "By key"}
-              </button>
+        <Sheet title={`Access to ${s.name}`} onClose={() => setShare(false)} size="narrow">
+          <div className="access-options" role="radiogroup">
+            {(["local", "key", "public"] as ShareMode[]).map((m) => (
+              <label key={m} className={`access-option ${mode === m ? "on" : ""}`}>
+                <input type="radio" name={`access-${s.name}`} checked={mode === m} disabled={busy} onChange={() => setMode(m)} />
+                <span>
+                  <b>{ACCESS_WORD[m]}</b>
+                  <span className="sub">{m === "local" ? `Reachable only from your network at ${lan ?? "its LAN address"}.` : m === "key" ? "Served through the site; the link carries a key once and sets a cookie." : "Served through the site; anyone with the link, no login."}</span>
+                </span>
+              </label>
             ))}
           </div>
-          {!s.share?.public_base && mode !== "local" && <div className="sub" style={{ color: "var(--warn)", marginBottom: 6 }}>MINIAPP_PUBLIC_URL is not set: the link below has no public address yet.</div>}
-          {mode === "local" && <div className="sub">Reachable only from your network at {s.url?.replace(/^https?:\/\//, "") ?? "the LAN address"}. Public and key modes serve it through the site as well, under /s/{s.share?.slug ?? "…"}/.</div>}
+          {!s.share?.public_base && mode !== "local" && <div className="sub" style={{ color: "var(--warn)", margin: "8px 0" }}>MINIAPP_PUBLIC_URL is not set: the link has no public address yet.</div>}
           {mode !== "local" && s.share?.url && (
             <>
+              <label className="field">Link</label>
               <div className="share-field">
-                <Icon name="link" size={14} />
-                <input className="field mono" readOnly value={mode === "key" && s.share.key ? s.share.url : s.share.url} onFocus={(e) => e.target.select()} aria-label="share link" />
-                <button className="btn small" onClick={() => copy(s.share!.url!, "link")}><Icon name="copy" size={13} /> copy</button>
+                <input className="field mono" readOnly value={s.share.url} onFocus={(e) => e.target.select()} aria-label="share link" />
+                <button className="btn small" onClick={() => copy(s.share!.url!, "link")}><Icon name="copy" size={13} /> Copy</button>
               </div>
               {mode === "key" && s.share.key && (
-                <div className="share-field">
-                  <Icon name="key" size={14} />
-                  <input className="field mono" readOnly value={s.share.key} onFocus={(e) => e.target.select()} aria-label="share key" />
-                  <button className="btn small" onClick={() => copy(s.share!.key!, "key")}><Icon name="copy" size={13} /> copy</button>
-                  <button className="btn small" disabled={busy} onClick={() => setMode("key", true)} title="Mint a new key; the old link stops working">rotate</button>
-                </div>
+                <>
+                  <label className="field">Key</label>
+                  <div className="share-field">
+                    <input className="field mono" readOnly value={s.share.key} onFocus={(e) => e.target.select()} aria-label="share key" />
+                    <button className="btn small" onClick={() => copy(s.share!.key!, "key")}><Icon name="copy" size={13} /> Copy</button>
+                    <button className="btn small" disabled={busy} onClick={() => setMode("key", true)} title="Mint a new key; the old link stops working">New key</button>
+                  </div>
+                </>
               )}
-              <div className="sub">
-                {mode === "public" ? "Anyone who opens the link reaches the service through the site; no login." : "The link carries the key once and sets a cookie; without it the site answers 403. Share the bare address and the key separately when you prefer."}
-                {" "}The service lives under /s/{s.share.slug}/: pages must use relative links (or honour X-Forwarded-Prefix); plain HTTP only, no WebSocket.
-              </div>
+              <div className="sub" style={{ marginTop: 8 }}>The service lives under /s/{s.share.slug}/: pages must use relative links (or honour X-Forwarded-Prefix); plain HTTP only, no WebSocket.</div>
             </>
           )}
-        </div>
+        </Sheet>
       )}
     </div>
   );

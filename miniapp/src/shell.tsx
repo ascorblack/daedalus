@@ -1,7 +1,7 @@
 // The application shell: a page header with the screen's name and its actions, four tabs and a
 // More sheet on a phone, a rail with grouped destinations on a desktop.
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Icon, IconName } from "./icons";
 import { Sheet } from "./dialogs";
 import { Screen, navigate, pathFor } from "./router";
@@ -131,4 +131,17 @@ export function Rail({ screen, counts }: { screen: Screen; counts: Counts }) {
       <div className="rail-group bottom">{item("settings")}</div>
     </nav>
   );
+}
+
+/** Whether a media query matches, kept current as the window changes. */
+export function useMedia(query: string): boolean {
+  const [on, setOn] = useState(() => window.matchMedia?.(query).matches ?? false);
+  useEffect(() => {
+    const mq = window.matchMedia?.(query);
+    if (!mq) return;
+    const update = () => setOn(mq.matches);
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, [query]);
+  return on;
 }
