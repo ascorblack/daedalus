@@ -83,7 +83,10 @@ async def test_the_sandbox_opens_the_paths_the_host_named_for_the_session(tmp_pa
     worktree = tmp_path / "worktrees" / "bot" / "fix"
     worktree.mkdir(parents=True)
     exec_config = SimpleNamespace(sandbox="workspace", sandbox_extra_writable=[])
-    argv, sandboxed = await shell.sandbox_argv("git commit", worktree, workspace, exec_config, writable=[worktree, tmp_path / "missing"])
+    link = tmp_path / "worktrees" / "bot" / "elsewhere"
+    link.symlink_to(tmp_path)
+    argv, sandboxed = await shell.sandbox_argv("git commit", worktree, workspace, exec_config, writable=[worktree, tmp_path / "missing", link, worktree])
     assert sandboxed
     binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
+    # The missing path, the symlink and the duplicate are left out; the sandbox still runs.
     assert binds == [str(workspace), str(worktree)]

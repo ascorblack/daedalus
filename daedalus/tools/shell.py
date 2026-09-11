@@ -76,9 +76,14 @@ async def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config
     bwrap = shutil.which("bwrap") or "bwrap"
     argv = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--unshare-pid", "--die-with-parent", "--new-session"]
     paths = [workspace, *[Path(p) for p in getattr(exec_config, "sandbox_extra_writable", [])], *writable]
+    bound: set[str] = set()
     for path in paths:
-        if path.exists():
-            argv += ["--bind", str(path), str(path)]
+        # A bind needs a real directory at both ends: a symlink or a file here makes bubblewrap refuse the
+        # whole command, which is a broken sandbox for everything, not one path left read-only.
+        if path.is_symlink() or not path.is_dir() or str(path) in bound:
+            continue
+        bound.add(str(path))
+        argv += ["--bind", str(path), str(path)]
     return argv + ["bash", "-lc", command], True
 
 
