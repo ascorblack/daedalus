@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pathlib
 from pathlib import Path
 
 import pytest
@@ -171,3 +172,50 @@ def test_a_relative_name_is_not_resolved_beyond_the_package_root(tmp_path: Path)
     assert graph["daedalus.sub.deep"] >= {"daedalus.feature"}
     assert reachability.path_reaches(root, "daedalus.app", ["daedalus.feature"]) == (False, ["daedalus.feature"])
     assert reachability.unreachable_modules(root) == []
+
+
+def test_a_change_to_an_entry_point_can_name_that_entry_point(tmp_path: Path) -> None:
+    """The reported dead end: an entry point nothing imports had no name it could be proposed under.
+
+    Naming the changed module itself is refused so an agent cannot park a dead module on its own
+    name — but nothing imports a process entry point, so for ``daedalus/__main__.py`` every option
+    was refused: itself ("is the changed module itself"), anything else ("does not reach"), and no
+    path at all ("names no execution_path"). The change was unproposable. An entry point is the one
+    module that is its own runner, so it may name itself; a module below it still may not.
+    """
+    root = _tree(tmp_path, {
+        "daedalus/__init__.py": "",
+        "daedalus/__main__.py": "from daedalus.app import serve\n",
+        "daedalus/app.py": "from daedalus.host import runner\n",
+        "daedalus/host/__init__.py": "",
+        "daedalus/host/runner.py": "",
+    })
+    relevance_gate(root, ["daedalus/__main__.py"], "daedalus.__main__")
+    relevance_gate(root, ["daedalus/__main__.py", "tests/unit/test_main.py"], "daedalus.__main__:main")
+    # Still refused one level down: a module that something else runs must name that runner.
+    with pytest.raises(ProposalRefused, match="is the changed module itself"):
+        relevance_gate(root, ["daedalus/host/runner.py"], "daedalus.host.runner")
+
+
+def test_the_live_tree_has_no_entry_point_that_cannot_be_named() -> None:
+    """The live form of the dead end above, and cheap enough to run every time. An entry point that
+    something imports can be proposed by naming its importer; one that nothing imports has no other
+    name, and naming itself must be accepted or the module is unproposable.
+
+    Measured over the live tree with the gate itself: before the fix, 2 of 85 module files accepted
+    no candidate path at all (``daedalus.__main__``, ``daedalus.bench.harbor``); after it, 0 do."""
+    graph = reachability.import_graph(ROOT)
+    orphans = 0
+    for entry in reachability.ENTRY_POINTS:
+        parts = entry.split(".")
+        file = str(pathlib.PurePosixPath(*parts).with_suffix(".py"))
+        if not (ROOT / file).is_file():
+            file = str(pathlib.PurePosixPath(*parts) / "__init__.py")
+        if not (ROOT / file).is_file():
+            continue
+        if any(entry in deps for deps in graph.values()):
+            continue  # its importer can be named instead
+        orphans += 1
+        relevance_gate(ROOT, [file], entry)
+    assert orphans >= 1, "no entry point is import-free any more: this test checked nothing"
+    assert reachability.unreachable_modules(ROOT) == []

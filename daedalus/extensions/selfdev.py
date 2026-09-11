@@ -104,12 +104,19 @@ def relevance_gate(root: Path, changed_files: list[str], execution_path: str | N
     ``execution_path`` is ``pkg.module`` or ``pkg.module:symbol``; the module must exist in the
     proposed tree and, through the static import graph, reach every changed module. A change that
     touches no host module (tests, docs, skills, the Mini App, deploy files) needs no path.
+
+    Naming the changed module itself is refused, because a module is not the reason it runs. The
+    exception is a process entry point: nothing imports it, so there is no other name to give, and
+    the entry point is by definition the thing that runs. Without this, a change to
+    ``daedalus/__main__.py`` has no valid proposal: itself is refused, nothing else reaches it, and
+    no path at all is refused as well.
     """
     present = [f for f in changed_files if (root / f).is_file()]  # a deleted module needs no path: it is gone
     modules = reachability.modules_for_files(root, present)
     if not modules:
         return
-    if execution_path and execution_path.split(":", 1)[0].strip() in modules:
+    named = execution_path.split(":", 1)[0].strip() if execution_path else ""
+    if named in modules and named not in reachability.ENTRY_POINTS:
         raise ProposalRefused(
             f"execution_path {execution_path!r} is the changed module itself. Name the code that runs it — the tool, "
             "hook, extension or startup step that imports it — not the module being changed."
