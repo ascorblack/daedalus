@@ -19,6 +19,32 @@ from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.transport.telegram.voice import TranscriptionError, transcribe
 
+KEYPROXY_DIR = Path(__file__).resolve().parents[2] / "deploy" / "keyproxy"
+
+
+def _keyproxy_module(name: str = "proxy") -> Any:
+    """Load a key-proxy module the way the proxy's own image runs it.
+
+    ``proxy.py`` imports its siblings by bare name (``from claude import ...``), which is what
+    ``PYTHONPATH=/app`` gives it in the container. Loading it by file path alone leaves those
+    imports unresolvable, so the two tests below failed at import with ``No module named 'claude'``
+    rather than on anything they assert. The other key-proxy tests already put the directory on
+    ``sys.path`` first; this does the same, and reuses an already-loaded module so two tests in one
+    session do not execute the file twice.
+    """
+    import importlib.util
+    import sys
+
+    if str(KEYPROXY_DIR) not in sys.path:
+        sys.path.insert(0, str(KEYPROXY_DIR))
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, KEYPROXY_DIR / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    sys.modules[name] = module
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
 
 def test_flatten_payload_is_bounded_and_readable() -> None:
     text = flatten_payload({"action": "opened", "pull_request": {"title": "Fix", "user": {"login": "x"}, "labels": [{"name": "bug"}]}})
@@ -160,11 +186,7 @@ async def test_sandbox_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_key_proxy_routing_and_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("keyproxy", Path(__file__).resolve().parents[2] / "deploy" / "keyproxy" / "proxy.py")
-    proxy = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    spec.loader.exec_module(proxy)  # type: ignore[union-attr]
+    proxy = _keyproxy_module()
     monkeypatch.setenv("DEEPSEEK_API_KEY", "dk")
     monkeypatch.setenv("KEYPROXY_UPSTREAM_MYLLM", "http://10.0.0.1:9000/v1/")
     monkeypatch.setenv("KEYPROXY_KEY_MYLLM", "")
@@ -268,13 +290,10 @@ def test_vendor_host_detection_uses_the_real_hostname() -> None:
 
 async def test_key_proxy_decodes_compressed_upstreams_and_replaces_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     import gzip
-    import importlib.util
 
     from aiohttp.test_utils import TestClient, TestServer
 
-    spec = importlib.util.spec_from_file_location("keyproxy_handle", Path(__file__).resolve().parents[2] / "deploy" / "keyproxy" / "proxy.py")
-    proxy = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    spec.loader.exec_module(proxy)  # type: ignore[union-attr]
+    proxy = _keyproxy_module()
     monkeypatch.setenv("DEEPSEEK_API_KEY", "real-key")
     seen: dict[str, Any] = {}
 
