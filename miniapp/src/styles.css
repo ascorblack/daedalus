@@ -1000,3 +1000,30 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
   .settings-link-text .sub { display: none; }
   .settings-link.active { background: var(--surface-2); border-color: var(--line); }
 }
+
+/* ── rail collapse, palette, offline strip ──────────────────────────────────────────────── */
+.offline-strip { position: sticky; top: 0; z-index: 13; text-align: center; padding: 6px 12px; font-size: 12.5px; color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--bg)); border-bottom: 1px solid color-mix(in srgb, var(--warn) 30%, transparent); }
+.main.chat-open .offline-strip { flex: none; }
+.rail-item.search, .rail-item.collapse { width: 100%; background: none; border: 0; font: inherit; cursor: pointer; text-align: left; }
+.rail-item.search { border: 1px solid var(--line); background: var(--surface-1); margin-bottom: 8px; }
+.rail-item.search kbd { margin-left: auto; font: 11px var(--mono); color: var(--fg-3); }
+.rail-item.collapse { color: var(--fg-3); }
+.palette-sheet .field { margin-bottom: 8px; font-size: 16px; }
+.palette-list { display: flex; flex-direction: column; max-height: 50vh; overflow-y: auto; }
+.palette-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; padding: 9px 10px; border: 0; background: none; color: var(--fg); font: inherit; text-align: left; border-radius: 8px; cursor: pointer; }
+.palette-row .ic { color: var(--fg-2); }
+.palette-row.on { background: var(--surface-2); }
+.palette-row .sub { max-width: 40%; }
+@media (min-width: 1024px) {
+  .app.rail-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
+  .rail.collapsed { padding: 14px 8px; }
+  .rail.collapsed .rail-text, .rail.collapsed .rail-label { display: none; }
+  .rail.collapsed .rail-item, .rail.collapsed .brand { justify-content: center; padding-left: 0; padding-right: 0; }
+  .rail.collapsed .rail-item .count { position: absolute; top: 4px; right: 4px; margin: 0; }
+  .rail.collapsed .rail-item.active::before { left: -8px; }
+  .rail.collapsed .rail-group { margin-bottom: 4px; }
+  .rail.collapsed .brand { padding-bottom: 12px; }
+  .rail.collapsed .rail-item.search { border-color: transparent; background: none; }
+  .bulkbar { left: var(--rail-w); }
+  .app.rail-collapsed .bulkbar { left: 64px; }
+}

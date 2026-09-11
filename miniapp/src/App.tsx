@@ -1,4 +1,4 @@
-import { Component, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Component, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, SessionSummary, telegram } from "./api";
 import { StatusLabel } from "./components";
 import { ConfirmHost, Sheet, ToastHost, toast as showToast } from "./dialogs";
@@ -14,8 +14,9 @@ import { MemoryScreen } from "./screens/Memory";
 import { ServicesScreen } from "./screens/Services";
 import { LoginScreen } from "./screens/Login";
 import { back, migrateLegacyLocation, navigate, pathFor, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
-import { Counts, MoreSheet, Rail, TabBar, useMedia } from "./shell";
-import { useQuery } from "./store";
+import { Counts, MoreSheet, Palette, PaletteItem, Rail, TabBar, screenTitle, useMedia, useShortcuts } from "./shell";
+import { SCREENS } from "./router";
+import { peek, useOffline, useQuery } from "./store";
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
@@ -61,6 +62,27 @@ export function App() {
     });
   };
   const [more, setMore] = useState(false);
+  const [palette, setPalette] = useState(false);
+  const [railCollapsed, setRailCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("daedalus.rail") === "collapsed";
+    } catch {
+      return false;
+    }
+  });
+  const toggleRail = () => {
+    setRailCollapsed((v) => {
+      try {
+        localStorage.setItem("daedalus.rail", v ? "open" : "collapsed");
+      } catch {
+        /* private mode */
+      }
+      return !v;
+    });
+  };
+  const openPalette = useCallback(() => setPalette(true), []);
+  useShortcuts(openPalette);
+  const offline = useOffline();
   // Inside Telegram every request carries initData; outside, the browser needs a token or the session cookie.
   const [authed, setAuthed] = useState<boolean | null>(() => (telegram()?.initData ? true : null));
   const inbox = useQuery<{ unread: number }>(authed ? "/api/inbox/unread" : null, { pollMs: 20000, staleMs: 5000 });
@@ -179,6 +201,14 @@ export function App() {
 
   const open = (id: string) => navigate(sessionPath(id));
   const closeSession = () => back(pathFor("agents"));
+  const paletteItems = (): PaletteItem[] => {
+    const sessions = peek<SessionSummary[]>("/api/sessions") ?? [];
+    return [
+      { id: "new-agent", label: "New agent", icon: "plus", run: () => navigate(pathFor("agents", null, { new: "1" })) },
+      ...SCREENS.map((s) => ({ id: `go-${s}`, label: `Go to ${screenTitle(s)}`, icon: "back" as const, run: () => navigate(pathFor(s)) })),
+      ...sessions.map((s) => ({ id: `s-${s.id}`, label: s.title, hint: s.model ?? "", icon: "bots" as const, run: () => open(s.id) })),
+    ];
+  };
 
   if (authed === null) return <div className="app"><div className="empty">Loading…</div></div>;
   if (authed === false) {
@@ -235,11 +265,13 @@ export function App() {
   }
 
   return (
-    <div className="app">
-      {wide && <Rail screen={route.screen} counts={counts} />}
+    <div className={`app ${railCollapsed ? "rail-collapsed" : ""}`}>
+      {wide && <Rail screen={route.screen} counts={counts} collapsed={railCollapsed} onToggle={toggleRail} onPalette={openPalette} />}
       <div ref={main} className={`main ${sessionId ? "chat-open" : ""}`}>
+        {offline && <div className="offline-strip" role="status">No connection to the bot · retrying…</div>}
         {content}
       </div>
+      {palette && <Palette items={paletteItems()} onClose={() => setPalette(false)} />}
       {!wide && !sessionId && <TabBar screen={route.screen} counts={counts} onMore={() => setMore((m) => !m)} moreOpen={more} />}
       {more && <MoreSheet screen={route.screen} counts={counts} onClose={() => setMore(false)} />}
       {picking && sessionId && <SessionPicker exclude={sessionId} onPick={(id) => { navigate(sessionPath(sessionId, id)); setPicking(false); }} onClose={() => setPicking(false)} />}

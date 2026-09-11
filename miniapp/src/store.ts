@@ -3,7 +3,7 @@
 // reload; the point is that switching screens never flashes an empty frame.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "./api";
+import { ApiError, api } from "./api";
 
 type Entry = { data: unknown; at: number; error: string | null };
 
@@ -49,6 +49,7 @@ async function fetchInto<T>(key: string): Promise<T> {
     .get<T>(key)
     .then((data) => {
       // Only the newest request for a key writes; a slower, older one has nothing to add.
+      setOffline(false);
       if (inflight.get(key) === p && !held.has(key)) {
         cache.set(key, { data, at: Date.now(), error: null });
         notify(key);
@@ -56,6 +57,8 @@ async function fetchInto<T>(key: string): Promise<T> {
       return data;
     })
     .catch((e: Error) => {
+      if (!(e instanceof ApiError)) setOffline(true);
+      else setOffline(false);
       const prev = cache.get(key);
       if (inflight.get(key) === p) {
         cache.set(key, { data: prev?.data, at: prev?.at ?? 0, error: e.message || "request failed" });
@@ -68,6 +71,26 @@ async function fetchInto<T>(key: string): Promise<T> {
     });
   inflight.set(key, p);
   return p;
+}
+
+/** Whether the last request reached the bot at all: a network failure flips it, any answer flips it back. */
+let offline = false;
+const offlineListeners = new Set<() => void>();
+function setOffline(v: boolean) {
+  if (offline === v) return;
+  offline = v;
+  for (const l of offlineListeners) l();
+}
+export function useOffline(): boolean {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const on = () => force((n) => n + 1);
+    offlineListeners.add(on);
+    return () => {
+      offlineListeners.delete(on);
+    };
+  }, []);
+  return offline;
 }
 
 export type Query<T> = { data: T | undefined; error: string | null; loading: boolean; refresh: () => Promise<void> };

@@ -14,7 +14,7 @@ type Filter = "all" | "working" | "loops";
 
 export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (id: string) => void; toast: (t: string) => void; current?: string; compact?: boolean }) {
   const { data: sessions, error, loading } = useQuery<SessionSummary[]>("/api/sessions", { pollMs: 5000, staleMs: 3000 });
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(() => new URLSearchParams(window.location.search).get("new") === "1");
   const [showWorkspaces, setShowWorkspaces] = useState(false);
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);

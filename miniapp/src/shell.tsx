@@ -105,32 +105,121 @@ export function MoreSheet({ screen, counts, onClose }: { screen: Screen; counts:
   );
 }
 
-export function Rail({ screen, counts }: { screen: Screen; counts: Counts }) {
+export function Rail({ screen, counts, collapsed, onToggle, onPalette }: { screen: Screen; counts: Counts; collapsed: boolean; onToggle: () => void; onPalette: () => void }) {
   const item = (s: Screen) => {
     const n = countFor(s, counts);
     return (
-      <a key={s} href={pathFor(s)} className={`rail-item ${screen === s ? "active" : ""}`} aria-current={screen === s ? "page" : undefined} onClick={(e) => go(e, pathFor(s))}>
+      <a key={s} href={pathFor(s)} className={`rail-item ${screen === s ? "active" : ""}`} aria-current={screen === s ? "page" : undefined} onClick={(e) => go(e, pathFor(s))} title={collapsed ? TITLES[s] : undefined}>
         <Icon name={ICONS[s]} size={18} />
-        <span>{TITLES[s]}</span>
+        <span className="rail-text">{TITLES[s]}</span>
         {n > 0 && <span className={`count ${s === "services" ? "ok" : s === "changes" ? "attn" : ""}`}>{n}</span>}
       </a>
     );
   };
   return (
-    <nav className="rail" aria-label="Primary">
-      <a className="brand" href={pathFor("agents")} onClick={(e) => go(e, pathFor("agents"))}>
+    <nav className={`rail ${collapsed ? "collapsed" : ""}`} aria-label="Primary">
+      <a className="brand" href={pathFor("agents")} onClick={(e) => go(e, pathFor("agents"))} title="Daedalus">
         <img src="/app/icons/icon-192.png" alt="" width={26} height={26} />
-        Daedalus
+        <span className="rail-text">Daedalus</span>
       </a>
+      <button className="rail-item search" onClick={onPalette} title="Search and go (Ctrl/⌘ K)">
+        <Icon name="search" size={18} />
+        <span className="rail-text">Search…</span>
+        <kbd className="rail-text">⌘K</kbd>
+      </button>
       {GROUPS.map((g) => (
         <div key={g.label} className="rail-group">
           <div className="rail-label">{g.label}</div>
           {g.items.map(item)}
         </div>
       ))}
-      <div className="rail-group bottom">{item("settings")}</div>
+      <div className="rail-group bottom">
+        {item("settings")}
+        <button className="rail-item collapse" onClick={onToggle} title={collapsed ? "Expand the rail" : "Collapse the rail"} aria-label={collapsed ? "Expand the rail" : "Collapse the rail"} aria-expanded={!collapsed}>
+          <Icon name={collapsed ? "columns" : "back"} size={18} />
+          <span className="rail-text">Collapse</span>
+        </button>
+      </div>
     </nav>
   );
+}
+
+// ── command palette ──────────────────────────────────────────────────────────────────────
+
+export type PaletteItem = { id: string; label: string; hint?: string; icon: IconName; run: () => void };
+
+/** Ctrl/⌘ K: go somewhere by name — a screen, a session, an action. */
+export function Palette({ items, onClose }: { items: PaletteItem[]; onClose: () => void }) {
+  const [q, setQ] = useState("");
+  const [cursor, setCursor] = useState(0);
+  const needle = q.trim().toLowerCase();
+  const shown = (needle ? items.filter((it) => `${it.label} ${it.hint ?? ""}`.toLowerCase().includes(needle)) : items).slice(0, 12);
+  useEffect(() => setCursor(0), [needle]);
+  const run = (it: PaletteItem) => {
+    onClose();
+    it.run();
+  };
+  return (
+    <Sheet ariaLabel="Search and go" onClose={onClose} size="narrow" className="palette-sheet">
+      <input
+        className="field"
+        autoFocus
+        placeholder="Go to, open, create…"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown") {
+            setCursor((c) => Math.min(shown.length - 1, c + 1));
+            e.preventDefault();
+          } else if (e.key === "ArrowUp") {
+            setCursor((c) => Math.max(0, c - 1));
+            e.preventDefault();
+          } else if (e.key === "Enter" && shown[cursor]) run(shown[cursor]);
+        }}
+        aria-label="Search and go"
+      />
+      <div className="palette-list" role="listbox">
+        {shown.map((it, i) => (
+          <button key={it.id} role="option" aria-selected={i === cursor} className={`palette-row ${i === cursor ? "on" : ""}`} onMouseEnter={() => setCursor(i)} onClick={() => run(it)}>
+            <Icon name={it.icon} size={16} />
+            <span className="truncate">{it.label}</span>
+            {it.hint && <span className="sub truncate">{it.hint}</span>}
+          </button>
+        ))}
+        {shown.length === 0 && <div className="sub" style={{ padding: "10px 12px" }}>Nothing matches.</div>}
+      </div>
+    </Sheet>
+  );
+}
+
+const GO_KEYS: Record<string, Screen> = { a: "agents", i: "inbox", b: "board", c: "changes", m: "memory", u: "usage", s: "settings" };
+
+/** Keyboard on a desktop: Ctrl/⌘ K opens the palette, `g` then a letter goes to a screen. Never inside a text field. */
+export function useShortcuts(onPalette: () => void) {
+  useEffect(() => {
+    let pendingG = 0;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      const typing = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        onPalette();
+        return;
+      }
+      if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "g") {
+        pendingG = Date.now();
+        return;
+      }
+      if (pendingG && Date.now() - pendingG < 1200 && GO_KEYS[e.key]) {
+        e.preventDefault();
+        navigate(pathFor(GO_KEYS[e.key]));
+      }
+      pendingG = 0;
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onPalette]);
 }
 
 /** Whether a media query matches, kept current as the window changes. */
