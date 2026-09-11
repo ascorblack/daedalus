@@ -4,6 +4,31 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-11
 
+- **The app is an application.** Every screen is an address under `/app` (`/app/agents/<id>` is a session,
+  `/app/settings/models` a settings section), so Back, a reload, Telegram's back button and a link all land on
+  the same screen; the server answers the app for any of its paths. A phone shows four tabs (Agents, Inbox,
+  Board, More) with the rest behind More; a desktop has a rail with grouped destinations that folds to icons, a
+  search-and-go palette on Ctrl/⌘ K, and `g` + a letter to jump between screens. Each screen names itself and
+  keeps its actions in its header; the brand line is gone.
+- **Rows instead of cards.** Agents are grouped by what they need (Needs you, Working, Loops, Idle) and carry the
+  model, the time and the loop line, with subagents inside the leader's card and no raw ids. Inbox entries have a
+  kind icon and severity, repeats fold into one card with a count, and a pending change is a card with Approve
+  and Reject on it. The board is a kanban on a wide screen (cards drag between columns) and sections on a phone;
+  a task shows its priority as a stripe and its checklist as a bar. A schedule reads as a sentence in the reader's
+  own clock and is made from a moment, a daily or weekly time or a cadence; cron stays for the rest. Services
+  open with one button and say who can reach them in plain words. Memories are clamped cards with bulk selection
+  from the header. Usage leads with what is metered today, the tightest quota and the tokens, and every quota
+  line says what is left and when it resets. Settings is an index of sections, side by side on a wide screen.
+- **A session in less chrome.** The header is back, title and one status line (model, context when it matters,
+  subagents, loop) with an overflow menu; tokens, cost, ids and the settings live in the Session info sheet. A
+  live bar over the composer says which step the agent is on; the composer is one line, Stop asks first, and
+  revert and fork sit in a menu on the message. On wide screens the sessions list can stay beside the
+  conversation and the inspector sits on the right.
+- **Shared behaviour.** Confirmations say what the action does and focus the safe button; deletions can be
+  undone for five seconds; Escape closes only the top layer; times, tokens, money and schedules format through
+  one module in the reader's locale, never with seconds or an ISO timestamp; `idle` is grey, so working and
+  waiting stand out. A schedule can be edited and paused (`PATCH /api/schedules/{id}`), and the roster carries
+  each session's model.
 - **Removed models stay removed.** The Claude subscription seed re-added its presets on every start; a seed is
   now applied once and recorded in the config (`seeded`).
 - **Settings, models and clients.** One line per model and per client — label, client · model, and pills for
