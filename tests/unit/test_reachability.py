@@ -198,13 +198,26 @@ def test_a_change_to_an_entry_point_can_name_that_entry_point(tmp_path: Path) ->
 
 
 def test_the_live_tree_has_no_entry_point_that_cannot_be_named() -> None:
-    """The live form of the dead end above, and cheap enough to run every time. An entry point that
-    something imports can be proposed by naming its importer; one that nothing imports has no other
-    name, and naming itself must be accepted or the module is unproposable.
+    """The live form of the dead end above. It asserts two things and says which is which.
 
-    Measured over the live tree with the gate itself: before the fix, 2 of 85 module files accepted
-    no candidate path at all (``daedalus.__main__``, ``daedalus.bench.harbor``); after it, 0 do."""
+    First, every module file in the tree is reachable from the process entry points, so the entry
+    point is the only kind of module whose own name may be the only candidate left. Second, for each
+    entry point that nothing imports, the gate accepts naming it — the case that had no answer at
+    all before the change. That is behaviour, not a count of the tree; the count (2 of 85 module
+    files accepted no candidate path before, 0 after) was measured by asking the gate itself over
+    every module file, and it is a measurement of the change, not something this test re-derives.
+    """
     graph = reachability.import_graph(ROOT)
+    with_files = {
+        reachability.module_name(ROOT, path)
+        for path in (ROOT / reachability.PACKAGE).rglob("*.py")
+    }
+    from_an_entry = reachability.reachable(graph)
+    orphans_by_name = sorted(m for m in with_files if m not in from_an_entry)
+    assert orphans_by_name == [], (
+        "these module files are reached by no process entry point, so no path can be named for them "
+        "unless they are entry points themselves: " + ", ".join(orphans_by_name)
+    )
     orphans = 0
     for entry in reachability.ENTRY_POINTS:
         parts = entry.split(".")
@@ -218,4 +231,3 @@ def test_the_live_tree_has_no_entry_point_that_cannot_be_named() -> None:
         orphans += 1
         relevance_gate(ROOT, [file], entry)
     assert orphans >= 1, "no entry point is import-free any more: this test checked nothing"
-    assert reachability.unreachable_modules(ROOT) == []

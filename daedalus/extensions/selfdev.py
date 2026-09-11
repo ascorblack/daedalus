@@ -106,10 +106,10 @@ def relevance_gate(root: Path, changed_files: list[str], execution_path: str | N
     touches no host module (tests, docs, skills, the Mini App, deploy files) needs no path.
 
     Naming the changed module itself is refused, because a module is not the reason it runs. The
-    exception is a process entry point: nothing imports it, so there is no other name to give, and
-    the entry point is by definition the thing that runs. Without this, a change to
-    ``daedalus/__main__.py`` has no valid proposal: itself is refused, nothing else reaches it, and
-    no path at all is refused as well.
+    exception is a process entry point: it is where the process starts, so naming it is naming the
+    runner rather than the module under it. For an entry point that nothing imports it is also the
+    only name there is — without this, a change to ``daedalus/__main__.py`` has no valid proposal:
+    itself is refused, nothing else reaches it, and no path at all is refused as well.
     """
     present = [f for f in changed_files if (root / f).is_file()]  # a deleted module needs no path: it is gone
     modules = reachability.modules_for_files(root, present)
