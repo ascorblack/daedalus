@@ -739,7 +739,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "workspace": str(state.workspace),
             "workspace_name": state.workspace.name,
             "workspace_own": state.workspace == manager.workspace_for(session_id),
-            "workspace_sessions": [u for u in await manager.workspace_users(state.workspace) if u["id"] != session_id],
+            # Subagents share their leader's workspace by design; they are listed under Subagents (and the leader under
+            # "leader:"), so the workspace list shows only the sessions that were attached to it.
+            "workspace_sessions": [u for u in await manager.workspace_users(state.workspace) if u["id"] != session_id and u["id"] not in {c["session_id"] for c in subagents} and u["id"] != state.metadata.get("subagent_of")],
             "pending": state.pending.payload if state.pending else None,
             "model": await session_model_label(state),
             "provider": await session_provider(state),
@@ -1014,6 +1016,16 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             return await services.stop(session_id, name, note="stopped by the operator")
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
+
+    @api.delete("/api/sessions/{session_id}/services/{name}")
+    async def session_service_remove(session_id: str, name: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Forget a service: a running one is stopped first; its log file stays in the workspace."""
+        services = app.extensions.get("services")
+        if services is None:
+            raise HTTPException(503, "services are not installed")
+        if not await services.remove(session_id, name):
+            raise HTTPException(404, f"no service {name!r} in this session")
+        return {"removed": name}
 
     @api.get("/api/sessions/{session_id}/services/{name}/logs")
     async def session_service_logs(session_id: str, name: str, lines: int = 120, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

@@ -38,6 +38,8 @@ class SessionServices:
     """Create a standing agent session with a brief, files and settings (see the SpawnAgent tool)."""
     exec_backend: ExecBackend | None = None
     """Where Exec runs and the file tools look when the session drives another machine (a benchmark container)."""
+    writable: list[Path] = field(default_factory=list)
+    """Paths outside the workspace this session may write to under the sandbox: the worktrees it opened for its own changes."""
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property

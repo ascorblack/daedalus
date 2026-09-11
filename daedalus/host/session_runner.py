@@ -959,10 +959,25 @@ class SessionManager:
             self_rebuild=hooks.get("self_rebuild"),
             self_rollback=hooks.get("self_rollback"),
             progress=_bind(hooks.get("progress"), state.session.id),
+            writable=[Path(str(p)) for p in (state.session.metadata.get("worktrees") or []) if str(p).startswith("/")],
             extra={"skill_store": self.skills, "manager": self, "vision": _LiveVision(self), "jobs": self._jobs.setdefault(state.session.id, {})},
         )
         state.services = services
         locator.register(services)
+
+    async def open_writable(self, session_id: str, path: Path) -> None:
+        """Let this session write to ``path`` under the sandbox from now on — a worktree it opened for its own changes."""
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        paths = [str(p) for p in (state.session.metadata.get("worktrees") or [])]
+        if str(path) not in paths:
+            paths.append(str(path))
+            state.session.metadata["worktrees"] = paths
+            state.metadata["worktrees"] = paths
+            await self.sessions.update_metadata(session_id, state.session.metadata)
+        if state.services is not None and path not in state.services.writable:
+            state.services.writable.append(path)
 
     # -- input --------------------------------------------------------------------
 

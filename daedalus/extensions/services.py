@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from daedalus.tools.shell import shell_environment
+from daedalus.tools.shell import sandbox_argv, shell_environment
 
 if TYPE_CHECKING:
     from daedalus.app import Application
@@ -236,9 +236,12 @@ class Services:
         log_path = log_dir / f"{name}.log"
         env = shell_environment(session_id, {"PORT": str(chosen)} if chosen else None)
         env["HOST"] = "0.0.0.0"
+        # The same wall Exec has: a service is a long-lived command, not a way around the sandbox.
+        session_services = manager.locator_services(session_id)
+        argv, _sandboxed = await sandbox_argv(command, workdir, state.workspace, self.app.config.tools.exec, writable=getattr(session_services, "writable", ()))
         with open(log_path, "ab") as log:
             log.write(f"\n=== {_now()} start: {command}\n".encode())
-            proc = subprocess.Popen(["bash", "-lc", command], cwd=str(workdir), env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)  # noqa: S603
+            proc = subprocess.Popen(argv, cwd=str(workdir), env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)  # noqa: S603
         self._procs[(session_id, name)] = proc
         await self.app.db.execute(
             "INSERT INTO services(session_id, name, command, cwd, port, pid, status, restart, log_path, note, started_at, stopped_at) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, NULL, ?, NULL)"

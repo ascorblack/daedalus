@@ -67,3 +67,23 @@ def test_the_browser_store_is_inherited(host_env) -> None:  # type: ignore[no-un
 def test_explicit_extra_wins(host_env) -> None:  # type: ignore[no-untyped-def]
     env = shell_environment("sess-1", {"EXAMPLE_API_KEY": "given", "PATH": "/opt/bin"})
     assert env["EXAMPLE_API_KEY"] == "given" and env["PATH"] == "/opt/bin"
+
+
+@pytest.mark.asyncio
+async def test_the_sandbox_opens_the_paths_the_host_named_for_the_session(tmp_path, monkeypatch) -> None:
+    """A worktree the session opened is writable inside the sandbox; a path that does not exist is not bound."""
+    from types import SimpleNamespace
+
+    from daedalus.tools import shell
+
+    monkeypatch.setattr(shell, "bwrap_status", lambda: "ok")
+    monkeypatch.setattr(shell.shutil, "which", lambda name: "/usr/bin/bwrap")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    worktree = tmp_path / "worktrees" / "bot" / "fix"
+    worktree.mkdir(parents=True)
+    exec_config = SimpleNamespace(sandbox="workspace", sandbox_extra_writable=[])
+    argv, sandboxed = await shell.sandbox_argv("git commit", worktree, workspace, exec_config, writable=[worktree, tmp_path / "missing"])
+    assert sandboxed
+    binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
+    assert binds == [str(workspace), str(worktree)]

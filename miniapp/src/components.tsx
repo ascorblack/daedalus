@@ -140,6 +140,16 @@ export function ServiceRow({ s, sessionId, onChange, toast, onLogs }: { s: Servi
       toast(errorText(e));
     }
   }
+  async function remove() {
+    if (!(await confirmAsync(s.status === "running" ? `Stop and remove service "${s.name}"?` : `Remove service "${s.name}" from the list? Its log stays in the workspace.`))) return;
+    try {
+      await api.delete(`/api/sessions/${sessionId}/services/${encodeURIComponent(s.name)}`);
+      toast(`${s.name}: removed`);
+      onChange();
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
   async function logs() {
     try {
       const r = await api.get<{ text: string }>(`/api/sessions/${sessionId}/services/${encodeURIComponent(s.name)}/logs?lines=200`);
@@ -187,6 +197,7 @@ export function ServiceRow({ s, sessionId, onChange, toast, onLogs }: { s: Servi
         )}
         <button className="iconbtn small" onClick={logs} title="Log" aria-label="log"><Icon name="file" size={15} /></button>
         {s.status === "running" && <button className="iconbtn small" onClick={stop} title="Stop" aria-label="stop"><Icon name="stop" size={15} /></button>}
+        <button className="iconbtn small" onClick={remove} title={s.status === "running" ? "Stop and remove" : "Remove from the list"} aria-label="remove"><Icon name="trash" size={15} /></button>
       </div>
       {share && s.status === "running" && (
         <div className="share-panel">

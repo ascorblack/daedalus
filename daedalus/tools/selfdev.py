@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
@@ -26,9 +28,14 @@ async def self_workspace(context: ToolContext, repo: str, branch: str) -> ToolRe
     if repo not in ("bot", "core"):
         return error(context, "repo must be 'bot' or 'core'")
     try:
-        return ok(context, await hook(repo=repo, branch=branch))
+        path = await hook(repo=repo, branch=branch)
     except Exception as exc:  # noqa: BLE001
         return error(context, f"could not create the worktree: {exc}")
+    # The worktree is where this session's changes go: Exec, Verify and services may write there under the sandbox.
+    manager = services.extra.get("manager")
+    if manager is not None and hasattr(manager, "open_writable"):
+        await manager.open_writable(context.session_id, Path(str(path)))
+    return ok(context, str(path))
 
 
 @tool(

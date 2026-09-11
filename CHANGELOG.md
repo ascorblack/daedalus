@@ -4,6 +4,17 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-11
 
+- **Services run inside the sandbox.** `ServiceStart` ran its command outside the wall `Exec` has, and the agent
+  used it to write where `Exec` could not. A service now runs under the same sandbox; the worktrees a session
+  opens with `SelfWorkspace` are writable for that session's commands, which is where those writes belonged.
+  A service can be removed from the app (stopped first if it runs); subagents are no longer listed twice in a
+  session's sidebar.
+- **Fallback chain.** A rung whose context window cannot hold the current prompt plus its output cap is
+  skipped with that reason; when nothing fits, the loop retries where it was instead of ending the run on a
+  model that could not take it. A subagent that ends without a reply names the error that ended it.
+- **Compaction.** The whole-history pass also runs before a run that would start over the ratio (a session
+  switched to a smaller-window model); the summariser's cap fits a summary in any script, a unit the
+  summariser keeps failing on is left alone, and a compaction pass no longer renames the topic there and back.
 - **OpenCode Go.** A provider kind `opencode` for the OpenCode Go / Zen gateway: the key proxy knows the upstream
   (`OPENCODE_API_KEY`), every request carries the session id the gateway routes and caches by, thinking goes out
   in DeepSeek's shape, and presets for its models carry the gateway's list prices so the metered spend tracks the

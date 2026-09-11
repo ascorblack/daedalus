@@ -54,7 +54,7 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
         return error(context, f"working directory does not exist: {workdir}")
     # A failure anywhere in a pipeline fails the check; `pytest | tail` must not pass on tail's exit code.
     try:
-        argv, sandboxed = await sandbox_argv("set -o pipefail\n" + command, workdir, services.workspace_dir, tool_config(context).exec)
+        argv, sandboxed = await sandbox_argv("set -o pipefail\n" + command, workdir, services.workspace_dir, tool_config(context).exec, writable=getattr(services, "writable", ()))
     except SandboxUnavailable as exc:
         return error(context, str(exc))
     proc = await asyncio.create_subprocess_exec(
