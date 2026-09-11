@@ -91,3 +91,83 @@ def test_size_gate_asks_what_a_large_or_net_new_change_replaces() -> None:
     with pytest.raises(ProposalRefused, match="new modules over 150 lines"):
         size_gate(90, {"daedalus/host/store.py": 170}, "Adds a store.")
     size_gate(260, {"daedalus/host/store.py": 170}, "Replaces the ad-hoc dict in session_runner with a store; removes two helpers.")
+
+
+def test_a_relative_dynamic_import_is_resolved_not_left_as_a_dot_name(tmp_path: Path) -> None:
+    """The reported defect, in isolation: the module is live and loaded through
+    ``importlib.import_module(".feature", package=__package__)``, and that relative import is the
+    only mention of it anywhere in the tree. Before the fix the walk kept the literal ``.feature``,
+    so ``daedalus.feature`` had no incoming edge and the gate refused a change that runs."""
+    root = _tree(tmp_path, {
+        "daedalus/__init__.py": "",
+        "daedalus/__main__.py": "import importlib\nresult = importlib.import_module('.feature', package=__package__).VALUE\n",
+        "daedalus/feature.py": "VALUE = 7\n",
+    })
+    graph = reachability.import_graph(root)
+    assert graph["daedalus.__main__"] >= {"daedalus.feature"}
+    assert ".feature" not in graph["daedalus.__main__"]
+    assert reachability.unreachable_modules(root) == []
+    assert reachability.path_reaches(root, "daedalus.__main__", ["daedalus.feature"]) == (True, [])
+
+
+def test_every_relative_form_python_resolves_is_resolved_the_same_way(tmp_path: Path) -> None:
+    """``.mod``, ``..mod``, a positional ``package``, ``__name__`` inside a package ``__init__``, and a
+    call that names no package: each resolves to the module the interpreter really loads. The runtime
+    side of this comparison was checked separately against ``importlib`` itself."""
+    root = _tree(tmp_path, {
+        "daedalus/__init__.py": "",
+        "daedalus/__main__.py": "import importlib\nfrom daedalus.sub import loader, deep, loose\nfrom daedalus import pkg\nfrom daedalus.sub import positional\n",
+        "daedalus/feature.py": "VALUE = 7\n",
+        "daedalus/sub/__init__.py": "",
+        "daedalus/sub/loader.py": "import importlib\nmod = importlib.import_module('.sibling', package=__package__)\n",
+        "daedalus/sub/sibling.py": "OK = True\n",
+        "daedalus/sub/deep.py": "import importlib\nmod = importlib.import_module('..feature', package=__package__)\n",
+        "daedalus/sub/positional.py": "import importlib\nmod = importlib.import_module('.sibling', 'daedalus.sub')\n",
+        "daedalus/sub/loose.py": "import importlib\nmod = importlib.import_module('.sibling')\n",
+        "daedalus/pkg/__init__.py": "import importlib\nmod = importlib.import_module('.sibling', package=__name__)\n",
+        "daedalus/pkg/sibling.py": "OK = True\n",
+    })
+    graph = reachability.import_graph(root)
+    assert graph["daedalus.sub.loader"] >= {"daedalus.sub.sibling"}
+    assert graph["daedalus.sub.positional"] >= {"daedalus.sub.sibling"}
+    assert graph["daedalus.sub.loose"] >= {"daedalus.sub.sibling"}
+    assert graph["daedalus.sub.deep"] >= {"daedalus.feature"}
+    assert graph["daedalus.pkg"] >= {"daedalus.pkg.sibling"}
+    assert reachability.unreachable_modules(root) == []
+
+
+def test_a_package_the_source_does_not_name_is_not_guessed(tmp_path: Path) -> None:
+    """A guard, not a regression proof: this behaviour is the same before and after the fix, and it is
+    here so it cannot drift silently. ``package=where`` is a variable and ``package=elsewhere.__name__``
+    is another module's attribute, so the walk keeps the literal and draws no edge. The cost is stated
+    rather than hidden — a module reached only that way reads as unreached, and needs a path the walk
+    can see. The gain is that no edge is invented either."""
+    root = _tree(tmp_path, {
+        "daedalus/__init__.py": "",
+        "daedalus/app.py": "import importlib\nwhere = 'daedalus'\nmod = importlib.import_module('.feature', package=where)\n",
+        "daedalus/feature.py": "VALUE = 7\n",
+        "daedalus/other.py": "import importlib\nmod = importlib.import_module('.feature', package=elsewhere.__name__)\n",
+    })
+    graph = reachability.import_graph(root)
+    assert ".feature" in graph["daedalus.app"]
+    assert ".feature" in graph["daedalus.other"]
+    assert reachability.path_reaches(root, "daedalus.app", ["daedalus.feature"]) == (False, ["daedalus.feature"])
+    assert reachability.path_reaches(root, "daedalus.other", ["daedalus.other.feature"]) == (False, ["daedalus.other.feature"])
+
+
+def test_a_relative_name_is_not_resolved_beyond_the_package_root(tmp_path: Path) -> None:
+    """``..feature`` from a top-level module leaves the package, so there is no module it could name
+    and the literal is kept — while the valid relative import in the same tree is still resolved."""
+    root = _tree(tmp_path, {
+        "daedalus/__init__.py": "",
+        "daedalus/__main__.py": "from daedalus.sub import deep\n",
+        "daedalus/app.py": "import importlib\nmod = importlib.import_module('..feature', package=__package__)\n",
+        "daedalus/sub/__init__.py": "",
+        "daedalus/sub/deep.py": "import importlib\nmod = importlib.import_module('..feature', package=__package__)\n",
+        "daedalus/feature.py": "VALUE = 7\n",
+    })
+    graph = reachability.import_graph(root)
+    assert graph["daedalus.app"] >= {"..feature"}
+    assert graph["daedalus.sub.deep"] >= {"daedalus.feature"}
+    assert reachability.path_reaches(root, "daedalus.app", ["daedalus.feature"]) == (False, ["daedalus.feature"])
+    assert reachability.unreachable_modules(root) == []
