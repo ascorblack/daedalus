@@ -111,15 +111,30 @@ class Board:
             row = await self.app.db.fetchone("SELECT count(*) c FROM board_tasks WHERE status = 'doing'")
             if row and int(row["c"]) >= limit:
                 raise ValueError(f"work-in-progress limit reached ({limit} tasks in 'doing'); finish or hand back one first")
-        if status == "done" and any(not c["done"] for c in task["checklist"]):
-            raise ValueError("the checklist is not complete; check the items or drop them first")
-        checklist = task["checklist"]
-        for i in check or []:
-            if 0 <= i < len(checklist):
-                checklist[i]["done"] = True
-        for i in uncheck or []:
-            if 0 <= i < len(checklist):
-                checklist[i]["done"] = False
+        # Apply the caller's checklist edits before judging completeness: "I checked the last items,
+        # close the task" is one call, and testing the checklist the call *arrived* to refused it.
+        # Index precedence is unchanged — an index in both lists ends up unchecked.
+        unchecked, checked = set(uncheck or []), set(check or [])
+        checklist = [
+            {**item, "done": False} if i in unchecked else {**item, "done": True} if i in checked else item
+            for i, item in enumerate(task["checklist"])
+        ]
+        # A task may not be left finished with an item still open, whichever way this call moved:
+        # closing it, or editing the checklist of a task that is already done. The gate judges the
+        # checklist this call produces, and it runs before anything is written, so a refusal stores
+        # nothing — the message has to say so, or the caller retries with the wrong indexes.
+        if (status or task["status"]) == "done":
+            still_open = [i for i, c in enumerate(checklist) if not c["done"]]
+            if still_open:
+                named = ", ".join(f"{i} ({str(checklist[i].get('text', '')).strip()[:40]})" for i in still_open[:5])
+                more = "" if len(still_open) <= 5 else f" and {len(still_open) - 5} more"
+                remedy = (
+                    "Repeat it with every index you want checked (check=[...], status='done'), or leave the "
+                    "task in another status."
+                    if status == "done"
+                    else "Reopen the task first (status='todo' or 'doing') and edit its checklist there."
+                )
+                raise ValueError(f"the checklist is not complete: {named}{more}. Nothing was stored. {remedy}")
         notes = task["notes"] or ""
         if note:
             notes = (notes + "\n" if notes else "") + f"[{_now()[:16].replace('T', ' ')}] {note[:1000]}"

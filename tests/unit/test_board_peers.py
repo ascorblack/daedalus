@@ -48,6 +48,86 @@ async def test_board_dependencies_wip_and_checklist(app: Any) -> None:
     assert "✅" in text and "build" in text
 
 
+async def test_board_done_applies_checklist_edits_before_the_gate(app: Any) -> None:
+    """Finishing the last item and closing the task is one call, not two.
+
+    The completeness gate used to test the checklist the call *arrived* to, so the one call a
+    finishing agent naturally makes — check=[...] together with status='done' — was refused, with a
+    message that named an operation the board does not have ("drop them").
+    """
+    board = Board(app)
+    t = await board.add(title="ship it", checklist=["write", "test", "announce"])
+    with pytest.raises(ValueError) as exc:
+        await board.update(t["id"], status="done", check=[0, 1])
+    message = str(exc.value)
+    assert "2 (announce)" in message, message  # names what is still open
+    assert "Nothing was stored" in message, message  # and says the call changed nothing at all
+    refused = await board.get(t["id"])
+    assert refused["status"] == "todo"  # a refused call changes nothing …
+    assert [c["done"] for c in refused["checklist"]] == [False, False, False]  # … not even the checks it sent
+    done = await board.update(t["id"], status="done", check=[0, 1, 2], note="published")
+    assert done["status"] == "done"
+    assert all(c["done"] for c in done["checklist"])
+    assert "published" in done["notes"]
+    # Uncheck still wins over check for the same index, as it did before the ordering changed.
+    t2 = await board.add(title="reopen", checklist=["a", "b"])
+    await board.update(t2["id"], check=[0, 1])
+    again = await board.update(t2["id"], check=[1], uncheck=[1])
+    assert [c["done"] for c in again["checklist"]] == [True, False]
+
+
+async def test_board_done_gate_reads_the_resulting_checklist(app: Any) -> None:
+    """Edge cases of the reordered gate, each one a way the ordering could have gone wrong."""
+    board = Board(app)
+
+    # A task with no checklist, and one with an empty checklist, can still be closed.
+    assert (await board.update((await board.add(title="bare"))["id"], status="done"))["status"] == "done"
+    empty = await board.add(title="empty", checklist=[])
+    assert (await board.update(empty["id"], status="done"))["status"] == "done"
+
+    # Indexes outside the list stay ignored, as they were before.
+    ranges = await board.add(title="ranges", checklist=["a"])
+    done = await board.update(ranges["id"], status="done", check=[0, 5, -3])
+    assert [c["done"] for c in done["checklist"]] == [True]
+    assert [c["done"] for c in (await board.update(ranges["id"], check=[7], uncheck=[7]))["checklist"]] == [True]
+
+    # An index in both lists ends up unchecked, so such a call leaves an item open and cannot close
+    # the task. The old gate tested the checklist the call arrived to, so it let this through and
+    # stored a finished task with an unchecked item.
+    both = await board.add(title="both", checklist=["a", "b", "c"])
+    await board.update(both["id"], check=[0, 1, 2])
+    with pytest.raises(ValueError):
+        await board.update(both["id"], status="done", check=[1], uncheck=[1])
+    assert (await board.get(both["id"]))["status"] != "done"  # the refused call changed nothing
+    assert [c["done"] for c in (await board.get(both["id"]))["checklist"]] == [True, True, True]
+
+    # A status other than 'done' is not gated at all.
+    other = await board.add(title="review", checklist=["a", "b"])
+    assert (await board.update(other["id"], status="review", note="half"))["status"] == "review"
+
+    # A finished task cannot be reopened from under its own status: an uncheck that left an item open
+    # while the task stayed done is the same inconsistent state the gate exists to prevent, so it is
+    # refused until the task itself is reopened.
+    finished = await board.add(title="finished", checklist=["a", "b"])
+    await board.update(finished["id"], status="done", check=[0, 1])
+    with pytest.raises(ValueError) as exc:
+        await board.update(finished["id"], uncheck=[0])
+    assert "Reopen the task first" in str(exc.value), str(exc.value)
+    after = await board.get(finished["id"])
+    assert after["status"] == "done" and [c["done"] for c in after["checklist"]] == [True, True]
+    reopened = await board.update(finished["id"], status="doing", uncheck=[0])
+    assert reopened["status"] == "doing" and [c["done"] for c in reopened["checklist"]] == [False, True]
+
+    # A long checklist names the first five open items and counts the rest.
+    long_task = await board.add(title="long", checklist=[f"item {i}" for i in range(400)])
+    with pytest.raises(ValueError) as exc:
+        await board.update(long_task["id"], status="done", check=list(range(393)))
+    message = str(exc.value)
+    assert "393 (item 393)" in message and "and 2 more" in message, message
+    final = await board.update(long_task["id"], status="done", check=list(range(400)))
+    assert final["status"] == "done" and all(c["done"] for c in final["checklist"])
+
+
 async def test_board_hands_back_quiet_tasks(app: Any) -> None:
     board = Board(app)
     app.config.board.stale_hours = 1

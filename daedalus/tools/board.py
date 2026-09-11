@@ -42,7 +42,10 @@ async def board_add(
         "Move or annotate a board task: status todo|doing|review|done|blocked|dropped, a progress note, "
         "checklist items to check/uncheck (0-based indexes). Taking a task to 'doing' claims it for this "
         "session (respecting the work-in-progress limit); 'done' requires a complete checklist and "
-        "unblocks dependents."
+        "unblocks dependents. The checklist edits in the same call are applied before that requirement is "
+        "tested, so finishing the last item and closing the task is one call: check=[...], status='done'. "
+        "A task that is already done keeps the requirement — reopen it (status='todo' or 'doing') before "
+        "unchecking an item."
     ),
 )
 async def board_update(
