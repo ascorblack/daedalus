@@ -1027,3 +1027,10 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
   .bulkbar { left: var(--rail-w); }
   .app.rail-collapsed .bulkbar { left: 64px; }
 }
+
+/* the first item of a meta line keeps its width; what follows truncates */
+.erow-meta > span:first-child, .erow-meta > .nowrap, .erow-meta > .chip, .erow-meta > span[title], .erow-meta > .pill { flex: none; }
+.erow-meta > .mono:not(:first-child) { flex: 0 1 auto; }
+.mrow-foot { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); align-items: center; }
+.mrow.default .mtitle::before { content: ""; }
+@media (max-width: 480px) { .kpi-grid > .kpi:last-child:nth-child(odd) { grid-column: 1 / -1; } }

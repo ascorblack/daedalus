@@ -88,7 +88,7 @@ export function TabBar({ screen, counts, onMore, moreOpen }: { screen: Screen; c
 
 export function MoreSheet({ screen, counts, onClose }: { screen: Screen; counts: Counts; onClose: () => void }) {
   return (
-    <Sheet onClose={onClose} size="narrow" className="more-sheet" ariaLabel="More">
+    <Sheet onClose={onClose} size="narrow" className="more-sheet" title="More">
       <div className="more-grid">
         {MORE.map((s) => {
           const n = countFor(s, counts);

@@ -4,7 +4,7 @@ import { Icon, IconName } from "../icons";
 import { pathFor } from "../router";
 import { PageHeader, go, useMedia } from "../shell";
 import { api, telegram, HeartbeatStatus, Preset, ProviderConf, SearchBackendInfo, SearchCheck, Settings } from "../api";
-import { numInput } from "../ui";
+import { confirmAsync, numInput } from "../ui";
 import { timeAgo } from "../components";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "openai_compat"];
@@ -112,22 +112,20 @@ function PresetRow({ id, p, isDefault, inChain, providers, onDefault, onChain, o
   const title = p.label || `${p.provider}/${p.model}`;
   return (
     <div className={`mrow ${isDefault ? "default" : ""} ${open ? "open" : ""}`}>
-      <div className="mline">
-        <button className={`radio ${isDefault ? "on" : ""}`} onClick={onDefault} aria-label="make default" title={isDefault ? "default for new sessions" : "make this the default for new sessions"} />
+      <div className="mline noradio">
         <button className="mmain" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
           <span className="mtitle">{title}</span>
           <span className="mmeta">{p.provider} · {p.model}</span>
         </button>
         <div className="mtags">
-          {isDefault && <span className="pill idle">default</span>}
+          {isDefault && <span className="chip accent">default</span>}
           {!isDefault && inChain && <span className="pill">fallback</span>}
           <span className="pill">{p.thinking ? `think ${p.reasoning_effort}` : "no thinking"}</span>
           {p.images && <span className="pill">images</span>}
           <span className="pill">{Math.round(p.context_window / 1000)}k</span>
         </div>
         <div className="mactions">
-          <button className={`iconbtn small ${open ? "on" : ""}`} onClick={() => setOpen((o) => !o)} title={open ? "close" : "edit"} aria-label="edit"><span className={`chev ${open ? "down" : ""}`}>›</span></button>
-          <DeleteButton label="✕" onDelete={onDelete} />
+          <button className={`iconbtn small ${open ? "on" : ""}`} onClick={() => setOpen((o) => !o)} title={open ? "Close" : "Edit"} aria-label={open ? "Close" : "Edit"}><span className={`chev ${open ? "down" : ""}`}>›</span></button>
         </div>
       </div>
       {open && (
@@ -172,6 +170,13 @@ function PresetRow({ id, p, isDefault, inChain, providers, onDefault, onChain, o
             <Toggle on={p.images} onClick={() => onPatch({ images: !p.images })} title="the model accepts pictures">images {p.images ? "on" : "off"}</Toggle>
             {!isDefault && <Toggle on={inChain} onClick={onChain} title="tried after the default when it fails">{inChain ? "fallback ✓" : "use as fallback"}</Toggle>}
             <span className="sub mono mid">{id}</span>
+          </div>
+          <div className="btnrow mrow-foot">
+            {isDefault ? <span className="sub">Opens new sessions.</span> : <button className="btn small primary" onClick={onDefault}>Make default</button>}
+            <span className="grow" />
+            <button className="btn small danger" disabled={isDefault} title={isDefault ? "pick another default first" : "remove this model"} onClick={async () => { if (await confirmAsync(`Delete "${title}"?`, { body: "Sessions that chose it fall back to the default; the client stays.", action: "Delete model" })) onDelete(); }}>
+              <Icon name="trash" size={14} /> Delete
+            </button>
           </div>
         </div>
       )}
@@ -239,24 +244,6 @@ function AddPresetRow({ providers, onAdd, toast }: { providers: string[]; onAdd:
   );
 }
 
-function DeleteButton({ label, onDelete }: { label: string; onDelete: () => void }) {
-  const [confirming, setConfirming] = useState(false);
-  return (
-    <button
-      className={`btn small danger ${confirming ? "primary" : ""}`}
-      onClick={() => {
-        if (confirming) onDelete();
-        else {
-          setConfirming(true);
-          setTimeout(() => setConfirming(false), 2500);
-        }
-      }}
-    >
-      {confirming ? "sure?" : label}
-    </button>
-  );
-}
-
 /** One client: id, kind and readiness on a line; the address and the key behind it. */
 function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
   id: string;
@@ -283,8 +270,7 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
           {p.api_key_set && <span className="pill">key stored</span>}
         </div>
         <div className="mactions">
-          <button className={`iconbtn small ${open ? "on" : ""}`} onClick={() => setOpen((o) => !o)} title={open ? "close" : "edit"} aria-label="edit"><span className={`chev ${open ? "down" : ""}`}>›</span></button>
-          <DeleteButton label="✕" onDelete={() => onRemove(id)} />
+          <button className={`iconbtn small ${open ? "on" : ""}`} onClick={() => setOpen((o) => !o)} title={open ? "Close" : "Edit"} aria-label={open ? "Close" : "Edit"}><span className={`chev ${open ? "down" : ""}`}>›</span></button>
         </div>
       </div>
       {open && (
@@ -334,6 +320,12 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
                 )}
               </div>
             </label>
+          </div>
+          <div className="btnrow mrow-foot">
+            <span className="grow" />
+            <button className="btn small danger" onClick={async () => { if (await confirmAsync(`Remove the client "${id}"?`, { body: "Models that use it stop working until they are moved to another client.", action: "Remove client" })) onRemove(id); }}>
+              <Icon name="trash" size={14} /> Remove
+            </button>
           </div>
         </div>
       )}
