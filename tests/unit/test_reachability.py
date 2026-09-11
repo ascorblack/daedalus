@@ -954,3 +954,59 @@ def test_a_widened_entry_point_tuple_cannot_widen_the_gate(tmp_path: Path, monke
         relevance_gate(root, ["daedalus/parasite.py"], "daedalus.parasite")
     # Control: the module that really is a boot entry point may still name itself.
     relevance_gate(root, ["daedalus/__main__.py"], "daedalus.__main__")
+
+
+def test_an_unrelated_counted_run_does_not_launder_an_empty_one(tmp_path: Path) -> None:
+    """While a test run that executed nothing is on the receipts, a module must be named by a run that
+    counted tests. Otherwise an unrelated green run makes the empty one harmless and a `cat` reopens
+    the hole the count rule closes."""
+    now = datetime.now(UTC).timestamp()
+    fresh = _at(now, 3600)
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py"]
+    empty_run = {"id": 31, "command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "at": fresh, "tests_run": 0}
+    unrelated = {"id": 32, "command": "uv run pytest tests/unit/test_unrelated.py -q", "passed": 1, "at": fresh, "tests_run": 40}
+    reader = {"id": 33, "command": "cat daedalus/host/boot_guard.py", "passed": 1, "at": fresh}
+    with pytest.raises(ProposalRefused, match="only reads it is not enough"):
+        evidence_gate(root, changed, [empty_run, unrelated, reader], None)
+    # A counted run naming the module itself is what closes it — and a stale one is not enough.
+    stale_run = {"id": 34, "command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1,
+                 "at": _at(now, -3600), "tests_run": 5}
+    with pytest.raises(ProposalRefused, match="only reads it is not enough"):
+        evidence_gate(root, changed, [empty_run, stale_run, reader], None)
+    evidence_gate(root, changed, [empty_run, unrelated, reader, {
+        "id": 35, "command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "at": fresh, "tests_run": 5,
+    }], None)
+
+
+def test_a_broken_symlink_is_not_a_deletion(tmp_path: Path) -> None:
+    """The deletion exemption is about bytes that are gone. A link whose target is gone leaves a path a
+    checkout cannot read, and accepting it would make an old receipt enough for a file nobody can open."""
+    now = datetime.now(UTC).timestamp()
+    fresh = _at(now, 3600)
+    root = _evidence_tree(tmp_path, {"daedalus/host/boot_guard.py": "GUARD = 1\n"})
+    link = root / "daedalus/host/vanished.py"
+    link.symlink_to(root / "daedalus/host/never_there.py")
+    with pytest.raises(ProposalRefused, match="points nowhere"):
+        evidence_gate(root, ["daedalus/host/vanished.py"],
+                      [{"id": 41, "command": "cat daedalus/host/vanished.py", "passed": 1, "at": fresh}], None)
+
+
+def test_a_count_of_an_unexpected_type_is_not_a_count(tmp_path: Path) -> None:
+    """The number in a receipt comes from a database column, so its type is not guaranteed. It is read
+    as data: a value that is not a number is not a count, and the receipt is refused as evidence — never
+    raised into the card it is printed on."""
+    now = datetime.now(UTC).timestamp()
+    fresh = _at(now, 3600)
+    root = _evidence_tree(tmp_path, {"daedalus/host/boot_guard.py": "GUARD = 1\n"})
+    changed = ["daedalus/host/boot_guard.py"]
+    empty_run = {"id": 51, "command": "uv run pytest tests/unit -q", "passed": 1, "at": fresh, "tests_run": 0}
+    with pytest.raises(ProposalRefused, match="not a number"):
+        evidence_gate(root, changed, [
+            empty_run,
+            {"id": 52, "command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "at": fresh,
+             "tests_run": "many"},
+        ], None)

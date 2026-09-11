@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from daedalus.tools.verify import _command_workdir, _is_test_run, _test_counts, _tree_state
+from daedalus.tools.verify import (
+    _command_workdir,
+    _counts_from_output,
+    _is_test_run,
+    _test_counts,
+    _tree_state,
+)
 
 
 @pytest.mark.parametrize(
@@ -65,12 +71,25 @@ def test_the_last_footer_wins_and_the_window_does_not_hide_it() -> None:
         ("FOO=1 BAR=2 uv run pytest -q", True),
         ("timeout 600 pytest -q", True),
         ("pytest tests | tail -5", True),
+        # wrappers that only pass the runner through: a package runner, a coverage driver, a shell
+        ("uv run --extra dev pytest tests/unit -q", True),
+        ("uvx pytest tests -q", True),
+        ("uv run -m pytest tests -q", True),
+        ("coverage run -m pytest tests -q", True),
+        ("python -m coverage run -m pytest tests -q", True),
+        ("bash -lc 'pytest tests -q'", True),
+        ("nice pytest -q", True),
+        ("nice -n 5 pytest -q", True),
+        ("stdbuf -oL pytest -q", True),
+        ("timeout 30 nice pytest -q", True),
         # mentions the runner without running it
         ("cat pytest.ini", False),
         ("grep -rn pytest log.txt", False),
         ("echo pytest", False),
         ('python -c "import pytest"', False),
         ("uv run python -c 'import pytest'", False),
+        ("python -m coverage report", False),
+        ("uv run ruff check pytest", False),
         # runners whose output this module does not parse are not claimed
         ("tox -e py", False),
         ("nox -s tests", False),
@@ -80,6 +99,18 @@ def test_the_last_footer_wins_and_the_window_does_not_hide_it() -> None:
 )
 def test_a_runner_is_recognised_as_an_invocation(command: str, expected: bool) -> None:
     assert _is_test_run(command) is expected
+
+
+def test_a_line_printed_by_a_test_does_not_override_the_runner_footer() -> None:
+    """A test can print a unittest-shaped line; the pytest footer is still the runner's own report.
+
+    Read as one pool, the later line wins and the recorded count becomes zero — a passing run that the
+    gate would then treat as evidence that nothing ran.
+    """
+    text = "Ran 3 tests in 0.001s\nOK\n3 passed in 0.41s\n"
+    assert _test_counts(text) == (3, 0)
+    # unittest really was the runner: no pytest footer anywhere, so its shape is read.
+    assert _test_counts("Ran 5 tests in 0.001s\n\nOK\n") == (5, 0)
 
 
 def test_the_tree_comes_from_the_directory_the_command_ran_in(tmp_path: Path) -> None:
@@ -95,3 +126,30 @@ def test_the_tree_comes_from_the_directory_the_command_ran_in(tmp_path: Path) ->
 
 def test_the_tree_is_empty_for_a_directory_that_is_not_a_checkout(tmp_path: Path) -> None:
     assert asyncio.run(_tree_state(tmp_path)) == ""
+
+
+def test_the_counts_come_from_the_tail_then_the_head() -> None:
+    """A long run's footer is in the tail, a short one's in the head, and junk in the tail must not stop
+    the head from being read (a non-empty junk string is truthy, so `or` would not work)."""
+    assert _counts_from_output("junk\n" * 100, "5 passed in 0.10s\n") == (5, 0)
+    assert _counts_from_output("9 passed in 0.30s\n", "5 passed in 0.10s\n") == (9, 0)
+    assert _counts_from_output("junk\n", "still junk\n") == (None, None)
+
+
+def test_the_tree_marks_a_dirty_checkout(tmp_path: Path) -> None:
+    """A receipt taken with uncommitted edits says so: the commit alone is not the tree the check saw."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {"PATH": "/usr/bin:/bin", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com", "HOME": str(tmp_path)}
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env)
+    (repo / "a.txt").write_text("one\n")
+    subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "commit", "-q", "-m", "one"], cwd=repo, check=True, env=env)
+    clean = asyncio.run(_tree_state(repo))
+    assert clean and not clean.endswith("+worktree"), clean
+    (repo / "a.txt").write_text("two\n")
+    dirty = asyncio.run(_tree_state(repo))
+    assert dirty.endswith("+worktree"), dirty

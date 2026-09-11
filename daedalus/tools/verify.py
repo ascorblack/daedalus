@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import os
 import re
+import shlex
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,27 +61,80 @@ def _is_test_run(command: str) -> bool:
     claimed here: the receipt then records no count and the gate does not invent one.
     """
     for segment in re.split(r"&&|\|\||;|\|", command or ""):
-        tokens = segment.strip().split()
-        index = 0
-        while index < len(tokens) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", tokens[index]):
-            index += 1  # leading environment assignments
-        # launchers that only wrap the real command
-        while index < len(tokens) and tokens[index] in ("env", "sudo", "time", "timeout", "uv", "poetry", "hatch", "pipenv", "pdm", "rye", "exec", "command", "nohup"):
-            index += 1
-            if index < len(tokens) and tokens[index] in ("run", "exec", "-m"):
-                index += 1
-            elif index < len(tokens) and re.fullmatch(r"\d+[smhd]?", tokens[index]):
-                index += 1  # timeout's duration
-        if index >= len(tokens):
-            continue
-        word = tokens[index].rsplit("/", 1)[-1]
-        rest = tokens[index + 1 :]
-        if word in ("pytest", "py.test"):
+        if _segment_runs_tests(_tokenize(segment)):
             return True
-        if re.fullmatch(r"python[0-9.]*", word) and "-m" in rest:
-            module = rest[rest.index("-m") + 1] if rest.index("-m") + 1 < len(rest) else ""
-            if module in ("pytest", "unittest"):
-                return True
+    return False
+
+
+# Commands that wrap the real one without changing it: a package runner, a scheduler-side effect, a
+# shell. Each is skipped, then its own options, then its subcommand word.
+_LAUNCHERS = frozenset({
+    "env", "sudo", "time", "timeout", "nice", "ionice", "stdbuf", "exec", "command", "nohup",
+    "uv", "uvx", "poetry", "hatch", "pipenv", "pdm", "rye", "coverage", "bash", "sh", "zsh", "dash",
+    "xargs",
+})
+# Launchers whose options take a value, so the value is not mistaken for the command word
+# (`uv run --extra dev pytest`, `nice -n 5 pytest`, `stdbuf -oL pytest`, `coverage run --branch …`).
+_VALUE_OPTIONS = frozenset({
+    "-n", "-p", "--extra", "--with", "--python", "--directory", "--project", "--index", "-i",
+    "--timeout", "-o", "--branch", "--source", "--include", "--rcfile", "--pythonpath",
+})
+_DURATION = re.compile(r"\d+[smhd]?$")
+
+
+def _tokenize(segment: str) -> list[str]:
+    """Split a command segment into words, honouring quotes; a quoted command is split again."""
+    try:
+        words = shlex.split(segment, posix=True)
+    except ValueError:  # unbalanced quotes: the plain split is the best reading available
+        words = segment.strip().split()
+    out: list[str] = []
+    for word in words:
+        if " " in word.strip():
+            out.extend(word.split())  # `bash -lc 'pytest -q'`: the shell's own words
+        else:
+            out.append(word)
+    return out
+
+
+def _segment_runs_tests(tokens: list[str]) -> bool:
+    """Whether one command segment, already tokenised, invokes a test runner."""
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", token):
+            index += 1  # environment assignment in front of the command
+            continue
+        word = token.rsplit("/", 1)[-1]
+        if word == "pytest" or word == "py.test":
+            return True
+        if re.fullmatch(r"python[0-9.]*", word):
+            rest = tokens[index + 1 :]
+            if "-m" in rest:
+                at = rest.index("-m")
+                module = rest[at + 1] if at + 1 < len(rest) else ""
+                if module in ("pytest", "unittest"):
+                    return True
+                if module in ("coverage",):  # `python -m coverage run -m pytest`
+                    index += 1 + at + 2
+                    continue
+            return False
+        if word in _LAUNCHERS:
+            index += 1
+            continue
+        if word in ("run", "exec"):
+            index += 1  # a launcher's own subcommand (`uv run`, `poetry run`, `coverage run`)
+            continue
+        if token.startswith("-"):
+            if token in _VALUE_OPTIONS:
+                index += 2
+            else:
+                index += 1
+            continue
+        if _DURATION.fullmatch(token):
+            index += 1  # `timeout 30 …`
+            continue
+        return False  # some other program: whatever follows is its argument, not a command
     return False
 
 
@@ -141,9 +195,14 @@ def _test_counts(output: str) -> tuple[int | None, int | None]:
     not know, which is different from saying nothing ran. ``(0, 0)`` is a fact the runner stated: it
     ran nothing (``no tests ran``, or a collect-only run, which collected but executed none).
 
-    Counts are read from the last footer in the output, and only from a line shaped like one. A test
-    that prints the phrase, a logged example of a summary, or a summary pushed out of the window by a
-    chatty reporter is not the runner reporting on itself.
+    Counts are read from the runner's own footer, and only from a line shaped like one. A test that
+    prints the phrase, a logged example of a summary, or a summary pushed out of the window by a chatty
+    reporter is not the runner reporting on itself.
+
+    pytest's summary wins over unittest's when both appear. A pytest run can be made to print a
+    unittest-shaped line from inside a test (``print("Ran 3 tests in 0.001s")``), and that line would
+    otherwise override the real footer — which is the count the gate reads. unittest's shape is read
+    only when no pytest footer is present, i.e. when unittest really was the runner.
     """
     text = output or ""
     checks: list[tuple[int, int, str]] = []
@@ -158,8 +217,8 @@ def _test_counts(output: str) -> tuple[int | None, int | None]:
                 skipped += value
             executed += value
         checks.append((executed, skipped, "footer"))
-    for match in _TEST_UNITTEST.finditer(text):
-        checks.append((int(match.group(1)), 0, "unittest"))
+    if not checks:
+        checks = [(int(m.group(1)), 0, "unittest") for m in _TEST_UNITTEST.finditer(text)]
     if not checks:
         if _TEST_EMPTY.search(text):
             return 0, 0
@@ -251,6 +310,19 @@ async def verify(context: ToolContext, criterion: str, command: str, cwd: str | 
     return await _receipt(context, services, manager, criterion, command, workdir, exit_code, hasher.hexdigest(), bytes(head), bytes(tail), total_bytes, time.monotonic() - started, timed_out, kill_failed, sandboxed, dependencies)
 
 
+def _counts_from_output(tail_text: str, head_text: str) -> tuple[int | None, int | None]:
+    """A run's counts, read from the tail first and the head second.
+
+    A long run's footer is at the end of its output, which is what the tail holds; a short run's is at
+    the start, which is what the head holds. The tail is tried first because a tail that decodes to
+    junk is still a non-empty string, so a truthiness test would never look at the head.
+    """
+    run, skipped = _test_counts(tail_text)
+    if run is None:
+        run, skipped = _test_counts(head_text)
+    return run, skipped
+
+
 async def _receipt(context: ToolContext, services: Any, manager: Any, criterion: str, command: str, workdir: Path, exit_code: int, full_digest: str, head: bytes, tail: bytes, total_bytes: int, elapsed: float, timed_out: bool, kill_failed: bool, sandboxed: bool, dependencies: str | None) -> ToolResult:
     """Record the receipt and shape the answer; the same for a local process and a command run elsewhere."""
     if timed_out:
@@ -266,9 +338,7 @@ async def _receipt(context: ToolContext, services: Any, manager: Any, criterion:
     tree = await _tree_state(_command_workdir(command, workdir))
     # Read the tail first (a long run's footer is there), then the head: a tail that decodes to junk is
     # truthy, so `or` would never look at the head, and the head is where a short run's footer is.
-    tests_run, tests_skipped = _test_counts(tail.decode("utf-8", "replace"))
-    if tests_run is None:
-        tests_run, tests_skipped = _test_counts(output)
+    tests_run, tests_skipped = _counts_from_output(tail.decode("utf-8", "replace"), output)
     if manager is not None:
         # Receipts travel to proposal cards and pull-request bodies: nothing secret may be recorded.
         r = redact.shared()

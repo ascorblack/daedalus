@@ -223,16 +223,24 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
     tree. A row whose timestamp is missing or unreadable is no evidence at all, not an exemption —
     ``receipt_rows`` selects the column, so the host always supplies it.
 
-    Four limits are known and are named rather than hidden. The receipt's ``tree`` field is shown to a
+    A green test run that executed nothing is a specific hazard, and the window is judged for it as a
+    whole rather than row by row. If every passing receipt is such a run, the change has no check at all.
+    And while such a run is in the window, naming a module with a command that only reads it is not
+    enough: each changed host module then needs a run that counted tests and postdates it, because
+    otherwise any unrelated green run launders the empty one and the count rule is undone by arrangement.
+
+    Five limits are known and are named rather than hidden. The receipt's ``tree`` field is shown to a
     reader and is not read here: a receipt from the right commit on the wrong branch still passes, and
     closing that needs the tree to be compared against the proposed worktree. The comparison is against
     modification time, not content, so an edit followed by a timestamp of an earlier date defeats it,
     and a content-preserving rewrite (a ``touch``, a formatter, a rebase) blocks the change until the
     check is run again. A deleted file has no bytes left to cover, so a receipt that names it is enough
-    for it. And a receipt that names a file without running it — ``cat`` it, print its path — counts as
-    naming when the window holds no green test run that executed nothing; where it does, the change is
-    refused, because a run that proves nothing sitting beside a command that only reads a file names
-    the code without checking it.
+    for it — but a symlink whose target is gone is refused, because a path no checkout can read is not
+    a deletion. A receipt that names a file without running it — ``cat`` it, print its path — counts as
+    naming when the window holds no empty test run; where it does, the rule above refuses the change. And
+    a command that runs the tests through a wrapper this module does not recognise is treated as no test
+    run at all, so its count is not read: a runner the receipt cannot parse is not counted, and the cost
+    is that such a receipt has to name the code some other way.
     """
     root = root.resolve()
     green = [r for r in receipts if r.get("passed")]
@@ -281,25 +289,59 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
     def current(f: str, rows: list[dict[str, Any]]) -> bool:
         """Whether one of these receipts postdates the file, i.e. covers the bytes in the tree."""
         path = root / f
-        if not path.is_file():
+        if not path.exists() and not path.is_symlink():
             return True  # deleted: no bytes left to cover, and the receipt names it
         newest = path.stat().st_mtime
-        return any((when := _receipt_time(r)) is not None and when >= newest for r in rows)
+        return any(_postdates(r, newest) for r in rows)
+
+    def _postdates(row: dict[str, Any], newest: float) -> bool:
+        when = _receipt_time(row)
+        return when is not None and when >= newest
+
+    def counted_tests(row: dict[str, Any]) -> bool:
+        """Whether the receipt is a test run that says it executed at least one test.
+
+        The same reading as ``_ran_no_tests``, so the two cannot drift: the row is a counted test run
+        exactly when it is a test run and that function has no complaint about it.
+        """
+        return PYTHON_TEST_RUN(str(row.get("command") or "")) and _ran_no_tests(row) is None
+
+    # A symlink whose target is gone is not a deleted file. The deletion exemption says "no bytes left to
+    # cover"; a broken link leaves a path in the tree that no checkout can read, and exempting it would
+    # turn "the file is not there" into a reason to accept an old receipt.
+    broken = [f for f in sorted(tokens_for) if (root / f).is_symlink() and not (root / f).exists()]
+    if broken:
+        raise ProposalRefused(
+            "a changed path is a symlink whose target is gone: " + ", ".join(broken)
+            + ". The deletion exemption does not apply to a link that points nowhere — no receipt can "
+            "have covered that file. Repair or remove the link, then propose again."
+        )
 
     unnamed: list[str] = []
     stale: list[str] = []
+    unaudited: list[str] = []
     for f in sorted(tokens_for):
         rows = naming(f)
         if not rows:
             if f in must_be_named:
                 unnamed.append(f)
             continue
-        if current(f, rows):
-            continue  # named by a receipt that postdates it: the bytes in the tree are covered
         path = root / f
-        newest = path.stat().st_mtime
-        dates = ", ".join(sorted({str(r.get("at") or "no timestamp") for r in rows}))
-        stale.append(f"{f} (last written {datetime.fromtimestamp(newest, tz=UTC).isoformat()}; receipts at {dates})")
+        deleted = not path.exists() and not path.is_symlink()
+        newest = None if deleted else path.stat().st_mtime
+        covered = deleted or any(_postdates(r, newest) for r in rows)
+        if not covered:
+            dates = ", ".join(sorted({str(r.get("at") or "no timestamp") for r in rows}))
+            stale.append(f"{f} (last written {datetime.fromtimestamp(newest, tz=UTC).isoformat()}; receipts at {dates})")
+            continue
+        # A green test run that executed nothing must not be what stands behind a changed module: while
+        # such a row is in the window, naming the module is not enough — a run that counted tests has to
+        # name it. Without this, any unrelated counted run launders an empty one, and a command that only
+        # reads the file reopens the hole the count rule is meant to close.
+        if empty and f in must_be_named and not any(
+            counted_tests(r) and (deleted or _postdates(r, newest)) for r in rows
+        ):
+            unaudited.append(f)
 
     if not passed and empty:
         raise ProposalRefused(
@@ -311,14 +353,6 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
     # A green test run that executed nothing must not sit in the window while the change rides on a
     # receipt that only reads a file: that is the count rule undone by arrangement. If the window holds
     # such a row and no run that really counted tests, the proposal is refused for what it is.
-    def counted_tests(row: dict[str, Any]) -> bool:
-        if not PYTHON_TEST_RUN(str(row.get("command") or "")):
-            return False
-        try:
-            return int(row.get("tests_run")) >= 1
-        except (TypeError, ValueError):
-            return False
-
     real_run = any(counted_tests(r) for r in passed)
     if empty and not real_run:
         raise ProposalRefused(
@@ -326,6 +360,13 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
             + "; ".join(f"receipt {r.get('id')} — {_ran_no_tests(r)} ({str(r.get('command') or '')[:RECEIPT_COMMAND_CHARS]})" for r in empty)
             + ") and no run that counted any tests, so what names the changed code is a command that only read a file. "
             "Run the tests the change exercises with Verify, after the last edit."
+        )
+    if unaudited:
+        raise ProposalRefused(
+            "a test run that executed nothing is in the window, so naming a changed module with a command "
+            "that only reads it is not enough: " + ", ".join(unaudited) + ". While such a row is on the "
+            "receipts, every changed host module needs a run that counted tests and postdates it. Run those "
+            "tests with Verify, after the last edit."
         )
     if unnamed:
         raise ProposalRefused(
