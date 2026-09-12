@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from daedalus.tools.verify import (
+    UNFINGERPRINTED,
     _command_workdir,
     _content_digests,
     _counts_from_output,
@@ -138,6 +139,32 @@ def test_the_counts_come_from_the_tail_then_the_head() -> None:
     assert _counts_from_output("junk\n", "still junk\n") == (None, None)
 
 
+def test_the_fingerprint_is_keyed_from_the_repository_root(tmp_path: Path) -> None:
+    """Reported by review: `ls-files --others` prints paths relative to the directory it ran in, while the
+    digest was taken from the toplevel, so a check run from a subdirectory wrote a key that named no file
+    and left the changed file uncovered. Keys are repo-relative wherever the check ran."""
+    repo, _env = _repo(tmp_path)
+    (repo / "sub").mkdir()
+    (repo / "sub" / "new.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "kept.txt").write_text("two\n", encoding="utf-8")
+    from_root = asyncio.run(_content_digests(repo))
+    from_sub = asyncio.run(_content_digests(repo / "sub"))
+    assert set(from_root) == {"kept.txt", "sub/new.py"}, from_root
+    assert from_sub == from_root
+    assert from_sub["sub/new.py"] == file_digest(repo / "sub" / "new.py")
+
+
+def test_a_checkout_whose_base_cannot_be_found_says_so_rather_than_staying_silent(tmp_path: Path) -> None:
+    """An empty fingerprint used to be stored when there was nothing to compare against, which the gate
+    read as "no claim" and the clock then decided. The receipt now carries the reason, so a check that
+    cannot name its tree is visible in the receipt and covers nothing in the gate."""
+    repo, _env = _repo(tmp_path)
+    digests = asyncio.run(_content_digests(repo))  # clean tree, and no origin/main to compare with
+    assert list(digests) == [UNFINGERPRINTED], digests
+    (repo / "kept.txt").write_text("two\n", encoding="utf-8")
+    assert set(asyncio.run(_content_digests(repo))) == {"kept.txt"}
+
+
 def test_the_tree_marks_a_dirty_checkout(tmp_path: Path) -> None:
     """A receipt taken with uncommitted edits says so: the commit alone is not the tree the check saw."""
     import subprocess
@@ -194,14 +221,22 @@ def test_the_fingerprint_names_the_bytes_the_check_ran_against(tmp_path: Path) -
 
 def test_a_deleted_file_and_a_symlink_have_answers_of_their_own(tmp_path: Path) -> None:
     """Silence about a path is not a fact about it: a receipt has to be able to say "already gone" and
-    "a link to this" as clearly as it says a digest."""
+    "a link to these bytes" as clearly as it says a digest. A link is fingerprinted through what it
+    points at, so editing the target moves the digest, and a link to nothing says which it is rather
+    than reading as an ordinary file."""
     repo, env = _repo(tmp_path)
     import subprocess
 
     (repo / "gone.txt").write_text("bye\n")
-    subprocess.run(["git", "add", "gone.txt"], cwd=repo, check=True, env=env)
+    (repo / "target.txt").write_text("first\n")
+    subprocess.run(["git", "add", "gone.txt", "target.txt"], cwd=repo, check=True, env=env)
     subprocess.run(["git", "commit", "-q", "-m", "add gone"], cwd=repo, check=True, env=env)
     (repo / "gone.txt").unlink()                       # deleted after the branch point
-    (repo / "link.txt").symlink_to("target-does-not-exist")
+    (repo / "link.txt").symlink_to("target.txt")
+    (repo / "dangling.txt").symlink_to("nowhere.txt")
     digests = asyncio.run(_content_digests(repo))
-    assert digests["gone.txt"] == "absent" and digests["link.txt"].startswith("link:"), digests
+    assert digests["gone.txt"] == "absent", digests
+    assert digests["link.txt"] == "link:" + file_digest(repo / "target.txt"), digests
+    assert digests["dangling.txt"].startswith("link-broken:"), digests
+    (repo / "target.txt").write_text("second\n", encoding="utf-8")
+    assert asyncio.run(_content_digests(repo))["link.txt"] != digests["link.txt"]

@@ -185,17 +185,18 @@ def _names(command: str, choices: set[str]) -> bool:
     return any(re.search(r"(?<![A-Za-z0-9_-])" + re.escape(tok) + r"(?![A-Za-z0-9_])", command) for tok in choices)
 
 
-def _recorded_digests(row: dict[str, Any]) -> dict[str, str]:
-    """The content the receipt says it ran against, keyed by path from the repo root.
+def _content_claim(row: dict[str, Any]) -> dict[str, str] | None:
+    """The content the receipt says it ran against, or ``None`` when it makes no claim at all.
 
-    A row written before this column existed, an empty one, and one holding something that is not an
-    object all read as "this receipt makes no content claim" — which is what they are. The gate then
-    falls back to the timestamp rule for such a row rather than refusing it: an old receipt is not a
-    wrong one.
+    ``None`` is one shape only: a row whose column is empty, which is what every receipt written before
+    the column existed carries. Anything else that is not a mapping of path to digest — a list, a string,
+    a number, text that will not parse — is a claim the gate cannot read, and an unreadable claim covers
+    nothing. Reading those as "no claim" would hand the decision back to the clock, which is the hole
+    this rule exists to close; ``Verify`` never writes them, so one can only arrive by tampering.
     """
     raw = row.get("file_digests")
-    if not raw:
-        return {}
+    if raw is None or not str(raw).strip():
+        return None
     try:
         data = json.loads(str(raw))
     except ValueError:
@@ -239,10 +240,14 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
     host module needs a receipt of its own — one receipt that names one of them says nothing about the
     rest, and a receipt for a differently named test does not reach the module it tests.
 
-    Naming the change is not enough on its own: the receipt must also have been recorded at or after
-    the last write to the file it names, or it proves something about bytes that are no longer in the
-    tree. A row whose timestamp is missing or unreadable is no evidence at all, not an exemption —
-    ``receipt_rows`` selects the column, so the host always supplies it.
+    Naming the change is not enough on its own. A receipt that fingerprinted its checkout — ``Verify``
+    records the files its checkout differs by, with a digest of each — is judged by content: it covers a
+    file exactly when the bytes are the ones it recorded, and the claim has to reach this file at all, so
+    a path the check never saw is not covered by it however recent the receipt is. A receipt that makes
+    no content claim, which is every row written before that column existed, is judged by the clock: it
+    must have been recorded at or after the last write to the file it names. A row whose timestamp is
+    missing or unreadable is no evidence at all, not an exemption — ``receipt_rows`` selects the column,
+    so the host always supplies it.
 
     A green test run that executed nothing is a specific hazard, and the window is judged for it as a
     whole rather than row by row. If every passing receipt is such a run, the change has no check at all.
@@ -250,18 +255,17 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
     enough: each changed host module then needs a run that counted tests and postdates it, because
     otherwise any unrelated green run launders the empty one and the count rule is undone by arrangement.
 
-    Four limits are known and are named rather than hidden. The receipt's ``tree`` field — the commit it
-    ran against — is shown to a reader and is not compared here, because a commit is a name and a rebase
-    renames identical content; what a receipt can be held to is the ``file_digests`` it carries, and the
-    comparison against the proposed worktree is made on those. A row without digests (one written before
-    the column existed) is still judged by modification time: an edit followed by a timestamp of an
-    earlier date defeats that rule, and such a row is the only case where a content-preserving rewrite
-    (a ``touch``, a formatter, a rebase) blocks the change. A deleted file has no bytes left to cover, so
-    a receipt that names it is enough for it — but a symlink whose target is gone is refused, because a
-    path no checkout can read is not a deletion. And a command that runs the tests through a wrapper this
-    module does not recognise is treated as no test run at all, so its count is not read: a runner the
-    receipt cannot parse is not counted, and the cost is that such a receipt has to name the code some
-    other way.
+    Four limits are known and are named rather than hidden. A receipt can be asked from outside any
+    checkout, and then it makes no content claim and the clock rule judges it: this is the behaviour of
+    every receipt written before the column existed, and it is the one way to leave the content rule
+    behind — a row that makes a claim never falls back. The comparison is against the branch point with
+    ``origin/main``, so a proposed tree whose history does not carry that ref is fingerprinted as its
+    whole difference from ``HEAD`` or not at all. A deleted file has no bytes left to cover, so a
+    receipt that names it is enough for it — but a symlink whose target is gone is refused, because a
+    path no checkout can read is not a deletion. And a command that runs the tests through a wrapper
+    this module does not recognise is treated as no test run at all, so its count is not read: a runner
+    the receipt cannot parse is not counted, and the cost is that such a receipt has to name the code
+    some other way.
     """
     root = root.resolve()
     green = [r for r in receipts if r.get("passed")]
@@ -308,22 +312,25 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
         return found
 
     def _covers(row: dict[str, Any], f: str, path: Path, newest: float) -> bool:
-        """Whether this receipt covers the file: by its recorded bytes when it has them, else by time.
+        """Whether this receipt covers the file: by its recorded bytes when it claims any, else by time.
 
-        A receipt that fingerprinted this file is judged by content alone — the bytes are the claim — and
-        a receipt that did not is judged by the clock, as every receipt was before the column existed.
-        The two are not mixed inside one row: a digest that matches is not rescued by a fresh timestamp,
-        and a row with no digest is not refused for lacking one.
+        A receipt that fingerprinted its checkout is judged by content alone, and the claim has to reach
+        this file: a path the check never saw is not covered by it, however fresh the clock. Only a
+        receipt that makes no content claim at all — one written before the column existed, or from a
+        directory that is not a checkout — is judged by the clock, as every receipt was before.
         """
-        recorded = _recorded_digests(row)
-        if recorded and f in recorded:
-            return recorded[f] == FILE_DIGEST(path)
+        claim = _content_claim(row)
+        if claim is not None:
+            return claim.get(f) == FILE_DIGEST(path)
         return _postdates(row, newest)
 
     def _why_stale(f: str, rows: list[dict[str, Any]], path: Path, newest: float) -> str:
-        """Why the receipts that name this file do not cover it: content or clock, said plainly."""
-        if any(f in _recorded_digests(r) and _recorded_digests(r)[f] != FILE_DIGEST(path) for r in rows):
+        """Why the receipts that name this file do not cover it: content, clock or silence, said plainly."""
+        claims = [_content_claim(r) for r in rows]
+        if any(c is not None and f in c and c[f] != FILE_DIGEST(path) for c in claims):
             return "the receipts ran against content that is not what the file holds now"
+        if any(c is not None and f not in c for c in claims):
+            return "the receipts made a content claim, and this file was not part of it"
         dates = ", ".join(sorted({str(r.get("at") or "no timestamp") for r in rows}))
         return f"last written {datetime.fromtimestamp(newest, tz=UTC).isoformat()}; receipts at {dates}"
 
@@ -639,7 +646,7 @@ class SelfDevelopment:
             tree = row["tree"] or ""
             tree_note = f", tree {tree[:12]}{'+dirty' if tree.endswith('+worktree') else ''}" if tree else ""
             run_note = f", {row['tests_run']} tests run" if row["tests_run"] is not None else ""
-            covers = len(_recorded_digests(dict(row)))
+            covers = len(_content_claim(dict(row)) or {})
             bytes_note = f", covers {covers} changed file" + ("s" if covers != 1 else "") if covers else ""
             lines.append(f"- {'✅' if row['passed'] else '❌'} {r.redact(row['criterion'])} — `{shown}` (exit {row['exit_code']}, receipt v{row['id']}{tree_note}{run_note}{bytes_note}){deps_note}{suffix}")
         return "\n\nVerification receipts:\n" + "\n".join(lines)

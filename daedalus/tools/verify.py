@@ -197,12 +197,20 @@ MAX_DIGEST_CHARS = 32768
 def file_digest(path: Path) -> str:
     """A short, stable name for the bytes at ``path`` — or for the reason there are none.
 
-    ``absent``, ``unreadable`` and ``link:<digest>`` are answers, not omissions: a receipt that says a
-    path was already gone is making a claim, and a claim that can be checked beats silence.
+    ``absent``, ``unreadable`` and the two link forms are answers, not omissions: a receipt that says a
+    path was already gone is making a claim, and a claim that can be checked beats silence. A symlink is
+    fingerprinted through its target's bytes, so retargeting it to different content moves the digest;
+    only a link whose target cannot be read at all falls back to the link text, and it says so.
     """
     try:
         if path.is_symlink():
-            return "link:" + hashlib.sha256(os.readlink(path).encode("utf-8", "replace")).hexdigest()[:32]
+            if path.is_file():
+                hasher = hashlib.sha256()
+                with path.open("rb") as fh:
+                    for chunk in iter(lambda: fh.read(1 << 20), b""):
+                        hasher.update(chunk)
+                return "link:" + hasher.hexdigest()
+            return "link-broken:" + hashlib.sha256(os.readlink(path).encode("utf-8", "replace")).hexdigest()[:32]
         if not path.is_file():
             return "absent"
         hasher = hashlib.sha256()
@@ -214,14 +222,24 @@ def file_digest(path: Path) -> str:
         return "unreadable"
 
 
+# A receipt whose checkout could not be fingerprinted carries this instead of a map: a non-empty
+# object, because an empty one would read as "no claim" and hand the decision back to the clock.
+UNFINGERPRINTED = "__unfingerprinted__"
+
+
 async def _content_digests(workdir: Path) -> dict[str, str]:
     """The files this checkout differs by and what is in them, keyed by path from the repo root.
 
     "Differs by" means: different from the branch point with ``origin/main``, plus files git does not
     track yet. Those are the bytes a proposal can change, so those are the bytes its receipts have to
-    cover; fingerprinting the whole tree would only say that something moved. A path that is not a git
-    checkout, a set too large to fingerprint, or a git that will not answer all yield an empty mapping:
-    the receipt then carries no content claim, which is different from claiming the content matched.
+    cover; fingerprinting the whole tree would only say that something moved.
+
+    The returned map is read by the gate as a claim about the whole change: every changed file has to be
+    in it. So a directory that is not a git checkout at all yields ``{}`` — no claim, and the receipt is
+    judged by the clock as receipts were before this column existed — while a checkout that *is* one but
+    cannot be fingerprinted (no base commit, too many files, too large) yields a map holding
+    ``UNFINGERPRINTED`` and a reason, which claims everything and covers nothing: a check whose tree
+    cannot be named is not quietly downgraded to a timestamp.
 
     The comparison this enables is byte-for-byte. A formatter, a rebase or a fresh checkout that leaves
     the bytes alone no longer makes a receipt look stale, and an edit that keeps the old timestamp no
@@ -239,23 +257,27 @@ async def _content_digests(workdir: Path) -> dict[str, str]:
         return out if proc.returncode == 0 else None
 
     top = await git("rev-parse", "--show-toplevel")
+    if not top:
+        return {}  # not a checkout: no claim, and the clock rule stands as it did before
     base = await git("merge-base", "origin/main", "HEAD")
     if base is None:
         base = await git("rev-parse", "HEAD")
-    if not top or base is None:
-        return {}
+    if base is None:
+        return {UNFINGERPRINTED: "this checkout has no commit to compare against"}
     names: set[str] = set()
-    for args in (("diff", "--name-only", "-z", base.decode().strip()), ("ls-files", "--others", "--exclude-standard", "-z")):
+    # --full-name matters: run from a subdirectory, git would print the other files relative to it,
+    # and the digests are keyed from the repository root the gate looks in.
+    for args in (("diff", "--name-only", "-z", base.decode().strip()), ("ls-files", "--others", "--exclude-standard", "--full-name", "-z")):
         data = await git(*args)
         if data:
             names.update(name for name in data.decode("utf-8", "replace").split("\0") if name)
-    if not names or len(names) > MAX_DIGEST_FILES:
-        return {}
+    if len(names) > MAX_DIGEST_FILES:
+        return {UNFINGERPRINTED: f"this checkout differs by {len(names)} files, more than a receipt fingerprints"}
     root = Path(top.decode("utf-8", "replace").strip())
     out = {name: file_digest(root / name) for name in sorted(names)}
-    if len(json.dumps(out, sort_keys=True)) > MAX_DIGEST_CHARS:
-        return {}
-    return out
+    if out and len(json.dumps(out, sort_keys=True)) > MAX_DIGEST_CHARS:
+        return {UNFINGERPRINTED: "the fingerprints do not fit in a receipt"}
+    return {UNFINGERPRINTED: "this checkout differs by no file at all"} if not out else out
 
 
 def _test_counts(output: str) -> tuple[int | None, int | None]:
