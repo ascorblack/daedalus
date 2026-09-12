@@ -460,7 +460,7 @@ def test_a_partial_content_claim_cannot_be_laundered_by_a_legacy_clock_row(tmp_p
         evidence_gate(root, changed, rows, None)
 
 
-
+def test_size_gate_asks_what_a_large_or_net_new_change_replaces() -> None:
     size_gate(120, {"daedalus/host/small.py": 40}, "A small thing.")
     with pytest.raises(ProposalRefused, match="does not say what it replaces"):
         size_gate(260, {}, "Adds a validation harness with four checks.")

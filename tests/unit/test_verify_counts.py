@@ -146,10 +146,11 @@ def test_the_fingerprint_is_keyed_from_the_repository_root(tmp_path: Path) -> No
     repo, _env = _repo(tmp_path)
     (repo / "sub").mkdir()
     (repo / "sub" / "new.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "outside.py").write_text("outside\n", encoding="utf-8")
     (repo / "kept.txt").write_text("two\n", encoding="utf-8")
     from_root = asyncio.run(_content_digests(repo))
     from_sub = asyncio.run(_content_digests(repo / "sub"))
-    assert set(from_root) == {"kept.txt", "sub/new.py"}, from_root
+    assert set(from_root) == {"kept.txt", "outside.py", "sub/new.py"}, from_root
     assert from_sub == from_root
     assert from_sub["sub/new.py"] == file_digest(repo / "sub" / "new.py")
 
