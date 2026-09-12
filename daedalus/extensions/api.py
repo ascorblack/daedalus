@@ -849,6 +849,30 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                     return {"id": call_id, "content": redact.redact(block.content), "is_error": block.is_error, "length": len(block.content)}
         raise HTTPException(404, "no such tool result")
 
+    @api.get("/api/sessions/{session_id}/sent/{call_id}/download")
+    async def sent_file(session_id: str, call_id: str, _: dict[str, Any] = Depends(auth)) -> FileResponse:
+        """The file a SendFile call handed over, by that call: the app attaches it under the answer, wherever the file lives."""
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        for message in reversed(await manager.transcript(session_id)):
+            for block in message.content_blocks:
+                if isinstance(block, ToolUseBlock) and block.tool_call_id == call_id:
+                    if block.name != "SendFile":
+                        raise HTTPException(404, "that call did not send a file")
+                    try:
+                        raw = json.loads(block.arguments_json or "{}").get("path")
+                    except ValueError:
+                        raw = None
+                    if not isinstance(raw, str) or not raw.strip():
+                        raise HTTPException(404, "the call named no file")
+                    candidate = Path(raw).expanduser()
+                    target = candidate if candidate.is_absolute() else state.workspace / candidate
+                    if not target.is_file():
+                        raise HTTPException(404, "the file is gone")
+                    return FileResponse(target, media_type=mimetypes.guess_type(target.name)[0] or "application/octet-stream", filename=target.name, headers={"Access-Control-Allow-Origin": "https://web.telegram.org"})
+        raise HTTPException(404, "no such call")
+
     @api.post("/api/sessions/{session_id}/messages")
     async def send_message(session_id: str, body: SendMessageBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:

@@ -1539,6 +1539,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
         </div>
       )}
       {turn.answer && <Md className={`answer ${live ? "streaming" : ""}`} text={turn.answer} />}
+      <SentFiles items={turn.activity} />
     </div>
   );
 });
@@ -1829,6 +1830,38 @@ function ToolAttachment({ item }: { item: ToolItem }) {
       <button type="button" className="file-chip" onClick={() => preview(src)} title={canPreview(name) ? "preview" : "download"}>
         <span aria-hidden>{fileGlyph(name)}</span> {name}
       </button>
+    </div>
+  );
+}
+
+/** The files the agent handed over in this turn, attached under the answer whatever the trace shows. */
+function SentFiles({ items }: { items: Activity[] }) {
+  const { id, preview } = useContext(SessionContext);
+  const sent = items.filter((a): a is ToolItem => a.kind === "tool" && a.name === "SendFile" && !a.running && !a.error && typeof a.args.path === "string");
+  if (!sent.length || !id) return null;
+  return (
+    <div className="sent-files" aria-label="files sent to you">
+      {sent.map((t) => {
+        const path = String(t.args.path);
+        const name = path.split("/").filter(Boolean).pop() ?? path;
+        const caption = typeof t.args.caption === "string" ? t.args.caption : "";
+        // The file is served by the call that sent it, so a path outside the workspace opens too.
+        const src: PreviewSource = { base: `${sessionBase(id)}/sent/${encodeURIComponent(t.id)}`, path: name };
+        if (previewKind(name) === "image") {
+          return (
+            <figure key={t.id} className="sent-file image">
+              <AuthImg src={src} alt={name} className="tool-image" onClick={() => preview(src)} />
+              {caption && <figcaption className="sub">{caption}</figcaption>}
+            </figure>
+          );
+        }
+        return (
+          <button key={t.id} type="button" className="file-chip sent-file" onClick={() => preview(src)} title={caption || (canPreview(name) ? "preview" : "download")}>
+            <span aria-hidden>{fileGlyph(name)}</span>
+            <span className="truncate">{name}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }

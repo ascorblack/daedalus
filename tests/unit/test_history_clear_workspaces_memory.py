@@ -147,3 +147,28 @@ async def test_clear_api_and_command(client: httpx.AsyncClient) -> None:
     r = await client.post(f"/api/sessions/{sid}/command", json={"line": "/clear"}, headers=H)
     assert r.status_code == 200 and "History cleared" in r.json()["text"]
     assert any(c["name"] == "clear" and c["confirm"] for c in (await client.get("/api/commands", headers=H)).json())
+
+
+async def test_sent_file_is_served_by_the_call_that_sent_it(client: httpx.AsyncClient, manager: SessionManager, tmp_path: Path) -> None:
+    from protocore.contracts.types import ToolUseBlock
+
+    sid = (await client.post("/api/sessions", json={"title": "files"}, headers=H)).json()["id"]
+    state = await manager.get_state(sid)
+    assert state is not None
+    (state.workspace / "report.md").write_text("# report")
+    outside = tmp_path / "chart.png"
+    outside.write_bytes(b"\x89PNG-ish")
+    calls = [
+        Message(role=MessageRole.assistant, content_blocks=[ToolUseBlock(tool_call_id="s1", name="SendFile", arguments_json='{"path": "report.md", "caption": "the report"}')]),
+        Message(role=MessageRole.assistant, content_blocks=[ToolUseBlock(tool_call_id="s2", name="SendFile", arguments_json=f'{{"path": "{outside}"}}')]),
+        Message(role=MessageRole.assistant, content_blocks=[ToolUseBlock(tool_call_id="r1", name="Read", arguments_json='{"path": "report.md"}')]),
+    ]
+    await manager.sessions.append_transcript(sid, calls)
+    r = await client.get(f"/api/sessions/{sid}/sent/s1/download", headers=H)
+    assert r.status_code == 200 and r.text == "# report" and "report.md" in r.headers["content-disposition"]
+    r = await client.get(f"/api/sessions/{sid}/sent/s2/download", headers=H)
+    assert r.status_code == 200 and r.content == b"\x89PNG-ish" and r.headers["content-type"].startswith("image/png")
+    assert (await client.get(f"/api/sessions/{sid}/sent/r1/download", headers=H)).status_code == 404
+    assert (await client.get(f"/api/sessions/{sid}/sent/nope/download", headers=H)).status_code == 404
+    outside.unlink()
+    assert (await client.get(f"/api/sessions/{sid}/sent/s2/download", headers=H)).status_code == 404

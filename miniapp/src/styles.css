@@ -1037,3 +1037,10 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .mrow-foot { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); align-items: center; }
 .mrow.default .mtitle::before { content: ""; }
 @media (max-width: 480px) { .kpi-grid > .kpi:last-child:nth-child(odd) { grid-column: 1 / -1; } }
+
+/* ── files the agent sent, attached under the answer ───────────────────────────────────── */
+.sent-files { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin-top: 8px; }
+.sent-file.image { margin: 0; display: flex; flex-direction: column; gap: 4px; max-width: min(100%, 420px); }
+.sent-file.image .tool-image { max-height: 320px; }
+.sent-file.file-chip { max-width: 100%; min-height: 40px; }
+.sent-file .truncate { max-width: 260px; }
