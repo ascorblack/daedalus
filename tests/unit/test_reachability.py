@@ -441,7 +441,26 @@ def test_a_checkout_that_cannot_be_fingerprinted_covers_nothing(tmp_path: Path) 
         evidence_gate(root, changed, [row], None)
 
 
-def test_size_gate_asks_what_a_large_or_net_new_change_replaces() -> None:
+def test_a_partial_content_claim_cannot_be_laundered_by_a_legacy_clock_row(tmp_path: Path) -> None:
+    """Once a modern content claim is in the receipt window, an old empty-column row cannot rescue a
+    path it did not fingerprint with a newer timestamp."""
+    now = datetime.now(UTC).timestamp()
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    command = "uv run pytest tests/unit/test_boot_guard.py -q"
+    claim = {"tests/unit/test_boot_guard.py": FILE_DIGEST(root / "tests/unit/test_boot_guard.py")}
+    rows = [
+        {"id": 51, "command": command, "passed": 1, "tests_run": 5, "at": _at(now, -3600), "file_digests": json.dumps(claim)},
+        {"id": 52, "command": command, "passed": 1, "tests_run": 5, "at": _at(now, 3600), "file_digests": ""},
+    ]
+    with pytest.raises(ProposalRefused, match="was not part of it"):
+        evidence_gate(root, changed, rows, None)
+
+
+
     size_gate(120, {"daedalus/host/small.py": 40}, "A small thing.")
     with pytest.raises(ProposalRefused, match="does not say what it replaces"):
         size_gate(260, {}, "Adds a validation harness with four checks.")

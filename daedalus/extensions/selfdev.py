@@ -311,6 +311,15 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
                 found.append(row)
         return found
 
+    has_content_claim = any(_content_claim(r) is not None for r in passed)
+
+    def claim_window(f: str) -> list[dict[str, Any]]:
+        """The receipts naming this file, with legacy clock rows excluded beside a modern claim."""
+        rows = naming(f)
+        if not has_content_claim:
+            return rows
+        return [r for r in rows if _content_claim(r) is not None]
+
     def _covers(row: dict[str, Any], f: str, path: Path, newest: float) -> bool:
         """Whether this receipt covers the file: by its recorded bytes when it claims any, else by time.
 
@@ -361,9 +370,9 @@ def evidence_gate(root: Path, changed_files: list[str], receipts: list[dict[str,
     stale: list[str] = []
     unaudited: list[str] = []
     for f in sorted(tokens_for):
-        rows = naming(f)
+        rows = claim_window(f)
         if not rows:
-            if f in must_be_named:
+            if f in must_be_named and not naming(f):
                 unnamed.append(f)
             continue
         path = root / f

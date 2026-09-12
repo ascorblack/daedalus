@@ -265,9 +265,14 @@ async def _content_digests(workdir: Path) -> dict[str, str]:
     if base is None:
         return {UNFINGERPRINTED: "this checkout has no commit to compare against"}
     names: set[str] = set()
-    # --full-name matters: run from a subdirectory, git would print the other files relative to it,
-    # and the digests are keyed from the repository root the gate looks in.
-    for args in (("diff", "--name-only", "-z", base.decode().strip()), ("ls-files", "--others", "--exclude-standard", "--full-name", "-z")):
+    # --full-name and the `:/` pathspec both matter: run from a subdirectory, git would print untracked
+    # files relative to it and would list only the ones under it, while the digests are keyed from the
+    # repository root the gate looks in. `:/` names the whole repository, so the claim is about the
+    # change wherever the check happened to run from.
+    for args in (
+        ("diff", "--name-only", "-z", base.decode().strip()),
+        ("ls-files", "--others", "--exclude-standard", "--full-name", "-z", ":/"),
+    ):
         data = await git(*args)
         if data:
             names.update(name for name in data.decode("utf-8", "replace").split("\0") if name)
