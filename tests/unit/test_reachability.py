@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import pathlib
 from datetime import UTC, datetime
@@ -18,6 +19,8 @@ from daedalus.extensions.selfdev import (
     size_gate,
 )
 from daedalus.host import reachability
+from daedalus.tools.verify import UNFINGERPRINTED
+from daedalus.tools.verify import file_digest as FILE_DIGEST
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -123,7 +126,7 @@ def test_the_timestamp_is_what_decides_it(tmp_path: Path) -> None:
     command = "uv run pytest tests/unit/test_boot_guard.py -q"
     now = datetime.now(UTC).timestamp()
     evidence_gate(root, changed, [{"id": 1, "command": command, "passed": 1, "tests_run": 5, "at": _at(now, 3600)}], None)
-    with pytest.raises(ProposalRefused, match="before the file it names was last written"):
+    with pytest.raises(ProposalRefused, match="does not cover the bytes now in the tree"):
         evidence_gate(root, changed, [{"id": 1, "command": command, "passed": 1, "tests_run": 5, "at": _at(now, -3600)}], None)
     # An edit to the covering test alone is enough: the test is part of what the receipt claims.
     os.utime(root / "tests/unit/test_boot_guard.py", (now - 7200, now - 7200))
@@ -146,10 +149,10 @@ def test_a_receipt_without_a_usable_timestamp_is_no_evidence(tmp_path: Path) -> 
         {"command": command, "passed": 1, "tests_run": 5, "at": ""},
         {"command": command, "passed": 1, "tests_run": 5, "at": "yesterday"},
     ):
-        with pytest.raises(ProposalRefused, match="before the file it names was last written"):
+        with pytest.raises(ProposalRefused, match="does not cover the bytes now in the tree"):
             evidence_gate(root, changed, [row], None)
     # An undated row cannot shadow a dated one either: the dated stale row still fails the gate.
-    with pytest.raises(ProposalRefused, match="before the file it names was last written"):
+    with pytest.raises(ProposalRefused, match="does not cover the bytes now in the tree"):
         evidence_gate(root, changed, [{"command": command, "passed": 1, "tests_run": 5}, {"command": command, "passed": 1, "tests_run": 5, "at": _at(datetime.now(UTC).timestamp(), -3600)}], None)
 
 
@@ -195,10 +198,12 @@ def test_a_deleted_file_is_covered_by_a_naming_receipt(tmp_path: Path) -> None:
         evidence_gate(root, changed, [{"command": command, "passed": 1, "tests_run": 5, "at": _at(now, 3600)}], None)
 
 
-def test_a_content_preserving_rewrite_blocks_until_the_check_is_rerun(tmp_path: Path) -> None:
-    """A known cost, stated rather than hidden: the gate compares modification time, not content, so
-    anything that restamps a file - a formatter, a rebase, a fresh worktree - makes every receipt look
-    stale until the check is run again. The remedy is the message's, and it is one command."""
+def test_a_content_preserving_rewrite_blocks_a_row_that_carries_no_digest(tmp_path: Path) -> None:
+    """The fallback, stated rather than hidden: a receipt written before receipts carried content (or one
+    whose checkout could not be fingerprinted) is still judged by modification time, so anything that
+    restamps a file - a formatter, a rebase, a fresh worktree - makes it look stale until the check is
+    run again. A receipt with digests is not affected: see
+    test_a_receipt_covers_the_bytes_it_recorded."""
     now = datetime.now(UTC).timestamp()
     root = _evidence_tree(tmp_path, {
         "daedalus/host/boot_guard.py": "GUARD = 1\n",
@@ -214,6 +219,79 @@ def test_a_content_preserving_rewrite_blocks_until_the_check_is_rerun(tmp_path: 
         os.utime(root / name, (now, now))
     with pytest.raises(ProposalRefused, match="Run the check again"):
         evidence_gate(root, changed, receipt, None)
+
+
+def test_a_receipt_covers_the_bytes_it_recorded(tmp_path: Path) -> None:
+    """A receipt that fingerprinted the files it named is judged by their content: the same bytes under a
+    new timestamp are covered, so a formatter, a rebase or a fresh checkout no longer blocks a check that
+    already ran against exactly this content."""
+    now = datetime.now(UTC).timestamp()
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    row = {
+        "command": "uv run pytest tests/unit/test_boot_guard.py -q",
+        "passed": 1,
+        "tests_run": 5,
+        # recorded long before the files were restamped, which is the point
+        "at": _at(now, -7200),
+        "file_digests": json.dumps({name: FILE_DIGEST(root / name) for name in changed}),
+    }
+    for name in changed:
+        os.utime(root / name, (now, now))
+    evidence_gate(root, changed, [row], None)
+    # One byte more and the receipt no longer covers the file, however recent it is.
+    (root / changed[0]).write_text("GUARD = 2\n", encoding="utf-8")
+    os.utime(root / changed[0], (now, now))
+    with pytest.raises(ProposalRefused, match="does not cover the bytes now in the tree"):
+        evidence_gate(root, changed, [row], None)
+
+
+def test_an_edit_the_clock_does_not_show_is_still_an_edit(tmp_path: Path) -> None:
+    """The hole the timestamp rule leaves open: an edit followed by an old timestamp passed, because the
+    gate read a clock and not a file. A digest is an answer to "what did the check run against" that the
+    clock cannot fake - and a receipt from a different checkout with the right command and the right
+    clock is refused for the same reason."""
+    now = datetime.now(UTC).timestamp()
+    fresh = _at(now, 3600)
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    command = "uv run pytest tests/unit/test_boot_guard.py -q"
+    # the receipt says it ran against content the file does not hold: right command, right clock, and it
+    # still says nothing about these bytes
+    elsewhere = {name: FILE_DIGEST(root / name) for name in changed}
+    elsewhere[changed[0]] = "0" * 64
+    with pytest.raises(ProposalRefused, match="not what the file holds now"):
+        evidence_gate(root, changed, [{"command": command, "passed": 1, "tests_run": 5, "at": fresh, "file_digests": json.dumps(elsewhere)}], None)
+    # the edit the clock refuses to show: the file is written, then given the timestamp it had before
+    good = {name: FILE_DIGEST(root / name) for name in changed}
+    (root / changed[0]).write_text("GUARD = 9\n", encoding="utf-8")
+    os.utime(root / changed[0], (now - 7200, now - 7200))
+    with pytest.raises(ProposalRefused, match="does not cover the bytes now in the tree"):
+        evidence_gate(root, changed, [{"command": command, "passed": 1, "tests_run": 5, "at": fresh, "file_digests": json.dumps(good)}], None)
+
+
+def test_an_empty_run_does_not_drag_a_changed_test_file_into_the_staleness_rule(tmp_path: Path) -> None:
+    """A changed test file is judged only when a receipt names it; a run that executed nothing is not one
+    of those receipts, so it neither covers the test file nor turns it into a stale one. The window still
+    needs a counted run for the host module, which is what makes this shape worth pinning down."""
+    now = datetime.now(UTC).timestamp()
+    fresh = _at(now, 3600)
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+        "tests/unit/test_other.py": "def test_other():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    counted = {"id": 31, "command": "uv run pytest tests/unit/test_other.py -q && uv run python -c 'import daedalus.host.boot_guard'", "passed": 1, "at": fresh, "tests_run": 5}
+    # The empty run names the changed test file, and it is older than the file it names.
+    empty = {"id": 32, "command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "at": _at(now, -3600), "tests_run": 0}
+    evidence_gate(root, changed, [counted, empty], None)
 
 
 def test_a_passing_run_that_executed_no_tests_is_not_evidence(tmp_path: Path) -> None:
@@ -274,7 +352,135 @@ def test_an_empty_test_run_cannot_be_what_names_a_file(tmp_path: Path) -> None:
     ], None)
 
 
-def test_size_gate_asks_what_a_large_or_net_new_change_replaces() -> None:
+def test_a_content_claim_has_to_reach_the_file(tmp_path: Path) -> None:
+    """Reported by review: the fingerprint was read as a lookup table with a clock behind it, so a claim
+    that simply did not mention the file fell back to mtime and an edit with an old timestamp passed. A
+    claim is about the whole change — the files that were in the checkout when the check ran — so a path
+    the check never saw is not covered by it, whatever the timestamp says."""
+    now = datetime.now(UTC).timestamp()
+    fresh = _at(now, 3600)
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "daedalus/host/unrelated.py": "OTHER = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    command = "uv run pytest tests/unit/test_boot_guard.py -q"
+    row = {"id": 41, "command": command, "passed": 1, "tests_run": 5, "at": fresh}
+    # A claim naming one unrelated file covers neither changed path, however fresh the receipt.
+    row["file_digests"] = json.dumps({"daedalus/host/unrelated.py": FILE_DIGEST(root / "daedalus/host/unrelated.py")})
+    with pytest.raises(ProposalRefused, match="was not part of it"):
+        evidence_gate(root, changed, [row], None)
+    # A claim that reaches the file is judged by its bytes: an edit the clock refuses to show is refused.
+    claim = {name: FILE_DIGEST(root / name) for name in changed}
+    claim["daedalus/host/unrelated.py"] = FILE_DIGEST(root / "daedalus/host/unrelated.py")
+    row["file_digests"] = json.dumps(claim)
+    evidence_gate(root, changed, [row], None)
+    (root / changed[0]).write_text("GUARD = 2\n", encoding="utf-8")
+    os.utime(root / changed[0], (now - 7200, now - 7200))  # an old timestamp, as an editor might leave
+    with pytest.raises(ProposalRefused, match="does not cover the bytes now in the tree"):
+        evidence_gate(root, changed, [row], None)
+    # And a receipt that makes no content claim at all is still judged by the clock, which is what every
+    # receipt written before the column existed does: fresh enough, so the same edit is covered.
+    del row["file_digests"]
+    evidence_gate(root, changed, [row], None)
+
+
+@pytest.mark.parametrize("stored", ["{}", "[]", "null", "not json at all", '"a string"', "42"])
+def test_a_column_value_the_gate_cannot_read_covers_nothing(tmp_path: Path, stored: str) -> None:
+    """A stored value that is not a mapping of path to digest is not "no claim" — that reading hands the
+    decision to the clock, which is the hole this rule closes. Only an empty column, which is what every
+    receipt written before the column existed carries, is judged by the clock. Verify writes a reason
+    instead of an empty object when it cannot fingerprint, so a value like these arrives only by tampering."""
+    now = datetime.now(UTC).timestamp()
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    command = "uv run pytest tests/unit/test_boot_guard.py -q"
+    os.utime(root / changed[0], (now - 7200, now - 7200))
+    with pytest.raises(ProposalRefused, match="was not part of it"):
+        evidence_gate(root, changed, [{"command": command, "passed": 1, "tests_run": 5, "at": _at(now, 3600), "file_digests": stored}], None)
+
+
+def test_a_row_that_makes_no_content_claim_at_all_is_judged_by_the_clock(tmp_path: Path) -> None:
+    """The one shape that is not a claim: an empty column, which is what a receipt written before the
+    column existed carries. The clock decides for it, as it did for every receipt before."""
+    now = datetime.now(UTC).timestamp()
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    command = "uv run pytest tests/unit/test_boot_guard.py -q"
+    os.utime(root / changed[0], (now - 7200, now - 7200))
+    for empty in ("", "   ", None):
+        evidence_gate(root, changed, [{"command": command, "passed": 1, "tests_run": 5, "at": _at(now, 3600), "file_digests": empty}], None)
+        with pytest.raises(ProposalRefused, match="does not cover the bytes now in the tree"):
+            evidence_gate(root, changed, [{"command": command, "passed": 1, "tests_run": 5, "at": _at(now, -3600), "file_digests": empty}], None)
+    # no column at all, which is the pre-migration shape
+    evidence_gate(root, changed, [{"command": command, "passed": 1, "tests_run": 5, "at": _at(now, 3600)}], None)
+
+
+def test_a_checkout_that_cannot_be_fingerprinted_covers_nothing(tmp_path: Path) -> None:
+    """The other half of the same review finding: Verify used to store an empty object when the checkout
+    could not be fingerprinted, which read as "no claim" and handed the decision back to the clock. A
+    check whose tree cannot be named says so in the receipt, and such a receipt covers no file."""
+    now = datetime.now(UTC).timestamp()
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    row = {
+        "command": "uv run pytest tests/unit/test_boot_guard.py -q", "passed": 1, "tests_run": 5,
+        "at": _at(now, 3600), "file_digests": json.dumps({UNFINGERPRINTED: "this checkout has no commit to compare against"}),
+    }
+    with pytest.raises(ProposalRefused, match="was not part of it"):
+        evidence_gate(root, changed, [row], None)
+
+
+def test_a_partial_content_claim_cannot_be_laundered_by_a_legacy_clock_row(tmp_path: Path) -> None:
+    """Once a modern content claim is in the receipt window, an old empty-column row cannot rescue a
+    path it did not fingerprint with a newer timestamp."""
+    now = datetime.now(UTC).timestamp()
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/boot_guard.py": "GUARD = 1\n",
+        "tests/unit/test_boot_guard.py": "def test_guard():\n    assert True\n",
+    })
+    changed = ["daedalus/host/boot_guard.py", "tests/unit/test_boot_guard.py"]
+    command = "uv run pytest tests/unit/test_boot_guard.py -q"
+    claim = {"tests/unit/test_boot_guard.py": FILE_DIGEST(root / "tests/unit/test_boot_guard.py")}
+    rows = [
+        {"id": 51, "command": command, "passed": 1, "tests_run": 5, "at": _at(now, -3600), "file_digests": json.dumps(claim)},
+        {"id": 52, "command": command, "passed": 1, "tests_run": 5, "at": _at(now, 3600), "file_digests": ""},
+    ]
+    with pytest.raises(ProposalRefused, match="was not part of it"):
+        evidence_gate(root, changed, rows, None)
+
+
+def test_a_modern_claim_for_one_module_cannot_erase_a_legacy_name_for_another(tmp_path: Path) -> None:
+    """The per-file rule is deliberate: a modern claim for A must not turn a legacy receipt naming B
+    into an invisible row. A stale legacy namer for B remains stale, rather than being skipped."""
+    now = datetime.now(UTC).timestamp()
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/first.py": "A = 1\n",
+        "daedalus/host/second.py": "B = 1\n",
+        "tests/unit/test_first.py": "def test_a():\n    assert True\n",
+        "tests/unit/test_second.py": "def test_b():\n    assert True\n",
+    })
+    changed = ["daedalus/host/first.py", "daedalus/host/second.py"]
+    first = {"daedalus/host/first.py": FILE_DIGEST(root / "daedalus/host/first.py")}
+    rows = [
+        {"id": 61, "command": "uv run pytest tests/unit/test_first.py -q", "passed": 1, "tests_run": 5, "at": _at(now, 3600), "file_digests": json.dumps(first)},
+        {"id": 62, "command": "uv run pytest tests/unit/test_second.py -q", "passed": 1, "tests_run": 5, "at": _at(now, -3600), "file_digests": ""},
+    ]
+    with pytest.raises(ProposalRefused, match="last written"):
+        evidence_gate(root, changed, rows, None)
+
+
+
     size_gate(120, {"daedalus/host/small.py": 40}, "A small thing.")
     with pytest.raises(ProposalRefused, match="does not say what it replaces"):
         size_gate(260, {}, "Adds a validation harness with four checks.")

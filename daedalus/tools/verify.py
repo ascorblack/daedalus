@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -188,6 +189,102 @@ async def _tree_state(workdir: Path) -> str:
     return head[:40] + ("+worktree" if dirty else "")
 
 
+# how many files one receipt may fingerprint, and the JSON ceiling for the result
+MAX_DIGEST_FILES = 256
+MAX_DIGEST_CHARS = 32768
+
+
+def file_digest(path: Path) -> str:
+    """A short, stable name for the bytes at ``path`` — or for the reason there are none.
+
+    ``absent``, ``unreadable`` and the two link forms are answers, not omissions: a receipt that says a
+    path was already gone is making a claim, and a claim that can be checked beats silence. A symlink is
+    fingerprinted through its target's bytes, so retargeting it to different content moves the digest;
+    only a link whose target cannot be read at all falls back to the link text, and it says so.
+    """
+    try:
+        if path.is_symlink():
+            if path.is_file():
+                hasher = hashlib.sha256()
+                with path.open("rb") as fh:
+                    for chunk in iter(lambda: fh.read(1 << 20), b""):
+                        hasher.update(chunk)
+                return "link:" + hasher.hexdigest()
+            return "link-broken:" + hashlib.sha256(os.readlink(path).encode("utf-8", "replace")).hexdigest()[:32]
+        if not path.is_file():
+            return "absent"
+        hasher = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except OSError:
+        return "unreadable"
+
+
+# A receipt whose checkout could not be fingerprinted carries this instead of a map: a non-empty
+# object, because an empty one would read as "no claim" and hand the decision back to the clock.
+UNFINGERPRINTED = "__unfingerprinted__"
+
+
+async def _content_digests(workdir: Path) -> dict[str, str]:
+    """The files this checkout differs by and what is in them, keyed by path from the repo root.
+
+    "Differs by" means: different from the branch point with ``origin/main``, plus files git does not
+    track yet. Those are the bytes a proposal can change, so those are the bytes its receipts have to
+    cover; fingerprinting the whole tree would only say that something moved.
+
+    The returned map is read by the gate as a claim about the whole change: every changed file has to be
+    in it. So a directory that is not a git checkout at all yields ``{}`` — no claim, and the receipt is
+    judged by the clock as receipts were before this column existed — while a checkout that *is* one but
+    cannot be fingerprinted (no base commit, too many files, too large) yields a map holding
+    ``UNFINGERPRINTED`` and a reason, which claims everything and covers nothing: a check whose tree
+    cannot be named is not quietly downgraded to a timestamp.
+
+    The comparison this enables is byte-for-byte. A formatter, a rebase or a fresh checkout that leaves
+    the bytes alone no longer makes a receipt look stale, and an edit that keeps the old timestamp no
+    longer slips past.
+    """
+    async def git(*args: str) -> bytes | None:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", str(workdir), *args,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+        except (TimeoutError, OSError):
+            return None
+        return out if proc.returncode == 0 else None
+
+    top = await git("rev-parse", "--show-toplevel")
+    if not top:
+        return {}  # not a checkout: no claim, and the clock rule stands as it did before
+    base = await git("merge-base", "origin/main", "HEAD")
+    if base is None:
+        base = await git("rev-parse", "HEAD")
+    if base is None:
+        return {UNFINGERPRINTED: "this checkout has no commit to compare against"}
+    names: set[str] = set()
+    # --full-name and the `:/` pathspec both matter: run from a subdirectory, git would print untracked
+    # files relative to it and would list only the ones under it, while the digests are keyed from the
+    # repository root the gate looks in. `:/` names the whole repository, so the claim is about the
+    # change wherever the check happened to run from.
+    for args in (
+        ("diff", "--name-only", "-z", base.decode().strip()),
+        ("ls-files", "--others", "--exclude-standard", "--full-name", "-z", ":/"),
+    ):
+        data = await git(*args)
+        if data:
+            names.update(name for name in data.decode("utf-8", "replace").split("\0") if name)
+    if len(names) > MAX_DIGEST_FILES:
+        return {UNFINGERPRINTED: f"this checkout differs by {len(names)} files, more than a receipt fingerprints"}
+    root = Path(top.decode("utf-8", "replace").strip())
+    out = {name: file_digest(root / name) for name in sorted(names)}
+    if out and len(json.dumps(out, sort_keys=True)) > MAX_DIGEST_CHARS:
+        return {UNFINGERPRINTED: "the fingerprints do not fit in a receipt"}
+    return {UNFINGERPRINTED: "this checkout differs by no file at all"} if not out else out
+
+
 def _test_counts(output: str) -> tuple[int | None, int | None]:
     """How many tests the run executed and skipped, from the runner's own footer.
 
@@ -335,7 +432,11 @@ async def _receipt(context: ToolContext, services: Any, manager: Any, criterion:
     digest = full_digest[:16]
     at = datetime.now(UTC).isoformat()
     receipt_id = ""
-    tree = await _tree_state(_command_workdir(command, workdir))
+    check_dir = _command_workdir(command, workdir)
+    tree = await _tree_state(check_dir)
+    # What the check ran against, as bytes rather than as a commit name: this is what lets the gate
+    # answer "does this receipt cover the file in the tree?" with a comparison of contents.
+    digests = await _content_digests(check_dir)
     # Read the tail first (a long run's footer is there), then the head: a tail that decodes to junk is
     # truthy, so `or` would never look at the head, and the head is where a short run's footer is.
     tests_run, tests_skipped = _counts_from_output(tail.decode("utf-8", "replace"), output)
@@ -345,17 +446,17 @@ async def _receipt(context: ToolContext, services: Any, manager: Any, criterion:
         deps = (dependencies or "").strip()
         async with manager.db.transaction() as conn:
             cursor = await conn.execute(
-                "INSERT INTO verifications(session_id, run_id, criterion, command, cwd, exit_code, passed, output_digest, output_head, duration_ms, at, sandboxed, dependencies, tree, tests_run, tests_skipped)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO verifications(session_id, run_id, criterion, command, cwd, exit_code, passed, output_digest, output_head, duration_ms, at, sandboxed, dependencies, tree, tests_run, tests_skipped, file_digests)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     context.session_id, context.run_id, r.redact(criterion)[:300], r.redact(command)[:2000], str(workdir), exit_code, int(passed), full_digest,
                     r.redact(output[:OUTPUT_HEAD_CHARS]), int(elapsed * 1000), at, int(sandboxed), r.redact(deps)[:300],
-                    tree, tests_run, tests_skipped,
+                    tree, tests_run, tests_skipped, json.dumps(digests, sort_keys=True),
                 ),
             )
             receipt_id = f"v{cursor.lastrowid}"
     deps = (dependencies or "").strip()
-    header = f"{'✅ verified' if passed else '❌ NOT verified'}: {criterion} — exit {exit_code}{' (timed out' + ('; the process group survived the kill' if kill_failed else '') + ')' if timed_out else ''} · receipt {receipt_id or 'not recorded'} · digest {digest} · at {at}" + (f" · output {total_bytes} B, first {len(head)} B kept" if truncated else "") + (f" · deps: {deps}" if deps else "") + (f" · tree {tree}" if tree else "") + (f" · tests {tests_run} run" + (f", {tests_skipped} skipped" if tests_skipped else "") if tests_run is not None else "") + (" · sandbox=workspace" if sandboxed else "")
+    header = f"{'✅ verified' if passed else '❌ NOT verified'}: {criterion} — exit {exit_code}{' (timed out' + ('; the process group survived the kill' if kill_failed else '') + ')' if timed_out else ''} · receipt {receipt_id or 'not recorded'} · digest {digest} · at {at}" + (f" · output {total_bytes} B, first {len(head)} B kept" if truncated else "") + (f" · deps: {deps}" if deps else "") + (f" · tree {tree}" if tree else "") + (f" · covers {len(digests)} changed file" + ("s" if len(digests) != 1 else "") if digests else "") + (f" · tests {tests_run} run" + (f", {tests_skipped} skipped" if tests_skipped else "") if tests_run is not None else "") + (" · sandbox=workspace" if sandboxed else "")
     body = clip(output, services.max_tool_output_chars, note="write the output to a file for the rest")
     text = f"{header}\n{body}" if body.strip() else header
     return ok(context, text, receipt=receipt_id, passed=passed, exit_code=exit_code) if passed else error(context, text, receipt=receipt_id, passed=passed, exit_code=exit_code)
