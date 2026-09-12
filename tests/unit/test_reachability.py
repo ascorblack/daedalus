@@ -460,7 +460,27 @@ def test_a_partial_content_claim_cannot_be_laundered_by_a_legacy_clock_row(tmp_p
         evidence_gate(root, changed, rows, None)
 
 
-def test_size_gate_asks_what_a_large_or_net_new_change_replaces() -> None:
+def test_a_modern_claim_for_one_module_cannot_erase_a_legacy_name_for_another(tmp_path: Path) -> None:
+    """The per-file rule is deliberate: a modern claim for A must not turn a legacy receipt naming B
+    into an invisible row. A stale legacy namer for B remains stale, rather than being skipped."""
+    now = datetime.now(UTC).timestamp()
+    root = _evidence_tree(tmp_path, {
+        "daedalus/host/first.py": "A = 1\n",
+        "daedalus/host/second.py": "B = 1\n",
+        "tests/unit/test_first.py": "def test_a():\n    assert True\n",
+        "tests/unit/test_second.py": "def test_b():\n    assert True\n",
+    })
+    changed = ["daedalus/host/first.py", "daedalus/host/second.py"]
+    first = {"daedalus/host/first.py": FILE_DIGEST(root / "daedalus/host/first.py")}
+    rows = [
+        {"id": 61, "command": "uv run pytest tests/unit/test_first.py -q", "passed": 1, "tests_run": 5, "at": _at(now, 3600), "file_digests": json.dumps(first)},
+        {"id": 62, "command": "uv run pytest tests/unit/test_second.py -q", "passed": 1, "tests_run": 5, "at": _at(now, -3600), "file_digests": ""},
+    ]
+    with pytest.raises(ProposalRefused, match="last written"):
+        evidence_gate(root, changed, rows, None)
+
+
+
     size_gate(120, {"daedalus/host/small.py": 40}, "A small thing.")
     with pytest.raises(ProposalRefused, match="does not say what it replaces"):
         size_gate(260, {}, "Adds a validation harness with four checks.")
