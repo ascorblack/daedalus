@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,6 +15,7 @@ from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
 from daedalus.config import RuntimeConfig, Settings
+from daedalus.extensions.api import message_view
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 
@@ -321,6 +323,28 @@ async def test_steer_sent_while_running_lands_in_the_transcript(settings: Settin
     await manager.submit(state.session.id, "change of plan")
     texts = [m.content_blocks[0].text for m in await manager.sessions.list_transcript(state.session.id)]  # type: ignore[union-attr]
     assert texts == ["change of plan"]
+    state.task.cancel()
+    await manager.close()
+
+
+async def test_a_steer_the_core_placed_is_not_shown_twice_while_the_run_lasts(settings: Settings, db: Database) -> None:
+    """The host records a steer when it is sent; the core later puts the same text into its history
+    with a timestamp of its own. The live view must still show the operator's words once."""
+    provider = ScriptedProvider([{"text": "hi"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("busy")
+    state.task = asyncio.create_task(asyncio.sleep(5))
+    await manager.submit(state.session.id, "change of plan")
+    # What the core does with a placed queue item: a plain user message, no host metadata, new timestamp.
+    state.engine = SimpleNamespace(history=[Message(role=MessageRole.user, content_blocks=[TextBlock(text="change of plan")])])  # type: ignore[assignment]
+    shown = await manager.transcript(state.session.id)
+    operator_said = [m for m in shown if m.role is MessageRole.user and m.metadata.get("daedalus.origin") == "operator"]
+    assert [m.content_blocks[0].text for m in operator_said] == ["change of plan"]  # type: ignore[union-attr]
+    # The core's copy is still carried, marked as the core's, and the Mini App's view hides it:
+    # exactly one of the two is shown as the operator's message.
+    views = [message_view(m) for m in shown if m.role is MessageRole.user]
+    assert [(v["origin"], v["internal"]) for v in views] == [("operator", False), ("core", True)]
+    state.engine = None
     state.task.cancel()
     await manager.close()
 
