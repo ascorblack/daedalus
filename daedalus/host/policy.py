@@ -44,6 +44,16 @@ DANGEROUS_TARGETS = {"~", "~/", "~/*", "$HOME", "$HOME/*", "${HOME}"} | {form fo
 OPERATOR_CHECKOUTS = ("/srv/daedalus", "/srv/protocore-exp")
 """The operator's repositories as mounted in the container: they change only through pull requests. The host adds
 the checkouts' real paths when it builds the policy."""
+IDLE_WAIT_SECONDS = 30
+"""A ``sleep`` this long, or a ``while``/``until`` loop around one, is the agent waiting for something — a
+subagent's report, a background job — in the foreground of the very run that would receive it. The report
+arrives as a message and wakes the run when it ends; the sleep only delays reading it. Shorter sleeps stay:
+a server needs a moment to come up."""
+WAIT_REASON = (
+    "waiting in the foreground blocks the run that would receive what it waits for: a subagent's report and a "
+    "finished job arrive as messages that wake you the moment they are ready. If there is nothing to do "
+    "meanwhile, end the turn; to read a running job, use JobOutput; a service's log, ServiceLogs."
+)
 WRITERS = {"cp", "mv", "install", "rsync", "ln"}
 """Commands whose last non-flag argument is their destination."""
 GIT_OPTIONS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
@@ -292,6 +302,20 @@ def host_allowed(host: str, allow: Iterable[str]) -> bool:
     return False
 
 
+def _sleep_seconds(args: list[str]) -> float:
+    """How long ``sleep`` with these arguments waits: GNU suffixes, several operands added, ``infinity`` forever."""
+    total = 0.0
+    for arg in args:
+        if arg.startswith("-"):
+            continue
+        m = re.fullmatch(r"(\d+(?:\.\d*)?|\.\d+)([smhd]?)", arg)
+        if m:
+            total += float(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+        elif arg in ("inf", "infinity"):
+            return float("inf")
+    return total
+
+
 def _under(path: str, roots: Iterable[str]) -> bool:
     p = path.rstrip("/") or "/"
     return any(p == r.rstrip("/") or p.startswith(r.rstrip("/") + "/") for r in roots)
@@ -309,7 +333,7 @@ class Policy:
 
     # -- built-in judgement -----------------------------------------------------------
 
-    def _shell(self, command: str, cwd: str | None) -> Decision:
+    def _shell(self, command: str, cwd: str | None, *, foreground: bool = True) -> Decision:
         segments = shell_segments(command)
         hosts = hosts_in(segments)
         worst = Decision(ALLOW, hosts=hosts)
@@ -323,6 +347,13 @@ class Policy:
 
         if re.search(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}", command):
             escalate(DENY, "a fork bomb", "shell.forkbomb")
+        if foreground:
+            # A service or a background job may well sleep in a loop: that is its work. A foreground call cannot.
+            if re.search(r"\b(while|until)\b[^\n]*\bsleep\b", command) and any(w[0] == "sleep" for w in segments):
+                escalate(DENY, f"a polling loop: {WAIT_REASON}", "shell.wait")
+            for words in segments:
+                if words[0] == "sleep" and _sleep_seconds(words[1:]) >= IDLE_WAIT_SECONDS:
+                    escalate(DENY, f"sleep {' '.join(words[1:])}: {WAIT_REASON}", "shell.wait")
         for words in segments:
             if words[0] == "cd" and len(words) > 1:
                 where = _norm(words[1]) if words[1].startswith("/") else where  # a `cd` earlier in the line moves every later command
@@ -402,7 +433,7 @@ class Policy:
     def evaluate(self, tool: str, arguments: dict[str, Any], *, grants: Iterable[str] = ()) -> Decision:
         text = canonical(tool, arguments)
         if tool in SHELL_TOOLS:
-            decision = self._shell(text, str(arguments.get("cwd") or "") or None)
+            decision = self._shell(text, str(arguments.get("cwd") or "") or None, foreground=tool == "Exec" and not bool(arguments.get("background")))
         elif tool == "WebFetch":
             decision = self._web(text)
         else:

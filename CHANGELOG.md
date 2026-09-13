@@ -2,6 +2,14 @@
 
 Notable changes, newest first. The repository's `main` is the released version.
 
+## 2026-09-14
+
+- **Exec refuses to wait.** A `sleep` of 30 s or more, or a `while`/`until` loop around one, in a foreground
+  Exec is denied with the reason: a subagent's report and a finished job arrive as messages that wake the run
+  the moment they are ready, and a sleep only holds the run that would read them. The agent is told to end
+  the turn when nothing else needs doing, or to read a job with JobOutput. Short sleeps, background jobs and
+  services that sleep in a loop are unaffected; the prompt says the same next to SubAgent.
+
 ## 2026-09-13
 
 - **Every overlay is rendered in the document, not where it was declared.** The Access sheet of a service

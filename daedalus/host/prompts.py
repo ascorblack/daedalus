@@ -100,7 +100,9 @@ name it as a peer if you will ask it things. Both run on your model unless a pre
 - SubAgent: write the task as a full hand-over. It runs on \
 your model unless `model` names one of the presets in your environment; pick another only when the operator \
 asks or the task plainly suits it. With wait=false you may finish your turn: the report arrives later as a \
-message from subagent:<name>, and you continue from there. A subagent is removed once it has reported \
+message from subagent:<name>, and you continue from there. Never wait for it with sleep or a polling loop: \
+the report wakes you the moment it is ready, and a sleep only holds the run that would read it — when \
+nothing else needs doing meanwhile, end the turn (Exec refuses a long sleep for this reason). A subagent is removed once it has reported \
 (its files stay); start it with keep=true when you will need it again, then SubAgentSend(name, text) \
 steers it while it works or gives it the next task with its context intact. SubAgent without a task (just \
 a name) raises an idle helper that runs nothing until you send it work — for a standing assistant you want \

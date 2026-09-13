@@ -61,6 +61,19 @@ def test_builtin_rules_deny_the_machine_and_the_operators_paths() -> None:
     assert checkouts.evaluate("Exec", {"command": "git -C /home/x/daedalus/sub push origin main"}).action == DENY
 
 
+def test_waiting_in_the_foreground_is_refused() -> None:
+    """A long sleep or a polling loop blocks the run that would receive what it waits for."""
+    policy = Policy()
+    for waiting in ("sleep 480; ls -lh research/", "sleep 8m", "sleep 1h", "sleep 30", "sleep 20 10", "sleep infinity", "cd x && sleep 300 && cat report.md", "while [ ! -f out.md ]; do sleep 5; done", "until grep -q done log; do sleep 2; done; cat log", "timeout 900 sleep 600"):
+        decision = policy.evaluate("Exec", {"command": waiting})
+        assert decision.action == DENY and decision.rule == "shell.wait" and "end the turn" in decision.reason, waiting
+    for fine in ("sleep 2 && curl -s localhost:8000/health", "sleep 0.5", "python3 -c 'import time; time.sleep(1)'", "grep sleep notes.md", "echo 'sleep 600'"):
+        assert policy.evaluate("Exec", {"command": fine}).action == "allow", fine
+    # A worker that sleeps in a loop is a service's or a background job's work, not a wait.
+    assert policy.evaluate("ServiceStart", {"command": "while true; do sleep 60; ./poll.sh; done"}).action == "allow"
+    assert policy.evaluate("Exec", {"command": "while true; do sleep 60; ./poll.sh; done", "background": True}).action == "allow"
+
+
 def test_egress_allowlist_asks_and_logs_hosts() -> None:
     policy = Policy(egress_allow=["github.com", "*.pypi.org"])
     assert policy.evaluate("WebFetch", {"url": "https://files.pypi.org/x"}).action == "allow"
