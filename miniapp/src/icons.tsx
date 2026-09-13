@@ -4,7 +4,7 @@ export type IconName =
   | "back" | "more" | "plus" | "up" | "stop" | "model" | "terminal" | "file" | "pen" | "search" | "globe" | "attach" | "image"
   | "question" | "skill" | "spawn" | "bulb" | "wrench" | "clock" | "plug" | "dot" | "compact"
   | "folder" | "settings" | "bots" | "inbox" | "board" | "changes" | "chart" | "loop" | "pause" | "play" | "trash" | "check" | "close" | "send"
-  | "download" | "share" | "split" | "key" | "link" | "down" | "copy" | "columns" | "eye" | "mic";
+  | "download" | "share" | "split" | "key" | "link" | "down" | "copy" | "columns" | "eye" | "mic" | "fork" | "undo";
 
 const PATHS: Record<IconName, string> = {
   back: "M15 18l-6-6 6-6",
@@ -49,7 +49,11 @@ const PATHS: Record<IconName, string> = {
   key: "M15 3a6 6 0 1 0 0 12 6 6 0 0 0 0-12zM10 14l-7 7M6 18l2 2M9 15l2 2",
   link: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
   down: "M12 5v14M5 12l7 7 7-7",
-  copy: "M8 8h12v12H8zM16 8V4H4v12h4",
+  copy: "M9 9h11v11H9zM15 9V4H4v11h5",
+  // A branch leaving the line it came from: what forking a session from a turn does.
+  fork: "M7 4a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM17 4a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM12 15a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM7 9v1a3 3 0 0 0 3 3h4a3 3 0 0 0 3-3V9M12 13v2",
+  // The undo arrow: the history goes back to this point.
+  undo: "M4 9h11a5 5 0 0 1 0 10H8M4 9l4-4M4 9l4 4",
   columns: "M3 5h18v14H3zM12 5v14",
   eye: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
   mic: "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM6 11a6 6 0 0 0 12 0M12 17v4M9 21h6",
