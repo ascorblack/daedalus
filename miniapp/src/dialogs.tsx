@@ -3,6 +3,7 @@
 // focus goes in and comes back to the control that opened it.
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Icon, IconName } from "./icons";
 
 // ── sheet ────────────────────────────────────────────────────────────────────────────────
@@ -176,7 +177,12 @@ export function OverflowMenu({ items, label = "More", icon = "more", small, clas
       <button ref={trigger} className={`iconbtn ${small ? "small" : ""} ${open ? "on" : ""} ${className ?? ""}`} aria-label={label} title={label} aria-haspopup="menu" aria-expanded={open} onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}>
         <Icon name={icon} size={small ? 16 : 18} />
       </button>
-      {open && pos && (
+      {open && pos && createPortal(
+        // In the document's own stacking context, not the row's: a `position: fixed` menu inside an
+        // element that gets a transform (a card with `:active { transform: scale(…) }` under the
+        // pressing finger) is positioned against that element instead of the viewport. The menu then
+        // jumps away between mousedown and mouseup, the release lands outside it, and no click ever
+        // reaches the item — every action in the menu looked dead.
         <div ref={menu} className="menu" role="menu" style={{ position: "fixed", top: pos.top, right: pos.right }} onClick={(e) => e.stopPropagation()}>
           {items.map((it, i) =>
             it === "-" ? (
@@ -188,7 +194,8 @@ export function OverflowMenu({ items, label = "More", icon = "more", small, clas
               </button>
             ),
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );
