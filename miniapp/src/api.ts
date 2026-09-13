@@ -142,7 +142,7 @@ export type SearchCheck = {
 export type SessionSummary = {
   id: string;
   title: string;
-  status: "idle" | "running" | "waiting" | "failed";
+  status: "idle" | "running" | "waiting" | "failed" | "compacting";
   created_at: string;
   last_message_at: string;
   run_id: string | null;
@@ -198,10 +198,13 @@ export type MessageView = {
   created_at: string;
 };
 
+export type Compacting = { reason: string; stage: "summarising" | "merging" | "writing"; messages: number; parts_done: number; parts_total: number; started_at: string };
+
 export type SessionDetail = {
   id: string;
   title: string;
   status: string;
+  compacting?: Compacting | null;
   run_id: string | null;
   workspace: string;
   workspace_name?: string;

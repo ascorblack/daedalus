@@ -5,7 +5,7 @@ import { Icon } from "./icons";
 import { OverflowMenu, Sheet } from "./dialogs";
 import { confirmAsync, errorText } from "./ui";
 
-export type Status = "idle" | "running" | "waiting" | "failed" | "done";
+export type Status = "idle" | "running" | "waiting" | "failed" | "done" | "compacting";
 
 export function Avatar({ status, seed }: { status: Status; seed: string }) {
   // Deterministic accessory per session so each "bot" stays recognisable.
@@ -24,7 +24,7 @@ export function Avatar({ status, seed }: { status: Status; seed: string }) {
 }
 
 /** One word for a state, in the one colour that state has everywhere: idle stays grey. */
-export const STATUS_WORD: Record<string, string> = { idle: "Idle", running: "Working", waiting: "Needs you", failed: "Failed", done: "Done", paused: "Paused", stopped: "Stopped", pending: "Pending", merged: "Merged", approved: "Approved", rejected: "Rejected", closed: "Closed", dead: "Died", stopped_: "Stopped" };
+export const STATUS_WORD: Record<string, string> = { idle: "Idle", running: "Working", waiting: "Needs you", compacting: "Compacting", failed: "Failed", done: "Done", paused: "Paused", stopped: "Stopped", pending: "Pending", merged: "Merged", approved: "Approved", rejected: "Rejected", closed: "Closed", dead: "Died", stopped_: "Stopped" };
 
 export function Dot({ status, className }: { status: string; className?: string }) {
   return <span className={`dot ${status} ${className ?? ""}`} aria-hidden />;

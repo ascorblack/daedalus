@@ -4,6 +4,14 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-13
 
+- **A compaction is visible while it runs.** The session shows "Compacting" with a progress bar in the chat
+  (how many messages, which part of the transcript is being summarised, merging, writing) and in the agents
+  list, whether it was started from the Mini App or with `/compact` in Telegram; the stream carries the
+  progress, so nothing has to be guessed at.
+- **The session layout is remembered.** The pane opened on the right (files, MCP servers) and whether the
+  session panel is shown stay as set across sessions and reloads.
+- **Agents list: a shared directory groups its owner too.** The session a directory was made for sits in the
+  group with the agents that joined it, and the group is named after that session.
 - **Every agent has its own board.** `BoardList`, `BoardGet` and `BoardUpdate` see the tasks created by the
   session and its subagents, plus the tasks the operator posted to nobody in particular; another agent's tasks
   are not on it, so a loop agent reading "the board" reads its own plan and cannot pick up a colleague's bug

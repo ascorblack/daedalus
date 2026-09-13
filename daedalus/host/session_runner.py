@@ -119,6 +119,9 @@ class SessionState:
     """Consecutive runs the model provider failed; each one waits longer before the work is driven again."""
     outage_task: asyncio.Task[None] | None = None
     """The wait before the next attempt after a provider failure, so a session sleeps at most once."""
+    compacting: dict[str, Any] | None = None
+    """A compaction in flight: reason, stage (summarising/merging/writing), parts done of total, started_at.
+    The Mini App and the list read it; ``None`` when none is running."""
     run_active_since: float = 0.0
     """Monotonic time the current run (re)started driving the model: the time cap counts from here, not from
     the run's creation, so an hour waiting on the operator's answer is not an hour of run time."""
@@ -468,6 +471,8 @@ class SessionManager:
                     status = "running"
                 elif state.pending is not None:
                     status = "waiting"
+                elif state.compacting is not None:
+                    status = "compacting"
                 elif state.engine is not None and state.engine.state is LoopState.FAILED:
                     status = "failed"
             out.append(
@@ -617,6 +622,31 @@ class SessionManager:
         history, tail = full[:cut], full[cut:]
         if not history:
             raise RuntimeError("nothing to compact: the whole history is inside the kept tail")
+        state.compacting = {"reason": reason, "stage": "summarising", "messages": len(history), "parts_done": 0, "parts_total": 0, "started_at": datetime.now(UTC).isoformat()}
+        await self._compaction_progress(state)
+        try:
+            return await self._compact_progressing(state, history, tail, instructions, reason, own_task_ok=own_task_ok)
+        finally:
+            state.compacting = None
+            await self._compaction_progress(state)
+
+    async def _compaction_progress(self, state: SessionState, **fields: Any) -> None:
+        """Advance the compaction's public state and tell the session's listeners (the Mini App stream)."""
+        if state.compacting is not None:
+            state.compacting.update(fields)
+        event = TurnEvent(
+            type=EventType.STATE_CHANGED,
+            run_id=state.run_id or "",
+            payload={"from": "idle", "to": "compacting" if state.compacting else "idle", "reason": "compaction_progress", "compacting": state.compacting},
+        )
+        for sink in self._sinks:
+            try:
+                await sink(state.session.id, event)
+            except Exception:  # noqa: BLE001
+                logger.exception("event sink failed")
+
+    async def _compact_progressing(self, state: SessionState, history: list[Message], tail: list[Message], instructions: str, reason: str, *, own_task_ok: bool) -> str:
+        session_id = state.session.id
         rungs, _ = self.resolve_model(await self.live.load(session_id))
         provider, model = rungs[0]  # the session's own model summarises its own history …
         if self.config.compaction.preset and self.config.compaction.preset in self.config.presets:
@@ -626,7 +656,8 @@ class SessionManager:
                 logger.warning("compaction preset %r is not usable; summarising with the session's model", self.config.compaction.preset)
         language = self.config.answer_language if self.config.answer_language != "auto" else operator_language(history)
         observability = LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, run_id=state.run_id, call_purpose="compaction", call_category="compaction")
-        summary = await self._summarise_history(provider, model, history, language=language, instructions=instructions, observability=observability)
+        summary = await self._summarise_history(provider, model, history, language=language, instructions=instructions, observability=observability, progress=lambda **f: self._compaction_progress(state, **f))
+        await self._compaction_progress(state, stage="writing")
         # What the operator said is written by code, never by the summariser: rules do not decay.
         summary = self.redactor.redact(summary + operator_quotes(history) + identifier_index(history) + verbatim_tail(history))
         busy = state.running and not (own_task_ok and state.task is asyncio.current_task())
@@ -664,20 +695,36 @@ class SessionManager:
         await self.sessions.append_transcript(session_id, [message])
         return summary
 
-    async def _summarise_history(self, provider: Any, model: str, history: Sequence[Message], *, language: str, instructions: str, observability: LLMObservabilityContext) -> str:
-        """One structured summary of ``history``: a single call, or parallel part summaries merged when the transcript is long."""
+    async def _summarise_history(self, provider: Any, model: str, history: Sequence[Message], *, language: str, instructions: str, observability: LLMObservabilityContext, progress: Callable[..., Awaitable[None]] | None = None) -> str:
+        """One structured summary of ``history``: a single call, or parallel part summaries merged when the transcript is long.
+
+        ``progress`` hears how many parts there are and each one finishing, then the merge; a
+        compaction of a long history takes minutes and the operator watches it."""
+
+        async def report(**fields: Any) -> None:
+            if progress is not None:
+                await progress(**fields)
+
         cfg = self.config.compaction
         focus = f"\n\nThe operator asks to focus on: {instructions.strip()}" if instructions.strip() else ""
         transcript_text = transcript_for_summary(history)
         parts = split_transcript(transcript_text, cfg.chunk_tokens)
+        await report(parts_total=len(parts), parts_done=0, stage="summarising")
         if len(parts) == 1:
             return await self._summary_call(provider, model, COMPACT_PROMPT.format(language=language, max_words=cfg.max_words) + focus, transcript_text, observability)
         part_words = max(300, cfg.max_words // 2)
-        partials = await asyncio.gather(*(
-            self._summary_call(provider, model, CHUNK_PROMPT.format(index=i + 1, total=len(parts), language=language, max_words=part_words) + focus, part, observability, strict=False)
-            for i, part in enumerate(parts)
-        ))
+        done = 0
+
+        async def part_summary(index: int, part: str) -> str:
+            nonlocal done
+            text = await self._summary_call(provider, model, CHUNK_PROMPT.format(index=index + 1, total=len(parts), language=language, max_words=part_words) + focus, part, observability, strict=False)
+            done += 1
+            await report(parts_done=done)
+            return text
+
+        partials = await asyncio.gather(*(part_summary(i, part) for i, part in enumerate(parts)))
         joined = "\n\n".join(f"<part {i + 1}>\n{text}\n</part {i + 1}>" for i, text in enumerate(partials) if text)
+        await report(stage="merging")
         return await self._summary_call(provider, model, MERGE_PROMPT.format(language=language, max_words=cfg.max_words) + focus, joined, observability)
 
     async def _summary_call(self, provider: Any, model: str, prompt: str, body: str, observability: LLMObservabilityContext, *, strict: bool = True) -> str:

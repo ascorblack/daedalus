@@ -1,6 +1,6 @@
 import { Component, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { api, AsrStatus, LoopView, ProviderUsage, Schedule, SlashCommand, MessageView, Question, SessionDetail } from "../api";
+import { api, AsrStatus, LoopView, ProviderUsage, Schedule, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
 import { Dot, STATUS_WORD, ServiceRow, Status, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, timeAgo } from "../components";
 import { OverflowMenu, Sheet, confirmDialog } from "../dialogs";
 import { commandPreview, plainPreview, untilShort } from "../format";
@@ -160,7 +160,11 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
-  const [view, setView] = useState<"chat" | "files" | "mcp">("chat");
+  // The layout is the operator's, not the session's: the pane they opened on the right (files, MCP) and
+  // whether the session panel is shown stay put across sessions and reloads, so leaving for Settings and
+  // coming back does not mean reopening the files and closing the panel again.
+  const [view, setView] = useState<"chat" | "files" | "mcp">(() => (readLayout("view") === "files" || readLayout("view") === "mcp" ? (readLayout("view") as "files" | "mcp") : "chat"));
+  useEffect(() => writeLayout("view", view), [view]);
   const [info, setInfo] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [modes, setModes] = useState<string[]>([]);
@@ -179,7 +183,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   const [dragging, setDragging] = useState(0);
   const [providerUsage, setProviderUsage] = useState<ProviderUsage | null>(null);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
-  const [asideOpen, setAsideOpen] = useState(() => pane === undefined);
+  const [asideOpen, setAsideOpen] = useState(() => pane === undefined && readLayout("aside") !== "0");
+  useEffect(() => { if (pane === undefined) writeLayout("aside", asideOpen ? "1" : "0"); }, [asideOpen, pane]);
   const [asr, setAsr] = useState<AsrStatus | null>(null);
   const [asideWidth, setAsideWidth] = usePaneWidth("aside", 272, 200, 520);
   const [paneWidth, setPaneWidth] = usePaneWidth("pane", 420, 280, 900);
@@ -329,6 +334,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
 
   const status = (detail?.status ?? "idle") as Status;
   const busy = status === "running" || status === "waiting";
+  const compacting = detail?.compacting ?? null;
 
   // The event stream carries every change while a run is active; this re-read is the safety net, not the feed.
   useEffect(() => {
@@ -956,6 +962,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
               <Icon name="down" size={18} />
             </button>
           )}
+          {compacting && <CompactionBar c={compacting} />}
           {busy && (
             <button className={`livebar ${status}`} onClick={jumpToBottom} role="status" aria-live="polite" title="To the latest step">
               <Dot status={status} />
@@ -1249,6 +1256,22 @@ function LoopPanel({ sessionId, loop, onChange, toast }: { sessionId: string; lo
 }
 
 // ── side panels: widths, usage, cron, attachments ─────────────────────────────────────────
+
+function readLayout(key: string): string | null {
+  try {
+    return localStorage.getItem(`daedalus.session.${key}`);
+  } catch {
+    return null;
+  }
+}
+
+function writeLayout(key: string, value: string): void {
+  try {
+    localStorage.setItem(`daedalus.session.${key}`, value);
+  } catch {
+    /* private mode: the layout lasts for the visit */
+  }
+}
 
 /** A pane width the operator dragged, remembered per browser. */
 function usePaneWidth(key: string, initial: number, min: number, max: number): [number, (w: number) => void] {
@@ -1859,6 +1882,27 @@ function ToolAttachment({ item }: { item: ToolItem }) {
 }
 
 /** The files the agent handed over in this turn, attached under the answer whatever the trace shows. */
+/** The compaction in flight: which stage, how many parts are summarised, how long it has run. */
+function CompactionBar({ c }: { c: Compacting }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const parts = c.parts_total > 1 ? Math.round((100 * c.parts_done) / c.parts_total) : 0;
+  const pct = c.stage === "writing" ? 97 : c.stage === "merging" ? 88 : c.parts_total > 1 ? Math.round(parts * 0.8) : 35;
+  const what = c.stage === "writing" ? "writing the summary" : c.stage === "merging" ? "merging the parts" : c.parts_total > 1 ? `part ${Math.min(c.parts_done + 1, c.parts_total)} of ${c.parts_total}` : "summarising";
+  return (
+    <div className="livebar compacting" role="status" aria-live="polite">
+      <Dot status="compacting" />
+      <b>Compacting</b>
+      <span className="num">{fmtDuration(Date.now() - new Date(c.started_at).getTime())}</span>
+      <span>· {c.messages} messages · {what}</span>
+      <div className="bar" aria-hidden><i style={{ ["--v" as string]: pct }} /></div>
+    </div>
+  );
+}
+
 function SentFiles({ items }: { items: Activity[] }) {
   const { id, preview } = useContext(SessionContext);
   const sent = items.filter((a): a is ToolItem => a.kind === "tool" && a.name === "SendFile" && !a.running && !a.error && typeof a.args.path === "string");

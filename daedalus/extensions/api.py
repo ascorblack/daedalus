@@ -767,7 +767,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if state is None:
             raise HTTPException(404, "no such session")
         source = await manager.transcript(session_id, tail=tail)
-        status = "running" if state.running else "waiting" if state.pending else "idle"
+        status = "running" if state.running else "waiting" if state.pending else "compacting" if state.compacting else "idle"
         usage = await app.db.fetchone(
             "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cache_read_tokens) ch, sum(cost_usd) usd FROM usage_events WHERE session_id = ?",
             (session_id,),
@@ -783,6 +783,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "id": session_id,
             "title": state.session.title,
             "status": status,
+            "compacting": state.compacting,
             "run_id": state.run_id,
             "workspace": str(state.workspace),
             "workspace_name": state.workspace.name,

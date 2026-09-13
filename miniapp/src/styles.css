@@ -139,6 +139,7 @@ a { color: var(--accent); text-decoration: none; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-3); flex: none; display: inline-block; }
 .dot.running { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
 .dot.waiting { background: var(--warn); }
+.dot.compacting { background: var(--info); animation: pulse 1.4s ease-in-out infinite; }
 .dot.done, .dot.merged, .dot.ok { background: var(--ok); }
 .dot.failed, .dot.dead, .dot.error { background: var(--bad); }
 .dot.paused { background: var(--fg-2); }
@@ -875,6 +876,8 @@ body.resizing iframe { pointer-events: none; }
 /* ── the session: live bar over the composer, key/value rows in the info sheet ──────────── */
 .livebar { flex:none; align-self:center; margin:6px 12px 0; display:flex; align-items:center; gap:6px; max-width:calc(100% - 24px); padding:6px 12px 6px 10px; border:1px solid var(--line-strong); border-radius:999px; background:var(--surface-2); color:var(--fg-2); font:inherit; font-size:13px; cursor:pointer; white-space:nowrap; }
 .livebar b { color:var(--fg); }
+.livebar .bar { width: 72px; flex: none; }
+.livebar .bar i { background: var(--info); }
 .livebar .truncate { min-width:0; }
 .livebar.waiting { border-color:color-mix(in srgb, var(--warn) 50%, transparent); }
 .livebar .ic { flex:none; color:var(--fg); }

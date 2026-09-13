@@ -142,7 +142,7 @@ function Row({ s, kids, onOpen, current }: { s: SessionSummary; kids: SessionSum
   const [showKids, setShowKids] = useState(false);
   const orphan = !!s.metadata?.subagent_of;
   const status = s.status as Status;
-  const spoken = status === "running" || status === "waiting" || status === "failed";
+  const spoken = status === "running" || status === "waiting" || status === "failed" || status === "compacting";
   const loop = loopLine(s);
   const visibleKids = showKids ? kids : kids.slice(0, 3);
   const open = () => onOpen(s.id);

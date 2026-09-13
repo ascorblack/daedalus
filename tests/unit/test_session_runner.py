@@ -272,6 +272,37 @@ def test_transcript_for_summary_clips_tool_results() -> None:
     assert " … " in text and len(text) < 1000
 
 
+async def test_compaction_reports_its_progress_to_the_listeners(settings: Settings, db: Database) -> None:
+    """While the summary is written the session says so: stage and parts done, then nothing again."""
+    provider = ScriptedProvider([{"text": "hi"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("c")
+    waiter = asyncio.create_task(_wait_finished(manager))
+    await manager.submit(state.session.id, "hello there")
+    await waiter
+    seen: list[dict[str, Any] | None] = []
+
+    async def sink(sid: str, event: Any) -> None:
+        if event.payload.get("reason") == "compaction_progress":
+            seen.append(dict(event.payload["compacting"]) if event.payload["compacting"] else None)
+
+    manager.add_sink(sink)
+
+    async def fake_summarise(provider, model, history, *, language, instructions, observability, progress=None):  # type: ignore[no-untyped-def]
+        assert state.compacting is not None and state.compacting["stage"] == "summarising"
+        await progress(parts_total=2, parts_done=0)
+        await progress(parts_done=1)
+        await progress(stage="merging")
+        return SECTIONED
+
+    manager._summarise_history = fake_summarise  # type: ignore[method-assign]
+    await manager.compact(state.session.id)
+    assert state.compacting is None
+    stages = [(p["stage"], p["parts_done"], p["parts_total"]) if p else None for p in seen]
+    assert stages == [("summarising", 0, 0), ("summarising", 0, 2), ("summarising", 1, 2), ("merging", 1, 2), ("writing", 1, 2), None]
+    assert (await manager.list_sessions(limit=5))[0]["status"] == "idle"
+
+
 async def test_compact_replaces_history_with_summary_and_keeps_a_backup(settings: Settings, db: Database) -> None:
     provider = ScriptedProvider([{"text": "hi"}])
     manager = await _manager(settings, db, provider)
