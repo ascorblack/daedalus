@@ -97,6 +97,31 @@ export function App() {
       .catch(() => setAuthed(false));
   }, [authed]);
 
+  // The shell is exactly as tall as the browser really shows. dvh is a unit the WebView computes from
+  // its own idea of the viewport, which on Android (Telegram's WebView, a soft keyboard, a collapsing
+  // URL bar) is taller than the visible area: the page then gets a scroll of its own and the header or
+  // the composer is pushed out of sight until the reader drags the whole page back.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    const apply = () => {
+      const height = vv ? vv.height : window.innerHeight;
+      if (height > 0) document.documentElement.style.setProperty("--vh", `${Math.round(height)}px`);
+      // The keyboard on iOS scrolls the page instead of resizing it; put it back.
+      if (window.scrollY !== 0) window.scrollTo(0, 0);
+    };
+    apply();
+    vv?.addEventListener("resize", apply);
+    vv?.addEventListener("scroll", apply);
+    window.addEventListener("resize", apply);
+    window.addEventListener("orientationchange", apply);
+    return () => {
+      vv?.removeEventListener("resize", apply);
+      vv?.removeEventListener("scroll", apply);
+      window.removeEventListener("resize", apply);
+      window.removeEventListener("orientationchange", apply);
+    };
+  }, []);
+
   useEffect(() => {
     const tg = telegram();
     migrateLegacyLocation(tg?.initDataUnsafe?.start_param);

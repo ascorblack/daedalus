@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <link rel="stylesheet" href="../../miniapp/src/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <div class="main chat-open">
+        <div class="chat">
+          <div class="chat-head">
+            <button class="iconbtn">back</button>
+            <div class="grow">
+              <button class="chat-title">A session with a fairly long title that wraps nowhere</button>
+              <div class="sub meta"><span class="word running">Working</span><span class="chip model">Opus 5</span></div>
+            </div>
+            <button class="iconbtn">more</button>
+          </div>
+          <div class="chat-body">
+            <div class="chat-main">
+              <div class="chat-scroll">
+                <div class="timeline" id="timeline"></div>
+              </div>
+              <button class="livebar"><span class="truncate">Working 3m 29s · step 26</span></button>
+              <div class="composer">
+                <div class="composer-box line">
+                  <button class="iconbtn">+</button>
+                  <textarea rows="1" placeholder="Steer the agent…"></textarea>
+                  <button class="iconbtn">mic</button>
+                  <button class="iconbtn">stop</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      // The same measurement App.tsx installs: the shell is the height the browser really shows.
+      (() => {
+        const vv = window.visualViewport;
+        const apply = () => {
+          const height = vv ? vv.height : window.innerHeight;
+          if (height > 0) document.documentElement.style.setProperty("--vh", `${Math.round(height)}px`);
+          if (window.scrollY !== 0) window.scrollTo(0, 0);
+        };
+        apply();
+        vv?.addEventListener("resize", apply);
+        vv?.addEventListener("scroll", apply);
+        window.addEventListener("resize", apply);
+        window.addEventListener("orientationchange", apply);
+      })();
+      const tl = document.getElementById("timeline");
+      for (let i = 0; i < 80; i++) {
+        const d = document.createElement("div");
+        d.className = "answer";
+        d.textContent = `Message ${i}: ` + "lorem ipsum dolor sit amet ".repeat(12);
+        tl.appendChild(d);
+      }
+    </script>
+  </body>
+</html>
