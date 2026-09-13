@@ -840,6 +840,7 @@ body.resizing iframe { pointer-events: none; }
 
 /* ── entity rows: the roster, and every other list of things with a title and a state ─────── */
 .erow-group { margin-bottom: 6px; }
+.erow.fork { margin-left: 22px; border-left: 2px solid var(--line-strong); }
 .erow { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: start; padding: 11px 12px; margin-bottom: 8px; background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius); cursor: pointer; transition: background .15s; }
 .erow:hover { background: var(--surface-2); }
 .erow:active { transform: scale(.995); }

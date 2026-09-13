@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { Fragment, useCallback, useMemo, useState } from "react";
 import { api, SessionSummary, Settings, Workspace } from "../api";
 import { Avatar, Dot, STATUS_WORD, Skeleton, Status, ToolPicker, fmtInterval } from "../components";
 import { Sheet } from "../dialogs";
@@ -33,9 +33,19 @@ export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (i
     const leader = s.metadata?.subagent_of;
     if (leader && ids.has(leader)) children.set(leader, [...(children.get(leader) ?? []), s]);
   }
+  // A fork sits under the session it was taken from: it has its own directory (a copy of the source's
+  // files as of the fork point), so grouping by workspace would put it elsewhere, and the kinship is what
+  // the reader is looking for. A fork whose origin is gone is listed on its own.
+  const forks = new Map<string, SessionSummary[]>();
+  for (const s of all) {
+    const origin = s.metadata?.forked_from?.session_id;
+    if (origin && origin !== s.id && ids.has(origin) && !s.metadata?.subagent_of) forks.set(origin, [...(forks.get(origin) ?? []), s]);
+  }
+  const isNestedFork = (s: SessionSummary) => !!s.metadata?.forked_from?.session_id && ids.has(s.metadata.forked_from.session_id) && !s.metadata?.subagent_of;
   const q = query.trim().toLowerCase();
-  const matches = (s: SessionSummary) => !q || s.title.toLowerCase().includes(q) || (s.model ?? "").toLowerCase().includes(q) || (children.get(s.id) ?? []).some((c) => (c.metadata?.subagent_name ?? c.title).toLowerCase().includes(q));
-  const top = all.filter((s) => !(s.metadata?.subagent_of && ids.has(s.metadata.subagent_of))).filter(matches);
+  const matchesSelf = (s: SessionSummary) => !q || s.title.toLowerCase().includes(q) || (s.model ?? "").toLowerCase().includes(q) || (children.get(s.id) ?? []).some((c) => (c.metadata?.subagent_name ?? c.title).toLowerCase().includes(q));
+  const matches = (s: SessionSummary) => matchesSelf(s) || (forks.get(s.id) ?? []).some(matchesSelf);
+  const top = all.filter((s) => !(s.metadata?.subagent_of && ids.has(s.metadata.subagent_of)) && !isNestedFork(s)).filter(matches);
   const childRunning = (s: SessionSummary) => (children.get(s.id) ?? []).some((c) => c.status === "running" || c.status === "waiting");
   const kind = (s: SessionSummary): "waiting" | "working" | "loop" | "idle" => {
     if (s.status === "waiting") return "waiting";
@@ -112,7 +122,12 @@ export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (i
                 {groupBy === "workspace" && g.key !== OWN && <Icon name="folder" size={13} />} {g.label} <span className="n">{g.items.length}</span>
               </div>
               {g.items.map((s) => (
-                <Row key={s.id} s={s} kids={children.get(s.id) ?? []} onOpen={onOpen} current={current === s.id || (children.get(s.id) ?? []).some((c) => c.id === current)} />
+                <Fragment key={s.id}>
+                  <Row s={s} kids={children.get(s.id) ?? []} onOpen={onOpen} current={current === s.id || (children.get(s.id) ?? []).some((c) => c.id === current)} />
+                  {(forks.get(s.id) ?? []).filter((f) => !q || matchesSelf(f)).map((f) => (
+                    <Row key={f.id} s={f} kids={children.get(f.id) ?? []} onOpen={onOpen} current={current === f.id || (children.get(f.id) ?? []).some((c) => c.id === current)} fork={{ of: s.title, seq: f.metadata!.forked_from!.seq }} />
+                  ))}
+                </Fragment>
               ))}
             </section>
           ),
@@ -138,7 +153,7 @@ function loopLine(s: SessionSummary): string {
   return `Loop ${loop.status}${loop.pause_note || loop.stop_reason ? `: ${(loop.pause_note || loop.stop_reason || "").slice(0, 80)}` : ""} · ${runs}`;
 }
 
-function Row({ s, kids, onOpen, current }: { s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean }) {
+function Row({ s, kids, onOpen, current, fork }: { s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number } }) {
   const [showKids, setShowKids] = useState(false);
   const orphan = !!s.metadata?.subagent_of;
   const status = s.status as Status;
@@ -147,7 +162,7 @@ function Row({ s, kids, onOpen, current }: { s: SessionSummary; kids: SessionSum
   const visibleKids = showKids ? kids : kids.slice(0, 3);
   const open = () => onOpen(s.id);
   return (
-    <div className={`erow ${status} ${current ? "current" : ""}`} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
+    <div className={`erow ${status} ${current ? "current" : ""} ${fork ? "fork" : ""}`} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
       <Avatar status={status} seed={s.id} />
       <div className="erow-main">
         <div className="erow-head">
@@ -162,6 +177,7 @@ function Row({ s, kids, onOpen, current }: { s: SessionSummary; kids: SessionSum
           {orphan && <span className="sep">·</span>}
           {orphan && <span>subagent, leader gone</span>}
         </div>
+        {fork && <div className="erow-meta"><Icon name="fork" size={12} /> <span title={`forked from ${fork.of} at message ${fork.seq}`}>fork of {fork.of} · from message {fork.seq}</span></div>}
         {loop && <div className={`erow-meta ${s.metadata?.loop?.status === "paused" ? "waiting" : ""}`}>{loop}</div>}
         {kids.length > 0 && (
           <div className="erow-children" onClick={(e) => e.stopPropagation()}>

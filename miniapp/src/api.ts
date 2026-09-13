@@ -151,7 +151,7 @@ export type SessionSummary = {
   /** The name of the directory the session works in, and whether that directory is its own. */
   workspace?: string;
   workspace_own?: boolean;
-  metadata?: { subagent_of?: string; subagent_name?: string; loop?: LoopView; [k: string]: unknown };
+  metadata?: { subagent_of?: string; subagent_name?: string; loop?: LoopView; forked_from?: { session_id: string; seq: number }; [k: string]: unknown };
 };
 
 export type LoopView = {
