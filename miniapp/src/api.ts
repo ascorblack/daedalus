@@ -148,6 +148,9 @@ export type SessionSummary = {
   run_id: string | null;
   /** The preset label or provider/model the session's next call goes to. */
   model?: string;
+  /** The name of the directory the session works in, and whether that directory is its own. */
+  workspace?: string;
+  workspace_own?: boolean;
   metadata?: { subagent_of?: string; subagent_name?: string; loop?: LoopView; [k: string]: unknown };
 };
 

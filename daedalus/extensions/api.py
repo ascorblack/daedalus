@@ -157,6 +157,8 @@ class NewSessionBody(BaseModel):
     """A workspace directory name to work in (another session's id or a named workspace); empty = a directory of its own."""
     tools_off: list[str] = Field(default_factory=list)
     """Tools this session does not get (by name); everything else stays on."""
+    preset: str | None = None
+    """The model preset the session starts on; empty = the global default."""
     loop: LoopBody | None = None
     """Make it a loop agent: woken up for this instruction on an interval or when it says so."""
 
@@ -688,6 +690,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         default_label = default_preset.display(default_id)
         overrides_by_id = await manager.live.load_models([row["id"] for row in rows])
         for row in rows:
+            # The directory the session works in, so the list can group sessions by workspace.
+            workspace = Path(str(row["metadata"].get("workspace"))) if row["metadata"].get("workspace") else manager.workspace_for(row["id"])
+            row["workspace"] = workspace.name
+            row["workspace_own"] = workspace == manager.workspace_for(row["id"])
             overrides = overrides_by_id.get(row["id"], {})
             if overrides.get("preset") and overrides["preset"] in app.config.presets:
                 row["model"] = app.config.presets[overrides["preset"]].display(overrides["preset"])
@@ -716,6 +722,12 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 raise HTTPException(502, f"Telegram refused to create the topic: {exc}") from exc
         else:
             state = await manager.create_session(body.title, metadata=metadata)
+        if body.preset:
+            # Before the first run, so the session's opening task already goes to the chosen model.
+            try:
+                await manager.set_model(state.session.id, preset=body.preset)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         if body.prompt:
             await manager.submit(state.session.id, body.prompt)
         if body.loop is not None:
@@ -726,7 +738,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 await loops.create(state.session.id, instruction=body.loop.instruction, mode=body.loop.mode, interval_seconds=(body.loop.interval_minutes or 0) * 60 or None, max_runs=body.loop.max_runs, start_now=body.loop.start_now)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
-        return {"id": state.session.id, "title": body.title}
+        return {"id": state.session.id, "title": body.title, "model": await session_model_label(state)}
 
     async def session_model_label(state: Any) -> str:
         overrides = await manager.live.load(state.session.id)
