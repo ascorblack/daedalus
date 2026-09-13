@@ -11,6 +11,9 @@ import { confirmAsync, errorText, fmtBytes } from "../ui";
 import { Files } from "./Session";
 
 type Filter = "all" | "working" | "loops";
+type GroupBy = "status" | "workspace";
+
+const OWN = "\u0000own";  // sessions in a directory of their own: one group, not one group each
 
 export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (id: string) => void; toast: (t: string) => void; current?: string; compact?: boolean }) {
   const { data: sessions, error, loading } = useQuery<SessionSummary[]>("/api/sessions", { pollMs: 5000, staleMs: 3000 });
@@ -19,6 +22,8 @@ export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (i
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
+  const [groupBy, setGroupBy] = useState<GroupBy>(() => (localStorage.getItem("agents.groupBy") as GroupBy) || "status");
+  const setGrouping = (g: GroupBy) => { setGroupBy(g); localStorage.setItem("agents.groupBy", g); };
 
   // Subagents sit under their leader; a child whose leader is gone is listed on its own.
   const all = sessions ?? [];
@@ -38,12 +43,24 @@ export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (i
     if (s.metadata?.loop && s.metadata.loop.status === "active") return "loop";
     return "idle";
   };
-  const groups: { key: string; label: string; items: SessionSummary[] }[] = [
-    { key: "waiting", label: "Needs you", items: top.filter((s) => kind(s) === "waiting") },
-    { key: "working", label: "Working", items: top.filter((s) => kind(s) === "working") },
-    { key: "loop", label: "Loops", items: top.filter((s) => kind(s) === "loop") },
-    { key: "idle", label: "Idle", items: top.filter((s) => kind(s) === "idle") },
-  ].filter((g) => (filter === "all" ? true : filter === "working" ? g.key === "waiting" || g.key === "working" : g.key === "loop"));
+  const kept = top.filter((s) => (filter === "all" ? true : filter === "working" ? kind(s) === "waiting" || kind(s) === "working" : kind(s) === "loop"));
+  const byStatus: { key: string; label: string; items: SessionSummary[] }[] = [
+    { key: "waiting", label: "Needs you", items: kept.filter((s) => kind(s) === "waiting") },
+    { key: "working", label: "Working", items: kept.filter((s) => kind(s) === "working") },
+    { key: "loop", label: "Loops", items: kept.filter((s) => kind(s) === "loop") },
+    { key: "idle", label: "Idle", items: kept.filter((s) => kind(s) === "idle") },
+  ];
+  // By workspace the shared directories come first (a project with its agents in it); everything that
+  // works in a directory of its own goes into one group at the end, because one agent is not a project.
+  const buckets = new Map<string, SessionSummary[]>();
+  for (const s of kept) {
+    const key = s.workspace && s.workspace_own === false ? s.workspace : OWN;
+    buckets.set(key, [...(buckets.get(key) ?? []), s]);
+  }
+  const byWorkspace = [...buckets.entries()]
+    .sort((a, b) => (a[0] === OWN ? 1 : b[0] === OWN ? -1 : a[0].localeCompare(b[0])))
+    .map(([key, items]) => ({ key, label: key === OWN ? "Own directory" : key, items }));
+  const groups = groupBy === "workspace" ? byWorkspace : byStatus;
   const activeCount = top.filter((s) => kind(s) === "waiting" || kind(s) === "working").length;
   const shown = groups.reduce((n, g) => n + g.items.length, 0);
 
@@ -67,6 +84,9 @@ export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (i
               {f === "all" ? `All · ${top.length}` : f === "working" ? `Active · ${activeCount}` : `Loops · ${top.filter((s) => kind(s) === "loop").length}`}
             </button>
           ))}
+          <button className="chip select" aria-pressed={groupBy === "workspace"} onClick={() => setGrouping(groupBy === "workspace" ? "status" : "workspace")} title="Group the list by the workspace each agent works in">
+            <Icon name="folder" size={13} /> By workspace
+          </button>
         </div>}
       </PageHeader>
       <div className="screen narrow">
@@ -84,7 +104,7 @@ export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (i
           g.items.length === 0 ? null : (
             <section key={g.key} className="erow-group">
               <div className="section-title">
-                {g.label} <span className="n">{g.items.length}</span>
+                {groupBy === "workspace" && g.key !== OWN && <Icon name="folder" size={13} />} {g.label} <span className="n">{g.items.length}</span>
               </div>
               {g.items.map((s) => (
                 <Row key={s.id} s={s} kids={children.get(s.id) ?? []} onOpen={onOpen} current={current === s.id || (children.get(s.id) ?? []).some((c) => c.id === current)} />

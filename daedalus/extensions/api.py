@@ -690,6 +690,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         default_label = default_preset.display(default_id)
         overrides_by_id = await manager.live.load_models([row["id"] for row in rows])
         for row in rows:
+            # The directory the session works in, so the list can group sessions by workspace.
+            workspace = Path(str(row["metadata"].get("workspace"))) if row["metadata"].get("workspace") else manager.workspace_for(row["id"])
+            row["workspace"] = workspace.name
+            row["workspace_own"] = workspace == manager.workspace_for(row["id"])
             overrides = overrides_by_id.get(row["id"], {})
             if overrides.get("preset") and overrides["preset"] in app.config.presets:
                 row["model"] = app.config.presets[overrides["preset"]].display(overrides["preset"])
