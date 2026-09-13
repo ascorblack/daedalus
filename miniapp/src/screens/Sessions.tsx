@@ -52,14 +52,19 @@ export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (i
   ];
   // By workspace the shared directories come first (a project with its agents in it); everything that
   // works in a directory of its own goes into one group at the end, because one agent is not a project.
+  // A directory is shared when more than one top-level agent works in it — the one it was made for
+  // included: an agent whose own directory another agent joined belongs to that group, not to "own".
+  const tenants = new Map<string, number>();
+  for (const s of top) if (s.workspace) tenants.set(s.workspace, (tenants.get(s.workspace) ?? 0) + 1);
+  const titleOf = new Map(all.map((s) => [s.id, s.title]));
   const buckets = new Map<string, SessionSummary[]>();
   for (const s of kept) {
-    const key = s.workspace && s.workspace_own === false ? s.workspace : OWN;
+    const key = s.workspace && (tenants.get(s.workspace) ?? 0) > 1 ? s.workspace : OWN;
     buckets.set(key, [...(buckets.get(key) ?? []), s]);
   }
   const byWorkspace = [...buckets.entries()]
     .sort((a, b) => (a[0] === OWN ? 1 : b[0] === OWN ? -1 : a[0].localeCompare(b[0])))
-    .map(([key, items]) => ({ key, label: key === OWN ? "Own directory" : key, items }));
+    .map(([key, items]) => ({ key, label: key === OWN ? "Own directory" : titleOf.get(key) ?? key, items }));
   const groups = groupBy === "workspace" ? byWorkspace : byStatus;
   const activeCount = top.filter((s) => kind(s) === "waiting" || kind(s) === "working").length;
   const shown = groups.reduce((n, g) => n + g.items.length, 0);
