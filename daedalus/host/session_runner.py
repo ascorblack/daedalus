@@ -437,7 +437,18 @@ class SessionManager:
         state = self._states.get(session_id)
         if state is not None and state.engine is not None and state.running:
             known = {self.sessions.transcript_key(m) for m in rows}
-            rows = rows + [m for m in state.engine.history if self.sessions.transcript_key(m) not in known]
+            live = [m for m in state.engine.history if self.sessions.transcript_key(m) not in known]
+            # A queued steer or follow-up is written to the transcript when it is submitted; the core
+            # later places the same text into its history as a fresh user message with a timestamp of
+            # its own, which the key-based dedup cannot recognise. Marking live user messages the host
+            # did not write itself as the core's is what the persisted sync (from_history) does, and it
+            # keeps the operator's words from appearing twice while the run is still going.
+            rows = rows + [
+                m.model_copy(update={"metadata": {**m.metadata, "daedalus.origin": "core"}})
+                if m.role is MessageRole.user and "daedalus.origin" not in m.metadata and not m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)
+                else m
+                for m in live
+            ]
         return rows[-tail:] if tail > 0 else rows
 
     async def list_sessions(self, limit: int = 100) -> list[dict[str, Any]]:

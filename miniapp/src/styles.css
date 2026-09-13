@@ -80,7 +80,9 @@ a { color: var(--accent); text-decoration: none; }
 
 /* ── shell: the viewport itself, not Telegram's stable-height variable (Android keeps the collapsed
    height after the app is reopened, and the screen shrinks to a strip) ─────────────────────── */
-.app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+/* --vh is the height the browser actually shows, measured from visualViewport (the soft keyboard and
+   Android's WebView chrome are in it); dvh is the fallback for a browser without that API. */
+.app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; height: var(--vh, 100dvh); overflow: hidden; }
 .main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 .main.chat-open { overflow: hidden; }
 .screen { flex: 1; padding: 6px 14px calc(76px + env(safe-area-inset-bottom)); }
