@@ -2,7 +2,7 @@ import { Component, createContext, memo, useCallback, useContext, useEffect, use
 import type { ReactElement, ReactNode } from "react";
 import { api, AsrStatus, LoopView, ProviderUsage, Schedule, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
 import { Dot, STATUS_WORD, ServiceRow, Status, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, timeAgo } from "../components";
-import { OverflowMenu, Sheet, confirmDialog } from "../dialogs";
+import { OverflowMenu, Sheet, confirmDialog, Overlay } from "../dialogs";
 import { commandPreview, plainPreview, untilShort } from "../format";
 import { codeBlock, renderMarkdown } from "../md";
 import { confirmAsync, enterSends, errorText, fmtBytes, fmtTok, haptic } from "../ui";
@@ -1132,7 +1132,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       </div>
 
       {commandResult && (
-        <div className="sheet-backdrop" onClick={() => setCommandResult(null)}>
+        <Overlay><div className="sheet-backdrop" onClick={() => setCommandResult(null)}>
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
             <div className="grip" />
             <h3 className="mono">{commandResult.line}</h3>
@@ -1140,13 +1140,13 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
               <pre className="diff" style={{ whiteSpace: "pre-wrap" }}>{commandResult.text}</pre>
             </div>
           </div>
-        </div>
+        </div></Overlay>
       )}
 
       {preview && <FilePreview src={preview} onClose={() => setPreview(null)} />}
 
       {picker && (
-        <div className="sheet-backdrop" onClick={() => setPicker(null)}>
+        <Overlay><div className="sheet-backdrop" onClick={() => setPicker(null)}>
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
             <div className="grip" />
             <h3>Model for this session</h3>
@@ -1176,7 +1176,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
               </div>
             </div>
           </div>
-        </div>
+        </div></Overlay>
       )}
     </div>
   );

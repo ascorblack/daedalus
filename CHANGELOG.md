@@ -4,6 +4,12 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-13
 
+- **Every overlay is rendered in the document, not where it was declared.** The Access sheet of a service
+  (like its menu before it) sat inside a pressable card: while the mouse button was down the card's press
+  transform made it the containing block of the fixed sheet, the sheet snapped onto the card with its body
+  clipped, and the release landed outside "Local only". Sheets, the file preview, the confirmation dialog and
+  the command-result and model-picker panels now go through one portal that also keeps their clicks from
+  reaching the row underneath; a browser check drives the real mouse over the Access sheet.
 - **A compaction is visible while it runs.** The session shows "Compacting" with a progress bar in the chat
   (how many messages, which part of the transcript is being summarised, merging, writing) and in the agents
   list, whether it was started from the Mini App or with `/compact` in Telegram; the stream carries the

@@ -44,7 +44,8 @@ export function Sheet({ title, ariaLabel, onClose, children, size, className, he
     };
   }, []);
   return (
-    <div className="sheet-backdrop" onClick={onClose}>
+    <Overlay>
+      <div className="sheet-backdrop" onClick={(e) => { e.stopPropagation(); onClose(); }}>
       <div ref={panel} tabIndex={-1} className={`sheet ${size ?? ""} ${className ?? ""}`} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={typeof title === "string" ? title : ariaLabel}>
         <div className="grip" />
         <div className="sheet-head">
@@ -54,7 +55,26 @@ export function Sheet({ title, ariaLabel, onClose, children, size, className, he
         </div>
         <div className="sheet-body">{children}</div>
       </div>
-    </div>
+      </div>
+    </Overlay>
+  );
+}
+
+/** Every overlay is rendered in the document, never where it was declared.
+
+    An ancestor with a transform, a filter or `contain` becomes the containing block of a
+    `position: fixed` descendant, and its `overflow: hidden` clips it. A sheet declared inside a
+    pressable card (`:active { transform: scale(…) }`) therefore snapped to the card under the
+    pressed mouse button and lost its body to the card's clip; the release landed outside the
+    control, so the choice never registered. React still bubbles events through a portal to the
+    component tree, so the backdrops stop their clicks and key presses from reaching the row that
+    declared them — a row that opens on click must not open under its own dialog. */
+export function Overlay({ children }: { children: ReactNode }) {
+  return createPortal(
+    <div className="overlay-root" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
+      {children}
+    </div>,
+    document.body,
   );
 }
 
@@ -112,6 +132,7 @@ function ConfirmDialog({ pending, onDone }: { pending: Pending; onDone: (ok: boo
     e.preventDefault();
   };
   return (
+    <Overlay>
     <div className="sheet-backdrop confirm" onClick={() => onDone(false)}>
       <div ref={box} className="dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" onClick={(e) => e.stopPropagation()} onKeyDown={trap}>
         <h3 id="confirm-title">{pending.title}</h3>
@@ -124,6 +145,7 @@ function ConfirmDialog({ pending, onDone }: { pending: Pending; onDone: (ok: boo
         </div>
       </div>
     </div>
+    </Overlay>
   );
 }
 

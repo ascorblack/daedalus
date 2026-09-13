@@ -3,6 +3,7 @@
 // auth header (an <img src> cannot carry one) and shown from a blob URL; the office formats are
 // converted in the browser by libraries loaded only when such a file is opened.
 
+import { Overlay } from "./dialogs";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
 import { Icon } from "./icons";
@@ -231,6 +232,7 @@ export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () 
   const loading = !failure && (!url || (kind !== "image" && kind !== "pdf" && kind !== "audio" && kind !== "video" && kind !== "other" && !body));
 
   return (
+    <Overlay>
     <div className="sheet-backdrop preview-backdrop" onClick={onClose}>
       <div className={`sheet preview ${kind}`} onClick={(e) => e.stopPropagation()} role="dialog" aria-label={name}>
         <div className="sheet-head">
@@ -280,5 +282,6 @@ export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () 
         </div>
       </div>
     </div>
+    </Overlay>
   );
 }
