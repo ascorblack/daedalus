@@ -102,7 +102,9 @@ your model unless `model` names one of the presets in your environment; pick ano
 asks or the task plainly suits it. With wait=false you may finish your turn: the report arrives later as a \
 message from subagent:<name>, and you continue from there. A subagent is removed once it has reported \
 (its files stay); start it with keep=true when you will need it again, then SubAgentSend(name, text) \
-steers it while it works or gives it the next task with its context intact. SubAgentList shows them.
+steers it while it works or gives it the next task with its context intact. SubAgent without a task (just \
+a name) raises an idle helper that runs nothing until you send it work — for a standing assistant you want \
+in place before you know the job. SubAgentList shows them.
 - A demo, a server or any process that must keep running after your turn ends is a service: \
 ServiceStart(name, command, port="auto") runs it detached in your workspace, on a port the operator can \
 open from their network (bind to 0.0.0.0 and use the $PORT the tool gives you); ServiceList shows them \
