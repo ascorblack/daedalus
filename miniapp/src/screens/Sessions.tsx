@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { api, SessionSummary, Workspace } from "../api";
+import { api, SessionSummary, Settings, Workspace } from "../api";
 import { Avatar, Dot, STATUS_WORD, Skeleton, Status, ToolPicker, fmtInterval } from "../components";
 import { Sheet } from "../dialogs";
 import { relTime, shortModel, untilShort } from "../format";
@@ -170,9 +170,17 @@ function NewAgentSheet({ onClose, onCreated, toast }: { onClose: () => void; onC
   const [loopMinutes, setLoopMinutes] = useState("10");
   const [loopMax, setLoopMax] = useState("");
   const [workspace, setWorkspace] = useState("");
+  const [preset, setPreset] = useState("");
   const [advanced, setAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const workspaces = useQuery<Workspace[]>("/api/workspaces", { staleMs: 30000 });
+  const settings = useQuery<Settings>("/api/settings", { staleMs: 60000 });
+  const presets = settings.data?.presets ?? {};
+  const defaultPreset = settings.data?.model?.preset ?? "";
+  const presetLabel = (id: string) => {
+    const p = presets[id];
+    return p ? p.label || `${p.provider}/${p.model}` : id;
+  };
 
   async function create() {
     if (!title.trim() || busy) return;
@@ -181,7 +189,7 @@ function NewAgentSheet({ onClose, onCreated, toast }: { onClose: () => void; onC
       const loop = loopOn && loopText.trim()
         ? { instruction: loopText.trim(), mode: loopMode, interval_minutes: loopMode === "interval" ? Math.max(1, Number(loopMinutes) || 10) : null, max_runs: loopMax.trim() ? Math.max(1, Number(loopMax) || 1) : null }
         : undefined;
-      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff, loop, workspace: workspace || undefined });
+      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff, loop, workspace: workspace || undefined, preset: preset || undefined });
       onClose();
       onCreated(created.id);
     } catch (e) {
@@ -197,6 +205,13 @@ function NewAgentSheet({ onClose, onCreated, toast }: { onClose: () => void; onC
       <input className="field" autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What this agent is about" onKeyDown={(e) => e.key === "Enter" && create()} />
       <label className="field">First task (optional)</label>
       <textarea className="field" rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="It starts on this right away" />
+      <label className="field">Model</label>
+      <select className="field" value={preset} onChange={(e) => setPreset(e.target.value)}>
+        <option value="">Default{defaultPreset ? ` · ${presetLabel(defaultPreset)}` : ""}</option>
+        {Object.keys(presets).map((id) => (
+          <option key={id} value={id}>{presetLabel(id)}</option>
+        ))}
+      </select>
       <label className="field">Workspace</label>
       <select className="field" value={workspace} onChange={(e) => setWorkspace(e.target.value)}>
         <option value="">A directory of its own</option>

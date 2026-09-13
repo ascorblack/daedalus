@@ -141,6 +141,21 @@ async def test_workspace_api_create_list_upload_attach_delete(client: httpx.Asyn
     assert (await client.get("/api/workspaces/shared-lab/files", headers=H)).status_code == 404
 
 
+async def test_new_session_starts_on_the_chosen_model_preset(client: httpx.AsyncClient, manager: SessionManager) -> None:
+    chosen = next(pid for pid in manager.config.presets if pid != manager.config.model.preset)
+    r = await client.post("/api/sessions", json={"title": "on grok", "preset": chosen}, headers=H)
+    assert r.status_code == 200, r.text
+    sid = r.json()["id"]
+    # The preset is in place before any run of the session, and the answer names the model it will use.
+    assert (await manager.live.load(sid)).get("preset") == chosen
+    assert r.json()["model"] == manager.config.presets[chosen].display(chosen)
+    assert (await client.get(f"/api/sessions/{sid}", headers=H)).json()["model"] == manager.config.presets[chosen].display(chosen)
+    # Without a preset the session stays on the global default; an unknown one is refused.
+    plain = (await client.post("/api/sessions", json={"title": "default"}, headers=H)).json()["id"]
+    assert (await manager.live.load(plain)).get("preset") in (None, "")
+    assert (await client.post("/api/sessions", json={"title": "nope", "preset": "no.such-model"}, headers=H)).status_code == 400
+
+
 async def test_clear_api_and_command(client: httpx.AsyncClient) -> None:
     sid = (await client.post("/api/sessions", json={"title": "c"}, headers=H)).json()["id"]
     assert (await client.post(f"/api/sessions/{sid}/clear", headers=H)).json() == {"dropped": 0}
