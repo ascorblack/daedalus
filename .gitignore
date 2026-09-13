@@ -26,3 +26,6 @@ miniapp/dist/
 .DS_Store
 .idea/
 .vscode/
+
+# screenshots the browser checks write with SHOTS=1
+tests/browser/*.png

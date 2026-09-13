@@ -1512,8 +1512,8 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
             actions={
               turn.user.seq && onTurnAction && !live
                 ? [
-                    { icon: "split", label: "Fork a session from here", onSelect: () => onTurnAction("fork", turn.user!.seq!) },
-                    { icon: "back", label: "Revert to here…", danger: true, onSelect: () => onTurnAction("revert", turn.user!.seq!) },
+                    { icon: "fork", label: "Fork a session from here", onSelect: () => onTurnAction("fork", turn.user!.seq!) },
+                    { icon: "undo", label: "Revert to here…", danger: true, onSelect: () => onTurnAction("revert", turn.user!.seq!) },
                   ]
                 : []
             }
