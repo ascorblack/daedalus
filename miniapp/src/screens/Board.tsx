@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, SessionSummary } from "../api";
 import { Skeleton, copyText } from "../components";
 import { OverflowMenu, Sheet } from "../dialogs";
 import { absTime, relTime } from "../format";
@@ -20,6 +20,7 @@ type Task = {
   checklist: { text: string; done: boolean }[];
   depends_on: string[];
   session_id: string | null;
+  origin_session_id: string | null;
   notes: string;
   created_at: string;
   updated_at: string;
@@ -158,7 +159,7 @@ export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) =>
         )}
       </div>
       {creating && <NewTaskSheet onClose={() => setCreating(false)} onCreated={() => { setCreating(false); reload(); }} toast={toast} />}
-      {open && <TaskSheet t={open} owner={open.session_id ? titles[open.session_id] : undefined} onClose={() => navigate(pathFor("board"), { replace: true })} onMove={move} onCheck={check} onRemove={remove} onOpenSession={onOpen} toast={toast} />}
+      {open && <TaskSheet t={open} owner={open.session_id ? titles[open.session_id] : undefined} board={open.origin_session_id ? titles[open.origin_session_id] : undefined} onClose={() => navigate(pathFor("board"), { replace: true })} onMove={move} onCheck={check} onRemove={remove} onOpenSession={onOpen} toast={toast} />}
     </>
   );
 }
@@ -192,7 +193,7 @@ function TaskRow({ t, owner, onOpen, onDragStart, onDragEnd, dragging }: { t: Ta
   );
 }
 
-function TaskSheet({ t, owner, onClose, onMove, onCheck, onRemove, onOpenSession, toast }: { t: Task; owner?: string; onClose: () => void; onMove: (t: Task, s: Status) => void; onCheck: (t: Task, i: number) => void; onRemove: (t: Task) => void; onOpenSession: (id: string) => void; toast: (t: string) => void }) {
+function TaskSheet({ t, owner, board, onClose, onMove, onCheck, onRemove, onOpenSession, toast }: { t: Task; owner?: string; board?: string; onClose: () => void; onMove: (t: Task, s: Status) => void; onCheck: (t: Task, i: number) => void; onRemove: (t: Task) => void; onOpenSession: (id: string) => void; toast: (t: string) => void }) {
   const done = t.checklist.filter((c) => c.done).length;
   return (
     <Sheet
@@ -218,6 +219,9 @@ function TaskSheet({ t, owner, onClose, onMove, onCheck, onRemove, onOpenSession
         {owner && <button className="linkbtn" onClick={() => onOpenSession(t.session_id!)}>{owner}</button>}
         <span className="sep">·</span>
         <span title={absTime(t.updated_at)}>updated {relTime(t.updated_at)}</span>
+      </div>
+      <div className="sub" style={{ marginBottom: 10 }}>
+        {t.origin_session_id ? <>Board of <button className="linkbtn" onClick={() => onOpenSession(t.origin_session_id!)}>{board ?? "a removed agent"}</button></> : "Posted to every agent's board"}
       </div>
       {t.acceptance && (
         <section className="sheet-section">
@@ -263,8 +267,10 @@ function TaskSheet({ t, owner, onClose, onMove, onCheck, onRemove, onOpenSession
 }
 
 function NewTaskSheet({ onClose, onCreated, toast }: { onClose: () => void; onCreated: () => void; toast: (t: string) => void }) {
-  const [form, setForm] = useState({ title: "", acceptance: "", checklist: "", priority: 3 });
+  const [form, setForm] = useState({ title: "", acceptance: "", checklist: "", priority: 3, session_id: "" });
   const [busy, setBusy] = useState(false);
+  const { data: sessions } = useQuery<SessionSummary[]>("/api/sessions", { staleMs: 15000 });
+  const agents = (sessions ?? []).filter((s) => !s.title.startsWith("[sub]"));
   async function create() {
     setBusy(true);
     try {
@@ -273,6 +279,7 @@ function NewTaskSheet({ onClose, onCreated, toast }: { onClose: () => void; onCr
         acceptance: form.acceptance,
         priority: form.priority,
         checklist: form.checklist.split("\n").map((l) => l.trim()).filter(Boolean),
+        session_id: form.session_id || null,
       });
       onCreated();
     } catch (e) {
@@ -296,6 +303,12 @@ function NewTaskSheet({ onClose, onCreated, toast }: { onClose: () => void; onCr
         ))}
       </div>
       <div className="sub" style={{ marginTop: 4 }}>P1 is the most urgent.</div>
+      <label className="field">Board</label>
+      <select className="field" value={form.session_id} onChange={(e) => setForm({ ...form, session_id: e.target.value })}>
+        <option value="">Every agent (whoever takes it)</option>
+        {agents.map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
+      </select>
+      <div className="sub" style={{ marginTop: 4 }}>An agent sees its own tasks and the ones posted to every agent.</div>
       <div className="sheet-foot">
         <button className="btn ghost" onClick={onClose}>Cancel</button>
         <button className="btn primary" disabled={busy || !form.title.trim()} onClick={create}>Create</button>

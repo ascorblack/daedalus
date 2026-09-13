@@ -267,6 +267,8 @@ class BoardTaskBody(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     priority: int = Field(default=3, ge=1, le=5)
     notes: str = ""
+    session_id: str | None = None
+    """The agent whose board the task goes on; ``None`` posts it to every agent's board."""
 
 
 class BoardUpdateBody(BaseModel):
@@ -1299,7 +1301,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/board")
     async def board_add(body: BoardTaskBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:
-            return await _board().add(title=body.title, acceptance=body.acceptance, checklist=body.checklist, depends_on=body.depends_on, priority=body.priority, notes=body.notes)
+            if body.session_id and await manager.get_state(body.session_id) is None:
+                raise HTTPException(404, "no such session")
+            return await _board().add(title=body.title, acceptance=body.acceptance, checklist=body.checklist, depends_on=body.depends_on, priority=body.priority, notes=body.notes, session_id=body.session_id)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 

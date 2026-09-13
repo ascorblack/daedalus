@@ -17,8 +17,8 @@ def _hook(context: ToolContext):  # type: ignore[no-untyped-def]
 @tool(
     name="BoardAdd",
     description=(
-        "Add a task to the shared board. Use it when work has more than a few steps, spans sessions, "
-        "or must survive compaction and restarts: title, acceptance criteria (how anyone can tell it "
+        "Add a task to your board (this session's, shared with its subagents). Use it when work has more "
+        "than a few steps or must survive compaction and restarts: title, acceptance criteria (how anyone can tell it "
         "is done), an optional checklist, dependencies (task ids that must finish first — the task "
         "stays 'blocked' until they do), priority 1 (highest) to 5. Returns the task id."
     ),
@@ -55,7 +55,7 @@ async def board_update(
     if hook is None:
         return error(context, "the board is not available")
     try:
-        task = await hook("update", task_id=task_id, status=status, note=note, check=check, uncheck=uncheck, priority=priority, session_id=context.session_id if status == "doing" else None, run_id=context.run_id if status == "doing" else None)
+        task = await hook("update", task_id=task_id, status=status, note=note, check=check, uncheck=uncheck, priority=priority, actor=context.session_id, run_id=context.run_id if status == "doing" else None)
     except KeyError:
         return error(context, f"no task {task_id}")
     except ValueError as exc:
@@ -64,12 +64,19 @@ async def board_update(
     return ok(context, f"task {task['id']} is now {task['status']}" + (f", checklist {done}/{len(task['checklist'])}" if task["checklist"] else ""))
 
 
-@tool(name="BoardList", description="Show the board: open tasks by status and priority (include_done=true adds finished ones). A task's acceptance, notes and checklist come with BoardGet.")
+@tool(
+    name="BoardList",
+    description=(
+        "Show your board: open tasks by status and priority (include_done=true adds finished ones). It holds the "
+        "tasks this session and its subagents created and the ones the operator posted to nobody in particular; "
+        "other agents' tasks are not on it. A task's acceptance, notes and checklist come with BoardGet."
+    ),
+)
 async def board_list(context: ToolContext, status: str | None = None, include_done: bool = False) -> ToolResult:
     hook = _hook(context)
     if hook is None:
         return error(context, "the board is not available")
-    return ok(context, await hook("render", status=status, include_done=include_done))
+    return ok(context, await hook("render", status=status, include_done=include_done, actor=context.session_id))
 
 
 @tool(name="BoardGet", description="Everything about one board task: acceptance criteria, checklist, dependencies, notes, who works on it.")
@@ -78,7 +85,7 @@ async def board_get(context: ToolContext, task_id: str) -> ToolResult:
     if hook is None:
         return error(context, "the board is not available")
     try:
-        t = await hook("get", task_id=task_id)
+        t = await hook("get", task_id=task_id, actor=context.session_id)
     except KeyError:
         return error(context, f"no task {task_id}")
     checklist = "\n".join(f"  [{'x' if c['done'] else ' '}] {i}. {c['text']}" for i, c in enumerate(t["checklist"])) or "  (none)"

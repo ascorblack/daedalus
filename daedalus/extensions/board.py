@@ -5,6 +5,13 @@ dependencies (a task becomes ready when every dependency is done), a priority an
 session working on it. Work-in-progress is limited, a task whose session went quiet is
 handed back, and the board is the same object in the Mini App, in ``/board`` and in the
 agent's tools.
+
+Every agent sees its own board: the tasks created by its session and its subagents, plus
+the tasks the operator posted to nobody in particular. Another agent's tasks are not on it.
+Two independent agents each keep a plan there, and a loop agent that "reads the board at the
+start of a long task" reads its plan, not a colleague's — the day it did, it picked up a bug
+fix a second agent was already working on. Work crosses the line by a hand-over (SubAgent,
+SpawnAgent, AskPeer) or by the operator, never by one agent finding it on the other's board.
 """
 
 from __future__ import annotations
@@ -48,8 +55,10 @@ class Board:
         task_id = uuid.uuid4().hex[:6]
         deps = [d for d in (depends_on or []) if d and d != task_id]
         for dep in deps:
-            if await self.app.db.fetchone("SELECT id FROM board_tasks WHERE id = ?", (dep,)) is None:
-                raise ValueError(f"unknown dependency {dep}")
+            try:
+                await self.get(dep, actor=session_id)  # a dependency is a task on the same board
+            except KeyError:
+                raise ValueError(f"unknown dependency {dep}") from None
         status = "blocked" if await self._has_open_deps(deps) else "todo"
         await self.app.db.execute(
             "INSERT INTO board_tasks(id, title, status, priority, acceptance, checklist, depends_on, session_id, origin_session_id, notes, created_at, updated_at)"
@@ -59,8 +68,29 @@ class Board:
         await self.export_plan(session_id)
         return await self.get(task_id)
 
-    async def get(self, task_id: str) -> dict[str, Any]:
-        row = await self.app.db.fetchone("SELECT * FROM board_tasks WHERE id = ?", (task_id,))
+    async def family(self, session_id: str) -> list[str]:
+        """The session whose board it is and the subagents that share it: a subagent works on its leader's board."""
+        leader = session_id
+        row = await self.app.db.fetchone("SELECT metadata FROM sessions WHERE id = ?", (session_id,))
+        if row is not None:
+            try:
+                leader = str(json.loads(row["metadata"] or "{}").get("subagent_of") or session_id)
+            except (TypeError, ValueError):
+                leader = session_id
+        subs = await self.app.db.fetchall("SELECT id FROM sessions WHERE metadata LIKE ?", (f'%"subagent_of": "{leader}"%',))
+        return [leader, *(str(r["id"]) for r in subs if str(r["id"]) != leader)]
+
+    async def _scope(self, actor: str | None) -> tuple[str, tuple[Any, ...]]:
+        """The SQL that narrows a query to what ``actor`` may see: its family's tasks and the operator's unaddressed ones."""
+        if actor is None:
+            return "1", ()
+        family = await self.family(actor)
+        return f"(origin_session_id IS NULL OR origin_session_id IN ({','.join('?' for _ in family)}))", tuple(family)
+
+    async def get(self, task_id: str, *, actor: str | None = None) -> dict[str, Any]:
+        """One task; for an agent (``actor``) a task outside its board does not exist."""
+        where, args = await self._scope(actor)
+        row = await self.app.db.fetchone(f"SELECT * FROM board_tasks WHERE id = ? AND {where}", (task_id, *args))
         if row is None:
             raise KeyError(task_id)
         return self._view(dict(row))
@@ -71,13 +101,15 @@ class Board:
         row["depends_on"] = json.loads(row.get("depends_on") or "[]")
         return row
 
-    async def list(self, status: str | None = None, *, include_done: bool = True) -> list[dict[str, Any]]:
+    async def list(self, status: str | None = None, *, include_done: bool = True, actor: str | None = None) -> list[dict[str, Any]]:
+        """The board as ``actor`` sees it; ``None`` is the operator, who sees every session's tasks."""
+        where, args = await self._scope(actor)
         if status:
-            rows = await self.app.db.fetchall("SELECT * FROM board_tasks WHERE status = ? ORDER BY priority, created_at", (status,))
+            rows = await self.app.db.fetchall(f"SELECT * FROM board_tasks WHERE status = ? AND {where} ORDER BY priority, created_at", (status, *args))
         elif include_done:
-            rows = await self.app.db.fetchall("SELECT * FROM board_tasks ORDER BY CASE status WHEN 'doing' THEN 0 WHEN 'review' THEN 1 WHEN 'todo' THEN 2 WHEN 'blocked' THEN 3 WHEN 'done' THEN 4 ELSE 5 END, priority, created_at")
+            rows = await self.app.db.fetchall(f"SELECT * FROM board_tasks WHERE {where} ORDER BY CASE status WHEN 'doing' THEN 0 WHEN 'review' THEN 1 WHEN 'todo' THEN 2 WHEN 'blocked' THEN 3 WHEN 'done' THEN 4 ELSE 5 END, priority, created_at", args)
         else:
-            rows = await self.app.db.fetchall("SELECT * FROM board_tasks WHERE status NOT IN ('done', 'dropped') ORDER BY priority, created_at")
+            rows = await self.app.db.fetchall(f"SELECT * FROM board_tasks WHERE status NOT IN ('done', 'dropped') AND {where} ORDER BY priority, created_at", args)
         return [self._view(dict(r)) for r in rows]
 
     async def _has_open_deps(self, deps: list[str]) -> bool:
@@ -100,17 +132,25 @@ class Board:
         title: str | None = None,
         acceptance: str | None = None,
         priority: int | None = None,
+        actor: str | None = None,
     ) -> dict[str, Any]:
-        task = await self.get(task_id)
+        """Change a task. ``actor`` is the session acting (its board bounds what it may touch); ``session_id``
+        names who claims the task on the way to 'doing' and defaults to the actor."""
+        task = await self.get(task_id, actor=actor)
         if status and status not in STATUSES:
             raise ValueError(f"status must be one of {', '.join(STATUSES)}")
+        claimant = session_id or actor
         if status == "doing" and task["status"] != "doing":
             if await self._has_open_deps(task["depends_on"]):
                 raise ValueError("this task still has unfinished dependencies")
-            limit = self.app.config.board.wip_limit
-            row = await self.app.db.fetchone("SELECT count(*) c FROM board_tasks WHERE status = 'doing'")
-            if row and int(row["c"]) >= limit:
-                raise ValueError(f"work-in-progress limit reached ({limit} tasks in 'doing'); finish or hand back one first")
+            if claimant is not None:
+                # The limit rations one agent's attention, so it counts the tasks its family holds, not the
+                # whole installation's: a second agent's three open tasks are not a reason to refuse this one.
+                limit = self.app.config.board.wip_limit
+                family = await self.family(claimant)
+                row = await self.app.db.fetchone(f"SELECT count(*) c FROM board_tasks WHERE status = 'doing' AND session_id IN ({','.join('?' for _ in family)})", tuple(family))
+                if row and int(row["c"]) >= limit:
+                    raise ValueError(f"work-in-progress limit reached ({limit} tasks in 'doing'); finish or hand back one first")
         # Apply the caller's checklist edits before judging completeness: "I checked the last items,
         # close the task" is one call, and testing the checklist the call *arrived* to refused it.
         # Index precedence is unchanged — an index in both lists ends up unchecked.
@@ -140,7 +180,7 @@ class Board:
             notes = (notes + "\n" if notes else "") + f"[{_now()[:16].replace('T', ' ')}] {note[:1000]}"
         # The claim belongs to whoever holds the task in 'doing'; leaving 'doing' releases it.
         if status == "doing":
-            owner, owner_run = session_id or task["session_id"], run_id or task["run_id"]
+            owner, owner_run = claimant or task["session_id"], run_id or task["run_id"]
         elif status:
             owner, owner_run = None, None
         else:
@@ -238,8 +278,8 @@ class Board:
         if state is None:
             return
         # A subagent shares its leader's workspace: the file there lists the whole family's tasks.
-        leader = str(state.metadata.get("subagent_of") or session_id)
-        family = [leader, *(str(r["id"]) for r in await self.app.db.fetchall("SELECT id FROM sessions WHERE metadata LIKE ?", (f'%"subagent_of": "{leader}"%',)))]
+        family = await self.family(session_id)
+        leader = family[0]
         placeholders = ",".join("?" for _ in family)
         rows = await self.app.db.fetchall(f"SELECT * FROM board_tasks WHERE origin_session_id IN ({placeholders}) ORDER BY CASE status WHEN 'doing' THEN 0 WHEN 'review' THEN 1 WHEN 'todo' THEN 2 WHEN 'blocked' THEN 3 WHEN 'done' THEN 4 ELSE 5 END, priority, created_at", tuple(family))
         tasks = [self._view(dict(r)) for r in rows]
@@ -275,13 +315,13 @@ class Board:
         if op == "update":
             return await self.update(kwargs.pop("task_id"), **kwargs)
         if op == "list":
-            return await self.list(kwargs.get("status"), include_done=bool(kwargs.get("include_done", False)))
+            return await self.list(kwargs.get("status"), include_done=bool(kwargs.get("include_done", False)), actor=kwargs.get("actor"))
         if op == "get":
-            return await self.get(kwargs["task_id"])
+            return await self.get(kwargs["task_id"], actor=kwargs.get("actor"))
         if op == "delete":
             return await self.delete(kwargs["task_id"])
         if op == "render":
-            return self.render(await self.list(kwargs.get("status"), include_done=bool(kwargs.get("include_done", False))))
+            return self.render(await self.list(kwargs.get("status"), include_done=bool(kwargs.get("include_done", False)), actor=kwargs.get("actor")))
         raise ValueError(op)
 
 

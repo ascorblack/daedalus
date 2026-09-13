@@ -128,3 +128,49 @@ async def test_context_overflow_compacts_and_drives_the_turn_again(settings: Set
         assert calls.count("submit:core") == 2 and state.overflow_streak == 2
     finally:
         await manager.close()
+
+
+async def test_provider_outage_drives_the_turn_again_with_a_growing_wait(settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run the provider dropped is driven again after a wait that doubles per failure, a bounded number of times."""
+    from protocore.runtime.events.envelope import TurnEvent
+    from protocore.runtime.events.types import EventType
+
+    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager.config.ops.provider_retry_max_attempts = 2
+    manager.config.ops.provider_retry_base_seconds = 5.0
+    manager.config.ops.provider_retry_max_seconds = 8.0
+    await manager.start()
+    calls: list[str] = []
+    slept: list[float] = []
+
+    async def fake_submit(session_id: str, text: str, attachments=(), *, steer=False, as_answer=True, origin="operator") -> str:  # type: ignore[no-untyped-def]
+        calls.append(f"submit:{origin}")
+        assert text == manager.OUTAGE_NOTE
+        return "run-2"
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    manager.submit = fake_submit  # type: ignore[method-assign]
+    monkeypatch.setattr("daedalus.host.session_runner.asyncio.sleep", fake_sleep)
+    try:
+        state = await manager.create_session("s")
+        state.run_id = "r1"
+        await manager._dispatch_event(state, TurnEvent(type=EventType.ERROR, run_id="r1", payload={"kind": "llm_provider_error", "message": "HTTP 502"}))
+        assert state.last_error_kind == "llm_provider_error"
+        manager._schedule_outage_recovery(state)
+        await state.outage_task
+        assert calls == ["submit:core"] and slept == [5.0] and state.outage_streak == 1
+        manager._schedule_outage_recovery(state)
+        await state.outage_task
+        assert slept == [5.0, 8.0]  # doubled, then capped
+        manager._schedule_outage_recovery(state)  # the third failure in a row is left alone
+        assert state.outage_task.done() and calls.count("submit:core") == 2 and state.outage_streak == 2
+        # A session that moved on meanwhile (a newer run) is not driven again over that run.
+        state.outage_streak = 0
+        manager._schedule_outage_recovery(state)
+        state.run_id = "r-newer"
+        await state.outage_task
+        assert calls.count("submit:core") == 2
+    finally:
+        await manager.close()

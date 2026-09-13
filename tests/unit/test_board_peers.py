@@ -197,3 +197,33 @@ async def test_peer_answer_only_counts_what_came_after_the_question(app: Any) ->
     target.metadata["peer_depth"] = 2
     await peers.on_run_finished(target.session.id, "r", "completed")
     assert "peer_depth" not in target.metadata
+
+
+async def test_each_agent_sees_its_own_board_and_the_operator_pool(app: Any) -> None:
+    """A task belongs to the board of the session that created it (shared with its subagents); another
+    agent neither lists, reads nor claims it. A task the operator posts without an addressee is on
+    every board. The work-in-progress limit counts what one family holds, not the whole installation."""
+    board = Board(app)
+    await app.db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata) VALUES (?, ?, ?, ?, ?, ?)", ("lead", "daedalus", "lead", "t", "t", "{}"))
+    await app.db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata) VALUES (?, ?, ?, ?, ?, ?)", ("helper", "daedalus", "[sub] h", "t", "t", '{"subagent_of": "lead"}'))
+    mine = await board.add(title="fix the duplicate message", session_id="lead")
+    theirs = await board.add(title="post on the forum", session_id="other")
+    pool = await board.add(title="anyone: rotate the logs")
+
+    assert [t["id"] for t in await board.list(None, actor="other")] == [theirs["id"], pool["id"]]
+    assert {t["id"] for t in await board.list(None, actor="helper")} == {mine["id"], pool["id"]}  # the subagent works on its leader's board
+    assert {t["id"] for t in await board.list(None)} == {mine["id"], theirs["id"], pool["id"]}  # the operator sees everything
+    with pytest.raises(KeyError):
+        await board.get(mine["id"], actor="other")
+    with pytest.raises(KeyError):
+        await board.update(mine["id"], status="doing", actor="other")
+    assert (await board.get(mine["id"]))["status"] == "todo"  # the refused claim changed nothing
+
+    claimed = await board.update(pool["id"], status="doing", actor="other")
+    assert claimed["session_id"] == "other"
+    app.config.board.wip_limit = 1
+    with pytest.raises(ValueError):
+        await board.update(theirs["id"], status="doing", actor="other")  # other's own limit
+    assert (await board.update(mine["id"], status="doing", actor="helper"))["session_id"] == "helper"  # lead's family is not rationed by other's claims
+    with pytest.raises(ValueError, match="unknown dependency"):
+        await board.add(title="after theirs", depends_on=[theirs["id"]], session_id="lead")  # a dependency must be on the same board

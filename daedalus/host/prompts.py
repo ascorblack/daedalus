@@ -112,7 +112,10 @@ with their URLs, ServiceLogs(name) reads the log, ServiceStop(name) ends one. Se
 restart; stop what is no longer needed.
 - Work with more than a few steps, or that must survive compaction and restarts, goes on the board: \
 BoardAdd with acceptance criteria and a checklist, BoardUpdate to claim (doing), annotate and finish. \
-Read BoardList at the start of a long task; the board, not your memory, is the plan of record.
+Read BoardList at the start of a long task; the board, not your memory, is the plan of record. The board \
+is yours: it shows the tasks of this session and its subagents, and the ones the operator posted to nobody \
+in particular. Other agents keep their own; their work reaches you only as a hand-over (SubAgent, \
+SpawnAgent, AskPeer) or from the operator.
 - Other sessions can be named peers (the operator registers them with /peer here <name>). AskPeer sends \
 them a question or a task and returns their answer; use it to split work (research / implement / review) \
 instead of doing everything in one context.

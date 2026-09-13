@@ -65,6 +65,8 @@ from daedalus.tools import discover_tools
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_OUTAGE_KINDS = frozenset({"llm_provider_error", "llm_timeout", "llm_stream_idle", "llm_rate_limit"})
+"""Terminal error kinds that mean the endpoint, not the request, failed: the run is driven again once the wait is over."""
 RECOVERY_REASONS = frozenset({"transient_llm_error_retry", "model_fallback_triggered", "soft_stop_notified", "llm_context_window_exceeded", "context_window_recovered", "reasoning_length_cut_retry", "continue_prompt_injected", "max_output_token_recovery"})
 """The state changes worth a log line: each is a round the run had to recover from, and the log is where the reason survives."""
 BRIEF_MAX_CHARS = 12_000
@@ -113,6 +115,10 @@ class SessionState:
     """The kind of the error that ended the current run, from the core's ERROR event (``llm_context_window_exceeded`` …)."""
     overflow_streak: int = 0
     """Consecutive runs that overflowed the context window; recovery stops after a few so a hopeless history cannot loop."""
+    outage_streak: int = 0
+    """Consecutive runs the model provider failed; each one waits longer before the work is driven again."""
+    outage_task: asyncio.Task[None] | None = None
+    """The wait before the next attempt after a provider failure, so a session sleeps at most once."""
     run_active_since: float = 0.0
     """Monotonic time the current run (re)started driving the model: the time cap counts from here, not from
     the run's creation, so an hour waiting on the operator's answer is not an hour of run time."""
@@ -224,7 +230,7 @@ class SessionManager:
     async def close(self) -> None:
         """Shut down keeping every active run resumable (snapshots stay in place)."""
         self.shutting_down = True
-        tasks = [s.task for s in self._states.values() if s.task and not s.task.done()]
+        tasks = [t for s in self._states.values() for t in (s.task, s.outage_task) if t and not t.done()]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -1421,8 +1427,49 @@ class SessionManager:
                 await self._drain_leftover_follow_ups(state)
             if status == "completed":
                 state.overflow_streak = 0
+                state.outage_streak = 0
             elif status == "failed" and state.last_error_kind == "llm_context_window_exceeded" and not state.running:
                 await self._recover_from_overflow(state)
+            elif status == "failed" and state.last_error_kind in PROVIDER_OUTAGE_KINDS and not state.running:
+                self._schedule_outage_recovery(state)
+
+    OUTAGE_NOTE = (
+        "[The previous turn stopped because the model provider was unreachable for a while. "
+        "Nothing was lost; continue the work from where it stopped.]"
+    )
+
+    def _schedule_outage_recovery(self, state: SessionState) -> None:
+        """A run the provider dropped is not the end of the task either: wait, then drive the turn again.
+
+        The core already retried in place and wound the run down; that covers a blip of seconds. An outage
+        of minutes ends in a failed run, and a failed run used to stay failed until the operator wrote
+        something — the turn had to be resumed by hand. The wait grows with every consecutive failure and
+        the attempts are bounded, so a provider that is down for the day does not keep a session busy.
+        """
+        if self.shutting_down:
+            return
+        ops = self.config.ops
+        if state.outage_streak >= ops.provider_retry_max_attempts:
+            logger.warning("session %s: the provider failed %d runs in a row; not retrying", state.session.id, state.outage_streak)
+            return
+        state.outage_streak += 1
+        delay = min(ops.provider_retry_base_seconds * 2 ** (state.outage_streak - 1), ops.provider_retry_max_seconds)
+        logger.warning("session %s: provider failure %d; driving the turn again in %.0f s", state.session.id, state.outage_streak, delay)
+        if state.outage_task is not None and not state.outage_task.done():
+            state.outage_task.cancel()
+        state.outage_task = asyncio.create_task(self._recover_from_outage(state, state.run_id, delay), name=f"outage:{state.session.id}")
+        state.outage_task.add_done_callback(_log_task_failure)
+
+    async def _recover_from_outage(self, state: SessionState, failed_run_id: str | None, delay: float) -> None:
+        await asyncio.sleep(delay)
+        if self.shutting_down or self._states.get(state.session.id) is not state:
+            return
+        if state.running or state.pending is not None or state.run_id != failed_run_id:
+            return  # something else moved the session on meanwhile (an operator message, a scheduled turn)
+        try:
+            await self.submit(state.session.id, self.OUTAGE_NOTE, as_answer=False, origin="core")
+        except RuntimeError as exc:
+            logger.warning("session %s: outage recovery did not start: %s", state.session.id, exc)
 
     OVERFLOW_NOTE = (
         "[The previous turn stopped because the conversation no longer fitted the model's context window. "

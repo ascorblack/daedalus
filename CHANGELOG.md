@@ -2,6 +2,19 @@
 
 Notable changes, newest first. The repository's `main` is the released version.
 
+## 2026-09-13
+
+- **Every agent has its own board.** `BoardList`, `BoardGet` and `BoardUpdate` see the tasks created by the
+  session and its subagents, plus the tasks the operator posted to nobody in particular; another agent's tasks
+  are not on it, so a loop agent reading "the board" reads its own plan and cannot pick up a colleague's bug
+  fix. The work-in-progress limit counts what one agent holds, not the whole installation. The operator's board
+  in the Mini App still shows everything, says whose board each task is on, and a new task can be addressed to
+  one agent (`session_id` on `POST /api/board`) or left for whoever takes it.
+- **A provider outage no longer ends the task.** The core retries a failed stream in place for seconds; when
+  the provider stays unreachable the run failed and stayed failed until the operator wrote something. The host
+  now drives the turn again after a wait that doubles per consecutive failure (`ops.provider_retry_*`, 30 s to
+  10 min, six attempts), unless the session moved on meanwhile.
+
 ## 2026-09-11
 
 - **The app is an application.** Every screen is an address under `/app` (`/app/agents/<id>` is a session,

@@ -509,7 +509,7 @@ class WebhookConfig(BaseModel):
 
 class BoardConfig(BaseModel):
     wip_limit: int = Field(default=3, ge=1)
-    """How many tasks may be 'doing' at once, across every session."""
+    """How many tasks one agent (a session with its subagents) may hold in 'doing' at once."""
     stale_hours: int = Field(default=6, ge=1)
     """A 'doing' task whose session has been quiet this long is handed back to 'todo'."""
 
@@ -559,6 +559,11 @@ class OpsConfig(BaseModel):
     learning_digest_days: int = Field(default=7, ge=1)
     learning_repeat_threshold: int = Field(default=3, ge=2)
     """A failure or an ask seen this many times in a digest window becomes an improvement candidate."""
+    provider_retry_max_attempts: int = Field(default=6, ge=0)
+    """Runs driven again after the model provider failed one, in a row; 0 leaves a failed run failed."""
+    provider_retry_base_seconds: float = Field(default=30.0, ge=1)
+    """The wait before the first of those attempts; it doubles each time up to ``provider_retry_max_seconds``."""
+    provider_retry_max_seconds: float = Field(default=600.0, ge=1)
 
 
 class HeartbeatConfig(BaseModel):
