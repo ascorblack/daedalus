@@ -46,6 +46,14 @@ BRIEF = (
     "subagents of your own, and end with a final reply that contains everything the leader needs."
 )
 
+IDLE_BRIEF = (
+    "You are a subagent of session {leader}: a standing helper. You were started without a task and wait "
+    "for the leader's messages; each one arrives via SubAgentSend and is a job to do. Work in the shared "
+    "workspace (the leader reads the files you leave there), do not ask the operator questions, do not "
+    "start subagents of your own, and end every run with a final reply that contains everything the "
+    "leader needs — it is delivered to the leader verbatim."
+)
+
 FOLLOW_UP_HEADER = "[message from your leader session {leader} via SubAgentSend — act on it; your final reply is delivered to the leader verbatim]\n\n"
 
 
@@ -100,7 +108,7 @@ class Subagents:
         self,
         *,
         leader_id: str,
-        task: str,
+        task: str | None = None,
         model: str | None = None,
         name: str | None = None,
         wait: bool = False,
@@ -115,9 +123,10 @@ class Subagents:
         leader = await manager.get_state(leader_id)
         if leader is None:
             raise ValueError("unknown leader session")
-        task = task.strip()
-        if not task:
-            raise ValueError("the task is empty")
+        task = (task or "").strip()
+        idle = not task
+        if idle and not (name or "").strip():
+            raise ValueError("a subagent started without a task needs a name, so you can address it with SubAgentSend")
         persona_text = ""
         if persona:
             persona_text = self.persona(persona)
@@ -134,7 +143,7 @@ class Subagents:
             model = model.strip()
             if model not in models:
                 raise ValueError(f"unknown model {model!r}; choose one of: {', '.join(models)}")
-        label = (name or task.splitlines()[0])[:48].strip()
+        label = (name or task.splitlines()[0])[:48].strip()  # type: ignore[union-attr]
         taken = {c["name"] for c in await self.children(leader_id)}
         if label in taken:
             # A name is how the leader addresses the subagent later; two of one name would be ambiguous.
@@ -146,11 +155,11 @@ class Subagents:
             "subagent_of": leader_id,
             "subagent_name": label,
             "subagent_depth": depth,
-            "subagent_keep": bool(keep),
+            "subagent_keep": bool(keep) or idle,
             "subagent_expects": (expects or "").strip(),
             "subagent_deliverable": (deliverable or "").strip(),
             "workspace": str(leader.workspace),
-            "brief": BRIEF.format(leader=leader_id),
+            "brief": (IDLE_BRIEF if idle else BRIEF).format(leader=leader_id) + (f"\n\n[persona: {persona}]\n{persona_text}" if idle and persona_text else ""),
             "unattended": True,
         }
         for key in ("mode", "mcp"):
@@ -171,9 +180,22 @@ class Subagents:
                     thinking_enabled=overrides.get("thinking_enabled"),
                     reasoning_effort=overrides.get("reasoning_effort"),
                 )
+        opening = (f"[persona: {persona}]\n{persona_text}\n\n" if persona_text else "")
+        if idle:
+            # No run at all: the session stands by with its brief until the leader sends it work.
+            on = model or "the leader's model"
+            return {
+                "session_id": cid,
+                "run_id": None,
+                "name": label,
+                "model": model or "(leader's model)",
+                "answer": None,
+                "kept": True,
+                "idle": True,
+                "note": f"subagent {label!r} is up and idle on {on} (session {cid}); give it work with SubAgentSend({label!r}, …)",
+            }
         if wait:
             self._waited.add(cid)
-        opening = (f"[persona: {persona}]\n{persona_text}\n\n" if persona_text else "")
         run_id = await manager.submit(cid, TASK_HEADER.format(leader=leader_id) + opening + task + contract_text(expects, deliverable), as_answer=False, origin=f"subagent-task:{leader_id}")
         result: dict[str, Any] = {"session_id": cid, "run_id": run_id, "name": label, "model": model or "(leader's model)", "answer": None, "kept": bool(keep)}
         if not wait:

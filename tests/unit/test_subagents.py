@@ -91,7 +91,7 @@ async def test_subagent_model_choice_depth_and_limits(app: Any) -> None:
     assert child is not None
     with pytest.raises(ValueError, match="too deep"):
         await subs.spawn(leader_id=child.session.id, task="deeper")
-    with pytest.raises(ValueError, match="empty"):
+    with pytest.raises(ValueError, match="needs a name"):
         await subs.spawn(leader_id=leader.session.id, task="   ")
 
 
@@ -113,6 +113,30 @@ async def test_subagent_is_removed_after_reporting_unless_kept(app: Any) -> None
     assert (leader.workspace / "shared.txt").read_text() == "keep me"
     reports = [t for _, t, o in submitted if o.startswith("subagent:")]
     assert any("has been removed" in t for t in reports) and any("SubAgentSend('helper'" in t for t in reports)
+
+
+async def test_subagent_without_a_task_stands_by_until_it_is_sent_work(app: Any) -> None:
+    manager: SessionManager = app.manager
+    subs = Subagents(app)
+    leader = await manager.create_session("lead")
+    submitted = _capture(manager)
+    with pytest.raises(ValueError, match="needs a name"):
+        await subs.spawn(leader_id=leader.session.id, task="  ")
+    result = await subs.spawn(leader_id=leader.session.id, name="analyst")
+    assert result["idle"] is True and result["run_id"] is None and result["kept"] is True
+    assert not submitted  # nothing was run: an idle subagent costs nothing until it is used
+    child = await manager.get_state(result["session_id"])
+    assert child is not None and child.workspace == leader.workspace
+    assert child.metadata["subagent_keep"] is True and "wait for the leader's messages" in child.metadata["brief"]
+    assert [c["name"] for c in await subs.children(leader.session.id)] == ["analyst"]
+    # It takes its first job through SubAgentSend, like any kept subagent.
+    sent = await subs.send(leader_id=leader.session.id, name="analyst", text="read the log")
+    assert sent["delivered"] == "run" and submitted[-1][0] == result["session_id"] and "read the log" in submitted[-1][1]
+    # Reporting does not remove it.
+    await manager.sessions.append_transcript(result["session_id"], [Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="the log is empty")])])
+    await subs.on_run_finished(result["session_id"], "run-x", "completed")
+    assert submitted[-1][2] == "subagent:analyst" and "the log is empty" in submitted[-1][1]
+    assert await manager.get_state(result["session_id"]) is not None
 
 
 async def test_subagent_send_steers_a_running_one_and_restarts_a_kept_one(app: Any) -> None:
