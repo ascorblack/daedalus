@@ -1505,19 +1505,19 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
       )}
       {turn.user && (
         <div className="msg-wrap">
-          {turn.user.seq && onTurnAction && !live && (
-            <div className="turn-actions">
-              <OverflowMenu
-                small
-                label="This turn"
-                items={[
-                  { label: "Fork a session from here", icon: "split", onSelect: () => onTurnAction("fork", turn.user!.seq!) },
-                  { label: "Revert to here…", icon: "back", danger: true, onSelect: () => onTurnAction("revert", turn.user!.seq!) },
-                ]}
-              />
-            </div>
-          )}
           <Md className="msg user" text={turn.user.text} />
+          {/* Under the message, not beside it: a row beside the bubble is off-screen on a phone. */}
+          <MessageActions
+            text={turn.user.text}
+            actions={
+              turn.user.seq && onTurnAction && !live
+                ? [
+                    { icon: "split", label: "Fork a session from here", onSelect: () => onTurnAction("fork", turn.user!.seq!) },
+                    { icon: "back", label: "Revert to here…", danger: true, onSelect: () => onTurnAction("revert", turn.user!.seq!) },
+                  ]
+                : []
+            }
+          />
         </div>
       )}
       {hasWork && (
@@ -1539,10 +1539,34 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
         </div>
       )}
       {turn.answer && <Md className={`answer ${live ? "streaming" : ""}`} text={turn.answer} />}
+      {turn.answer && !live && <MessageActions text={turn.answer} />}
       <SentFiles items={turn.activity} />
     </div>
   );
 });
+
+type MessageAction = { icon: IconName; label: string; danger?: boolean; onSelect: () => void };
+
+/** The row of small buttons under a message: copy it, and whatever else the turn allows. */
+function MessageActions({ text, actions = [] }: { text: string; actions?: MessageAction[] }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    setCopied(await copyText(text));
+    window.setTimeout(() => setCopied(false), 1600);
+  };
+  return (
+    <div className="msg-actions">
+      <button className="iconbtn small" onClick={copy} aria-label={copied ? "Copied" : "Copy"} title={copied ? "Copied" : "Copy"}>
+        <Icon name={copied ? "check" : "copy"} size={15} />
+      </button>
+      {actions.map((a) => (
+        <button key={a.label} className={`iconbtn small ${a.danger ? "danger" : ""}`} onClick={a.onSelect} aria-label={a.label} title={a.label}>
+          <Icon name={a.icon} size={15} />
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function SummaryBlock({ message }: { message: MessageView }) {
   const [open, setOpen] = useState(false);
