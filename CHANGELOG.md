@@ -4,6 +4,15 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-15
 
+- **A desktop launcher.** `desktop/` builds one small binary per platform that turns a folder into a
+  running Daedalus with Docker as the only thing installed on the host. It clones the bot and the
+  core with git in a container, asks for a provider key, the optional Telegram values and a daily cap
+  on a local page, writes the same `.env` and `daedalus-secrets/keyproxy.env` a server install uses,
+  and runs `deploy/compose.yaml` unchanged over that folder. A generated override points the two
+  services at the images published to GHCR and makes the Telegram containers optional, so a first
+  start pulls instead of building and falls back to a local build when the platform has no image.
+  `start`, `stop`, `status`, `logs`, `update`, `setup`, `open` and `uninstall` are also buttons on
+  the launcher's page; closing the launcher leaves the stack running.
 - **Telegram works without a group.** `telegram.mode` chooses where sessions live: `private` — every
   session in the operator's private chat, which is a window onto one of them at a time — or `topics`,
   today's forum with one topic per session. An installation that never bound a group is private, and

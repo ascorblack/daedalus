@@ -190,6 +190,14 @@ Then clone, configure, start the stack, verify it as the page says, and give me 
 and the two-line summary section 8 asks for. Never paste keys or tokens back into this chat.
 ```
 
+### Desktop app
+
+On a machine of your own there is a launcher that does all of the above for you: one binary that
+clones both repositories, asks for the keys on a page in your browser, and runs this same compose
+file, with Docker as the only thing you install. Download it from the
+[releases](https://github.com/ascorblack/daedalus/releases) (the `desktop-v*` tags) and read
+[desktop/README.md](desktop/README.md) for the folder it makes and the disk the images take.
+
 ### Models and keys
 
 Providers are OpenAI-compatible endpoints (DeepSeek, OpenRouter, a self-hosted vLLM, anything else) with their own base URL, key and timeout; **presets** on top of them name a model with its thinking mode, effort, image support, context window and output cap. One preset is the default, others are fallbacks, any session can switch. Speech-to-text and the vision model pick a provider the same way.
@@ -248,6 +256,7 @@ miniapp/        Vite + React app (Telegram Mini App and browser); src/router.ts,
 skills/         SKILL.md skills the agent can load
 personas/       the persona the prompt is built from
 deploy/         Dockerfile, compose, key proxy, SearXNG settings, env examples
+desktop/        the launcher: one binary that runs the stack on a personal machine
 tests/          unit and integration tests; tests/browser drives the built app with a real mouse
 docs/           design and decisions (2026-09-06, historical), screenshots, diagrams
 ```
