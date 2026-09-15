@@ -156,6 +156,9 @@ CURRENT_SESSION_KEY = "telegram.current_session"
 """Which session the private chat is a window onto; in kv, so a restart resumes the same one."""
 SESSION_HEADER = "▸"
 """Marks the line that names a session speaking in the private chat out of its turn."""
+SESSION_LIST_LIMIT = 30
+"""How many sessions /sessions prints — and therefore the largest number /use may be given:
+a number the operator was never shown resolves to a session they did not mean."""
 TOPIC_RENAME_DEBOUNCE_SECONDS = 2.0
 TOPIC_RENAME_MAX_WAIT_SECONDS = 60.0
 STALE_NOTICE_DELAY_SECONDS = 3.0
@@ -459,14 +462,18 @@ class TelegramFront:
         await self.set_current_session(state.session.id)
         return state
 
-    def _general_outbox(self) -> TelegramOutbox | None:
-        """The operator channel: the General topic of the bound forum, or the private chat."""
+    def _general_outbox(self, *, header: Callable[[], str] | None = None) -> TelegramOutbox | None:
+        """The operator channel: the General topic of the bound forum, or the private chat.
+
+        ``header`` names the session speaking, for the sessions that share this one channel
+        because they have no topic of their own.
+        """
         if self.private_mode():
-            return TelegramOutbox(self.bot, self.settings.owner_user_id, None) if self.settings.owner_user_id else None
+            return TelegramOutbox(self.bot, self.settings.owner_user_id, None, header=header) if self.settings.owner_user_id else None
         chat_id = self.config.telegram.forum_chat_id or self.settings.owner_user_id
         if not chat_id:
             return None
-        return TelegramOutbox(self.bot, chat_id, self.config.telegram.general_topic_id or None)
+        return TelegramOutbox(self.bot, chat_id, self.config.telegram.general_topic_id or None, header=header)
 
     async def notify(self, text: str, *, markdown: bool = True) -> None:
         """Post to the operator channel (General topic or the private chat)."""
@@ -516,9 +523,18 @@ class TelegramFront:
         if self.private_mode():
             return await self._private_outbox(session_id)
         binding = await self.binding_for_session(session_id)
-        if binding is None:
-            return self._general_outbox()
-        return TelegramOutbox(self.bot, binding.chat_id, binding.thread_id)
+        if binding is not None:
+            return TelegramOutbox(self.bot, binding.chat_id, binding.thread_id)
+        state = await self.manager.get_state(session_id)
+        title = state.session.title if state is not None else session_id
+        try:
+            binding = await self.ensure_topic(session_id, title)
+        except (TelegramBusy, TelegramRefused) as exc:
+            # A session that outlived private mode, or one Telegram would not open a topic for yet.
+            logger.warning("session %s has no topic: %s", session_id, exc)
+        if binding is not None:
+            return TelegramOutbox(self.bot, binding.chat_id, binding.thread_id)
+        return self._general_outbox(header=lambda: f"{SESSION_HEADER} {title}")
 
     async def _private_outbox(self, session_id: str) -> TelegramOutbox | None:
         """The private chat, naming the session whenever it is not the one the operator is writing to."""
@@ -534,6 +550,63 @@ class TelegramFront:
 
         return TelegramOutbox(self.bot, self.settings.owner_user_id, None, header=header)
 
+    async def ensure_topic(self, session_id: str, title: str, *, chat_id: int | None = None) -> TopicBinding | None:
+        """The session's own topic in the bound forum, opened now if it has none.
+
+        Returns None when there is no forum to open one in. Raises :class:`TelegramBusy` when
+        Telegram asks for a pause, so the caller can leave the session without a topic for now
+        rather than lose it: the session exists either way, and gets its topic when it next speaks.
+        """
+        binding = await self.binding_for_session(session_id)
+        if binding is not None:
+            return binding
+        forum = chat_id or self.config.telegram.forum_chat_id
+        if not forum:
+            return None
+        try:
+            topic = await tg_call(self.bot.create_forum_topic, forum, title[:128], attempts=2, flood_chat=forum)
+        except TelegramRetryAfter as exc:
+            raise TelegramBusy(int(exc.retry_after), session_id) from exc
+        except TelegramAPIError as exc:
+            raise TelegramRefused(str(exc), session_id) from exc
+        return await self.bind_topic(forum, topic.message_thread_id, session_id, title)
+
+    async def adopt_sessions_into_topics(self) -> int:
+        """Give every session without a binding a topic of its own; returns how many were opened.
+
+        Sessions born in the private chat carry no topic. After a switch to topics they would
+        speak in General with nothing naming them, which is the confusion topics exist to end.
+        Telegram rate-limits topic creation, so a pause stops the sweep instead of failing it —
+        whatever is left over is opened by :meth:`outbox_for_session` on the session's next output.
+        """
+        opened = 0
+        for session in await self.manager.list_sessions():
+            if await self.binding_for_session(session["id"]) is not None:
+                continue
+            try:
+                if await self.ensure_topic(session["id"], session["title"]) is not None:
+                    opened += 1
+            except TelegramBusy as exc:
+                logger.warning("topic sweep stopped after %s: %s", opened, exc)
+                break
+            except TelegramRefused as exc:
+                logger.warning("no topic for session %s: %s", session["id"], exc)
+        return opened
+
+    async def forget_session(self, session_id: str) -> None:
+        """Drop what the chat holds for a session that is about to be deleted.
+
+        Called before the deletion, while the binding row is still there: afterwards there is
+        nothing left to say which topic was the session's.
+        """
+        binding = await self.binding_for_session(session_id)
+        if binding is not None and binding.thread_id:
+            try:
+                await self.bot.delete_forum_topic(binding.chat_id, binding.thread_id)
+            except TelegramAPIError as exc:
+                logger.warning("could not delete the topic of session %s: %s", session_id, exc)
+        await self._release_current(session_id)
+
     async def create_session_topic(
         self, title: str, *, metadata: dict[str, Any] | None = None, chat_id: int | None = None, topic: bool = True
     ) -> tuple[SessionState, TopicBinding]:
@@ -546,27 +619,19 @@ class TelegramFront:
         if self.private_mode():
             return state, TopicBinding(self.settings.owner_user_id, 0, state.session.id, title)
         forum = (chat_id or self.config.telegram.forum_chat_id) if topic else 0
-        if forum:
-            try:
-                topic = await tg_call(self.bot.create_forum_topic, forum, title[:128], attempts=2, flood_chat=forum)
-            except TelegramRetryAfter as exc:
-                # The session exists without a topic; it is reachable from the Mini App and gets a topic later.
-                raise TelegramBusy(int(exc.retry_after), state.session.id) from exc
-            except TelegramAPIError as exc:
-                raise TelegramRefused(str(exc), state.session.id) from exc
-            binding = await self.bind_topic(forum, topic.message_thread_id, state.session.id, title)
-            try:
-                await tg_call(
-                    self.bot.send_message,
-                    forum,
-                    f"Session {state.session.id} — {title}\nworkspace: {state.workspace}",
-                    message_thread_id=topic.message_thread_id,
-                    flood_chat=forum,
-                )
-            except Exception:  # noqa: BLE001 — the banner is cosmetic
-                logger.warning("could not post the session banner", exc_info=True)
-        else:
-            binding = await self.bind_topic(self.settings.owner_user_id, 0, state.session.id, title)
+        binding = await self.ensure_topic(state.session.id, title, chat_id=forum) if forum else None
+        if binding is None:
+            return state, await self.bind_topic(self.settings.owner_user_id, 0, state.session.id, title)
+        try:
+            await tg_call(
+                self.bot.send_message,
+                forum,
+                f"Session {state.session.id} — {title}\nworkspace: {state.workspace}",
+                message_thread_id=binding.thread_id,
+                flood_chat=forum,
+            )
+        except Exception:  # noqa: BLE001 — the banner is cosmetic
+            logger.warning("could not post the session banner", exc_info=True)
         return state, binding
 
     async def _session_for_message(self, message: Message) -> SessionState | None:
@@ -650,9 +715,11 @@ class TelegramFront:
         self.config.telegram.general_topic_id = 0
         self.config.telegram.mode = "topics"
         await self.save_config(self.config)
+        opened = await self.adopt_sessions_into_topics()
         await message.answer(
             "Bound. Create sessions with /new <title>; each topic is a session. "
-            "Mini App → Settings → Chat puts them back in the private chat if you prefer it."
+            + (f"The {opened} session(s) that were already open have topics of their own now. " if opened else "")
+            + "Mini App → Settings → Chat puts them back in the private chat if you prefer it."
         )
 
     async def cmd_new(self, message: Message, command: CommandObject) -> None:
@@ -687,7 +754,7 @@ class TelegramFront:
         if not arg:
             await message.answer("usage: /use <number from /sessions | title | session id>")
             return
-        sessions = await self.manager.list_sessions(limit=50)
+        sessions = await self.manager.list_sessions(limit=SESSION_LIST_LIMIT)
         chosen: dict[str, Any] | None = None
         if arg.isdigit() and 1 <= int(arg) <= len(sessions):
             chosen = sessions[int(arg) - 1]
@@ -1088,7 +1155,7 @@ class TelegramFront:
     async def cmd_sessions(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
-        sessions = await self.manager.list_sessions(limit=30)
+        sessions = await self.manager.list_sessions(limit=SESSION_LIST_LIMIT)
         private = self.private_mode()
         if not sessions:
             await message.answer("No sessions yet." + (" /new <title> starts one." if private else ""))
@@ -1661,12 +1728,11 @@ class TelegramFront:
         answer = state["answers"][index]
         if choice == "custom":
             await query.answer()
-            if query.message is not None:
-                prompt_id = await self.send_force_reply(
-                    query.message.chat.id,
-                    query.message.message_thread_id if query.message.is_topic_message else None,
-                    "Type your answer:",
-                )
+            outbox = await self.outbox_for_session(session_id)
+            if outbox is not None:
+                # Through the outbox, so the prompt carries the asking session's name wherever the
+                # question card did — a bare "Type your answer:" in a shared chat says nothing.
+                prompt_id = await self.send_force_reply(outbox.chat_id, outbox.thread_id, outbox.attributed("Type your answer:"))
                 # What the operator replies to says whose question it answers, so a chat holding
                 # several sessions still routes the answer to the session that asked.
                 self._force_reply_targets[prompt_id] = session_id
@@ -1753,7 +1819,11 @@ class TelegramFront:
         self._question_state.pop(session_id, None)
 
     async def _force_reply_session(self, message: Message) -> SessionState | None:
-        """The session whose "type your answer" prompt this message replies to, if any."""
+        """The session whose "type your answer" prompt this message replies to, if any.
+
+        The target is popped: the prompt answers one question. A second reply to the same prompt
+        is an ordinary message to the current session, which is what a second thought usually is.
+        """
         reply = message.reply_to_message
         session_id = self._force_reply_targets.pop(reply.message_id, None) if reply is not None else None
         return await self.manager.get_state(session_id) if session_id else None

@@ -6,10 +6,13 @@ import asyncio
 import time
 from typing import Any
 
+import pytest
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import CommandObject
+from aiogram.methods import CreateForumTopic
 from aiogram.types import CallbackQuery, Message
 
-from daedalus.transport.telegram.front import TelegramFront
+from daedalus.transport.telegram.front import SESSION_HEADER, TelegramFront
 from tests.unit.test_front import OWNER, RecordingBot, _message, front  # noqa: F401 — the fixture is reused here
 
 
@@ -155,7 +158,7 @@ async def test_a_typed_answer_reaches_the_session_that_asked(front: TelegramFron
     buttons = [b for row in sent["reply_markup"].inline_keyboard for b in row]
     await front.on_callback(_callback(buttons[-1].callback_data or "", sent))
     prompt = front.bot.sent[-1]  # type: ignore[attr-defined]
-    assert prompt["text"] == "Type your answer:"
+    assert prompt["text"] == "▸ background\n\nType your answer:"  # the prompt says whose question it is, like the card above it
 
     await front.on_message(_reply_to("the release one", prompt["id"], prompt["text"]))
     await asyncio.sleep(0.05)
@@ -188,3 +191,62 @@ async def test_closing_the_current_session_frees_the_chat(front: TelegramFront) 
     await front.on_message(_message("hello again"))
     await asyncio.sleep(0.05)
     assert front.submitted[-1][0] != chosen  # type: ignore[attr-defined] — a fresh session takes the chat
+
+
+async def test_binding_a_group_gives_the_sessions_already_open_a_topic_each(front: TelegramFront) -> None:
+    """A session born in the private chat keeps its name after the switch instead of joining a crowd in General."""
+    replies: list[str] = []
+    await front.cmd_new(_said(_message("/new alpha"), replies), _command("new", "alpha"))
+    await front.cmd_new(_said(_message("/new beta"), replies), _command("new", "beta"))
+    assert front.bot.topics == []  # type: ignore[attr-defined] — private mode opens none
+
+    await front.cmd_bind(_said(_message("/bind", chat_type="supergroup", chat_id=-100), replies))
+    assert front.private_mode() is False
+    assert sorted(front.bot.topics) == ["alpha", "beta"]  # type: ignore[attr-defined]
+    for session in await front.manager.list_sessions():
+        outbox = await front.outbox_for_session(session["id"])
+        assert outbox is not None and outbox.chat_id == -100 and outbox.thread_id
+        assert outbox.header is None  # in its own topic a session needs no name
+
+
+async def test_a_session_telegram_will_not_open_a_topic_for_is_named_in_general(front: TelegramFront, monkeypatch: pytest.MonkeyPatch) -> None:
+    replies: list[str] = []
+    await front.cmd_new(_said(_message("/new orphan"), replies), _command("new", "orphan"))
+    orphan = await front.current_session_id()
+    front.config.telegram.forum_chat_id = -100
+    front.config.telegram.mode = "topics"
+
+    async def busy(chat_id: int, name: str) -> None:
+        raise TelegramRetryAfter(CreateForumTopic(chat_id=chat_id, name=name), "Too Many Requests", 0)
+
+    monkeypatch.setattr(front.bot, "create_forum_topic", busy)
+    outbox = await front.outbox_for_session(orphan)
+    assert outbox is not None and outbox.chat_id == -100 and outbox.thread_id is None
+    await outbox.send_text("the answer", markdown=False)
+    assert front.bot.sent[-1]["text"] == f"{SESSION_HEADER} orphan\n\nthe answer"  # type: ignore[attr-defined]
+
+    monkeypatch.undo()  # the pause passes; the next output opens the topic after all
+    outbox = await front.outbox_for_session(orphan)
+    assert outbox is not None and outbox.thread_id == 10 and outbox.header is None
+    assert (await front.binding_for_session(orphan)) is not None
+
+
+async def test_use_refuses_a_number_sessions_never_printed(front: TelegramFront) -> None:
+    replies: list[str] = []
+    await front.cmd_new(_said(_message("/new alpha"), replies), _command("new", "alpha"))
+    await front.cmd_use(_said(_message("/use 42"), replies), _command("use", "42"))
+    assert "No session matches" in replies[-1]
+    assert await front.current_session_id() == (await front.manager.list_sessions())[0]["id"]
+
+
+async def test_deleting_the_current_session_frees_the_private_chat(front: TelegramFront) -> None:
+    """What /delete and the close button do, the API's delete does too: the chat stops pointing at a corpse."""
+    replies: list[str] = []
+    await front.cmd_new(_said(_message("/new doomed"), replies), _command("new", "doomed"))
+    doomed = await front.current_session_id()
+    await front.forget_session(doomed)
+    assert await front.manager.delete_session(doomed) is True
+    assert await front.current_session_id() == ""
+    await front.on_message(_message("hello again"))
+    await asyncio.sleep(0.05)
+    assert front.submitted[-1][0] != doomed  # type: ignore[attr-defined]
