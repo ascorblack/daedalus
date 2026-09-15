@@ -201,9 +201,12 @@ class TelegramOutbox(Outbox):
         self.header = header
 
     def attributed(self, text: str) -> str:
-        """``text`` with the session's name above it, for plain and Markdown messages."""
+        """``text`` with the session's name above it, for plain and Markdown messages.
+
+        The blank line is what keeps Markdown from folding the name into the first paragraph.
+        """
         head = self.header() if self.header is not None else ""
-        return f"{head}\n{text}" if head else text
+        return f"{head}\n\n{text}" if head else text
 
     def attributed_html(self, text: str) -> str:
         """The same line for rich HTML, where the title has to be escaped."""
@@ -649,7 +652,7 @@ class TelegramFront:
         await self.save_config(self.config)
         await message.answer(
             "Bound. Create sessions with /new <title>; each topic is a session. "
-            "The private chat goes back to being one window in Mini App → Settings → Chat."
+            "Mini App → Settings → Chat puts them back in the private chat if you prefer it."
         )
 
     async def cmd_new(self, message: Message, command: CommandObject) -> None:
@@ -1038,6 +1041,8 @@ class TelegramFront:
         binding = await self.binding_for_session(session_id)
         if binding is None:
             removed = await self.manager.delete_session(session_id)
+            if removed:
+                await self._release_current(session_id)
             await message.answer("deleted" if removed else "no such session")
             return
         await self._ask_close(binding.session_id, binding.title, message.chat.id, message.message_thread_id if message.is_topic_message else None)
@@ -1207,7 +1212,9 @@ class TelegramFront:
         )
         text = f"today: {row['c'] or 0} calls · in {row['i'] or 0:,} · out {row['o'] or 0:,} · cached {row['ch'] or 0:,}"
         text += _cost_words(row["usd"], int(row["unmetered"] or 0))
-        state = await self._session_for_message(message) if not self._is_general(message) else None
+        # In the private chat there is no General to stand apart from: the spend of the session
+        # the chat is on is as much "here" as a topic's own is.
+        state = await self._session_for_message(message) if (self.private_mode() or not self._is_general(message)) else None
         if state is not None:
             srow = await self.manager.db.fetchone(
                 "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cost_usd) usd, sum(cost_usd IS NULL) unmetered"
