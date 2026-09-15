@@ -1,9 +1,10 @@
 """Pairing links: the way into the app on an installation that has no Telegram to vouch for a browser.
 
-The server mints one code at every start and writes the link it belongs to next to the database
-(``<state_dir>/pairing-url``, readable by the operator only) and into the log. Opening that link once
-turns the browser into a signed-in one; from there the operator adds a passkey and never needs the
-link again.
+The server mints one code at a start that finds no other way in (no bot, no passkey) and writes the
+link it belongs to next to the database (``<state_dir>/pairing-url``, readable by the operator only);
+the log names the file, never the link. Opening that link once turns the browser into a signed-in one;
+from there the operator adds a passkey and never needs the link again. ``daedalus auth pair`` makes
+another at any time.
 
 A code is stored as its SHA-256 only: whoever reads the database reads no usable link. It lives for
 half an hour, is spent the first time it is opened, and spending one revokes every other code that is
@@ -44,8 +45,11 @@ async def mint(db: Database, *, note: str = "", ttl_minutes: int = TTL_MINUTES) 
     return code
 
 
-async def redeem(db: Database, code: str) -> bool:
-    """Spend a code: true once, for one that exists and has not expired, and never again."""
+async def redeem(db: Database, code: str, *, state_dir: Path | None = None) -> bool:
+    """Spend a code: true once, for one that exists and has not expired, and never again.
+
+    The link file goes with it: what it held is no longer a way in, and a launcher that opens the
+    file's link on every start must not send the operator to a spent one."""
     row = await db.fetchone("SELECT id, expires_at, used_at FROM pairing_codes WHERE code_hash = ?", (_digest(code or ""),))
     if row is None or row["used_at"] is not None:
         return False
@@ -54,6 +58,8 @@ async def redeem(db: Database, code: str) -> bool:
         return False
     await db.execute("UPDATE pairing_codes SET used_at = ? WHERE id = ?", (now.isoformat(), row["id"]))
     await db.execute("DELETE FROM pairing_codes WHERE used_at IS NULL")
+    if state_dir is not None:
+        (state_dir / URL_FILE).unlink(missing_ok=True)
     return True
 
 

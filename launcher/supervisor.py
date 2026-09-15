@@ -265,6 +265,7 @@ class Supervisor:
         self.lock = asyncio.Lock()
         self.last_result = "startup"
         self.health_task: asyncio.Task[None] | None = None
+        self.rebuild_task: asyncio.Task[None] | None = None
         self.queued_rebuild: str | None = None
         """The reason of a rebuild asked for while another was running: it runs right after, so a pull
         request merged during a rebuild is not left undeployed until someone asks again."""
@@ -343,23 +344,33 @@ class Supervisor:
         slot — a second request during the same wait replaces the reason, the outcome is the same
         origin/main either way) and starts as soon as the lock is free.
         """
-        if self.lock.locked():
+        if self.lock.locked() or (self.rebuild_task is not None and not self.rebuild_task.done()):
             self.queued_rebuild = reason
             return "a rebuild or rollback is in progress; this one is queued and starts right after it"
-        asyncio.create_task(self._rebuild(reason))
+        self.rebuild_task = asyncio.create_task(self._rebuild(reason))
         return "rebuild started: the bot stops, main is pulled and preflighted, then it restarts (rolled back on failure)"
 
     def _run_queued_rebuild(self) -> None:
         if self.queued_rebuild is None:
             return
         reason, self.queued_rebuild = self.queued_rebuild, None
+        try:
+            self.rebuild_task = asyncio.create_task(self._rebuild(reason))
+        except RuntimeError:
+            log(f"queued rebuild dropped, the loop is closing: {reason}")
+            return
         log(f"queued rebuild starts: {reason}")
-        asyncio.create_task(self._rebuild(reason))
 
     async def _rebuild(self, reason: str) -> None:
         """Fetch, preflight the new revision on a candidate checkout while the bot keeps serving, and only then
         stop it, move the running checkouts and restart. A revision that fails the preflight never touches the
         running bot: the failure is recorded and the bot goes on as it was."""
+        try:
+            await self._rebuild_locked(reason)
+        finally:
+            self._run_queued_rebuild()  # whatever happened above, a request that waited is not lost
+
+    async def _rebuild_locked(self, reason: str) -> None:
         async with self.lock:
             log(f"rebuild requested: {reason}")
             previous = {"bot": head(BOT_REPO), "core": head(CORE_REPO)}
@@ -381,6 +392,7 @@ class Supervisor:
                     for repo in (BOT_REPO, CORE_REPO):
                         git(repo, "reset", "--hard", "origin/main")
                     if self._request_image_rebuild():
+                        self.queued_rebuild = None  # this container is going away; the new one starts from origin/main
                         outcome = "image rebuild requested; the container will be replaced by the rebuilder"
                         return
                     log("image rebuild needed but no rebuilder is configured; continuing in place")
@@ -423,7 +435,6 @@ class Supervisor:
                 LAST_REBUILD.write_text(f"{datetime.now(UTC).isoformat()} {reason}: {outcome}\n")
                 if stopped:
                     self.restart_requested.set()
-        self._run_queued_rebuild()
 
     def _changed_files(self, old: str, new: str) -> set[str]:
         if old == new or "unknown" in (old, new):
@@ -446,13 +457,17 @@ class Supervisor:
     async def rollback(self, steps_back: int) -> str:
         if self.lock.locked():
             return "a rebuild or rollback is already in progress"
+        result = "not rolled back"
         try:
-            return await self._rollback(steps_back)
+            result = await self._rollback(steps_back)
+            return result
         finally:
-            if self.queued_rebuild is not None:
+            if self.queued_rebuild is not None and result.startswith("rolled back"):
                 # The operator just went back on purpose; a rebuild asked for meanwhile would undo that.
                 log(f"queued rebuild dropped after the rollback: {self.queued_rebuild}")
                 self.queued_rebuild = None
+            else:
+                self._run_queued_rebuild()  # nothing was rolled back: the request stands
 
     async def _rollback(self, steps_back: int) -> str:
         async with self.lock:

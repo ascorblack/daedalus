@@ -1425,7 +1425,11 @@ class SessionManager:
         """
         # The core allows a user message one content block, so the context joins the text rather
         # than following it; a message with no text (an image alone) goes as it is.
-        context = prompts.turn_context(notes=await self.workspace_notes(state))
+        volatile = [await self.workspace_notes(state)]
+        loop_state = str(state.metadata.get("loop_state") or "").strip()
+        if loop_state:
+            volatile.append("\n" + loop_state)  # the loop's counter and next wake-up change every run
+        context = prompts.turn_context(notes="".join(volatile))
         blocks = list(message.content_blocks)
         for i, block in enumerate(blocks):
             if isinstance(block, TextBlock):
@@ -2189,7 +2193,7 @@ def identifier_index(history: Sequence[Message], *, limit: int = IDENTIFIER_INDE
             continue
         for b in m.content_blocks:
             if isinstance(b, TextBlock) and (m.role is MessageRole.assistant or m.metadata.get("daedalus.origin") == "operator"):
-                source = b.text
+                source = prompts.without_turn_context(b.text)
             elif isinstance(b, ToolUseBlock):
                 source = b.arguments_json or ""
             else:
@@ -2278,7 +2282,7 @@ def repoint_summary(message: Message, mapping: dict[int, int]) -> Message:
 def operator_language(history: Sequence[Message]) -> str:
     """A coarse guess at the operator's language from their messages (Cyrillic → Russian, else English)."""
     text = " ".join(
-        b.text for m in history if m.role is MessageRole.user for b in m.content_blocks if isinstance(b, TextBlock)
+        prompts.without_turn_context(b.text) for m in history if m.role is MessageRole.user for b in m.content_blocks if isinstance(b, TextBlock)
     )
     letters = [c for c in text if c.isalpha()]
     if letters and sum("\u0400" <= c <= "\u04ff" for c in letters) / len(letters) > 0.3:

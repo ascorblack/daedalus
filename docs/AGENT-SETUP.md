@@ -72,7 +72,7 @@ The first build takes several minutes (Chromium, Node, the Python environment). 
 
 ```bash
 docker compose -f deploy/compose.yaml --env-file .env ps        # daedalus, keyproxy, searxng, rebuilder (+ telegram-bot-api) "running"
-docker logs deploy-daedalus-1 2>&1 | grep -E "bot started|pairing link|polling"
+docker logs deploy-daedalus-1 2>&1 | grep -E "bot started|pairing link|polling"     # "pairing link written to …" without Telegram
 ```
 
 `bot started pid=… bot=<sha> core=<sha>` must appear. Without Telegram there is no "polling" line; that is
@@ -80,8 +80,9 @@ expected.
 
 ## 3. Log the operator in
 
-The app is at `http://127.0.0.1:8765/app` on the server. The server prints a one-time **pairing link** at
-every start (`pairing link: …` in the log) and writes it to the state volume:
+The app is at `http://127.0.0.1:8765/app` on the server. When there is no other way in (no Telegram, no
+passkey yet) the server writes a one-time **pairing link** to the state volume at start (the log says
+`pairing link written to …`; the link itself is never logged):
 
 ```bash
 docker exec deploy-daedalus-1 cat /srv/state/pairing-url
@@ -100,8 +101,9 @@ link works through the tunnel as printed (it uses `http://127.0.0.1:8765`).
 
 ## 4. HTTPS (when there is a domain)
 
-Put any reverse proxy with TLS in front of port 8765 and set `MINIAPP_PUBLIC_URL=https://<domain>`. The
-proxy must pass `X-Forwarded-Proto` and keep long connections (the app streams events). Caddy needs one line:
+Put any reverse proxy with TLS in front of port 8765 and set `MINIAPP_PUBLIC_URL=https://<domain>` (that is
+what marks the session cookie secure). The proxy must keep long connections open (the app streams events).
+Caddy needs one line:
 
 ```
 <domain> {
@@ -109,8 +111,8 @@ proxy must pass `X-Forwarded-Proto` and keep long connections (the app streams e
 }
 ```
 
-nginx: `proxy_pass http://127.0.0.1:8765; proxy_http_version 1.1; proxy_buffering off; proxy_read_timeout 3600s;`
-plus `proxy_set_header X-Forwarded-Proto $scheme;`. Restart the stack after changing `.env`
+nginx: `proxy_pass http://127.0.0.1:8765; proxy_http_version 1.1; proxy_buffering off; proxy_read_timeout 3600s;`.
+Restart the stack after changing `.env`
 (`docker compose … up -d`). With Telegram, register `https://<domain>/app` as the bot's menu button in
 @BotFather.
 

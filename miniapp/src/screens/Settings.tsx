@@ -889,7 +889,7 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
   }
 
   async function remove(key: passkeys.PasskeyView) {
-    if (!(await confirmAsync(`Remove "${key.name}"? A browser holding it will have to sign in another way.`))) return;
+    if (!(await confirmAsync(`Remove "${key.name}"?`, { body: "The key can no longer sign a browser in. Browsers that are signed in already stay signed in until you sign out everywhere below.", action: "Remove" }))) return;
     try {
       setKeys((await passkeys.forget(key.id)).passkeys);
     } catch (e) {
@@ -903,6 +903,22 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
       <div className="sub">
         The key stays in this device (or its password manager) and never leaves it. One is enough to sign in on the login screen, so the pairing link stays a
         one-off.
+      </div>
+      <div className="btnrow" style={{ marginTop: 8 }}>
+        <button
+          className="btn small"
+          onClick={async () => {
+            if (!(await confirmAsync("Sign out everywhere?", { body: "Every browser and installed app that is signed in has to sign in again; this one is re-issued its session.", action: "Sign out everywhere" }))) return;
+            try {
+              await passkeys.signOutEverywhere();
+              toast("every other session is signed out");
+            } catch (e) {
+              toast(errorText(e));
+            }
+          }}
+        >
+          Sign out everywhere
+        </button>
       </div>
       {keys === null && <div className="empty">Loading…</div>}
       {keys !== null && keys.length === 0 && <div className="sub" style={{ marginTop: 8 }}>No passkey yet — add one and this browser stops needing a link.</div>}

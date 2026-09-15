@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -35,12 +36,15 @@ func coreRemote() string {
 // gitArgs runs git inside a container: git is not assumed to be installed on the host, and Docker
 // is there by definition because the stack needs it.
 func gitArgs(p Paths, args ...string) []string {
-	return append([]string{
-		"run", "--rm",
-		"-v", p.Data + ":/work",
-		"-w", "/work",
-		gitImage,
-	}, args...)
+	run := []string{"run", "--rm", "-v", p.Data + ":/work", "-w", "/work"}
+	// The container writes into the data folder as whoever runs it. Left to itself that is root, and a
+	// checkout root owns is one the launcher (and the operator) can no longer write .env into; so on the
+	// systems that have a uid, git runs as the launcher's own user. Windows has none, and Docker Desktop
+	// maps the files to the desktop user there anyway.
+	if uid := os.Getuid(); uid >= 0 {
+		run = append(run, "--user", fmt.Sprintf("%d:%d", uid, os.Getgid()), "-e", "HOME=/tmp")
+	}
+	return append(append(run, gitImage), args...)
 }
 
 // EnsureRepos clones what is missing. An existing checkout is left as it is — it may hold the

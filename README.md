@@ -173,7 +173,7 @@ Telegram's 20 MB, and it needs `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from http
 
 ### Signing in without Telegram
 
-Every start prints a one-time **pairing link** — in the log as `pairing link: …` and in `pairing-url` in the
+A start with no other way in (no bot, no passkey yet) writes a one-time **pairing link** to `pairing-url` in the
 state directory, readable by its owner only. Open it once and this browser is signed in; it expires after 30
 minutes, is spent on first use, and using one revokes the rest. A fresh one:
 

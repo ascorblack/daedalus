@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -91,6 +92,9 @@ func TestGitRunsInAContainerOverTheDataFolder(t *testing.T) {
 	}
 	if !strings.Contains(args, "--depth 50") {
 		t.Fatalf("the clone has no history for the supervisor to roll back to: %s", args)
+	}
+	if os.Getuid() >= 0 && !strings.Contains(args, fmt.Sprintf("--user %d:%d", os.Getuid(), os.Getgid())) {
+		t.Fatalf("the checkout would belong to root, and the launcher could not write .env into it: %s", args)
 	}
 }
 

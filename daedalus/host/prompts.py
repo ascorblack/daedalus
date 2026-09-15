@@ -241,8 +241,9 @@ def environment_section(
 
 
 TURN_CONTEXT_OPEN, TURN_CONTEXT_CLOSE = "<turn-context>", "</turn-context>"
-TURN_CONTEXT_RE = re.compile(r"\n*" + re.escape(TURN_CONTEXT_OPEN) + r".*?" + re.escape(TURN_CONTEXT_CLOSE), re.S)
-"""Finds the block in a message's text, for the readers that must not see it (the app, the summariser)."""
+TURN_CONTEXT_RE = re.compile(r"\n*" + re.escape(TURN_CONTEXT_OPEN) + r"(?:(?!" + re.escape(TURN_CONTEXT_OPEN) + r").)*" + re.escape(TURN_CONTEXT_CLOSE) + r"\s*$", re.S)
+"""Finds the block where the host put it — the end of the text — for the readers that must not see it
+(the app, the summariser). Only the last one, so an operator quoting the tag keeps their words."""
 
 
 def without_turn_context(text: str) -> str:

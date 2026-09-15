@@ -41,7 +41,7 @@ mkdir -p "$SECRETS_DIR" && chmod 700 "$SECRETS_DIR"
 [ -f "$SECRETS_FILE" ] || cp deploy/keyproxy.env.example "$SECRETS_FILE"
 chmod 600 "$SECRETS_FILE"
 
-say "1/4 Telegram — optional. Leave the token empty to run on the app alone; you will sign in with the pairing link the bot prints at startup."
+say "1/4 Telegram — optional. Leave the token empty to run on the app alone; you will sign in with a pairing link the bot writes at startup."
 say "(https://t.me/BotFather for the token; @userinfobot for your numeric id; https://my.telegram.org/apps for the API pair)"
 ask TELEGRAM_BOT_TOKEN "Bot token (empty = no Telegram)" secret
 if [ -n "$(current TELEGRAM_BOT_TOKEN "$ENV_FILE")" ]; then
@@ -83,8 +83,9 @@ say "Done. Logs: docker logs -f deploy-daedalus-1"
 if [ ${#PROFILE[@]} -gt 0 ]; then
   say "Next: send /start to the bot; /bind in a supergroup with topics for parallel sessions; /app for the Mini App."
 else
-  say "Open the app with the pairing link the bot printed at startup:"
-  say "  docker logs deploy-daedalus-1 2>&1 | grep 'pairing link'"
+  say "Open the app with the pairing link the bot wrote at startup (or mint a fresh one):"
+  say "  docker exec deploy-daedalus-1 cat /srv/state/pairing-url"
+  say "  docker exec deploy-daedalus-1 uv run --frozen python -m daedalus auth pair"
   say "A fresh link: docker compose -f deploy/compose.yaml exec daedalus python -m daedalus auth pair"
   say "Add a passkey in Settings → Security once you are in, and the link is never needed again."
 fi

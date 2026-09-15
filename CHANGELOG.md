@@ -4,6 +4,14 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-15
 
+- **Sign-in hardened after review.** A pairing link is minted at start only when there is no other way in
+  (no bot, no passkey) and the log names the file, never the link; a spent link lands on the app with the
+  reason instead of an error page, and the file goes when the link is used. A passkey must be discoverable
+  (the authenticator that refuses is told why), every ceremony has its own challenge so two browsers, or a
+  stranger polling the login endpoint, cannot spend each other's, the cookie's `secure` flag follows the
+  public address rather than a header any client can send, and Settings → Security can sign out everywhere.
+  The prompt prefix now holds for loop agents too: the iteration counter and the next wake-up ride in the
+  turn context. The supervisor's queued rebuild runs from a `finally`, never after an image rebuild.
 - **The login page stands on its own.** It rendered inside the shell's grid on a wide screen, in the column
   kept for the rail, so it sat pinned to the left in a narrow strip. It is a centred card now, outside the
   shell, and offers every way in at once: a passkey when one is enrolled (and says how to get one when not),

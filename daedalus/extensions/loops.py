@@ -210,15 +210,26 @@ class Loops:
         }
 
     def note(self, loop: dict[str, Any] | None) -> str:
-        """The line the system prompt carries about the session's loop."""
+        """The line the system prompt carries about the session's loop: what does not change between runs.
+
+        The counter, the next wake-up and the status change with every run; they go in ``state``,
+        which the host puts in the turn context, so the system prompt stays the same bytes and the
+        provider's cache holds across the runs of a loop — the sessions that run most often."""
         if loop is None:
             return ""
         cadence = f"every {fmt_interval(loop['interval_seconds'])}" if loop["mode"] == "interval" else "dynamically paced: you set each next wake-up with LoopNext"
+        cap = f", at most {loop['max_runs']} iterations" if loop.get("max_runs") else ""
+        instruction = " ".join(loop["instruction"].split())
+        return f"- Your loop ({cadence}{cap}): {instruction}"
+
+    def state(self, loop: dict[str, Any] | None) -> str:
+        """The loop's moving parts, for the turn context."""
+        if loop is None:
+            return ""
         runs = f"{loop['run_count']}" + (f" of {loop['max_runs']}" if loop.get("max_runs") else "")
         nxt = f"; next wake-up {str(loop['next_run_at'])[:16].replace('T', ' ')} UTC" if loop.get("next_run_at") else ""
         status = f"; status {loop['status']}" + (f" ({loop.get('stop_reason') or loop.get('pause_note') or ''})" if loop["status"] != "active" else "")
-        instruction = " ".join(loop["instruction"].split())
-        return f"- Your loop ({cadence}; iterations so far {runs}{nxt}{status}): {instruction}"
+        return f"- Loop: iterations so far {runs}{nxt}{status}"
 
     async def _sync(self, session_id: str) -> None:
         manager = self.app.manager
@@ -231,9 +242,11 @@ class Loops:
             if loop is None:
                 meta.pop("loop", None)
                 meta.pop("loop_note", None)
+                meta.pop("loop_state", None)
             else:
                 meta["loop"] = self.summary(loop)
                 meta["loop_note"] = self.note(loop)
+                meta["loop_state"] = self.state(loop)
         await manager.sessions.update_metadata(session_id, state.session.metadata)
 
     # -- firing ---------------------------------------------------------------------

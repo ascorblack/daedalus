@@ -55,7 +55,7 @@ class RelyingParty:
 
 def relying_party(public_url: str, port: int) -> RelyingParty:
     if public_url:
-        parsed = urlparse(public_url)
+        parsed = urlparse(public_url if "://" in public_url else f"https://{public_url}")  # a bare host is an https one
         host = parsed.hostname or "localhost"
         netloc = parsed.netloc or host
         return RelyingParty(rp_id=host, origins=(f"{parsed.scheme or 'https'}://{netloc}",))
@@ -130,9 +130,17 @@ async def registration_options(db: Database, rp: RelyingParty) -> dict[str, Any]
         # The owner is one person: a device that already holds a key offers to replace it rather than
         # silently making a second one for the same site.
         exclude_credentials=_descriptors(await credentials(db)),
-        authenticator_selection=AuthenticatorSelectionCriteria(resident_key=ResidentKeyRequirement.PREFERRED, user_verification=UserVerificationRequirement.PREFERRED),
+        # Required, not preferred: sign-in offers no list of credentials, so only a discoverable key
+        # is ever offered by the authenticator; one that is not would be enrolled and never usable.
+        authenticator_selection=AuthenticatorSelectionCriteria(resident_key=ResidentKeyRequirement.REQUIRED, user_verification=UserVerificationRequirement.PREFERRED),
     )
     return json.loads(options_to_json(options))
+
+
+def declined_resident_key(credential: dict[str, Any]) -> bool:
+    """Whether the authenticator said, in the ``credProps`` extension, that the key is NOT discoverable."""
+    props = (credential.get("clientExtensionResults") or {}).get("credProps") or {}
+    return props.get("rk") is False
 
 
 def verify_registration(credential: dict[str, Any], *, challenge: bytes, rp: RelyingParty) -> Any:

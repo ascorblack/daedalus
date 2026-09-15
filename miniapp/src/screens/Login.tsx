@@ -23,7 +23,9 @@ export type AuthConfig = {
 export function LoginScreen({ onDone }: { onDone: () => void }) {
   const slot = useRef<HTMLDivElement>(null);
   const [conf, setConf] = useState<AuthConfig | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() =>
+    new URLSearchParams(window.location.search).get("pairing") === "spent" ? "That pairing link was already used or has expired. Ask for a fresh one (daedalus auth pair) or sign in another way." : null,
+  );
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {

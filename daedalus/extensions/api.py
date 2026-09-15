@@ -139,11 +139,14 @@ class PasskeyRegisterBody(BaseModel):
     credential: dict[str, Any]
     """What ``navigator.credentials.create`` returned, serialised as the browser gives it."""
     name: str = Field(default="", max_length=80)
+    ceremony: str = Field(default="", max_length=64)
+    """The id the matching ``begin`` call answered with: it names the challenge this response signs."""
 
 
 class PasskeyLoginBody(BaseModel):
     credential: dict[str, Any]
     """What ``navigator.credentials.get`` returned, serialised as the browser gives it."""
+    ceremony: str = Field(default="", max_length=64)
 
 
 class SendMessageBody(BaseModel):
@@ -637,6 +640,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     assert manager is not None
     settings = app.settings
     secret_cache: dict[str, bytes] = {}
+    secret_lock = asyncio.Lock()
 
     async def session_secret() -> bytes:
         """What signs the browser's session cookie.
@@ -645,22 +649,30 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         this installation, so that the token alone is not enough to forge one. Not the bot token:
         an installation without Telegram has none, and its cookies must still mean something.
         """
-        if "value" not in secret_cache:
-            stored = await app.db.kv_get("session_secret")
-            if not stored:
-                stored = secrets.token_urlsafe(32)
-                await app.db.kv_set("session_secret", stored)
-            secret_cache["value"] = hashlib.sha256(f"session:{api_token}:{stored}".encode()).digest()
-        return secret_cache["value"]
+        async with secret_lock:  # two first requests at once must not mint two secrets
+            if "value" not in secret_cache:
+                stored = await app.db.kv_get("session_secret")
+                if not stored:
+                    stored = secrets.token_urlsafe(32)
+                    await app.db.kv_set("session_secret", stored)
+                secret_cache["value"] = hashlib.sha256(f"session:{api_token}:{stored}".encode()).digest()
+            return secret_cache["value"]
+
+    async def revoke_sessions() -> None:
+        """Every browser session ends at once: a new secret signs the cookies from here on."""
+        async with secret_lock:
+            await app.db.kv_set("session_secret", secrets.token_urlsafe(32))
+            secret_cache.clear()
 
     def over_https(request: Request) -> bool:
-        """Whether the browser reached us over TLS — directly or through the proxy that terminates it.
+        """Whether the browser reached us over TLS.
 
         A cookie marked secure is never sent back over plain http, which is exactly how the app is
-        opened on the machine itself; marking it unconditionally locks that case out.
+        opened on the machine itself; marking it unconditionally locks that case out. TLS is either
+        on this connection or on the proxy the public address names; a forwarded-proto header is not
+        consulted, because any client can send one.
         """
-        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
-        return (forwarded or request.url.scheme) == "https"
+        return request.url.scheme == "https" or settings.miniapp_public_url.lower().startswith("https://")
 
     async def sign_in(response: Response, request: Request) -> None:
         response.set_cookie(
@@ -720,14 +732,27 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return passkeys.relying_party(settings.miniapp_public_url, settings.api_port)
 
     # Both ceremonies are a pair of calls, and the challenge of the first has to survive until the
-    # second. One owner, one browser at a time: a slot per ceremony is all the state there is.
-    challenges: dict[str, tuple[bytes, float]] = {}
+    # second. Each begin names its ceremony, so two browsers (or a stranger polling the public login
+    # endpoint) cannot spend each other's challenge; the table stays small by dropping what expired.
+    CEREMONY_TTL, CEREMONY_MAX = 300.0, 64
+    challenges: dict[str, tuple[str, bytes, float]] = {}
 
-    def _take_challenge(kind: str) -> bytes:
-        held = challenges.pop(kind, None)
-        if held is None or held[1] < time.time():
+    def _hold_challenge(kind: str, options: dict[str, Any]) -> str:
+        now = time.time()
+        for key in [k for k, (_, _, until) in challenges.items() if until < now]:
+            challenges.pop(key, None)
+        while len(challenges) >= CEREMONY_MAX:
+            challenges.pop(next(iter(challenges)))  # the oldest goes; a flood cannot grow the table
+        ceremony = secrets.token_urlsafe(16)
+        challenge = base64.urlsafe_b64decode(options["challenge"] + "=" * (-len(options["challenge"]) % 4))
+        challenges[ceremony] = (kind, challenge, now + CEREMONY_TTL)
+        return ceremony
+
+    def _take_challenge(kind: str, ceremony: str) -> bytes:
+        held = challenges.pop(ceremony, None) if ceremony else None
+        if held is None or held[0] != kind or held[2] < time.time():
             raise HTTPException(400, "the request expired; start again")
-        return held[0]
+        return held[1]
 
     @api.get("/api/auth/config")
     async def auth_config() -> dict[str, Any]:
@@ -756,8 +781,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.get("/api/auth/pair")
     async def auth_pair(code: str, request: Request) -> RedirectResponse:
         """A pairing link: spend the code, hand the browser a session cookie and open the app."""
-        if not await pairing.redeem(app.db, code):
-            raise HTTPException(403, "this pairing link is spent or expired; mint another with `daedalus auth pair`")
+        if not await pairing.redeem(app.db, code, state_dir=settings.state_dir):
+            # A spent link still lands on the app: a browser that paired with it earlier is signed in
+            # already, and one that is not sees the login page say why.
+            return RedirectResponse("/app/?pairing=spent", status_code=303)
         response = RedirectResponse("/app/", status_code=303)
         await sign_in(response, request)
         return response
@@ -765,15 +792,18 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/auth/passkeys/register/begin")
     async def passkey_register_begin(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         options = await passkeys.registration_options(app.db, _relying_party())
-        challenges["register"] = (base64.urlsafe_b64decode(options["challenge"] + "=" * (-len(options["challenge"]) % 4)), time.time() + 300)
-        return options
+        return {**options, "ceremony": _hold_challenge("register", options)}
 
     @api.post("/api/auth/passkeys/register/finish")
     async def passkey_register_finish(body: PasskeyRegisterBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:
-            verified = passkeys.verify_registration(body.credential, challenge=_take_challenge("register"), rp=_relying_party())
+            verified = passkeys.verify_registration(body.credential, challenge=_take_challenge("register", body.ceremony), rp=_relying_party())
         except Exception as exc:  # noqa: BLE001 — every failure here is the same answer: this key is not accepted
             raise HTTPException(400, f"the passkey was not accepted: {exc}") from exc
+        if passkeys.declined_resident_key(body.credential):
+            # Login offers no list of credentials (no username to type), so a key the authenticator
+            # did not make discoverable could be enrolled and then never offered at sign-in.
+            raise HTTPException(400, "this authenticator did not make the passkey discoverable, so it could not sign you in later; use a device or key that stores passkeys")
         transports = list(body.credential.get("response", {}).get("transports") or [])
         await passkeys.store(
             app.db,
@@ -790,8 +820,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if await passkeys.count(app.db) == 0:
             raise HTTPException(404, "no passkey is enrolled")
         options = await passkeys.authentication_options(app.db, _relying_party())
-        challenges["login"] = (base64.urlsafe_b64decode(options["challenge"] + "=" * (-len(options["challenge"]) % 4)), time.time() + 300)
-        return options
+        return {**options, "ceremony": _hold_challenge("login", options)}
 
     @api.post("/api/auth/passkeys/login/finish")
     async def passkey_login_finish(body: PasskeyLoginBody, request: Request, response: JSONResponse) -> dict[str, Any]:
@@ -801,7 +830,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         try:
             verified = passkeys.verify_authentication(
                 body.credential,
-                challenge=_take_challenge("login"),
+                challenge=_take_challenge("login", body.ceremony),
                 rp=_relying_party(),
                 public_key=base64.urlsafe_b64decode(stored["public_key"] + "=" * (-len(stored["public_key"]) % 4)),
                 sign_count=int(stored["sign_count"]),
@@ -821,6 +850,14 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if not await passkeys.remove(app.db, passkey_id):
             raise HTTPException(404, "no such passkey")
         return {"ok": True, "passkeys": await passkeys.listing(app.db)}
+
+    @api.post("/api/auth/sessions/revoke")
+    async def auth_revoke(request: Request, response: JSONResponse, who: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Sign out everywhere: every cookie issued so far stops working, this browser gets a fresh one."""
+        await revoke_sessions()
+        if who.get("via") == "cookie":
+            await sign_in(response, request)
+        return {"ok": True}
 
     @api.get("/api/auth/me")
     async def auth_me(who: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2370,10 +2407,13 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     server = uvicorn.Server(config)
     app.extensions["api_token"] = token
     base = app.settings.miniapp_public_url or f"http://127.0.0.1:{app.settings.api_port}"
-    # Every start leaves one usable way in that needs nothing else: the operator reads it from the log
-    # or from the file, opens it once, and adds a passkey.
-    url = await pairing.announce(app.db, app.settings.state_dir, base)
-    logger.warning("pairing link: %s", url)
+    # An installation with no other way in gets one at start: a link in a file only the operator can
+    # read (never in the log, which is copied around and which the agent's own tools can read).
+    # Anything else — a bot, an enrolled passkey — is a way in already; a fresh link is one
+    # `daedalus auth pair` away.
+    if not app.settings.telegram_bot_token and await passkeys.count(app.db) == 0:
+        await pairing.announce(app.db, app.settings.state_dir, base)
+        logger.warning("pairing link written to %s (opens once; `daedalus auth pair` makes another)", app.settings.state_dir / pairing.URL_FILE)
     if app.front is not None:
 
         async def cmd_app(message, command) -> None:  # type: ignore[no-untyped-def]

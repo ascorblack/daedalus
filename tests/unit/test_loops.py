@@ -115,7 +115,7 @@ async def test_pause_stop_max_runs_and_validation(app: Any) -> None:
     await loops.resume(sid)
     await loops.pause(sid, "need the API key")
     loop = await loops.get(sid)
-    assert loop["status"] == "paused" and loop["pause_note"] == "need the API key" and "status paused (need the API key)" in state.metadata["loop_note"]
+    assert loop["status"] == "paused" and loop["pause_note"] == "need the API key" and "status paused (need the API key)" in state.metadata["loop_state"]
     with pytest.raises(ValueError, match="paused"):
         await loops.schedule_next(sid, 60, "x")
     await loops.stop(sid, "enough")
