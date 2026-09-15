@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -131,16 +132,67 @@ func resolveDocker() {
 	dockerFile = findDocker(runtime.GOOS, home, exec.LookPath, runnableFile)
 }
 
+// dockerSearchPath is the PATH a docker invocation runs with: the folder docker was found in and
+// every known install folder, ahead of what the launcher inherited. Finding the client is only half
+// of a Finder start's problem — docker itself then looks for its helpers on PATH, and Docker Desktop
+// stores registry logins behind docker-credential-desktop, which lives next to the client. With the
+// inherited PATH alone a pull of a public image fails with "error getting credentials" before it has
+// asked the registry anything.
+func dockerSearchPath(goos, home, dockerFile, inherited string) string {
+	separator := string(os.PathListSeparator)
+	var dirs []string
+	if dockerFile != "" {
+		dirs = append(dirs, filepath.Dir(dockerFile))
+	}
+	for _, candidate := range dockerCandidates(goos, home) {
+		dirs = append(dirs, filepath.Dir(candidate))
+	}
+	if inherited != "" {
+		dirs = append(dirs, strings.Split(inherited, separator)...)
+	}
+	seen := make(map[string]bool, len(dirs))
+	out := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		if dir == "" || seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		out = append(out, dir)
+	}
+	return strings.Join(out, separator)
+}
+
+// dockerEnv is the environment every docker invocation gets: the process's own, with PATH widened
+// as dockerSearchPath describes.
+func dockerEnv() []string {
+	home, _ := os.UserHomeDir()
+	path := dockerSearchPath(runtime.GOOS, home, dockerPath(), os.Getenv("PATH"))
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if key, _, _ := strings.Cut(kv, "="); !strings.EqualFold(key, "PATH") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "PATH="+path)
+}
+
+// dockerCmd is a docker command with the resolved client and the widened PATH.
+func dockerCmd(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, dockerCommand(), args...)
+	cmd.Env = dockerEnv()
+	return cmd
+}
+
 // CheckDocker fails when docker is absent, not running, or without the compose plugin. All three
 // look the same to the operator — the stack cannot start — so all three carry the same message.
 func CheckDocker(ctx context.Context) error {
 	if dockerPath() == "" {
 		return errors.New(dockerMissing)
 	}
-	if _, err := runOut(ctx, dockerCommand(), "info", "--format", "{{.ServerVersion}}"); err != nil {
+	if _, err := runDocker(ctx, "info", "--format", "{{.ServerVersion}}"); err != nil {
 		return errors.New(dockerMissing)
 	}
-	if _, err := runOut(ctx, dockerCommand(), "compose", "version", "--short"); err != nil {
+	if _, err := runDocker(ctx, "compose", "version", "--short"); err != nil {
 		return errors.New(dockerMissing)
 	}
 	return nil
@@ -148,7 +200,7 @@ func CheckDocker(ctx context.Context) error {
 
 // DockerVersion is the daemon's version, for the status line. An empty string means not reachable.
 func DockerVersion(ctx context.Context) string {
-	out, err := runOut(ctx, dockerCommand(), "info", "--format", "{{.ServerVersion}}")
+	out, err := runDocker(ctx, "info", "--format", "{{.ServerVersion}}")
 	if err != nil {
 		return ""
 	}
@@ -175,14 +227,14 @@ func composeArgs(p Paths, telegram bool, args ...string) []string {
 
 // compose runs a compose command and returns its combined output.
 func compose(ctx context.Context, p Paths, telegram bool, args ...string) (string, error) {
-	return runOut(ctx, dockerCommand(), composeArgs(p, telegram, args...)...)
+	return runDocker(ctx, composeArgs(p, telegram, args...)...)
 }
 
 // composeQuiet runs a compose command and returns only what the command itself wrote. docker and uv
 // both report progress on stderr, which would otherwise end up inside a value that is read back —
 // a pairing link is one line, and one line is all it may be.
 func composeQuiet(ctx context.Context, p Paths, telegram bool, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, dockerCommand(), composeArgs(p, telegram, args...)...)
+	cmd := dockerCmd(ctx, composeArgs(p, telegram, args...)...)
 	var out, problem bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &problem
@@ -195,17 +247,22 @@ func composeQuiet(ctx context.Context, p Paths, telegram bool, args ...string) (
 // composeStream runs a compose command with the terminal attached, for logs and builds whose
 // progress the operator wants to watch as it happens.
 func composeStream(ctx context.Context, p Paths, telegram bool, args ...string) error {
-	cmd := exec.CommandContext(ctx, dockerCommand(), composeArgs(p, telegram, args...)...)
+	cmd := dockerCmd(ctx, composeArgs(p, telegram, args...)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	return cmd.Run()
 }
 
-// run executes a command and returns stdout and stderr together: docker writes progress to stderr
-// and the useful part of a failure is usually there.
-func runOut(ctx context.Context, name string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+// runDocker executes docker and returns stdout and stderr together: docker writes progress to
+// stderr and the useful part of a failure is usually there.
+func runDocker(ctx context.Context, args ...string) (string, error) {
+	return runCmd(dockerCmd(ctx, args...))
+}
+
+func runCmd(cmd *exec.Cmd) (string, error) {
+	name := cmd.Args[0]
+	args := cmd.Args[1:]
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf

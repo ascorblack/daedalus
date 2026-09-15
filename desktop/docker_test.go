@@ -172,3 +172,18 @@ func TestPATHWinsOverTheKnownLocations(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestDockerRunsWithItsOwnFolderOnPATH(t *testing.T) {
+	path := dockerSearchPath("darwin", "/Users/o", "/Applications/Docker.app/Contents/Resources/bin/docker", "/usr/bin:/bin")
+	want := "/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/opt/homebrew/bin:/Users/o/.docker/bin:/usr/bin:/bin"
+	if path != want {
+		t.Fatalf("PATH = %q, want %q", path, want)
+	}
+}
+
+func TestDockerPATHWithoutAClientStillNamesTheKnownFolders(t *testing.T) {
+	path := dockerSearchPath("linux", "", "", "")
+	if path != "/usr/bin:/usr/local/bin:/snap/bin" {
+		t.Fatalf("PATH = %q", path)
+	}
+}
