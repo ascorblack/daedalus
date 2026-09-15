@@ -4,7 +4,8 @@ import { Icon, IconName } from "../icons";
 import { pathFor } from "../router";
 import { PageHeader, go, useMedia } from "../shell";
 import { api, telegram, HeartbeatStatus, Preset, ProviderConf, SearchBackendInfo, SearchCheck, Settings } from "../api";
-import { confirmAsync, numInput } from "../ui";
+import { confirmAsync, errorText, numInput } from "../ui";
+import * as passkeys from "../passkeys";
 import { timeAgo } from "../components";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "openai_compat"];
@@ -861,13 +862,94 @@ export function HealthScreen({ toast }: { toast: (t: string) => void }) {
   );
 }
 
-type Section = "models" | "rules" | "limits" | "tools" | "chat" | "heartbeat" | "about";
+/** Security: the passkeys that sign the owner in with no Telegram, no password and no pairing link. */
+function SecurityTab({ toast }: { toast: (t: string) => void }) {
+  const [keys, setKeys] = useState<passkeys.PasskeyView[] | null>(null);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const can = passkeys.supported();
+  useEffect(() => {
+    passkeys
+      .list()
+      .then(setKeys)
+      .catch((e) => toast(errorText(e)));
+  }, [toast]);
+
+  async function add() {
+    setBusy(true);
+    try {
+      setKeys(await passkeys.enrol(name.trim() || "This device"));
+      setName("");
+      toast("passkey added");
+    } catch (e) {
+      toast(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(key: passkeys.PasskeyView) {
+    if (!(await confirmAsync(`Remove "${key.name}"? A browser holding it will have to sign in another way.`))) return;
+    try {
+      setKeys((await passkeys.forget(key.id)).passkeys);
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
+
+  return (
+    <div className="card">
+      <div className="section-title" style={{ marginTop: 0 }}>Passkeys</div>
+      <div className="sub">
+        The key stays in this device (or its password manager) and never leaves it. One is enough to sign in on the login screen, so the pairing link stays a
+        one-off.
+      </div>
+      {keys === null && <div className="empty">Loading…</div>}
+      {keys !== null && keys.length === 0 && <div className="sub" style={{ marginTop: 8 }}>No passkey yet — add one and this browser stops needing a link.</div>}
+      {keys !== null && keys.length > 0 && (
+        <div className="mlist">
+          {keys.map((k) => (
+            <div key={k.id} className="mrow">
+              <div className="mline noradio">
+                <div className="mmain">
+                  <span className="mtitle">{k.name}</span>
+                  <span className="mmeta">
+                    added {timeAgo(k.created_at)} · {k.last_used_at ? `last used ${timeAgo(k.last_used_at)}` : "never used"}
+                  </span>
+                </div>
+                <div className="mactions">
+                  <button className="btn small" onClick={() => void remove(k)}>Remove</button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <label className="field">Name for the new passkey</label>
+      <input className="field" placeholder="This device" value={name} onChange={(e) => setName(e.target.value)} />
+      <div className="btnrow">
+        <button className="btn primary small" disabled={busy || !can} onClick={() => void add()}>
+          {busy ? "Waiting for the device…" : "Add a passkey"}
+        </button>
+      </div>
+      {!can && (
+        <div className="sub">
+          This browser will not make a passkey on this address. A passkey needs https, or the app opened at <code>http://localhost</code> — an address bar
+          showing an IP is not a name a key can belong to.
+        </div>
+      )}
+    </div>
+  );
+}
+
+type Section = "models" | "rules" | "limits" | "tools" | "chat" | "security" | "heartbeat" | "about";
 const SECTIONS: { id: Section; label: string; hint: string; icon: IconName }[] = [
   { id: "models", label: "Models & providers", hint: "which model opens a session, the fallbacks, the clients", icon: "model" },
   { id: "rules", label: "Working rules", hint: "the standing instructions and how self-changes are approved", icon: "pen" },
   { id: "limits", label: "Limits & budget", hint: "spend caps, iterations, context compaction, balance alerts", icon: "chart" },
   { id: "tools", label: "Tools & search", hint: "web search backends, fetch, exec, speech, vision", icon: "wrench" },
   { id: "chat", label: "Chat & scheduler", hint: "Telegram behaviour and scheduled runs", icon: "inbox" },
+  { id: "security", label: "Security", hint: "the passkeys that sign this browser in", icon: "key" },
   { id: "heartbeat", label: "Heartbeat", hint: "the periodic check-in run", icon: "loop" },
   { id: "about", label: "About", hint: "versions, providers, this browser", icon: "settings" },
 ];
@@ -1095,6 +1177,8 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
             </div>
           </div>
         );
+      case "security":
+        return <SecurityTab toast={toast} />;
       case "heartbeat":
         return <HeartbeatTab s={s} toast={toast} />;
       case "about":

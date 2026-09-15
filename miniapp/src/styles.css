@@ -580,6 +580,9 @@ input.field, select.field, textarea.field {
 .login .sub.small { font-size: 12px; margin-top: 24px; }
 .login-widget { min-height: 48px; display: flex; justify-content: center; }
 .login-error { color: var(--bad); font-size: 14px; }
+.login-note { border: 1px solid var(--line); border-radius: var(--r); padding: 12px 14px; text-align: left; background: var(--card); }
+.login-note p { margin: 6px 0 0; }
+.login-note code { font-size: 12px; }
 
 /* session aside (wide screens) */
 .wide-only { display: none; }
@@ -1020,6 +1023,9 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 /* ── rail collapse, palette, offline strip ──────────────────────────────────────────────── */
 .offline-strip { position: sticky; top: 0; z-index: 13; text-align: center; padding: 6px 12px; font-size: 12.5px; color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--bg)); border-bottom: 1px solid color-mix(in srgb, var(--warn) 30%, transparent); }
 .main.chat-open .offline-strip { flex: none; }
+.nudge-strip { position: sticky; top: 0; z-index: 13; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; padding: 7px 12px; font-size: 12.5px; color: var(--fg-2); background: var(--surface-1); border-bottom: 1px solid var(--line); }
+.nudge-strip a { color: var(--primary); font-weight: 600; }
+.main.chat-open .nudge-strip { flex: none; }
 .rail-item.search, .rail-item.collapse { width: 100%; background: none; border: 0; font: inherit; cursor: pointer; text-align: left; }
 .rail-item.search { border: 1px solid var(--line); background: var(--surface-1); margin-bottom: 8px; }
 .rail-item.search kbd { margin-left: auto; font: 11px var(--mono); color: var(--fg-3); }

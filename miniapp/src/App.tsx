@@ -12,9 +12,10 @@ import { UsageScreen } from "./screens/Usage";
 import { HealthScreen, SettingsScreen } from "./screens/Settings";
 import { MemoryScreen } from "./screens/Memory";
 import { ServicesScreen } from "./screens/Services";
-import { LoginScreen } from "./screens/Login";
+import { AuthConfig, LoginScreen } from "./screens/Login";
+import * as passkeys from "./passkeys";
 import { back, migrateLegacyLocation, navigate, pathFor, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
-import { Counts, MoreSheet, Palette, PaletteItem, Rail, TabBar, screenTitle, useMedia, useShortcuts } from "./shell";
+import { Counts, MoreSheet, Palette, PaletteItem, Rail, TabBar, go, screenTitle, useMedia, useShortcuts } from "./shell";
 import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
 
@@ -294,6 +295,7 @@ export function App() {
       {wide && <Rail screen={route.screen} counts={counts} collapsed={railCollapsed} onToggle={toggleRail} onPalette={openPalette} />}
       <div ref={main} className={`main ${sessionId ? "chat-open" : ""}`}>
         {offline && <div className="offline-strip" role="status">No connection to the bot · retrying…</div>}
+        <PasskeyNudge />
         {content}
       </div>
       {palette && <Palette items={paletteItems()} onClose={() => setPalette(false)} />}
@@ -302,6 +304,39 @@ export function App() {
       {picking && sessionId && <SessionPicker exclude={sessionId} onPick={(id) => { navigate(sessionPath(sessionId, id)); setPicking(false); }} onClose={() => setPicking(false)} />}
       <ToastHost />
       <ConfirmHost />
+    </div>
+  );
+}
+
+/** After a pairing link, the browser is signed in but holds nothing of its own: offer it a passkey, once. */
+function PasskeyNudge() {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    if (telegram()?.initData || !passkeys.supported()) return;
+    try {
+      if (localStorage.getItem("daedalus.passkeyNudge") === "off") return;
+    } catch {
+      /* private mode */
+    }
+    api
+      .get<AuthConfig>("/api/auth/config")
+      .then((c) => setShow(c.passkeys === 0))
+      .catch(() => setShow(false));
+  }, []);
+  if (!show) return null;
+  const dismiss = () => {
+    try {
+      localStorage.setItem("daedalus.passkeyNudge", "off");
+    } catch {
+      /* private mode */
+    }
+    setShow(false);
+  };
+  return (
+    <div className="nudge-strip" role="status">
+      <span>This browser signs in with a link. Add a passkey and it signs in by itself.</span>
+      <a href={pathFor("settings", "security")} onClick={(e) => (go(e, pathFor("settings", "security")), dismiss())}>Add one</a>
+      <button className="linkbtn" onClick={dismiss}>Not now</button>
     </div>
   );
 }
