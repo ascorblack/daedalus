@@ -4,6 +4,23 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-15
 
+- **The desktop launcher is something you download and open.** The first release attached the bare
+  binaries: a browser download carries no execute bit, so double-clicking `daedalus-desktop-darwin-arm64`
+  opened the Mach-O in TextEdit, and Gatekeeper would have refused it in any case — the notes answered
+  that with a `xattr` incantation, which is a workaround and not a product. Releases now carry archives:
+  `Daedalus-macOS.zip` holding a `Daedalus.app` (one universal build for both kinds of Mac, its own icon,
+  signed and notarized when the Apple secrets are set and ad-hoc when they are not, never unsigned and
+  never a failed release for a missing secret), a tarball per Linux architecture that keeps the
+  executable's mode, and a zip for Windows, with `SHA256SUMS` over all of them.
+  `curl -fsSL .../desktop/install.sh | sh` installs either of the first two into `./Daedalus` and checks
+  the download against those sums — and a file fetched with curl is never quarantined, so that path asks
+  Gatekeeper nothing at all. Opened from Finder the launcher now behaves like an application rather than
+  a command: its data folder is `data/` beside the `.app` — the folder you put the app in — instead of
+  the root of the disk that a working directory of `/` would have made; Docker is looked for where the
+  installers put it, because a program started from Finder inherits a PATH that names none of them; and a
+  Docker that is missing or not started is shown on the launcher's own page, which opens first and stays
+  up with the button to try again, instead of being printed to a terminal nobody has.
+
 - **A fresh checkout builds its app before the first start.** The bundle is not in git and only a rebuild
   built it, so a new installation (the desktop launcher, a clone made by a setup script) answered 404 at
   `/app` until the first merged pull request. The supervisor builds it once when it is missing. Blank

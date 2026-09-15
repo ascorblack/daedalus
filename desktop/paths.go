@@ -28,11 +28,15 @@ type Paths struct {
 	Override    string
 }
 
-// NewPaths resolves the data directory: --data when given, otherwise ./data next to the binary's
-// working directory, so the binary can be dropped into any folder and run from there.
+// NewPaths resolves the data directory: --data when given, otherwise the default the executable's
+// own location implies, so the launcher can be dropped into any folder and run from there.
 func NewPaths(dataDir string) (Paths, error) {
 	if dataDir == "" {
-		dataDir = "data"
+		exe, err := os.Executable()
+		if err != nil {
+			exe = ""
+		}
+		dataDir = DefaultDataDir(exe)
 	}
 	abs, err := filepath.Abs(dataDir)
 	if err != nil {
@@ -52,6 +56,45 @@ func NewPaths(dataDir string) (Paths, error) {
 		Compose:     filepath.Join(bot, "deploy", "compose.yaml"),
 		Override:    filepath.Join(abs, "compose.desktop.yaml"),
 	}, nil
+}
+
+// bundleRoot reports the .app directory an executable is running out of, and whether it is running
+// out of one at all. The layout macOS requires is <Something>.app/Contents/MacOS/<executable>.
+func bundleRoot(exe string) (string, bool) {
+	if exe == "" {
+		return "", false
+	}
+	macos := filepath.Dir(exe)      // .../Contents/MacOS
+	contents := filepath.Dir(macos) // .../Contents
+	app := filepath.Dir(contents)   // .../Something.app
+	if filepath.Base(macos) != "MacOS" || filepath.Base(contents) != "Contents" || filepath.Ext(app) != ".app" {
+		return "", false
+	}
+	return app, true
+}
+
+// DefaultDataDir is where everything the installation owns goes when --data does not say. From a
+// bundle it is next to the .app — the folder the operator dropped the app into, which is the "one
+// folder" the whole installation is. It is deliberately not inside the bundle, which the next
+// download replaces, and deliberately not relative: Finder starts a bundled program with "/" as its
+// working directory, so a relative default would try to write into the root of the disk. Started
+// from a terminal as a plain executable it stays relative, so the folder follows the shell.
+func DefaultDataDir(exe string) string {
+	if app, ok := bundleRoot(exe); ok {
+		return filepath.Join(filepath.Dir(app), "data")
+	}
+	return "data"
+}
+
+// Bundled reports whether this process is the executable inside a .app — which is also to say that
+// it was most likely started from Finder, with no terminal to print to.
+func Bundled() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	_, ok := bundleRoot(exe)
+	return ok
 }
 
 // EnsureDirs creates the folders that must exist before anything is written into them. The secrets

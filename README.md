@@ -209,11 +209,22 @@ and the two-line summary section 8 asks for. Never paste keys or tokens back int
 
 ### Desktop app
 
-On a machine of your own there is a launcher that does all of the above for you: one binary that
-clones both repositories, asks for the keys on a page in your browser, and runs this same compose
-file, with Docker as the only thing you install. Download it from the
-[releases](https://github.com/ascorblack/daedalus/releases) (the `desktop-v*` tags) and read
-[desktop/README.md](desktop/README.md) for the folder it makes and the disk the images take.
+On a machine of your own there is a launcher that does all of the above for you: it clones both
+repositories, asks for the keys on a page in your browser, and runs this same compose file, with
+Docker as the only thing you install.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ascorblack/daedalus/main/desktop/install.sh | sh
+```
+
+That takes the newest `desktop-v*` release, checks it against the release's `SHA256SUMS`, and
+unpacks it into `./Daedalus`. By hand, take the archive for your machine from the
+[releases](https://github.com/ascorblack/daedalus/releases): `Daedalus-macOS.zip` holds
+`Daedalus.app` for both kinds of Mac and is opened with a double-click,
+`daedalus-desktop-linux-<arch>.tar.gz` and `daedalus-desktop-windows-amd64.zip` hold the executable.
+Everything the installation owns is made inside the folder you unpack into.
+[desktop/README.md](desktop/README.md) has the layout, the disk the images take, and how releases
+are signed.
 
 ### Models and keys
 

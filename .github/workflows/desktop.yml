@@ -1,4 +1,9 @@
-# The desktop launcher: five binaries on a desktop-v* tag, attached to the release that tag names.
+# The desktop launcher, released on a desktop-v* tag as one archive per platform.
+#
+# Archives and not bare binaries: a browser download carries no execute bit, so a raw Mach-O or ELF
+# file is not something a person can double-click, and on macOS Finder opens it in a text editor
+# instead. The macOS archive holds an application bundle, signed and — when the secrets are there —
+# notarized, so that opening it is the ordinary thing it looks like.
 name: desktop
 
 on:
@@ -12,9 +17,6 @@ permissions:
 jobs:
   binaries:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: desktop
     steps:
       - uses: actions/checkout@v4
 
@@ -25,31 +27,136 @@ jobs:
           cache: false
 
       - run: go vet ./...
+        working-directory: desktop
       - run: go test ./...
+        working-directory: desktop
 
       - name: Cross-compile
+        working-directory: desktop
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          mkdir -p dist
+          mkdir -p dist/bin
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
             goos="${target%/*}"; goarch="${target#*/}"
-            out="dist/daedalus-desktop-$goos-$goarch"
+            out="dist/bin/daedalus-desktop-$goos-$goarch"
             case "$goos" in windows) out="$out.exe";; esac
             echo "building $out"
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
               go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$out" .
           done
-          (cd dist && sha256sum * > SHA256SUMS)
+
+      - name: Pack Linux and Windows
+        working-directory: desktop
+        run: |
+          mkdir -p dist/archives stage
+          # The tarball keeps the executable's mode, which is the whole point of shipping one: the
+          # file comes out of it runnable, with nothing to chmod first.
+          for arch in amd64 arm64; do
+            cp "dist/bin/daedalus-desktop-linux-$arch" stage/daedalus-desktop
+            chmod +x stage/daedalus-desktop
+            tar -czf "dist/archives/daedalus-desktop-linux-$arch.tar.gz" -C stage daedalus-desktop
+            rm stage/daedalus-desktop
+          done
+          cp dist/bin/daedalus-desktop-windows-amd64.exe stage/daedalus-desktop.exe
+          (cd stage && zip -q ../dist/archives/daedalus-desktop-windows-amd64.zip daedalus-desktop.exe)
+          rm -rf stage
+          ls -l dist/archives
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-dist
+          path: desktop/dist
+          retention-days: 1
+
+  # The bundle is built on macOS because only macOS has lipo, sips, iconutil, codesign and
+  # notarytool. It is the last job, so it is also the one that publishes: the checksums have to
+  # cover every archive, including its own.
+  package:
+    needs: binaries
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-dist
+          path: desktop/dist
+
+      - name: Build, sign and notarize Daedalus.app
+        working-directory: desktop
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          chmod +x dist/bin/daedalus-desktop-darwin-*
+          ./package-macos.sh "${{ github.ref_name }}" \
+            dist/bin/daedalus-desktop-darwin-amd64 \
+            dist/bin/daedalus-desktop-darwin-arm64 \
+            dist/app
+          mv dist/app/Daedalus-macOS.zip dist/archives/
+
+      - name: Checksums
+        working-directory: desktop
+        run: |
+          cd dist/archives
+          # Written outside the folder first: a checksum file cannot cover itself, and a glob that
+          # expanded after the redirect had made it would try.
+          shasum -a 256 ./* | sed 's| \./| |' > ../SHA256SUMS
+          mv ../SHA256SUMS SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Release notes
+        working-directory: desktop
+        run: |
+          if [ "$(cat dist/app/signing.txt)" = "developer-id" ]; then
+            mac_open='Double-click **Daedalus** in the folder. The app is signed and notarized, so it opens like any other application.'
+          else
+            mac_open='Double-click **Daedalus** in the folder. This build is signed ad-hoc rather than with a Developer ID certificate, so the first time you open a copy that came through a browser, macOS asks: right-click the app, choose **Open**, then **Open** again. Only the first launch asks. A copy installed with the one-liner below never asks at all.'
+          fi
+          cat > dist/notes.md <<NOTES
+          Daedalus on your own machine: one folder, Docker, and this launcher. It clones the two
+          repositories, asks for the keys on a page in your browser, starts the stack and opens the app.
+          **Docker Desktop (macOS, Windows) or Docker Engine with the compose plugin (Linux) has to be
+          installed and running** — the launcher never installs it for you.
+
+          ### Install it in one line — macOS and Linux
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/desktop/install.sh | sh
+          \`\`\`
+
+          It picks the right archive, checks it against the checksums below, and unpacks it into
+          \`./Daedalus\`.
+
+          ### Or download it
+
+          | Machine | File | Then |
+          |---|---|---|
+          | macOS (Apple Silicon and Intel) | \`Daedalus-macOS.zip\` | Unzip it into a folder of its own. $mac_open |
+          | Linux x86-64 | \`daedalus-desktop-linux-amd64.tar.gz\` | \`tar -xzf\` it into an empty folder and run \`./daedalus-desktop\`. |
+          | Linux ARM64 | \`daedalus-desktop-linux-arm64.tar.gz\` | \`tar -xzf\` it into an empty folder and run \`./daedalus-desktop\`. |
+          | Windows x86-64 | \`daedalus-desktop-windows-amd64.zip\` | \`Expand-Archive daedalus-desktop-windows-amd64.zip -DestinationPath Daedalus\` in PowerShell, then run \`daedalus-desktop.exe\`. The executable is unsigned, so SmartScreen warns once: **More info → Run anyway**. |
+
+          The launcher makes everything else — the checkouts, the keys, the database — inside the folder
+          you put it in, so deleting that folder deletes the installation.
+
+          \`SHA256SUMS\` covers every archive here. [desktop/README.md](https://github.com/${{ github.repository }}/blob/main/desktop/README.md) has the folder layout, the disk the images take, and every command.
+          NOTES
+          cat dist/notes.md
 
       - name: Attach them to the release
         if: startsWith(github.ref, 'refs/tags/')
+        working-directory: desktop
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          notes='Put the binary for your platform in an empty folder and run it. Docker is the only
-          requirement; see desktop/README.md. macOS refuses an unsigned binary on the first launch:
-          right-click it and choose Open, or run `xattr -d com.apple.quarantine daedalus-desktop`.'
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "$notes"
-          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file dist/notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file dist/notes.md
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/archives/* --clobber

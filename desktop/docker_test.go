@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -127,5 +128,47 @@ func TestTheImageFollowsTheRemote(t *testing.T) {
 		if got := imageOwner(remote); got != want {
 			t.Fatalf("%s names owner %q, want %q", remote, got, want)
 		}
+	}
+}
+
+// A launcher started from Finder inherits a PATH without Docker Desktop's client in it. Telling an
+// operator whose Docker is running that Docker is missing is the worst answer available, so the
+// installers' own locations are searched before giving up.
+func TestDockerIsFoundWherePATHDoesNotName(t *testing.T) {
+	never := func(string) (string, error) { return "", errors.New("not in PATH") }
+	found := func(want string) func(string) bool {
+		return func(path string) bool { return path == want }
+	}
+	for _, c := range []struct{ goos, home, want string }{
+		{"darwin", "/Users/someone", "/usr/local/bin/docker"},
+		{"darwin", "/Users/someone", "/opt/homebrew/bin/docker"},
+		{"darwin", "/Users/someone", "/Users/someone/.docker/bin/docker"},
+		{"darwin", "/Users/someone", "/Applications/Docker.app/Contents/Resources/bin/docker"},
+		{"linux", "/home/someone", "/usr/bin/docker"},
+		{"linux", "/home/someone", "/usr/local/bin/docker"},
+		{"linux", "/home/someone", "/snap/bin/docker"},
+		{"windows", `C:\Users\someone`, `C:\Program Files\Docker\Docker\resources\bin\docker.exe`},
+	} {
+		if got := findDocker(c.goos, c.home, never, found(c.want)); got != c.want {
+			t.Fatalf("%s: found %q, want %q", c.goos, got, c.want)
+		}
+	}
+	// Nothing anywhere is an empty answer, which is what CheckDocker turns into its one message.
+	if got := findDocker("darwin", "/Users/someone", never, func(string) bool { return false }); got != "" {
+		t.Fatalf("found %q where there is no docker", got)
+	}
+	// A home the process cannot name must not turn into a path rooted at the disk.
+	for _, candidate := range dockerCandidates("darwin", "") {
+		if strings.HasPrefix(candidate, "/.docker") {
+			t.Fatalf("a nameless home produced %s", candidate)
+		}
+	}
+}
+
+// PATH comes first: an operator who put docker somewhere of their own meant it.
+func TestPATHWinsOverTheKnownLocations(t *testing.T) {
+	mine := func(string) (string, error) { return "/opt/mine/docker", nil }
+	if got := findDocker("darwin", "/Users/someone", mine, func(string) bool { return true }); got != "/opt/mine/docker" {
+		t.Fatalf("got %q", got)
 	}
 }

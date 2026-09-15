@@ -65,7 +65,7 @@ func EnsureRepos(ctx context.Context, p Paths, log func(string, ...any)) error {
 			continue
 		}
 		log("cloning %s", repo.name)
-		if _, err := runOut(ctx, "docker", gitArgs(p, "clone", "--depth", cloneDepth, repo.remote, "/work/"+repo.name)...); err != nil {
+		if _, err := runOut(ctx, dockerCommand(), gitArgs(p, "clone", "--depth", cloneDepth, repo.remote, "/work/"+repo.name)...); err != nil {
 			return err
 		}
 	}
@@ -84,10 +84,10 @@ func UpdateRepos(ctx context.Context, p Paths, log func(string, ...any)) error {
 			continue
 		}
 		log("updating %s", repo.name)
-		if _, err := runOut(ctx, "docker", gitArgs(p, "-C", "/work/"+repo.name, "fetch", "--depth", cloneDepth, "origin", "main")...); err != nil {
+		if _, err := runOut(ctx, dockerCommand(), gitArgs(p, "-C", "/work/"+repo.name, "fetch", "--depth", cloneDepth, "origin", "main")...); err != nil {
 			return err
 		}
-		if _, err := runOut(ctx, "docker", gitArgs(p, "-C", "/work/"+repo.name, "reset", "--hard", "origin/main")...); err != nil {
+		if _, err := runOut(ctx, dockerCommand(), gitArgs(p, "-C", "/work/"+repo.name, "reset", "--hard", "origin/main")...); err != nil {
 			return err
 		}
 	}

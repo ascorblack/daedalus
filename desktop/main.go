@@ -35,7 +35,8 @@ commands:
   uninstall   remove the containers, networks and volumes
 
 flags:
-  --data DIR  where the checkouts, the keys and the environment live (default: ./data)
+  --data DIR  where the checkouts, the keys and the environment live
+              (default: ./data, or data/ beside the app when run from Daedalus.app)
   --port N    the port the launcher's own page listens on (default: 8770)
   --setup     ask the setup questions even though the configuration exists
   --keep-data uninstall: keep the volumes and the data folder
@@ -131,7 +132,7 @@ func run(argv []string) error {
 
 // startCommand is the whole first run: the page for the questions when there are questions to ask,
 // then the stack, then the browser. The launcher keeps serving its page afterwards so the buttons
-// work; closing it leaves the containers running.
+// work, whether the start succeeded or not; closing it leaves the containers running.
 func startCommand(ctx context.Context, app *App, opts options) error {
 	server := NewServer(app, opts.port)
 	if err := server.Start(); err != nil {
@@ -142,18 +143,42 @@ func startCommand(ctx context.Context, app *App, opts options) error {
 	if server != nil {
 		defer server.Stop(context.Background())
 	}
+	// showing records that the launcher's page is already in front of the operator, so it is not
+	// opened a second time in another tab.
+	showing := false
 	if !app.paths.Configured() || opts.setup {
 		if server == nil {
 			return errors.New("the setup page needs a free port: pass --port")
 		}
 		fmt.Println("Set Daedalus up at", server.URL())
 		_ = OpenBrowser(ctx, server.URL())
+		showing = true
 		if err := server.WaitForSetup(ctx); err != nil {
 			return err
 		}
 	}
+	if server != nil && !showing && Bundled() {
+		// Started from Finder the browser is the only window there is, and a first start pulls
+		// several gigabytes before the app itself answers. The launcher's page is where that
+		// progress is, so it is opened before the work rather than after it.
+		_ = OpenBrowser(ctx, server.URL())
+		showing = true
+	}
 	if err := app.Start(ctx); err != nil {
-		return err
+		if server == nil {
+			return err
+		}
+		// Double-clicked from Finder there is no terminal to read and no shell to try again in, and
+		// the commonest failure by far — Docker not installed, or installed and not started — is one
+		// the operator fixes in a minute and then wants a button for. App.Start has already recorded
+		// what happened for the page to show, so the launcher opens that page and stays on it.
+		fmt.Fprintln(os.Stderr, err.Error())
+		if !showing {
+			_ = OpenBrowser(ctx, server.URL())
+		}
+		fmt.Printf("The launcher is at %s — it says what went wrong, and starts the stack once that is fixed.\n", server.URL())
+		<-ctx.Done()
+		return nil
 	}
 	url := app.OpenURL(ctx)
 	fmt.Println("opening", url)

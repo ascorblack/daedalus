@@ -1,40 +1,56 @@
 # Daedalus on your own machine
 
-`daedalus-desktop` is a single binary that turns a folder into a running Daedalus. It clones the two
+`daedalus-desktop` is one small program — `Daedalus.app` on macOS — that turns a folder into a
+running Daedalus. It clones the two
 repositories, asks the handful of questions the stack needs on a page in your browser, writes the
 same environment files a server install uses, and runs `docker compose` against the repository's own
 `deploy/compose.yaml`. Nothing is installed on the host: **Docker is the only requirement**, and the
 launcher never installs it for you.
 
-The launcher is about 8 MB and carries no runtime with it. Everything that runs is in containers.
+It is about 8 MB, or twice that as the universal macOS build, and carries no runtime with it.
+Everything that runs is in containers.
 
 ## Get it
 
-Download the binary for your platform from the
-[releases page](https://github.com/ascorblack/daedalus/releases) (tags beginning with `desktop-v`),
-put it in an empty folder, and run it.
+One line on macOS and Linux — it takes the newest `desktop-v*` release, checks the download against
+the release's `SHA256SUMS`, and unpacks it into `./Daedalus`:
 
-```bash
-mkdir daedalus && cd daedalus
-curl -fL -o daedalus-desktop https://github.com/ascorblack/daedalus/releases/latest/download/daedalus-desktop-linux-amd64
-chmod +x daedalus-desktop
-./daedalus-desktop
+```sh
+curl -fsSL https://raw.githubusercontent.com/ascorblack/daedalus/main/desktop/install.sh | sh
 ```
 
-On **macOS**, the binary is not signed or notarized: Gatekeeper refuses it on the first launch.
-Either right-click it in Finder and choose *Open*, or clear the quarantine flag once:
+`DAEDALUS_DIR=/somewhere/else` puts it elsewhere. Or take the archive by hand from the
+[releases page](https://github.com/ascorblack/daedalus/releases) (the tags beginning with
+`desktop-v`):
 
-```bash
-xattr -d com.apple.quarantine daedalus-desktop
-```
+| Machine | File | What is in it |
+|---|---|---|
+| macOS, both kinds | `Daedalus-macOS.zip` | `Daedalus.app` — one universal build for Apple Silicon and Intel |
+| Linux x86-64 | `daedalus-desktop-linux-amd64.tar.gz` | `daedalus-desktop`, already executable |
+| Linux ARM64 | `daedalus-desktop-linux-arm64.tar.gz` | `daedalus-desktop`, already executable |
+| Windows x86-64 | `daedalus-desktop-windows-amd64.zip` | `daedalus-desktop.exe` |
 
-On **Windows**, run `daedalus-desktop-windows-amd64.exe` from a terminal in the folder you want the
-installation to live in; SmartScreen shows the same kind of warning for an unsigned binary.
+Unpack it into a folder of its own — the installation is made **inside that folder**, so deleting
+the folder deletes the installation.
+
+On **macOS**, double-click `Daedalus`. When the release was built with the signing secrets in place
+the app is signed and notarized and simply opens. When it was not, it is signed ad-hoc, and macOS
+asks once about a copy that arrived through a browser: right-click the app, choose *Open*, then
+*Open* again. A copy fetched by the one-liner above never asks at all — the quarantine attribute
+that makes Gatekeeper ask is set by the browser, and `curl` does not set it. Unzip with Finder or
+`ditto -x -k`, not with `unzip`: an app bundle carries symlinks and the signature's own extended
+attributes, and `unzip` drops both, which leaves an app macOS calls damaged.
+
+On **Windows**, unpack with `Expand-Archive daedalus-desktop-windows-amd64.zip -DestinationPath
+Daedalus` in PowerShell and run `daedalus-desktop.exe` from the folder you want the installation to
+live in. The executable is not signed, so SmartScreen warns once: *More info → Run anyway*.
 
 ## What happens on the first run
 
-1. Docker is checked. Without it the launcher says what to install and stops — Docker Desktop on
-   macOS and Windows, Docker Engine with the compose plugin on Linux.
+1. Docker is checked — including the places the installers put it, since a program started from
+   Finder inherits a PATH that has none of them in it. Without Docker the launcher says what to
+   install, on its own page as well as in the terminal, and waits there: Docker Desktop on macOS and
+   Windows, Docker Engine with the compose plugin on Linux.
 2. The two repositories are cloned into the folder, with `git` running in a container: git is not
    expected on the host either.
 3. A page opens at `http://127.0.0.1:8770` and asks for a model provider key, optionally the
@@ -48,28 +64,40 @@ back with the machine. The launcher's page is only a remote control.
 
 ## The folder
 
-Everything lives next to the binary, in `data/` (or wherever `--data` points):
+Everything the installation owns is in one folder — the one you unpacked into. On macOS the data
+sits **beside** the app, not inside it, because the bundle is replaced by the next download:
 
 ```
-data/
-  daedalus/               the bot checkout; deploy/compose.yaml runs from here
-  protocore-exp/          the core checkout
-  daedalus-secrets/
-    keyproxy.env          provider keys (0600) — outside every folder the agent can read
-    ssh/                  keys and config for hosts the agent may reach; may stay empty
-  .env                    what compose interpolates and the agent container reads
-  compose.desktop.yaml    the launcher's override: the published images, Telegram made optional
+Daedalus/
+  Daedalus.app            or daedalus-desktop / daedalus-desktop.exe elsewhere
+  data/
+    daedalus/               the bot checkout; deploy/compose.yaml runs from here
+    protocore-exp/          the core checkout
+    daedalus-secrets/
+      keyproxy.env          provider keys (0600) — outside every folder the agent can read
+      ssh/                  keys and config for hosts the agent may reach; may stay empty
+    .env                    what compose interpolates and the agent container reads
+    compose.desktop.yaml    the launcher's override: the published images, Telegram made optional
 ```
+
+`data/` is next to the `.app` when the launcher runs from a bundle, and next to the working
+directory otherwise — a plain executable run from a terminal makes `./data` where you are, as
+before. `--data DIR` overrides both. (Finder starts a bundled program with `/` as its working
+directory, which is why the bundle does not follow that rule.)
 
 This is the layout a server install has, which is why the repository's compose file runs against it
 unchanged. Provider keys are deliberately not in `.env`: that file is mounted into the agent
 container, and the key proxy's file is not.
 
-To move an installation, move the folder and the binary together, or pass `--data` to the folder's
-new place. To use a fork, set `DAEDALUS_GIT_REMOTE` and `DAEDALUS_CORE_GIT_REMOTE` before the first
-run: the images are pulled from the fork owner's namespace as well, so a fork's code never runs
-upstream's image. A fork that publishes no images has nothing to pull, and the first start builds
-them locally instead.
+To move an installation, move the whole folder. To use a fork, set `DAEDALUS_GIT_REMOTE` and
+`DAEDALUS_CORE_GIT_REMOTE` before the first run: the images are pulled from the fork owner's
+namespace as well, so a fork's code never runs upstream's image. A fork that publishes no images has
+nothing to pull, and the first start builds them locally instead.
+
+Double-clicked from Finder there is no terminal to read, so the launcher's page opens in the browser
+first and everything — the progress, a Docker that is not installed or not started, and the buttons
+to try again — is on it. The launcher keeps serving that page whether the start succeeded or not;
+closing it leaves the containers running.
 
 ## Commands
 
@@ -135,8 +163,46 @@ cd desktop
 ./build.sh            # GO_IMAGE=golang:1.23 by default; VERSION= to stamp a version
 ```
 
+`./package-macos.sh VERSION AMD64 ARM64 OUTPUT_DIR` turns the two macOS binaries into
+`Daedalus.app` inside `Daedalus-macOS.zip` — one universal executable made with `lipo`, the
+`Info.plist`, an `AppIcon.icns` built from `docs/brand/avatar-bot.png`, a signature, and the zip
+made with `ditto -c -k --keepParent`. It needs macOS: `lipo`, `sips`, `iconutil`, `codesign` and
+`notarytool` are all Apple's. Without the signing secrets in the environment it signs ad-hoc and
+says so, which is also what happens in CI when the secrets are not set.
+
 The module has no dependencies outside the standard library. Tests:
 
 ```bash
 docker run --rm -v "$PWD":/src -w /src -e GOFLAGS=-mod=mod -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod golang:1.23 go test ./...
 ```
+
+## Signing releases
+
+A release signed with a Developer ID certificate and notarized by Apple opens with a double-click
+and no questions; without the secrets below the same release is signed ad-hoc, which is fine for
+anyone installing with the one-liner and one right-click → *Open* for anyone who downloaded it in a
+browser. **A missing secret never fails the release** — the workflow signs ad-hoc, says so in the
+job log, and says so in the release notes.
+
+Five repository secrets, all five needed before signing is attempted:
+
+| Secret | What it is | Where it comes from |
+|---|---|---|
+| `APPLE_CERTIFICATE_P12` | base64 of a **Developer ID Application** certificate exported as `.p12` | Apple Developer account → *Certificates, Identifiers & Profiles* → *Certificates* → **+** → *Developer ID Application*. Upload a CSR made by Keychain Access (*Certificate Assistant → Request a Certificate From a Certificate Authority*), download the `.cer`, open it (it lands in the login keychain), then right-click the **private key** under *My Certificates* → *Export* to get the `.p12`. Requires the Apple Developer Program. |
+| `APPLE_CERTIFICATE_PASSWORD` | the password that export asked for | you choose it during the export |
+| `APPLE_ID` | the Apple account the app is notarized under | the account that owns the certificate |
+| `APPLE_TEAM_ID` | ten characters, e.g. `A1B2C3D4E5` | [developer.apple.com/account](https://developer.apple.com/account) → *Membership details* → *Team ID* |
+| `APPLE_APP_PASSWORD` | an **app-specific** password, not the account password | [appleid.apple.com](https://appleid.apple.com) → *Sign-In and Security* → *App-Specific Passwords* → **+** |
+
+The certificate is put into the secret base64-encoded, because a repository secret holds text:
+
+```bash
+base64 -i DeveloperID.p12 | tr -d '\n' | pbcopy    # macOS
+base64 -w0 DeveloperID.p12                         # Linux
+```
+
+What the workflow then does on the macOS runner: imports the certificate into a temporary keychain
+it deletes afterwards, signs the executable and the bundle with `--options runtime --timestamp` and
+the (deliberately empty) entitlements in `macos/entitlements.plist` — the hardened runtime is what
+notarization requires — submits the zip with `xcrun notarytool submit --wait`, staples the ticket to
+the bundle so the first launch needs no network, and zips it again.
