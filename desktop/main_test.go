@@ -33,4 +33,11 @@ func TestParseArgsRefusesWhatItCannotMean(t *testing.T) {
 	if _, err := parseArgs([]string{"--port", "abc"}); err == nil {
 		t.Fatal("a port must be a number")
 	}
+	// A mistyped port that quietly became another one would leave the page somewhere unexpected.
+	if _, err := parseArgs([]string{"--port", "8770abc"}); err == nil {
+		t.Fatal("a port with something after it is an error")
+	}
+	if _, err := parseArgs([]string{"--port", "70000"}); err == nil {
+		t.Fatal("a number that is not a port is an error")
+	}
 }

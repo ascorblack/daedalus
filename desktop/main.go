@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 )
 
@@ -225,9 +226,13 @@ func parseArgs(argv []string) (options, error) {
 			if err != nil {
 				return opts, err
 			}
-			if _, err := fmt.Sscanf(port, "%d", &opts.port); err != nil {
+			// Atoi and not Sscanf: Sscanf reads "8770abc" as 8770 and reports no error, and a
+			// mistyped port that silently becomes another one is worse than a refusal.
+			number, err := strconv.Atoi(strings.TrimSpace(port))
+			if err != nil || number < 0 || number > 65535 {
 				return opts, fmt.Errorf("--port takes a number, not %q", port)
 			}
+			opts.port = number
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return opts, fmt.Errorf("no such flag: %s\n\n%s", arg, usage)
