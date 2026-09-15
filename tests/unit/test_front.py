@@ -99,12 +99,23 @@ async def front(settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatc
     await manager.close()
 
 
-async def test_private_message_creates_the_direct_session_and_submits(front: TelegramFront) -> None:
+async def test_private_message_creates_the_first_session_and_submits(front: TelegramFront) -> None:
     await front.on_message(_message("hello agent"))
     await asyncio.sleep(0.05)
     assert front.submitted == [(front.submitted[0][0], "hello agent", [])]  # type: ignore[attr-defined]
+    session_id = front.submitted[0][0]  # type: ignore[attr-defined]
+    assert await front.current_session_id() == session_id  # with no group bound the chat is the window onto it
+    state = await front.manager.get_state(session_id)
+    assert state is not None and state.session.title == "direct"
+
+
+async def test_private_message_uses_the_bound_direct_topic_in_topics_mode(front: TelegramFront) -> None:
+    front.config.telegram.forum_chat_id = -100
+    await front.on_message(_message("hello agent"))
+    await asyncio.sleep(0.05)
     binding = await front.binding_for_topic(OWNER, 0)
     assert binding is not None and binding.title == "direct"
+    assert front.submitted[0][0] == binding.session_id  # type: ignore[attr-defined]
 
 
 async def test_non_owner_is_ignored(front: TelegramFront) -> None:

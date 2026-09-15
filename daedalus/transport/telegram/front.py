@@ -53,21 +53,33 @@ from daedalus.transport.telegram.voice import (
 
 logger = logging.getLogger(__name__)
 
-HELP = """<b>Daedalus</b>
+HELP_TOPICS = """<b>Daedalus</b>
 Each forum topic is one agent session with its own workspace. Write in a topic to talk to that session; files you send land in its workspace.
 
 /bind — (in a supergroup with topics) make it the session hub
 /new &lt;title&gt; — new session (new topic)
 /stop — stop the current run · /close — close this topic (asks whether to delete the agent and its workspace)
-/rename &lt;title&gt; — rename this session (and its topic) · /compact [focus] — replace the history with a summary
-/delete &lt;id&gt; · /cleanup — delete a session; delete every session whose topic is already closed
 /sessions · /status — what exists, what is running
-/model [provider/]&lt;name&gt;|default · /thinking on|off|low|medium|high — model settings (default in General, per session in a topic)
+"""
+
+HELP_PRIVATE = """<b>Daedalus</b>
+Every session lives in this chat, which is a window onto one of them at a time. Write here and the current session hears you; files you send land in its workspace. When another session speaks — a scheduled report, a loop agent, a question — its name is the line above its words, and an answer goes back to it.
+
+/sessions · /status — the sessions, numbered; what is running
+/use &lt;n|title&gt; — write to that session from now on
+/new &lt;title&gt; — new session, and write to it
+/stop — stop the current run · /close — put the current session away (asks whether to delete the agent and its workspace)
+/bind — (in a supergroup with topics) give every session a topic of its own instead
+"""
+
+HELP_TAIL = """/rename &lt;title&gt; — rename this session (and its topic) · /compact [focus] — replace the history with a summary
+/delete &lt;id&gt; · /cleanup — delete a session; delete every session whose topic is already closed
+/model [provider/]&lt;name&gt;|default · /thinking on|off|low|medium|high — model settings (per session; in a group's General topic, the default)
 /usage · /balance — spend and provider balances
 /schedules · /schedule run|on|off|delete &lt;id&gt; — scheduled tasks
 /inbox [all|clear] · /heartbeat [on|off|run] · /doctor · /intents — inbox, the periodic check, health, standing intents
 /mode [quick|deep|careful|default] — limits and rules for this session
-/board [all] · /peer here &lt;name&gt;|list|forget &lt;name&gt; — the task board; name this topic as a peer other sessions can ask
+/board [all] · /peer here &lt;name&gt;|list|forget &lt;name&gt; — the task board; name this session as a peer other sessions can ask
 /approval manual|auto · /verbosity 0|1|2 — self-change approval, chat detail
 /rebuild · /rollback [n] · /panic — supervisor operations
 /prompt — show the editable working rules (edit them in the Mini App → Settings)
@@ -131,6 +143,8 @@ FREE_REACTIONS = frozenset(
 )
 """The emoji a bot may react with (Telegram rejects anything else)."""
 
+FORCE_REPLY_MAX = 50
+"""How many open "type your answer" prompts are remembered by the session that asked."""
 VOICE_PENDING_TTL_SECONDS = 2 * 3600
 VOICE_PENDING_MAX = 50
 SPEECH_MIME_TYPES = {"audio/ogg", "audio/opus", "audio/oga", "audio/wav", "audio/x-wav", "audio/webm"}
@@ -138,6 +152,10 @@ RUN_REACTIONS = {"received": "👀", "steered": "✍", "completed": "🔥", "fai
 TOPIC_STATUS_PREFIX = {"running": "🟢", "awaiting": "🔴", "completed": "🏁", "failed": "💥", "cancelled": "⏹", "interrupted": "⏸", "compacting": "🗜"}
 """Telegram silently drops some emoji from the start of a topic name (✅ ❓ ✔️ ☑️ were measured to
 vanish, and a repeat rename then fails with TOPIC_NOT_MODIFIED); every prefix here was verified to survive."""
+CURRENT_SESSION_KEY = "telegram.current_session"
+"""Which session the private chat is a window onto; in kv, so a restart resumes the same one."""
+SESSION_HEADER = "▸"
+"""Marks the line that names a session speaking in the private chat out of its turn."""
 TOPIC_RENAME_DEBOUNCE_SECONDS = 2.0
 TOPIC_RENAME_MAX_WAIT_SECONDS = 60.0
 STALE_NOTICE_DELAY_SECONDS = 3.0
@@ -169,14 +187,31 @@ class TelegramOutbox(Outbox):
     Text goes out as a rich message (Telegram renders Markdown natively: tables, headings,
     code, quotes, collapsible blocks). When the server refuses rich content the same text
     falls back to HTML entities and finally to plain text.
+
+    ``header`` is asked, at every send, for the line that names the session this outbox belongs
+    to. It returns text only where the chat carries more than one session at once — the private
+    chat holding a session other than the current one — so the operator always knows who is
+    talking; in a topic, where the topic itself is the name, it stays empty.
     """
 
-    def __init__(self, bot: Bot, chat_id: int, thread_id: int | None) -> None:
+    def __init__(self, bot: Bot, chat_id: int, thread_id: int | None, *, header: Callable[[], str] | None = None) -> None:
         self.bot = bot
         self.chat_id = chat_id
         self.thread_id = thread_id or None
+        self.header = header
+
+    def attributed(self, text: str) -> str:
+        """``text`` with the session's name above it, for plain and Markdown messages."""
+        head = self.header() if self.header is not None else ""
+        return f"{head}\n{text}" if head else text
+
+    def attributed_html(self, text: str) -> str:
+        """The same line for rich HTML, where the title has to be escaped."""
+        head = self.header() if self.header is not None else ""
+        return f"<p>{html.escape(head, quote=False)}</p>{text}" if head else text
 
     async def send_text(self, text: str, *, markdown: bool = True) -> int:
+        text = self.attributed(text)
         if markdown:
             try:
                 msg = await tg_call(
@@ -206,6 +241,7 @@ class TelegramOutbox(Outbox):
         return msg.message_id
 
     async def send_html(self, html: str) -> int:
+        html = self.attributed_html(html)
         try:
             msg = await tg_call(
                 self.bot.send_rich_message, self.chat_id, InputRichMessage(html=html), message_thread_id=self.thread_id, flood_chat=self.chat_id
@@ -230,6 +266,7 @@ class TelegramOutbox(Outbox):
             logger.debug("reaction failed", exc_info=True)
 
     async def edit_text(self, message_id: int, text: str, *, html: bool = False) -> None:
+        text = self.attributed_html(text) if html else self.attributed(text)
         if flooded(self.chat_id):
             return  # Telegram asked for a pause; a status edit is skipped, the next one carries the newer state
         try:
@@ -251,6 +288,7 @@ class TelegramOutbox(Outbox):
             note_flood(self.chat_id, float(exc.retry_after))
 
     async def send_document(self, path: Path, caption: str | None = None) -> int:
+        caption = self.attributed(caption or "").strip() or None
         msg = await tg_call(
             self.bot.send_document,
             self.chat_id,
@@ -262,6 +300,7 @@ class TelegramOutbox(Outbox):
         return msg.message_id
 
     async def send_photo(self, path: Path, caption: str | None = None) -> int:
+        caption = self.attributed(caption or "").strip() or None
         msg = await tg_call(
             self.bot.send_photo,
             self.chat_id,
@@ -279,8 +318,12 @@ class TelegramOutbox(Outbox):
             pass
 
     async def send_draft(self, draft_id: int, text: str) -> bool:
-        """Live draft (Bot API 9.5+). Telegram allows it in private chats only."""
-        if self.chat_id < 0:
+        """Live draft (Bot API 9.5+). Telegram allows it in private chats only.
+
+        A draft carries no header, so a session that would need one streams nothing: its answer
+        arrives as a message with its name on it rather than as unattributed text being typed.
+        """
+        if self.chat_id < 0 or (self.header is not None and self.header()):
             return False
         try:
             if text:
@@ -327,8 +370,15 @@ class TelegramFront:
         self.router = Router()
         self.dp.include_router(self.router)
         self._renderers: dict[str, RunRenderer] = {}
-        self._buffers: dict[tuple[int, int], InboundBuffer] = {}
+        self._buffers: dict[tuple[int, int, str], InboundBuffer] = {}
+        """One merge buffer per (chat, thread, session): in the private chat two sessions share a
+        chat, and their messages must not be merged into one submission."""
         self._question_state: dict[str, dict[str, Any]] = {}
+        self._current_session: str | None = None
+        """The private chat's session, cached from kv; None until it is read the first time."""
+        self._force_reply_targets: dict[int, str] = {}
+        """Message id of a "type your answer" prompt → the session that asked, so a reply in a
+        chat shared by several sessions is attributed to the asker and not to the current one."""
         self._compact_focus: dict[str, str] = {}
         self._last_operator_message: dict[str, tuple[int, int]] = {}
         """Per session: the chat and id of the operator's latest message, for the outcome reaction."""
@@ -379,7 +429,37 @@ class TelegramFront:
     def _is_owner(self, user_id: int | None) -> bool:
         return user_id is not None and user_id == self.settings.owner_user_id
 
+    def private_mode(self) -> bool:
+        """True when every session lives in the operator's private chat rather than in its own topic."""
+        return self.config.telegram.session_mode() == "private"
+
+    async def current_session_id(self) -> str:
+        """The session the private chat is a window onto; remembered in kv across restarts."""
+        if self._current_session is None:
+            self._current_session = str(await self.manager.db.kv_get(CURRENT_SESSION_KEY, "") or "")
+        return self._current_session
+
+    async def set_current_session(self, session_id: str) -> None:
+        self._current_session = session_id
+        await self.manager.db.kv_set(CURRENT_SESSION_KEY, session_id)
+
+    async def current_state(self) -> SessionState | None:
+        """The session the private chat talks to; the first message creates it."""
+        session_id = await self.current_session_id()
+        state = await self.manager.get_state(session_id) if session_id else None
+        if state is None:
+            binding = await self.binding_for_topic(self.settings.owner_user_id, 0)
+            # The chat's single session from before it held several: keep talking to that one.
+            state = await self.manager.get_state(binding.session_id) if binding is not None else None
+        if state is None:
+            state = await self.manager.create_session("direct")
+        await self.set_current_session(state.session.id)
+        return state
+
     def _general_outbox(self) -> TelegramOutbox | None:
+        """The operator channel: the General topic of the bound forum, or the private chat."""
+        if self.private_mode():
+            return TelegramOutbox(self.bot, self.settings.owner_user_id, None) if self.settings.owner_user_id else None
         chat_id = self.config.telegram.forum_chat_id or self.settings.owner_user_id
         if not chat_id:
             return None
@@ -403,12 +483,13 @@ class TelegramFront:
                 if len(data.encode("utf-8")) > 64:
                     raise ValueError(f"callback_data over Telegram's 64-byte limit: {data!r}")
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label[:60], callback_data=data) for label, data in row] for row in rows])
-        msg = await tg_call(self.bot.send_message, outbox.chat_id, text, message_thread_id=outbox.thread_id, reply_markup=keyboard, flood_chat=outbox.chat_id)
+        msg = await tg_call(self.bot.send_message, outbox.chat_id, outbox.attributed(text), message_thread_id=outbox.thread_id, reply_markup=keyboard, flood_chat=outbox.chat_id)
         return int(msg.message_id)
 
-    async def send_force_reply(self, chat_id: int, thread_id: int | None, text: str) -> None:
-        """Ask for a one-message free-text reply (the client opens the reply box)."""
-        await tg_call(self.bot.send_message, chat_id, text, message_thread_id=thread_id, reply_markup=ForceReply(selective=True), flood_chat=chat_id)
+    async def send_force_reply(self, chat_id: int, thread_id: int | None, text: str) -> int:
+        """Ask for a one-message free-text reply (the client opens the reply box); returns its message id."""
+        msg = await tg_call(self.bot.send_message, chat_id, text, message_thread_id=thread_id, reply_markup=ForceReply(selective=True), flood_chat=chat_id)
+        return int(msg.message_id)
 
     async def binding_for_session(self, session_id: str) -> TopicBinding | None:
         row = await self.manager.db.fetchone("SELECT * FROM topics WHERE session_id = ?", (session_id,))
@@ -428,16 +509,39 @@ class TelegramFront:
         return TopicBinding(chat_id, thread_id, session_id, title)
 
     async def outbox_for_session(self, session_id: str) -> TelegramOutbox | None:
+        """Where this session's output goes: the one place that tells the two modes apart."""
+        if self.private_mode():
+            return await self._private_outbox(session_id)
         binding = await self.binding_for_session(session_id)
         if binding is None:
             return self._general_outbox()
         return TelegramOutbox(self.bot, binding.chat_id, binding.thread_id)
 
+    async def _private_outbox(self, session_id: str) -> TelegramOutbox | None:
+        """The private chat, naming the session whenever it is not the one the operator is writing to."""
+        if not self.settings.owner_user_id:
+            return None
+        await self.current_session_id()  # warm the cache: the header below is read on a send, which cannot await
+
+        def header() -> str:
+            if session_id == self._current_session:
+                return ""
+            state = self.manager.live_state(session_id)
+            return f"{SESSION_HEADER} {state.session.title if state is not None else session_id}"
+
+        return TelegramOutbox(self.bot, self.settings.owner_user_id, None, header=header)
+
     async def create_session_topic(
         self, title: str, *, metadata: dict[str, Any] | None = None, chat_id: int | None = None, topic: bool = True
     ) -> tuple[SessionState, TopicBinding]:
-        """Create a session and, when a forum is bound, its topic."""
+        """Create a session and, in topics mode, its topic.
+
+        In private mode there is no topic and nothing to bind: the session is reachable from
+        /sessions, /use and the Mini App, and speaks in the private chat under its own name.
+        """
         state = await self.manager.create_session(title, metadata=metadata)
+        if self.private_mode():
+            return state, TopicBinding(self.settings.owner_user_id, 0, state.session.id, title)
         forum = (chat_id or self.config.telegram.forum_chat_id) if topic else 0
         if forum:
             try:
@@ -470,6 +574,8 @@ class TelegramFront:
         thread_id = message.message_thread_id or 0
         if message.chat.type == "private":
             thread_id = 0
+            if self.private_mode():
+                return await self.current_state()
         binding = await self.binding_for_topic(chat_id, thread_id)
         if binding is not None:
             return await self.manager.get_state(binding.session_id)
@@ -498,6 +604,7 @@ class TelegramFront:
         r = self.router
         r.message.register(self.cmd_start, Command("start", "help"))
         r.message.register(self.cmd_new, Command("new"))
+        r.message.register(self.cmd_use, Command("use"))
         r.message.register(self.cmd_stop, Command("stop"))
         r.message.register(self.cmd_close, Command("close"))
         r.message.register(self.cmd_rename, Command("rename"))
@@ -527,7 +634,7 @@ class TelegramFront:
     async def cmd_start(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
-        await message.answer(HELP, parse_mode=ParseMode.HTML)
+        await message.answer((HELP_PRIVATE if self.private_mode() else HELP_TOPICS) + HELP_TAIL, parse_mode=ParseMode.HTML)
 
     async def cmd_bind(self, message: Message) -> None:
         """Bind this forum supergroup as the session hub."""
@@ -538,13 +645,22 @@ class TelegramFront:
             return
         self.config.telegram.forum_chat_id = message.chat.id
         self.config.telegram.general_topic_id = 0
+        self.config.telegram.mode = "topics"
         await self.save_config(self.config)
-        await message.answer("Bound. Create sessions with /new <title>; each topic is a session.")
+        await message.answer(
+            "Bound. Create sessions with /new <title>; each topic is a session. "
+            "The private chat goes back to being one window in Mini App → Settings → Chat."
+        )
 
     async def cmd_new(self, message: Message, command: CommandObject) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
         title = (command.args or "").strip() or datetime.now(UTC).strftime("session %m-%d %H:%M")
+        if self.private_mode():
+            state, _ = await self.create_session_topic(title)
+            await self.set_current_session(state.session.id)
+            await message.answer(f"New session '{title}' ({state.session.id}). You are writing to it; /sessions lists the others.")
+            return
         if message.chat.type == "private" and not self.config.telegram.forum_chat_id:
             await message.answer(
                 "Topics need a supergroup with topics enabled: add me there as an admin "
@@ -556,6 +672,34 @@ class TelegramFront:
         state, binding = await self.create_session_topic(title, chat_id=forum)
         if message.chat.type == "private":
             await message.answer(f"Created topic '{title}' (session {state.session.id}).")
+
+    async def cmd_use(self, message: Message, command: CommandObject) -> None:
+        """Point the private chat at another session: by its number in /sessions, its title, or its id."""
+        if not self._is_owner(message.from_user.id if message.from_user else None):
+            return
+        if not self.private_mode():
+            await message.answer("/use belongs to the private chat; in a bound group, write in the session's own topic.")
+            return
+        arg = (command.args or "").strip()
+        if not arg:
+            await message.answer("usage: /use <number from /sessions | title | session id>")
+            return
+        sessions = await self.manager.list_sessions(limit=50)
+        chosen: dict[str, Any] | None = None
+        if arg.isdigit() and 1 <= int(arg) <= len(sessions):
+            chosen = sessions[int(arg) - 1]
+        else:
+            lowered = arg.lower()
+            chosen = (
+                next((s for s in sessions if s["id"] == arg), None)
+                or next((s for s in sessions if s["title"].lower().startswith(lowered)), None)
+                or next((s for s in sessions if lowered in s["title"].lower()), None)
+            )
+        if chosen is None:
+            await message.answer(f"No session matches {arg!r}; /sessions lists them.")
+            return
+        await self.set_current_session(str(chosen["id"]))
+        await message.answer(f"Writing to '{chosen['title']}' ({chosen['id']}). What the others say still arrives here, under their names.")
 
     async def cmd_stop(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
@@ -569,13 +713,21 @@ class TelegramFront:
     async def cmd_close(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
+        if self.private_mode():
+            session_id = await self.current_session_id()
+            state = await self.manager.get_state(session_id) if session_id else None
+            if state is None:
+                await message.answer("No session is open here; /new <title> starts one.")
+                return
+            await self._ask_close(state.session.id, state.session.title, message.chat.id, None)
+            return
         if self._is_general(message):
             await message.answer("Use /close inside a session topic.")
             return
         binding = await self.binding_for_topic(message.chat.id, message.message_thread_id or 0)
         if binding is None:
             return
-        await self._ask_close(binding, message.chat.id, message.message_thread_id)
+        await self._ask_close(binding.session_id, binding.title, message.chat.id, message.message_thread_id)
 
     async def cmd_rename(self, message: Message, command: CommandObject) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
@@ -610,7 +762,7 @@ class TelegramFront:
 
     def set_topic_status(self, session_id: str, status: str) -> None:
         """Show the session's state in its topic name (debounced: one rename per burst of changes)."""
-        if not self.config.telegram.topic_status_emoji or self._topic_status.get(session_id) == status:
+        if self.private_mode() or not self.config.telegram.topic_status_emoji or self._topic_status.get(session_id) == status:
             return
         self._topic_status[session_id] = status
         task = self._topic_status_tasks.get(session_id)
@@ -770,25 +922,31 @@ class TelegramFront:
         outbox = TelegramOutbox(self.bot, message.chat.id, message.message_thread_id if message.is_topic_message else None)
         await outbox.send_html(f"<p><b>Working rules</b> — {origin}. Edit in the Mini App → Settings.</p><pre>{html.escape(rules)}</pre>")
 
-    async def _ask_close(self, binding: TopicBinding, chat_id: int, thread_id: int | None) -> None:
-        state = await self.manager.get_state(binding.session_id)
+    async def _ask_close(self, session_id: str, title: str, chat_id: int, thread_id: int | None) -> None:
+        state = await self.manager.get_state(session_id)
         size = 0
         if state is not None and state.workspace.exists():
             size = sum(f.stat().st_size for f in state.workspace.rglob("*") if f.is_file())
+        keep = "📦 Put it away, keep the agent" if self.private_mode() else "📦 Close the topic, keep the agent"
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="🗑 Close and delete the agent + workspace", callback_data=f"cl:{binding.session_id}:delete")],
-                [InlineKeyboardButton(text="📦 Close the topic, keep the agent", callback_data=f"cl:{binding.session_id}:keep")],
-                [InlineKeyboardButton(text="Cancel", callback_data=f"cl:{binding.session_id}:cancel")],
+                [InlineKeyboardButton(text="🗑 Close and delete the agent + workspace", callback_data=f"cl:{session_id}:delete")],
+                [InlineKeyboardButton(text=keep, callback_data=f"cl:{session_id}:keep")],
+                [InlineKeyboardButton(text="Cancel", callback_data=f"cl:{session_id}:cancel")],
             ]
         )
         await tg_call(
             self.bot.send_message,
             chat_id,
-            f"Close session '{binding.title}' ({binding.session_id})? Its workspace holds {size / 1_048_576:.1f} MB.",
+            f"Close session '{title}' ({session_id})? Its workspace holds {size / 1_048_576:.1f} MB.",
             message_thread_id=thread_id,
             reply_markup=keyboard,
         )
+
+    async def _release_current(self, session_id: str) -> None:
+        """A session that was put away or deleted stops being the private chat's window."""
+        if await self.current_session_id() == session_id:
+            await self.set_current_session("")
 
     async def _close_topic(self, binding: TopicBinding) -> None:
         await self.manager.db.execute(
@@ -835,15 +993,19 @@ class TelegramFront:
                 await query.message.edit_text("Close cancelled.", reply_markup=None)
             return
         if action == "keep":
+            await self.manager.stop(session_id)
             if binding is not None:
-                await self.manager.stop(session_id)
                 await self._close_topic(binding)
+            await self._release_current(session_id)
             await query.answer("closed")
             if query.message is not None:
-                await query.message.edit_text(f"Topic closed; session {session_id} and its workspace are kept (/sessions, Mini App).", reply_markup=None)
+                where = "/sessions, /use, Mini App" if self.private_mode() else "/sessions, Mini App"
+                what = "Put away" if self.private_mode() else "Topic closed"
+                await query.message.edit_text(f"{what}; session {session_id} and its workspace are kept ({where}).", reply_markup=None)
             return
         if binding is not None:
             await self._close_topic(binding)
+        await self._release_current(session_id)
         removed = await self.manager.delete_session(session_id, delete_workspace=True)
         await query.answer("deleted" if removed else "already gone")
         if query.message is not None:
@@ -864,7 +1026,7 @@ class TelegramFront:
             "UPDATE topics SET closed_at = ? WHERE chat_id = ? AND thread_id = ?",
             (datetime.now(UTC).isoformat(), binding.chat_id, binding.thread_id),
         )
-        await self._ask_close(binding, message.chat.id, self.config.telegram.general_topic_id or None)
+        await self._ask_close(binding.session_id, binding.title, message.chat.id, self.config.telegram.general_topic_id or None)
 
     async def cmd_delete(self, message: Message, command: CommandObject) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
@@ -878,7 +1040,7 @@ class TelegramFront:
             removed = await self.manager.delete_session(session_id)
             await message.answer("deleted" if removed else "no such session")
             return
-        await self._ask_close(binding, message.chat.id, message.message_thread_id if message.is_topic_message else None)
+        await self._ask_close(binding.session_id, binding.title, message.chat.id, message.message_thread_id if message.is_topic_message else None)
 
     async def cmd_cleanup(self, message: Message) -> None:
         """Delete every session whose topic is already closed."""
@@ -922,11 +1084,17 @@ class TelegramFront:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
         sessions = await self.manager.list_sessions(limit=30)
+        private = self.private_mode()
         if not sessions:
-            await message.answer("No sessions yet.")
+            await message.answer("No sessions yet." + (" /new <title> starts one." if private else ""))
             return
-        lines = [f"{'▶' if s['status']=='running' else '❓' if s['status']=='waiting' else '·'} {s['title']} — {s['id']} ({s['status']})" for s in sessions]
-        await message.answer("\n".join(lines))
+        current = await self.current_session_id() if private else ""
+        lines = [
+            f"{i}. {'▶' if s['status'] == 'running' else '❓' if s['status'] == 'waiting' else '·'} {s['title']} — {s['id']} ({s['status']})"
+            + ("  ← you are writing here" if s["id"] == current else "")
+            for i, s in enumerate(sessions, 1)
+        ]
+        await message.answer("\n".join(lines) + ("\n\n/use <number> writes to another one." if private else ""))
 
     async def cmd_model(self, message: Message, command: CommandObject) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
@@ -1062,7 +1230,12 @@ class TelegramFront:
             f"self-change approval: {c.self_change.approval}, auto_rebuild={c.self_change.auto_rebuild}\n"
             f"limits: ${self.settings.usd_per_day}/day (env), {c.limits.max_iterations} iterations, tool timeout {c.limits.tool_timeout_seconds:.0f}s\n"
             f"balance thresholds: {c.balance.thresholds_usd} (every {c.balance.poll_seconds}s)\n"
-            f"verbosity: {c.telegram.verbosity}\nforum: {c.telegram.forum_chat_id or 'not bound'}"
+            f"verbosity: {c.telegram.verbosity}\n"
+            + (
+                "chat: one private chat, a window onto one session at a time (/sessions, /use)"
+                if self.private_mode()
+                else f"chat: one topic per session in forum {c.telegram.forum_chat_id or 'not bound'}"
+            )
         )
 
     async def cmd_operator(self, message: Message, command: CommandObject) -> None:
@@ -1122,7 +1295,7 @@ class TelegramFront:
         if self._is_stale(message):
             self._note_stale(message)
             return
-        state = await self._session_for_message(message)
+        state = await self._force_reply_session(message) or await self._session_for_message(message)
         if state is None:
             return
         if await self._maybe_custom_answer(message, state):
@@ -1133,7 +1306,7 @@ class TelegramFront:
         if oversize:
             await message.reply(f"⚠️ {oversize}")
             return
-        key = (message.chat.id, message.message_thread_id or 0)
+        key = (message.chat.id, message.message_thread_id or 0, state.session.id)
         text = self._text_of(message)
         self._last_operator_message[state.session.id] = (message.chat.id, message.message_id)
         if self.config.telegram.reactions:
@@ -1194,7 +1367,7 @@ class TelegramFront:
             pass
 
     async def _enqueue_text(self, state: SessionState, message: Message, text: str, attachment: Attachment | None) -> None:
-        key = (message.chat.id, message.message_thread_id or 0)
+        key = (message.chat.id, message.message_thread_id or 0, state.session.id)
         buffer = self._buffers.setdefault(key, InboundBuffer())
         buffer.text.append(text)
         if attachment is not None:
@@ -1232,7 +1405,7 @@ class TelegramFront:
         if state is None:
             return
         self._discard_audio(state, attachment)
-        key = (chat_id, thread_id)
+        key = (chat_id, thread_id, session_id)
         buffer = self._buffers.setdefault(key, InboundBuffer())
         buffer.text.append(text)
         if buffer.task is not None:
@@ -1307,7 +1480,7 @@ class TelegramFront:
         except TelegramBadRequest:
             pass
 
-    async def _flush_inbound(self, key: tuple[int, int], state: SessionState, wait: float) -> None:
+    async def _flush_inbound(self, key: tuple[int, int, str], state: SessionState, wait: float) -> None:
         await asyncio.sleep(wait)
         buffer = self._buffers.pop(key, None)
         if buffer is None:
@@ -1322,8 +1495,9 @@ class TelegramFront:
             await self.manager.submit(state.session.id, text, buffer.attachments)
         except Exception as exc:  # noqa: BLE001
             logger.exception("submit failed")
-            outbox = TelegramOutbox(self.bot, key[0], key[1] or None)
-            await outbox.send_text(f"⚠️ could not start: {exc}", markdown=False)
+            outbox = await self.outbox_for_session(state.session.id)
+            if outbox is not None:
+                await outbox.send_text(f"⚠️ could not start: {exc}", markdown=False)
             await self.react_to_last(state.session.id, "failed")
             return
         if was_running:
@@ -1404,7 +1578,7 @@ class TelegramFront:
         if len(state["questions"]) > 1:
             text += f"\n({index + 1}/{len(state['questions'])})"
         msg = await tg_call(
-            self.bot.send_message, outbox.chat_id, text, message_thread_id=outbox.thread_id, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+            self.bot.send_message, outbox.chat_id, outbox.attributed(text), message_thread_id=outbox.thread_id, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
         )
         state["message_ids"].append(msg.message_id)
 
@@ -1412,6 +1586,12 @@ class TelegramFront:
         """The operator pressed Stop on a streaming draft: cancel that session's run."""
         chat_id = event.chat.id
         thread_id = getattr(event, "message_thread_id", None) or 0
+        if self.private_mode() and chat_id == self.settings.owner_user_id:
+            # Only the current session streams a draft here, so the Stop belongs to it.
+            session_id = await self.current_session_id()
+            if session_id:
+                await self.manager.stop(session_id)
+            return
         binding = await self.binding_for_topic(chat_id, thread_id)
         if binding is not None:
             await self.manager.stop(binding.session_id)
@@ -1475,7 +1655,16 @@ class TelegramFront:
         if choice == "custom":
             await query.answer()
             if query.message is not None:
-                await self.bot.send_message(query.message.chat.id, "Type your answer:", message_thread_id=query.message.message_thread_id if query.message.is_topic_message else None, reply_markup=ForceReply(selective=True))
+                prompt_id = await self.send_force_reply(
+                    query.message.chat.id,
+                    query.message.message_thread_id if query.message.is_topic_message else None,
+                    "Type your answer:",
+                )
+                # What the operator replies to says whose question it answers, so a chat holding
+                # several sessions still routes the answer to the session that asked.
+                self._force_reply_targets[prompt_id] = session_id
+                while len(self._force_reply_targets) > FORCE_REPLY_MAX:
+                    self._force_reply_targets.pop(next(iter(self._force_reply_targets)))
             state["awaiting_custom"] = index
             return
         if choice == "done":
@@ -1555,6 +1744,12 @@ class TelegramFront:
             state["index"] = max(0, len(state["questions"]) - 1)
             return
         self._question_state.pop(session_id, None)
+
+    async def _force_reply_session(self, message: Message) -> SessionState | None:
+        """The session whose "type your answer" prompt this message replies to, if any."""
+        reply = message.reply_to_message
+        session_id = self._force_reply_targets.pop(reply.message_id, None) if reply is not None else None
+        return await self.manager.get_state(session_id) if session_id else None
 
     async def _maybe_custom_answer(self, message: Message, state: SessionState) -> bool:
         qs = self._question_state.get(state.session.id)

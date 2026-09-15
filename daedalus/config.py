@@ -24,6 +24,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 ReasoningEffort = Literal["low", "medium", "high"]
 ApprovalMode = Literal["manual", "auto"]
 ScheduleTopicMode = Literal["per_task", "per_run"]
+TelegramMode = Literal["topics", "private"]
 
 ProviderKind = Literal["deepseek", "openrouter", "opencode", "vllm", "openai_compat"]
 PROVIDER_KINDS: tuple[ProviderKind, ...] = ("deepseek", "openrouter", "opencode", "vllm", "openai_compat")
@@ -579,6 +580,11 @@ class HeartbeatConfig(BaseModel):
 
 
 class TelegramConfig(BaseModel):
+    mode: TelegramMode | None = None
+    """Where sessions live in Telegram. ``topics``: one forum topic per session in the bound
+    supergroup. ``private``: every session lives in the operator's private chat, which is a window
+    onto one of them at a time (/sessions, /use). Unset means the shape follows the installation —
+    topics once a group was bound, the private chat otherwise."""
     forum_chat_id: int = 0
     """Supergroup with topics; 0 means "not bound yet"."""
     general_topic_id: int = 0
@@ -606,6 +612,10 @@ class TelegramConfig(BaseModel):
     streaming: bool = True
     """Stream the answer as a live draft (sendMessageDraft) while it is generated; private chats only."""
     draft_interval_seconds: float = 0.35
+
+    def session_mode(self) -> TelegramMode:
+        """The mode in force: the explicit choice, or topics for an installation that bound a group."""
+        return self.mode or ("topics" if self.forum_chat_id else "private")
 
 
 OPENCODE_GO_PRICING: dict[str, dict[str, float]] = {
