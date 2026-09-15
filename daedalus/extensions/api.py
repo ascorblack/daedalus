@@ -2414,6 +2414,9 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     if not app.settings.telegram_bot_token and await passkeys.count(app.db) == 0:
         await pairing.announce(app.db, app.settings.state_dir, base)
         logger.warning("pairing link written to %s (opens once; `daedalus auth pair` makes another)", app.settings.state_dir / pairing.URL_FILE)
+    else:
+        # A link a previous start left behind is at best expired and at worst a way in nobody asked for.
+        (app.settings.state_dir / pairing.URL_FILE).unlink(missing_ok=True)
     if app.front is not None:
 
         async def cmd_app(message, command) -> None:  # type: ignore[no-untyped-def]
