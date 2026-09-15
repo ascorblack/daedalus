@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,17 +24,34 @@ func TestParsePairingURLTakesTheLastAddress(t *testing.T) {
 	}
 }
 
-func TestPairingFromLogsPrefersTheNewestLine(t *testing.T) {
-	logs := strings.Join([]string{
-		"daedalus-1  | starting",
-		"daedalus-1  | pairing link: http://127.0.0.1:8765/p/first",
-		"daedalus-1  | restarting",
-		"daedalus-1  | Pairing link: http://127.0.0.1:8765/p/second.",
-	}, "\n")
-	if got := pairingFromLogs(logs); got != "http://127.0.0.1:8765/p/second" {
+// The server writes the link to a file when the stack comes up, and the launcher offers it only
+// while it belongs to that start: a link is good for one use, and an older file holds one that has
+// most likely been spent already.
+func TestPairingIsReadOnlyFromAFileTheLastStartWrote(t *testing.T) {
+	started := time.Now()
+	fresh := fmt.Sprintf("%d\nhttp://127.0.0.1:8765/api/auth/pair?code=fresh\n", started.Add(2*time.Second).Unix())
+	if got := pairingFromFile(fresh, started); got != "http://127.0.0.1:8765/api/auth/pair?code=fresh" {
 		t.Fatalf("got %q", got)
 	}
-	if got := pairingFromLogs("daedalus-1  | nothing about pairing\n"); got != "" {
+	stale := fmt.Sprintf("%d\nhttp://127.0.0.1:8765/api/auth/pair?code=spent\n", started.Add(-time.Hour).Unix())
+	if got := pairingFromFile(stale, started); got != "" {
+		t.Fatalf("a link from an earlier start was offered: %q", got)
+	}
+	// Nothing to measure against: the launcher did not start this stack itself.
+	if got := pairingFromFile(stale, time.Time{}); got != "http://127.0.0.1:8765/api/auth/pair?code=spent" {
+		t.Fatalf("got %q", got)
+	}
+	if got := pairingFromFile("cat: no such file\n", started); got != "" {
+		t.Fatalf("invented a link: %q", got)
+	}
+}
+
+func TestAMintedLinkIsReadOffTheFirstLine(t *testing.T) {
+	out := "http://127.0.0.1:8765/api/auth/pair?code=one\nthis link opens once and expires in 30 minutes\n"
+	if got := firstPairingURL(out); got != "http://127.0.0.1:8765/api/auth/pair?code=one" {
+		t.Fatalf("got %q", got)
+	}
+	if got := firstPairingURL("no link here\n"); got != "" {
 		t.Fatalf("invented a link: %q", got)
 	}
 }

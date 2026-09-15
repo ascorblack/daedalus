@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -11,6 +12,10 @@ import (
 // readyTimeout covers a first start on a cold machine: pulling the agent image, or building it,
 // then the supervisor's own startup.
 const readyTimeout = 3 * time.Minute
+
+// pairingFile is where the server leaves the link that signs the operator in. The state directory is
+// a named Docker volume, so the file is read through the container rather than from the host.
+const pairingFile = "/srv/state/pairing-url"
 
 // AppURL is the address of the app on this machine.
 func AppURL(port string) string { return "http://127.0.0.1:" + port + "/app/" }
@@ -45,20 +50,62 @@ func WaitReady(ctx context.Context, port string, timeout time.Duration) error {
 	return fmt.Errorf("the app at %s did not come up within %s (%s)", url, timeout, last)
 }
 
-// PairingURL asks the running container for the link that signs the operator in. The state
-// directory is a named Docker volume, so it is read through the container rather than from the
-// host; when the file is not there the logs are read for the line the server prints at startup.
-func PairingURL(ctx context.Context, p Paths, telegram bool) string {
-	if out, err := compose(ctx, p, telegram, "exec", "-T", "daedalus", "cat", "/srv/state/pairing-url"); err == nil {
-		if url := parsePairingURL(out); url != "" {
-			return url
-		}
-	}
-	out, err := compose(ctx, p, telegram, "logs", "--no-color", "--tail", "500", "daedalus")
+// PairingURL reads the link the server left in the state directory, and only when the file was
+// written after the moment the launcher last brought the stack up. A link is good for one use: an
+// older file is from an earlier run, its link has most likely been spent, and sending the operator
+// to a spent link is worse than sending them to the app's own login screen.
+func PairingURL(ctx context.Context, p Paths, telegram bool, after time.Time) string {
+	out, err := composeQuiet(ctx, p, telegram, "exec", "-T", "daedalus",
+		"sh", "-c", "stat -c %Y "+pairingFile+" && cat "+pairingFile)
 	if err != nil {
 		return ""
 	}
-	return pairingFromLogs(out)
+	return pairingFromFile(out, after)
+}
+
+// MintPairing asks the container for a fresh link. This is the only other way the launcher comes by
+// one: the server does not put the link anywhere a log reader could pick it up, and a launcher that
+// harvested logs would be teaching the operator that a log file is a place to find a credential.
+func MintPairing(ctx context.Context, p Paths, telegram bool) (string, error) {
+	out, err := composeQuiet(ctx, p, telegram, "exec", "-T", "daedalus",
+		"uv", "run", "--frozen", "python", "-m", "daedalus", "auth", "pair")
+	if err != nil {
+		return "", err
+	}
+	return firstPairingURL(out), nil
+}
+
+// pairingFromFile reads what stat and cat printed together: the file's modification time as an
+// epoch second on the first line, the link on what follows. A zero `after` means this launcher did
+// not start the stack and has nothing to measure the file against, so the file is taken as it is.
+func pairingFromFile(out string, after time.Time) string {
+	head, rest, ok := strings.Cut(strings.TrimSpace(out), "\n")
+	if !ok {
+		return ""
+	}
+	written, err := strconv.ParseInt(strings.TrimSpace(head), 10, 64)
+	if err != nil {
+		return ""
+	}
+	// stat counts in whole seconds, so the start is rounded down to the same resolution rather than
+	// failing a file written in the very second the stack came up.
+	if !after.IsZero() && time.Unix(written, 0).Before(after.Truncate(time.Second)) {
+		return ""
+	}
+	return parsePairingURL(rest)
+}
+
+// firstPairingURL takes the link off the first line that carries one: the command prints the link
+// and nothing else, and anything ahead of it is the container clearing its throat.
+func firstPairingURL(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		for _, field := range strings.Fields(line) {
+			if isHTTPURL(field) {
+				return strings.TrimRight(field, ".,)")
+			}
+		}
+	}
+	return ""
 }
 
 // parsePairingURL takes the last address out of the file's contents. The file holds one line, but a
@@ -70,23 +117,6 @@ func parsePairingURL(out string) string {
 			if isHTTPURL(field) {
 				found = strings.TrimRight(field, ".,)")
 			}
-		}
-	}
-	return found
-}
-
-// pairingFromLogs reads the same link off the log line the server prints. The last occurrence wins:
-// a restart prints a new link and the old one may already be spent.
-func pairingFromLogs(out string) string {
-	found := ""
-	for _, line := range strings.Split(out, "\n") {
-		lower := strings.ToLower(line)
-		idx := strings.Index(lower, "pairing link:")
-		if idx < 0 {
-			continue
-		}
-		if url := parsePairingURL(line[idx:]); url != "" {
-			found = url
 		}
 	}
 	return found

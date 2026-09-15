@@ -30,6 +30,7 @@ commands:
   logs [-f]   the stack's logs
   update      move both checkouts to what is published, refresh the images, restart
   open        open the app in the browser
+  pair        print a fresh pairing link for signing in to the app
   uninstall   remove the containers, networks and volumes
 
 flags:
@@ -112,6 +113,13 @@ func run(argv []string) error {
 			return nil
 		}
 		fmt.Println("opened", url)
+		return nil
+	case "pair":
+		url, err := app.Pair(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Println(url)
 		return nil
 	case "uninstall":
 		return app.Uninstall(ctx, opts.keepData)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -19,6 +20,12 @@ type App struct {
 	lines   []string
 	busy    string
 	failure string
+
+	// startedAt is when the stack was last brought up, and paired records that a link which signs
+	// the operator in has already been handed to a browser since. Both exist so that the launcher
+	// offers a pairing link once, while it is fresh, and the app's own address afterwards.
+	startedAt time.Time
+	paired    bool
 }
 
 // logLimit is how much of the running commentary the page keeps. It is a progress view, not a log
@@ -92,6 +99,12 @@ func (a *App) start(ctx context.Context) error {
 		return err
 	}
 	telegram := a.Telegram()
+	// From here on the containers may restart, and the server writes a new pairing link when they
+	// do. The moment is taken before the start rather than after it, so a link written while the
+	// stack was coming up still counts as this start's.
+	a.mu.Lock()
+	a.startedAt, a.paired = time.Now(), false
+	a.mu.Unlock()
 	a.log("pulling images")
 	if _, err := compose(ctx, a.paths, telegram, "pull"); err != nil {
 		// No published image for this platform, or no network. Building takes several minutes the
@@ -194,19 +207,62 @@ func (a *App) uninstall(ctx context.Context, keepData bool) error {
 	return nil
 }
 
-// Open points the browser at the running app, at the pairing link when the server offers one.
+// Open points the browser at the running app, at a link that signs the operator in when one is to
+// be had.
 func (a *App) Open(ctx context.Context) (string, error) {
 	url := a.OpenURL(ctx)
 	return url, OpenBrowser(ctx, url)
 }
 
-// OpenURL is the address to open: the link that signs the operator in, or the plain app address
-// when the server does not offer one.
+// OpenURL is the address to open. A pairing link is offered once per start and only while it is
+// fresh: the file the server wrote when the stack came up, or a link minted on the spot when there
+// is no such file. What is left is the app's own address, whose login screen is a better landing
+// place than a link that has already been spent — and the only answer at all when the stack is not
+// running.
 func (a *App) OpenURL(ctx context.Context) string {
-	if url := PairingURL(ctx, a.paths, a.Telegram()); url != "" {
-		return url
+	app := AppURL(APIPort(a.paths))
+	a.mu.Lock()
+	started, paired := a.startedAt, a.paired
+	a.mu.Unlock()
+	if paired {
+		return app
 	}
-	return AppURL(APIPort(a.paths))
+	// Every compose call reads the override, and `open` on its own has not written it yet.
+	if err := WriteOverride(a.paths); err != nil {
+		return app
+	}
+	telegram := a.Telegram()
+	url := PairingURL(ctx, a.paths, telegram, started)
+	if url == "" {
+		url, _ = MintPairing(ctx, a.paths, telegram)
+	}
+	if url == "" {
+		return app
+	}
+	a.mu.Lock()
+	a.paired = true
+	a.mu.Unlock()
+	return url
+}
+
+// Pair mints a fresh link that signs the operator in, for a browser that holds no session and has
+// no passkey enrolled yet. The link opens once and expires; the stack has to be running, because it
+// is the container that mints it.
+func (a *App) Pair(ctx context.Context) (string, error) {
+	if err := CheckDocker(ctx); err != nil {
+		return "", err
+	}
+	if err := WriteOverride(a.paths); err != nil {
+		return "", err
+	}
+	url, err := MintPairing(ctx, a.paths, a.Telegram())
+	if err != nil {
+		return "", err
+	}
+	if url == "" {
+		return "", errors.New("the container printed no link; check that the stack is running with `daedalus-desktop status`")
+	}
+	return url, nil
 }
 
 // Status is what the status command prints and what the page renders.

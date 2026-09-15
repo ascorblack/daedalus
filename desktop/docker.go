@@ -73,6 +73,20 @@ func compose(ctx context.Context, p Paths, telegram bool, args ...string) (strin
 	return runOut(ctx, "docker", composeArgs(p, telegram, args...)...)
 }
 
+// composeQuiet runs a compose command and returns only what the command itself wrote. docker and uv
+// both report progress on stderr, which would otherwise end up inside a value that is read back —
+// a pairing link is one line, and one line is all it may be.
+func composeQuiet(ctx context.Context, p Paths, telegram bool, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "docker", composeArgs(p, telegram, args...)...)
+	var out, problem bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &problem
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("docker compose %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(problem.String()))
+	}
+	return out.String(), nil
+}
+
 // composeStream runs a compose command with the terminal attached, for logs and builds whose
 // progress the operator wants to watch as it happens.
 func composeStream(ctx context.Context, p Paths, telegram bool, args ...string) error {
