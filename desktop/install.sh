@@ -5,7 +5,7 @@
 #
 # It takes the newest desktop-v* release, downloads the archive for this machine, checks it against
 # the release's SHA256SUMS, and unpacks it into ./Daedalus (or $DAEDALUS_DIR). Everything the
-# installation owns — the checkouts, the keys, the database — is then made by the launcher inside
+# installation owns - the checkouts, the keys, the database - is then made by the launcher inside
 # that same folder, so removing the folder removes the installation.
 #
 # Nothing here clears a quarantine attribute, and nothing needs to: a file fetched with curl is not
@@ -45,7 +45,7 @@ fi
 
 # The newest release whose tag names the launcher: the repository releases other things too, so
 # "latest" on its own is not necessarily this.
-say "Looking for the newest desktop release of $repo…"
+say "Looking for the newest desktop release of ${repo}..."
 tag="$(curl -fsSL "$api/releases?per_page=30" |
   grep -o '"tag_name"[ ]*:[ ]*"desktop-v[^"]*"' |
   head -n 1 |
@@ -56,7 +56,7 @@ base="https://github.com/$repo/releases/download/$tag"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT INT TERM
 
-say "Downloading $asset from $tag…"
+say "Downloading $asset from ${tag}..."
 curl -fL --progress-bar -o "$work/$asset" "$base/$asset" ||
   fail "$tag has no $asset. See https://github.com/$repo/releases/tag/$tag."
 curl -fsSL -o "$work/SHA256SUMS" "$base/SHA256SUMS" ||
@@ -82,7 +82,7 @@ target="$(cd "$dir" && pwd)"
 if [ "$platform" = "macos" ]; then
   rm -rf "$target/Daedalus.app"
   # ditto, not unzip: the bundle carries symlinks and the signature's own extended attributes, and
-  # unzip drops both — which leaves an app macOS refuses as damaged.
+  # unzip drops both - which leaves an app macOS refuses as damaged.
   ditto -x -k "$work/$asset" "$target"
   say ""
   say "Installed $tag into $target."
@@ -96,4 +96,4 @@ else
   say "Run it:  cd '$target' && ./daedalus-desktop"
   say "Docker Engine with the compose plugin must be installed and running."
 fi
-say "The launcher makes everything else — the checkouts, the keys, the data — inside that folder."
+say "The launcher makes everything else - the checkouts, the keys, the data - inside that folder."
