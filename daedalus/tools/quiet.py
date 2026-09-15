@@ -25,7 +25,7 @@ async def stay_silent(context: ToolContext, note: str = "") -> ToolResult:
     metadata = state.session.metadata if state is not None else {}
     origin = (state.run_origin if state is not None else "operator").split(":")[0]
     if not (metadata.get("unattended") or metadata.get("heartbeat") or origin in ("schedule", "reminder", "heartbeat", "loop")):
-        return error(context, "StaySilent is only for unattended runs (heartbeat, scheduled tasks); the operator is waiting for a reply here")
+        return error(context, "StaySilent is only for unattended runs (heartbeat, scheduled tasks). The operator is waiting for a reply here: answer them directly, a short 'nothing new' included")
     services.extra["silent_run"] = context.run_id
     services.extra["silent_note"] = note.strip()[:500]
     return ok(context, "Noted. Finish with a brief final reply for the record; it will not be sent to the chat.")

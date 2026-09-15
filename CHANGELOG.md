@@ -2,6 +2,16 @@
 
 Notable changes, newest first. The repository's `main` is the released version.
 
+## 2026-09-15
+
+- **A rebuild asked for during another one is queued.** The supervisor used to answer "already in progress" and
+  forget the request, so a pull request merged during a rebuild waited for the next one. One slot: the latest
+  reason wins (the target is origin/main either way), it starts when the lock is free, and a rollback drops it.
+- **The agent is told what is private to the machine.** The environment section and the self-development skill
+  name what the proposal gate refuses (the LAN address of its services, hostnames, the operator's paths and
+  accounts), so a proposal is not refused for a value the agent read from ServiceList. StaySilent's refusal in
+  an attended run says what to do instead.
+
 ## 2026-09-14
 
 - **Exec refuses to wait.** A `sleep` of 30 s or more, or a `while`/`until` loop around one, in a foreground

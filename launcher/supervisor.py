@@ -265,6 +265,9 @@ class Supervisor:
         self.lock = asyncio.Lock()
         self.last_result = "startup"
         self.health_task: asyncio.Task[None] | None = None
+        self.queued_rebuild: str | None = None
+        """The reason of a rebuild asked for while another was running: it runs right after, so a pull
+        request merged during a rebuild is not left undeployed until someone asks again."""
 
     # -- child lifecycle ------------------------------------------------------------
 
@@ -334,11 +337,24 @@ class Supervisor:
     # -- operations -----------------------------------------------------------------
 
     async def rebuild(self, reason: str) -> str:
-        """Acknowledge at once; the work runs in the background and reports through LAST_REBUILD."""
+        """Acknowledge at once; the work runs in the background and reports through LAST_REBUILD.
+
+        A request that lands while a rebuild or rollback holds the lock is not dropped: it is kept (one
+        slot — a second request during the same wait replaces the reason, the outcome is the same
+        origin/main either way) and starts as soon as the lock is free.
+        """
         if self.lock.locked():
-            return "a rebuild or rollback is already in progress"
+            self.queued_rebuild = reason
+            return "a rebuild or rollback is in progress; this one is queued and starts right after it"
         asyncio.create_task(self._rebuild(reason))
         return "rebuild started: the bot stops, main is pulled and preflighted, then it restarts (rolled back on failure)"
+
+    def _run_queued_rebuild(self) -> None:
+        if self.queued_rebuild is None:
+            return
+        reason, self.queued_rebuild = self.queued_rebuild, None
+        log(f"queued rebuild starts: {reason}")
+        asyncio.create_task(self._rebuild(reason))
 
     async def _rebuild(self, reason: str) -> None:
         """Fetch, preflight the new revision on a candidate checkout while the bot keeps serving, and only then
@@ -407,6 +423,7 @@ class Supervisor:
                 LAST_REBUILD.write_text(f"{datetime.now(UTC).isoformat()} {reason}: {outcome}\n")
                 if stopped:
                     self.restart_requested.set()
+        self._run_queued_rebuild()
 
     def _changed_files(self, old: str, new: str) -> set[str]:
         if old == new or "unknown" in (old, new):
@@ -429,6 +446,15 @@ class Supervisor:
     async def rollback(self, steps_back: int) -> str:
         if self.lock.locked():
             return "a rebuild or rollback is already in progress"
+        try:
+            return await self._rollback(steps_back)
+        finally:
+            if self.queued_rebuild is not None:
+                # The operator just went back on purpose; a rebuild asked for meanwhile would undo that.
+                log(f"queued rebuild dropped after the rollback: {self.queued_rebuild}")
+                self.queued_rebuild = None
+
+    async def _rollback(self, steps_back: int) -> str:
         async with self.lock:
             await self.stop_child()
             history = load_history()

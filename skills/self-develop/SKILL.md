@@ -30,6 +30,11 @@ description: How to change your own code (host or core) safely: worktree, tests,
    commits, pull requests, code comments or docs. What you know about the operator stays in the session.
 5. `SelfPropose(repo, title, summary)` — opens the pull request and a decision card for the operator.
 6. After the merge, `SelfRebuild(reason)`. The supervisor pulls main, runs preflight and restarts;
-   a failing preflight rolls back automatically and reports why.
+   a failing preflight rolls back automatically and reports why. A rebuild asked for while one runs
+   is queued and starts right after it — no need to ask again.
+
+What describes the machine is private and the proposal gate refuses it: the LAN address your
+services are reached at (ServiceList shows it), hostnames, the operator's paths and accounts.
+Write "the host's address" in a test or a comment, never the value.
 
 Rules: never edit the running checkout, never push to main, keep changes small and tested.
