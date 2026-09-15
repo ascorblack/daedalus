@@ -4,6 +4,19 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-15
 
+- **The desktop launcher's page answers only itself.** Its port is on the loopback address, but every
+  page a browser has open can reach that address too, and a form post or a bodyless `fetch` travels
+  cross-site without asking — enough for a page the operator merely visits to rewrite the provider
+  keys and the Telegram identity the installation trusts, then restart the stack under them. The
+  page now refuses anything that changes state and did not come from itself, and carries a token,
+  minted per run, that the setup form and the buttons send back. Setup also stopped overwriting what
+  it was not given: a field left empty keeps the value in force, with a *remove* box for emptying one
+  on purpose, and the public address set by hand in `.env` — the host passkeys are enrolled against —
+  survives a re-run. "Open" offers a pairing link once per start and only while it belongs to that
+  start, mints a fresh one when there is none, and otherwise goes to the app's own login screen;
+  `daedalus-desktop pair` prints a link whenever a browser needs one, and nothing reads links out of
+  logs any more. A fork's checkout pulls the fork owner's images rather than upstream's, and `--port`
+  refuses a number with something after it.
 - **Sign-in hardened after review.** A pairing link is minted at start only when there is no other way in
   (no bot, no passkey) and the log names the file, never the link; a spent link lands on the app with the
   reason instead of an error page, and the file goes when the link is used. A passkey must be discoverable

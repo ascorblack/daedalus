@@ -67,7 +67,9 @@ container, and the key proxy's file is not.
 
 To move an installation, move the folder and the binary together, or pass `--data` to the folder's
 new place. To use a fork, set `DAEDALUS_GIT_REMOTE` and `DAEDALUS_CORE_GIT_REMOTE` before the first
-run.
+run: the images are pulled from the fork owner's namespace as well, so a fork's code never runs
+upstream's image. A fork that publishes no images has nothing to pull, and the first start builds
+them locally instead.
 
 ## Commands
 
@@ -80,10 +82,23 @@ run.
 | `daedalus-desktop logs -f` | the stack's logs |
 | `daedalus-desktop update` | move both checkouts to what is published, refresh the images, restart |
 | `daedalus-desktop open` | open the app in the browser |
+| `daedalus-desktop pair` | print a fresh pairing link for signing in to the app |
 | `daedalus-desktop uninstall [--keep-data]` | remove the containers, networks and volumes |
 
 Flags: `--data DIR` (default `./data`), `--port N` for the launcher's own page (default 8770),
 `--setup` to ask the questions again on a start, `--version`.
+
+On the setup page, **a field left empty keeps whatever is already in force** — re-running setup to
+change the daily cap does not blank the provider keys, and the public address set by hand in
+`data/.env` is never touched. A value is removed only by ticking *remove* beside it.
+
+## Signing in
+
+The first start opens the app through a one-time link the stack writes when it comes up, and the
+launcher offers that link once, while it belongs to that start. Afterwards `open` goes to the app
+itself, whose login screen takes a passkey, Telegram, or a pairing link. `daedalus-desktop pair`
+prints a fresh link whenever a browser needs one — a new machine, a cleared cookie jar, or a session
+that has expired. Each link opens once and expires after thirty minutes.
 
 Settings that are not on the setup page — a GitHub token for self-development, a public address for
 the app, extra providers and the search APIs — are edited in `data/.env` and
