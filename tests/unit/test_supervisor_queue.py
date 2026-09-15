@@ -67,3 +67,27 @@ async def test_a_rollback_drops_what_was_queued_behind_it(tmp_path: Path) -> Non
     assert await supervisor.rollback(0) == "rolled back"
     await asyncio.sleep(0)
     assert ran == [] and supervisor.queued_rebuild is None
+
+
+def test_a_checkout_without_a_built_app_gets_one_before_the_first_start(tmp_path: Path, monkeypatch: object) -> None:
+    """The bundle is not in git: a fresh clone must not serve 404 at /app until the first rebuild."""
+    sup = _load(tmp_path)
+    repo = tmp_path / "bot"
+    (repo / "miniapp").mkdir(parents=True)
+    (repo / "miniapp" / "package.json").write_text("{}")
+    ran: list[list[str]] = []
+
+    def fake_run(step: list[str], cwd: Path, timeout: int = 0) -> tuple[int, str]:
+        ran.append(step)
+        if step[:2] == ["npm", "run"]:
+            (cwd / "dist").mkdir(exist_ok=True)
+            (cwd / "dist" / "index.html").write_text("<!doctype html>")
+        return 0, ""
+
+    sup.run = fake_run
+    sup.shutil.which = lambda name: "/usr/bin/npm"
+    sup.restore_owner = lambda repo: None
+    sup.build_app_if_missing(repo)
+    assert [s[:2] for s in ran] == [["npm", "ci"], ["npm", "run"]]
+    sup.build_app_if_missing(repo)  # already built: nothing runs
+    assert len(ran) == 2

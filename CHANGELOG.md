@@ -4,6 +4,10 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-15
 
+- **A fresh checkout builds its app before the first start.** The bundle is not in git and only a rebuild
+  built it, so a new installation (the desktop launcher, a clone made by a setup script) answered 404 at
+  `/app` until the first merged pull request. The supervisor builds it once when it is missing. Blank
+  Telegram values in the env file (`OWNER_USER_ID=`) mean "unset" instead of failing to parse.
 - **Every slash command the app offers, the app can run.** Twenty-two of the thirty-two commands the
   palette advertises were handed to the Telegram handlers and answered 409 on an installation with no
   bot token: `/stop`, `/model`, `/thinking`, `/mode`, `/rename`, `/new`, `/delete`, `/usage`, `/status`,

@@ -210,6 +210,28 @@ def install_from_candidate(repo: Path) -> tuple[bool, str]:
     return True, out
 
 
+def build_app_if_missing(repo: Path) -> None:
+    """A fresh checkout has no built app: the bundle is not in git, and a rebuild builds it on the candidate.
+
+    The first start of an installation — a clone the desktop launcher or a setup script just made —
+    would otherwise serve 404 at /app until the first merged pull request. Built once here, in the
+    tree about to run; a failure is logged and the bot still starts (the API and Telegram work
+    without the app)."""
+    miniapp = repo / "miniapp"
+    if (miniapp / "dist" / "index.html").is_file() or not (miniapp / "package.json").exists() or not shutil.which("npm"):
+        return
+    log("no built app in the checkout; building it before the first start")
+    try:
+        for step in (["npm", "ci", "--no-audit", "--no-fund"], ["npm", "run", "build"]):
+            code, out = run(step, cwd=miniapp, timeout=1200)
+            if code != 0:
+                log(f"app build failed ({' '.join(step)}): {out[-800:]}")
+                return
+        log("app built")
+    finally:
+        restore_owner(repo)
+
+
 def reap_zombies(keep: set[int]) -> int:
     """Collect children the bot left behind (sandbox wrappers reparented to PID 1) — by pid, never with a
     wait on any child, so the bot process asyncio itself waits on is not taken from under it."""
@@ -601,6 +623,7 @@ async def main() -> int:
     GOOD_DIR.mkdir(parents=True, exist_ok=True)
     if not load_history():
         record_good()
+    await asyncio.to_thread(build_app_if_missing, BOT_REPO)
     tasks = [
         asyncio.create_task(supervisor.serve_socket()),
         asyncio.create_task(supervisor.budget_loop()),
