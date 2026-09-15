@@ -238,11 +238,8 @@ export function App() {
 
   if (authed === null) return <div className="app"><div className="empty">Loading…</div></div>;
   if (authed === false) {
-    return (
-      <div className="app">
-        <LoginScreen onDone={() => setAuthed(true)} />
-      </div>
-    );
+    // Outside the shell on purpose: the shell's wide layout reserves the rail's column, and a login page has no rail.
+    return <LoginScreen onDone={() => setAuthed(true)} />;
   }
 
   const sessionId = route.session;

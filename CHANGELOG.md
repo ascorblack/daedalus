@@ -4,6 +4,10 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-15
 
+- **The login page stands on its own.** It rendered inside the shell's grid on a wide screen, in the column
+  kept for the rail, so it sat pinned to the left in a narrow strip. It is a centred card now, outside the
+  shell, and offers every way in at once: a passkey when one is enrolled (and says how to get one when not),
+  Telegram when a bot is configured, and a field for a pairing link or code.
 - **Telegram is optional.** With no bot token the bot starts anyway: the API, the app, the scheduler, the
   loops, the inbox and self-development all run, and the front is simply absent. What used to be a chat line
   with nowhere to go — a failed rebuild, a resumed run, an exhausted budget, a low provider balance, a change

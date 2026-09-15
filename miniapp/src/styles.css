@@ -574,15 +574,22 @@ input.field, select.field, textarea.field {
 .loop-instruction { color: var(--fg); white-space: pre-wrap; margin-bottom: 4px; }
 
 /* login */
-.login { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 32px 24px; text-align: center; max-width: 480px; margin: 0 auto; }
-.login-logo { border-radius: 24px; }
+.gate { min-height: 100vh; min-height: 100dvh; display: flex; align-items: center; justify-content: center; padding: 24px 16px; background: var(--bg); }
+.login { width: 100%; max-width: 460px; display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 32px 28px 24px; text-align: center; background: var(--surface-1); border: 1px solid var(--line); border-radius: 20px; }
+.login-logo { border-radius: 18px; }
 .login h1 { margin: 0; font-size: 26px; letter-spacing: -0.02em; }
-.login .sub.small { font-size: 12px; margin-top: 24px; }
+.login .sub.small { font-size: 12.5px; line-height: 1.45; }
+.login-methods { width: 100%; display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
+.login-methods .btn.big { width: 100%; justify-content: center; min-height: 46px; font-size: 15px; gap: 8px; }
+.login-or { color: var(--fg-3); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; display: flex; align-items: center; gap: 12px; }
+.login-or::before, .login-or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .login-widget { min-height: 48px; display: flex; justify-content: center; }
+.login-pair { width: 100%; text-align: left; display: flex; flex-direction: column; gap: 6px; }
+.login-pair .share-field { display: flex; gap: 8px; }
+.login-pair .share-field .field { flex: 1; min-width: 0; }
+.login-pair .sub.small { margin: 2px 0 0; }
 .login-error { color: var(--bad); font-size: 14px; }
-.login-note { border: 1px solid var(--line); border-radius: var(--r); padding: 12px 14px; text-align: left; background: var(--card); }
-.login-note p { margin: 6px 0 0; }
-.login-note code { font-size: 12px; }
+.login-foot { margin-top: 8px; color: var(--fg-3); }
 
 /* session aside (wide screens) */
 .wide-only { display: none; }
