@@ -210,10 +210,8 @@ def environment_section(
     github_org: str = "",
     ssh_hosts: Sequence[tuple[str, str]] = (),
 ) -> str:
-    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
         "Environment:",
-        f"- Date/time: {now}",
         f"- Session: {session_title}",
         f"- Workspace (cwd for tools): {workspace}",
         f"- Files the operator sends arrive under {workspace / 'inbox'}",
@@ -242,10 +240,34 @@ def environment_section(
     return "\n".join(lines) + "\n"
 
 
+TURN_CONTEXT_OPEN, TURN_CONTEXT_CLOSE = "<turn-context>", "</turn-context>"
+TURN_CONTEXT_RE = re.compile(r"\n*" + re.escape(TURN_CONTEXT_OPEN) + r".*?" + re.escape(TURN_CONTEXT_CLOSE), re.S)
+"""Finds the block in a message's text, for the readers that must not see it (the app, the summariser)."""
+
+
+def without_turn_context(text: str) -> str:
+    return TURN_CONTEXT_RE.sub("", text).rstrip()
+
+
+def turn_context(*, now: datetime | None = None, notes: str = "") -> str:
+    """What changes between runs, written where it does not spoil the prompt cache.
+
+    The clock, the workspace's own notes and the open board tasks used to sit in the system prompt.
+    Every run rebuilt it, so the first request of every run began with a different first message and
+    the provider re-read the whole replayed history behind it: measured at the start of runs, the
+    cache hit was near zero while inside a run it was above eighty percent. The frozen sections now
+    stay identical across runs of a session, and what varies rides at the END of the opening
+    message of the run — new content where the history grows anyway.
+    """
+    stamp = (now or datetime.now(UTC)).strftime("%Y-%m-%d %H:%M UTC")
+    body = f"- Date/time: {stamp}" + (("\n" + notes.strip()) if notes.strip() else "")
+    return f"{TURN_CONTEXT_OPEN}\nThe state of things as this turn starts (not part of the request):\n{body}\n{TURN_CONTEXT_CLOSE}"
+
+
 def governance_section(path: Path) -> str:
     if path.is_file():
         return path.read_text(encoding="utf-8").strip() + "\n"
     return ""
 
 
-__all__ = ["BOARD", "DEFAULT_RULES", "HEADLINE_RE", "HISTORY", "PERSONA", "SCHEDULING", "SELF_DEVELOPMENT", "environment_section", "governance_section", "language_section", "rules_section", "split_headline"]
+__all__ = ["BOARD", "DEFAULT_RULES", "HEADLINE_RE", "HISTORY", "PERSONA", "SCHEDULING", "SELF_DEVELOPMENT", "environment_section", "governance_section", "language_section", "rules_section", "split_headline", "turn_context", "without_turn_context"]

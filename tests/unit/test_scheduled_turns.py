@@ -175,3 +175,27 @@ async def test_provider_outage_drives_the_turn_again_with_a_growing_wait(setting
         assert calls.count("submit:core") == 2
     finally:
         await manager.close()
+
+
+async def test_the_prompt_prefix_is_stable_across_runs_and_the_turn_context_rides_on_the_message(settings: Settings, db: Database) -> None:
+    """The system prompt has no clock and no board in it; both travel at the end of the run's opening
+    message, so the provider's prompt cache holds from one run of a session to the next."""
+    from daedalus.host import prompts
+    from daedalus.host.session_runner import Message, MessageRole, TextBlock
+
+    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    await manager.start()
+    try:
+        state = await manager.create_session("s")
+        first = await manager._build_engine(state, "run-1")
+        second = await manager._build_engine(state, "run-2")
+        assert first.config.system_prompt_sections == second.config.system_prompt_sections
+        assert not any("Date/time" in s for s in first.config.system_prompt_sections)
+        message = Message(role=MessageRole.user, content_blocks=[TextBlock(text="hello")])
+        opened = await manager._with_turn_context(state, message)
+        assert manager.sessions.transcript_key(opened) == manager.sessions.transcript_key(message)
+        text = opened.content_blocks[0].text
+        assert len(opened.content_blocks) == 1 and text.startswith("hello\n\n" + prompts.TURN_CONTEXT_OPEN) and text.endswith(prompts.TURN_CONTEXT_CLOSE)
+        assert "Date/time:" in text and prompts.without_turn_context(text) == "hello"
+    finally:
+        await manager.close()

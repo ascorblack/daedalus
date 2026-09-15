@@ -20,7 +20,7 @@ from protocore.contracts.llm import LLMObservabilityContext, LLMRequest
 from protocore.contracts.memory import MemoryScope
 from protocore.contracts.types import Message, MessageRole, TextBlock, ToolResultBlock, ToolUseBlock
 
-from daedalus.host.prompts import split_headline
+from daedalus.host.prompts import split_headline, without_turn_context
 from daedalus.host.session_runner import TENANT, transcript_for_summary
 
 if TYPE_CHECKING:
@@ -66,7 +66,7 @@ class Learning:
             names: dict[str, str] = {}
             for m in history:
                 if m.role is MessageRole.user and not ask and m.metadata.get("daedalus.origin") not in (None, "core"):
-                    ask = "".join(b.text for b in m.content_blocks if isinstance(b, TextBlock)).strip()
+                    ask = without_turn_context("".join(b.text for b in m.content_blocks if isinstance(b, TextBlock))).strip()
                 for b in m.content_blocks:
                     if isinstance(b, ToolUseBlock):
                         tools[b.name] += 1

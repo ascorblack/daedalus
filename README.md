@@ -175,6 +175,21 @@ Then, in Telegram:
 2. For parallel sessions, create a supergroup with topics, add the bot as an administrator with *manage topics*, and send `/bind` there. `/new <title>` now creates a topic per session; topics you create by hand are adopted too.
 3. Open the app with `/app`. Set `MINIAPP_PUBLIC_URL` to an HTTPS address that proxies to port 8765 and register it as the bot's menu button in @BotFather; the same address serves the browser version (sign in with Telegram's login widget) and the shared services under `/s/…`.
 
+### Let your agent install it
+
+Have a coding agent (Claude Code, Codex, Cursor, another Daedalus) set the server up for you: it follows
+[`docs/AGENT-SETUP.md`](docs/AGENT-SETUP.md), which is written for an agent — every step is a command with
+the output it must see. Paste this into the agent, on a shell with Docker on the target server:
+
+```text
+Install Daedalus (https://github.com/ascorblack/daedalus) on this server for me, following the
+instructions for agents in docs/AGENT-SETUP.md of that repository exactly. Before you start, ask me
+in one message for everything section 1 of that page needs (a model key or a CLI login to use,
+whether I want Telegram, whether there is a domain, the daily cap, a GitHub token or "later").
+Then clone, configure, start the stack, verify it as the page says, and give me the pairing link
+and the two-line summary section 8 asks for. Never paste keys or tokens back into this chat.
+```
+
 ### Models and keys
 
 Providers are OpenAI-compatible endpoints (DeepSeek, OpenRouter, a self-hosted vLLM, anything else) with their own base URL, key and timeout; **presets** on top of them name a model with its thinking mode, effort, image support, context window and output cap. One preset is the default, others are fallbacks, any session can switch. Speech-to-text and the vision model pick a provider the same way.

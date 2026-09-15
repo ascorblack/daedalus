@@ -4,6 +4,12 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-15
 
+- **The prompt prefix is stable across runs.** The clock and the workspace notes (`AGENTS.md`, the open board
+  tasks) were rendered into the system prompt at every run, so the first request of every run began with a
+  different first message and the provider re-read the whole history behind it: measured at run starts, the
+  cache hit was near zero. Both now ride in a `<turn-context>` block at the end of the run's opening message;
+  the system prompt is byte-identical from one run of a session to the next. The app, the summariser, the
+  compaction quotes and the learning digest strip the block.
 - **A rebuild asked for during another one is queued.** The supervisor used to answer "already in progress" and
   forget the request, so a pull request merged during a rebuild waited for the next one. One slot: the latest
   reason wins (the target is origin/main either way), it starts when the lock is free, and a rollback drops it.

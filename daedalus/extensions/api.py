@@ -42,6 +42,7 @@ from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
+from daedalus.host import prompts
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import TENANT, Attachment
 from daedalus.providers.openai_compat import UsageRecord
@@ -563,7 +564,7 @@ def message_view(message: Message) -> dict[str, Any]:
             tool_results.append({"id": block.tool_call_id, "content": redact.redact(block.content[:TOOL_RESULT_PREVIEW_CHARS]), "is_error": block.is_error, "length": len(block.content)})
     compaction = message.metadata.get("daedalus.compaction") if isinstance(message.metadata, dict) else None
     is_summary = bool(message.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)) if isinstance(message.metadata, dict) else False
-    body = "".join(text)
+    body = prompts.without_turn_context("".join(text))
     if is_summary:
         body = _SUMMARY_WRAP_RE.sub("", body).strip()
         # A summary without the host's record came from the core mid-run; the host's own (auto/manual) sit between runs.

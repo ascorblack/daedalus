@@ -41,6 +41,7 @@ from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
 
 from daedalus.config import RuntimeConfig, Settings
+from daedalus.host import prompts
 from daedalus.host.checkpoints import CheckpointError, Checkpoints, workspace_size
 from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
 from daedalus.host.hooks import DaedalusHookManager
@@ -1299,7 +1300,7 @@ class SessionManager:
             reasoning_effort=overrides.get("reasoning_effort") or preset.reasoning_effort,
             context_window=state.context_window or preset.context_window,
             max_output_tokens=preset.max_output_tokens,
-            extra_notes=self.notes_for(state) + await self.workspace_notes(state),
+            extra_notes=self.notes_for(state),
             blocked_tools=self.blocked_tools_for(state),
         )
         self._attach_hooks(engine, state)
@@ -1392,6 +1393,8 @@ class SessionManager:
         state.last_error_kind = ""
         if message is not None:
             state.run_origin = str(message.metadata.get("daedalus.origin") or "operator")
+        if message is not None and not continue_turn:
+            message = await self._with_turn_context(state, message)
         if state.engine is None or not continue_turn:
             run_id = uuid.uuid4().hex[:12]
             engine = await self._build_engine(state, run_id)
@@ -1412,6 +1415,23 @@ class SessionManager:
         state.task = asyncio.create_task(self._drive(state, engine, message, continue_turn), name=f"run:{run_id}")
         state.task.add_done_callback(_log_task_failure)
         return run_id
+
+    async def _with_turn_context(self, state: SessionState, message: Message) -> Message:
+        """The run's opening message with the turn context as its last block.
+
+        Same message identity (role and creation time), so the transcript keeps the copy that was
+        recorded when the operator sent it and the working history carries the one the model reads;
+        the app and the summariser strip the block from what they show.
+        """
+        # The core allows a user message one content block, so the context joins the text rather
+        # than following it; a message with no text (an image alone) goes as it is.
+        context = prompts.turn_context(notes=await self.workspace_notes(state))
+        blocks = list(message.content_blocks)
+        for i, block in enumerate(blocks):
+            if isinstance(block, TextBlock):
+                blocks[i] = TextBlock(text=f"{block.text.rstrip()}\n\n{context}")
+                return message.model_copy(update={"content_blocks": blocks})
+        return message
 
     async def _drive(
         self, state: SessionState, engine: QueryEngine, message: Message | None, continue_turn: bool
@@ -1762,8 +1782,9 @@ class SessionManager:
         begins from the plan of record rather than from memory of it.
 
         ``AGENTS.md`` (or ``CLAUDE.md``) in the workspace root is the agent's own project memory; the open
-        board tasks of this session are its plan. Both are volatile text: they change between runs and
-        sit after the static prompt sections.
+        board tasks of this session are its plan. Both are volatile text: they change between runs, so
+        they travel in the turn context at the end of the run's opening message, never in the system
+        prompt, whose bytes must not change between runs if the provider is to serve them from cache.
         """
         parts: list[str] = []
         for name in ("AGENTS.md", "CLAUDE.md"):
@@ -2140,7 +2161,7 @@ def operator_quotes(history: Sequence[Message], *, skip_last: int = VERBATIM_TAI
     lines: list[str] = []
     seen: set[str] = set()
     for m in older:
-        text = " ".join("".join(b.text for b in m.content_blocks if isinstance(b, TextBlock)).split())
+        text = " ".join(prompts.without_turn_context("".join(b.text for b in m.content_blocks if isinstance(b, TextBlock))).split())
         if not text or text in seen:
             continue
         seen.add(text)
@@ -2214,7 +2235,7 @@ def verbatim_tail(history: Sequence[Message], count: int = VERBATIM_TAIL_MESSAGE
         return ""
     lines = ["", "", "## Recent operator messages (verbatim)"]
     for m in tail:
-        text = "".join(b.text for b in m.content_blocks if isinstance(b, TextBlock)).strip()
+        text = prompts.without_turn_context("".join(b.text for b in m.content_blocks if isinstance(b, TextBlock))).strip()
         lines.append(f"- [{m.created_at.strftime('%Y-%m-%d %H:%M')}] {text[:1500]}")
     return "\n".join(lines)
 
@@ -2292,7 +2313,7 @@ def transcript_for_summary(history: Sequence[Message], *, result_chars: int = 60
             continue
         for block in message.content_blocks:
             if isinstance(block, TextBlock):
-                text = block.text.strip()
+                text = prompts.without_turn_context(block.text).strip()  # the clock and the board of a past turn are not history
                 if text:
                     lines.append(f"[{message.role.value}] {text[:4000]}")
             elif isinstance(block, ToolUseBlock):
