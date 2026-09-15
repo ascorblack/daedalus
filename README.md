@@ -15,7 +15,7 @@
   <img alt="Docker Compose" src="https://img.shields.io/badge/deploy-docker%20compose-2496ed.svg" />
   <img alt="Telegram" src="https://img.shields.io/badge/chat-Telegram-26a5e4.svg" />
   <img alt="React" src="https://img.shields.io/badge/app-React%2019-61dafb.svg" />
-  <img alt="tests" src="https://img.shields.io/badge/tests-320%2B-4ade80.svg" />
+  <img alt="tests" src="https://img.shields.io/badge/tests-440%2B-4ade80.svg" />
 </p>
 
 <p align="center">
@@ -45,7 +45,7 @@ Each forum topic is a session with its own workspace. Files in, files out, voice
 <td width="33%" valign="top">
 
 **🖥️ A real web app**<br/>
-Agents, live transcripts, file browser with previews (images, Markdown, CSV, PDF, Word, Excel), two sessions side by side, drag-and-drop and clipboard attachments, a microphone. Installable as a PWA.
+Every screen is an address under `/app`: agents, live transcripts, the files an agent sends you attached under its answer, a file browser with previews (images, Markdown, CSV, PDF, Word, Excel), two sessions side by side, drag-and-drop and clipboard attachments, a microphone. Four tabs on a phone, a rail and a ⌘K palette on a desk. Installable as a PWA.
 
 </td>
 <td width="33%" valign="top">
@@ -59,7 +59,7 @@ Shell, files, search, web fetch and search (self-hosted SearXNG), a vision model
 <td valign="top">
 
 **🔁 Autonomy that stays on a leash**<br/>
-Loop agents wake up on an interval or when they say so; cron tasks run in fresh or standing sessions; a heartbeat checks in; a task board and an inbox keep you informed. Every run has turn, spend and time limits.
+Loop agents wake up on an interval or when they say so; cron tasks run in fresh or standing sessions; a heartbeat checks in; every agent keeps its own task board and an inbox keeps you informed. Every run has turn, spend and time limits, and a provider outage pauses the work instead of ending it.
 
 </td>
 <td valign="top">
@@ -113,6 +113,8 @@ Provider keys live in a key-proxy container that injects them into upstream call
 </p>
 <p align="center"><sub>The same app on a phone — inside Telegram as a Mini App, or in any browser</sub></p>
 
+<sub>The screenshots show the app before the 2026-09-11 redesign (rows instead of cards, addresses for every screen, a rail on wide screens); the layout differs, the screens are the same.</sub>
+
 ## How it is put together
 
 <p align="center"><img src="docs/diagrams/containers.png" alt="Containers: operator → Telegram / reverse proxy → the agent container (supervisor, bot, tools, workspaces, state), key proxy, SearXNG, rebuilder" width="100%" /></p>
@@ -125,7 +127,9 @@ Five containers, one job each. The agent container has no provider keys and no d
 
 <p align="center"><img src="docs/diagrams/run.png" alt="A run: the message, the prompt, the tool loop with steers, the streamed answer, the snapshot and compaction" width="88%" /></p>
 
-What makes long sessions work: the **transcript** keeps everything, the **working history** the model sees is compacted into summaries when it grows (with `HistoryExpand` to read the originals back), a **revert** restores the history *and* the workspace to any earlier turn, a **fork** starts a new session from one, and `/clear` starts over while keeping the files.
+What makes long sessions work: the **transcript** keeps everything, the **working history** the model sees is compacted into summaries when it grows (with `HistoryExpand` to read the originals back; the app shows the compaction with a progress bar while it runs), a **revert** restores the history *and* the workspace to any earlier turn, a **fork** starts a new session from one (with its own copy of the files, listed under its origin), and `/clear` starts over while keeping the files.
+
+What makes them survive: runs resume from snapshots after a restart; a run the provider dropped is retried in place by the core and, when the provider stays down, driven again by the host after a wait that doubles per failure (`ops.provider_retry_*`, 30 s to 10 min, six attempts); a context overflow is compacted and the turn driven again; the core's own wind-down notice never outlives the run it was written for.
 
 ## Self-development
 
@@ -137,16 +141,17 @@ The PR text passes a public-text gate (nothing about your machine leaks into a p
 
 | Area | Tools |
 |---|---|
-| Files & shell | `Exec` (with an optional bubblewrap sandbox), `Read`, `Write`, `Edit`, `Find`, `Search` |
+| Files & shell | `Exec` (with an optional bubblewrap sandbox; `background=true` with `JobOutput` / `JobKill` / `JobList` for what outlives the call; a long `sleep` or a polling loop in the foreground is refused — reports and finished jobs arrive as messages), `Read`, `Write`, `Edit`, `Find`, `Search` |
 | Web | `WebFetch`, `WebSearch` — SearXNG by default; Serper, Tavily, Exa, Perplexity, Keenable through the key proxy |
 | Seeing | `ImageView` — a separate vision model answers questions about an image, so the main context never carries pixels |
-| Delegation | `SubAgent`, `SubAgentSend`, `SpawnAgent`, `AskPeer` — helpers in the same workspace, sibling sessions, named peers |
+| Delegation | `SubAgent`, `SubAgentSend`, `SubAgentList`, `SpawnAgent`, `AskPeer` — helpers in the same workspace (a report wakes the leader when it is ready; an idle helper can be raised without a task), sibling sessions, named peers |
 | Time | `ScheduleCreate`, `LoopNext`, `IntentCreate` — cron, self-paced loops, standing intents on inbound events |
 | Hosting | `ServiceStart` / `ServiceStop` / `ServiceLogs` — processes that outlive the turn, on ports you can reach and share |
 | Memory | `Remember`, `Recall`, `Forget`, `HistorySearch`, `HistoryExpand` |
 | Quality | `Verify` — a check with a criterion, recorded as a receipt; `LearningReport` |
 | Self | `SelfWorkspace`, `SelfPropose`, `SelfRebuild`, `SelfRollback` |
-| Extensions | `Skill` (30 bundled skills: design systems, web QA, writing, scheduling…), `Mcp*` with OAuth, `Board*`, `SendFile`, `StaySilent` |
+| Planning | `BoardAdd` / `BoardUpdate` / `BoardList` / `BoardGet` — the agent's own board (shared with its subagents; tasks you post to nobody in particular are on every board), with acceptance criteria, checklists, dependencies and a per-agent work-in-progress limit; `PLAN.md` in the workspace is its rendering |
+| Extensions | `Skill` (31 bundled skills: design systems, web QA, writing, scheduling…), `Mcp*` with OAuth, `SendFile` (attached under the answer in the app too), `StaySilent` |
 
 Every tool can be switched off per session from the app, and a **mode** (`quick`, `deep`, `careful`) bundles limits and extra rules.
 
@@ -200,7 +205,8 @@ uv run pytest -q                                 # tests
 | `/brief [text]`, `/cap <usd>` | standing instructions; spend cap for the session |
 | `/sessions`, `/status`, `/usage`, `/balance` | roster; what is running; spend; provider balances |
 | `/schedules`, `/schedule run\|on\|off\|delete <id>` | scheduled tasks |
-| `/board`, `/inbox`, `/intents`, `/peer` | the task board, the inbox, standing intents, peers |
+| `/board`, `/inbox`, `/intents`, `/peer` | every agent's board tasks, the inbox, standing intents, peers |
+| `/allow <key>` | grant once a call the policy asked about |
 | `/approval manual\|auto`, `/verbosity 0\|1\|2` | self-change approval; how much of a run the chat shows |
 | `/heartbeat`, `/doctor [fix]`, `/settings`, `/prompt` | the periodic check; health checks; configuration; the working rules |
 | `/rebuild`, `/rollback [n]`, `/panic` | supervisor operations |
@@ -211,18 +217,23 @@ Every session command also works from the app's composer with the same `/` palet
 
 ```
 daedalus/
-  host/         sessions, engine wiring, prompts, skills store, checkpoints
+  host/         sessions, engine wiring, prompts, tool policy, hooks, skills store, checkpoints
   providers/    OpenAI-compatible adapter, fallback chain, pricing, registry
   tools/        one tool per module, PascalCase names
   stores/       SQLite stores, blob store, durable memory
+  security/     redaction of secrets in what the model and the chat see
   transport/    Telegram (aiogram 3): topics, rich messages, voice, files
   extensions/   HTTP API + app, self-development, scheduler, loops, subagents,
                 services, board, peers, inbox, heartbeat, balance, MCP
+  bench/        headless task runner and the Harbor adapter
 launcher/       the supervisor (PID 1, never edited by the agent)
-miniapp/        Vite + React app (Telegram Mini App and browser)
+miniapp/        Vite + React app (Telegram Mini App and browser); src/router.ts, shell.tsx,
+                dialogs.tsx, store.ts, format.ts and one file per screen under src/screens/
 skills/         SKILL.md skills the agent can load
+personas/       the persona the prompt is built from
 deploy/         Dockerfile, compose, key proxy, SearXNG settings, env examples
-tests/          unit and integration tests
+tests/          unit and integration tests; tests/browser drives the built app with a real mouse
+docs/           design and decisions (2026-09-06, historical), screenshots, diagrams
 ```
 
 ## Configuration
@@ -266,6 +277,15 @@ run_finished = ""
 
 [compaction]
 preset = ""                  # a cheaper preset for the summariser; empty = the session's model
+
+[board]
+wip_limit = 3                # tasks one agent (with its subagents) may hold in 'doing' at once
+stale_hours = 6              # a 'doing' task whose session went quiet this long is handed back
+
+[ops]
+provider_retry_max_attempts = 6      # runs driven again after the provider failed one; 0 leaves it failed
+provider_retry_base_seconds = 30.0   # the first wait; it doubles up to provider_retry_max_seconds
+provider_retry_max_seconds = 600.0
 
 [memory]
 extract_after_run = false    # store durable facts after a completed run (a paid call)

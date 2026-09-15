@@ -102,6 +102,15 @@ thresholds_usd = [
     0.5,
 ]
 
+[board]
+wip_limit = 3              # tasks one agent (with its subagents) may hold in 'doing' at once
+stale_hours = 6            # a 'doing' task whose session went quiet this long is handed back to 'todo'
+
+[ops]
+# provider_retry_max_attempts = 6      # runs driven again after the model provider failed one in a row; 0 = none
+# provider_retry_base_seconds = 30.0   # the first wait; it doubles each time up to provider_retry_max_seconds
+# provider_retry_max_seconds = 600.0
+
 [scheduler]
 topic_mode = "per_task"
 catch_up_missed = true
