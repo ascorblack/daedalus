@@ -93,7 +93,7 @@ class _App(SimpleNamespace):
 async def client(settings: Settings, db: Database, manager: SessionManager) -> Any:
     # The manager and its database live on this test's loop: the requests must run on it too, not on a
     # thread of their own (a sync TestClient would deadlock on the database lock).
-    app = _App(settings=settings, config=manager.config, db=db, manager=manager, front=None, extensions={}, guard=None)
+    app = _App(settings=settings, config=manager.config, db=db, manager=manager, front=None, extensions={}, guard=None, create_session=manager.create_session)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(app, "tok")), base_url="http://test") as c:  # type: ignore[arg-type]
         yield c
 

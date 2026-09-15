@@ -321,7 +321,7 @@ class Scheduler:
                 delivered = True
             except Exception:  # noqa: BLE001
                 logger.warning("reminder delivery failed", exc_info=True)
-        await self._post("reminder", schedule["name"], schedule["prompt"], severity="notice" if delivered else "warning", session_id=schedule.get("target_session"))
+        await self._post("reminder", schedule["name"], schedule["prompt"], severity="notice" if delivered or front is None else "warning", session_id=schedule.get("target_session"))
         return ""
 
     async def _fire_lazy(self, schedule: dict[str, Any]) -> str:
@@ -408,17 +408,10 @@ class Scheduler:
     async def run_task_session(self, title: str, prompt: str, workspace: Path, metadata: dict[str, Any], *, preset: str | None = None, origin: str = "schedule") -> Any:
         """Create the session (and topic) an unattended task runs in, and start it."""
         manager = self.app.manager
-        front = self.app.front
         assert manager is not None
         (workspace / "inbox").mkdir(parents=True, exist_ok=True)
         metadata = {**metadata, "workspace": str(workspace)}
-        if front is not None:
-            state, _ = await front.create_session_topic(title, metadata=metadata)
-            if state.workspace != workspace:
-                state.workspace = workspace
-                manager.register_services(state)
-        else:
-            state = await manager.create_session(title, workspace=workspace, metadata=metadata)
+        state = await self.app.create_session(title, metadata=metadata, workspace=workspace)
         if preset:
             await manager.set_model(state.session.id, preset=preset)
         await manager.submit(state.session.id, prompt, [], as_answer=False, origin=origin)
@@ -450,7 +443,7 @@ class Scheduler:
             if per_task:
                 await self.app.db.execute("UPDATE schedules SET topic_thread_id = ? WHERE id = ?", (binding.thread_id, schedule["id"]))
         else:
-            state = await manager.create_session(title, workspace=workspace, metadata=metadata)
+            state = await self.app.create_session(title, metadata=metadata, workspace=workspace)
         prompt = schedule["prompt"]
         files = json.loads(schedule.get("files") or "[]")
         if files:

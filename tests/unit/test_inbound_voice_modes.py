@@ -73,7 +73,8 @@ async def app(settings: Settings, db: Database) -> Any:
         return "run-x"
 
     manager.submit = fake_submit  # type: ignore[method-assign]
-    app = SimpleNamespace(settings=settings, config=RuntimeConfig(), db=db, manager=manager, front=None, extensions={}, submitted=submitted)
+    # Without a front Application.create_session is the manager's, so the stand-in hands it straight over.
+    app = SimpleNamespace(settings=settings, config=RuntimeConfig(), db=db, manager=manager, front=None, extensions={}, submitted=submitted, create_session=manager.create_session)
     yield app
     await manager.close()
 

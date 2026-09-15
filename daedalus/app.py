@@ -1,14 +1,22 @@
-"""Application composition: stores → sessions → Telegram (+ API, scheduler, monitors)."""
+"""Application composition: stores → sessions → API (+ Telegram, scheduler, monitors).
+
+Telegram is one front among the ways in, not the way in: with no bot token the same
+installation runs on its API and its app alone. Everything that used to speak to the chat
+goes through :meth:`Application.notify` and :meth:`Application.create_session`, which fall
+back to the inbox and to a plain session when there is no front to speak to.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import signal
+from pathlib import Path
+from typing import Any
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.boot_guard import BootGuard
-from daedalus.host.session_runner import SessionManager
+from daedalus.host.session_runner import SessionManager, SessionState
 from daedalus.stores.database import Database
 from daedalus.transport.telegram.front import TelegramFront
 
@@ -39,9 +47,10 @@ class Application:
         await self.db.open()
         self.manager = SessionManager(self.settings, self.config, db=self.db)
         await self.manager.start()
-        if not self.settings.telegram_bot_token or not self.settings.owner_user_id:
-            raise RuntimeError("TELEGRAM_BOT_TOKEN and OWNER_USER_ID must be set")
-        self.front = TelegramFront(self.settings, self.config, self.manager, save_config=self.save_config)
+        if self.settings.telegram_bot_token and not self.settings.owner_user_id:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN is set without OWNER_USER_ID: the bot would not know whose messages to answer")
+        if self.settings.telegram_bot_token:
+            self.front = TelegramFront(self.settings, self.config, self.manager, save_config=self.save_config)
         await self._install_extensions()
         await self._report_startup()
         if self.guard.skip_recovery:
@@ -49,33 +58,62 @@ class Application:
                 f"⚠️ {self.guard.unclean_boots} unclean restarts in a row: boot recovery (resuming runs, re-sending "
                 "answers) is skipped this once so the bot stays up. Unfinished runs stay parked; /doctor shows them."
             )
-            await self.front.notify(note, markdown=False)
+            if self.front is not None:
+                await self.front.notify(note, markdown=False)  # the chat is the alarm; the entry below is the record
             inbox = self.extensions.get("inbox")
             if inbox is not None:
                 await inbox.post("boot_guard", "Boot recovery skipped after repeated crashes", note, severity="error")  # type: ignore[attr-defined]
             return
         resumed = await self.manager.resume_unfinished()
         if resumed:
-            await self.front.notify(f"Resumed {len(resumed)} run(s) after restart.", markdown=False)
-        resent = await self.front.redeliver_pending()
-        if resent:
-            await self.front.notify(f"Re-sent {resent} answer(s) the previous process had not confirmed as delivered.", markdown=False)
+            await self.notify(f"Resumed {len(resumed)} run(s) after restart.", markdown=False, kind="startup")
+        if self.front is not None:
+            resent = await self.front.redeliver_pending()
+            if resent:
+                await self.front.notify(f"Re-sent {resent} answer(s) the previous process had not confirmed as delivered.", markdown=False)
+
+    async def notify(self, text: str, *, markdown: bool = True, kind: str = "notice", severity: str = "info") -> None:
+        """Say something to the operator: the chat when Telegram is configured, the inbox when it is not.
+
+        Without a front the inbox is the only channel the operator reads, so a message that would have
+        been a chat line becomes an entry there rather than disappearing into the log.
+        """
+        if self.front is not None:
+            await self.front.notify(text, markdown=markdown)
+            return
+        inbox = self.extensions.get("inbox")
+        if inbox is None:  # before the extensions are installed there is nowhere to put it but the log
+            logger.warning("%s", text)
+            return
+        headline, _, body = text.partition("\n")
+        await inbox.post(kind, headline.strip().strip("*_ ") or kind, body.strip(), severity=severity)  # type: ignore[attr-defined]
+
+    async def create_session(self, title: str, *, metadata: dict[str, Any] | None = None, workspace: Path | None = None) -> SessionState:
+        """A session with its chat topic where Telegram is configured, a plain session where it is not."""
+        assert self.manager is not None
+        if self.front is None:
+            return await self.manager.create_session(title, workspace=workspace, metadata=metadata)
+        state, _binding = await self.front.create_session_topic(title, metadata=metadata)
+        if workspace is not None and state.workspace != workspace:
+            # create_session_topic gives the session a directory of its own; the caller asked for this one.
+            state.workspace = workspace
+            self.manager.register_services(state)
+        return state
 
     async def _report_startup(self) -> None:
         """Tell the operator about a failed rebuild or an exhausted budget."""
-        assert self.front is not None
         failed = self.settings.state_dir / "good" / "FAILED"
         if failed.exists():
             text = failed.read_text(encoding="utf-8")
-            await self.front.notify("❌ The last rebuild failed preflight and was rolled back:\n\n" + text[-3000:], markdown=False)
+            await self.notify("❌ The last rebuild failed preflight and was rolled back:\n\n" + text[-3000:], markdown=False, kind="rebuild", severity="error")
             failed.rename(failed.with_suffix(".reported"))
         last = self.settings.state_dir / "good" / "LAST_REBUILD"
         if last.exists():
-            await self.front.notify("🔄 " + last.read_text(encoding="utf-8").strip()[-1500:], markdown=False)
+            await self.notify("🔄 " + last.read_text(encoding="utf-8").strip()[-1500:], markdown=False, kind="rebuild", severity="notice")
             last.rename(last.with_suffix(".reported"))
         exceeded = self.manager.budget_exceeded() if self.manager else None
         if exceeded:
-            await self.front.notify(f"💸 Daily budget exceeded ({exceeded}). New runs are refused until tomorrow or /budget reset.", markdown=False)
+            await self.notify(f"💸 Daily budget exceeded ({exceeded}). New runs are refused until tomorrow or /budget reset.", markdown=False, kind="budget", severity="warning")
 
     async def _install_extensions(self) -> None:
         """Scheduler, balance monitor, self-development, API — each attaches here."""
@@ -83,7 +121,7 @@ class Application:
             install_all,  # Lazy: extensions import the Application type; a top-level import would be a cycle
         )
 
-        assert self.manager is not None and self.front is not None
+        assert self.manager is not None
         self.background.extend(await install_all(self))
 
     def install_signal_handlers(self) -> None:
@@ -92,7 +130,11 @@ class Application:
             loop.add_signal_handler(sig, self.stopping.set)
 
     async def run(self) -> None:
-        assert self.front is not None
+        if self.front is None:
+            # Nothing to poll: the API, the scheduler and the loops carry the installation on their own.
+            await self.stopping.wait()
+            await self.shutdown()
+            return
         polling = asyncio.create_task(self.front.start(), name="telegram-polling")
         stop_waiter = asyncio.create_task(self.stopping.wait(), name="stop-waiter")
         done, _ = await asyncio.wait({polling, stop_waiter}, return_when=asyncio.FIRST_COMPLETED)

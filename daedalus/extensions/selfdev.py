@@ -594,7 +594,7 @@ class SelfDevelopment:
             result = await self.decide(proposal_id, "approve", reason="auto-approval mode")
             return f"PR #{pr_number} {pr_url} — {result}"
         await self._send_card(proposal_id, repo, title, summary + receipts, pr_url, diffstat)
-        return f"PR #{pr_number} opened: {pr_url}. Waiting for the operator's decision in chat."
+        return f"PR #{pr_number} opened: {pr_url}. Waiting for the operator's decision."
 
     async def _branch_started(self, spec: RepoSpec, worktree: Path) -> str | None:
         """When the branch diverged from main: receipts older than that are not evidence for it.
@@ -662,11 +662,15 @@ class SelfDevelopment:
 
     async def _send_card(self, proposal_id: str, repo: str, title: str, summary: str, pr_url: str, diffstat: str) -> None:
         front = self.app.front
-        if front is None:
-            return
-        outbox = front._general_outbox()
+        outbox = front._general_outbox() if front is not None else None
         if outbox is None:
+            # No chat to put the buttons in: the proposal is decided on the Changes screen, and the
+            # inbox is what tells the operator there is one waiting.
+            inbox = self.app.extensions.get("inbox")
+            if inbox is not None:
+                await inbox.post("change_proposal", f"Change proposal ({repo}): {title}", f"{summary[:1500]}\n\n{pr_url}", severity="notice")
             return
+        assert front is not None
         text = f"🛠 Change proposal ({repo}): {title}\n\n{summary[:1500]}\n\n{diffstat[-800:]}\n\n{pr_url}"
         message_id = await front.send_choice(
             outbox,

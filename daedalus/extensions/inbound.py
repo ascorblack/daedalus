@@ -125,12 +125,7 @@ class Inbound:
             if s["title"] == default_title and s.get("metadata", {}).get("inbound"):
                 await self.app.db.kv_set(KV_SESSION_PREFIX + default_title, s["id"])
                 return await manager.get_state(s["id"])
-        front = self.app.front
-        metadata = {"unattended": True, "inbound": True}
-        if front is not None:
-            state, _ = await front.create_session_topic(default_title, metadata=metadata)
-        else:
-            state = await manager.create_session(default_title, metadata=metadata)
+        state = await self.app.create_session(default_title, metadata={"unattended": True, "inbound": True})
         await self.app.db.kv_set(KV_SESSION_PREFIX + default_title, state.session.id)
         return state
 
