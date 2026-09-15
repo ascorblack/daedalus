@@ -413,6 +413,28 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE verifications ADD COLUMN file_digests TEXT NOT NULL DEFAULT '';
     """,
+    # 22 — the two ways into the app that need no Telegram: a one-time pairing link, and the
+    # browser's own passkey. Codes are stored hashed, so the database never holds a usable link.
+    """
+    CREATE TABLE pairing_codes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code_hash TEXT NOT NULL UNIQUE,
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT
+    );
+    CREATE TABLE passkeys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        credential_id TEXT NOT NULL UNIQUE,
+        public_key TEXT NOT NULL,
+        sign_count INTEGER NOT NULL DEFAULT 0,
+        transports TEXT NOT NULL DEFAULT '[]',
+        name TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+    );
+    """,
 ]
 
 

@@ -21,6 +21,7 @@ dependencies = [
     # Skills: webapp-testing / web-design-reviewer drive a headless Chromium; canvas-design draws with Pillow.
     "playwright==1.62.0",
     "pillow>=11.0",
+    "webauthn>=3.0.0",
 ]
 
 [project.optional-dependencies]

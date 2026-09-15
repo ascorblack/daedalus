@@ -4,6 +4,7 @@
 ``daedalus check``  — open the state, register tools and providers, exit.
 ``daedalus run``    — run one agent session from the terminal (no Telegram).
 ``daedalus doctor`` — check the deployment (config, state, git, providers); ``--fix`` applies safe repairs.
+``daedalus auth pair`` — mint a one-time link that signs a browser in, for an installation without Telegram.
 """
 
 from __future__ import annotations
@@ -121,6 +122,24 @@ async def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_auth(args: argparse.Namespace) -> int:
+    from daedalus.stores import pairing  # Lazy: each subcommand imports only what it runs
+    from daedalus.stores.database import Database  # Lazy: each subcommand imports only what it runs
+
+    settings = _settings(args)
+    db = Database(settings.db_path)
+    await db.open()
+    try:
+        base = settings.miniapp_public_url or f"http://127.0.0.1:{settings.api_port}"
+        # The state directory is the bot's, so this works the same run from a shell inside the container.
+        url = await pairing.announce(db, settings.state_dir, base, note="cli")
+    finally:
+        await db.close()
+    print(url)
+    print(f"Opens once, within {pairing.TTL_MINUTES} minutes; using it revokes every other pairing link.")
+    return 0
+
+
 async def cmd_serve(args: argparse.Namespace) -> int:
     from daedalus.app import serve  # Lazy: each subcommand imports only what it runs
 
@@ -142,6 +161,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--prompt", "-p", default=None, help="first message; omit for interactive input")
     run.add_argument("--title", default="terminal")
     sub.add_parser("serve", help="run the bot")
+    auth = sub.add_parser("auth", help="ways into the app that need no Telegram")
+    auth_sub = auth.add_subparsers(dest="auth_command", required=True)
+    auth_sub.add_parser("pair", help="mint a one-time pairing link and print it")
     bench = sub.add_parser("bench", help="run a task manifest headless and record pass/turns/tokens/cost per task")
     bench.add_argument("manifest", help="JSON manifest: {name, tasks: [{id, prompt, setup, check, files, timeout_minutes, tags}], tools_off}")
     bench.add_argument("--preset", default=None, help="model preset id for every task (default: the configured default)")
@@ -193,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         handler_.addFilter(_DiagFilter())
     install_logging_filter(shared())
     _install_task_dump()
-    handler = {"check": cmd_check, "run": cmd_run, "serve": cmd_serve, "doctor": cmd_doctor, "bench": cmd_bench}[args.command]
+    handler = {"check": cmd_check, "run": cmd_run, "serve": cmd_serve, "doctor": cmd_doctor, "bench": cmd_bench, "auth": cmd_auth}[args.command]
     return asyncio.run(handler(args))
 
 

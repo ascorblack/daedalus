@@ -47,6 +47,7 @@ from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import TENANT, Attachment
 from daedalus.providers.openai_compat import UsageRecord
 from daedalus.security import redact
+from daedalus.stores import pairing, passkeys
 from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
@@ -128,6 +129,17 @@ def validate_init_data(init_data: str, bot_token: str, *, max_age: int = INIT_DA
     if "user" in pairs:
         pairs["user"] = json.loads(pairs["user"])
     return pairs
+
+
+class PasskeyRegisterBody(BaseModel):
+    credential: dict[str, Any]
+    """What ``navigator.credentials.create`` returned, serialised as the browser gives it."""
+    name: str = Field(default="", max_length=80)
+
+
+class PasskeyLoginBody(BaseModel):
+    credential: dict[str, Any]
+    """What ``navigator.credentials.get`` returned, serialised as the browser gives it."""
 
 
 class SendMessageBody(BaseModel):
@@ -620,11 +632,48 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     manager = app.manager
     assert manager is not None
     settings = app.settings
-    session_secret = hashlib.sha256(f"session:{settings.telegram_bot_token}:{api_token}".encode()).digest()
+    secret_cache: dict[str, bytes] = {}
+
+    async def session_secret() -> bytes:
+        """What signs the browser's session cookie.
+
+        The API token, so that rotating it invalidates every cookie, plus a secret minted once for
+        this installation, so that the token alone is not enough to forge one. Not the bot token:
+        an installation without Telegram has none, and its cookies must still mean something.
+        """
+        if "value" not in secret_cache:
+            stored = await app.db.kv_get("session_secret")
+            if not stored:
+                stored = secrets.token_urlsafe(32)
+                await app.db.kv_set("session_secret", stored)
+            secret_cache["value"] = hashlib.sha256(f"session:{api_token}:{stored}".encode()).digest()
+        return secret_cache["value"]
+
+    def over_https(request: Request) -> bool:
+        """Whether the browser reached us over TLS — directly or through the proxy that terminates it.
+
+        A cookie marked secure is never sent back over plain http, which is exactly how the app is
+        opened on the machine itself; marking it unconditionally locks that case out.
+        """
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        return (forwarded or request.url.scheme) == "https"
+
+    async def sign_in(response: Response, request: Request) -> None:
+        response.set_cookie(
+            SESSION_COOKIE,
+            session_cookie_value(await session_secret(), settings.owner_user_id),
+            max_age=SESSION_TTL,
+            httponly=True,
+            secure=over_https(request),
+            samesite="lax",
+            path="/",
+        )
 
     async def auth(request: Request) -> dict[str, Any]:
         header = request.headers.get("authorization", "")
         if header.startswith("tma "):
+            if not settings.telegram_bot_token:
+                raise HTTPException(401, "this installation has no Telegram bot")
             try:
                 data = validate_init_data(header[4:], settings.telegram_bot_token)
             except ValueError as exc:
@@ -638,9 +687,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             token = request.query_params.get("token")  # browser navigation cannot set headers
         if token and secrets.compare_digest(token, api_token):
             return {"user_id": settings.owner_user_id}
-        # A browser that logged in with Telegram's widget holds a signed cookie; the site and the installed app use it.
+        # A browser that paired, signed in with a passkey or used Telegram's widget holds a signed cookie.
         cookie = request.cookies.get(SESSION_COOKIE)
-        if cookie and verify_session_cookie(session_secret, cookie) == settings.owner_user_id:
+        if cookie and verify_session_cookie(await session_secret(), cookie) == settings.owner_user_id:
             return {"user_id": settings.owner_user_id, "via": "cookie"}
         raise HTTPException(401, "authentication required")
 
@@ -648,32 +697,126 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     bot_username: dict[str, str] = {}
 
-    async def _bot_username() -> str:
+    async def _bot_username() -> str | None:
+        """The bot whose Login Widget vouches for the operator; None when there is none to ask."""
         if bot_username.get("name"):
             return bot_username["name"]
         front = app.front
         if front is None or getattr(front, "bot", None) is None:
-            raise HTTPException(503, "the Telegram bot is not running")
-        me = await front.bot.get_me()
+            return None
+        try:
+            me = await front.bot.get_me()
+        except Exception:  # noqa: BLE001 — an unreachable bot is one way in missing, not a broken login page
+            logger.warning("could not read the bot's username", exc_info=True)
+            return None
         bot_username["name"] = str(me.username or "")
-        return bot_username["name"]
+        return bot_username["name"] or None
+
+    def _relying_party() -> passkeys.RelyingParty:
+        return passkeys.relying_party(settings.miniapp_public_url, settings.api_port)
+
+    # Both ceremonies are a pair of calls, and the challenge of the first has to survive until the
+    # second. One owner, one browser at a time: a slot per ceremony is all the state there is.
+    challenges: dict[str, tuple[bytes, float]] = {}
+
+    def _take_challenge(kind: str) -> bytes:
+        held = challenges.pop(kind, None)
+        if held is None or held[1] < time.time():
+            raise HTTPException(400, "the request expired; start again")
+        return held[0]
 
     @api.get("/api/auth/config")
     async def auth_config() -> dict[str, Any]:
-        """What the login page needs: the bot whose Login Widget vouches for the operator."""
-        return {"bot_username": await _bot_username(), "cookie": SESSION_COOKIE}
+        """What the login page needs: which ways in this installation actually has."""
+        username = await _bot_username()
+        return {
+            "telegram": {"bot_username": username} if username else None,
+            "passkeys": await passkeys.count(app.db),
+            "pairing": await pairing.outstanding(app.db) > 0,
+        }
 
     @api.post("/api/auth/telegram")
-    async def auth_telegram(body: dict[str, Any], response: JSONResponse) -> dict[str, Any]:
+    async def auth_telegram(body: dict[str, Any], request: Request, response: JSONResponse) -> dict[str, Any]:
         """Telegram's Login Widget result: verified with the bot token, accepted only for the owner, answered with a session cookie."""
+        if not settings.telegram_bot_token:
+            raise HTTPException(503, "this installation has no Telegram bot")
         try:
             fields = validate_login_widget(body, settings.telegram_bot_token)
         except ValueError as exc:
             raise HTTPException(401, f"login refused: {exc}") from exc
         if int(fields.get("id", 0)) != settings.owner_user_id:
             raise HTTPException(403, "not the owner")
-        response.set_cookie(SESSION_COOKIE, session_cookie_value(session_secret, settings.owner_user_id), max_age=SESSION_TTL, httponly=True, secure=True, samesite="lax", path="/")
+        await sign_in(response, request)
         return {"ok": True, "user_id": settings.owner_user_id, "name": fields.get("first_name")}
+
+    @api.get("/api/auth/pair")
+    async def auth_pair(code: str, request: Request) -> RedirectResponse:
+        """A pairing link: spend the code, hand the browser a session cookie and open the app."""
+        if not await pairing.redeem(app.db, code):
+            raise HTTPException(403, "this pairing link is spent or expired; mint another with `daedalus auth pair`")
+        response = RedirectResponse("/app/", status_code=303)
+        await sign_in(response, request)
+        return response
+
+    @api.post("/api/auth/passkeys/register/begin")
+    async def passkey_register_begin(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        options = await passkeys.registration_options(app.db, _relying_party())
+        challenges["register"] = (base64.urlsafe_b64decode(options["challenge"] + "=" * (-len(options["challenge"]) % 4)), time.time() + 300)
+        return options
+
+    @api.post("/api/auth/passkeys/register/finish")
+    async def passkey_register_finish(body: PasskeyRegisterBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            verified = passkeys.verify_registration(body.credential, challenge=_take_challenge("register"), rp=_relying_party())
+        except Exception as exc:  # noqa: BLE001 — every failure here is the same answer: this key is not accepted
+            raise HTTPException(400, f"the passkey was not accepted: {exc}") from exc
+        transports = list(body.credential.get("response", {}).get("transports") or [])
+        await passkeys.store(
+            app.db,
+            credential_id=verified.credential_id,
+            public_key=verified.credential_public_key,
+            sign_count=int(verified.sign_count),
+            transports=[str(x) for x in transports],
+            name=body.name.strip() or "This device",
+        )
+        return {"ok": True, "passkeys": await passkeys.listing(app.db)}
+
+    @api.post("/api/auth/passkeys/login/begin")
+    async def passkey_login_begin() -> dict[str, Any]:
+        if await passkeys.count(app.db) == 0:
+            raise HTTPException(404, "no passkey is enrolled")
+        options = await passkeys.authentication_options(app.db, _relying_party())
+        challenges["login"] = (base64.urlsafe_b64decode(options["challenge"] + "=" * (-len(options["challenge"]) % 4)), time.time() + 300)
+        return options
+
+    @api.post("/api/auth/passkeys/login/finish")
+    async def passkey_login_finish(body: PasskeyLoginBody, request: Request, response: JSONResponse) -> dict[str, Any]:
+        stored = await passkeys.find(app.db, str(body.credential.get("id") or ""))
+        if stored is None:
+            raise HTTPException(403, "this passkey is not enrolled here")
+        try:
+            verified = passkeys.verify_authentication(
+                body.credential,
+                challenge=_take_challenge("login"),
+                rp=_relying_party(),
+                public_key=base64.urlsafe_b64decode(stored["public_key"] + "=" * (-len(stored["public_key"]) % 4)),
+                sign_count=int(stored["sign_count"]),
+            )
+        except Exception as exc:  # noqa: BLE001 — a refused signature is a refused login, whatever went wrong
+            raise HTTPException(403, f"the passkey was refused: {exc}") from exc
+        await passkeys.used(app.db, stored["credential_id"], int(verified.new_sign_count))
+        await sign_in(response, request)
+        return {"ok": True, "user_id": settings.owner_user_id}
+
+    @api.get("/api/auth/passkeys")
+    async def passkey_list(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        return await passkeys.listing(app.db)
+
+    @api.delete("/api/auth/passkeys/{passkey_id}")
+    async def passkey_delete(passkey_id: int, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        if not await passkeys.remove(app.db, passkey_id):
+            raise HTTPException(404, "no such passkey")
+        return {"ok": True, "passkeys": await passkeys.listing(app.db)}
 
     @api.get("/api/auth/me")
     async def auth_me(who: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -708,23 +851,18 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.post("/api/sessions")
     async def new_session(body: NewSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        front = app.front
         metadata: dict[str, Any] = {"tools_off": sorted(set(body.tools_off))} if body.tools_off else {}
         if body.workspace:
             directory = _workspace_dir(body.workspace)
             if not directory.is_dir():
                 raise HTTPException(404, f"no workspace named {body.workspace!r}")
             metadata["workspace"] = str(directory)
-        metadata = metadata or None  # type: ignore[assignment]
-        if front is not None:
-            try:
-                state, _binding = await front.create_session_topic(body.title, metadata=metadata)
-            except TelegramBusy as exc:
-                raise HTTPException(429, f"Telegram asks to wait {exc.retry_after}s before creating another topic (session {exc.session_id} exists without a topic)") from exc
-            except TelegramRefused as exc:
-                raise HTTPException(502, f"Telegram refused to create the topic: {exc}") from exc
-        else:
-            state = await manager.create_session(body.title, metadata=metadata)
+        try:
+            state = await app.create_session(body.title, metadata=metadata or None)
+        except TelegramBusy as exc:
+            raise HTTPException(429, f"Telegram asks to wait {exc.retry_after}s before creating another topic (session {exc.session_id} exists without a topic)") from exc
+        except TelegramRefused as exc:
+            raise HTTPException(502, f"Telegram refused to create the topic: {exc}") from exc
         if body.preset:
             # Before the first run, so the session's opening task already goes to the chosen model.
             try:
@@ -1023,12 +1161,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if source is None:
             raise HTTPException(404, "no such session")
         title = (body.title or f"{re.sub(r'\s*\(fork @\d+\)$', '', source.session.title)} (fork @{body.seq})")[:128]
-        front = app.front
         try:
-            if front is not None:
-                target, _binding = await front.create_session_topic(title, metadata={"forked_from": {"session_id": session_id, "seq": body.seq}})
-            else:
-                target = await manager.create_session(title, metadata={"forked_from": {"session_id": session_id, "seq": body.seq}})
+            target = await app.create_session(title, metadata={"forked_from": {"session_id": session_id, "seq": body.seq}})
         except TelegramBusy as exc:
             raise HTTPException(429, str(exc)) from exc
         except TelegramRefused as exc:
@@ -2231,11 +2365,15 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     config = uvicorn.Config(api, host=app.settings.api_host, port=app.settings.api_port, log_level="warning", access_log=False)
     server = uvicorn.Server(config)
     app.extensions["api_token"] = token
+    base = app.settings.miniapp_public_url or f"http://127.0.0.1:{app.settings.api_port}"
+    # Every start leaves one usable way in that needs nothing else: the operator reads it from the log
+    # or from the file, opens it once, and adds a passkey.
+    url = await pairing.announce(app.db, app.settings.state_dir, base)
+    logger.warning("pairing link: %s", url)
     if app.front is not None:
 
         async def cmd_app(message, command) -> None:  # type: ignore[no-untyped-def]
-            url = app.settings.miniapp_public_url or f"http://127.0.0.1:{app.settings.api_port}"
-            await message.answer(f"Mini App: {url}/app/\nAPI token (for scripts): {token}")
+            await message.answer(f"Mini App: {base}/app/\nAPI token (for scripts): {token}")
 
         app.front.command_hooks["app"] = cmd_app
 

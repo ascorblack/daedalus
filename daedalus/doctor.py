@@ -136,7 +136,12 @@ async def _config(ctx: DoctorContext) -> list[Check]:
 
 async def _telegram(ctx: DoctorContext) -> list[Check]:
     st = ctx.settings
-    out = [Check("telegram credentials", bool(st.telegram_bot_token and st.owner_user_id), "token and owner set" if st.telegram_bot_token and st.owner_user_id else "TELEGRAM_BOT_TOKEN or OWNER_USER_ID missing", "fail", "set them in the environment (.env)")]
+    out = [await _sign_in(ctx)]
+    if not st.telegram_bot_token:
+        # Telegram is a front, not a requirement: without a token there is nothing here to be wrong.
+        out.append(Check("telegram", True, "no bot token: the app is the only front", "ok"))
+        return out
+    out.append(Check("telegram credentials", bool(st.owner_user_id), "token and owner set" if st.owner_user_id else "TELEGRAM_BOT_TOKEN is set without OWNER_USER_ID", "fail", "set OWNER_USER_ID in the environment (.env)"))
     tg = ctx.config.telegram
     private = tg.session_mode() == "private"
     # Both shapes are complete: the private chat is a window onto one session at a time, a bound
@@ -151,6 +156,27 @@ async def _telegram(ctx: DoctorContext) -> list[Check]:
         except Exception as exc:  # noqa: BLE001
             out.append(Check("bot api", False, f"getMe failed: {type(exc).__name__}: {exc}", "fail", "check the local Bot API server / network"))
     return out
+
+
+async def _sign_in(ctx: DoctorContext) -> Check:
+    """Whether a browser can get in at all, and with what."""
+    from daedalus.stores import pairing, passkeys  # Lazy: doctor runs in processes that never serve the API
+
+    ways = []
+    if ctx.settings.telegram_bot_token:
+        ways.append("telegram login")
+    enrolled = await passkeys.count(ctx.db) if ctx.db is not None else 0
+    if enrolled:
+        ways.append(f"{enrolled} passkey" + ("s" if enrolled != 1 else ""))
+    if ctx.db is not None and await pairing.outstanding(ctx.db):
+        ways.append(f"a pairing link ({ctx.settings.state_dir / pairing.URL_FILE})")
+    return Check(
+        "sign-in",
+        bool(ways),
+        ", ".join(ways) if ways else "no way into the app: no bot, no passkey, no live pairing link",
+        "ok" if ways else "warn",
+        "mint one with `python -m daedalus auth pair`",
+    )
 
 
 async def _state(ctx: DoctorContext) -> list[Check]:
