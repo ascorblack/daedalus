@@ -47,6 +47,10 @@ input {
   padding: 9px 11px;
 }
 input:focus { outline: none; border-color: var(--accent); }
+/* An empty field means "leave it alone", so emptying a value is a deliberate tick rather than a
+   deletion. It sits under its field, quieter than the label above it. */
+.drop { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #6c7784; }
+.drop input { padding: 0; accent-color: var(--accent); }
 .tag {
   font-size: 11px; text-transform: none; letter-spacing: 0;
   color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; margin-left: 6px;

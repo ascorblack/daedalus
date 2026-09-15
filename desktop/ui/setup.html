@@ -16,14 +16,19 @@
   {{if .DockerMissing}}<p class="banner warn">{{.DockerMissing}}</p>{{end}}
 
   <form method="post" action="/setup" class="card">
+    <input type="hidden" name="csrf" value="{{.CSRF}}" />
     <section class="block">
       <h2>A model to think with</h2>
       <p class="hint">One key is enough. Keys are written to <code>daedalus-secrets/keyproxy.env</code>, outside every folder the agent can read, and reach the provider through the key proxy — the agent process never holds one.</p>
       <div class="grid">
-        <label>DeepSeek API key<input type="password" name="deepseek" value="{{.Setup.DeepseekKey}}" autocomplete="off" spellcheck="false" /></label>
-        <label>OpenRouter API key<input type="password" name="openrouter" value="{{.Setup.OpenrouterKey}}" autocomplete="off" spellcheck="false" /></label>
-        <label>OpenCode API key<input type="password" name="opencode" value="{{.Setup.OpencodeKey}}" autocomplete="off" spellcheck="false" /></label>
+        <label>DeepSeek API key<input type="password" name="deepseek" value="{{.Setup.DeepseekKey}}" autocomplete="off" spellcheck="false" />
+          <span class="drop"><input type="checkbox" name="clear" value="deepseek" /> remove this key</span></label>
+        <label>OpenRouter API key<input type="password" name="openrouter" value="{{.Setup.OpenrouterKey}}" autocomplete="off" spellcheck="false" />
+          <span class="drop"><input type="checkbox" name="clear" value="openrouter" /> remove this key</span></label>
+        <label>OpenCode API key<input type="password" name="opencode" value="{{.Setup.OpencodeKey}}" autocomplete="off" spellcheck="false" />
+          <span class="drop"><input type="checkbox" name="clear" value="opencode" /> remove this key</span></label>
       </div>
+      <p class="hint">A field left empty keeps whatever is already in force — nothing here is ever blanked by accident. Tick <em>remove</em> to empty one on purpose.</p>
       <p class="hint">No key at all is fine if you are signed in to the ChatGPT (Codex), Claude Code or SuperGrok CLI on this machine: those logins are mounted into the key proxy and become providers of their own.</p>
     </section>
 
@@ -31,10 +36,14 @@
       <h2>Telegram <span class="tag">optional</span></h2>
       <p class="hint">Telegram is optional; without it you use the app in the browser. With it, every forum topic becomes a session you can write to from your phone.</p>
       <div class="grid">
-        <label>Bot token <span class="note">@BotFather</span><input type="password" name="bot_token" value="{{.Setup.BotToken}}" autocomplete="off" spellcheck="false" /></label>
-        <label>Your numeric user id <span class="note">@userinfobot</span><input type="text" name="owner_id" value="{{.Setup.OwnerID}}" inputmode="numeric" autocomplete="off" /></label>
-        <label>Telegram API id <span class="note">my.telegram.org/apps</span><input type="text" name="api_id" value="{{.Setup.APIID}}" autocomplete="off" /></label>
-        <label>Telegram API hash<input type="password" name="api_hash" value="{{.Setup.APIHash}}" autocomplete="off" spellcheck="false" /></label>
+        <label>Bot token <span class="note">@BotFather</span><input type="password" name="bot_token" value="{{.Setup.BotToken}}" autocomplete="off" spellcheck="false" />
+          <span class="drop"><input type="checkbox" name="clear" value="bot_token" /> remove, and turn Telegram off</span></label>
+        <label>Your numeric user id <span class="note">@userinfobot</span><input type="text" name="owner_id" value="{{.Setup.OwnerID}}" inputmode="numeric" autocomplete="off" />
+          <span class="drop"><input type="checkbox" name="clear" value="owner_id" /> remove</span></label>
+        <label>Telegram API id <span class="note">my.telegram.org/apps</span><input type="text" name="api_id" value="{{.Setup.APIID}}" autocomplete="off" />
+          <span class="drop"><input type="checkbox" name="clear" value="api_id" /> remove</span></label>
+        <label>Telegram API hash<input type="password" name="api_hash" value="{{.Setup.APIHash}}" autocomplete="off" spellcheck="false" />
+          <span class="drop"><input type="checkbox" name="clear" value="api_hash" /> remove</span></label>
       </div>
     </section>
 

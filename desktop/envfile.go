@@ -16,6 +16,11 @@ type envVar struct {
 
 // Setup holds the answers the setup page collects. Everything is optional except that the stack is
 // only useful with either a provider key or a CLI login on the host.
+//
+// An answer that arrives empty means "leave what is on disk alone". Setup is run again to change one
+// value, and a form that carries nothing for the others — a browser that did not fill a password
+// field back in, or a page that is not the launcher's own — must not wipe them. Clear holds the
+// fields the operator ticked to empty on purpose, which is the only way a value is removed.
 type Setup struct {
 	DeepseekKey   string
 	OpenrouterKey string
@@ -25,6 +30,7 @@ type Setup struct {
 	APIID         string
 	APIHash       string
 	USDPerDay     string
+	Clear         map[string]bool
 }
 
 // Telegram reports whether the Telegram side of the stack should run. Without a token the bot is
@@ -88,23 +94,47 @@ func clean(value string) string {
 	return strings.TrimSpace(value)
 }
 
+// answered builds the reader that decides a key's new value: what the form carried, or — when it
+// carried nothing and the operator did not ask for the field to be emptied — whatever a previous
+// run already wrote. The key is always written, so compose never has to interpolate a name that is
+// not in the file.
+func answered(s Setup, current map[string]string) func(key, field, value string) string {
+	return func(key, field, value string) string {
+		if value = clean(value); value != "" || s.Clear[field] {
+			return value
+		}
+		return current[key]
+	}
+}
+
+// dailyCap is the spending cap to write: what the form carried, else what is already in force, else
+// the figure a fresh install starts with.
+func dailyCap(given, existing string) string {
+	if given = clean(given); given != "" {
+		return given
+	}
+	if existing != "" {
+		return existing
+	}
+	return "20"
+}
+
 // envUpdates is everything the launcher sets in <data>/.env. The three DAEDALUS_* paths are
 // absolute because the rebuilder container resolves them on the host, not inside a project
 // directory; SERVICES_PUBLIC_HOST is the loopback address because a desktop install serves the
-// operator's own machine.
-func envUpdates(p Paths, s Setup, searxngSecret, home string) []envVar {
-	daily := clean(s.USDPerDay)
-	if daily == "" {
-		daily = "20"
-	}
+// operator's own machine. `current` is what a previous run left in the file.
+func envUpdates(p Paths, s Setup, current map[string]string, searxngSecret, home string) []envVar {
+	answer := answered(s, current)
 	return []envVar{
-		{"TELEGRAM_BOT_TOKEN", clean(s.BotToken)},
-		{"OWNER_USER_ID", clean(s.OwnerID)},
-		{"TELEGRAM_API_ID", clean(s.APIID)},
-		{"TELEGRAM_API_HASH", clean(s.APIHash)},
-		{"USD_PER_DAY", daily},
+		{"TELEGRAM_BOT_TOKEN", answer("TELEGRAM_BOT_TOKEN", "bot_token", s.BotToken)},
+		{"OWNER_USER_ID", answer("OWNER_USER_ID", "owner_id", s.OwnerID)},
+		{"TELEGRAM_API_ID", answer("TELEGRAM_API_ID", "api_id", s.APIID)},
+		{"TELEGRAM_API_HASH", answer("TELEGRAM_API_HASH", "api_hash", s.APIHash)},
+		{"USD_PER_DAY", dailyCap(s.USDPerDay, current["USD_PER_DAY"])},
 		{"SEARXNG_SECRET", searxngSecret},
-		{"MINIAPP_PUBLIC_URL", ""},
+		// The public address is not on the setup page: an operator who set one by hand keeps it,
+		// and passkeys are enrolled against that host, so blanking it would invalidate them.
+		{"MINIAPP_PUBLIC_URL", current["MINIAPP_PUBLIC_URL"]},
 		{"API_PORT", "8765"},
 		{"SERVICES_PORT_RANGE", "8100-8119"},
 		{"SERVICES_PUBLIC_HOST", "127.0.0.1"},
@@ -120,21 +150,19 @@ func envUpdates(p Paths, s Setup, searxngSecret, home string) []envVar {
 // keyproxyUpdates is everything the launcher sets in daedalus-secrets/keyproxy.env. Provider keys
 // live only here: the file is outside every mount the agent container gets, so the agent process
 // never holds a key even when it edits its own code.
-func keyproxyUpdates(s Setup) []envVar {
-	daily := clean(s.USDPerDay)
-	if daily == "" {
-		daily = "20"
-	}
+func keyproxyUpdates(s Setup, current map[string]string) []envVar {
+	answer := answered(s, current)
 	return []envVar{
-		{"DEEPSEEK_API_KEY", clean(s.DeepseekKey)},
-		{"OPENROUTER_API_KEY", clean(s.OpenrouterKey)},
-		{"OPENCODE_API_KEY", clean(s.OpencodeKey)},
-		{"KEYPROXY_USD_PER_DAY", daily},
+		{"DEEPSEEK_API_KEY", answer("DEEPSEEK_API_KEY", "deepseek", s.DeepseekKey)},
+		{"OPENROUTER_API_KEY", answer("OPENROUTER_API_KEY", "openrouter", s.OpenrouterKey)},
+		{"OPENCODE_API_KEY", answer("OPENCODE_API_KEY", "opencode", s.OpencodeKey)},
+		{"KEYPROXY_USD_PER_DAY", dailyCap(s.USDPerDay, current["KEYPROXY_USD_PER_DAY"])},
 	}
 }
 
 // WriteSetup writes both env files. The existing values are read first, so re-running setup keeps
-// a key the operator does not retype and keeps the SearXNG secret stable across runs.
+// a key the form did not carry, keeps a public address set by hand, and keeps the SearXNG secret
+// stable across runs.
 func WriteSetup(p Paths, s Setup) error {
 	if err := p.EnsureDirs(); err != nil {
 		return err
@@ -151,10 +179,11 @@ func WriteSetup(p Paths, s Setup) error {
 			return err
 		}
 	}
-	if err := os.WriteFile(p.Env, []byte(mergeEnv(readFile(p.Env), envUpdates(p, s, secret, home))), 0o600); err != nil {
+	if err := os.WriteFile(p.Env, []byte(mergeEnv(readFile(p.Env), envUpdates(p, s, current, secret, home))), 0o600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(p.KeyproxyEnv, []byte(mergeEnv(readFile(p.KeyproxyEnv), keyproxyUpdates(s))), 0o600); err != nil {
+	keys := readEnv(readFile(p.KeyproxyEnv))
+	if err := os.WriteFile(p.KeyproxyEnv, []byte(mergeEnv(readFile(p.KeyproxyEnv), keyproxyUpdates(s, keys))), 0o600); err != nil {
 		return err
 	}
 	return SyncBotEnv(p)

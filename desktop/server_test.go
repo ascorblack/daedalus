@@ -40,7 +40,10 @@ func TestTheSetupPageAsksAndWrites(t *testing.T) {
 		}
 	}
 
-	form := url.Values{"deepseek": {"sk-page"}, "usd_per_day": {"11"}, "bot_token": {""}}
+	if !strings.Contains(page, server.csrf) {
+		t.Fatal("the form carries no token, so nothing could ever be posted to it")
+	}
+	form := url.Values{"deepseek": {"sk-page"}, "usd_per_day": {"11"}, "bot_token": {""}, "csrf": {server.csrf}}
 	posted, err := client.PostForm(server.URL()+"setup", form)
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +86,7 @@ func TestTheStatusPageRendersOnceConfigured(t *testing.T) {
 	defer server.Stop(context.Background())
 	client := &http.Client{Timeout: 30 * time.Second}
 	page := get(t, client, server.URL())
-	for _, want := range []string{"Open the app", "Update", "/assets/app.js", paths.Data} {
+	for _, want := range []string{"Open the app", "Update", "/assets/app.js", paths.Data, server.csrf} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the status page does not mention %q", want)
 		}
@@ -94,6 +97,98 @@ func TestTheStatusPageRendersOnceConfigured(t *testing.T) {
 	if page := get(t, client, server.URL()+"assets/status.html"); page != "" {
 		t.Fatal("the templates are served as assets")
 	}
+}
+
+// The launcher listens on the loopback address, which every page in the operator's browser can
+// reach as well. A form post that rewrites the keys and the Telegram identity, and an action that
+// restarts the stack under them, are both requests a browser sends cross-site without asking.
+func TestTheSetupFormRefusesWhatAnotherPageCouldSend(t *testing.T) {
+	paths := setupTempInstall(t)
+	if err := WriteSetup(paths, Setup{DeepseekKey: "sk-mine", BotToken: "123:mine", OwnerID: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(NewApp(paths), 0)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer server.Stop(context.Background())
+
+	attack := url.Values{"bot_token": {"666:theirs"}, "owner_id": {"666"}, "csrf": {server.csrf}}
+	for _, refused := range []struct {
+		name    string
+		headers map[string]string
+		form    url.Values
+	}{
+		{"a browser that says the request is cross-site", map[string]string{"Sec-Fetch-Site": "cross-site"}, attack},
+		{"an origin that is not this page", map[string]string{"Origin": "http://evil.example"}, attack},
+		{"an origin on the right host but the wrong port", map[string]string{"Origin": "http://127.0.0.1:1"}, attack},
+		{"a form with no token at all", nil, url.Values{"bot_token": {"666:theirs"}, "owner_id": {"666"}}},
+		{"a form with the wrong token", nil, url.Values{"bot_token": {"666:theirs"}, "csrf": {"not-the-token"}}},
+	} {
+		resp := post(t, server.URL()+"setup", refused.headers, refused.form)
+		if resp != http.StatusForbidden {
+			t.Fatalf("%s answered %d, want %d", refused.name, resp, http.StatusForbidden)
+		}
+	}
+	if got := CurrentSetup(paths); got.BotToken != "123:mine" || got.OwnerID != "1" || got.DeepseekKey != "sk-mine" {
+		t.Fatalf("a refused form still rewrote the configuration: %+v", got)
+	}
+}
+
+func TestAnActionNeedsTheLauncherOwnHeader(t *testing.T) {
+	paths := setupTempInstall(t)
+	if err := WriteSetup(paths, Setup{}); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(NewApp(paths), 0)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer server.Stop(context.Background())
+
+	for _, refused := range []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"no header", nil},
+		{"the wrong token", map[string]string{csrfHeader: "not-the-token"}},
+		{"the right token from another site", map[string]string{csrfHeader: server.csrf, "Sec-Fetch-Site": "cross-site"}},
+	} {
+		if got := post(t, server.URL()+"api/action/start", refused.headers, nil); got != http.StatusForbidden {
+			t.Fatalf("an action with %s answered %d, want %d", refused.name, got, http.StatusForbidden)
+		}
+	}
+	// A name that is not an action proves the token was accepted without anything being started.
+	if got := post(t, server.URL()+"api/action/nonsense", map[string]string{csrfHeader: server.csrf}, nil); got != http.StatusNotFound {
+		t.Fatalf("the page's own request answered %d, want %d", got, http.StatusNotFound)
+	}
+}
+
+func post(t *testing.T, address string, headers map[string]string, form url.Values) int {
+	t.Helper()
+	body := ""
+	if form != nil {
+		body = form.Encode()
+	}
+	req, err := http.NewRequest(http.MethodPost, address, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for name, value := range headers {
+		req.Header.Set(name, value)
+	}
+	client := &http.Client{
+		Timeout:       10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+	return resp.StatusCode
 }
 
 func get(t *testing.T, client *http.Client, address string) string {

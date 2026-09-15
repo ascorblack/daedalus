@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -51,7 +52,7 @@ func TestEnvUpdatesPointAtTheDataFolderAndLoopback(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := map[string]string{}
-	for _, v := range envUpdates(paths, Setup{}, "secret", "/home/someone") {
+	for _, v := range envUpdates(paths, Setup{}, map[string]string{}, "secret", "/home/someone") {
 		env[v.Key] = v.Value
 	}
 	if env["DAEDALUS_COMPOSE_PROJECT_DIR"] != paths.Bot || env["DAEDALUS_COMPOSE_FILE"] != paths.Compose || env["DAEDALUS_CORE_PROJECT_DIR"] != paths.Core {
@@ -118,6 +119,67 @@ func TestWriteSetupKeepsTheSearxngSecretAndUntypedKeys(t *testing.T) {
 	}
 	if got := CurrentSetup(paths); got.DeepseekKey != "sk-one" {
 		t.Fatalf("the setup page would open with an empty key field: %+v", got)
+	}
+}
+
+// Setup is re-run to change one value, and a form that carries nothing for the rest — a browser
+// that did not fill a password field back in — must leave them as they are.
+func TestWriteSetupLeavesAloneWhatTheFormDidNotCarry(t *testing.T) {
+	paths := setupTempInstall(t)
+	full := Setup{DeepseekKey: "sk-deepseek", OpenrouterKey: "sk-router", BotToken: "123:abc", OwnerID: "42", APIID: "7", APIHash: "hash", USDPerDay: "9"}
+	if err := WriteSetup(paths, full); err != nil {
+		t.Fatal(err)
+	}
+	// A public address is not on the setup page at all; passkeys are enrolled against that host.
+	if err := os.WriteFile(paths.Env, []byte(readFile(paths.Env)+"MINIAPP_PUBLIC_URL=https://example.test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSetup(paths, Setup{USDPerDay: "9"}); err != nil {
+		t.Fatal(err)
+	}
+	got := CurrentSetup(paths)
+	if !reflect.DeepEqual(got, full) {
+		t.Fatalf("an empty form rewrote the configuration: %+v, want %+v", got, full)
+	}
+	if url := readEnv(readFile(paths.Env))["MINIAPP_PUBLIC_URL"]; url != "https://example.test" {
+		t.Fatalf("the public address the operator set by hand is now %q", url)
+	}
+	if cap := readEnv(readFile(paths.KeyproxyEnv))["KEYPROXY_USD_PER_DAY"]; cap != "9" {
+		t.Fatalf("the key proxy's cap is %q", cap)
+	}
+}
+
+func TestWriteSetupEmptiesOnlyWhatWasAskedFor(t *testing.T) {
+	paths := setupTempInstall(t)
+	if err := WriteSetup(paths, Setup{DeepseekKey: "sk-deepseek", OpenrouterKey: "sk-router", BotToken: "123:abc", OwnerID: "42"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSetup(paths, Setup{Clear: map[string]bool{"deepseek": true, "bot_token": true}}); err != nil {
+		t.Fatal(err)
+	}
+	got := CurrentSetup(paths)
+	if got.DeepseekKey != "" || got.BotToken != "" {
+		t.Fatalf("a ticked field was not emptied: %+v", got)
+	}
+	if got.OpenrouterKey != "sk-router" || got.OwnerID != "42" {
+		t.Fatalf("clearing one field emptied another: %+v", got)
+	}
+	if (Setup{BotToken: got.BotToken}).Telegram() {
+		t.Fatal("clearing the bot token must turn Telegram off")
+	}
+}
+
+// A desktop install keeps the default cap only until the operator names one, and never rewrites
+// their figure with it afterwards.
+func TestTheDailyCapFallsBackToWhatIsInForce(t *testing.T) {
+	if got := dailyCap("", ""); got != "20" {
+		t.Fatalf("a fresh install starts at %q", got)
+	}
+	if got := dailyCap("", "35"); got != "35" {
+		t.Fatalf("the cap in force became %q", got)
+	}
+	if got := dailyCap(" 12 ", "35"); got != "12" {
+		t.Fatalf("the cap the form carried became %q", got)
 	}
 }
 

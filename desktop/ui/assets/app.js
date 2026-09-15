@@ -2,6 +2,11 @@
 // process that may be doing a build, and a poll that misses one answer costs nothing.
 const el = (id) => document.getElementById(id);
 
+// The launcher answers an action only when this token comes back with it. It is minted per process
+// and rendered into the page, so a request from any other page in the browser — which can reach the
+// same loopback port — carries nothing and is refused.
+const token = document.querySelector('meta[name="csrf"]')?.content || "";
+
 async function refresh() {
   let status;
   try {
@@ -30,7 +35,10 @@ document.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
   button.disabled = true;
-  await fetch("/api/action/" + button.dataset.action, { method: "POST" });
+  await fetch("/api/action/" + button.dataset.action, {
+    method: "POST",
+    headers: { "X-Daedalus-Desktop": token },
+  });
   refresh();
 });
 
