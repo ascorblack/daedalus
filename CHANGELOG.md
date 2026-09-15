@@ -4,6 +4,26 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-15
 
+- **Every slash command the app offers, the app can run.** Twenty-two of the thirty-two commands the
+  palette advertises were handed to the Telegram handlers and answered 409 on an installation with no
+  bot token: `/stop`, `/model`, `/thinking`, `/mode`, `/rename`, `/new`, `/delete`, `/usage`, `/status`,
+  `/sessions`, `/settings`, `/board`, `/schedules`, `/schedule`, `/intents`, `/peer`, `/heartbeat`,
+  `/balance`, `/verbosity`, `/approval`, `/rebuild` and `/rollback` — the last two being the ones an
+  operator without a chat most needs. They run on the session manager and the extensions directly now,
+  and say the same as they do in the chat. `GET /api/commands` lists what this installation can actually
+  run, so the palette never offers a command that answers with a refusal; the few whose subject *is* the
+  chat — binding a forum, moving the private chat's window, closing a topic — say so rather than failing
+  as unknown commands.
+- **A session keeps its name when the chat gains topics.** A session opened while everything lived in the
+  private chat had no topic of its own; binding a group left it talking in General with nothing saying
+  which session it was, alongside every other one. `/bind` and the same switch in Settings → Chat open a
+  topic for every session that has none, a session Telegram will not open one for yet gets it on its next
+  output, and until then it speaks in General under its own name.
+- **Smaller corrections.** `/use <n>` refuses a number `/sessions` never printed — both list thirty.
+  Deleting a session through the API clears the private chat's pointer at it, as deleting one from the
+  chat always did, instead of leaving the next message to open a session nobody asked for. The
+  "Type your answer:" prompt carries the asking session's name, like the question card above it.
+
 - **The desktop launcher's page answers only itself.** Its port is on the loopback address, but every
   page a browser has open can reach that address too, and a form post or a bodyless `fetch` travels
   cross-site without asking — enough for a page the operator merely visits to rewrite the provider

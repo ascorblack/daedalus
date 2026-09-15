@@ -635,9 +635,6 @@ class TelegramFront:
         return state, binding
 
     async def _session_for_message(self, message: Message) -> SessionState | None:
-        forced = getattr(message, "forced_session_id", None)  # a command issued from the Mini App names its session outright
-        if forced:
-            return await self.manager.get_state(forced)
         chat_id = message.chat.id
         thread_id = message.message_thread_id or 0
         if message.chat.type == "private":

@@ -10,10 +10,35 @@ from protocore.contracts.tools import ToolContext
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions import commands as slash
+from daedalus.extensions.board import Board
 from daedalus.extensions.inbox import Inbox
+from daedalus.extensions.peers import Peers
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.tools.chat import spawn_agent
+
+
+def _app(settings: Settings, db: Database, manager: SessionManager, config: RuntimeConfig) -> Any:
+    """What ``run_command`` reads of the Application, with nothing behind it but the manager."""
+
+    async def save_config(cfg: RuntimeConfig) -> None:
+        app.config = cfg
+
+    async def create_session(title: str, **kw: Any) -> Any:
+        return await manager.create_session(title, **kw)
+
+    app = SimpleNamespace(
+        settings=settings,
+        config=config,
+        db=db,
+        manager=manager,
+        front=None,
+        extensions={},
+        guard=None,
+        save_config=save_config,
+        create_session=create_session,
+    )
+    return app
 
 
 def test_parse_recognises_commands() -> None:
@@ -24,25 +49,123 @@ def test_parse_recognises_commands() -> None:
 
 
 async def test_commands_run_without_the_chat_front(settings: Settings, db: Database) -> None:
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    config = RuntimeConfig()
+    manager = SessionManager(settings, config, db=db)
     await manager.start()
-    app = SimpleNamespace(settings=settings, config=RuntimeConfig(), db=db, manager=manager, front=None, extensions={}, guard=None)
-    app.extensions["inbox"] = Inbox(app)  # type: ignore[arg-type]
+    app = _app(settings, db, manager, config)
+    app.extensions["inbox"] = Inbox(app)
     state = await manager.create_session("s")
     sid = state.session.id
-    assert "Session cap: $2.00" in await slash.run_command(app, sid, "/cap 2")  # type: ignore[arg-type]
+
+    async def run(line: str) -> str:
+        return await slash.run_command(app, sid, line)
+
+    assert "Session cap: $2.00" in await run("/cap 2")
     assert state.metadata["usd_cap"] == 2.0
-    assert "removed" in await slash.run_command(app, sid, "/cap none")  # type: ignore[arg-type]
-    assert "No brief" in await slash.run_command(app, sid, "/brief")  # type: ignore[arg-type]
-    assert "updated" in await slash.run_command(app, sid, "/brief You keep the changelog.")  # type: ignore[arg-type]
-    assert "You keep the changelog." in manager.notes_for(state) and "Brief:" in await slash.run_command(app, sid, "/brief")  # type: ignore[arg-type]
-    assert "Working rules" in await slash.run_command(app, sid, "/prompt")  # type: ignore[arg-type]
-    assert "nothing unread" in await slash.run_command(app, sid, "/inbox")  # type: ignore[arg-type]
-    assert "No sessions with closed topics" in await slash.run_command(app, sid, "/cleanup")  # type: ignore[arg-type]
+    assert "removed" in await run("/cap none")
+    assert "No brief" in await run("/brief")
+    assert "updated" in await run("/brief You keep the changelog.")
+    assert "You keep the changelog." in manager.notes_for(state) and "Brief:" in await run("/brief")
+    assert "Working rules" in await run("/prompt")
+    assert "nothing unread" in await run("/inbox")
+    assert "No sessions with closed topics" in await run("/cleanup")
     with pytest.raises(KeyError):
-        await slash.run_command(app, sid, "/nonsense")  # type: ignore[arg-type]
-    with pytest.raises(RuntimeError, match="Telegram front"):
-        await slash.run_command(app, sid, "/usage")  # type: ignore[arg-type]
+        await run("/nonsense")
+    with pytest.raises(RuntimeError, match="Telegram chat itself"):
+        await run("/bind")  # the chat's own commands are named, not answered with "unknown command"
+    await manager.close()
+
+
+async def test_the_chat_commands_are_not_the_chat_s_to_run(settings: Settings, db: Database) -> None:
+    """Everything the Mini App offers runs on an installation with no bot token at all."""
+    config = RuntimeConfig()
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    app = _app(settings, db, manager, config)
+    state = await manager.create_session("s")
+    sid = state.session.id
+
+    async def run(line: str) -> str:
+        return await slash.run_command(app, sid, line)
+
+    assert "Nothing is running" in await run("/stop")
+
+    preset_id = next(iter(config.presets))
+    assert "models:" in await run("/model") and preset_id in await run("/model")
+    assert "Session model:" in await run(f"/model {preset_id}")
+    assert "global default" in await run("/model default")
+    assert "usage: /model" in await run("/model nosuchprovider/x")
+    assert "thinking=True effort=high" in await run("/thinking high")
+    assert "usage: /thinking" in await run("/thinking perhaps")
+    assert "mode: default" in await run("/mode")
+    assert "no such mode" in await run("/mode nonesuch")
+
+    assert "Renamed to: kept" in await run("/rename kept")
+    renamed = await manager.get_state(sid)
+    assert renamed is not None and renamed.session.title == "kept"
+
+    made = await run("/new second")
+    second = made.rsplit("(", 1)[1].rstrip(").")
+    assert "New session 'second'" in made and await manager.get_state(second) is not None
+
+    listed = await run("/sessions")
+    assert "kept" in listed and "second" in listed
+    assert "Idle" in await run("/status")
+    usage = await run("/usage")
+    assert usage.startswith("today: 0 calls") and "this session: 0 calls" in usage
+    settings_text = await run("/settings")
+    assert "model:" in settings_text and "no Telegram front" in settings_text
+
+    assert "verbosity=2" in await run("/verbosity 2") and app.config.telegram.verbosity == 2
+    assert "usage: /verbosity" in await run("/verbosity loud")
+    assert "approval=auto" in await run("/approval auto") and app.config.self_change.approval == "auto"
+
+    assert f"Session {second} deleted" in await run(f"/delete {second}")
+    assert await manager.get_state(second) is None
+    assert "no such session" in await run("/delete nope")
+    await manager.close()
+
+
+async def test_the_palette_offers_only_what_is_installed(settings: Settings, db: Database) -> None:
+    config = RuntimeConfig()
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    app = _app(settings, db, manager, config)
+    state = await manager.create_session("s")
+    sid = state.session.id
+
+    async def run(line: str) -> str:
+        return await slash.run_command(app, sid, line)
+
+    bare = {c.name for c in slash.available(app)}
+    assert {"compact", "stop", "model", "usage", "settings", "delete"} <= bare
+    assert bare.isdisjoint({"board", "peer", "loop", "inbox", "rebuild", "rollback", "schedules"})
+    assert "The board is not installed" in await run("/board")
+    assert "The scheduler is not installed" in await run("/schedules")
+    assert "Self-development is not installed" in await run("/rebuild")
+
+    app.extensions["board"] = Board(app)
+    app.extensions["peers"] = Peers(app)
+    assert {"board", "peer"} <= {c.name for c in slash.available(app)}
+    assert "the board is empty" in await run("/board")
+    assert "peer 'alpha'" in await run("/peer here alpha")
+    assert "alpha" in await run("/peer")
+    assert "forgotten" in await run("/peer forget alpha")
+
+    done: list[tuple[str, Any]] = []
+
+    async def rebuild(reason: str) -> str:
+        done.append(("rebuild", reason))
+        return "rebuilding"
+
+    async def rollback(steps: int) -> str:
+        done.append(("rollback", steps))
+        return "rolled back"
+
+    app.extensions["selfdev"] = SimpleNamespace(rebuild=rebuild, rollback=rollback)
+    assert await run("/rebuild") == "rebuilding" and done[-1] == ("rebuild", "operator request")
+    assert await run("/rollback 2") == "rolled back" and done[-1] == ("rollback", 2)
+    assert "usage: /rollback" in await run("/rollback soon")
     await manager.close()
 
 

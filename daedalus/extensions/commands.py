@@ -1,21 +1,24 @@
 """Slash commands for the Mini App: the same commands the chat knows, run for a named session.
 
-The chat handlers take a Telegram message; the Mini App gives them a stand-in that names the
-session outright and collects every reply as text. A few commands that answer with a keyboard
-or send through the chat are handled here directly, with the same effect.
+Every command here runs on the session manager and on the extensions directly — never through
+the Telegram front — so an installation with no bot token answers exactly as one with a chat.
+The chat handlers in the Telegram transport are a second rendering of the same actions, not the
+implementation of them; only the commands whose subject *is* the chat (binding a forum, moving
+the private chat's window, closing a topic) belong to the transport alone.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from daedalus.doctor import DoctorContext, render_text, run_checks
 from daedalus.extensions.inbox import format_entries
 from daedalus.host.prompts import DEFAULT_RULES
 from daedalus.security import redact
+from daedalus.transport.telegram.front import SESSION_LIST_LIMIT
 
 if TYPE_CHECKING:
     from daedalus.app import Application
@@ -68,6 +71,30 @@ COMMANDS: tuple[CommandSpec, ...] = (
 )
 BY_NAME = {c.name: c for c in COMMANDS}
 
+TELEGRAM_ONLY = frozenset({"bind", "use", "close"})
+"""Commands whose subject is the chat itself. They are never advertised here; naming them keeps
+the refusal specific instead of "unknown command"."""
+
+NEEDS_EXTENSION: dict[str, str] = {
+    "loop": "loops",
+    "inbox": "inbox",
+    "board": "board",
+    "schedules": "scheduler",
+    "schedule": "scheduler",
+    "intents": "inbound",
+    "peer": "peers",
+    "heartbeat": "heartbeat",
+    "balance": "balance",
+    "rebuild": "selfdev",
+    "rollback": "selfdev",
+}
+"""A command is only as present as the extension that carries it."""
+
+
+def available(app: Application) -> tuple[CommandSpec, ...]:
+    """The commands this installation can actually run, so the palette never offers a refusal."""
+    return tuple(c for c in COMMANDS if c.name not in NEEDS_EXTENSION or NEEDS_EXTENSION[c.name] in app.extensions)
+
 
 def parse(line: str) -> tuple[str, str] | None:
     """``/name args`` → (name, args); None when the line is not a command."""
@@ -79,45 +106,24 @@ def parse(line: str) -> tuple[str, str] | None:
     return (name, rest.strip()) if name.isidentifier() else None
 
 
-@dataclass
-class _Reply:
-    texts: list[str] = field(default_factory=list)
-
-    async def answer(self, text: str, **_: Any) -> _Reply:
-        self.texts.append(str(text))
-        return self
-
-    reply = answer
-
-    async def edit_text(self, text: str, **_: Any) -> _Reply:
-        self.texts.append(str(text))
-        return self
-
-    async def delete(self) -> None:
-        return None
+def _cost_words(usd: float | None, unmetered: int) -> str:
+    """Spend for a summary line: a priced total, and an honest count of calls with no known price."""
+    if usd is None:
+        return " · cost unknown (no price for these calls)" if unmetered else ""
+    text = f" · ${usd:.4f}"
+    if unmetered:
+        text += f" (+{unmetered} unmetered call{'s' if unmetered != 1 else ''})"
+    return text
 
 
-class MiniAppMessage(_Reply):
-    """What a chat handler needs from a message: the owner, a chat that looks like the session's topic, and answer()."""
-
-    def __init__(self, *, owner_id: int, session_id: str, chat_id: int, thread_id: int, text: str) -> None:
-        super().__init__()
-        self.forced_session_id = session_id
-        self.from_user = SimpleNamespace(id=owner_id)
-        self.chat = SimpleNamespace(id=chat_id, type="supergroup" if thread_id else "private", is_forum=bool(thread_id))
-        self.message_thread_id = thread_id or None
-        self.is_topic_message = bool(thread_id)
-        self.reply_to_message = None
-        self.message_id = 0
-        self.text = text
-
-
-async def run_command(app: Application, session_id: str, line: str) -> str:
+async def run_command(app: Application, session_id: str, line: str) -> str:  # noqa: C901, PLR0911, PLR0912, PLR0915 — one branch per command reads better than a table of thirty callbacks
     """Run one slash command for ``session_id`` and return what the chat would have shown."""
     parsed = parse(line)
     if parsed is None:
         raise ValueError("not a command")
     name, args = parsed
+    if name in TELEGRAM_ONLY:
+        raise RuntimeError(f"/{name} acts on the Telegram chat itself and has nothing to act on here")
     spec = BY_NAME.get(name)
     if spec is None:
         raise KeyError(name)
@@ -127,7 +133,8 @@ async def run_command(app: Application, session_id: str, line: str) -> str:
     state = await manager.get_state(session_id)
     if state is None:
         raise KeyError("no such session")
-    # Commands the chat answers with a keyboard or through the outbox: done here, same effect.
+
+    # -- the session's history and its run ------------------------------------------
     if name == "compact":
         if state.running:
             return "Stop the run first."
@@ -138,6 +145,51 @@ async def run_command(app: Application, session_id: str, line: str) -> str:
             return "Stop the run first."
         result = await manager.clear_history(session_id)
         return f"🧹 History cleared: {result['dropped']} message(s) left the working history. The workspace, the brief and the session's settings stay; the transcript keeps the old turns."
+    if name == "stop":
+        return "Stopping…" if await manager.stop(session_id) else "Nothing is running in this session."
+
+    # -- what the session runs with -------------------------------------------------
+    if name == "model":
+        default_id, default = app.config.preset()
+        if not args:
+            lines = [f"  {pid} — {p.display(pid)}{'  (default)' if pid == default_id else ''}" for pid, p in app.config.presets.items()]
+            return f"default: {default.display(default_id)}\nmodels:\n" + "\n".join(lines) + "\nusage: /model <preset-id> · /model default · /model provider/model-id"
+        if args in app.config.presets:
+            await manager.set_model(session_id, preset=args)
+            return f"Session model: {app.config.presets[args].display(args)} (from the next model call)"
+        if args in ("default", "reset"):
+            await manager.set_model(session_id, clear=True)
+            return "Session model: back to the global default"
+        provider, _, model_name = args.partition("/")
+        if not model_name or provider not in manager.providers.available():
+            return "usage: /model <preset-id> | provider/model-id | default"
+        await manager.set_model(session_id, model_name=model_name, provider=provider)
+        return f"Session model: {provider}/{model_name} (from the next model call)"
+    if name == "thinking":
+        arg = args.lower()
+        default_id, default = app.config.preset()
+        if arg in ("on", "off"):
+            thinking, effort = arg == "on", None
+        elif arg in ("low", "medium", "high"):
+            thinking, effort = True, arg
+        else:
+            return f"{default.display(default_id)}: thinking={default.thinking} effort={default.reasoning_effort}\nusage: /thinking on|off|low|medium|high"
+        await manager.set_model(session_id, thinking=thinking, reasoning_effort=effort)
+        return f"Session thinking={thinking} effort={effort or default.reasoning_effort}"
+    if name == "mode":
+        arg = args.lower()
+        if not arg:
+            current = state.metadata.get("mode") or "default"
+            lines = [
+                f"  {mode_name} — {m.description or ''} (iterations {m.max_iterations or app.config.limits.max_iterations}, cap ${m.usd_per_run if m.usd_per_run is not None else app.config.limits.usd_per_run})"
+                for mode_name, m in app.config.modes.items()
+            ]
+            return f"mode: {current}\navailable:\n" + "\n".join(lines) + "\nusage: /mode <name> · /mode default"
+        try:
+            chosen = await manager.set_mode(session_id, None if arg in ("default", "off", "reset") else arg)
+        except ValueError as exc:
+            return str(exc)
+        return f"mode: {chosen or 'default'} (applies from the next run)"
     if name == "cap":
         if args.lower() in ("none", "off", "", "-"):
             await manager.set_session_cap(session_id, None)
@@ -157,6 +209,84 @@ async def run_command(app: Application, session_id: str, line: str) -> str:
         approves = result.get("approves")
         what = f"{approves['tool']}: `{approves['text']}`" if approves else "a call this host has not seen refused yet (the key is taken on trust)"
         return f"Granted {result['key']} for {what}. The same call passes once within {result['expires_in_minutes']} minutes. Open grants: {', '.join(result['grants'])}."
+    if name == "brief":
+        if not args:
+            current = str(state.metadata.get("brief") or "")
+            return ("Brief:\n" + current) if current else "No brief. /brief <text> sets one; it lives in this session's system prompt."
+        await manager.set_brief(session_id, args)
+        return "Brief updated; it applies from the next run."
+
+    # -- the sessions themselves ----------------------------------------------------
+    if name == "rename":
+        title = args.strip()
+        if not title:
+            return f"Current title: {state.session.title}\nusage: /rename <new title>"
+        if front is not None:
+            await front.rename_session(session_id, title)  # renames the topic with it, where there is one
+        else:
+            await manager.rename_session(session_id, title)
+        return f"Renamed to: {title}"
+    if name == "new":
+        title = args.strip() or datetime.now(UTC).strftime("session %m-%d %H:%M")
+        created = await app.create_session(title)
+        if front is not None and front.private_mode():
+            # In the private chat a new session is the one the operator is now writing to, as /new does there.
+            await front.set_current_session(created.session.id)
+        return f"New session '{title}' ({created.session.id})."
+    if name == "delete":
+        target = args.strip()
+        if not target:
+            return "usage: /delete <session id>  (see /sessions)"
+        if front is not None:
+            await front.forget_session(target)  # while its topic row is still there to be read
+        removed = await manager.delete_session(target)
+        return f"Session {target} deleted with its workspace." if removed else "no such session"
+    if name == "cleanup":
+        closed = await manager.closed_topic_sessions()
+        if not closed:
+            return "No sessions with closed topics."
+        if args.lower() != "confirm":
+            return "Sessions whose topics are closed:\n" + "\n".join(f"- {s['title']} ({s['session_id']})" for s in closed) + "\n\n/cleanup confirm deletes them with their workspaces."
+        removed = 0
+        for s in closed:
+            removed += int(await manager.delete_session(s["session_id"]))
+        return f"Deleted {removed} session(s) with their workspaces."
+    if name == "sessions":
+        sessions = await manager.list_sessions(limit=SESSION_LIST_LIMIT)
+        if not sessions:
+            return "No sessions yet."
+        current = await front.current_session_id() if front is not None and front.private_mode() else ""
+        return "\n".join(
+            f"{i}. {'▶' if s['status'] == 'running' else '❓' if s['status'] == 'waiting' else '·'} {s['title']} — {s['id']} ({s['status']})"
+            + ("  ← the chat is writing here" if s["id"] == current else "")
+            for i, s in enumerate(sessions, 1)
+        )
+    if name == "status":
+        active = [s for s in await manager.list_sessions(limit=50) if s["status"] in ("running", "waiting")]
+        if not active:
+            return "Idle. No active runs."
+        return "\n".join(f"{s['status']}: {s['title']} ({s['id']})" for s in active)
+    if name == "usage":
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        row = await app.db.fetchone(
+            "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cache_read_tokens) ch, sum(cost_usd) usd,"
+            " sum(cost_usd IS NULL) unmetered FROM usage_events WHERE at >= ?",
+            (today,),
+        )
+        text = f"today: {row['c'] or 0} calls · in {row['i'] or 0:,} · out {row['o'] or 0:,} · cached {row['ch'] or 0:,}"
+        text += _cost_words(row["usd"], int(row["unmetered"] or 0))
+        srow = await app.db.fetchone(
+            "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cost_usd) usd, sum(cost_usd IS NULL) unmetered"
+            " FROM usage_events WHERE session_id = ?",
+            (session_id,),
+        )
+        text += f"\nthis session: {srow['c'] or 0} calls · in {srow['i'] or 0:,} · out {srow['o'] or 0:,}"
+        text += _cost_words(srow["usd"], int(srow["unmetered"] or 0))
+        if app.config.limits.usd_per_run > 0:
+            text += f"\nper-run cap: ${app.config.limits.usd_per_run:.2f} (limits.usd_per_run)"
+        return text
+
+    # -- what the extensions carry --------------------------------------------------
     if name == "loop":
         loops = app.extensions.get("loops")
         if loops is None:
@@ -189,18 +319,6 @@ async def run_command(app: Application, session_id: str, line: str) -> str:
         except ValueError as exc:
             return str(exc)
         return "Loop started: " + loops.note(loop).lstrip("- ")
-    if name == "brief":
-        if not args:
-            current = str(state.metadata.get("brief") or "")
-            return ("Brief:\n" + current) if current else "No brief. /brief <text> sets one; it lives in this session's system prompt."
-        await manager.set_brief(session_id, args)
-        return "Brief updated; it applies from the next run."
-    if name == "doctor":
-        ctx = DoctorContext(settings=app.settings, config=app.config, db=app.db, manager=manager, front=front, extensions=dict(app.extensions), guard=app.guard, fix=args.lower() == "fix")
-        return redact.redact(render_text(await run_checks(ctx)))
-    if name == "prompt":
-        rules = app.config.prompt.rules.strip() or DEFAULT_RULES.strip()
-        return "Working rules" + (" (default)" if not app.config.prompt.rules.strip() else "") + ":\n" + rules
     if name == "inbox":
         inbox = app.extensions.get("inbox")
         if inbox is None:
@@ -215,29 +333,159 @@ async def run_command(app: Application, session_id: str, line: str) -> str:
         if args.lower() != "all":
             await inbox.mark_read([int(e["id"]) for e in entries])  # type: ignore[attr-defined]
         return text
-    if name == "cleanup":
-        closed = await manager.closed_topic_sessions()
-        if not closed:
-            return "No sessions with closed topics."
-        if args.lower() != "confirm":
-            return "Sessions whose topics are closed:\n" + "\n".join(f"- {s['title']} ({s['session_id']})" for s in closed) + "\n\n/cleanup confirm deletes them with their workspaces."
-        removed = 0
-        for s in closed:
-            removed += int(await manager.delete_session(s["session_id"]))
-        return f"Deleted {removed} session(s) with their workspaces."
-    if front is None:
-        raise RuntimeError("chat commands need the Telegram front")
-    topic = await app.db.fetchone("SELECT chat_id, thread_id FROM topics WHERE session_id = ? AND closed_at IS NULL", (session_id,))
-    chat_id = int(topic["chat_id"]) if topic else int(app.config.telegram.forum_chat_id or app.settings.owner_user_id)
-    thread_id = int(topic["thread_id"] or 0) if topic else 0
-    message = MiniAppMessage(owner_id=app.settings.owner_user_id, session_id=session_id, chat_id=chat_id, thread_id=thread_id, text=line)
-    command = SimpleNamespace(prefix="/", command=name, args=args or None)  # what the chat handlers read of aiogram's CommandObject
-    handler = getattr(front, f"cmd_{name}", None)
-    if handler is not None and name not in ("operator",):
-        await handler(message, command) if name in ("new", "rename", "delete", "model", "thinking", "mode") else await handler(message)
-    else:
-        await front.cmd_operator(message, command)
-    return "\n\n".join(message.texts) or "done"
+    if name == "board":
+        board = app.extensions.get("board")
+        if board is None:
+            return "The board is not installed."
+        tasks = await board.list(None, include_done=args.lower() == "all")
+        return ("📋 Board\n" + board.render(tasks) + "\n\n/board all shows finished tasks too")[:4000]
+    if name == "schedules":
+        scheduler = app.extensions.get("scheduler")
+        if scheduler is None:
+            return "The scheduler is not installed."
+        items = await scheduler.list()
+        if not items:
+            return "No scheduled tasks. The agent creates them with ScheduleCreate."
+        lines = [
+            f"{'✓' if s['enabled'] else '✗'} {s['id']} [{s.get('kind') or 'agent'}] {s['name']} — {('cron ' + s['cron']) if s['cron'] else 'once'}"
+            f" · next {s['next_run_at'] or '-'}" + (f" · failures {s['failure_count']}" if s.get("failure_count") else "") + (" · running" if s["id"] in scheduler._active else "")
+            for s in items
+        ]
+        return "\n".join(lines) + "\n\n/schedule delete <id> · /schedule on|off <id> · /schedule run <id>"
+    if name == "schedule":
+        scheduler = app.extensions.get("scheduler")
+        if scheduler is None:
+            return "The scheduler is not installed."
+        parts = args.split()
+        if len(parts) == 2 and parts[0] == "delete":
+            return "deleted" if await scheduler.delete(parts[1]) else "no such schedule"
+        if len(parts) == 2 and parts[0] in ("on", "off"):
+            await scheduler.set_enabled(parts[1], parts[0] == "on")
+            return f"{parts[1]}: {parts[0]}"
+        if len(parts) == 2 and parts[0] == "run":
+            row = await app.db.fetchone("SELECT * FROM schedules WHERE id = ?", (parts[1],))
+            if row is None:
+                return "no such schedule"
+            try:
+                started = await scheduler.fire(dict(row), advance=False)
+            except RuntimeError as exc:
+                return str(exc)
+            return f"started session {started}" if started else "fired"
+        return "usage: /schedule delete <id> | on <id> | off <id> | run <id>"
+    if name == "intents":
+        inbound = app.extensions.get("inbound")
+        if inbound is None:
+            return "Inbound intents are not installed."
+        parts = args.split()
+        if len(parts) == 2 and parts[0] == "delete":
+            return "deleted" if await inbound.delete_intent(parts[1]) else "no such intent"
+        items = await inbound.list_intents()
+        if not items:
+            return "No standing intents. The agent creates them with IntentCreate ('when an inbound event mentions X, do Y')."
+        return "\n".join(f"{'✓' if i['enabled'] else '✗'} {i['id']} /{i['pattern']}/ → {i['action'][:60]} · fired {i['fired_count']}/{i['max_fires']}" for i in items) + "\n\n/intents delete <id>"
+    if name == "peer":
+        peers = app.extensions.get("peers")
+        if peers is None:
+            return "Peers are not installed."
+        parts = args.split()
+        if len(parts) == 2 and parts[0] == "here":
+            try:
+                await peers.register(parts[1], session_id)
+            except ValueError as exc:
+                return str(exc)
+            return f"this session is now peer '{parts[1].lower()}': other sessions can AskPeer it"
+        if len(parts) == 2 and parts[0] == "forget":
+            return "forgotten" if await peers.forget(parts[1].lower()) else "no such peer"
+        registry = await peers.registry()
+        if not registry:
+            return "No peers. /peer here <name> names this session as one."
+        lines = []
+        for peer_name, peer_id in sorted(registry.items()):
+            peer_state = await manager.get_state(peer_id)
+            lines.append(f"• {peer_name} → {peer_state.session.title if peer_state else peer_id} ({'running' if peer_state is not None and peer_state.running else 'idle'})")
+        return "\n".join(lines) + "\n\n/peer here <name> · /peer forget <name>"
+    if name == "heartbeat":
+        heartbeat = app.extensions.get("heartbeat")
+        if heartbeat is None:
+            return "The heartbeat is not installed."
+        arg = args.lower()
+        if arg in ("on", "off"):
+            app.config.heartbeat.enabled = arg == "on"
+            await app.save_config(app.config)
+            return f"heartbeat {'on' if app.config.heartbeat.enabled else 'off'}" + ("" if heartbeat.read().strip() else " (HEARTBEAT.md is empty: fill it in Settings → Heartbeat)")
+        if arg == "run":
+            try:
+                started = await heartbeat.fire(manual=True)
+            except RuntimeError as exc:
+                return f"cannot run: {exc}"
+            return f"heartbeat started in session {started}"
+        st = heartbeat.status()
+        return (
+            f"heartbeat: {'on' if st['enabled'] else 'off'}{'' if st['armed'] or not st['enabled'] else ' (file empty → idle)'} · every {st['interval_minutes']} min · "
+            f"active {st['active_hours']} UTC · today {st['runs_today']}/{st['max_runs_per_day']} · last {st['last_run'] or 'never'}\n"
+            "usage: /heartbeat on|off|run — the prompt is HEARTBEAT.md (Settings → Heartbeat)"
+        )
+    if name == "balance":
+        monitor = app.extensions.get("balance")
+        if monitor is None:
+            return "The balance monitor is not installed."
+        balances = await monitor.current()
+        if not balances:
+            return "No provider with a balance endpoint is configured."
+        return "\n".join(f"{p}: {f'${b:.2f}' if b is not None else 'unavailable'}" for p, b in balances.items())
+
+    # -- the installation itself ----------------------------------------------------
+    if name == "doctor":
+        ctx = DoctorContext(settings=app.settings, config=app.config, db=app.db, manager=manager, front=front, extensions=dict(app.extensions), guard=app.guard, fix=args.lower() == "fix")
+        return redact.redact(render_text(await run_checks(ctx)))
+    if name == "prompt":
+        rules = app.config.prompt.rules.strip() or DEFAULT_RULES.strip()
+        return "Working rules" + (" (default)" if not app.config.prompt.rules.strip() else "") + ":\n" + rules
+    if name == "settings":
+        c = app.config
+        preset_id, preset = c.preset()
+        if front is None:
+            chat = "no Telegram front; the app and the API are the way in"
+        elif front.private_mode():
+            chat = "one private chat, a window onto one session at a time (/sessions, /use)"
+        else:
+            chat = f"one topic per session in forum {c.telegram.forum_chat_id or 'not bound'}"
+        return (
+            f"model: {preset.display(preset_id)} thinking={preset.thinking} effort={preset.reasoning_effort}\n"
+            f"fallback: {', '.join(c.model.chain) or 'none'}\n"
+            f"self-change approval: {c.self_change.approval}, auto_rebuild={c.self_change.auto_rebuild}\n"
+            f"limits: ${app.settings.usd_per_day}/day (env), {c.limits.max_iterations} iterations, tool timeout {c.limits.tool_timeout_seconds:.0f}s\n"
+            f"balance thresholds: {c.balance.thresholds_usd} (every {c.balance.poll_seconds}s)\n"
+            f"verbosity: {c.telegram.verbosity}\n"
+            f"chat: {chat}"
+        )
+    if name == "verbosity":
+        try:
+            app.config.telegram.verbosity = max(0, min(2, int(args.strip())))
+        except ValueError:
+            return "usage: /verbosity 0|1|2"
+        await app.save_config(app.config)
+        return f"verbosity={app.config.telegram.verbosity}"
+    if name == "approval":
+        arg = args.strip()
+        if arg not in ("manual", "auto"):
+            return f"approval={app.config.self_change.approval}\nusage: /approval manual|auto"
+        app.config.self_change.approval = arg
+        await app.save_config(app.config)
+        return f"approval={arg}"
+    if name in ("rebuild", "rollback"):
+        selfdev = app.extensions.get("selfdev")
+        if selfdev is None:
+            return "Self-development is not installed on this host."
+        if name == "rebuild":
+            return await selfdev.rebuild(args.strip() or "operator request")
+        try:
+            steps = int(args.strip()) if args.strip() else 0
+        except ValueError:
+            return "usage: /rollback [steps_back]"
+        return await selfdev.rollback(steps)
+
+    raise KeyError(name)  # a spec with no branch: the two lists are kept together above
 
 
-__all__ = ["BY_NAME", "COMMANDS", "CommandSpec", "MiniAppMessage", "parse", "run_command"]
+__all__ = ["BY_NAME", "COMMANDS", "NEEDS_EXTENSION", "TELEGRAM_ONLY", "CommandSpec", "available", "parse", "run_command"]

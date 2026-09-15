@@ -1164,12 +1164,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str, keep_workspace: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        binding = await app.front.binding_for_session(session_id) if app.front is not None else None
-        if binding is not None and binding.thread_id and app.front is not None:
-            try:
-                await app.front.bot.delete_forum_topic(binding.chat_id, binding.thread_id)
-            except Exception:  # noqa: BLE001
-                pass
+        if app.front is not None:
+            # Before the deletion: the topic to close and the private chat's pointer are both
+            # read from rows that go with the session.
+            await app.front.forget_session(session_id)
         return {"deleted": await manager.delete_session(session_id, delete_workspace=not keep_workspace)}
 
     @api.patch("/api/sessions/{session_id}")
@@ -1419,7 +1417,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.get("/api/commands")
     async def list_commands(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
-        return [{"name": c.name, "args": c.args, "description": c.description, "scope": c.scope, "confirm": c.confirm} for c in slash.COMMANDS]
+        """Only what this installation can run: a palette entry that answers with a refusal is a lie."""
+        return [{"name": c.name, "args": c.args, "description": c.description, "scope": c.scope, "confirm": c.confirm} for c in slash.available(app)]
 
     @api.post("/api/sessions/{session_id}/command")
     async def run_slash_command(session_id: str, body: CommandBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2267,10 +2266,15 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             new_config = type(app.config).model_validate(current)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(400, str(exc)) from exc
+        switching_to_topics = app.front is not None and app.front.private_mode() and new_config.telegram.session_mode() == "topics"
         await app.save_config(new_config)
         await manager.providers.close_retired()
         if app.front is not None:
             app.front.config = new_config
+            if switching_to_topics:
+                # Sessions opened in the private chat have no topic; without one they would all
+                # speak in General at once, with nothing saying which is which.
+                await app.front.adopt_sessions_into_topics()
         return _settings_view()
 
     # -- provider endpoints ----------------------------------------------------------------
