@@ -1045,6 +1045,19 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
         return (
           <div className="card">
             <div className="section-title" style={{ marginTop: 0 }}>Chat & scheduler</div>
+            <label className="field">Where sessions live</label>
+            <div className="btnrow" style={{ marginTop: 0 }}>
+              {([["private", "one private chat"], ["topics", "a topic per session"]] as const).map(([m, label]) => (
+                <button key={m} className={`btn small ${(s.telegram.mode ?? (s.telegram.forum_chat_id ? "topics" : "private")) === m ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, mode: m } })}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="sub">
+              {(s.telegram.mode ?? (s.telegram.forum_chat_id ? "topics" : "private")) === "private"
+                ? "The private chat is a window onto one session at a time: /sessions lists them, /use switches. Every other session still speaks there, under its own name."
+                : `Each session gets its own forum topic${s.telegram.forum_chat_id ? "" : " — send /bind in a supergroup with topics first"}.`}
+            </div>
             <label className="field">Telegram verbosity</label>
             <div className="btnrow" style={{ marginTop: 0 }}>
               {[0, 1, 2].map((v) => (

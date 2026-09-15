@@ -334,6 +334,8 @@ export type Settings = {
   scheduler: { topic_mode: string; catch_up_missed: boolean };
   compaction: { auto_ratio: number; keep_recent_messages: number; max_words: number; chunk_tokens: number; min_messages: number; core_trigger_ratio: number };
   telegram: {
+    mode: "topics" | "private" | null;
+    forum_chat_id: number;
     verbosity: number;
     reactions: boolean;
     topic_status_emoji: boolean;

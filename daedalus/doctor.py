@@ -137,7 +137,13 @@ async def _config(ctx: DoctorContext) -> list[Check]:
 async def _telegram(ctx: DoctorContext) -> list[Check]:
     st = ctx.settings
     out = [Check("telegram credentials", bool(st.telegram_bot_token and st.owner_user_id), "token and owner set" if st.telegram_bot_token and st.owner_user_id else "TELEGRAM_BOT_TOKEN or OWNER_USER_ID missing", "fail", "set them in the environment (.env)")]
-    out.append(Check("session hub", bool(ctx.config.telegram.forum_chat_id), f"forum {ctx.config.telegram.forum_chat_id}" if ctx.config.telegram.forum_chat_id else "no forum bound: only the private chat works, one session", "ok" if ctx.config.telegram.forum_chat_id else "warn", "add the bot to a supergroup with topics and send /bind there"))
+    tg = ctx.config.telegram
+    private = tg.session_mode() == "private"
+    # Both shapes are complete: the private chat is a window onto one session at a time, a bound
+    # forum gives each session a topic. Only "topics without a forum" is a configuration to fix.
+    hub_ok = private or bool(tg.forum_chat_id)
+    hub = "every session in the private chat (/sessions, /use)" if private else (f"forum {tg.forum_chat_id}" if tg.forum_chat_id else "telegram.mode is topics but no forum is bound")
+    out.append(Check("session hub", hub_ok, hub, "ok" if hub_ok else "warn", "add the bot to a supergroup with topics and send /bind there, or set telegram.mode to private"))
     if ctx.front is not None:
         try:
             me = await asyncio.wait_for(ctx.front.bot.get_me(), timeout=_timeout(ctx))
