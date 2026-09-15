@@ -177,7 +177,7 @@ function Row({ s, kids, onOpen, current, fork }: { s: SessionSummary; kids: Sess
           {orphan && <span className="sep">·</span>}
           {orphan && <span>subagent, leader gone</span>}
         </div>
-        {fork && <div className="erow-meta"><Icon name="fork" size={12} /> <span title={`forked from ${fork.of} at message ${fork.seq}`}>fork of {fork.of} · from message {fork.seq}</span></div>}
+        {fork && <div className="erow-meta"><Icon name="fork" size={12} /> <span title={`forked from ${fork.of} at message ${fork.seq}`}>forked at message {fork.seq}</span></div>}
         {loop && <div className={`erow-meta ${s.metadata?.loop?.status === "paused" ? "waiting" : ""}`}>{loop}</div>}
         {kids.length > 0 && (
           <div className="erow-children" onClick={(e) => e.stopPropagation()}>

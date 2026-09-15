@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/session.png" alt="A session: the agent's steps, an image it looked at, the answer, and the panel with quota, services and subagents" width="100%" />
+  <img src="docs/screenshots/session.png" alt="A session: the agent's steps, an image it looked at, the file it sent, and the panel with quota, cron, services and subagents" width="100%" />
 </p>
 
 > Built on [protocore](https://github.com/ascorblack-labs/protocore-community), an open agent core (ReAct loop, tools, context compaction, snapshots and resumable runs, memory, skills). The copy it runs on is [protocore-exp](https://github.com/ascorblack/protocore-exp).
@@ -81,11 +81,11 @@ Provider keys live in a key-proxy container that injects them into upstream call
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/bots.png" alt="Agents: active sessions, subagents under their leaders, loops" /></td>
+<td width="50%"><img src="docs/screenshots/bots.png" alt="Agents grouped by workspace: a fork under its origin, subagents under their leader, a loop with its cadence" /></td>
 <td width="50%"><img src="docs/screenshots/dual.png" alt="Two sessions side by side on a wide screen" /></td>
 </tr>
 <tr>
-<td align="center"><sub>Agents — subagents under their leader, loop agents with their cadence</sub></td>
+<td align="center"><sub>Agents — grouped by workspace; a fork sits under its origin, subagents under their leader, a loop shows its cadence</sub></td>
 <td align="center"><sub>Two sessions side by side; each pane has its own files and settings</sub></td>
 </tr>
 <tr>
@@ -102,7 +102,7 @@ Provider keys live in a key-proxy container that injects them into upstream call
 </tr>
 <tr>
 <td align="center"><sub>Workspace files with previews and uploads</sub></td>
-<td align="center"><sub>The task board the agent keeps</sub></td>
+<td align="center"><sub>The boards the agents keep: every task says whose it is</sub></td>
 </tr>
 </table>
 
@@ -113,7 +113,7 @@ Provider keys live in a key-proxy container that injects them into upstream call
 </p>
 <p align="center"><sub>The same app on a phone — inside Telegram as a Mini App, or in any browser</sub></p>
 
-<sub>The screenshots show the app before the 2026-09-11 redesign (rows instead of cards, addresses for every screen, a rail on wide screens); the layout differs, the screens are the same.</sub>
+<sub>The screenshots are taken over an invented installation by <code>tests/browser/screenshots.py</code>; rerun it after a change to the app.</sub>
 
 ## How it is put together
 
