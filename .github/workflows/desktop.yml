@@ -1,0 +1,55 @@
+# The desktop launcher: five binaries on a desktop-v* tag, attached to the release that tag names.
+name: desktop
+
+on:
+  push:
+    tags: ["desktop-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          # The module has no dependencies, so there is nothing worth caching.
+          cache: false
+
+      - run: go vet ./...
+      - run: go test ./...
+
+      - name: Cross-compile
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            goos="${target%/*}"; goarch="${target#*/}"
+            out="dist/daedalus-desktop-$goos-$goarch"
+            case "$goos" in windows) out="$out.exe";; esac
+            echo "building $out"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$out" .
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+
+      - name: Attach them to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes='Put the binary for your platform in an empty folder and run it. Docker is the only
+          requirement; see desktop/README.md. macOS refuses an unsigned binary on the first launch:
+          right-click it and choose Open, or run `xattr -d com.apple.quarantine daedalus-desktop`.'
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "$notes"
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
