@@ -68,8 +68,8 @@ func TestOverrideNamesThePublishedImagesAndFreesTelegram(t *testing.T) {
 	}
 	text := string(body)
 	for _, want := range []string{
-		agentImage,
-		keyproxyImage,
+		agentImage(),
+		keyproxyImage(),
 		`profiles: ["telegram"]`,
 		// Without required:false the whole project refuses to load while the profile is off,
 		// because daedalus depends on a service that is not in the project.
@@ -103,5 +103,29 @@ func TestAForkOverridesTheRemote(t *testing.T) {
 	t.Setenv("DAEDALUS_CORE_GIT_REMOTE", "https://example.invalid/core")
 	if botRemote() != "https://example.invalid/fork" || coreRemote() != "https://example.invalid/core" {
 		t.Fatal("the fork remotes are ignored")
+	}
+}
+
+// A fork's checkout running upstream's image is a mismatch nothing would report, so the image
+// follows the remote the code comes from.
+func TestTheImageFollowsTheRemote(t *testing.T) {
+	t.Setenv("DAEDALUS_GIT_REMOTE", "https://github.com/Someone-Else/daedalus")
+	if got := agentImage(); got != "ghcr.io/someone-else/daedalus:latest" {
+		t.Fatalf("got %q", got)
+	}
+	if got := keyproxyImage(); got != "ghcr.io/someone-else/daedalus-keyproxy:latest" {
+		t.Fatalf("got %q", got)
+	}
+	for remote, want := range map[string]string{
+		"https://github.com/ascorblack/daedalus":     "ascorblack",
+		"https://github.com/ascorblack/daedalus.git": "ascorblack",
+		"git@github.com:a-fork/daedalus.git":         "a-fork",
+		"ssh://git@github.com/a-fork/daedalus":       "a-fork",
+		"https://github.com:443/a-fork/daedalus":     "a-fork",
+		"nonsense":                                   defaultImageOwner,
+	} {
+		if got := imageOwner(remote); got != want {
+			t.Fatalf("%s names owner %q, want %q", remote, got, want)
+		}
 	}
 }

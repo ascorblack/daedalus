@@ -14,12 +14,37 @@ import (
 // project, whatever the folder is called.
 const projectName = "daedalus"
 
-// The images the launcher prefers over a local build. They are published from the repository's main
-// branch; when a platform has no published image the launcher builds it on the spot instead.
-const (
-	agentImage    = "ghcr.io/ascorblack/daedalus:latest"
-	keyproxyImage = "ghcr.io/ascorblack/daedalus-keyproxy:latest"
-)
+// defaultImageOwner is the namespace the published images live in when the remote does not name one.
+const defaultImageOwner = "ascorblack"
+
+// agentImage and keyproxyImage are what the launcher prefers over a local build. The namespace
+// follows the remote the checkout comes from: a fork's code running upstream's image is a mismatch
+// nothing would report. A fork that publishes no images has nothing to pull, and the start falls
+// back to building, which is what happens on a platform without a published image anyway.
+func agentImage() string { return "ghcr.io/" + imageOwner(botRemote()) + "/daedalus:latest" }
+
+func keyproxyImage() string {
+	return "ghcr.io/" + imageOwner(botRemote()) + "/daedalus-keyproxy:latest"
+}
+
+// imageOwner is the owner segment of a git remote — github.com/<owner>/<repo> — in the lowercase a
+// registry namespace has to be, whatever case the account is written in.
+func imageOwner(remote string) string {
+	rest := strings.TrimSpace(remote)
+	if _, after, ok := strings.Cut(rest, "://"); ok {
+		rest = after
+		if _, host, ok := strings.Cut(rest, "@"); ok { // ssh://git@host/owner/repo
+			rest = host
+		}
+	} else if _, host, ok := strings.Cut(rest, "@"); ok { // git@host:owner/repo
+		rest = strings.Replace(host, ":", "/", 1)
+	}
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) < 2 || parts[1] == "" {
+		return defaultImageOwner
+	}
+	return strings.ToLower(parts[1])
+}
 
 // dockerMissing is what the operator sees when Docker is not there. Docker is never installed for
 // them: it is a system-wide decision, and on macOS and Windows it is a desktop application.

@@ -30,6 +30,6 @@ services:
 // WriteOverride writes the override file. It is rewritten on every start because the image names
 // belong to the launcher's version, not to the operator's folder.
 func WriteOverride(p Paths) error {
-	body := fmt.Sprintf(overrideYAML, agentImage, keyproxyImage)
+	body := fmt.Sprintf(overrideYAML, agentImage(), keyproxyImage())
 	return os.WriteFile(p.Override, []byte(body), 0o644)
 }
