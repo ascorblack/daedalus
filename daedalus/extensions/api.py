@@ -109,7 +109,11 @@ def verify_session_cookie(secret: bytes, value: str) -> int | None:
         return None
     if int(data.get("exp", 0)) < time.time():
         return None
-    return int(data.get("uid", 0)) or None
+    if "uid" not in data:
+        return None
+    # Zero is the owner of an installation with no Telegram account behind it, so it is an answer
+    # like any other: only a forged or expired cookie has none.
+    return int(data["uid"])
 
 
 def validate_init_data(init_data: str, bot_token: str, *, max_age: int = INIT_DATA_MAX_AGE) -> dict[str, Any]:

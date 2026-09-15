@@ -59,6 +59,7 @@ def test_session_cookie_round_trip_and_forgery() -> None:
     assert verify_session_cookie(secret, value[:-1] + ("0" if value[-1] != "0" else "1")) is None
     assert verify_session_cookie(secret, "garbage") is None
     assert verify_session_cookie(secret, session_cookie_value(secret, 42, ttl=-1)) is None
+    assert verify_session_cookie(secret, session_cookie_value(secret, 0)) == 0  # the owner of an installation with no Telegram
 
 
 # -- pairing links and passkeys: signing in with no Telegram at all -----------------------------
@@ -107,6 +108,16 @@ async def test_a_pairing_link_opens_the_app_once(client: httpx.AsyncClient, db: 
     # Spent: the same link a second time is refused, and so is one that was never minted.
     assert (await client.get("/api/auth/pair", params={"code": code})).status_code == 403
     assert (await client.get("/api/auth/pair", params={"code": "not-a-code"})).status_code == 403
+
+
+async def test_an_installation_with_no_telegram_account_still_holds_a_session(settings: Settings, db: Database) -> None:
+    """Owner id zero is what an installation without Telegram has; a cookie must still mean the owner."""
+    settings.telegram_bot_token = ""
+    settings.owner_user_id = 0
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(_app(settings, db), "tok")), base_url="http://test") as c:  # type: ignore[arg-type]
+        assert (await c.get("/api/auth/pair", params={"code": await pairing.mint(db)})).status_code == 303
+        assert (await c.get("/api/auth/me")).json() == {"user_id": 0, "via": "cookie"}
+        assert (await c.post("/api/auth/passkeys/register/begin")).status_code == 200
 
 
 async def test_using_a_link_revokes_the_ones_still_outstanding(db: Database) -> None:
