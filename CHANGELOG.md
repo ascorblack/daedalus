@@ -4,6 +4,24 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-15
 
+- **Telegram is optional.** With no bot token the bot starts anyway: the API, the app, the scheduler, the
+  loops, the inbox and self-development all run, and the front is simply absent. What used to be a chat line
+  with nowhere to go — a failed rebuild, a resumed run, an exhausted budget, a low provider balance, a change
+  proposal waiting for a decision, a fired reminder — becomes an inbox entry instead of a lost message; a
+  session created without a chat is a session without a topic. `doctor` no longer fails an installation for
+  having no bot, and reports what a browser can actually sign in with. The local Bot API server is behind the
+  compose profile `telegram`, so the stack comes up without it.
+- **Signing in without Telegram: a pairing link, then a passkey.** Every start prints a one-time link (in the
+  log, and in `pairing-url` in the state directory, readable by its owner only); `daedalus auth pair` mints
+  another. A link opens once, expires after thirty minutes, and using one revokes the rest. From the browser it
+  signed in, Settings → Security enrols a **passkey** — a discoverable credential, so the login screen asks for
+  no username — and the login screen then offers "Sign in with a passkey" beside the Telegram widget, or an
+  explanation when neither is set up yet. The relying party follows `MINIAPP_PUBLIC_URL`, falling back to
+  `localhost` for the app opened on the machine itself.
+- **The session cookie is honest about the connection.** It is marked secure only when the browser really
+  reached the app over TLS (directly or through the proxy that terminates it), so the http-on-localhost case
+  can hold a session at all; and it is signed with the API token plus a secret minted once per installation
+  rather than with the bot token, which an installation without Telegram does not have.
 - **A desktop launcher.** `desktop/` builds one small binary per platform that turns a folder into a
   running Daedalus with Docker as the only thing installed on the host. It clones the bot and the
   core with git in a container, asks for a provider key, the optional Telegram values and a daily cap

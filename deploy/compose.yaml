@@ -18,6 +18,10 @@
 #   telegram-bot-api-data -> /var/lib/telegram-bot-api  files the local Bot API server stores
 #
 # Networks: "telegram" (bot ⇄ local Bot API), "keys" (bot ⇄ key proxy), "search" (bot ⇄ SearXNG).
+#
+# Telegram is optional. The local Bot API server is behind the "telegram" profile, so the stack comes up
+# without it (`docker compose … up -d`); add `--profile telegram` when TELEGRAM_BOT_TOKEN is set. With no
+# token the bot never calls the Bot API host, so its absence costs nothing.
 services:
   daedalus:
     stop_grace_period: 40s  # the supervisor drains the bot for 25 s before killing it; Docker must wait longer
@@ -33,6 +37,7 @@ services:
     env_file:
       - ../.env
     environment:
+      # Only ever dialled when a bot token is set, which is also when the telegram profile is up.
       TELEGRAM_API_BASE: http://telegram-bot-api:8081
       TELEGRAM_LOCAL_MODE: "true"
       STATE_DIR: /srv/state
@@ -76,8 +81,6 @@ services:
       - "${SERVICES_PORT_RANGE:-8100-8119}:${SERVICES_PORT_RANGE:-8100-8119}"
     networks: [telegram, keys, search]
     depends_on:
-      telegram-bot-api:
-        condition: service_started
       keyproxy:
         condition: service_healthy
       searxng:
@@ -155,8 +158,10 @@ services:
         sleep 5;
       done'
 
+  # Files up to 2 GB, instead of Telegram's 20 MB. Only started with `--profile telegram`.
   telegram-bot-api:
     image: aiogram/telegram-bot-api:latest
+    profiles: [telegram]
     restart: unless-stopped
     environment:
       TELEGRAM_API_ID: ${TELEGRAM_API_ID}

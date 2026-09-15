@@ -157,7 +157,7 @@ Every tool can be switched off per session from the app, and a **mode** (`quick`
 
 ## Run it
 
-Requirements: Docker with Compose, a Telegram bot token, your numeric Telegram user id, Telegram API credentials for the local Bot API server (files above 20 MB), and at least one model API key **or** a ChatGPT / Claude Code / SuperGrok login on the host.
+Requirements: Docker with Compose, and at least one model API key **or** a ChatGPT / Claude Code / SuperGrok login on the host. **Telegram is optional**: with a bot token you get the chat as a front; without one the app in the browser is the whole interface.
 
 ```bash
 git clone https://github.com/ascorblack/daedalus
@@ -167,9 +167,26 @@ bash deploy/setup.sh            # asks for the values, writes .env and ../daedal
 
 By hand instead: clone `protocore-exp` next to this repository, copy `deploy/env.example` to `.env` and
 `deploy/keyproxy.env.example` to `../daedalus-secrets/keyproxy.env` (provider keys go there, outside the
-checkout, `chmod 600`), then `docker compose -f deploy/compose.yaml --env-file .env up -d --build`.
+checkout, `chmod 600`), then `docker compose -f deploy/compose.yaml --env-file .env up -d --build`. With a
+bot token add `--profile telegram`, which also starts the local Bot API server (files up to 2 GB, instead of
+Telegram's 20 MB, and it needs `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from https://my.telegram.org/apps).
 
-Then, in Telegram:
+### Signing in without Telegram
+
+Every start prints a one-time **pairing link** — in the log as `pairing link: …` and in `pairing-url` in the
+state directory, readable by its owner only. Open it once and this browser is signed in; it expires after 30
+minutes, is spent on first use, and using one revokes the rest. A fresh one:
+
+```bash
+docker compose -f deploy/compose.yaml exec daedalus python -m daedalus auth pair
+```
+
+Then add a **passkey** in Settings → Security: the key stays in the device (or its password manager) and signs
+you in from the login screen with no link and no password. A passkey belongs to the address it was made at, so
+set `MINIAPP_PUBLIC_URL` before enrolling one; on the machine itself, open the app at `http://localhost:8765`
+rather than at the IP, which is not a name a key can belong to.
+
+### With Telegram
 
 1. Send `/start` to the bot in a private chat. That chat is a window onto one session at a time: `/new <title>` starts a session and writes to it, `/sessions` numbers them, `/use <n|title>` switches, `/close` puts one away. Every other session — a scheduled task, a loop agent, an agent you spawned — still speaks in the same chat, with its name above its words, and a question of any of them is answered back into it. Nothing else is needed.
 2. Optional, for a chat of its own per session: create a supergroup with topics, add the bot as an administrator with *manage topics*, and send `/bind` there. One topic is then one session, and topics you create by hand are adopted too. Mini App → Settings → Chat switches between the two shapes.
@@ -211,6 +228,7 @@ uv sync --extra dev
 uv run python -m daedalus check                  # configuration and tool registry
 uv run python -m daedalus run -p "say hello"     # one session in the terminal
 uv run python -m daedalus serve                  # the bot
+uv run python -m daedalus auth pair              # a one-time link that signs a browser in
 uv run pytest -q                                 # tests
 (cd miniapp && npm install && npm run build)     # the app, served by the bot from miniapp/dist
 ```
