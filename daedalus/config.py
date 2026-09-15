@@ -37,6 +37,17 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    @field_validator("owner_user_id", "api_port", "usd_per_day", mode="before")
+    @classmethod
+    def _blank_means_default(cls, value: object, info: Any) -> object:
+        """``OWNER_USER_ID=`` in an env file is an unset value, not the number "".
+
+        A setup that writes every key it knows (the desktop launcher, a copied env.example) leaves the
+        Telegram ones blank on an installation without Telegram; the bot must start on that."""
+        if isinstance(value, str) and not value.strip():
+            return cls.model_fields[info.field_name].default
+        return value
+
     telegram_bot_token: str = ""
     bench_state_dir: Path | None = None
     """State directory the Harbor adapter uses (``BENCH_STATE_DIR``): its own config.toml and database, never the bot's."""
