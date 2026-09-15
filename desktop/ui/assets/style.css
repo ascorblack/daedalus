@@ -1,0 +1,88 @@
+/* The launcher page. Dark, one column, no framework: it is served by a few megabytes of Go and has
+   to look the same on a fresh machine with nothing installed on it. Surfaces lighten as they come
+   forward; seams are hairlines, never darker slabs. */
+:root {
+  color-scheme: dark;
+  --bg: #0e1013;
+  --raise: #161a1f;
+  --raise-2: #1d222a;
+  --line: #262c35;
+  --text: #e7ecf2;
+  --muted: #98a3b2;
+  --accent: #6ea8fe;
+  --warn: #f0b429;
+  --ok: #56d364;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 980px; margin: 0 auto; padding: 40px 24px 64px; }
+.head { margin-bottom: 28px; }
+h1 { font-size: 30px; letter-spacing: -0.02em; margin: 0 0 6px; }
+h2 { font-size: 15px; letter-spacing: 0.02em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+.sub, .hint { color: var(--muted); margin: 0; }
+.hint { font-size: 13px; margin-top: 10px; }
+code { background: var(--raise-2); border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
+.card {
+  background: var(--raise);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 22px;
+  margin-bottom: 16px;
+}
+.block + .block { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 14px; }
+label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+.note { color: #6c7784; font-size: 12px; }
+input {
+  background: var(--raise-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  padding: 9px 11px;
+}
+input:focus { outline: none; border-color: var(--accent); }
+.tag {
+  font-size: 11px; text-transform: none; letter-spacing: 0;
+  color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; margin-left: 6px;
+}
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 22px; }
+button, .button {
+  background: var(--raise-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  padding: 9px 16px;
+  text-decoration: none;
+}
+button:hover, .button:hover { background: #242b34; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
+button.primary:hover { background: #82b5ff; }
+button[disabled] { opacity: 0.5; cursor: default; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; margin-bottom: 16px; }
+.stat { display: flex; flex-direction: column; gap: 6px; }
+.label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+.value { font-size: 17px; }
+.link { color: var(--accent); text-decoration: none; word-break: break-all; }
+.busy { color: var(--muted); font-size: 13px; }
+.banner { border-radius: 10px; padding: 14px 16px; margin: 0 0 16px; border: 1px solid var(--line); background: var(--raise); }
+.banner.warn { border-color: rgba(240, 180, 41, 0.45); color: #f6d28a; }
+.log {
+  background: #0b0d10;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 14px;
+  white-space: pre-wrap;
+}

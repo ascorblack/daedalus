@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Daedalus</title>
+<link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+<main class="wrap">
+  <header class="head">
+    <h1>Daedalus</h1>
+    <p class="sub">Running from <code>{{.Status.Data}}</code>. Closing this launcher leaves the stack running.</p>
+  </header>
+
+  <p class="banner warn" id="alert" hidden></p>
+
+  <section class="cards">
+    <div class="card stat"><span class="label">Docker</span><span class="value" id="docker">…</span></div>
+    <div class="card stat"><span class="label">Containers</span><span class="value" id="containers">…</span></div>
+    <div class="card stat"><span class="label">Telegram</span><span class="value" id="telegram">…</span></div>
+    <div class="card stat"><span class="label">App</span><a class="value link" id="appurl" href="{{.Status.AppURL}}">{{.Status.AppURL}}</a></div>
+  </section>
+
+  <section class="card">
+    <div class="actions">
+      <button class="primary" data-action="open">Open the app</button>
+      <button data-action="start">Start</button>
+      <button data-action="stop">Stop</button>
+      <button data-action="update">Update</button>
+      <a class="button" href="/setup">Change the configuration</a>
+      <span class="busy" id="busy"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>What the launcher is doing</h2>
+    <pre class="log" id="log">nothing yet</pre>
+    <p class="hint">The stack's own logs: <code>daedalus-desktop logs -f</code>.</p>
+  </section>
+</main>
+<script src="/assets/app.js"></script>
+</body>
+</html>

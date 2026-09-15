@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Daedalus — setup</title>
+<link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+<main class="wrap">
+  <header class="head">
+    <h1>Daedalus</h1>
+    <p class="sub">Everything below is written to <code>{{.Status.Data}}</code> on this machine and to nowhere else.</p>
+  </header>
+
+  {{if .DockerMissing}}<p class="banner warn">{{.DockerMissing}}</p>{{end}}
+
+  <form method="post" action="/setup" class="card">
+    <section class="block">
+      <h2>A model to think with</h2>
+      <p class="hint">One key is enough. Keys are written to <code>daedalus-secrets/keyproxy.env</code>, outside every folder the agent can read, and reach the provider through the key proxy — the agent process never holds one.</p>
+      <div class="grid">
+        <label>DeepSeek API key<input type="password" name="deepseek" value="{{.Setup.DeepseekKey}}" autocomplete="off" spellcheck="false" /></label>
+        <label>OpenRouter API key<input type="password" name="openrouter" value="{{.Setup.OpenrouterKey}}" autocomplete="off" spellcheck="false" /></label>
+        <label>OpenCode API key<input type="password" name="opencode" value="{{.Setup.OpencodeKey}}" autocomplete="off" spellcheck="false" /></label>
+      </div>
+      <p class="hint">No key at all is fine if you are signed in to the ChatGPT (Codex), Claude Code or SuperGrok CLI on this machine: those logins are mounted into the key proxy and become providers of their own.</p>
+    </section>
+
+    <section class="block">
+      <h2>Telegram <span class="tag">optional</span></h2>
+      <p class="hint">Telegram is optional; without it you use the app in the browser. With it, every forum topic becomes a session you can write to from your phone.</p>
+      <div class="grid">
+        <label>Bot token <span class="note">@BotFather</span><input type="password" name="bot_token" value="{{.Setup.BotToken}}" autocomplete="off" spellcheck="false" /></label>
+        <label>Your numeric user id <span class="note">@userinfobot</span><input type="text" name="owner_id" value="{{.Setup.OwnerID}}" inputmode="numeric" autocomplete="off" /></label>
+        <label>Telegram API id <span class="note">my.telegram.org/apps</span><input type="text" name="api_id" value="{{.Setup.APIID}}" autocomplete="off" /></label>
+        <label>Telegram API hash<input type="password" name="api_hash" value="{{.Setup.APIHash}}" autocomplete="off" spellcheck="false" /></label>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2>Spending</h2>
+      <p class="hint">The cap is enforced twice: by the supervisor, which the agent cannot edit, and by the key proxy, which stops paying once the day's budget is spent.</p>
+      <div class="grid">
+        <label>Daily cap, USD<input type="text" name="usd_per_day" value="{{if .Setup.USDPerDay}}{{.Setup.USDPerDay}}{{else}}20{{end}}" inputmode="decimal" /></label>
+      </div>
+    </section>
+
+    <footer class="actions">
+      <button type="submit" class="primary">Save and start</button>
+      <span class="hint">The first start downloads the images. They are several gigabytes: the agent's container carries a headless browser.</span>
+    </footer>
+  </form>
+</main>
+</body>
+</html>
