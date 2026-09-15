@@ -4,6 +4,17 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-15
 
+- **Telegram works without a group.** `telegram.mode` chooses where sessions live: `private` — every
+  session in the operator's private chat, which is a window onto one of them at a time — or `topics`,
+  today's forum with one topic per session. An installation that never bound a group is private, and
+  `/bind` still switches it to topics, so nothing existing changes shape. In the private chat `/sessions`
+  numbers the sessions, `/use <n|title>` points the chat at one, `/new <title>` creates one and writes to
+  it, `/close` puts it away, and the chosen session survives a restart. Sessions the operator is not
+  looking at keep talking: a scheduled report, a loop agent's answer or a question arrives with a line
+  naming the session above it, an inline answer goes back to the session that asked, and so does a typed
+  one — it is attributed by the message it replies to, not by whichever session the chat is on. Where the
+  output of a session goes is decided in one place (`outbox_for_session`), so both shapes share the whole
+  feature set: files, voice, live status per run, approval cards, notifications and the Mini App.
 - **The prompt prefix is stable across runs.** The clock and the workspace notes (`AGENTS.md`, the open board
   tasks) were rendered into the system prompt at every run, so the first request of every run began with a
   different first message and the provider re-read the whole history behind it: measured at run starts, the

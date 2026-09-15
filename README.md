@@ -39,7 +39,7 @@ It is built to run for weeks: sessions survive restarts, runs resume from snapsh
 <td width="33%" valign="top">
 
 **💬 Telegram-native**<br/>
-Each forum topic is a session with its own workspace. Files in, files out, voice notes transcribed, questions as inline buttons, answers as rich messages that stream while they are written.
+Every session has its own workspace and speaks in the chat under its own name — in the private chat alone, or in a forum topic each when you bind a group. Files in, files out, voice notes transcribed, questions as inline buttons, answers as rich messages that stream while they are written.
 
 </td>
 <td width="33%" valign="top">
@@ -171,8 +171,8 @@ checkout, `chmod 600`), then `docker compose -f deploy/compose.yaml --env-file .
 
 Then, in Telegram:
 
-1. Send `/start` to the bot in a private chat — that chat is a session of its own.
-2. For parallel sessions, create a supergroup with topics, add the bot as an administrator with *manage topics*, and send `/bind` there. `/new <title>` now creates a topic per session; topics you create by hand are adopted too.
+1. Send `/start` to the bot in a private chat. That chat is a window onto one session at a time: `/new <title>` starts a session and writes to it, `/sessions` numbers them, `/use <n|title>` switches, `/close` puts one away. Every other session — a scheduled task, a loop agent, an agent you spawned — still speaks in the same chat, with its name above its words, and a question of any of them is answered back into it. Nothing else is needed.
+2. Optional, for a chat of its own per session: create a supergroup with topics, add the bot as an administrator with *manage topics*, and send `/bind` there. One topic is then one session, and topics you create by hand are adopted too. Mini App → Settings → Chat switches between the two shapes.
 3. Open the app with `/app`. Set `MINIAPP_PUBLIC_URL` to an HTTPS address that proxies to port 8765 and register it as the bot's menu button in @BotFather; the same address serves the browser version (sign in with Telegram's login widget) and the shared services under `/s/…`.
 
 ### Let your agent install it
@@ -211,14 +211,15 @@ uv run pytest -q                                 # tests
 
 | Command | Effect |
 |---|---|
-| `/new <title>` | new session (a new topic when a group is bound) |
-| `/stop`, `/close` | stop the current run; close this session's topic |
+| `/new <title>` | new session (a new topic when a group is bound) and write to it |
+| `/use <n\|title>` | in the private chat: write to that session from now on |
+| `/stop`, `/close` | stop the current run; put this session away (closing its topic when it has one) |
 | `/rename <title>` | rename the session and its topic |
 | `/compact [focus]`, `/clear` | replace the history with a summary; start over with an empty history (files, brief and settings stay) |
 | `/model [preset]`, `/thinking …`, `/mode …` | model, thinking and mode for this session |
 | `/loop [10m] <instruction>` | make this session a loop agent; `status`, `pause`, `resume`, `stop`, `remove` |
 | `/brief [text]`, `/cap <usd>` | standing instructions; spend cap for the session |
-| `/sessions`, `/status`, `/usage`, `/balance` | roster; what is running; spend; provider balances |
+| `/sessions`, `/status`, `/usage`, `/balance` | the numbered roster; what is running; spend; provider balances |
 | `/schedules`, `/schedule run\|on\|off\|delete <id>` | scheduled tasks |
 | `/board`, `/inbox`, `/intents`, `/peer` | every agent's board tasks, the inbox, standing intents, peers |
 | `/allow <key>` | grant once a call the policy asked about |
