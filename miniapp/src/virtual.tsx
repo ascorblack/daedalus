@@ -119,12 +119,12 @@ export function Windowed({ keys, render, scroller, estimate = 260, overscan = 90
     // A turn is as tall as the list is wide. A rotation, a pane opening, a desktop window resized:
     // every height remembered — and the average the unmeasured ones are guessed at — describes a
     // width that is gone, so the spacers would put the reader screens away from where they were.
-    const now = host.clientWidth;
-    if (now && width.current && now !== width.current) {
+    const w = host.clientWidth;
+    if (w && width.current && w !== width.current) {
       sizes.current.clear();
       anchor.current = null;
     }
-    if (now) width.current = now;
+    if (w) width.current = w;
     let dirty = false;
     for (const slot of host.querySelectorAll<HTMLElement>("[data-slot]")) {
       const key = slot.dataset.slot!;
