@@ -75,9 +75,9 @@ def message(seq: int, total: int) -> dict:
 
 
 def detail(messages: int, tail: int, before: int | None) -> dict:
-    """The session as the API returns it. `before` is answered when asked for; today's API ignores it."""
-    rows = [message(i, messages) for i in range(messages)]
-    if before is not None:
+    """The session as the API returns it. The cursor is answered only with --cursor: today's API has none."""
+    rows = [message(i + 1, messages) for i in range(messages)] + list(Stub.written)
+    if before is not None and Stub.cursor:
         rows = [r for r in rows if (r["seq"] or 0) < before]
     rows = rows[-tail:] if tail > 0 else rows
     return {
@@ -114,6 +114,9 @@ class Stub(BaseHTTPRequestHandler):
     """The app's whole API surface, invented, plus the built app under /app."""
 
     messages = 600
+    cursor = False  # whether `before=<seq>` is answered; today's API ignores it
+    initial_tail = 0  # when set, the app's full read is answered with this many rows only
+    written = []  # the messages the run has finished, as the transcript would hold them
     delta_ms = 20
     stop_every = 200
     served = []  # (path, bytes) of every /api read, so a refetch storm is visible as a number
@@ -159,7 +162,7 @@ class Stub(BaseHTTPRequestHandler):
             # history, so a case of N messages really puts N on the screen. A smaller tail is a tail
             # read and is answered as one.
             if tail in (0, 600):
-                tail = Stub.messages
+                tail = Stub.initial_tail or Stub.messages
             before = int(query["before"]) if query.get("before") else None
             return detail(Stub.messages, tail, before)
         return {}
@@ -172,6 +175,7 @@ class Stub(BaseHTTPRequestHandler):
         self.end_headers()
         words = ("The log ", "shows ", "one ", "slow ", "query ", "on ", "the ", "events ", "table, ", "which ")
         n = 0
+        written = ""
         try:
             self.wfile.write(b"event: message_start\ndata: {}\n\n")
             self.wfile.flush()
@@ -181,7 +185,14 @@ class Stub(BaseHTTPRequestHandler):
                 self.wfile.write(frame.encode())
                 self.wfile.flush()
                 n += 1
+                written += text
                 if n % Stub.stop_every == 0:
+                    # The message the stream just finished is in the transcript from now on, the way
+                    # the real one is by the time the app reads the end of the conversation.
+                    with Stub.lock:
+                        seq = Stub.messages + len(Stub.written) + 1
+                        Stub.written.append({"role": "assistant", "seq": seq, "text": written, "thinking": "", "tool_calls": [], "tool_results": [], "created_at": NOW.isoformat()})
+                    written = ""
                     self.wfile.write(b"event: message_stop\ndata: {}\n\n")
                     self.wfile.write(b'event: state_changed\ndata: {"status": "running"}\n\n')
                     self.wfile.flush()
@@ -247,6 +258,7 @@ def run_case(browser, port: int, messages: int, seconds: float, rate: float, wid
     Stub.messages = messages
     with Stub.lock:
         Stub.served.clear()
+        Stub.written.clear()
     context = browser.new_context(viewport={"width": width, "height": height}, device_scale_factor=2)
     page = context.new_page()
     cdp = context.new_cdp_session(page)
@@ -297,12 +309,16 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=390)
     ap.add_argument("--height", type=int, default=844)
     ap.add_argument("--port", type=int, default=8123)
+    ap.add_argument("--cursor", action="store_true", help="answer before=<seq> (the paginated API)")
+    ap.add_argument("--initial-tail", type=int, default=0, help="answer the app's full read with this many rows")
     ap.add_argument("--json", type=str, default="")
     args = ap.parse_args()
     if not DIST.joinpath("index.html").is_file():
         print(f"no build at {DIST}: run `npm run build` in miniapp first", file=sys.stderr)
         return 2
     sizes = args.messages or [600, 1200]
+    Stub.cursor = args.cursor
+    Stub.initial_tail = args.initial_tail
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Stub)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()

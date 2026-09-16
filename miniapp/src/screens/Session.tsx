@@ -1,142 +1,31 @@
-import { Component, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { Component, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { api, AsrStatus, LoopView, ProviderUsage, Schedule, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
 import { Dot, STATUS_WORD, ServiceRow, Status, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, timeAgo } from "../components";
 import { OverflowMenu, Sheet, confirmDialog, Overlay } from "../dialogs";
 import { commandPreview, plainPreview, untilShort } from "../format";
-import { EVIDENCE_EVENT, EvidenceRequest, codeBlock, renderMarkdown } from "../md";
+import { EVIDENCE_EVENT, EvidenceRequest, codeBlock, renderCached, renderMarkdown } from "../md";
 import { confirmAsync, enterSends, errorText, fmtBytes, fmtTok, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
 import { AuthImg, FilePreview, PreviewSource, canPreview, fileGlyph, previewKind, sessionBase } from "../preview";
+import { Activity, LiveStore, SummaryItem, ToolItem, Turn, applyLive, buildTurns, createLiveStore, isOlderPage, liveBase, prepend, reconcile } from "../turns";
+import { Windowed } from "../virtual";
 
-/** Markdown parsed once per text: a token streaming into one turn must not re-parse every other. */
-const Md = memo(function Md({ text, className }: { text: string; className?: string }) {
-  const html = useMemo(() => renderMarkdown(text), [text]);
+/**
+ * Markdown parsed once per text. `cacheKey` names a message that will never change again, so its
+ * rendering survives the component: a turn scrolled out of the window and back in is not re-parsed.
+ */
+const Md = memo(function Md({ text, className, cacheKey }: { text: string; className?: string; cacheKey?: string }) {
+  const html = useMemo(() => (cacheKey ? renderCached(cacheKey, text) : renderMarkdown(text)), [text, cacheKey]);
   return <div className={className} dangerouslySetInnerHTML={{ __html: html }} />;
 });
 
-/** The trailing retrieval headline ⟦…⟧ is for the transcript index, not for the reader; a half-streamed one is cut too. */
-function stripHeadline(text: string): string {
-  const m = text.match(/(?:^|\n)\s*⟦[^⟦⟧]{3,2000}⟧\s*$/s);
-  if (m && m.index !== undefined) return text.slice(0, m.index).trimEnd();
-  const open = text.lastIndexOf("⟦");
-  if (open !== -1 && !text.slice(open).includes("⟧")) {
-    const lineStart = text.lastIndexOf("\n", open) + 1;
-    if (!text.slice(lineStart, open).trim()) return text.slice(0, lineStart).trimEnd();
-  }
-  return text;
-}
-
-// ── data shapes ───────────────────────────────────────────────────────────────────────────
-
-type LiveTool = { id: string; name: string; args: string; result?: string; error?: boolean };
-type LiveState = { text: string; thinking: string; tools: LiveTool[]; startedAt: number | null };
-const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null };
-
-type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean; length?: number };
-type NoteItem = { kind: "note"; text: string };
-type ThinkItem = { kind: "thinking"; text: string };
-type SummaryItem = { kind: "summary"; text: string; reason: string };
-type Activity = ToolItem | NoteItem | ThinkItem | SummaryItem;
-
-type Turn = {
-  key: string;
-  user?: MessageView;
-  summary?: MessageView;
-  activity: Activity[];
-  answer: string;
-  startedAt: number;
-  endedAt: number;
-  pendingTools: number;
-};
-
-function parseArgs(raw: string): Record<string, unknown> {
-  try {
-    return JSON.parse(raw || "{}");
-  } catch {
-    return { raw };
-  }
-}
-
-/** Group the flat message list into turns: a user message plus everything the agent did after it. */
-function buildTurns(messages: MessageView[], live: LiveState, busy: boolean): Turn[] {
-  const results = new Map<string, { content: string; is_error: boolean; length?: number }>();
-  for (const m of messages) for (const r of m.tool_results) results.set(r.id, r);
-  const seen = new Set<string>();
-  const turns: Turn[] = [];
-  let current: Turn | null = null;
-  const open = (key: string, at: number): Turn => {
-    const t: Turn = { key, activity: [], answer: "", startedAt: at, endedAt: at, pendingTools: 0 };
-    turns.push(t);
-    return t;
-  };
-  messages.forEach((m, i) => {
-    const at = Date.parse(m.created_at) || Date.now();
-    if (m.role === "tool" || m.internal) return;
-    if (m.summary) {
-      if (m.compaction?.reason !== "core") {
-        // The host compacted between runs (auto) or on request (manual): a block of its own after the
-        // turn, so the answer that came before it stays the answer.
-        turns.push({ key: `s${m.seq ?? i}`, summary: m, activity: [], answer: "", startedAt: at, endedAt: at, pendingTools: 0 });
-        current = null;
-        return;
-      }
-      // The core compacted mid-run: a step inside the turn, where the summarised work used to be.
-      if (!current) current = open(`a${m.seq ?? i}`, at);
-      if (current.answer) {
-        current.activity.push({ kind: "note", text: current.answer });
-        current.answer = "";
-      }
-      current.activity.push({ kind: "summary", text: m.text, reason: "core" });
-      return;
-    }
-    if (m.role === "user") {
-      current = open(`u${m.seq ?? i}`, at);
-      current.user = m;
-      return;
-    }
-    if (m.role === "system") return;
-    if (!current) current = open(`a${m.seq ?? i}`, at);
-    current.endedAt = at;
-    if (current.answer) {
-      // Text that turned out not to be final becomes a note.
-      current.activity.push({ kind: "note", text: current.answer });
-      current.answer = "";
-    }
-    if (m.thinking) current.activity.push({ kind: "thinking", text: m.thinking });
-    if (m.text && m.tool_calls.length) current.activity.push({ kind: "note", text: m.text });
-    else if (m.text) current.answer = m.text;
-    for (const c of m.tool_calls) {
-      seen.add(c.id);
-      const r = results.get(c.id);
-      const liveResult = live.tools.find((t) => t.id === c.id);
-      const content = r?.content ?? liveResult?.result;
-      const running = content === undefined;
-      if (running) current.pendingTools++;
-      current.activity.push({ kind: "tool", id: c.id, name: c.name, args: c.arguments, result: content, error: r?.is_error ?? liveResult?.error, running, length: r?.length });
-    }
-  });
-  if (busy) {
-    if (!current) current = open("live", live.startedAt ?? Date.now());
-    const t: Turn = current;
-    const fresh = live.tools.filter((lt) => !seen.has(lt.id));
-    if (t.answer && (live.text || live.thinking || fresh.length)) {
-      // Something newer is streaming, so the text before it was not the final answer.
-      t.activity.push({ kind: "note", text: t.answer });
-      t.answer = "";
-    }
-    const thinkingKnown = t.activity.some((a) => a.kind === "thinking" && a.text === live.thinking);
-    if (live.thinking && !thinkingKnown) t.activity.push({ kind: "thinking", text: live.thinking });
-    for (const lt of fresh) {
-      const running = lt.result === undefined;
-      if (running) t.pendingTools++;
-      t.activity.push({ kind: "tool", id: lt.id, name: lt.name, args: parseArgs(lt.args), result: lt.result, error: lt.error, running });
-    }
-    if (live.text) t.answer = stripHeadline(live.text);
-    t.endedAt = Date.now();
-  }
-  return turns;
-}
+/** How much of the end of the conversation a run's event is answered with. */
+const TAIL_AFTER_EVENT = 24;
+/** Events come in bursts; one read answers the burst. */
+const EVENT_COALESCE_MS = 150;
+/** How many older messages a page holds when the reader scrolls past the top. */
+const OLDER_PAGE = 200;
 
 // ── screen ────────────────────────────────────────────────────────────────────────────────
 
@@ -156,7 +45,11 @@ export type SessionScreenProps = {
 
 export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOpen, onToggleList }: SessionScreenProps) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
-  const [live, setLive] = useState<LiveState>(EMPTY_LIVE);
+  // The streaming turn's state is not React state: a token must repaint the turn it belongs to,
+  // not the screen. The components that show it subscribe; everything else never hears about it.
+  const liveRef = useRef<LiveStore | null>(null);
+  if (!liveRef.current) liveRef.current = createLiveStore();
+  const live = liveRef.current;
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
@@ -173,7 +66,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   const [picker, setPicker] = useState<null | { presets: Record<string, { provider: string; model: string; label: string }>; global: string }>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [custom, setCustom] = useState("");
-  const [tick, setTick] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const stick = useRef(true);
@@ -245,6 +137,83 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     },
     [id, toast],
   );
+
+  // A run changes the end of the conversation and nothing else, so a run's events are answered by
+  // reading the end of it. `TAIL_AFTER_EVENT` messages is more than a round adds; when it turns out
+  // not to reach what the screen already holds, `reconcile` says so and the whole thing is re-read.
+  const refresh = useCallback(
+    async (kind: "tail" | "state") => {
+      try {
+        const next = await api.get<SessionDetail>(`/api/sessions/${id}?tail=${kind === "tail" ? TAIL_AFTER_EVENT : 1}`);
+        setOffline(false);
+        let whole = false;
+        setDetail((prev) => {
+          if (!prev) return next;
+          if (kind === "state") return { ...next, messages: prev.messages };
+          const merged = reconcile(prev.messages, next.messages);
+          whole = merged.gap;
+          return merged.gap ? prev : { ...next, messages: merged.messages };
+        });
+        if (whole) await load(true);
+      } catch (e) {
+        setOffline(true);
+        void e;
+      }
+    },
+    [id, load],
+  );
+
+  // Events arrive in bursts — a message ends, the state changes, the run settles — and one read
+  // answers all of them.
+  const queued = useRef<{ timer: number; kind: "tail" | "state" } | null>(null);
+  const refreshSoon = useCallback(
+    (kind: "tail" | "state") => {
+      const pendingRead = queued.current;
+      if (pendingRead) {
+        if (kind === "tail") pendingRead.kind = "tail";
+        return;
+      }
+      const timer = window.setTimeout(() => {
+        const wanted = queued.current?.kind ?? kind;
+        queued.current = null;
+        void refresh(wanted);
+      }, EVENT_COALESCE_MS);
+      queued.current = { timer, kind };
+    },
+    [refresh],
+  );
+  useEffect(() => () => {
+    if (queued.current) window.clearTimeout(queued.current.timer);
+    queued.current = null;
+  }, [id]);
+
+  // Older messages, when the reader scrolls past the top of what was loaded. The API may not take
+  // the cursor yet, in which case it answers with the tail it always answers with — that is not an
+  // older page, and asking again would only repeat it, so the screen stops asking.
+  const [older, setOlder] = useState<"more" | "loading" | "done">("more");
+  /** How far the reader was from the end when an older page went in, so they stay where they were. */
+  const keepFromEnd = useRef<number | null>(null);
+  const loadOlder = useCallback(async () => {
+    const oldest = detail?.messages[0]?.seq;
+    if (oldest == null || oldest <= 0) {
+      setOlder("done");
+      return;
+    }
+    setOlder("loading");
+    try {
+      const page = await api.get<SessionDetail>(`/api/sessions/${id}?before=${oldest}&tail=${OLDER_PAGE}`);
+      if (!isOlderPage(page.messages, oldest)) {
+        setOlder("done");
+        return;
+      }
+      const el = scroller.current;
+      keepFromEnd.current = el ? el.scrollHeight - el.scrollTop : null;
+      setDetail((prev) => (prev ? { ...prev, messages: prepend(prev.messages, page.messages) } : prev));
+      setOlder(page.messages.length < OLDER_PAGE ? "done" : "more");
+    } catch {
+      setOlder("more");
+    }
+  }, [id, detail?.messages]);
 
   useEffect(() => {
     load();
@@ -337,19 +306,16 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   const busy = status === "running" || status === "waiting";
   const compacting = detail?.compacting ?? null;
 
-  // The event stream carries every change while a run is active; this re-read is the safety net, not the feed.
+  // The event stream carries every change while a run is active; this is the safety net, not the
+  // feed, and it asks what the session is doing — not for the conversation over again.
   useEffect(() => {
     if (!busy) {
-      setLive(EMPTY_LIVE);
+      live.reset();
       return;
     }
-    const t = setInterval(() => load(true), 20000);
-    const clock = setInterval(() => setTick((n) => n + 1), 1000);
-    return () => {
-      clearInterval(t);
-      clearInterval(clock);
-    };
-  }, [busy, load]);
+    const t = setInterval(() => refresh("state"), 20000);
+    return () => clearInterval(t);
+  }, [busy, live, refresh]);
 
   // Live events while the screen is open.
   useEffect(() => {
@@ -395,35 +361,58 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       }
     })();
     function handle(event: string, p: Record<string, any>) {
-      if (event === "message_start") setLive((s) => ({ ...s, text: "", thinking: "", startedAt: s.startedAt ?? Date.now() }));
+      if (event === "message_start") live.update((s) => ({ ...s, text: "", thinking: "", startedAt: s.startedAt ?? Date.now() }));
       else if (event === "content_block_delta") {
         const d = p.delta ?? {};
-        if (d.type === "text_delta") setLive((s) => ({ ...s, text: s.text + (d.text ?? "") }));
-        if (d.type === "thinking_delta") setLive((s) => ({ ...s, thinking: s.thinking + (d.text ?? "") }));
+        if (d.type === "text_delta") live.update((s) => ({ ...s, text: s.text + (d.text ?? "") }));
+        if (d.type === "thinking_delta") live.update((s) => ({ ...s, thinking: s.thinking + (d.text ?? "") }));
       } else if (event === "tool_use_start") {
-        setLive((s) => ({ ...s, tools: [...s.tools, { id: p.tool_call_id, name: p.tool_name, args: "" }] }));
+        live.update((s) => ({ ...s, tools: [...s.tools, { id: p.tool_call_id, name: p.tool_name, args: "" }] }));
       } else if (event === "tool_use_stop") {
-        setLive((s) => ({ ...s, tools: s.tools.map((t) => (t.id === p.tool_call_id ? { ...t, args: JSON.stringify(p.final_input ?? {}) } : t)) }));
+        live.update((s) => ({ ...s, tools: s.tools.map((t) => (t.id === p.tool_call_id ? { ...t, args: JSON.stringify(p.final_input ?? {}) } : t)) }));
       } else if (event === "tool_result") {
-        setLive((s) => ({ ...s, tools: s.tools.map((t) => (t.id === p.tool_call_id ? { ...t, result: String(p.content ?? p.output ?? ""), error: !!p.is_error } : t)) }));
+        live.update((s) => ({ ...s, tools: s.tools.map((t) => (t.id === p.tool_call_id ? { ...t, result: String(p.content ?? p.output ?? ""), error: !!p.is_error } : t)) }));
       } else if (event === "message_stop") {
-        // The history now carries this message; drop the streamed copy once it is loaded.
-        load(true).then(() => setLive((s) => ({ ...s, text: "", thinking: "" })));
-      } else if (event === "state_changed" || event === "tool_call_pending" || event === "run_settled" || event === "compaction_completed") load(true);
+        // The message the stream just finished is on the screen already; reading the end of the
+        // conversation puts the written copy in its place, and only then is the streamed one dropped.
+        void refresh("tail").then(() => live.update((s) => ({ ...s, text: "", thinking: "" })));
+      } else if (event === "run_settled" || event === "compaction_completed") refreshSoon("tail");
+      else if (event === "state_changed" || event === "tool_call_pending") refreshSoon("state");
     }
     return () => {
       stop = true;
       controller.abort();
     };
-  }, [id, load]);
+  }, [id, live, load, refresh, refreshSoon]);
 
-  const turns = useMemo(() => buildTurns(detail?.messages ?? [], live, busy), [detail, live, busy]);
+  // The settled conversation, built once per message that lands. A turn whose messages did not
+  // change comes back as the same object, so `memo` on the view holds and a streamed token
+  // re-renders the turn it belongs to instead of all of them.
+  const built = useRef<Turn[]>([]);
+  const turns = useMemo(() => {
+    built.current = buildTurns(detail?.messages ?? [], built.current);
+    return built.current;
+  }, [detail?.messages]);
+  const tail = busy ? liveBase(turns) : null;
+  const settled = useMemo(() => (tail ? turns.slice(0, -1) : turns), [turns, tail]);
+  const turnKeys = useMemo(() => settled.map((t) => t.key), [settled]);
+
+  // A page of older messages is put in front of everything the reader is looking at, so the screen
+  // moves down by its height unless the distance to the end is restored.
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    const keep = keepFromEnd.current;
+    if (!el || keep == null) return;
+    keepFromEnd.current = null;
+    el.scrollTop = el.scrollHeight - keep;
+  }, [detail?.messages]);
 
   // Follow the newest content only while the reader is at the bottom and not scrolling by hand.
-  useEffect(() => {
+  const pinBottom = useCallback(() => {
     const el = scroller.current;
     if (el && stick.current && !userScrolling.current) el.scrollTop = el.scrollHeight;
-  }, [turns]);
+  }, []);
+  useEffect(pinBottom, [turns, pinBottom]);
 
   // The first paint of a long history lands mid-way once images and code blocks take their height:
   // pin the bottom again after layout settles.
@@ -483,6 +472,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
     stick.current = gap < 48;
     setAtBottom(gap < 160);
+    // Near the top of what was loaded: ask for the page before it, if the API has one. A history
+    // short enough to have arrived whole has no page before it and is never asked for one.
+    if (el.scrollTop < 400 && older === "more" && (detail?.messages.length ?? 0) >= OLDER_PAGE) void loadOlder();
   }
 
   // Files from the clipboard (a screenshot, a copied file) and files dropped on the chat join the draft.
@@ -681,21 +673,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     }
   }
 
-  // The step the agent is on right now, for the live bar.
-  const lastTurn = turns[turns.length - 1];
-  const currentStep = (() => {
-    if (!busy || !lastTurn) return "";
-    const items = lastTurn.activity;
-    const running = [...items].reverse().find((a) => a.kind === "tool" && a.running) as ToolItem | undefined;
-    if (running) {
-      const d = describe(running, detail?.workspace);
-      return `${d.verb}${d.detail ? ` ${d.detail}` : ""}`;
-    }
-    if (lastTurn.answer) return "Writing the answer";
-    if (live.thinking) return "Reasoning";
-    return status === "waiting" ? "Waiting for your answer" : "Thinking";
-  })();
-  const steps = lastTurn ? stepCount(lastTurn.activity) : 0;
   const ctxPct = detail?.context && detail.context.window > 0 ? Math.round((100 * detail.context.tokens) / detail.context.window) : null;
   const subRunning = (detail?.subagents ?? []).filter((x) => x.running).length;
 
@@ -706,7 +683,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     return () => window.clearTimeout(t);
   }, [info]);
 
-  void tick;
   const sessionCtx = useMemo(() => ({ id, workspace: detail?.workspace ?? "", preview: setPreview }), [id, detail?.workspace]);
 
   // What the answer cited, clicked: a file opens at the lines it named, a Verify receipt opens as a
@@ -968,13 +944,20 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
         <div className="chat-main">
           <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
             <div className="timeline">
-              {turns.map((t, i) => (
-                <Safe key={t.key}>
-                  <SessionContext.Provider value={sessionCtx}>
-                    <TurnView turn={t} live={busy && i === turns.length - 1} onTurnAction={turnAction} />
-                  </SessionContext.Provider>
-                </Safe>
-              ))}
+              {older !== "done" && <div className="sub older-note">{older === "loading" ? "loading earlier messages…" : ""}</div>}
+              <SessionContext.Provider value={sessionCtx}>
+                <Windowed
+                  keys={turnKeys}
+                  scroller={scroller}
+                  pinned={() => stick.current}
+                  render={(i) => (
+                    <Safe>
+                      <TurnView turn={settled[i]} live={false} onTurnAction={turnAction} />
+                    </Safe>
+                  )}
+                />
+                {busy && <LiveTurn base={tail} live={live} onTurnAction={turnAction} onRender={pinBottom} />}
+              </SessionContext.Provider>
               {detail?.pending && <QuestionCard key={detail.pending.questions.map((q) => q.question).join("|")} sessionId={id} questions={detail.pending.questions} onDone={() => load()} toast={toast} />}
             </div>
           </div>
@@ -984,16 +967,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
             </button>
           )}
           {compacting && <CompactionBar c={compacting} />}
-          {busy && (
-            <button className={`livebar ${status}`} onClick={jumpToBottom} role="status" aria-live="polite" title="To the latest step">
-              <Dot status={status} />
-              <b>{status === "waiting" ? "Needs you" : "Working"}</b>
-              {lastTurn && <span className="num">{fmtDuration(Date.now() - lastTurn.startedAt)}</span>}
-              {steps > 0 && <span>· step {steps}</span>}
-              {currentStep && <span className="truncate">· {currentStep}</span>}
-              {!atBottom && <Icon name="down" size={16} />}
-            </button>
-          )}
+          {busy && <LiveBar status={status} base={tail} live={live} workspace={detail?.workspace} atBottom={atBottom} onJump={jumpToBottom} />}
           <div className="composer">
             {pending.length > 0 && (
               <div className="attachments" aria-label="attachments">
@@ -1551,7 +1525,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
       )}
       {turn.user && (
         <div className="msg-wrap">
-          <Md className="msg user" text={turn.user.text} />
+          <Md className="msg user" text={turn.user.text} cacheKey={live ? undefined : `u${turn.user.seq ?? turn.key}`} />
           {/* Under the message, not beside it: a row beside the bubble is off-screen on a phone. */}
           <MessageActions
             text={turn.user.text}
@@ -1584,12 +1558,68 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
           {live && !turn.answer && turn.pendingTools === 0 && turn.activity.length > 0 && <div className="working">working…</div>}
         </div>
       )}
-      {turn.answer && <Md className={`answer ${live ? "streaming" : ""}`} text={turn.answer} />}
+      {turn.answer && <Md className={`answer ${live ? "streaming" : ""}`} text={turn.answer} cacheKey={live ? undefined : `a${turn.key}`} />}
       {turn.answer && !live && <MessageActions text={turn.answer} />}
       <SentFiles items={turn.activity} />
     </div>
   );
 });
+
+/**
+ * The turn the run is writing right now. It reads the stream directly, so a token repaints this
+ * component and nothing else: the settled turns above it never hear about it.
+ */
+function LiveTurn({ base, live, onTurnAction, onRender }: { base: Turn | null; live: LiveStore; onTurnAction?: (kind: "revert" | "fork", seq: number) => void; onRender?: () => void }) {
+  const state = useSyncExternalStore(live.subscribe, live.get);
+  useClock(1000);
+  useLayoutEffect(() => onRender?.());
+  const turn = applyLive(base, state, Date.now());
+  return (
+    <Safe>
+      <TurnView turn={turn} live onTurnAction={onTurnAction} />
+    </Safe>
+  );
+}
+
+/** The bar over the composer while a run is going: what the agent is on, and for how long. */
+function LiveBar({ status, base, live, workspace, atBottom, onJump }: { status: Status; base: Turn | null; live: LiveStore; workspace?: string; atBottom: boolean; onJump: () => void }) {
+  const state = useSyncExternalStore(live.subscribe, live.get);
+  useClock(1000);
+  const turn = applyLive(base, state, Date.now());
+  const steps = stepCount(turn.activity);
+  const running = [...turn.activity].reverse().find((a) => a.kind === "tool" && a.running) as ToolItem | undefined;
+  const step = running
+    ? (() => {
+        const d = describe(running, workspace);
+        return `${d.verb}${d.detail ? ` ${d.detail}` : ""}`;
+      })()
+    : turn.answer
+      ? "Writing the answer"
+      : state.thinking
+        ? "Reasoning"
+        : status === "waiting"
+          ? "Waiting for your answer"
+          : "Thinking";
+  return (
+    <button className={`livebar ${status}`} onClick={onJump} role="status" aria-live="polite" title="To the latest step">
+      <Dot status={status} />
+      <b>{status === "waiting" ? "Needs you" : "Working"}</b>
+      <span className="num">{fmtDuration(Date.now() - turn.startedAt)}</span>
+      {steps > 0 && <span>· step {steps}</span>}
+      {step && <span className="truncate">· {step}</span>}
+      {!atBottom && <Icon name="down" size={16} />}
+    </button>
+  );
+}
+
+/** A repaint on a timer, for the elapsed times — and only in the components that show one. */
+function useClock(ms: number): void {
+  const [, beat] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => beat((n) => n + 1), ms);
+    return () => clearInterval(t);
+  }, [ms]);
+}
 
 type MessageAction = { icon: IconName; label: string; danger?: boolean; onSelect: () => void };
 
