@@ -952,7 +952,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such project")
         sessions = await manager.projects.sessions_of(project_id)
         if sessions and not detach:
-            raise HTTPException(409, f"{len(sessions)} agent{'' if len(sessions) == 1 else 's'} work in {project.name}; removing it leaves them without its files (pass detach=1 to do it anyway)")
+            one = len(sessions) == 1
+            raise HTTPException(409, f"{len(sessions)} agent{'' if one else 's'} {'works' if one else 'work'} in {project.name}; removing it leaves them without its files (pass detach=1 to do it anyway)")
         await manager.projects.delete(project_id)
         await manager.reload_project(None, project_id)
         return {"ok": True, "detached": [s["id"] for s in sessions]}
