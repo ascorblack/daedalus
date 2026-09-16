@@ -27,6 +27,7 @@ from protocore.contracts.memory import MemoryScope
 from protocore.contracts.types import ToolResultBlock, ToolUseBlock
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.gzip import GZipMiddleware
 
 from daedalus.config import PROVIDER_KINDS, HeartbeatConfig, ModelPresetConfig, ProviderConfig
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
@@ -556,6 +557,9 @@ def _deep_merge(base: Any, patch: dict[str, Any]) -> dict[str, Any]:
 
 WEBHOOK_MAX_BYTES = 2 * 1024 * 1024
 
+GZIP_MIN_BYTES = 1024
+"""Responses smaller than this go out as they are: compressing them costs more than it saves."""
+
 MAX_TRANSCRIPT_PAGE = 2000
 """Turns one request may ask for. Beyond this a client is asking for a session, not a page."""
 
@@ -581,6 +585,10 @@ def _tool_group(name: str) -> str:
 
 def build_app(app: Application, api_token: str) -> FastAPI:
     api = FastAPI(title="Daedalus", docs_url=None, redoc_url=None)
+    # A session page is JSON and compresses about fivefold; over a phone connection that is the
+    # difference the operator feels. The event stream is excluded by content type, so a token
+    # still leaves the process the moment it arrives.
+    api.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_BYTES)
     manager = app.manager
     assert manager is not None
     settings = app.settings

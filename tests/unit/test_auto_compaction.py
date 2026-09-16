@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from protocore.contracts.llm import LLMResponse
@@ -147,4 +148,88 @@ async def test_a_stalled_summariser_call_is_retried_then_given_up(settings: Sett
     finally:
         sr.asyncio.wait_for = orig  # type: ignore[assignment]
     assert calls == 2
+    await manager.close()
+
+
+async def test_a_compaction_does_not_fire_again_on_the_next_turn(settings: Settings, db: Database) -> None:
+    """The trigger read the prompt size of the history the compaction had just replaced."""
+    config = RuntimeConfig()
+    config.compaction.auto_ratio = 0.5
+    config.compaction.keep_recent_messages = 2
+    config.compaction.min_messages = 2
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    state = await manager.create_session("repeat")
+    # Long turns, so the summary really is smaller than what it replaces — as it is in a real session.
+    history = [m for i in range(12) for m in (_op(f"ask {i}: " + "detail " * 400), Message(role=MessageRole.assistant, content_blocks=[TextBlock(text=f"answer {i}: " + "words " * 400)]))]
+    await manager.sessions.replace_messages(state.session.id, "daedalus", history)
+    await manager.sessions.append_transcript(state.session.id, history)
+    _, preset = manager.config.preset()
+    provider = manager.providers.get(preset.provider)
+    calls: list[str] = []
+
+    async def fake_complete(request: Any) -> LLMResponse:
+        calls.append(request.messages[0].content_blocks[0].text)
+        return LLMResponse(message=Message(role=MessageRole.assistant, content_blocks=[TextBlock(text=SECTIONED)]), stop_reason=StopReason.end_turn)
+
+    provider.complete_text = fake_complete  # type: ignore[method-assign]
+    await manager.usage.record(UsageRecord(provider_id=provider.endpoint.id, model="m", purpose="stream", raw={}, normalized={"input_tokens": 300_000}, cost_usd=0.0, duration_ms=1, run_id="r1", session_id=state.session.id))
+    await manager._maybe_auto_compact(state)
+    assert len(calls) == 1  # the history was over the ratio: it is compacted
+    assert state.usage_floor_seq > 0 and state.observed_prompt_tokens > 0
+    await manager._maybe_auto_compact(state)
+    assert len(calls) == 1  # and the summariser is not paid a second time to compact nothing
+    status = await manager.context_status(state)
+    assert status["tokens"] == state.observed_prompt_tokens < 300_000  # what is reported describes the history that is left
+    await manager.usage.record(UsageRecord(provider_id=provider.endpoint.id, model="m", purpose="stream", raw={}, normalized={"input_tokens": 310_000}, cost_usd=0.0, duration_ms=1, run_id="r2", session_id=state.session.id))
+    assert (await manager.context_status(state))["tokens"] == 310_000  # a real call after it is read again
+
+
+async def test_the_operators_message_does_not_wait_on_a_summariser(settings: Settings, db: Database) -> None:
+    """Compaction runs between runs; only a history that no longer fits at all is compacted on the way in."""
+    config = RuntimeConfig()
+    config.compaction.auto_ratio = 0.5
+    config.compaction.min_messages = 2
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    state = await manager.create_session("submit")
+    state.context_window = 100_000
+    history = [_op("one"), Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="a")]), _op("two"), Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="b")])]
+    await manager.sessions.replace_messages(state.session.id, "daedalus", history)
+    calls: list[str] = []
+
+    async def record(st: Any, instructions: str, **kwargs: Any) -> str:
+        calls.append(kwargs.get("reason", ""))
+        return "summary"
+
+    manager._compact_locked = record  # type: ignore[method-assign]
+    _, preset = manager.config.preset()
+    provider = manager.providers.get(preset.provider)
+    await manager.usage.record(UsageRecord(provider_id=provider.endpoint.id, model="m", purpose="stream", raw={}, normalized={"input_tokens": 60_000}, cost_usd=0.0, duration_ms=1, run_id="r1", session_id=state.session.id))
+    await manager._maybe_auto_compact(state, required_only=True)
+    assert calls == []  # over the ratio, but it still fits: the run starts, the compaction waits
+    await manager._maybe_auto_compact(state)
+    assert calls == ["auto"]  # between runs it happens
+    await manager.usage.record(UsageRecord(provider_id=provider.endpoint.id, model="m", purpose="stream", raw={}, normalized={"input_tokens": 120_000}, cost_usd=0.0, duration_ms=1, run_id="r2", session_id=state.session.id))
+    await manager._maybe_auto_compact(state, required_only=True)
+    assert calls == ["auto", "auto"]  # a history that no longer fits cannot be sent, so it goes first
+    await manager.close()
+
+
+async def test_a_run_cannot_start_while_the_history_is_being_rewritten(settings: Settings, db: Database) -> None:
+    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    await manager.start()
+    state = await manager.create_session("locked")
+    started: list[str] = []
+
+    async def fake_start(st: Any, message: Any, *, continue_turn: bool = False) -> str:
+        started.append("run")
+        return "run-id"
+
+    manager._start_run_locked = fake_start  # type: ignore[method-assign]
+    async with state.lock:  # what _compact_locked holds while it rewrites the history
+        task = asyncio.create_task(manager._start_run(state, None))
+        await asyncio.sleep(0.05)
+        assert started == [] and not task.done()
+    assert await task == "run-id" and started == ["run"]
     await manager.close()

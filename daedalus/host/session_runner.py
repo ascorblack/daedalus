@@ -62,6 +62,7 @@ from daedalus.stores.sqlite import (
     SqliteRunStore,
     SqliteSessionStore,
     SqliteUsageSink,
+    message_text,
 )
 from daedalus.tools import discover_tools
 
@@ -145,6 +146,12 @@ class SessionState:
     """Length of the working history when the current run began: what this run added starts here."""
     checkpoint_capped: bool = False
     """Set once the size cap has suppressed a snapshot, so the warning is logged once per session."""
+    observed_prompt_tokens: int = 0
+    """The host's own estimate of the next prompt after it rewrote the history, until a real call
+    measures one. A compaction makes every earlier measurement describe a history that is gone."""
+    usage_floor_seq: int = 0
+    """Usage rows up to here were recorded before the last history rewrite; reading one of them as
+    the current prompt size is what made a compaction fire again on the very next turn."""
 
     @property
     def running(self) -> bool:
@@ -624,13 +631,20 @@ class SessionManager:
         async with state.lock:
             return await self._compact_locked(state, instructions, keep_recent=keep_recent)
 
-    async def _maybe_auto_compact(self, state: SessionState) -> None:
-        """After a run: when the last prompt filled ``compaction.auto_ratio`` of the window, compact before the next one."""
+    async def _maybe_auto_compact(self, state: SessionState, *, required_only: bool = False) -> None:
+        """When the last prompt filled ``compaction.auto_ratio`` of the window, compact the history.
+
+        This runs after a run settles, between turns, because a compaction is a summariser call
+        that takes a minute or two and nobody should be waiting on it. ``required_only`` is the
+        exception on the way into a run: a history that no longer fits the window at all cannot
+        be sent, so that one is compacted before the run rather than refused by the provider.
+        """
         cfg = self.config.compaction
         if cfg.auto_ratio <= 0 or state.pending is not None or self.shutting_down:
             return
+        ratio = 1.0 if required_only else cfg.auto_ratio
         status = await self.context_status(state)
-        if not status["window"] or status["tokens"] < cfg.auto_ratio * status["window"] or status["messages"] < cfg.min_messages:
+        if not status["window"] or status["tokens"] < ratio * status["window"] or status["messages"] < cfg.min_messages:
             return
         async with state.lock:
             try:
@@ -729,6 +743,7 @@ class SessionManager:
         )
         rebuilt = [message, *tail]
         state.persist_gen += 1  # any persist captured before this point describes a history that is gone
+        await self._reset_observed_prompt(state, before=[*history, *tail], after=rebuilt)
         if state.engine is not None:
             engine = state.engine
             engine.history = rebuilt
@@ -741,6 +756,27 @@ class SessionManager:
         await self.sessions.replace_messages(session_id, TENANT, rebuilt)
         await self.sessions.append_transcript(session_id, [message])
         return summary
+
+    async def _reset_observed_prompt(self, state: SessionState, *, before: Sequence[Message], after: Sequence[Message]) -> None:
+        """Re-estimate the prompt for the history that now exists, and retire the measurements of the one that does not.
+
+        The trigger compares the last prompt the provider counted against the window. A
+        compaction does not make a call, so that count still described the history it just
+        replaced — and the next turn compacted again, summarising the kept tail for forty to
+        eighty seconds and changing nothing. Nearly half of the compactions in the log were
+        that. The new size is the measured one scaled by how much of the history survived.
+        Scaling rather than re-counting is deliberate: the estimator's calibration cancels out
+        of the ratio, so the answer errs only in the direction that costs nothing — a little
+        low, which delays the next compaction by a turn at most, where a little high would pay
+        for one that compacts nothing all over again.
+        """
+        row = await self.db.fetchone("SELECT coalesce(max(seq), 0) seq FROM usage_events WHERE session_id = ?", (state.session.id,))
+        measured = int((await self.context_status(state))["tokens"])
+        state.usage_floor_seq = int(row["seq"]) if row else 0
+        was = history_tokens(before)
+        scaled = round(measured * history_tokens(after) / was) if was else 0
+        # A rewrite that did not shrink the history says nothing about the prompt getting smaller.
+        state.observed_prompt_tokens = min(measured, scaled)
 
     async def _summarise_history(self, provider: Any, model: str, history: Sequence[Message], *, language: str, instructions: str, observability: LLMObservabilityContext, progress: Callable[..., Awaitable[None]] | None = None) -> str:
         """One structured summary of ``history``: a single call, or parallel part summaries merged when the transcript is long.
@@ -875,6 +911,7 @@ class SessionManager:
                 except CheckpointError as exc:
                     logger.warning("workspace restore failed: %s", exc)
             state.persist_gen += 1
+            await self._reset_observed_prompt(state, before=history, after=kept)
             if state.engine is not None:
                 state.engine.history = kept
                 state.engine.last_observed_prompt_tokens = 0
@@ -918,6 +955,7 @@ class SessionManager:
                     logger.warning("could not write the history backup %s", backup, exc_info=True)
                 await self.sessions.append_transcript(session_id, history, from_history=True)
             state.persist_gen += 1
+            await self._reset_observed_prompt(state, before=history, after=[])
             if state.engine is not None:
                 state.engine.history = []
                 state.engine.last_observed_prompt_tokens = 0
@@ -1171,10 +1209,11 @@ class SessionManager:
                 content_blocks=[TextBlock(text=body)],
                 metadata={"daedalus.origin": origin, **({"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {})},
             )
-            # A model with a smaller window than the last prompt was built for, or a history that grew past
-            # the ratio without a run boundary: the whole-history compaction runs now, before the run, rather
-            # than the core's per-iteration passes running every turn of it.
-            await self._maybe_auto_compact(state)
+            # Only what cannot be sent at all is compacted here — a model whose window is smaller
+            # than the history was built for. The ratio-based compaction happens between runs
+            # (see _drive), because it is a summariser call of a minute or two and the operator's
+            # message used to queue behind it.
+            await self._maybe_auto_compact(state, required_only=True)
             await self.sessions.append_transcript(session_id, [message])
             seqs = await self.sessions.transcript_seqs(session_id, [self.sessions.transcript_key(message)])
             await self.checkpoint(state, kind="before", seq=seqs[0] if seqs else None)
@@ -1761,8 +1800,13 @@ class SessionManager:
         """
         tokens = int(state.engine.last_observed_prompt_tokens) if state.engine is not None else 0
         if not tokens:
-            row = await self.db.fetchone("SELECT input_tokens FROM usage_events WHERE session_id = ? AND purpose = 'stream' ORDER BY seq DESC LIMIT 1", (state.session.id,))
-            tokens = int(row["input_tokens"] or 0) if row else 0
+            # Only a call made against the history as it stands now says anything about it: a row
+            # from before the last rewrite measured a history that no longer exists.
+            row = await self.db.fetchone(
+                "SELECT input_tokens FROM usage_events WHERE session_id = ? AND purpose = 'stream' AND seq > ? ORDER BY seq DESC LIMIT 1",
+                (state.session.id, state.usage_floor_seq),
+            )
+            tokens = int(row["input_tokens"] or 0) if row else state.observed_prompt_tokens
         try:
             _, preset = self.resolve_model(await self.live.load(state.session.id))
             window = int(state.context_window or preset.context_window or 0)
@@ -2269,6 +2313,16 @@ def identifier_index(history: Sequence[Message], *, limit: int = IDENTIFIER_INDE
         return ""
     items = list(seen)[-limit:]
     return "\n\n## Identifiers seen (extracted)\n" + "\n".join(f"- {t}" for t in items)
+
+
+CHARS_PER_TOKEN = 4
+"""The usual approximation, used only to say how big a history is after the host rewrote it —
+until the next call comes back with the provider's own count, which is what everything else reads."""
+
+
+def history_tokens(messages: Sequence[Message]) -> int:
+    """Roughly what a history costs in tokens, from its searchable text."""
+    return sum(len(message_text(m)) for m in messages) // CHARS_PER_TOKEN
 
 
 def compaction_cut(history: Sequence[Message], keep_recent: int) -> int:
