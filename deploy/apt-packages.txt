@@ -1,9 +1,7 @@
 ca-certificates
 curl
 git
-gnupg
 bash
-build-essential
 python3
 ripgrep
 jq
@@ -14,4 +12,3 @@ openssh-client
 less
 procps
 bubblewrap
-lsb-release
