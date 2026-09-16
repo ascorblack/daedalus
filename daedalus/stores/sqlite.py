@@ -269,20 +269,85 @@ class SqliteSessionStore(ISessionStore):
             out.extend(int(r["seq"]) for r in rows)
         return sorted(out)
 
-    async def list_transcript(self, session_id: str, *, limit: int = 0) -> list[Message]:
-        """Transcript rows as messages; each carries its row number in ``metadata["daedalus.seq"]``."""
-        if limit > 0:
+    async def transcript_keys_present(self, session_id: str, keys: Sequence[str]) -> set[str]:
+        """Which of ``keys`` the transcript already holds; the UNIQUE(session_id, key) index answers it."""
+        found: set[str] = set()
+        for start in range(0, len(keys), 500):  # stay under SQLite's bind-parameter limit
+            chunk = list(keys[start : start + 500])
+            marks = ",".join("?" for _ in chunk)
             rows = await self._db.fetchall(
-                "SELECT seq, message FROM (SELECT seq, message FROM transcript WHERE session_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq",
-                (session_id, limit),
+                f"SELECT key FROM transcript WHERE session_id = ? AND key IN ({marks})", (session_id, *chunk)
+            )
+            found.update(str(r["key"]) for r in rows)
+        return found
+
+    async def list_transcript(self, session_id: str, *, limit: int = 0, before_seq: int = 0) -> list[Message]:
+        """Transcript rows as messages; each carries its row number in ``metadata["daedalus.seq"]``.
+
+        ``limit`` is the newest N rows and ``before_seq`` the page older than a row already
+        shown: both are answered by the ``(session_id, seq)`` index, so the cost is the page
+        and not the session. An unbounded call reads the whole transcript and is only for the
+        few places that genuinely want all of it (the Markdown export, the bench runner).
+        """
+        params: list[Any] = [session_id]
+        where = "session_id = ?"
+        if before_seq > 0:
+            where += " AND seq < ?"
+            params.append(before_seq)
+        if limit > 0:
+            params.append(limit)
+            rows = await self._db.fetchall(
+                f"SELECT seq, message FROM (SELECT seq, message FROM transcript WHERE {where} ORDER BY seq DESC LIMIT ?) ORDER BY seq",
+                tuple(params),
             )
         else:
-            rows = await self._db.fetchall("SELECT seq, message FROM transcript WHERE session_id = ? ORDER BY seq", (session_id,))
+            rows = await self._db.fetchall(f"SELECT seq, message FROM transcript WHERE {where} ORDER BY seq", tuple(params))
         out = []
         for r in rows:
             message = Message.model_validate_json(r["message"])
             out.append(message.model_copy(update={"metadata": {**message.metadata, "daedalus.seq": int(r["seq"])}}))
         return out
+
+    async def transcript_bounds(self, session_id: str) -> tuple[int, int]:
+        """Lowest and highest transcript seq of a session; ``(0, 0)`` when it has none."""
+        row = await self._db.fetchone("SELECT min(seq) lo, max(seq) hi FROM transcript WHERE session_id = ?", (session_id,))
+        return (int(row["lo"] or 0), int(row["hi"] or 0)) if row else (0, 0)
+
+    TOOL_CALL_SCAN_PAGE = 200
+
+    async def messages_for_call(self, session_id: str, call_id: str) -> list[Message]:
+        """Transcript messages carrying a block of ``call_id``, newest first — without loading the session.
+
+        The transcript key names the call of a message whose first block carries one, so the
+        usual case is answered from the key index alone. A call that is not the first block of
+        its message is found by walking back a page at a time, which reads bounded slices
+        rather than the whole history.
+        """
+        suffix = f":{call_id}"
+        rows = await self._db.fetchall("SELECT seq, key FROM transcript WHERE session_id = ? ORDER BY seq DESC", (session_id,))
+        hits = [int(r["seq"]) for r in rows if str(r["key"]).endswith(suffix)]
+        if hits:
+            return await self._messages_at(session_id, hits)
+        out: list[Message] = []
+        for start in range(0, len(rows), self.TOOL_CALL_SCAN_PAGE):
+            page = [int(r["seq"]) for r in rows[start : start + self.TOOL_CALL_SCAN_PAGE]]
+            for message in await self._messages_at(session_id, page):
+                if any(getattr(b, "tool_call_id", None) == call_id for b in message.content_blocks):
+                    out.append(message)
+            if out:
+                return out
+        return out
+
+    async def _messages_at(self, session_id: str, seqs: Sequence[int]) -> list[Message]:
+        """The named transcript rows, in the order given."""
+        if not seqs:
+            return []
+        marks = ",".join("?" for _ in seqs)
+        rows = await self._db.fetchall(
+            f"SELECT seq, message FROM transcript WHERE session_id = ? AND seq IN ({marks})", (session_id, *seqs)
+        )
+        by_seq = {int(r["seq"]): Message.model_validate_json(r["message"]) for r in rows}
+        return [by_seq[s] for s in seqs if s in by_seq]
 
     async def replace_transcript_message(self, session_id: str, key: str, message: Message) -> bool:
         """Rewrite one transcript row in place (same key, same seq); the search index follows."""

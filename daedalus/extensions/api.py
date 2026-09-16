@@ -577,6 +577,9 @@ def _looks_like_core_nudge(text: str) -> bool:
 TOOL_RESULT_PREVIEW_CHARS = 4000
 """Characters of a tool result the transcript listing carries; the rest comes from the tool-result endpoint."""
 
+MAX_TRANSCRIPT_PAGE = 2000
+"""Turns one request may ask for. Beyond this a client is asking for a session, not a page."""
+
 
 def message_view(message: Message) -> dict[str, Any]:
     text: list[str] = []
@@ -958,11 +961,19 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return preset.provider
 
     @api.get("/api/sessions/{session_id}")
-    async def get_session(session_id: str, tail: int = 600, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+    async def get_session(session_id: str, tail: int = 600, before: int = 0, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """One page of a session. ``tail`` is the newest N turns; ``before=<seq>`` the page older than one already shown.
+
+        A page is all that is ever read: a session whose transcript is twenty thousand turns
+        costs the same to open as one with fifty.
+        """
         state = await manager.get_state(session_id)
         if state is None:
             raise HTTPException(404, "no such session")
-        source = await manager.transcript(session_id, tail=tail)
+        tail = max(1, min(tail, MAX_TRANSCRIPT_PAGE))
+        source = await manager.transcript(session_id, tail=tail, before=before)
+        oldest, _newest = await manager.sessions.transcript_bounds(session_id)
+        first_seq = next((s for s in (m.metadata.get("daedalus.seq") for m in source) if isinstance(s, int)), 0)
         status = "running" if state.running else "waiting" if state.pending else "compacting" if state.compacting else "idle"
         usage = await app.db.fetchone(
             "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cache_read_tokens) ch, sum(cost_usd) usd FROM usage_events WHERE session_id = ?",
@@ -1003,6 +1014,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "subagents": subagents,
             "verifications": dict(await app.db.fetchone("SELECT count(*) total, sum(passed) passed FROM verifications WHERE session_id = ?", (session_id,)) or {}),
             "messages": [message_view(m) for m in source],
+            "first_seq": first_seq,
+            "has_older": bool(first_seq and oldest and first_seq > oldest),
             "usage": dict(usage) if usage else {},
         }
 
@@ -1054,7 +1067,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         state = await manager.get_state(session_id)
         if state is None:
             raise HTTPException(404, "no such session")
-        for message in reversed(await manager.transcript(session_id)):
+        for message in await manager.sessions.messages_for_call(session_id, call_id):
             for block in message.content_blocks:
                 if isinstance(block, ToolResultBlock) and block.tool_call_id == call_id:
                     return {"id": call_id, "content": redact.redact(block.content), "is_error": block.is_error, "length": len(block.content)}
@@ -1066,7 +1079,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         state = await manager.get_state(session_id)
         if state is None:
             raise HTTPException(404, "no such session")
-        for message in reversed(await manager.transcript(session_id)):
+        for message in await manager.sessions.messages_for_call(session_id, call_id):
             for block in message.content_blocks:
                 if isinstance(block, ToolUseBlock) and block.tool_call_id == call_id:
                     if block.name != "SendFile":

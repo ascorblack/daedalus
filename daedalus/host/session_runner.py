@@ -435,19 +435,36 @@ class SessionManager:
         self.register_services(state)
         return state
 
-    async def transcript(self, session_id: str, *, tail: int = 0) -> list[Message]:
-        """Display history: the durable transcript plus whatever the live engine has not persisted yet."""
-        rows = await self.sessions.list_transcript(session_id)
-        if not rows:
+    async def transcript(self, session_id: str, *, tail: int = 0, before: int = 0) -> list[Message]:
+        """Display history: the durable transcript plus whatever the live engine has not persisted yet.
+
+        ``tail`` and ``before`` are pushed into SQL: a page costs the page. Only a caller that
+        passes neither reads the whole session, and the live engine's unpersisted messages are
+        merged in only for the newest page, which is the only page they can belong to.
+        """
+        rows = await self.sessions.list_transcript(session_id, limit=tail, before_seq=before)
+        if not rows and not before:
             # Sessions from before the transcript existed: seed it from the working history.
-            history = list(await self.sessions.list_messages(session_id, TENANT, limit=10_000))
-            if history:
-                await self.sessions.append_transcript(session_id, history)
-                rows = history
+            lo, _ = await self.sessions.transcript_bounds(session_id)
+            if not lo:
+                history = list(await self.sessions.list_messages(session_id, TENANT, limit=10_000))
+                if history:
+                    await self.sessions.append_transcript(session_id, history)
+                    rows = list(history)[-tail:] if tail > 0 else history
+        if before:
+            return rows
         state = self._states.get(session_id)
         if state is not None and state.engine is not None and state.running:
+            # Against the loaded page alone the dedup would re-show every live message older than
+            # it, so what the page does not settle is asked of the transcript by key: one indexed
+            # query, and the answer does not depend on how much of the session was read.
             known = {self.sessions.transcript_key(m) for m in rows}
-            live = [m for m in state.engine.history if self.sessions.transcript_key(m) not in known]
+            candidates = [m for m in state.engine.history if self.sessions.transcript_key(m) not in known]
+            if candidates and tail > 0:
+                keys = [self.sessions.transcript_key(m) for m in candidates]
+                persisted = await self.sessions.transcript_keys_present(session_id, keys)
+                candidates = [m for m in candidates if self.sessions.transcript_key(m) not in persisted]
+            live = candidates
             # A queued steer or follow-up is written to the transcript when it is submitted; the core
             # later places the same text into its history as a fresh user message with a timestamp of
             # its own, which the key-based dedup cannot recognise. Marking live user messages the host
@@ -459,7 +476,8 @@ class SessionManager:
                 else m
                 for m in live
             ]
-        return rows[-tail:] if tail > 0 else rows
+            return rows[-tail:] if tail > 0 else rows
+        return rows
 
     async def list_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = await self.sessions.list_sessions(TENANT, limit=limit)
