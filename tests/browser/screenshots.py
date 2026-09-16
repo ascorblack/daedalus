@@ -303,6 +303,41 @@ VOICE = {
 }
 
 
+# An installation that has already been set up, and one that has not: "Add a model" is the first
+# thing a fresh install shows, so it gets a picture of its own.
+PROVIDERS = [
+    {"id": "openrouter", "kind": "openrouter", "base_url": "http://keyproxy:3200/openrouter", "via_proxy": True, "key_held": True, "ready": True},
+    {"id": "opencode", "kind": "opencode", "base_url": "http://keyproxy:3200/opencode", "via_proxy": True, "key_held": True, "ready": True},
+    {"id": "deepseek", "kind": "deepseek", "base_url": "http://keyproxy:3200/deepseek", "via_proxy": True, "key_held": False, "ready": False},
+    {"id": "vllm", "kind": "vllm", "base_url": "", "via_proxy": False, "key_held": None, "ready": False},
+]
+ONBOARDING = {"has_model": True, "presets": 4, "default_preset": "deepseek-flash", "providers": PROVIDERS, "needs": [], "message": ""}
+FRESH = {"has_model": False, "presets": 0, "default_preset": "", "providers": PROVIDERS, "needs": ["model"], "message": "No model is configured yet. Add one in the app: Settings \u2192 Models \u2192 Add a model."}
+
+
+def catalogue_entry(id_: str, name: str, context: int, *, images: bool, reasoning: bool, price_in: float, price_out: float) -> dict:
+    return {
+        "id": id_,
+        "name": name,
+        "context_length": context,
+        "max_output_tokens": 32000,
+        "input_modalities": ["text", "image"] if images else ["text"],
+        "images": images,
+        "reasoning": reasoning,
+        "pricing": {"input": price_in, "output": price_out, "cache_hit": round(price_in / 10, 4)},
+    }
+
+
+CATALOGUE = [
+    catalogue_entry("anthropic/claude-opus-5", "Claude Opus 5", 1000000, images=True, reasoning=True, price_in=5.0, price_out=25.0),
+    catalogue_entry("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash", 128000, images=True, reasoning=True, price_in=0.28, price_out=0.42),
+    catalogue_entry("openai/gpt-5.6-luna", "GPT-5.6 Luna", 400000, images=True, reasoning=True, price_in=0.4, price_out=1.8),
+    catalogue_entry("qwen/qwen3.8-max", "Qwen3.8 Max", 256000, images=False, reasoning=True, price_in=2.0, price_out=6.0),
+    catalogue_entry("moonshot/kimi-k3", "Kimi K3", 256000, images=False, reasoning=True, price_in=3.0, price_out=15.0),
+    catalogue_entry("z-ai/glm-5.3-flash", "GLM-5.3 Flash", 200000, images=False, reasoning=True, price_in=0.15, price_out=0.5),
+]
+
+
 # ---- the stub API -------------------------------------------------------------------------
 
 
@@ -315,6 +350,8 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     url = request.url
     path = url.split("?", 1)[0]
     rel = path[path.index("/api/") :]
+    if rel == "/api/providers/lookup-models":
+        return respond(route, {"base_url": "http://keyproxy:3200/openrouter/v1", "models": [e["id"] for e in CATALOGUE], "entries": CATALOGUE})
     if request.method != "GET":
         return respond(route, {"ok": True})
     if rel.endswith("/stream"):
@@ -372,6 +409,8 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, {"path": "", "kind": "dir", "entries": FILES[""]})
     if rel == "/api/settings":
         return respond(route, SETTINGS)
+    if rel == "/api/onboarding":
+        return respond(route, FRESH if getattr(stub, "fresh", False) else ONBOARDING)
     if rel == "/api/modes":
         return respond(route, {"quick": {}, "deep": {}, "careful": {}, "plan": {}})
     if rel == "/api/commands":
@@ -431,6 +470,13 @@ def open_share(page: Page) -> None:
     page.wait_for_selector(".access-options", timeout=5000)
 
 
+def pick_a_model(page: Page) -> None:
+    """Walk the flow far enough that the picture shows all three steps with something in them."""
+    page.locator(".pickgrid .pick", has_text="OpenRouter").first.click()
+    page.wait_for_selector(".modelgrid .pick", timeout=15000)
+    page.locator(".modelgrid .pick", has_text="Claude Opus 5").first.click()
+
+
 def open_workspaces(page: Page) -> None:
     page.locator("button[aria-label='Workspaces']").click()
     page.wait_for_selector(".sheet", timeout=5000)
@@ -457,6 +503,9 @@ def run() -> int:
         shot(page, "services", "services")
         shot(page, "usage", "usage", settle=1500)
         shot(page, "memory", "memory")
+        stub.fresh = True  # type: ignore[attr-defined]
+        shot(page, "add-model", "agents", wait=".addmodel", before=pick_a_model, settle=600)
+        stub.fresh = False  # type: ignore[attr-defined]
         desk.close()
 
         phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
@@ -467,6 +516,9 @@ def run() -> int:
         shot(page, "phone-session", f"agents/{S1}", wait=".chat-scroll .timeline", before=expand_steps, settle=300)
         shot(page, "phone-voice", "voice")
         shot(page, "phone-memory", "memory")
+        stub.fresh = True  # type: ignore[attr-defined]
+        shot(page, "phone-add-model", "agents", wait=".addmodel", before=pick_a_model, settle=600)
+        stub.fresh = False  # type: ignore[attr-defined]
         phone.close()
         browser.close()
     return 0

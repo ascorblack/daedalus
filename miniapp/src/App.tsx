@@ -14,6 +14,7 @@ import { HealthScreen, SettingsScreen } from "./screens/Settings";
 import { MemoryScreen } from "./screens/Memory";
 import { ServicesScreen } from "./screens/Services";
 import { AuthConfig, LoginScreen } from "./screens/Login";
+import { OnboardingState, OnboardingScreen } from "./screens/AddModel";
 import * as passkeys from "./passkeys";
 import { back, migrateLegacyLocation, navigate, pathFor, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
 import { Counts, MoreSheet, Palette, PaletteItem, Rail, TabBar, go, screenTitle, useMedia, useShortcuts } from "./shell";
@@ -87,6 +88,15 @@ export function App() {
   const offline = useOffline();
   // Inside Telegram every request carries initData; outside, the browser needs a token or the session cookie.
   const [authed, setAuthed] = useState<boolean | null>(() => (telegram()?.initData ? true : null));
+  // Nothing in the app works without a model, so the app asks for one before it shows anything else.
+  const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
+  useEffect(() => {
+    if (!authed) return;
+    api
+      .get<OnboardingState>("/api/onboarding")
+      .then(setOnboarding)
+      .catch(() => setOnboarding({ has_model: true } as OnboardingState)); // an older bot has no such route: let the app through
+  }, [authed]);
   const inbox = useQuery<{ unread: number }>(authed ? "/api/inbox/unread" : null, { pollMs: 20000, staleMs: 5000 });
   const proposals = useQuery<{ status: string }[]>(authed ? "/api/proposals" : null, { pollMs: 60000, staleMs: 30000 });
   const counts: Counts = { inbox: inbox.data?.unread ?? 0, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
@@ -241,6 +251,18 @@ export function App() {
   if (authed === false) {
     // Outside the shell on purpose: the shell's wide layout reserves the rail's column, and a login page has no rail.
     return <LoginScreen onDone={() => setAuthed(true)} />;
+  }
+  if (onboarding === null) return <div className="app"><div className="empty">Loading…</div></div>;
+  if (!onboarding.has_model) {
+    return (
+      <div className="app">
+        <div className="main">
+          <OnboardingScreen toast={showToast} onDone={() => setOnboarding({ ...onboarding, has_model: true })} />
+        </div>
+        <ToastHost />
+        <ConfirmHost />
+      </div>
+    );
   }
 
   const sessionId = route.session;

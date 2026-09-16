@@ -1132,3 +1132,45 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
   .voice-compose { margin-top: 12px; }
   .voice-said { font-size: 17px; }
 }
+
+/* ── add a model: the first-run flow and the same three steps from Settings ───────────────── */
+.addmodel { padding-bottom: 8px; }
+.addmodel .step { padding: 14px 16px 16px; }
+.addmodel .step.muted { opacity: .55; }
+.step-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.step-n {
+  flex: none; width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  background: var(--surface-3); color: var(--fg-2); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.step-head b { font-size: 15.5px; }
+.step-head .sub { margin-top: 2px; }
+.pickgrid, .modelgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+.modelgrid { padding: 2px; margin-top: 10px; }
+.pick {
+  display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-width: 0; text-align: left; cursor: pointer;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 11px 13px; color: var(--fg); font: inherit;
+  transition: background .15s, border-color .15s;
+}
+.pick:hover { background: var(--surface-3); }
+.pick.dashed { border-style: dashed; }
+.pick.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface-2)); }
+.pick-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pick-top b { flex: 1; min-width: 0; font-size: 14.5px; }
+.pick-top .pill { flex: none; }
+.pick .sub { font-size: 12.5px; }
+.pick .mtags { padding: 4px 0 0; }
+.modelbar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.modelbar .field { margin: 0; }
+.addmodel-foot {
+  position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 2px calc(10px + env(safe-area-inset-bottom));
+  background: linear-gradient(to top, var(--bg) 70%, transparent);
+}
+.addmodel-foot .sub { min-width: 0; flex: 1 1 140px; }
+@media (min-width: 720px) {
+  .modelbar { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+  /* On a wide screen the list scrolls inside its step, so step 3 stays in view; on a phone a
+     scroll region inside a scrolling page is a trap, and the page simply grows. */
+  .modelgrid { max-height: 460px; overflow-y: auto; }
+  .addmodel .step { padding: 16px 20px 18px; }
+}

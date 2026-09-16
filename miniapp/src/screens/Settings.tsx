@@ -8,6 +8,8 @@ import { confirmAsync, errorText, numInput } from "../ui";
 import * as passkeys from "../passkeys";
 import { timeAgo } from "../components";
 import { VoiceSettings } from "./Voice";
+import { AddModel } from "./AddModel";
+import { Sheet } from "../dialogs";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "openai_compat"];
 
@@ -182,66 +184,6 @@ function PresetRow({ id, p, isDefault, inChain, providers, onDefault, onChain, o
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function AddPresetRow({ providers, onAdd, toast }: { providers: string[]; onAdd: (id: string, preset: Preset) => void; toast: (t: string) => void }) {
-  const [open, setOpen] = useState(false);
-  const [provider, setProvider] = useState(providers[0] ?? "");
-  const [model, setModel] = useState("");
-  const [label, setLabel] = useState("");
-  useEffect(() => { if (!providers.includes(provider)) setProvider(providers[0] ?? ""); }, [providers, provider]);
-  if (!open)
-    return (
-      <button className="btn small" style={{ marginTop: 10 }} onClick={() => setOpen(true)}>
-        ＋ add model
-      </button>
-    );
-  async function lookup(): Promise<string[] | null> {
-    try {
-      return (await api.post<{ models: string[] }>("/api/providers/lookup-models", { provider })).models;
-    } catch (e) {
-      toast((e as Error).message);
-      return null;
-    }
-  }
-  function add() {
-    if (!provider || !model.trim()) {
-      toast("pick a client and a model id");
-      return;
-    }
-    const id = `${provider}.${model.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "")}`;
-    onAdd(id, { provider, model: model.trim(), label: label.trim(), thinking: true, reasoning_effort: "medium", images: false, context_window: 128000, max_output_tokens: 32000 });
-    setOpen(false); setModel(""); setLabel("");
-  }
-  return (
-    <div className="mpanel add">
-      <div className="mfields">
-        <label className="mfield">
-          <span>Client</span>
-          <select className="field" value={provider} onChange={(e) => setProvider(e.target.value)}>
-            {providers.map((x) => (
-              <option key={x}>{x}</option>
-            ))}
-          </select>
-        </label>
-        <label className="mfield wide">
-          <span>Model id</span>
-          <div className="row" style={{ gap: 8 }}>
-            <input className="field" style={{ flex: 1, minWidth: 0 }} value={model} placeholder="model id" onChange={(e) => setModel(e.target.value)} />
-            <ModelsMenu load={lookup} current={model} onPick={setModel} />
-          </div>
-        </label>
-        <label className="mfield">
-          <span>Label (optional)</span>
-          <input className="field" value={label} placeholder="e.g. Qwen fast" onChange={(e) => setLabel(e.target.value)} />
-        </label>
-      </div>
-      <div className="btnrow">
-        <button className="btn small primary" onClick={add}>add</button>
-        <button className="btn small" onClick={() => setOpen(false)}>cancel</button>
-      </div>
     </div>
   );
 }
@@ -974,6 +916,7 @@ const SECTIONS: { id: Section; label: string; hint: string; icon: IconName }[] =
 
 export function SettingsScreen({ toast, section }: { toast: (t: string) => void; section?: string | null }) {
   const [s, setS] = useState<Settings | null>(null);
+  const [adding, setAdding] = useState(false);
   const [status, setStatus] = useState<any>(null);
   const wide = useMedia("(min-width: 1024px)");
   const current: Section | null = SECTIONS.some((x) => x.id === section) ? (section as Section) : null;
@@ -1079,8 +1022,18 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
                   />
                 ))}
               </div>
-              {Object.keys(s.presets ?? {}).length === 0 && <div className="sub" style={{ marginTop: 6 }}>No models yet: add one below.</div>}
-              <AddPresetRow providers={providerIds} toast={toast} onAdd={(id, p) => void patchPreset(id, p)} />
+              {Object.keys(s.presets ?? {}).length === 0 && (
+                <div className="empty">
+                  <b>No models yet</b>
+                  <div className="sub">A client is an address; a model is the thing that answers. Nothing runs until one is added.</div>
+                </div>
+              )}
+              <div className="btnrow">
+                <button className="btn primary" onClick={() => setAdding(true)}>
+                  <Icon name="plus" size={14} /> Add a model
+                </button>
+                <span className="sub faint" style={{ alignSelf: "center" }}>the endpoint's own list, with its context window, modalities and prices</span>
+              </div>
               <div className="sub" style={{ marginTop: 10 }}>Fallback order: {(s.model.chain ?? []).length ? s.model.chain.join(" → ") : "none"} (tried after the default when it fails).</div>
             </div>
             <div className="card">
@@ -1252,6 +1205,19 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
     }
   };
 
+  const addSheet = adding && (
+    <Sheet title="Add a model" size="wide" onClose={() => setAdding(false)}>
+      <AddModel
+        toast={toast}
+        onCancel={() => setAdding(false)}
+        onSaved={(id, next) => {
+          setS({ ...next, providers_available: next.providers_available ?? (s?.providers_available ?? []) });
+          setAdding(false);
+          toast(`added ${id}`);
+        }}
+      />
+    </Sheet>
+  );
   if (wide) {
     return (
       <>
@@ -1260,6 +1226,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
           <aside className="settings-nav">{index}</aside>
           <div className="settings-body">{shown && body(shown)}</div>
         </div>
+        {addSheet}
       </>
     );
   }
@@ -1268,6 +1235,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
       <>
         <PageHeader title="Settings" />
         <div className="screen narrow">{index}</div>
+        {addSheet}
       </>
     );
   }
@@ -1275,6 +1243,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
     <>
       <PageHeader title={SECTIONS.find((x) => x.id === current)!.label} back={pathFor("settings")} />
       <div className="screen narrow">{body(current)}</div>
+      {addSheet}
     </>
   );
 }
