@@ -848,16 +848,21 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     async def self_rollback(*, steps_back: int = 0, reason: str = "", **_: Any) -> str:
         return await selfdev.rollback(steps_back, reason)
 
-    app.manager.service_hooks.update(
-        {
-            "self_workspace": self_workspace,
-            "self_propose": self_propose,
-            "self_rebuild": self_rebuild,
-            "self_rollback": self_rollback,
-        }
-    )
+    mode = app.manager.capabilities.selfdev.mode
+    # The hooks follow the tools: in local mode a worktree is the whole surface — there is no remote to
+    # open a pull request against and no image to rebuild — so only the hook behind a registered tool is
+    # installed. The hook that applies a local change belongs beside this one when it exists.
+    app.manager.service_hooks["self_workspace"] = self_workspace
+    if mode == "server":
+        app.manager.service_hooks.update(
+            {
+                "self_propose": self_propose,
+                "self_rebuild": self_rebuild,
+                "self_rollback": self_rollback,
+            }
+        )
     front = app.front
-    if front is not None:
+    if front is not None and mode == "server":
         front.callback_hooks["cp"] = selfdev.on_callback
         front.message_interceptors.append(selfdev.intercept_message)
 

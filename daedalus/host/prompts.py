@@ -92,6 +92,19 @@ accounts, workloads or private circumstances. What you learned about the operato
 session.
 """
 
+SELF_DEVELOPMENT_LOCAL = """Self-development:
+- You may edit your own code in the checkout this installation runs from: 'bot' = the agent host \
+(tools, providers, chat transport, Mini App, skills), 'core' = the agent core library. There is no \
+fork, no remote and no pull request here; the change applies after a restart the operator triggers.
+- Call SelfWorkspace(repo, branch) to get a worktree to work in, edit there, run the test suites \
+through Verify, and commit. Never edit the running checkout directly and never push anywhere.
+- Never edit GOVERNANCE.md, the supervisor under /opt/launcher, or anything under the secrets \
+directory; those paths are protected.
+- Changes must keep the bot startable: a change that breaks the import or the smoke tests takes the \
+whole installation down with it, and the operator is the one who finds out.
+"""
+
+
 HISTORY = """Memory of this conversation:
 - When the history grows, older turns are replaced by summaries. Every turn stays in the \
 transcript: HistorySearch finds turns by words, HistoryExpand(from_seq, to_seq) reads them \
@@ -122,7 +135,7 @@ nothing else needs doing meanwhile, end the turn (Exec refuses a long sleep for 
 steers it while it works or gives it the next task with its context intact. Say what the helper may not do: it inherits \
 your toolbox and will use it, so name the launches, pushes and deliveries it may make and forbid them \
 explicitly when none are meant — silence reads as permission. Where it must be enforced rather than asked for, \
-tools_off=["SelfPropose", "ServiceStart"] takes those tools away from that subagent's session — and from any \
+tools_off=["Exec", "ServiceStart"] takes those tools away from that subagent's session — and from any \
 subagent it starts in turn, so it cannot hand on what you withheld — and its refusal \
 then names the tool and says you withheld it. SubAgent without a task (just \
 a name) raises an idle helper that runs nothing until you send it work — for a standing assistant you want \
@@ -232,6 +245,19 @@ def split_headline(text: str) -> tuple[str, str]:
     return text, ""
 
 
+def self_development_section(selfdev_mode: str) -> str:
+    """What the agent is told about changing its own code — nothing at all when it cannot.
+
+    A prompt that describes a workflow the installation does not have costs tokens and, worse, names
+    tools that are not registered; the model then calls one and gets an error it cannot act on.
+    """
+    if selfdev_mode == "server":
+        return SELF_DEVELOPMENT
+    if selfdev_mode == "local":
+        return SELF_DEVELOPMENT_LOCAL
+    return ""
+
+
 def rules_section(rules: str) -> str:
     text = rules.strip() or DEFAULT_RULES.strip()
     return text + "\n"
@@ -280,6 +306,7 @@ def environment_section(
     sandboxed: bool = False,
     github_org: str = "",
     ssh_hosts: Sequence[tuple[str, str]] = (),
+    selfdev_mode: str = "off",
 ) -> str:
     lines = [
         "Environment:",
@@ -291,17 +318,23 @@ def environment_section(
         f"- Current model: {model}",
     ]
     if github_org:
+        own = {
+            "server": " The operator's repositories (your host and core) change only through SelfPropose.",
+            "local": " The operator's repositories (your host and core) are edited in their own checkout and never pushed.",
+            "off": " The operator's repositories (your host and core) are not yours to change.",
+        }.get(selfdev_mode, "")
         lines.append(
             f"- Your GitHub organisation: {github_org}. Repositories for your own work live there and are yours to create, "
             f"push to, configure and delete (`GH_TOKEN=$GH_ORG_TOKEN gh repo create {github_org}/<name> …`; git uses the right "
-            "token by itself). The operator's repositories (your host and core) change only through SelfPropose."
+            "token by itself)." + own
         )
     if ssh_hosts:
         lines.append("- Servers you can reach with ssh (`~/.ssh/config`, keys installed):")
         lines.extend(f"  - `ssh {host}` — {about}" if about else f"  - `ssh {host}`" for host, about in ssh_hosts)
+    gate = "; the proposal gate refuses a diff that carries it" if selfdev_mode == "server" else ""
     lines.append(
         "- What describes this machine is private: the address your services are reached at, hostnames, the operator's "
-        "paths and accounts. None of it goes into code, tests, commits or pull requests; the proposal gate refuses a diff that carries it"
+        "paths and accounts. None of it goes into code, tests, commits or pull requests" + gate
     )
     lines.append(
         "- A tool result you have moved past is cut down to its opening lines once newer results have "
@@ -347,4 +380,4 @@ def governance_section(path: Path) -> str:
     return ""
 
 
-__all__ = ["BOARD", "CONCIERGE", "DEFAULT_RULES", "HEADLINE_RE", "HISTORY", "PERSONA", "SCHEDULING", "SELF_DEVELOPMENT", "concierge_sections", "environment_section", "governance_section", "language_section", "rules_section", "split_headline", "turn_context", "without_turn_context"]
+__all__ = ["BOARD", "CONCIERGE", "DEFAULT_RULES", "HEADLINE_RE", "HISTORY", "PERSONA", "SCHEDULING", "SELF_DEVELOPMENT", "SELF_DEVELOPMENT_LOCAL", "concierge_sections", "environment_section", "governance_section", "language_section", "rules_section", "self_development_section", "split_headline", "turn_context", "without_turn_context"]

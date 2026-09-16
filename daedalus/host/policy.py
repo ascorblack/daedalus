@@ -42,8 +42,16 @@ _DANGEROUS_BASES = ("/", "/srv", "/opt", "/etc", "/usr", "/var", "/home", "/root
 DANGEROUS_TARGETS = {"~", "~/", "~/*", "$HOME", "$HOME/*", "${HOME}"} | {form for base in _DANGEROUS_BASES for form in (base, base.rstrip("/") + "/", base.rstrip("/") + "/*")}
 """What a recursive delete or a recursive chmod must never be aimed at: the machine's own directories, whole or globbed."""
 OPERATOR_CHECKOUTS = ("/srv/daedalus", "/srv/protocore-exp")
-"""The operator's repositories as mounted in the container: they change only through pull requests. The host adds
-the checkouts' real paths when it builds the policy."""
+"""The operator's repositories as mounted in the container: what the agent may do with them depends on the
+self-development mode, but pushing from them is never one of those things. The host adds the checkouts' real
+paths when it builds the policy."""
+PUSH_REASON = {
+    "server": "changes to the host and core go through SelfPropose",
+    "local": "changes to the host and core stay in this checkout and apply after a restart",
+    "off": "this installation does not change its own code",
+}
+"""Why the push is refused, in the terms of the mode the installation runs in: a reason that names a tool the
+session does not have sends the agent looking for it."""
 IDLE_WAIT_SECONDS = 30
 """A ``sleep`` this long, or a ``while``/``until`` loop around one, is the agent waiting for something — a
 subagent's report, a background job — in the foreground of the very run that would receive it. The report
@@ -324,12 +332,13 @@ def _under(path: str, roots: Iterable[str]) -> bool:
 class Policy:
     """The rule set: built-ins plus the operator's, evaluated per call."""
 
-    def __init__(self, *, protected_paths: Iterable[Path] = (), egress_allow: Iterable[str] = (), rules: Iterable[Rule] = (), workspace_roots: Iterable[Path] = (), operator_checkouts: Iterable[Path] = ()) -> None:
+    def __init__(self, *, protected_paths: Iterable[Path] = (), egress_allow: Iterable[str] = (), rules: Iterable[Rule] = (), workspace_roots: Iterable[Path] = (), operator_checkouts: Iterable[Path] = (), selfdev_mode: str = "server") -> None:
         self.protected = [str(p) for p in protected_paths]
         self.egress_allow = [e for e in egress_allow if e.strip()]
         self.rules = list(rules)
         self.workspace_roots = [str(p) for p in workspace_roots]
         self.operator_checkouts = [*OPERATOR_CHECKOUTS, *(str(p) for p in operator_checkouts)]
+        self.selfdev_mode = selfdev_mode
 
     # -- built-in judgement -----------------------------------------------------------
 
@@ -396,7 +405,7 @@ class Policy:
                         escalate(ASK, "a forced push (use --force-with-lease, or ask)", "git.force_push")
                     origin = _norm(at) if at else where
                     if (origin and _under(origin, checkouts)) or any(_under(_norm(w), checkouts) for w in words[1:]):
-                        escalate(DENY, "pushing from the operator's checkout; changes to the host and core go through SelfPropose", "git.operator_push")
+                        escalate(DENY, f"pushing from the operator's checkout; {PUSH_REASON.get(self.selfdev_mode, PUSH_REASON["server"])}", "git.operator_push")
         if self.egress_allow:
             blocked = [h for h in hosts if not host_allowed(h, self.egress_allow)]
             if blocked:
