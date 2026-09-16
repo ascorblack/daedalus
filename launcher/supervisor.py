@@ -402,6 +402,10 @@ class Supervisor:
         request merged during a rebuild is not left undeployed until someone asks again."""
         self.mode = resolve_mode(CONFIGURED_MODE, repo=BOT_REPO, token=os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GITHUB_DAEDALUS_TOKEN", ""))
         self.restart_task: asyncio.Task[None] | None = None
+        self.running_revision = ""
+        """The commit the child was started on. Not the last known-good one: a revision becomes known-good
+        only after two healthy minutes, and a change refused before then would otherwise be taken back out
+        past a change that is already running."""
         self.failed_boots: list[float] = []
         """When each of the recent starts died before it was healthy. Three inside the window and the
         revision goes back to the last known-good one by itself: a change that cannot boot cannot be
@@ -415,7 +419,8 @@ class Supervisor:
         self.child = await asyncio.create_subprocess_exec(
             "bash", "-lc", BOT_CMD, cwd=str(BOT_REPO), env=bot_env(), start_new_session=True
         )
-        log(f"bot started pid={self.child.pid} bot={head(BOT_REPO)[:10]} core={head(CORE_REPO)[:10]}")
+        self.running_revision = head(BOT_REPO)
+        log(f"bot started pid={self.child.pid} bot={self.running_revision[:10]} core={head(CORE_REPO)[:10]}")
 
     async def stop_child(self, *, graceful_seconds: float = 25.0) -> None:
         child = self.child
@@ -536,7 +541,7 @@ class Supervisor:
         async with self.lock:
             target = head(BOT_REPO)
             history = load_history()
-            previous = history[-1]["bot"] if history else target
+            previous = self.running_revision or (history[-1]["bot"] if history else target)
             log(f"restart requested: {reason} (bot {previous[:10]} → {target[:10]})")
             changed = self._changed_files(previous, target)
             stopped = False
@@ -570,19 +575,21 @@ class Supervisor:
                 if stopped:
                     self.restart_requested.set()
 
-    async def _revert_to(self, good: str, broken: str, transcript: str) -> None:
-        """Take the refused commit back out of the running checkout.
+    async def _revert_to(self, running: str, broken: str, transcript: str) -> None:
+        """Put the checkout back to what the running process is on.
 
         The preflight ran on a copy, so nothing that failed has run — but the commit is in the checkout,
-        and the next start would pick it up without anyone asking for it. The commit itself is not lost:
-        the branch the agent committed on still points at it.
+        and the next start would pick it up without anyone asking for it. The target is the revision the
+        child was started on, which is the state the refusal has to restore; the last known-good commit
+        is a different thing and may be older than a change that is already running. The refused commit
+        itself is not lost: the branch the agent committed on still points at it.
         """
-        if good == broken:
+        if running == broken:
             write_result("preflight_failed", broken, f"the checks did not pass, so the change was not applied:\n{transcript[-1500:]}")
             return
-        code, out = git(BOT_REPO, "reset", "--hard", good)
+        code, out = git(BOT_REPO, "reset", "--hard", running)
         note = "" if code == 0 else f" The checkout could not be moved back ({out[-300:]}); it still holds the change."
-        write_result("preflight_failed", broken, f"the checks did not pass, so the change was not applied and the checkout was put back to {good[:10]}.{note}\n\n{transcript[-1500:]}")
+        write_result("preflight_failed", broken, f"the checks did not pass, so the change was not applied and the checkout was put back to {running[:10]}, which is what is running.{note}\n\n{transcript[-1500:]}")
 
     async def rebuild(self, reason: str) -> str:
         """Acknowledge at once; the work runs in the background and reports through LAST_REBUILD.

@@ -122,6 +122,7 @@ def _harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, preflight_ok: b
     monkeypatch.setattr(sup, "preflight", lambda repo, sync=True: (calls.append(f"preflight {repo} sync={sync}"), (preflight_ok, "transcript"))[1])
     supervisor = sup.Supervisor()
     supervisor.mode = "local"
+    supervisor.running_revision = "run0000000"
     supervisor._changed_files = lambda old, new: set(changed or {"daedalus/host/greeting.py"})  # type: ignore[method-assign]
 
     async def stop_child() -> None:
@@ -148,10 +149,21 @@ async def test_a_failing_change_never_stops_the_bot_and_is_taken_back_out(monkey
     await supervisor._apply_local("the operator asked the app to apply the change")
     assert "stop" not in calls
     assert not supervisor.restart_requested.is_set()
-    assert "git daedalus reset --hard good000000" in calls, "the refused commit was left in the running checkout"
+    assert "git daedalus reset --hard run0000000" in calls, "the refused commit was left in the running checkout"
     result = sup.last_change()
     assert result["status"] == "preflight_failed" and "not applied" in result["detail"]
     assert "the bot kept running" in sup.FAILED.read_text()
+
+
+async def test_a_refusal_goes_back_to_what_is_running_not_to_the_last_known_good(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A revision becomes known-good only after two healthy minutes. A change refused before then must
+    not take a change that is already running out with it."""
+    sup, supervisor, calls = _harness(monkeypatch, tmp_path, preflight_ok=False)
+    supervisor.running_revision = "applied000"  # applied a minute ago; good000000 is older
+    await supervisor._apply_local("another change")
+    assert "git daedalus reset --hard applied000" in calls
+    assert not any("reset --hard good000000" in c for c in calls)
+    assert "applied000" in sup.last_change()["detail"]
 
 
 async def test_a_change_to_the_image_is_applied_without_asking_for_a_rebuild(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
