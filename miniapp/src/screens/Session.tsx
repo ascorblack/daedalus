@@ -407,12 +407,27 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     el.scrollTop = el.scrollHeight - keep;
   }, [detail?.messages]);
 
+  // A history short enough to have arrived whole has no page before it: it is never asked for one,
+  // and the line that says a page is on its way is not in its way.
+  const pageable = older !== "done" && (detail?.messages.length ?? 0) >= OLDER_PAGE;
+
   // Follow the newest content only while the reader is at the bottom and not scrolling by hand.
   const pinBottom = useCallback(() => {
     const el = scroller.current;
     if (el && stick.current && !userScrolling.current) el.scrollTop = el.scrollHeight;
   }, []);
   useEffect(pinBottom, [turns, pinBottom]);
+
+  // Images, code blocks and the streaming turn take their height after the list has been laid out:
+  // while the reader is at the end, the end is where they stay.
+  useEffect(() => {
+    const el = scroller.current;
+    const list = el?.querySelector(".timeline");
+    if (!list || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => pinBottom());
+    ro.observe(list);
+    return () => ro.disconnect();
+  }, [pinBottom]);
 
   // The first paint of a long history lands mid-way once images and code blocks take their height:
   // pin the bottom again after layout settles.
@@ -474,7 +489,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     setAtBottom(gap < 160);
     // Near the top of what was loaded: ask for the page before it, if the API has one. A history
     // short enough to have arrived whole has no page before it and is never asked for one.
-    if (el.scrollTop < 400 && older === "more" && (detail?.messages.length ?? 0) >= OLDER_PAGE) void loadOlder();
+    if (el.scrollTop < 400 && older === "more" && pageable) void loadOlder();
   }
 
   // Files from the clipboard (a screenshot, a copied file) and files dropped on the chat join the draft.
@@ -944,7 +959,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
         <div className="chat-main">
           <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
             <div className="timeline">
-              {older !== "done" && <div className="sub older-note">{older === "loading" ? "loading earlier messages…" : ""}</div>}
+              {pageable && <div className="sub older-note">{older === "loading" ? "loading earlier messages…" : ""}</div>}
               <SessionContext.Provider value={sessionCtx}>
                 <Windowed
                   keys={turnKeys}

@@ -254,7 +254,7 @@ READ = """
 """
 
 
-def run_case(browser, port: int, messages: int, seconds: float, rate: float, width: int, height: int) -> dict:
+def run_case(browser, port: int, messages: int, seconds: float, rate: float, width: int, height: int, settle: float) -> dict:
     Stub.messages = messages
     with Stub.lock:
         Stub.served.clear()
@@ -271,6 +271,8 @@ def run_case(browser, port: int, messages: int, seconds: float, rate: float, wid
         open_bytes = sum(b for _, b in Stub.served)
         open_calls = len(Stub.served)
         Stub.served.clear()
+    # The opening of the screen is reported separately; the frame rate is the steady state after it.
+    time.sleep(settle)
     page.evaluate(PROBE)
     time.sleep(seconds)
     out = page.evaluate(READ)
@@ -305,6 +307,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--messages", type=int, action="append", help="history length (repeatable; default 600 and 1200)")
     ap.add_argument("--seconds", type=float, default=8.0)
+    ap.add_argument("--settle", type=float, default=3.0, help="seconds to let the screen settle before measuring")
     ap.add_argument("--rate", type=float, default=4.0, help="CPU throttle, 4 = mid-range phone")
     ap.add_argument("--width", type=int, default=390)
     ap.add_argument("--height", type=int, default=844)
@@ -326,7 +329,7 @@ def main() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--enable-precise-memory-info"])
         for n in sizes:
-            row = run_case(browser, args.port, n, args.seconds, args.rate, args.width, args.height)
+            row = run_case(browser, args.port, n, args.seconds, args.rate, args.width, args.height, args.settle)
             rows.append(row)
             print(json.dumps(row))
         browser.close()
