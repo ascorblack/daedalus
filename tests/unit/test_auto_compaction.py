@@ -8,7 +8,7 @@ from typing import Any
 from protocore.contracts.llm import LLMResponse
 from protocore.contracts.types import Message, MessageRole, StopReason, TextBlock, ToolResultBlock, ToolUseBlock
 
-from daedalus.config import RuntimeConfig, Settings
+from daedalus.config import Settings
 from daedalus.host.session_runner import (
     SessionManager,
     compaction_cut,
@@ -18,6 +18,7 @@ from daedalus.host.session_runner import (
 )
 from daedalus.providers.openai_compat import UsageRecord
 from daedalus.stores.database import Database
+from tests.support.models import model_config
 
 SECTIONED = "## Goal\ng\n## Constraints\nc\n## State\ns\n## Discoveries\nd\n## Open\no\n## Next steps\nn\n## Unknowns\nu\n## Identifiers\ni"
 
@@ -59,7 +60,7 @@ def test_transcript_splits_on_lines_by_size() -> None:
 
 
 async def test_auto_compaction_keeps_the_tail_and_quotes_the_operator(settings: Settings, db: Database) -> None:
-    config = RuntimeConfig()
+    config = model_config()
     config.compaction.auto_ratio = 0.5
     config.compaction.keep_recent_messages = 2
     config.compaction.min_messages = 4
@@ -119,7 +120,7 @@ async def test_a_stalled_summariser_call_is_retried_then_given_up(settings: Sett
 
     import pytest
 
-    config = RuntimeConfig()
+    config = model_config()
     config.compaction.call_timeout_seconds = 10  # the floor; the fake below never returns
     manager = SessionManager(settings, config, db=db)
     await manager.start()
@@ -153,7 +154,7 @@ async def test_a_stalled_summariser_call_is_retried_then_given_up(settings: Sett
 
 async def test_a_compaction_does_not_fire_again_on_the_next_turn(settings: Settings, db: Database) -> None:
     """The trigger read the prompt size of the history the compaction had just replaced."""
-    config = RuntimeConfig()
+    config = model_config()
     config.compaction.auto_ratio = 0.5
     config.compaction.keep_recent_messages = 2
     config.compaction.min_messages = 2
@@ -187,7 +188,7 @@ async def test_a_compaction_does_not_fire_again_on_the_next_turn(settings: Setti
 
 async def test_the_operators_message_does_not_wait_on_a_summariser(settings: Settings, db: Database) -> None:
     """Compaction runs between runs; only a history that no longer fits at all is compacted on the way in."""
-    config = RuntimeConfig()
+    config = model_config()
     config.compaction.auto_ratio = 0.5
     config.compaction.min_messages = 2
     manager = SessionManager(settings, config, db=db)
@@ -217,7 +218,7 @@ async def test_the_operators_message_does_not_wait_on_a_summariser(settings: Set
 
 
 async def test_a_run_cannot_start_while_the_history_is_being_rewritten(settings: Settings, db: Database) -> None:
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     state = await manager.create_session("locked")
     started: list[str] = []

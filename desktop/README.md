@@ -61,6 +61,11 @@ live in. The executable is not signed, so SmartScreen warns once: *More info →
 4. The image is pulled (or built, if there is no published image for your platform), the stack
    comes up, and the browser opens the app. There is one image and two containers from it: the
    agent, and the key proxy that holds the provider keys.
+5. **The app asks for a model, and that is the last step.** A key is an address; which model runs on
+   it — and what it costs — is yours to pick, so the installation ships with none. The app opens on
+   *Add a model*: choose the endpoint, choose a model from the list it serves (its context window,
+   its modalities and its prices are shown), save. Nothing runs before that, and everything does
+   after it. Later ones are added the same way from Settings → Models.
 
 Closing the launcher does not stop anything: the containers are `restart: unless-stopped` and come
 back with the machine. The launcher's page is only a remote control.

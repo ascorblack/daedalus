@@ -256,11 +256,12 @@ async def test_core_tier2_compaction_runs_through_the_provider() -> None:
 
 
 def test_preset_rungs_put_the_chosen_model_first_then_the_chain() -> None:
-    from daedalus.config import ModelPresetConfig, RuntimeConfig, Settings
+    from daedalus.config import ModelPresetConfig, Settings
     from daedalus.providers.registry import ProviderRegistry
+    from tests.support.models import model_config
 
     settings = Settings(deepseek_api_key="a", openrouter_api_key="b", vllm_base_url="http://vllm.test/v1")
-    config = RuntimeConfig()
+    config = model_config()
     config.presets["vllm.Qwen3.6"] = ModelPresetConfig(provider="vllm", model="Qwen3.6", images=True)
     registry = ProviderRegistry(settings, config)
     rungs = registry.rungs_for(config, "vllm.Qwen3.6")

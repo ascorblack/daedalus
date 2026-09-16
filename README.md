@@ -175,6 +175,14 @@ cd daedalus
 bash deploy/setup.sh            # asks for the values, writes .env and ../daedalus-secrets/keyproxy.env, starts the stack
 ```
 
+**The install ends in the app: add a model.** A provider key is an address, not a choice of model,
+so nothing is picked for you and the installation ships with none. The app opens on *Add a model*
+until one exists: pick an endpoint, pick a model from the list it serves — with its context window,
+its modalities and its prices beside it — and save. The same screen adds the next one later, from
+Settings → Models.
+
+<p align="center"><img src="docs/screenshots/add-model.png" alt="Add a model: the endpoint, the model from its own list with context window and prices, and how it runs" width="100%" /></p>
+
 By hand instead: clone `protocore-exp` next to this repository, copy `deploy/env.example` to `.env` and
 `deploy/keyproxy.env.example` to `../daedalus-secrets/keyproxy.env` (provider keys go there, outside the
 checkout, `chmod 600`), then `docker compose -f deploy/compose.yaml --env-file .env up -d --build`. With a
@@ -254,6 +262,8 @@ are signed.
 ### Models and keys
 
 Providers are OpenAI-compatible endpoints (DeepSeek, OpenRouter, a self-hosted vLLM, anything else) with their own base URL, key and timeout; **presets** on top of them name a model with its thinking mode, effort, image support, context window and output cap. One preset is the default, others are fallbacks, any session can switch. Speech-to-text and the vision model pick a provider the same way.
+
+**An installation ships no preset at all.** The endpoints are configured; which model runs on one — and what it costs per million tokens — is the first thing you decide, in *Add a model* (the app opens there until a model exists, and Settings → Models → **Add a model** is the same screen). The first model added becomes the default. Until then every way in says so and names the fix rather than failing: the chat commands, the API (409), `daedalus doctor`, `daedalus check`.
 
 Keys never enter the agent container: the **key proxy** injects them (`http://keyproxy:3200/deepseek`, `…/openrouter`, `…/opencode`, plus any `KEYPROXY_UPSTREAM_<NAME>`), meters the calls, and refuses model calls once the daily budget is spent. An [OpenCode Go](https://opencode.ai/go) subscription is the `opencode` provider: set `OPENCODE_API_KEY` and its models (DeepSeek, GLM, Qwen, Kimi, MiniMax, GPT-5.6 Luna …) are presets with the gateway's list prices, refreshed daily from [models.dev](https://models.dev), so the metered spend tracks the subscription's allowance, whose 5-hour, weekly and monthly windows show on the Usage screen; every request carries the session id the gateway routes and caches by. Your **ChatGPT (Codex), SuperGrok and Claude Code** logins are read from the CLIs' own auth files, refreshed in place, and exposed as the `codex`, `grok` and `claude` providers — their quota windows show on the Usage screen and beside every session that uses them.
 

@@ -9,14 +9,15 @@ import pytest
 from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import Message, MessageRole, TextBlock
 
-from daedalus.config import RuntimeConfig, Settings
+from daedalus.config import Settings
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.tools.quiet import stay_silent
+from tests.support.models import model_config
 
 
 async def test_stay_silent_accepts_a_scheduled_turn_and_refuses_an_operator_turn(settings: Settings, db: Database) -> None:
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     try:
         state = await manager.create_session("standing")
@@ -34,7 +35,7 @@ async def test_stay_silent_accepts_a_scheduled_turn_and_refuses_an_operator_turn
 
 
 async def test_leftover_input_is_drained_after_a_failed_run_with_its_origin(settings: Settings, db: Database) -> None:
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     started: list[Message] = []
 
@@ -67,7 +68,7 @@ async def test_leftover_input_is_drained_after_a_failed_run_with_its_origin(sett
 async def test_verify_fails_on_a_failure_hidden_behind_a_pipe(settings: Settings, db: Database) -> None:
     from daedalus.tools.verify import verify
 
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     try:
         state = await manager.create_session("verify")
@@ -100,7 +101,7 @@ async def test_context_overflow_compacts_and_drives_the_turn_again(settings: Set
     from protocore.runtime.events.envelope import TurnEvent
     from protocore.runtime.events.types import EventType
 
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     calls: list[str] = []
 
@@ -136,7 +137,7 @@ async def test_provider_outage_drives_the_turn_again_with_a_growing_wait(setting
     from protocore.runtime.events.envelope import TurnEvent
     from protocore.runtime.events.types import EventType
 
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     manager.config.ops.provider_retry_max_attempts = 2
     manager.config.ops.provider_retry_base_seconds = 5.0
     manager.config.ops.provider_retry_max_seconds = 8.0
@@ -183,7 +184,7 @@ async def test_the_prompt_prefix_is_stable_across_runs_and_the_turn_context_ride
     from daedalus.host import prompts
     from daedalus.host.session_runner import Message, MessageRole, TextBlock
 
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     try:
         state = await manager.create_session("s")

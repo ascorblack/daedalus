@@ -40,7 +40,7 @@ from protocore.tests_support.adapters import InMemoryToolRegistry
 from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
 
-from daedalus.config import VOICE_ONLY_TOOLS, VOICE_TOOLS, RuntimeConfig, Settings
+from daedalus.config import VOICE_ONLY_TOOLS, VOICE_TOOLS, NoModelConfigured, RuntimeConfig, Settings
 from daedalus.host import prompts
 from daedalus.host.checkpoints import CheckpointError, Checkpoints, scan_workspace
 from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
@@ -320,7 +320,7 @@ class SessionManager:
         if overrides.get("preset") and overrides["preset"] in self.config.presets:
             pid = overrides["preset"]
             return self.providers.rungs_for(self.config, pid), self.config.presets[pid]
-        _, default = self.config.preset()
+        _, default = self.config.preset()  # NoModelConfigured when the table is empty
         if overrides.get("provider") and overrides.get("model_name"):
             return self.providers.rungs_for_pair(self.config, overrides["provider"], overrides["model_name"]), default
         return self.providers.rungs_for(self.config), default
@@ -1153,6 +1153,11 @@ class SessionManager:
         if state is None:
             raise KeyError(session_id)
         async with state.submit_lock:
+            if not self.config.has_model:
+                # The one place every way in converges: chat, the API, a schedule, a subagent, the
+                # voice concierge. None of them can start a run without a model, and all of them
+                # already turn a RuntimeError here into a message the operator reads.
+                raise NoModelConfigured
             if self.shutting_down:
                 raise RuntimeError("the bot is stopping; the run starts after the restart")
             if self.recovering and not state.running:

@@ -3,6 +3,7 @@ import { api, SessionSummary, telegram } from "./api";
 import { StatusLabel } from "./components";
 import { ConfirmHost, Sheet, ToastHost, toast as showToast } from "./dialogs";
 import type { AuthConfig } from "./screens/Login";
+import type { OnboardingState } from "./screens/AddModel";
 import * as passkeys from "./passkeys";
 import { back, migrateLegacyLocation, navigate, pathFor, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
 import { Counts, MoreSheet, Palette, PaletteItem, Rail, TabBar, go, screenTitle, useMedia, useShortcuts } from "./shell";
@@ -25,6 +26,7 @@ const HealthScreen = lazy(() => import("./screens/Settings").then((m) => ({ defa
 const MemoryScreen = lazy(() => import("./screens/Memory").then((m) => ({ default: m.MemoryScreen })));
 const ServicesScreen = lazy(() => import("./screens/Services").then((m) => ({ default: m.ServicesScreen })));
 const LoginScreen = lazy(() => import("./screens/Login").then((m) => ({ default: m.LoginScreen })));
+const OnboardingScreen = lazy(() => import("./screens/AddModel").then((m) => ({ default: m.OnboardingScreen })));
 
 /** The conversation is what the operator opens next, whatever screen they landed on: fetch it while the browser is idle. */
 function prefetchSession(): void {
@@ -102,6 +104,15 @@ export function App() {
   useEffect(prefetchSession, []);
   // Inside Telegram every request carries initData; outside, the browser needs a token or the session cookie.
   const [authed, setAuthed] = useState<boolean | null>(() => (telegram()?.initData ? true : null));
+  // Nothing in the app works without a model, so the app asks for one before it shows anything else.
+  const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
+  useEffect(() => {
+    if (!authed) return;
+    api
+      .get<OnboardingState>("/api/onboarding")
+      .then(setOnboarding)
+      .catch(() => setOnboarding({ has_model: true } as OnboardingState)); // an older bot has no such route: let the app through
+  }, [authed]);
   const inbox = useQuery<{ unread: number }>(authed ? "/api/inbox/unread" : null, { pollMs: 20000, staleMs: 5000 });
   const proposals = useQuery<{ status: string }[]>(authed ? "/api/proposals" : null, { pollMs: 60000, staleMs: 30000 });
   const counts: Counts = { inbox: inbox.data?.unread ?? 0, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
@@ -259,6 +270,20 @@ export function App() {
       <Suspense fallback={<div className="app"><div className="empty">Loading…</div></div>}>
         <LoginScreen onDone={() => setAuthed(true)} />
       </Suspense>
+    );
+  }
+  if (onboarding === null) return <div className="app"><div className="empty">Loading…</div></div>;
+  if (!onboarding.has_model) {
+    return (
+      <div className="app">
+        <div className="main">
+          <Suspense fallback={<div className="empty">Loading…</div>}>
+            <OnboardingScreen toast={showToast} onDone={() => setOnboarding({ ...onboarding, has_model: true })} />
+          </Suspense>
+        </div>
+        <ToastHost />
+        <ConfirmHost />
+      </div>
     );
   }
 

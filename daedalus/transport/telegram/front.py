@@ -37,7 +37,7 @@ from aiogram.types import (
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
-from daedalus.config import RuntimeConfig, Settings
+from daedalus.config import NO_MODEL_MESSAGE, NoModelConfigured, RuntimeConfig, Settings
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import Attachment, SessionManager, SessionState
 from daedalus.stores.sqlite import DeliveryLedger
@@ -1169,7 +1169,11 @@ class TelegramFront:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
         arg = (command.args or "").strip()
-        default_id, default = self.config.preset()
+        found = self.config.default_preset()
+        if found is None:
+            await message.answer(NO_MODEL_MESSAGE)
+            return
+        default_id, default = found
         if not arg:
             lines = [f"  {pid} — {p.display(pid)}{'  (default)' if pid == default_id else ''}" for pid, p in self.config.presets.items()]
             await message.answer(
@@ -1213,7 +1217,11 @@ class TelegramFront:
         arg = (command.args or "").strip().lower()
         thinking: bool | None = None
         effort: str | None = None
-        default_id, default = self.config.preset()
+        found = self.config.default_preset()
+        if found is None:
+            await message.answer(NO_MODEL_MESSAGE)
+            return
+        default_id, default = found
         if arg in ("on", "off"):
             thinking = arg == "on"
         elif arg in ("low", "medium", "high"):
@@ -1295,8 +1303,10 @@ class TelegramFront:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
         c = self.config
+        default = c.default_preset()
+        model_line = f"{default[1].display(default[0])} thinking={default[1].thinking} effort={default[1].reasoning_effort}" if default else f"none — {NO_MODEL_MESSAGE}"
         await message.answer(
-            f"model: {c.preset()[1].display(c.preset()[0])} thinking={c.preset()[1].thinking} effort={c.preset()[1].reasoning_effort}\n"
+            f"model: {model_line}\n"
             f"fallback: {', '.join(c.model.chain) or 'none'}\n"
             f"self-change approval: {c.self_change.approval}, auto_rebuild={c.self_change.auto_rebuild}\n"
             f"limits: ${self.settings.usd_per_day}/day (env), {c.limits.max_iterations} iterations, tool timeout {c.limits.tool_timeout_seconds:.0f}s\n"
@@ -1564,6 +1574,12 @@ class TelegramFront:
         was_running = state.running and state.pending is None
         try:
             await self.manager.submit(state.session.id, text, buffer.attachments)
+        except NoModelConfigured as exc:
+            # Not a failure: the installation has not been finished yet. Say so, without a stack trace.
+            outbox = await self.outbox_for_session(state.session.id)
+            if outbox is not None:
+                await outbox.send_text(str(exc), markdown=False)
+            return
         except Exception as exc:  # noqa: BLE001
             logger.exception("submit failed")
             outbox = await self.outbox_for_session(state.session.id)
@@ -1847,7 +1863,8 @@ class TelegramFront:
         if outbox is None:
             return None
         state = await self.manager.get_state(session_id)
-        model = state.engine.effective_model_name if state and state.engine else self.config.preset()[1].model
+        default = self.config.default_preset()
+        model = state.engine.effective_model_name if state and state.engine else (default[1].model if default else "")
 
         async def cost_lookup(rid: str) -> float | None:
             row = await self.manager.db.fetchone("SELECT sum(cost_usd) c, count(*) n FROM usage_events WHERE run_id = ?", (rid,))

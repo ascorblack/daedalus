@@ -50,7 +50,8 @@ if [ -n "$(current TELEGRAM_BOT_TOKEN "$ENV_FILE")" ]; then
   ask TELEGRAM_API_HASH "Telegram API hash" secret
 fi
 
-say "2/4 Model keys (stored in $SECRETS_FILE, never inside the checkout). Leave a key empty to skip that provider."
+say "2/4 Provider keys (stored in $SECRETS_FILE, never inside the checkout). Leave a key empty to skip that provider."
+say "A key is an address, not a model: you pick the model itself in the app at the end, and it is the only step that cannot be skipped."
 ask DEEPSEEK_API_KEY "DeepSeek API key" secret "$SECRETS_FILE"
 ask OPENROUTER_API_KEY "OpenRouter API key" secret "$SECRETS_FILE"
 ask KEYPROXY_USD_PER_DAY "Daily spend cap for the key proxy, USD" "" "$SECRETS_FILE"
@@ -82,11 +83,13 @@ docker compose -f deploy/compose.yaml --env-file "$ENV_FILE" "${PROFILE[@]}" up 
 say "Done. Logs: docker logs -f deploy-daedalus-1"
 if [ ${#PROFILE[@]} -gt 0 ]; then
   say "Next: send /start to the bot; /bind in a supergroup with topics for parallel sessions; /app for the Mini App."
+  say "Then add a model in the app (it opens on \"Add a model\"): until one exists, nothing can run."
 else
   say "Open the app with the pairing link the bot wrote at startup (or mint a fresh one):"
   say "  docker exec deploy-daedalus-1 cat /srv/state/pairing-url"
   say "  docker exec deploy-daedalus-1 uv run --frozen python -m daedalus auth pair"
   say "A fresh link: docker compose -f deploy/compose.yaml exec daedalus python -m daedalus auth pair"
   say "Add a passkey in Settings → Security once you are in, and the link is never needed again."
+  say "The app opens on \"Add a model\": pick a provider, pick a model from its own list, save. Until one exists, nothing can run."
 fi
-say "Provider keys can be added later in $SECRETS_FILE."
+say "Provider keys can be added later in $SECRETS_FILE; models are added in the app (Settings → Models → Add a model)."

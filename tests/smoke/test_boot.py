@@ -8,6 +8,7 @@ import pkgutil
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
+from tests.support.models import DEFAULT_PRESET, model_config, presets
 
 
 def test_every_module_imports() -> None:
@@ -19,13 +20,15 @@ def test_every_module_imports() -> None:
 
 def test_config_roundtrip(settings: Settings) -> None:
     config = RuntimeConfig.load(settings.config_path)
-    config.presets["deepseek.deepseek-v4-flash"].label = "x"
+    assert config.presets == {}  # a fresh installation has no model until the operator adds one
+    config.presets.update(presets())
+    config.presets[DEFAULT_PRESET].label = "x"
     config.save(settings.config_path)
-    assert RuntimeConfig.load(settings.config_path).presets["deepseek.deepseek-v4-flash"].label == "x"
+    assert RuntimeConfig.load(settings.config_path).presets[DEFAULT_PRESET].label == "x"
 
 
 async def test_manager_starts_and_registers_tools(settings: Settings, db: Database) -> None:
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     names = {t.name for t in manager.tools.list_all()}
     for required in ("Exec", "Read", "Write", "Edit", "Find", "Search", "AskUser", "SendFile", "SelfPropose", "ScheduleCreate", "Skill"):

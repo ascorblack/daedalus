@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from daedalus.config import RuntimeConfig, Settings
+from daedalus.config import Settings
 from daedalus.host.session_runner import SessionManager
 from daedalus.providers.openai_compat import UsageRecord
 from daedalus.stores.database import Database
+from tests.support.models import model_config
 
 
 async def _record(manager: SessionManager, *, session_id: str, provider: str, usd: float | None, run_id: str = "r") -> None:
@@ -15,7 +16,7 @@ async def _record(manager: SessionManager, *, session_id: str, provider: str, us
 
 
 async def test_session_provider_and_total_caps(settings: Settings, db: Database) -> None:
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     a = await manager.create_session("a")
     b = await manager.create_session("b")

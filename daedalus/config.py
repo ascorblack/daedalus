@@ -118,14 +118,26 @@ class Settings(BaseSettings):
         return self.bot_repo_dir / "skills"
 
 
-DEFAULT_PRESET = "deepseek.deepseek-v4-flash"
+NO_MODEL_MESSAGE = "No model is configured yet. Add one in the app: Settings \u2192 Models \u2192 Add a model."
+"""What every entry point says when the preset table is empty. A fresh install ships no model:
+which one to run is the operator's first decision, not a guess made for them."""
+
+
+class NoModelConfigured(RuntimeError):
+    """Raised where a model is needed and none is configured. A RuntimeError, so the callers that
+    already turn a "this run cannot start" into a message (the API's 409, the chat reply) need
+    nothing new."""
+
+    def __init__(self, message: str = NO_MODEL_MESSAGE) -> None:
+        super().__init__(message)
 
 
 class ModelConfig(BaseModel):
     """Which model preset runs by default, and which ones stand in when it fails."""
 
-    preset: str = DEFAULT_PRESET
-    chain: list[str] = Field(default_factory=lambda: ["openrouter.deepseek-v4-flash"])
+    preset: str = ""
+    """Empty until the operator adds one; the first preset in the table stands in for it."""
+    chain: list[str] = Field(default_factory=list)
     """Fallback preset ids tried in order after the default one."""
 
 
@@ -183,7 +195,7 @@ class PromptConfig(BaseModel):
 class VisionConfig(BaseModel):
     """Model used by the ImageView tool (cheap, fast, image-capable)."""
 
-    preset: str = "openrouter.qwen-qwen3.7-flash"
+    preset: str = ""
     """A preset with ``images = true``; empty picks the first image-capable preset."""
     max_output_tokens: int = Field(default=2000, ge=100, le=32_000)
 
@@ -522,12 +534,12 @@ class VoiceConfig(BaseModel):
     """The voice page: a small fast model the operator talks to, which hands real work to agent sessions.
 
     ``preset`` should name a model that answers in a second or two — a conversation stalls where a
-    thinking model would merely be slow. The default is the cheapest no-thinking preset in the table.
+    thinking model would merely be slow. Empty falls back to the default preset.
     """
 
     enabled: bool = True
-    preset: str = "openrouter.qwen-qwen3.7-flash"
-    """The concierge's model preset; pick a fast one (no thinking, or low effort)."""
+    preset: str = ""
+    """The concierge's model preset; pick a fast one (no thinking, or low effort). Empty = the default preset."""
     tts: TtsConfig = Field(default_factory=TtsConfig)
 
 
@@ -745,27 +757,10 @@ class RuntimeConfig(BaseModel):
     """Seeds already applied to this file (``claude-subscription`` …). A seed adds a provider or presets once;
     listed here it is never applied again, so what the operator removes stays removed."""
     model: ModelConfig = Field(default_factory=ModelConfig)
-    presets: dict[str, ModelPresetConfig] = Field(
-        default_factory=lambda: {
-            DEFAULT_PRESET: ModelPresetConfig(provider="deepseek", model="deepseek-flash"),
-            "openrouter.deepseek-v4-flash": ModelPresetConfig(provider="openrouter", model="deepseek/deepseek-v4-flash", images=True),
-            "openrouter.qwen-qwen3.7-flash": ModelPresetConfig(
-                provider="openrouter", model="qwen/qwen3.7-flash", label="Qwen 3.7 Flash (vision)", thinking=False, images=True, max_output_tokens=4_000
-            ),
-            "grok.grok-4.6": ModelPresetConfig(provider="grok", model="grok-4.6", label="Grok 4.6 (SuperGrok subscription)", thinking=True, images=False, context_window=500_000),
-            "codex.gpt-5.6-terra": ModelPresetConfig(provider="codex", model="gpt-5.6-terra", label="GPT-5.6 Terra (ChatGPT subscription)", thinking=True, reasoning_effort="medium", images=True, context_window=400_000),
-            "codex.gpt-5.6-luna": ModelPresetConfig(provider="codex", model="gpt-5.6-luna", label="GPT-5.6 Luna (ChatGPT subscription, cheapest)", thinking=True, reasoning_effort="low", images=True, context_window=400_000),
-            "claude.sonnet-5": ModelPresetConfig(provider="claude", model="claude-sonnet-5", label="Claude Sonnet 5 (Claude Code subscription)", thinking=True, reasoning_effort="high", images=True, context_window=200_000),
-            "claude.opus-5": ModelPresetConfig(provider="claude", model="claude-opus-5", label="Claude Opus 5 (Claude Code subscription)", thinking=True, reasoning_effort="medium", images=True, context_window=1_000_000),
-            "claude.fable-5.1": ModelPresetConfig(provider="claude", model="claude-fable-5-1", label="Claude Fable 5.1 (Claude Code subscription)", thinking=True, reasoning_effort="medium", images=True, context_window=1_000_000),
-            "opencode.deepseek-v4.1-flash": ModelPresetConfig(provider="opencode", model="deepseek-v4.1-flash", label="DeepSeek V4.1 Flash (OpenCode Go)", thinking=True, reasoning_effort="high", images=False, context_window=256_000, max_output_tokens=65_536),
-            "opencode.glm-5.3-flash": ModelPresetConfig(provider="opencode", model="glm-5.3-flash", label="GLM-5.3 Flash (OpenCode Go)", thinking=True, reasoning_effort="high", images=False, context_window=200_000),
-            "opencode.kimi-k3": ModelPresetConfig(provider="opencode", model="kimi-k3", label="Kimi K3 (OpenCode Go)", thinking=True, reasoning_effort="high", images=False, context_window=256_000),
-            "opencode.qwen3.8-max": ModelPresetConfig(provider="opencode", model="qwen3.8-max", label="Qwen3.8 Max (OpenCode Go)", thinking=True, reasoning_effort="high", images=False, context_window=256_000),
-            "opencode.gpt-5.6-luna": ModelPresetConfig(provider="opencode", model="gpt-5.6-luna", label="GPT-5.6 Luna (OpenCode Go)", thinking=True, reasoning_effort="low", images=False, context_window=400_000),
-        }
-    )
-    """Named models keyed by id; the operator adds more in the Mini App."""
+    presets: dict[str, ModelPresetConfig] = Field(default_factory=dict)
+    """Named models keyed by id. Empty on a fresh install: a provider endpoint is not a model, and
+    which model to run — and pay for — is the operator's to pick. The app asks for one at first login
+    (Settings → Models → Add a model); ``deploy/config.example.toml`` shows the shape of an entry."""
     providers: dict[str, ProviderConfig] = Field(
         default_factory=lambda: {
             "deepseek": ProviderConfig(kind="deepseek", base_url="http://keyproxy:3200/deepseek"),
@@ -803,8 +798,17 @@ class RuntimeConfig(BaseModel):
     answer_language: str = "auto"
     """"auto" answers in the language of the request; otherwise a language name."""
 
-    def preset(self, preset_id: str | None = None) -> tuple[str, ModelPresetConfig]:
-        """The named preset, or the default one when the id is empty/unknown."""
+    @property
+    def has_model(self) -> bool:
+        """Whether anything can run at all. False on a fresh install until the operator adds a model."""
+        return bool(self.presets)
+
+    def default_preset(self, preset_id: str | None = None) -> tuple[str, ModelPresetConfig] | None:
+        """The named preset, the default one, or None when the table is empty.
+
+        The form for everything that only shows a model — a list, a settings line, a status chip.
+        Use :meth:`preset` where the caller genuinely needs one and cannot go on without it.
+        """
         if preset_id and preset_id in self.presets:
             return preset_id, self.presets[preset_id]
         if self.model.preset in self.presets:
@@ -812,7 +816,18 @@ class RuntimeConfig(BaseModel):
         if self.presets:
             first = next(iter(self.presets))
             return first, self.presets[first]
-        raise RuntimeError("no model presets are configured")
+        return None
+
+    def preset(self, preset_id: str | None = None) -> tuple[str, ModelPresetConfig]:
+        """The named preset, or the default one when the id is empty/unknown.
+
+        Raises :class:`NoModelConfigured` when there is no model at all; its message is the one the
+        operator reads, so it may be handed straight to a chat reply or an HTTP body.
+        """
+        found = self.default_preset(preset_id)
+        if found is None:
+            raise NoModelConfigured
+        return found
 
     def vision_preset(self) -> tuple[str, ModelPresetConfig] | None:
         if self.vision.preset and self.vision.preset in self.presets and self.presets[self.vision.preset].images:
@@ -825,7 +840,8 @@ class RuntimeConfig(BaseModel):
     @classmethod
     def load(cls, path: Path) -> RuntimeConfig:
         if not path.exists():
-            # The defaults already carry everything a seed would add: mark every seed applied.
+            # A seed adds presets to a config written before that seed existed. A file created now
+            # is not one of those: every seed counts as applied, so a fresh install stays empty.
             config = cls(seeded=list(SEEDS))
             config.save(path)
             return config
@@ -922,7 +938,7 @@ def _seed_presets(raw: dict[str, Any]) -> bool:
         preset.setdefault("images", False)
     chain = [by_provider[p] for p in (model.get("chain") or []) if isinstance(p, str) and p in by_provider and by_provider[p] != default_pid]
     chain += [c for c in (model.get("chain") or []) if isinstance(c, str) and c in presets and c not in chain and c != default_pid]
-    raw["model"] = {"preset": default_pid or (next(iter(presets)) if presets else DEFAULT_PRESET), "chain": chain}
+    raw["model"] = {"preset": default_pid or (next(iter(presets)) if presets else ""), "chain": chain}
     raw["vision"] = vision
     raw["presets"] = presets
     return True
@@ -1008,7 +1024,8 @@ def _migrate(raw: dict[str, Any]) -> bool:
 
 
 __all__ = [
-    "DEFAULT_PRESET",
+    "NO_MODEL_MESSAGE",
+    "NoModelConfigured",
     "preset_id_for",
     "ApprovalMode",
     "BalanceConfig",

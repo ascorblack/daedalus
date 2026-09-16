@@ -102,11 +102,12 @@ def render_text(checks: list[Check]) -> str:
 async def _config(ctx: DoctorContext) -> list[Check]:
     out: list[Check] = []
     cfg, st = ctx.config, ctx.settings
-    try:
-        pid, preset = cfg.preset()
-    except RuntimeError as exc:
-        out.append(Check("default model", False, str(exc), "fail", "create a preset in Settings → Models"))
+    found = cfg.default_preset()
+    if found is None:
+        out.append(Check("default model", False, "no model is configured; nothing can run yet", "fail", "open the app and add one: Settings → Models → Add a model"))
         pid, preset = "", None
+    else:
+        pid, preset = found
     if preset is not None:
         out.append(Check("default model", True, f"{pid} = {preset.display(pid)}", "ok"))
         provider = cfg.providers.get(preset.provider)
@@ -124,7 +125,8 @@ async def _config(ctx: DoctorContext) -> list[Check]:
             except Exception as exc:  # noqa: BLE001 — a hand-edited price table is exactly what this check is for
                 out.append(Check("pricing for the default model", False, f"the pricing table for {preset.provider} does not parse: {type(exc).__name__}: {exc}", "fail", "fix [providers.*.pricing] in config.toml"))
     vision = cfg.vision_preset()
-    out.append(Check("vision preset", vision is not None, f"{vision[0]}" if vision else "no image-capable preset: ImageView and photos in chat are unavailable", "ok" if vision else "warn", "mark a preset as accepting images"))
+    if cfg.has_model:
+        out.append(Check("vision preset", vision is not None, f"{vision[0]}" if vision else "no image-capable preset: ImageView and photos in chat are unavailable", "ok" if vision else "warn", "mark a preset as accepting images"))
     chain_bad = [c for c in cfg.model.chain if c not in cfg.presets]
     out.append(Check("fallback chain", not chain_bad, ", ".join(cfg.model.chain) or "none" if not chain_bad else f"unknown presets: {', '.join(chain_bad)}", "ok" if not chain_bad else "warn", "fix the chain in Settings → Models"))
     sandbox = cfg.tools.exec.sandbox

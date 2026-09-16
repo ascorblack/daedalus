@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from daedalus.config import NO_MODEL_MESSAGE
 from daedalus.doctor import DoctorContext, render_text, run_checks
 from daedalus.extensions.inbox import format_entries
 from daedalus.host.prompts import DEFAULT_RULES
@@ -150,7 +151,10 @@ async def run_command(app: Application, session_id: str, line: str) -> str:  # n
 
     # -- what the session runs with -------------------------------------------------
     if name == "model":
-        default_id, default = app.config.preset()
+        found = app.config.default_preset()
+        if found is None:
+            return NO_MODEL_MESSAGE
+        default_id, default = found
         if not args:
             lines = [f"  {pid} — {p.display(pid)}{'  (default)' if pid == default_id else ''}" for pid, p in app.config.presets.items()]
             return f"default: {default.display(default_id)}\nmodels:\n" + "\n".join(lines) + "\nusage: /model <preset-id> · /model default · /model provider/model-id"
@@ -167,7 +171,10 @@ async def run_command(app: Application, session_id: str, line: str) -> str:  # n
         return f"Session model: {provider}/{model_name} (from the next model call)"
     if name == "thinking":
         arg = args.lower()
-        default_id, default = app.config.preset()
+        found = app.config.default_preset()
+        if found is None:
+            return NO_MODEL_MESSAGE
+        default_id, default = found
         if arg in ("on", "off"):
             thinking, effort = arg == "on", None
         elif arg in ("low", "medium", "high"):
@@ -443,7 +450,8 @@ async def run_command(app: Application, session_id: str, line: str) -> str:  # n
         return "Working rules" + (" (default)" if not app.config.prompt.rules.strip() else "") + ":\n" + rules
     if name == "settings":
         c = app.config
-        preset_id, preset = c.preset()
+        found = c.default_preset()
+        model_line = f"{found[1].display(found[0])} thinking={found[1].thinking} effort={found[1].reasoning_effort}" if found else f"none — {NO_MODEL_MESSAGE}"
         if front is None:
             chat = "no Telegram front; the app and the API are the way in"
         elif front.private_mode():
@@ -451,7 +459,7 @@ async def run_command(app: Application, session_id: str, line: str) -> str:  # n
         else:
             chat = f"one topic per session in forum {c.telegram.forum_chat_id or 'not bound'}"
         return (
-            f"model: {preset.display(preset_id)} thinking={preset.thinking} effort={preset.reasoning_effort}\n"
+            f"model: {model_line}\n"
             f"fallback: {', '.join(c.model.chain) or 'none'}\n"
             f"self-change approval: {c.self_change.approval}, auto_rebuild={c.self_change.auto_rebuild}\n"
             f"limits: ${app.settings.usd_per_day}/day (env), {c.limits.max_iterations} iterations, tool timeout {c.limits.tool_timeout_seconds:.0f}s\n"

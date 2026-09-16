@@ -17,7 +17,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from daedalus.config import RuntimeConfig, Settings
+from daedalus.config import NO_MODEL_MESSAGE, RuntimeConfig, Settings
 
 
 def _settings(args: argparse.Namespace) -> Settings:
@@ -47,9 +47,13 @@ async def cmd_check(args: argparse.Namespace) -> int:
         print(f"config: {settings.config_path}")
         print(f"repos: bot={settings.bot_repo_dir} core={settings.core_repo_dir}")
         print(f"providers: {', '.join(manager.providers.available()) or '(none configured)'}")
-        pid, preset = config.preset()
-        print(f"model: {pid} = {preset.provider}/{preset.model} thinking={preset.thinking} effort={preset.reasoning_effort}")
-        print(f"presets: {', '.join(config.presets)}"),
+        found = config.default_preset()
+        if found is None:
+            print(f"model: none — {NO_MODEL_MESSAGE}")
+        else:
+            pid, preset = found
+            print(f"model: {pid} = {preset.provider}/{preset.model} thinking={preset.thinking} effort={preset.reasoning_effort}")
+        print(f"presets: {', '.join(config.presets) or '(none)'}"),
         print(f"tools ({len(tools)}): {', '.join(tools)}")
         skills = await manager.skills.list("daedalus")
         print(f"skills ({len(skills)}): {', '.join(s.name for s in skills) or '(none)'}")

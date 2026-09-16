@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
-from daedalus.config import PROVIDER_KINDS, HeartbeatConfig, ModelPresetConfig, ProviderConfig
+from daedalus.config import NO_MODEL_MESSAGE, PROVIDER_KINDS, HeartbeatConfig, ModelPresetConfig, ProviderConfig
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
@@ -401,6 +401,8 @@ class PresetPatch(BaseModel):
 
 
 PRESET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+NO_MODEL_LABEL = "no model"
+"""Where a model name would go in a list or a chip and there is none yet."""
 
 
 def resolve_model_patch(current: dict[str, Any], patch: dict[str, Any]) -> None:
@@ -418,6 +420,53 @@ def resolve_model_patch(current: dict[str, Any], patch: dict[str, Any]) -> None:
     current["model"] = merged
 
 
+def per_million(pricing: Any) -> dict[str, float]:
+    """A price per token (what OpenRouter publishes) as a price per million (what everything here uses)."""
+    if not isinstance(pricing, dict):
+        return {}
+    out: dict[str, float] = {}
+    for name, key in (("input", "prompt"), ("output", "completion"), ("cache_hit", "input_cache_read")):
+        try:
+            value = float(pricing[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if value >= 0:
+            out[name] = round(value * 1_000_000, 6)
+    return out
+
+
+def model_entry(raw: dict[str, Any]) -> dict[str, Any]:
+    """One model as the Add-a-model list shows it: whatever the endpoint chose to say about it.
+
+    Only ``id`` is ever there — a plain OpenAI-compatible ``/models`` says nothing else, and the
+    operator fills the rest in by hand. OpenRouter carries the context window, the modalities,
+    whether the model reasons and what a million tokens cost; those prefill the form instead.
+    """
+    entry: dict[str, Any] = {"id": str(raw.get("id") or "").strip()}
+    name = raw.get("name")
+    if isinstance(name, str) and name.strip():
+        entry["name"] = name.strip()
+    top = raw.get("top_provider") if isinstance(raw.get("top_provider"), dict) else {}
+    context = raw.get("context_length") or top.get("context_length")
+    if isinstance(context, int | float) and context > 0:
+        entry["context_length"] = int(context)
+    max_output = top.get("max_completion_tokens")
+    if isinstance(max_output, int | float) and max_output > 0:
+        entry["max_output_tokens"] = int(max_output)
+    architecture = raw.get("architecture") if isinstance(raw.get("architecture"), dict) else {}
+    modalities = architecture.get("input_modalities")
+    if isinstance(modalities, list):
+        entry["input_modalities"] = [str(m) for m in modalities]
+        entry["images"] = "image" in entry["input_modalities"]
+    parameters = raw.get("supported_parameters")
+    if isinstance(parameters, list):
+        entry["reasoning"] = "reasoning" in parameters or "reasoning_effort" in parameters
+    pricing = per_million(raw.get("pricing"))
+    if pricing:
+        entry["pricing"] = pricing
+    return entry
+
+
 async def lookup_openai_models(
     base_url: str,
     api_key: str | None = None,
@@ -428,7 +477,9 @@ async def lookup_openai_models(
 
     Tries ``{base}/models`` first, then ``{base}/v1/models``, so a base_url typed
     without the ``/v1`` prefix (``http://host:9000``) still resolves; the returned
-    ``base_url`` is the exact root the list was found at. Tests inject an
+    ``base_url`` is the exact root the list was found at. ``models`` is the bare list of
+    ids; ``entries`` is the same list with whatever else the endpoint said about each one
+    (see :func:`model_entry`). Tests inject an
     ``httpx.AsyncClient`` with a mock transport; production uses its own short-timeout
     client. Raises :class:`ValueError` when nothing answers with a model list.
     """
@@ -460,12 +511,13 @@ async def lookup_openai_models(
             except ValueError:
                 errors.append(f"{url}: not JSON")
                 continue
-            entries = data.get("data") if isinstance(data, dict) else None
-            models = [str(m["id"]) for m in entries] if isinstance(entries, list) else None
-            if not models:
+            listed = data.get("data") if isinstance(data, dict) else None
+            rows = [m for m in listed if isinstance(m, dict) and str(m.get("id") or "").strip()] if isinstance(listed, list) else []
+            if not rows:
                 errors.append(f"{url}: no model list in the response")
                 continue
-            return {"base_url": url[: -len("/models")], "models": models}
+            entries = [model_entry(m) for m in rows]
+            return {"base_url": url[: -len("/models")], "models": [e["id"] for e in entries], "entries": entries}
     finally:
         if owns_client:
             await client.aclose()
@@ -826,8 +878,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.get("/api/sessions")
     async def list_sessions(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
         rows = await manager.list_sessions(limit=200)
-        default_id, default_preset = app.config.preset()
-        default_label = default_preset.display(default_id)
+        default = app.config.default_preset()
+        default_label = default[1].display(default[0]) if default else NO_MODEL_LABEL
         overrides_by_id = await manager.live.load_models([row["id"] for row in rows])
         for row in rows:
             # The directory the session works in, so the list can group sessions by workspace.
@@ -881,8 +933,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             return app.config.presets[overrides["preset"]].display(overrides["preset"])
         if overrides.get("provider") and overrides.get("model_name"):
             return f"{overrides['provider']}/{overrides['model_name']}"
-        pid, preset = app.config.preset()
-        return preset.display(pid)
+        default = app.config.default_preset()
+        return default[1].display(default[0]) if default else NO_MODEL_LABEL
 
     async def session_provider(state: Any) -> str:
         """The provider id the session's next call goes to (for the usage card beside the chat)."""
@@ -891,8 +943,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             return app.config.presets[overrides["preset"]].provider
         if overrides.get("provider"):
             return str(overrides["provider"])
-        _, preset = app.config.preset()
-        return preset.provider
+        default = app.config.default_preset()
+        return default[1].provider if default else ""
 
     @api.get("/api/sessions/{session_id}")
     async def get_session(session_id: str, tail: int = 600, before: int = 0, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2296,6 +2348,40 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             return None
         return [str(n) for n in names] if isinstance(names, list) else None
 
+    @api.get("/api/onboarding")
+    async def onboarding(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """What this installation still needs before it can run anything.
+
+        A fresh install has provider endpoints but no model — a provider is an address, not a
+        choice of model — so the app opens Add a model instead of a chat that cannot answer.
+        """
+        usable = set(manager.providers.available())
+        held = await keyproxy_upstreams()
+        providers: list[dict[str, Any]] = []
+        for pid, pc in app.config.providers.items():
+            via_proxy = "keyproxy" in pc.base_url
+            key_held = None if not via_proxy or held is None else pid in held
+            providers.append(
+                {
+                    "id": pid,
+                    "kind": pc.kind,
+                    "base_url": pc.base_url,
+                    "via_proxy": via_proxy,
+                    "key_held": key_held,
+                    "ready": pid in usable and key_held is not False,
+                }
+            )
+        needs = [n for n, missing in (("provider_key", not any(p["ready"] for p in providers)), ("model", not app.config.has_model)) if missing]
+        default = app.config.default_preset()
+        return {
+            "has_model": app.config.has_model,
+            "presets": len(app.config.presets),
+            "default_preset": default[0] if default else "",
+            "providers": providers,
+            "needs": needs,
+            "message": "" if app.config.has_model else NO_MODEL_MESSAGE,
+        }
+
     @api.get("/api/settings")
     async def get_settings(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         view = _settings_view()
@@ -2395,11 +2481,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.post("/api/providers/lookup-models")
     async def lookup_provider_models(body: ModelsLookupBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """List model ids served at an OpenAI-compatible endpoint (``{base}/models``).
+        """List the models served at an OpenAI-compatible endpoint (``{base}/models``).
 
         Probes from the bot (a Mini App in a browser or Telegram cannot reach LAN
         addresses), with an optional bearer key. ``base_url`` in the reply is the exact
-        root the list was found at (``/v1`` appended when the caller omitted it).
+        root the list was found at (``/v1`` appended when the caller omitted it), ``models``
+        the ids, and ``entries`` the ids with the context window, modalities, reasoning
+        support and prices the endpoint reported — what Add a model fills the form from.
         """
         base_url, api_key = body.base_url, body.api_key
         if body.provider:
@@ -2438,6 +2526,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if not entry["model"]:
             raise HTTPException(400, "a preset needs a model id")
         raw["presets"][preset_id] = entry
+        model = raw.setdefault("model", {})
+        if str(model.get("preset") or "") not in raw["presets"]:
+            # The first model added is the one that runs: an install is not finished until one is.
+            model["preset"] = preset_id
+        vision = raw.setdefault("vision", {})
+        if entry.get("images") and str(vision.get("preset") or "") not in raw["presets"]:
+            vision["preset"] = preset_id
         try:
             new_config = type(app.config).model_validate(raw)
         except Exception as exc:  # noqa: BLE001
@@ -2448,13 +2543,19 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def delete_preset(preset_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         if preset_id not in app.config.presets:
             raise HTTPException(404, "no such preset")
-        if app.config.model.preset == preset_id:
+        last = len(app.config.presets) == 1
+        if app.config.model.preset == preset_id and not last:
             raise HTTPException(400, "this preset is the global default; pick another default first")
-        if app.config.vision.preset == preset_id:
+        if app.config.vision.preset == preset_id and not last:
             raise HTTPException(400, "this preset is the ImageView model; pick another in Settings → Tools first")
         raw = app.config.model_dump(mode="json")
         del raw["presets"][preset_id]
         raw["model"]["chain"] = [c for c in raw["model"].get("chain", []) if c != preset_id]
+        # Removing the last model is allowed: an installation with none is a state the app knows —
+        # it asks for one — and refusing would leave a wrong entry no one can take out.
+        for section in ("model", "vision", "voice"):
+            if raw[section].get("preset") == preset_id:
+                raw[section]["preset"] = ""
         return await _save_provider_config(type(app.config).model_validate(raw))
 
     # -- static mini app ------------------------------------------------------------

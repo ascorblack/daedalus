@@ -21,10 +21,12 @@ proper PWA and Telegram's Mini App works.
 
 Ask these once, together; do not start until you have the answers.
 
-1. **A model.** One of: an API key for DeepSeek, OpenRouter or OpenCode Go; or a self-hosted
+1. **A provider.** One of: an API key for DeepSeek, OpenRouter or OpenCode Go; or a self-hosted
    OpenAI-compatible endpoint (base URL + key); or a ChatGPT / Claude Code / SuperGrok login already
    present on this server (`~/.codex`, `~/.claude`, `~/.grok`) — those are used as providers through
-   the key proxy.
+   the key proxy. A key is an address, not a model: the installation ships with no model at all, and
+   the operator picks theirs in the app at the end (section 3a). Ask which one they want and what
+   they are willing to spend on it, so you can point them at it when you hand the app over.
 2. **Telegram, or not.** If they want Telegram: a bot token from @BotFather, their numeric Telegram
    user id, and (for files over 20 MB) API id + hash from https://my.telegram.org/apps. If not, skip
    every Telegram value: the app in the browser is the whole interface.
@@ -101,6 +103,21 @@ If there is no public address, the operator reaches the app through a tunnel:
 `ssh -L 8765:127.0.0.1:8765 <server>` and then `http://127.0.0.1:8765/app` on their machine; the pairing
 link works through the tunnel as printed (it uses `http://127.0.0.1:8765`).
 
+## 3a. The operator adds a model
+
+Signed in, the app opens on **Add a model** and stays there: the installation has none, and nothing —
+not a chat message, not a schedule — can run until one exists. Three steps on one page: the endpoint
+(the ones whose key the key proxy holds are marked ready), the model from the list that endpoint
+serves (with its context window, its modalities and its prices), and how it runs. Saving makes it the
+default.
+
+This is the operator's decision, not yours: do not pick a model for them. If they ask you to, ask
+which one and what it may cost first. You can confirm the state from the shell at any time:
+
+```bash
+docker exec deploy-daedalus-1 uv run --frozen python -m daedalus check   # "model: none — …" until one is added
+```
+
 ## 4. HTTPS (when there is a domain)
 
 Put any reverse proxy with TLS in front of port 8765 and set `MINIAPP_PUBLIC_URL=https://<domain>` (that is
@@ -129,9 +146,11 @@ Two shapes; both keep every feature:
 
 ## 6. Verify the whole thing works
 
-1. In the app, create an agent with the task "list the files in your workspace and tell me the date";
-   it must answer within a minute and the run must show tool steps.
-2. Settings → Models shows the configured presets; Usage shows the call you just made.
+1. After the operator has added a model (section 3a), create an agent in the app with the task "list
+   the files in your workspace and tell me the date"; it must answer within a minute and the run must
+   show tool steps. Before a model exists this step answers 409 with "No model is configured yet",
+   which is the correct behaviour, not a fault.
+2. Settings → Models shows the model they added, marked default; Usage shows the call you just made.
 3. `docker logs deploy-daedalus-1 | grep -i error` shows nothing about providers.
 
 ## 7. Updating
@@ -143,6 +162,7 @@ preflights and restarts (rolling back on failure). To update by hand: `git -C ~/
 
 ## 8. What to report back
 
-Tell the operator: the app address, how to log in (the pairing link, then a passkey), which model is the
-default and what it costs, the daily cap, and whether Telegram is on. Do not paste tokens or keys into
+Tell the operator: the app address, how to log in (the pairing link, then a passkey), that the app will
+ask them for a model before anything else and which providers are ready for one, the daily cap, and
+whether Telegram is on. Do not paste tokens or keys into
 the chat.
