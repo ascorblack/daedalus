@@ -112,5 +112,7 @@ RUN apt-get update \
     && uv pip install --python /srv/venv/bin/python --no-cache --requirements /tmp/requirements-browser.txt \
     && playwright install chromium-headless-shell \
     && rm -rf /root/.cache \
-    && ln -s "$(find /opt/pw-browsers -type f -name chrome-headless-shell | head -1)" /usr/local/bin/chromium
+    && shell="$(find /opt/pw-browsers -type f \( -name chrome-headless-shell -o -name headless_shell \) | head -1)" \
+    && test -n "$shell" \
+    && ln -s "$shell" /usr/local/bin/chromium
 ENV CHROME_PATH=/usr/local/bin/chromium
