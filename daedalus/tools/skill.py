@@ -10,8 +10,8 @@ from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
-from daedalus.host.toolchain import status as toolchain_status
 from daedalus.host.services import locator
+from daedalus.host.toolchain import status as toolchain_status
 from daedalus.tools._common import error, ok
 
 

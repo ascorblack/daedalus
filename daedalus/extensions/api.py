@@ -37,8 +37,8 @@ from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import tts_configured
-from daedalus.host import capabilities, prompts
-from daedalus.host.prompts import DEFAULT_RULES, split_headline
+from daedalus.host import capabilities
+from daedalus.host.prompts import DEFAULT_RULES
 from daedalus.host.session_runner import TENANT, Attachment
 from daedalus.host.transcript_view import message_view
 from daedalus.providers.openai_compat import UsageRecord
