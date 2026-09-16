@@ -116,6 +116,14 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
         loop_guard_nudge_max=3,
         # Three failures of one tool in a run that takes hundreds of turns is not a broken tool.
         max_consecutive_tool_errors=8,
+        # A result is worth its size while the agent is still reading it. Past
+        # the fresh window a long one is cut to its head in the request — the
+        # stored history keeps it whole — so a run of large reads stops
+        # spending the window on pages nobody is looking at any more.
+        tool_result_stale_trim_enabled=True,
+        tool_result_fresh_count=config.tools.results.fresh_count,
+        tool_result_stale_max_chars=config.tools.results.stale_max_chars,
+        tool_result_stale_trim_batch_chars=config.tools.results.trim_batch_chars,
     )
 
 

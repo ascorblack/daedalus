@@ -287,9 +287,31 @@ class ExecToolsConfig(BaseModel):
         return value
 
 
+class ResultToolsConfig(BaseModel):
+    """What happens to a tool result once the agent has moved past it.
+
+    ``[tools.exec] max_output_chars`` bounds what ONE call returns. It says
+    nothing about the twenty results already in the transcript, which the
+    request carries again on every turn — which is how a handful of large reads
+    fills the window. These three bound that: past the fresh window, a long
+    result is cut to its head in the request only, and the whole result stays
+    in the stored history.
+    """
+
+    fresh_count: int = Field(default=6, ge=0, le=200)
+    """How many of the newest tool results are always shown whole — the window in which the
+    agent is still working from what it read."""
+    stale_max_chars: int = Field(default=2_000, ge=200, le=100_000)
+    """Head kept of an older result that is longer than this; shorter ones are never cut."""
+    trim_batch_chars: int = Field(default=40_000, ge=0, le=5_000_000)
+    """How much trimmable excess must build up before any trimming happens. Every trim moves the
+    prompt prefix and costs a cache miss on the whole request, so it is done in batches."""
+
+
 class ToolsConfig(BaseModel):
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolsConfig = Field(default_factory=ExecToolsConfig)
+    results: ResultToolsConfig = Field(default_factory=ResultToolsConfig)
 
 
 class McpOAuthConfig(BaseModel):

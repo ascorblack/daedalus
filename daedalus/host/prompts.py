@@ -232,6 +232,11 @@ def environment_section(
         "- What describes this machine is private: the address your services are reached at, hostnames, the operator's "
         "paths and accounts. None of it goes into code, tests, commits or pull requests; the proposal gate refuses a diff that carries it"
     )
+    lines.append(
+        "- A tool result you have moved past is cut down to its opening lines once newer results have "
+        "taken its place; the note in its place says so. Nothing is lost — read the file or run the "
+        "command again when you need it, rather than answering from what you remember it said"
+    )
     lines.append("- Exec kills a command at its timeout (the result names it) and the wait is lost: a build, a solver, a test suite or a server that may run longer starts with background=true and is read with JobOutput; where jobs are unavailable, `nohup … > log 2>&1 &` and poll the log")
     if sandboxed:
         lines.append("- Exec and Verify run in a sandbox: the filesystem is read-only outside the workspace, /tmp is private, and background processes end with the command")

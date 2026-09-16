@@ -75,6 +75,19 @@ tool_timeout_seconds = 900.0
 # max_run_minutes = 0     # active minutes per run, 0 = none
 # max_run_tokens = 0      # tokens per run, every call counted, 0 = none
 
+[tools.exec]
+# The most one tool call may return to the model. Exec streams past it into a spill file and
+# shows a head and a tail; Read pages; every other tool is clipped to it.
+max_output_chars = 60000
+
+[tools.results]
+# What happens to a result the agent has already moved past. max_output_chars above bounds ONE
+# call; these bound the twenty results the request carries again on every turn.
+fresh_count = 6            # the newest results, always shown whole
+stale_max_chars = 2000     # head kept of an older result longer than this
+trim_batch_chars = 40000   # trimmable excess that must build up before any trimming happens
+# The stored history keeps every result whole; only the copy sent to the model is cut.
+
 [policy]
 # Hosts the agent may reach without asking ("example.com" or "*.example.com"); empty = every host, logged.
 egress_allow = []

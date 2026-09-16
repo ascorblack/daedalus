@@ -316,6 +316,14 @@ Beyond the app's settings, `config.toml` holds the guard rails:
 max_run_minutes = 0          # cap on active minutes per run (0 = none)
 max_run_tokens = 0           # cap on tokens per run, every call counted (0 = none)
 
+[tools.exec]
+max_output_chars = 60000     # the most one tool call returns to the model
+
+[tools.results]              # what happens to results the agent has moved past
+fresh_count = 6              # the newest results, always shown whole
+stale_max_chars = 2000       # head kept of an older result longer than this
+trim_batch_chars = 40000     # trimmable excess that must build up before any trimming happens
+
 [policy]                     # tool policy on top of the built-in rules (daedalus/host/policy.py)
 egress_allow = []            # hosts the agent may reach without asking; empty = every host, logged
 [[policy.rules]]
