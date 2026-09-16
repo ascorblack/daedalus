@@ -14,6 +14,7 @@ import asyncio
 import html
 import json
 import random
+import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -46,6 +47,35 @@ _TOOL_ICONS = {
     "McpEnable": "🔌",
     "McpDisable": "🔌",
 }
+
+_EVIDENCE_RE = re.compile(r"<\s*(file|run)\s+([^<>]*?)/?\s*>")
+_ATTR_RE = re.compile(r"([a-z_]+)\s*=\s*\"([^\"]*)\"")
+
+
+def flatten_evidence(text: str) -> str:
+    """The evidence tags of an answer, as text a chat without click targets can read.
+
+    The Mini App turns ``<file path="x.py" lines="3-9"/>`` and ``<run id="v12" label="14 passed"/>``
+    into chips that open the file and the receipt. Telegram has nothing to open, and an unrendered
+    tag is noise in the operator's chat — so a file becomes ``x.py:3-9`` and a run becomes its label
+    with the id behind it. A tag that carries neither a path nor an id is dropped: it points nowhere.
+    """
+
+    def one(match: re.Match[str]) -> str:
+        kind = match.group(1)
+        attrs = dict(_ATTR_RE.findall(match.group(2)))
+        if kind == "file":
+            path = attrs.get("path", "").strip()
+            lines = attrs.get("lines", "").strip()
+            return f"{path}:{lines}" if path and lines else path
+        run_id = attrs.get("id", "").strip()
+        label = attrs.get("label", "").strip()
+        if not run_id:
+            return label
+        return f"{label} (run {run_id})" if label else f"run {run_id}"
+
+    return _EVIDENCE_RE.sub(one, text)
+
 
 DEFAULT_EDIT_TIERS: tuple[tuple[float, float], ...] = ((60, 1), (300, 2), (900, 5), (0, 10))
 TOOL_TICK_SECONDS = 10.0
@@ -177,7 +207,7 @@ class RunRenderer:
             if used:
                 v.tokens = {k: int(val) for k, val in used.items() if isinstance(val, int | float)}
             if p.get("stop_reason") == "tool_use":
-                narration = split_headline(v.text_buffer.strip())[0]
+                narration = flatten_evidence(split_headline(v.text_buffer.strip())[0])
                 if narration and v.verbosity >= 1:
                     v.narration.append(narration[:400])
                 v.text_buffer = ""
@@ -231,7 +261,7 @@ class RunRenderer:
     async def push_draft(self) -> None:
         """Send the accumulated answer text as a live draft (plain text, capped at the message limit)."""
         v = self.view
-        text = redact(split_headline(v.text_buffer.strip())[0])[:3800]
+        text = flatten_evidence(redact(split_headline(v.text_buffer.strip())[0]))[:3800]
         if not self.streaming or not text or text == v.draft_sent or not v.draft_id:
             return
         try:
@@ -377,7 +407,7 @@ class RunRenderer:
         v = self.view
         v.state = status
         final, _headline = split_headline(v.text_buffer.strip())
-        final = redact(final)  # the model may quote a secret the operator pasted; Telegram must not receive it
+        final = flatten_evidence(redact(final))  # the model may quote a secret the operator pasted; Telegram must not receive it
         v.text_buffer = ""
         if quiet:
             v.final_sent = True

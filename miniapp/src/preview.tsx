@@ -4,14 +4,15 @@
 // converted in the browser by libraries loaded only when such a file is opened.
 
 import { Overlay } from "./dialogs";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { Icon } from "./icons";
 import { renderMarkdown } from "./md";
 import { errorText, fmtBytes } from "./ui";
 
-/** Where the bytes come from: a file under an API file root (`/api/sessions/<id>` or `/api/workspaces/<name>`), or a File object from the composer. */
-export type PreviewSource = { base: string; path: string } | { file: File };
+/** Where the bytes come from: a file under an API file root (`/api/sessions/<id>` or `/api/workspaces/<name>`), or a File object from the composer.
+ * `lines` ("20-40", or a single number) is what an answer cited: the file opens as source with that range marked. */
+export type PreviewSource = { base: string; path: string; lines?: string } | { file: File };
 
 export const sessionBase = (sessionId: string) => `/api/sessions/${sessionId}`;
 export const workspaceBase = (name: string) => `/api/workspaces/${encodeURIComponent(name)}`;
@@ -174,13 +175,57 @@ function Grid({ rows, note }: { rows: string[][]; note?: string }) {
   );
 }
 
+// ── cited lines ────────────────────────────────────────────────────────────────────────
+
+/** "20-40" or "20" → the inclusive line range, or null when it is neither. */
+export function parseRange(spec: string): { from: number; to: number } | null {
+  const m = /^\s*(\d+)\s*(?:[-–:]\s*(\d+))?\s*$/.exec(spec);
+  if (!m) return null;
+  const from = Number(m[1]);
+  const to = m[2] ? Number(m[2]) : from;
+  return from >= 1 && to >= from ? { from, to } : null;
+}
+
+/** How much of a long file is shown around the cited range. */
+const WINDOW_LINES = 120;
+
+/** The file as numbered source lines with the cited range marked; a long file is shown around the range. */
+function LinedText({ text, range }: { text: string; range: { from: number; to: number } }) {
+  const all = text.split("\n");
+  const start = Math.max(0, range.from - 1 - WINDOW_LINES);
+  const end = Math.min(all.length, range.to + WINDOW_LINES);
+  const windowed = start > 0 || end < all.length;
+  const shown = all.slice(start, end);
+  const first = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    first.current?.scrollIntoView({ block: "center" });
+  }, [range.from, range.to]);
+  return (
+    <div className="filetext lined">
+      {windowed && <div className="sub">lines {start + 1}–{end} of {all.length}</div>}
+      {shown.map((line, i) => {
+        const n = start + i + 1;
+        const cited = n >= range.from && n <= range.to;
+        return (
+          <div key={n} className={cited ? "line cited" : "line"} ref={n === range.from ? first : undefined}>
+            <span className="linenum">{n}</span>
+            <span className="linebody">{line || " "}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── the dialog ─────────────────────────────────────────────────────────────────────────
 
 const TEXT_LIMIT = 512_000;
 
 export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () => void }) {
   const name = sourceName(src);
-  const kind = previewKind(name);
+  // A cited range is about the source, so a Markdown or CSV file opens as text rather than rendered.
+  const cited = "path" in src && src.lines ? parseRange(src.lines) : null;
+  const kind = cited && ["markdown", "csv", "html", "text"].includes(previewKind(name)) ? "text" : previewKind(name);
   const { url, blob, error } = useBlobUrl(src);
   const [body, setBody] = useState<{ html?: string; text?: string; rows?: string[][]; sheets?: { name: string; rows: string[][] }[]; error?: string } | null>(null);
   const [sheet, setSheet] = useState(0);
@@ -238,6 +283,7 @@ export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () 
         <div className="sheet-head">
           <h3 className="preview-name" title={"file" in src ? name : src.path}>
             <span aria-hidden>{fileGlyph(name)}</span> {name}
+            {cited && <span className="sub"> · lines {cited.from === cited.to ? cited.from : `${cited.from}–${cited.to}`}</span>}
             {blob && <span className="sub"> · {fmtBytes(blob.size)}</span>}
           </h3>
           <div className="head-actions">
@@ -268,7 +314,7 @@ export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () 
           {!failure && body?.html && kind === "markdown" && <div className="answer preview-doc" dangerouslySetInnerHTML={{ __html: body.html }} />}
           {!failure && body?.html && kind === "docx" && <div className="answer preview-doc docx" dangerouslySetInnerHTML={{ __html: body.html }} />}
           {!failure && body?.text !== undefined && kind === "html" && <pre className="filetext">{body.text}</pre>}
-          {!failure && body?.text !== undefined && kind === "text" && <pre className="filetext">{body.text}</pre>}
+          {!failure && body?.text !== undefined && kind === "text" && (cited ? <LinedText text={body.text} range={cited} /> : <pre className="filetext">{body.text}</pre>)}
           {!failure && body?.rows && <Grid rows={body.rows} note={body.error} />}
           {!failure && body?.sheets && <Grid rows={body.sheets[sheet]?.rows ?? []} note={(body.sheets[sheet]?.rows.length ?? 0) >= 2000 ? "showing the first 2000 rows" : undefined} />}
           {!failure && url && kind === "other" && (

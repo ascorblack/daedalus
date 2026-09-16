@@ -22,6 +22,30 @@ describe("renderMarkdown", () => {
     expect(html).toContain("codecard");
     expect(html).toContain("<details><summary>s</summary>");
   });
+  it("turns cited files and runs into chips", () => {
+    const html = renderMarkdown('the fix is in <file path="daedalus/tools/web.py" lines="20-40"/> and the tests pass <run id="v12" label="14 passed"/>.');
+    expect(html).toContain('data-evidence="file"');
+    expect(html).toContain('data-path="daedalus/tools/web.py"');
+    expect(html).toContain('data-lines="20-40"');
+    expect(html).toContain('data-evidence="run"');
+    expect(html).toContain('data-run="v12"');
+    expect(html).toContain("14 passed");
+    expect(html).not.toContain("&lt;file");
+  });
+  it("leaves a quoted tag quoted and an incomplete one as text", () => {
+    const quoted = renderMarkdown('write `<file path="a.py"/>` to cite it');
+    expect(quoted).toContain("<code>&lt;file path=&quot;a.py&quot;/&gt;</code>");
+    expect(quoted).not.toContain("data-evidence");
+    const bare = renderMarkdown('<file lines="1-2"/> and <run label="x"/> point nowhere');
+    expect(bare).not.toContain("data-evidence");
+    expect(bare).toContain("&lt;file lines=&quot;1-2&quot;/&gt;");
+  });
+  it("keeps an attribute from escaping its quotes", () => {
+    const html = renderMarkdown('<file path="a" onmouseover="alert(1)"/> <file path="&lt;b&gt;.py"/>');
+    expect(html).not.toContain("onmouseover");
+    expect(html).toContain('data-path="a"');
+    expect(html).toContain("data-path=\"&amp;lt;b&amp;gt;.py\"");
+  });
   it("closes unbalanced details", () => {
     const html = renderMarkdown("<details><summary>s</summary>\ntext");
     expect((html.match(/<\/details>/g) ?? []).length).toBe(1);
