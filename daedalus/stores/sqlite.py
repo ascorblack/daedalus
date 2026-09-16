@@ -34,6 +34,16 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _like_literal(value: str) -> str:
+    """``value`` as a LIKE pattern that matches itself: a call id is an opaque string and may hold
+    a wildcard as easily as any other character."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _mentions_call(message: Message, call_id: str) -> bool:
+    return any(getattr(block, "tool_call_id", None) == call_id for block in message.content_blocks)
+
+
 def message_text(message: Message) -> str:
     """Everything searchable in a message: text, thinking is skipped, tool calls as name+args, tool results."""
     parts: list[str] = []
@@ -165,7 +175,13 @@ class SqliteSessionStore(ISessionStore):
 
     @staticmethod
     def transcript_key(message: Message) -> str:
-        """Identity of a message across history rewrites: role + creation time (+ tool call id)."""
+        """Identity of a message across history rewrites: role + creation time (+ tool call id).
+
+        A message that asks for two things at once carries two call ids and is named by the first of
+        them — the key is an identity, not an index, and changing its shape would make every message
+        already stored a different message. ``messages_for_call`` is where the other calls of a batch
+        are found, and it does not assume the key names the one it was asked about.
+        """
         extra = ""
         for block in message.content_blocks:
             call_id = getattr(block, "tool_call_id", None)
@@ -417,29 +433,53 @@ class SqliteSessionStore(ISessionStore):
         return (int(row["lo"] or 0), int(row["hi"] or 0)) if row else (0, 0)
 
     TOOL_CALL_SCAN_PAGE = 200
+    TOOL_CALL_BATCH_PAGES = 5
+    """How far back a key hit is followed to find the call it belongs to. A tool call and its result are
+    neighbours in the transcript; this is room for the batch around them and not for the session."""
 
     async def messages_for_call(self, session_id: str, call_id: str) -> list[Message]:
         """Transcript messages carrying a block of ``call_id``, newest first — without loading the session.
 
-        The transcript key names the call of a message whose first block carries one, so the
-        usual case is answered from the key index alone. A call that is not the first block of
-        its message is found by walking back a page at a time, which reads bounded slices
-        rather than the whole history.
+        The transcript key names one call of a message that carries any, so a result row is found from
+        the key index alone. The message that *made* the call may be keyed by another call of the same
+        batch — a model that asks for two things at once is keyed by the first of them — and is then
+        found by walking back from the hit a page at a time. Both are needed: one carries the result and
+        the other the arguments, and the file a ``SendFile`` handed over is named in the arguments.
         """
-        suffix = f":{call_id}"
-        rows = await self._db.fetchall("SELECT seq, key FROM transcript WHERE session_id = ? ORDER BY seq DESC", (session_id,))
-        hits = [int(r["seq"]) for r in rows if str(r["key"]).endswith(suffix)]
-        if hits:
-            return await self._messages_at(session_id, hits)
-        out: list[Message] = []
-        for start in range(0, len(rows), self.TOOL_CALL_SCAN_PAGE):
-            page = [int(r["seq"]) for r in rows[start : start + self.TOOL_CALL_SCAN_PAGE]]
-            for message in await self._messages_at(session_id, page):
-                if any(getattr(b, "tool_call_id", None) == call_id for b in message.content_blocks):
-                    out.append(message)
-            if out:
-                return out
-        return out
+        hits = [
+            int(r["seq"])
+            for r in await self._db.fetchall(
+                "SELECT seq FROM transcript WHERE session_id = ? AND key LIKE ? ESCAPE '\\' ORDER BY seq DESC",
+                (session_id, "%:" + _like_literal(call_id)),
+            )
+        ]
+        found = [m for m in await self._messages_at(session_id, hits) if _mentions_call(m, call_id)]
+        if any(isinstance(b, ToolUseBlock) and b.tool_call_id == call_id for m in found for b in m.content_blocks):
+            return found
+        # Either nothing was keyed by this call at all, or what was is the result of a call made in a
+        # batch. A hit gives the scan a place to start and a reason to stop early; without one there is
+        # nowhere to start but the end of the transcript.
+        before = min(hits) if hits else 0
+        pages = self.TOOL_CALL_BATCH_PAGES if hits else 0
+        seen = set(hits)
+        page = 0
+        while not pages or page < pages:
+            params: list[Any] = [session_id]
+            where = "session_id = ?"
+            if before:
+                where += " AND seq < ?"
+                params.append(before)
+            rows = await self._db.fetchall(f"SELECT seq FROM transcript WHERE {where} ORDER BY seq DESC LIMIT ?", (*params, self.TOOL_CALL_SCAN_PAGE))
+            if not rows:
+                break
+            seqs = [int(r["seq"]) for r in rows]
+            before, page = seqs[-1], page + 1
+            for message in await self._messages_at(session_id, [q for q in seqs if q not in seen]):
+                if _mentions_call(message, call_id):
+                    found.append(message)
+            if found and any(isinstance(b, ToolUseBlock) and b.tool_call_id == call_id for m in found for b in m.content_blocks):
+                break
+        return found
 
     async def _messages_at(self, session_id: str, seqs: Sequence[int]) -> list[Message]:
         """The named transcript rows, in the order given."""

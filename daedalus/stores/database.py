@@ -549,16 +549,25 @@ class Database:
         await self.conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
         row = await (await self.conn.execute("SELECT version FROM schema_version")).fetchone()
         current = int(row["version"]) if row else 0
+        if current > len(MIGRATIONS):
+            # A database written by a newer build. Opening it anyway works and fails later, at the
+            # first write that touches a table the old code remembers differently — which is inside
+            # the transaction that appends a message, so the bot runs, answers, and quietly stops
+            # keeping any transcript at all.
+            raise RuntimeError(
+                f"the database is at schema {current} and this build knows {len(MIGRATIONS)}: it was written by a newer version of Daedalus. "
+                "Run the newer version, or restore the database from before the downgrade."
+            )
         for index, script in enumerate(MIGRATIONS, start=1):
             if index <= current:
                 continue
+            # The version is written inside the migration's own transaction. Written after it, a
+            # process killed in between would leave the schema at N and the version at N-1, and the
+            # next start would run migration N again — on an ALTER TABLE, which is not idempotent,
+            # that is an install that cannot open its own database and has no way back.
+            version = f"INSERT INTO schema_version(version) VALUES ({index});" if current == 0 and index == 1 else f"UPDATE schema_version SET version = {index};"
             async with self._lock:
-                # executescript runs the statements atomically inside its own transaction.
-                await self.conn.executescript(f"BEGIN;\n{script}\nCOMMIT;")
-                if current == 0 and index == 1:
-                    await self.conn.execute("INSERT INTO schema_version(version) VALUES (?)", (index,))
-                else:
-                    await self.conn.execute("UPDATE schema_version SET version = ?", (index,))
+                await self.conn.executescript(f"BEGIN;\n{script}\n{version}\nCOMMIT;")
             current = index
 
     async def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
