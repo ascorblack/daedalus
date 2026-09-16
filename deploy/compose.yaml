@@ -15,6 +15,11 @@
 #   ../protocore-exp      -> /srv/protocore-exp the core repository
 #   daedalus-state        -> /srv/state         database, blobs, secrets, known-good history
 #   daedalus-workspaces   -> /srv/workspaces    per-session working directories
+#   daedalus-venv         -> /srv/venv          the virtualenv, seeded from the image on first start
+#     A named volume rather than the container's writable layer: replacing the container would otherwise
+#     throw away every `uv sync` and the next start would install everything again. Docker seeds an empty
+#     named volume from what the image holds at that path, so an image that bakes the virtualenv still
+#     starts with it; a sync only runs afterwards when uv.lock or pyproject.toml changed.
 #   telegram-bot-api-data -> /var/lib/telegram-bot-api  files the local Bot API server stores
 #
 # Networks: "telegram" (bot ⇄ local Bot API), "keys" (bot ⇄ key proxy), "search" (bot ⇄ SearXNG).
@@ -53,6 +58,10 @@ services:
       CORE_REPO_DIR: /srv/protocore-exp
       SUPERVISOR_SOCKET: /run/daedalus/supervisor.sock
       DAEDALUS_REBUILD_TRIGGER_DIR: /run/daedalus-rebuild
+      # off | local | server | auto. The supervisor resolves it the way the bot does, because it decides
+      # how a restart behaves before the bot is up: with a remote it pulls, without one it preflights the
+      # commit the agent left in the checkout.
+      DAEDALUS_SELFDEV_MODE: ${DAEDALUS_SELFDEV_MODE:-auto}
       USD_PER_DAY: ${USD_PER_DAY:-20}
       API_HOST: 0.0.0.0
       API_PORT: ${API_PORT:-8765}
@@ -75,6 +84,7 @@ services:
       - ../GOVERNANCE.md:/srv/daedalus/GOVERNANCE.md:ro
       - daedalus-state:/srv/state
       - daedalus-workspaces:/srv/workspaces
+      - daedalus-venv:/srv/venv
       # SSH material for servers the agent may use (keys, config, known_hosts), kept outside every repository;
       # the supervisor copies it into /root/.ssh with the permissions ssh insists on. Describe each host in a
       # comment above its `Host` line: the description goes into the agent's system prompt.
@@ -214,6 +224,7 @@ networks:
 volumes:
   daedalus-state:
   daedalus-workspaces:
+  daedalus-venv:
   telegram-bot-api-data:
   rebuild-trigger:
   searxng-cache:

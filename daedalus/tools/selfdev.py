@@ -1,4 +1,9 @@
-"""Self-development tools: worktree, propose a change, rebuild, roll back."""
+"""Self-development tools: worktree, apply or propose a change, rebuild, roll back.
+
+Which of these exist in a session is decided by the installation, not by the tool file: an install with a
+remote and a token gets SelfPropose and the rebuild pair, one with only a checkout gets SelfApply. The model
+is never shown a name it cannot call, so the two never have to be told apart in a prompt.
+"""
 
 from __future__ import annotations
 
@@ -67,6 +72,34 @@ async def self_propose(
 
 
 @tool(
+    name="SelfApply",
+    description=(
+        "Apply a worktree branch of one of your repositories ('bot' or 'core') to the checkout this "
+        "installation runs from. There is no remote and no pull request here: the commits go onto the "
+        "checkout's own branch and the app tells the operator to restart to run them. Commit your work "
+        "first and run the tests with Verify, because the same receipt rule applies as to a proposal: a "
+        "host-module change with no passing Verify receipt that exercises the changed code is refused, as "
+        "is one with no execution_path ('pkg.module' or 'pkg.module:symbol' — the tool, hook, extension or "
+        "startup step that runs the changed code) or a large change whose summary does not say what it "
+        "replaces. branch defaults to the most recently used worktree of that repo. The summary is one "
+        "sentence the operator reads on the restart banner. The restart checks the commit before it "
+        "applies it and keeps the running version if the checks fail."
+    ),
+)
+async def self_apply(context: ToolContext, repo: str, summary: str, branch: str | None = None, execution_path: str | None = None) -> ToolResult:
+    services = services_for(context)
+    if services.self_apply is None:
+        return error(context, "applying a change locally is not available in this session")
+    if repo not in ("bot", "core"):
+        return error(context, "repo must be 'bot' or 'core'")
+    try:
+        result = await services.self_apply(repo=repo, summary=summary, session_id=context.session_id, branch=branch, execution_path=execution_path)
+    except RuntimeError as exc:
+        return error(context, str(exc))
+    return ok(context, result)
+
+
+@tool(
     name="SelfRebuild",
     description=(
         "Ask the supervisor to pull the merged main branches, rebuild if the Dockerfile "
@@ -95,6 +128,6 @@ async def self_rollback(context: ToolContext, steps_back: int = 0, reason: str =
     )
 
 
-TOOLS = [self_workspace, self_propose, self_rebuild, self_rollback]
+TOOLS = [self_workspace, self_propose, self_apply, self_rebuild, self_rollback]
 
 __all__ = ["TOOLS"]

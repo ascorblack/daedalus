@@ -340,7 +340,7 @@ CATALOGUE = [
 
 # The installation in the pictures develops itself on a server: it has both checkouts, a token and a
 # rebuilder, so Changes is in the nav and carries no qualifying tag.
-CAPABILITIES = {"selfdev": {"mode": "server", "configured": "auto", "reasons": ["checkouts: both writable", "token: configured", "remotes: both have an origin", "rebuild: the rebuilder service"], "missing": [], "tools": ["SelfPropose", "SelfRebuild", "SelfRollback", "SelfWorkspace"]}}
+CAPABILITIES = {"selfdev": {"mode": "server", "configured": "auto", "reasons": ["checkouts: both writable", "token: configured", "remotes: both have an origin", "rebuild: the rebuilder service"], "missing": [], "tools": ["SelfPropose", "SelfRebuild", "SelfRollback", "SelfWorkspace"]}, "restart_required": None, "last_change": None}
 
 
 # ---- the stub API -------------------------------------------------------------------------

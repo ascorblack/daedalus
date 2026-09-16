@@ -5,7 +5,41 @@ import type { Screen } from "./router";
 
 export type SelfDevMode = "off" | "local" | "server";
 
-export type Capabilities = { selfdev: { mode: SelfDevMode; configured: string; reasons: string[]; missing: string[]; tools: string[] } };
+/** A change the agent committed to the checkout, waiting for the restart that runs it. */
+export type PendingChange = { repo: string; commit: string; summary: string; needs_image?: boolean; at?: string };
+
+/** What became of the change before it. `status` is the supervisor's word, not ours. */
+export type ChangeResult = PendingChange & { status: string; detail?: string; resolved_at?: string };
+
+export type Capabilities = {
+  selfdev: { mode: SelfDevMode; configured: string; reasons: string[]; missing: string[]; tools: string[] };
+  restart_required?: PendingChange | null;
+  last_change?: ChangeResult | null;
+};
+
+export type Notice = { kind: "pending" | "done" | "failed"; title: string; body: string; commit: string; action: boolean };
+
+/** What the app has to say about the agent's own code right now, or nothing.
+ *
+ * A change waiting to be applied wins over one that has already been decided: the older result is
+ * history the moment a new change is sitting there, and two strips stacked on top of each other is
+ * one strip too many. A result is shown until the reader dismisses it — "restart to apply" that
+ * simply vanishes leaves nobody sure whether the restart did anything.
+ */
+export function changeNotice(caps: Capabilities | undefined, dismissed: string): Notice | null {
+  const pending = caps?.restart_required;
+  if (pending?.commit) {
+    const image = pending.needs_image ? " This change also rewrites the image, which a restart cannot replace — run an update for that part." : "";
+    return { kind: "pending", title: "Changes are ready — restart to apply", body: pending.summary + image, commit: pending.commit, action: true };
+  }
+  const last = caps?.last_change;
+  if (!last?.commit || last.commit === dismissed) return null;
+  if (last.status === "applied") {
+    return { kind: "done", title: "The change is running", body: last.summary, commit: last.commit, action: false };
+  }
+  const title = last.status === "rolled_back" ? "The change was reversed" : "The change was not applied";
+  return { kind: "failed", title, body: last.detail || last.summary, commit: last.commit, action: false };
+}
 
 /** The destinations this installation really has. */
 export function visibleScreens(list: Screen[], selfdev: SelfDevMode): Screen[] {

@@ -90,3 +90,7 @@ button[disabled] { opacity: 0.5; cursor: default; }
   padding: 14px;
   white-space: pre-wrap;
 }
+
+/* The agent's own changes: the one card on this page that asks for a decision. */
+.card.change { border-color: rgba(45, 212, 191, 0.45); }
+.card.change p { margin: 6px 0 12px; color: var(--muted); }

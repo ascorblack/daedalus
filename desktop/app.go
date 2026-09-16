@@ -26,6 +26,11 @@ type App struct {
 	// offers a pairing link once, while it is fresh, and the app's own address afterwards.
 	startedAt time.Time
 	paired    bool
+
+	// What the container last said about the agent's own changes, and when it said it. Reading it
+	// means running a command inside the container, which is far too slow for every status poll.
+	changeNotice ChangeNotice
+	changeAt     time.Time
 }
 
 // logLimit is how much of the running commentary the page keeps. It is a progress view, not a log
@@ -147,6 +152,34 @@ func (a *App) stop(ctx context.Context) error {
 	// even when the token was removed from the configuration since.
 	_, err := compose(ctx, a.paths, true, "stop")
 	return err
+}
+
+// Apply restarts the stack onto the change the agent committed to the checkout. It is a stop and a
+// start and nothing more: the checkout is what runs, so the containers coming back up is the whole
+// of applying a local change — the same thing that happens when the operator closes the window and
+// opens it again. The supervisor checks the commit on the way and keeps the old code if it fails.
+func (a *App) Apply(ctx context.Context) error {
+	if err := a.begin("apply"); err != nil {
+		return err
+	}
+	err := a.apply(ctx)
+	a.end(err)
+	return err
+}
+
+func (a *App) apply(ctx context.Context) error {
+	a.log("restarting to apply the change")
+	if err := a.stop(ctx); err != nil {
+		return err
+	}
+	if err := a.start(ctx); err != nil {
+		return err
+	}
+	// The container has just come up and has a new answer; the cached one is from before the restart.
+	a.mu.Lock()
+	a.changeAt = time.Time{}
+	a.mu.Unlock()
+	return nil
 }
 
 // Update moves both checkouts to what is published, refreshes the images and restarts. The agent's
@@ -277,6 +310,10 @@ type Status struct {
 	Busy       string   `json:"busy"`
 	Failure    string   `json:"failure"`
 	Log        []string `json:"log"`
+
+	// Change is the agent's own code: a commit waiting for a restart, or what became of the last
+	// one. Empty unless the stack is running, because the container is what holds the answer.
+	Change ChangeNotice `json:"change"`
 }
 
 func (a *App) Status(ctx context.Context) Status {
@@ -295,6 +332,9 @@ func (a *App) Status(ctx context.Context) Status {
 	status.Docker = DockerVersion(ctx)
 	if status.Docker != "" && status.Configured {
 		status.Running = a.running(ctx)
+	}
+	if status.Running > 0 {
+		status.Change = a.change(ctx)
 	}
 	return status
 }
@@ -344,6 +384,11 @@ func (a *App) PrintStatus(ctx context.Context) {
 	fmt.Printf("containers   %d running\n", status.Running)
 	fmt.Printf("telegram     %s\n", telegram)
 	fmt.Printf("app          %s\n", status.AppURL)
+	if status.Change.Pending {
+		fmt.Printf("changes      ready — restart to apply: %s\n", status.Change.Summary)
+	} else if status.Change.Commit != "" {
+		fmt.Printf("changes      last change %s: %s\n", status.Change.Status, status.Change.Summary)
+	}
 	if status.Failure != "" {
 		fmt.Fprintf(os.Stderr, "last error   %s\n", status.Failure)
 	}

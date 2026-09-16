@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -2162,10 +2163,39 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "heartbeat": heartbeat.status() if heartbeat is not None else None,  # type: ignore[attr-defined]
         }
 
+    def selfdev_on() -> None:
+        """The proposals API answers only where changes are proposed at all.
+
+        With the mode off the answer is 404, not an empty list: an empty list reads like "no changes
+        yet" and the app would keep a navigation entry for a screen that can never fill.
+        """
+        if caps.selfdev.mode == "off":
+            raise HTTPException(404, "self-development is off in this installation")
+
     @api.get("/api/capabilities")
     async def capability_report(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """What this installation can do and why — the app hides what is not there instead of offering it."""
-        return caps.as_dict()
+        """What this installation can do and why — the app hides what is not there instead of offering it.
+
+        The mode was resolved once at startup; whether a change is waiting for a restart was not, and it is
+        read here on every poll. It rides on this answer rather than on a route of its own because the app
+        already asks this question and a banner that needs a second poll is a banner that arrives late.
+        """
+        selfdev = app.extensions.get("selfdev")
+        pending = selfdev.pending_change() if selfdev is not None else None  # type: ignore[attr-defined]
+        last = selfdev.last_change() if selfdev is not None else None  # type: ignore[attr-defined]
+        return replace(caps, restart_required=pending, last_change=last).as_dict()
+
+    @api.post("/api/self/restart")
+    async def self_restart(_: dict[str, Any] = Depends(auth), __: None = Depends(selfdev_on)) -> dict[str, Any]:
+        """Apply the change the agent committed: the supervisor checks it and restarts onto it.
+
+        The answer comes back before the restart does — this very process is what goes away — so it says
+        what was started, and the app learns how it ended from the capabilities it polls afterwards.
+        """
+        selfdev = app.extensions.get("selfdev")
+        if selfdev is None:
+            raise HTTPException(404, "self-development is off in this installation")
+        return {"result": await selfdev.restart_to_apply("the operator asked the app to apply the change")}  # type: ignore[attr-defined]
 
     # -- doctor -------------------------------------------------------------------------
 
@@ -2252,15 +2282,6 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
 
     # -- proposals ------------------------------------------------------------------
-
-    def selfdev_on() -> None:
-        """The proposals API answers only where changes are proposed at all.
-
-        With the mode off the answer is 404, not an empty list: an empty list reads like "no changes
-        yet" and the app would keep a navigation entry for a screen that can never fill.
-        """
-        if caps.selfdev.mode == "off":
-            raise HTTPException(404, "self-development is off in this installation")
 
     @api.get("/api/proposals")
     async def proposals(_: dict[str, Any] = Depends(auth), __: None = Depends(selfdev_on)) -> list[dict[str, Any]]:

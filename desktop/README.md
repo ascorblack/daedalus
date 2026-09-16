@@ -211,9 +211,34 @@ the app, extra providers and the search APIs — are edited in `data/.env` and
 ## Self-development on a desktop install
 
 A desktop install has the two checkouts and usually no GitHub token, so the capability probe resolves
-`[self_change] mode` to **`local`**: the agent gets `SelfWorkspace` and edits its own code in the
-checkout the stack runs from, with no fork, no remote and no pull request. The app marks the Changes
-screen `local`. Give the install a `GITHUB_TOKEN` with Contents and Pull requests on both forks and it
+`[self_change] mode` to **`local`**: the agent gets `SelfWorkspace` and `SelfApply` and improves its own
+code in the checkout the stack runs from, with no fork, no remote and no pull request. The app marks the
+Changes screen `local`.
+
+**How a change reaches you.** The agent works in a worktree, runs the tests through `Verify`, commits, and
+calls `SelfApply`. Its commits are fast-forwarded onto the checkout's own branch — a plain local git
+history you can read with `git -C data/daedalus log` — and then three places say the same thing:
+
+- the app shows a strip above the screen, *"Changes are ready — restart to apply"*, with the summary and a
+  **Restart** button;
+- the launcher's status page shows a card with the same line and a **Restart to apply** button;
+- `daedalus-desktop status` prints a `changes` line.
+
+Any of the three applies it, and so does the plain thing: **close the app and open it again.** The
+checkout is what runs — the image only supplies the environment — so the containers coming back up is the
+whole of applying a change.
+
+**What protects you.** The restart is not a leap. The supervisor checks out the agent's commit into a
+detached worktree of its own and runs there: `uv sync` (only when `uv.lock` or `pyproject.toml` changed —
+the virtualenv lives on the `daedalus-venv` volume and survives), `compileall`, `daedalus check` and the
+smoke tests. Only if all of that passes is the running bot stopped. A change that fails is taken back out
+of the checkout and the app says so with the reason. A change that passes but cannot stay up — three
+starts dying within ten minutes — puts the last known-good commit back on its own and tells you; the
+commit is not lost, it is still on the branch the agent made it on. A change to the `Dockerfile` or the
+system packages is applied as far as a restart can take it, and says the rest needs
+`daedalus-desktop update`.
+
+Give the install a `GITHUB_TOKEN` with Contents and Pull requests on both forks and it
 resolves to `server` instead — the full worktree → pull request → approval → rebuild workflow.
 Set `mode = "off"` in the configuration and the subsystem is not there at all: no tools, no screen, no
 `/api/proposals`, and nothing in the prompt about changing its own code. `daedalus doctor` names the

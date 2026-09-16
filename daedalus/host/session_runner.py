@@ -1115,6 +1115,7 @@ class SessionManager:
             spawn_agent=_bind(hooks.get("spawn_agent"), state.session.id),
             schedule=hooks.get("schedule"),
             self_propose=hooks.get("self_propose"),
+            self_apply=hooks.get("self_apply"),
             self_rebuild=hooks.get("self_rebuild"),
             self_rollback=hooks.get("self_rollback"),
             progress=_bind(hooks.get("progress"), state.session.id),
