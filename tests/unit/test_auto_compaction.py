@@ -7,7 +7,7 @@ from typing import Any
 from protocore.contracts.llm import LLMResponse
 from protocore.contracts.types import Message, MessageRole, StopReason, TextBlock, ToolResultBlock, ToolUseBlock
 
-from daedalus.config import RuntimeConfig, Settings
+from daedalus.config import Settings
 from daedalus.host.session_runner import (
     SessionManager,
     compaction_cut,
@@ -17,6 +17,7 @@ from daedalus.host.session_runner import (
 )
 from daedalus.providers.openai_compat import UsageRecord
 from daedalus.stores.database import Database
+from tests.support.models import model_config
 
 SECTIONED = "## Goal\ng\n## Constraints\nc\n## State\ns\n## Discoveries\nd\n## Open\no\n## Next steps\nn\n## Unknowns\nu\n## Identifiers\ni"
 
@@ -58,7 +59,7 @@ def test_transcript_splits_on_lines_by_size() -> None:
 
 
 async def test_auto_compaction_keeps_the_tail_and_quotes_the_operator(settings: Settings, db: Database) -> None:
-    config = RuntimeConfig()
+    config = model_config()
     config.compaction.auto_ratio = 0.5
     config.compaction.keep_recent_messages = 2
     config.compaction.min_messages = 4
@@ -118,7 +119,7 @@ async def test_a_stalled_summariser_call_is_retried_then_given_up(settings: Sett
 
     import pytest
 
-    config = RuntimeConfig()
+    config = model_config()
     config.compaction.call_timeout_seconds = 10  # the floor; the fake below never returns
     manager = SessionManager(settings, config, db=db)
     await manager.start()

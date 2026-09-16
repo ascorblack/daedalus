@@ -1,15 +1,52 @@
 answer_language = "auto"
 
+# Which model opens a new session, and which ones stand in when it fails.
+# A fresh install has NO model: a provider endpoint is not a model, and which one to run — and pay
+# for — is yours to pick. The app asks at first login (Settings -> Models -> Add a model) and writes
+# the [presets.*] entry for you. The examples below are documentation, not defaults: uncomment one
+# only if you would rather type it than click it, and make sure its provider has a key.
 [model]
-provider = "deepseek"
-name = "deepseek-flash"
-thinking = true
-reasoning_effort = "medium"
-chain = [
-    "deepseek",
-    "openrouter",
-]
-context_window = 128000
+preset = ""              # the preset id below that opens new sessions; empty = the first one
+chain = []               # preset ids tried in order after the default one fails
+
+# One preset per provider kind, to show the shape of an entry. Every field has a default;
+# provider and model are the only ones a preset cannot do without.
+# [presets."deepseek.deepseek-flash"]
+# provider = "deepseek"
+# model = "deepseek-flash"
+# label = ""                 # what the app shows; empty = "provider/model"
+# thinking = true
+# reasoning_effort = "medium"  # low | medium | high
+# images = false             # the model accepts pictures (ImageView, photos in chat)
+# context_window = 128000    # history a run may hold before it is compacted
+# max_output_tokens = 32000  # cap on one reply; thinking tokens count against it
+
+# [presets."openrouter.deepseek-v4-flash"]
+# provider = "openrouter"
+# model = "deepseek/deepseek-v4-flash"
+# images = true
+
+# [presets."opencode.glm-5.3-flash"]
+# provider = "opencode"
+# model = "glm-5.3-flash"
+# label = "GLM-5.3 Flash (OpenCode Go)"
+# reasoning_effort = "high"
+# context_window = 200000
+
+# [presets."vllm.Qwen3.8"]
+# provider = "vllm"
+# model = "Qwen3.8"
+# thinking = false
+
+# A subscription endpoint (Claude Code, Codex, SuperGrok) is a generic openai_compat client
+# behind the key proxy; the preset looks like any other.
+# [presets."claude.sonnet-5"]
+# provider = "claude"
+# model = "claude-sonnet-5"
+# label = "Claude Sonnet 5 (Claude Code subscription)"
+# reasoning_effort = "high"
+# images = true
+# context_window = 200000
 
 # Provider endpoints the bot can talk to. Every provider is an OpenAI-compatible client
 # (chat/completions, tools, JSON mode, streaming); "kind" selects only the environment-key
@@ -26,9 +63,6 @@ context_window = 128000
 [providers.deepseek]
 kind = "deepseek"
 base_url = "https://api.deepseek.com"
-default_model = "deepseek-flash"
-supports_images = false
-supports_thinking = true
 timeout_seconds = 600.0
 
 [providers.deepseek.pricing]
@@ -36,9 +70,6 @@ timeout_seconds = 600.0
 [providers.openrouter]
 kind = "openrouter"
 base_url = "https://openrouter.ai/api/v1"
-default_model = "deepseek/deepseek-v4-flash"
-supports_images = true
-supports_thinking = true
 timeout_seconds = 600.0
 
 [providers.openrouter.pricing]
@@ -52,16 +83,14 @@ timeout_seconds = 900.0
 [providers.vllm]
 kind = "vllm"
 base_url = ""            # empty = use VLLM_BASE_URL from the environment
-default_model = ""
-supports_images = false
-supports_thinking = false
 timeout_seconds = 600.0
 
 [providers.vllm.pricing]
 
+# The agent's eyes: a preset with images = true answers questions about pictures, so the main
+# context never carries pixels. Empty = the first image-capable preset, if there is one.
 [vision]
-provider = "openrouter"
-model = "qwen/qwen3.7-flash"
+preset = ""
 
 [mcp.servers]
 
@@ -141,7 +170,7 @@ verbosity = 1
 # with the [asr] endpoint as the fallback for browsers that have none.
 [voice]
 enabled = true
-preset = "openrouter.qwen-qwen3.7-flash"
+preset = ""              # a preset id; empty = the default preset
 
 # Reading the answer out loud. Empty url and provider = the browser's own synthesiser.
 # Any OpenAI-compatible /audio/speech endpoint works: a hosted one, or a local server.

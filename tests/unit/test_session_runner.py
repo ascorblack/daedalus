@@ -14,10 +14,11 @@ from protocore.contracts.types import Message, MessageRole, StopReason, TextBloc
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
-from daedalus.config import RuntimeConfig, Settings
+from daedalus.config import Settings
 from daedalus.extensions.api import message_view
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
+from tests.support.models import model_config
 
 
 class ScriptedProvider(ILLMProvider):
@@ -76,7 +77,7 @@ class ScriptedProvider(ILLMProvider):
 
 
 async def _manager(settings: Settings, db: Database, provider: ScriptedProvider) -> SessionManager:
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     manager.providers.rungs_for = lambda config: [(provider, "scripted-model")]  # type: ignore[method-assign]
     return manager

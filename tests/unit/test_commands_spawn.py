@@ -16,6 +16,7 @@ from daedalus.extensions.peers import Peers
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.tools.chat import spawn_agent
+from tests.support.models import model_config
 
 
 def _app(settings: Settings, db: Database, manager: SessionManager, config: RuntimeConfig) -> Any:
@@ -49,7 +50,7 @@ def test_parse_recognises_commands() -> None:
 
 
 async def test_commands_run_without_the_chat_front(settings: Settings, db: Database) -> None:
-    config = RuntimeConfig()
+    config = model_config()
     manager = SessionManager(settings, config, db=db)
     await manager.start()
     app = _app(settings, db, manager, config)
@@ -78,7 +79,7 @@ async def test_commands_run_without_the_chat_front(settings: Settings, db: Datab
 
 async def test_the_chat_commands_are_not_the_chat_s_to_run(settings: Settings, db: Database) -> None:
     """Everything the Mini App offers runs on an installation with no bot token at all."""
-    config = RuntimeConfig()
+    config = model_config()
     manager = SessionManager(settings, config, db=db)
     await manager.start()
     app = _app(settings, db, manager, config)
@@ -127,7 +128,7 @@ async def test_the_chat_commands_are_not_the_chat_s_to_run(settings: Settings, d
 
 
 async def test_the_palette_offers_only_what_is_installed(settings: Settings, db: Database) -> None:
-    config = RuntimeConfig()
+    config = model_config()
     manager = SessionManager(settings, config, db=db)
     await manager.start()
     app = _app(settings, db, manager, config)
@@ -170,7 +171,7 @@ async def test_the_palette_offers_only_what_is_installed(settings: Settings, db:
 
 
 async def test_spawn_agent_tool_hands_over_brief_files_and_settings(settings: Settings, db: Database) -> None:
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     parent = await manager.create_session("parent")
     (parent.workspace / "howto.md").write_text("step 1")
@@ -195,7 +196,7 @@ async def test_spawn_agent_tool_hands_over_brief_files_and_settings(settings: Se
 async def test_self_propose_failure_is_an_error_result(settings: Settings, db: Database) -> None:
     from daedalus.tools.selfdev import self_propose
 
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     state = await manager.create_session("p")
 
@@ -212,7 +213,7 @@ async def test_self_propose_failure_is_an_error_result(settings: Settings, db: D
 def test_core_compaction_trigger_stays_below_the_output_reservation() -> None:
     from daedalus.host.engine_factory import runtime_constants
 
-    config = RuntimeConfig()
+    config = model_config()
     rc = runtime_constants(config, context_window=128_000, max_output_tokens=32_000, thinking=False, mode=None)
     assert rc.compaction_trigger_ratio == 0.6  # 1 − 32k/128k − 0.15: a turn of tool results below the vLLM cliff, under the 0.85 default
     rc = runtime_constants(config, context_window=128_000, max_output_tokens=4_000, thinking=False, mode=None)

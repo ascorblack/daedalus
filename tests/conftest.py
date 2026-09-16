@@ -7,6 +7,7 @@ import pytest
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.stores.database import Database
+from tests.support.models import model_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,7 +28,8 @@ def settings(tmp_path: Path) -> Settings:
 
 @pytest.fixture
 def config() -> RuntimeConfig:
-    return RuntimeConfig()
+    """A configuration that can run: the shipped defaults carry no model at all."""
+    return model_config()
 
 
 @pytest.fixture

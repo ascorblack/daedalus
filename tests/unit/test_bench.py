@@ -12,10 +12,11 @@ from protocore.contracts.tools import ToolContext
 
 from daedalus.bench.manifest import Manifest, Task
 from daedalus.bench.runner import BenchRunner
-from daedalus.config import RuntimeConfig, Settings
+from daedalus.config import Settings
 from daedalus.host.filesystem import ExecOutcome, ShellFS
 from daedalus.host.services import SessionServices, locator
 from daedalus.stores.database import Database
+from tests.support.models import model_config
 from tests.unit.test_session_runner import ScriptedProvider
 
 
@@ -85,7 +86,7 @@ async def test_bench_runner_records_pass_turns_tokens_and_a_trajectory(settings:
     provider = ScriptedProvider([{"tool": "Write", "args": {"path": "answer.txt", "content": "42\n"}}, {"text": "wrote the answer"}])
     manifest = Manifest(name="smoke", tasks=[Task(id="write-42", prompt="Write 42 into answer.txt", check="test \"$(cat answer.txt)\" = 42", files={"README.md": "task"})])
     out = tmp_path / "out"
-    async with BenchRunner(settings, RuntimeConfig(), out_dir=out) as runner:
+    async with BenchRunner(settings, model_config(), out_dir=out) as runner:
         assert runner.manager is not None
         runner.manager.providers.rungs_for = lambda config, preset_id=None: [(provider, "scripted-model")]  # type: ignore[method-assign]
         records = await runner.run(manifest)

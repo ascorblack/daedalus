@@ -8,8 +8,15 @@ import httpx
 from fastapi.testclient import TestClient
 
 from daedalus.config import RuntimeConfig, Settings
-from daedalus.extensions.api import apply_provider_patch, build_app, lookup_openai_models, mask_provider_keys
+from daedalus.extensions.api import (
+    apply_provider_patch,
+    build_app,
+    lookup_openai_models,
+    mask_provider_keys,
+    model_entry,
+)
 from daedalus.providers.registry import ProviderRegistry
+from tests.support.models import model_config
 
 # -- pure helpers ---------------------------------------------------------------------------
 
@@ -233,7 +240,9 @@ async def test_lookup_appends_v1_and_parses_model_ids() -> None:
         result = await lookup_openai_models("http://10.0.0.5:9000", "sekret", client=client)
     finally:
         await client.aclose()
-    assert result == {"base_url": "http://10.0.0.5:9000/v1", "models": ["Qwen3.6", "Qwen3.5"]}
+    assert result["base_url"] == "http://10.0.0.5:9000/v1" and result["models"] == ["Qwen3.6", "Qwen3.5"]
+    # A plain OpenAI-compatible list says nothing but the ids, and the entries say nothing more.
+    assert result["entries"] == [{"id": "Qwen3.6"}, {"id": "Qwen3.5"}]
     assert len(requested) == 2  # /models first (404), then /v1/models
     assert requested[0].endswith("/models") and requested[1].endswith("/v1/models")
     assert sent_headers.get("authorization") == "Bearer sekret"
@@ -251,8 +260,28 @@ async def test_lookup_keeps_explicit_v1_root() -> None:
         result = await lookup_openai_models("http://10.0.0.5:9000/v1", client=client)
     finally:
         await client.aclose()
-    assert result == {"base_url": "http://10.0.0.5:9000/v1", "models": ["m1"]}
+    assert result == {"base_url": "http://10.0.0.5:9000/v1", "models": ["m1"], "entries": [{"id": "m1"}]}
     assert len(requested) == 1
+
+
+def test_model_entry_carries_what_the_endpoint_reports() -> None:
+    entry = model_entry(
+        {
+            "id": "vendor/model-x",
+            "name": "Model X",
+            "context_length": 200_000,
+            "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
+            "supported_parameters": ["tools", "reasoning"],
+            "top_provider": {"max_completion_tokens": 64_000},
+            "pricing": {"prompt": "0.0000003", "completion": "0.0000012", "input_cache_read": "0.00000003"},
+        }
+    )
+    assert entry["name"] == "Model X" and entry["context_length"] == 200_000 and entry["max_output_tokens"] == 64_000
+    assert entry["images"] is True and entry["reasoning"] is True
+    # Prices arrive per token and are shown — and stored — per million.
+    assert entry["pricing"] == {"input": 0.3, "output": 1.2, "cache_hit": 0.03}
+    # An endpoint that reports nothing is not guessed at.
+    assert model_entry({"id": "m", "object": "model"}) == {"id": "m"}
 
 
 async def test_lookup_fails_when_no_candidate_answers() -> None:
@@ -277,10 +306,10 @@ async def test_lookup_rejects_non_http_url() -> None:
 
 
 def test_presets_are_seeded_and_resolve_the_default(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    from daedalus.config import ModelPresetConfig, RuntimeConfig
+    from daedalus.config import ModelPresetConfig
     from daedalus.extensions.api import resolve_model_patch
 
-    config = RuntimeConfig()
+    config = model_config()
     config.providers["vllm"].base_url = "http://x/v1"
     config.presets["vllm.Qwen3.6"] = ModelPresetConfig(provider="vllm", model="Qwen3.6")
     path = tmp_path / "c.toml"

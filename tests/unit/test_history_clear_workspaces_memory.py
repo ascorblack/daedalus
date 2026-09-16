@@ -11,15 +11,16 @@ import pytest
 from protocore.contracts.memory import MemoryScope
 from protocore.contracts.types import Message, MessageRole, TextBlock
 
-from daedalus.config import RuntimeConfig, Settings
+from daedalus.config import Settings
 from daedalus.extensions.api import build_app
 from daedalus.host.session_runner import TENANT, SessionManager
 from daedalus.stores.database import Database
+from tests.support.models import model_config
 
 
 @pytest.fixture
 async def manager(settings: Settings, db: Database) -> Any:
-    m = SessionManager(settings, RuntimeConfig(), db=db)
+    m = SessionManager(settings, model_config(), db=db)
     await m.start()
     yield m
     await m.close()

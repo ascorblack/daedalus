@@ -23,11 +23,12 @@ from daedalus.extensions.voice import (
 )
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
+from tests.support.models import model_config
 
 
 @pytest.fixture
 async def app(settings: Settings, db: Database) -> Any:
-    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     application = SimpleNamespace(settings=settings, config=manager.config, db=db, manager=manager, front=None, extensions={})
 
@@ -283,7 +284,7 @@ async def client(settings: Settings, db: Database) -> Any:
     said: list[str] = []
     application = SimpleNamespace(
         settings=settings,
-        config=RuntimeConfig(),
+        config=model_config(),
         db=db,
         manager=SimpleNamespace(),
         front=None,
@@ -310,7 +311,11 @@ async def test_an_utterance_and_a_sentence_are_both_bounded(client: Any) -> None
 def test_voice_defaults_name_a_fast_model_and_no_speech_endpoint() -> None:
     config = RuntimeConfig()
     assert config.voice.enabled is True
-    preset = config.presets[config.voice.preset]
+    # An installation ships no model at all, so the concierge names none either: empty falls back
+    # to whatever the operator made the default.
+    assert config.voice.preset == ""
+    configured = model_config()
+    preset = configured.presets[configured.voice.preset]
     # The concierge must answer while the operator is still listening: no thinking, small output.
     assert preset.thinking is False and preset.max_output_tokens <= 8_000
     assert tts_configured(config.voice.tts) is False  # the browser speaks until an endpoint is configured
