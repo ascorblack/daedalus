@@ -29,6 +29,9 @@ type Phase = "idle" | "listening" | "thinking" | "speaking" | "delegating";
 
 const PHASE_WORD: Record<Phase, string> = { idle: "Ready", listening: "Listening", thinking: "Thinking", speaking: "Speaking", delegating: "Setting that up" };
 
+/** How long after the last spoken word the microphone stays deaf: a speaker's tail reaches it late. */
+const ECHO_TAIL_MS = 400;
+
 export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   const { data: state, refresh } = useQuery<VoiceState>("/api/voice", { staleMs: 10000, pollMs: 60000 });
   const [phase, setPhase] = useState<Phase>("idle");
@@ -58,6 +61,19 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
     micOnRef.current = micOn;
   }, [micOn]);
 
+  // The page is heard by its own microphone: a laptop or phone speaker plays the answer straight back
+  // into the recogniser, which would barge in on it and then submit the machine's words as the
+  // operator's next utterance. While anything is playing — the server's audio or the browser's own
+  // synthesiser — the listener keeps running and everything it hears is dropped.
+  const speakingRef = useRef(false);
+  const deafUntil = useRef(0);
+  const earsOpen = useCallback(() => !speakingRef.current && Date.now() >= deafUntil.current, []);
+  const onSpeaking = useCallback((on: boolean) => {
+    speakingRef.current = on;
+    if (!on) deafUntil.current = Date.now() + ECHO_TAIL_MS;
+    setPhase((f) => (on ? "speaking" : f === "speaking" ? (micOnRef.current ? "listening" : "idle") : f));
+  }, []);
+
   // ── the concierge's half of the conversation ────────────────────────────────────────────
   useEffect(() => {
     let stop = false;
@@ -67,7 +83,9 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
       while (!stop) {
         try {
           const response = await fetch("/api/voice/stream", { headers: api.authHeaders(), signal: controller.signal });
-          if (!response.body) return;
+          // One bodiless answer from a proxy is a dropped connection, not the end of the page: fall
+          // through to the backoff below rather than leaving the loop for good.
+          if (!response.body) throw new Error("no stream");
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
@@ -117,12 +135,12 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
 
   // ── speaking ─────────────────────────────────────────────────────────────────────────────
   useEffect(() => {
-    speaker.current = createSpeaker({ server: serverTts, lang, onSpeaking: (on) => setPhase((f) => (on ? "speaking" : f === "speaking" ? (micOnRef.current ? "listening" : "idle") : f)) });
+    speaker.current = createSpeaker({ server: serverTts, lang, onSpeaking });
     return () => {
       speaker.current?.stop();
       speaker.current = null;
     };
-  }, [serverTts, lang]);
+  }, [serverTts, lang, onSpeaking]);
 
   // ── what the operator says ───────────────────────────────────────────────────────────────
   const send = useCallback(async (text: string) => {
@@ -149,9 +167,9 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   const startMic = useCallback(async () => {
     speaker.current?.unlock();
     const handlers = {
-      onInterim: (t: string) => setHeard(t),
-      onFinal: (t: string) => void send(t),
-      onSpeechStart: () => bargeIn(),
+      onInterim: (t: string) => earsOpen() && setHeard(t),
+      onFinal: (t: string) => earsOpen() && void send(t),
+      onSpeechStart: () => earsOpen() && bargeIn(),
       onError: (m: string) => setProblem(m),
     };
     const l = canRecognise
@@ -159,6 +177,7 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
       : createRecorder({
           ...handlers,
           onUtterance: async (blob) => {
+            if (!earsOpen()) return;
             setPhase("thinking");
             try {
               const text = await sendUtterance(blob);
@@ -178,7 +197,7 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
     setMicOn(true);
     setPhase("listening");
     haptic("medium");
-  }, [bargeIn, canRecognise, lang, send]);
+  }, [bargeIn, canRecognise, earsOpen, lang, send]);
 
   const stopMic = useCallback(() => {
     listener.current?.stop();

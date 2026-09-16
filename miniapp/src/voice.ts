@@ -321,12 +321,16 @@ export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking:
     stop: () => {
       generation += 1;
       queue = [];
+      playing = false;
       audio.pause();
       try {
         window.speechSynthesis.cancel();
       } catch {
         /* no synthesiser */
       }
+      // Unmount goes through here, so the phase must come back down with it: a remount that starts in
+      // "speaking" never leaves it, because nothing is playing to end.
+      opts.onSpeaking(false);
     },
   };
 }
