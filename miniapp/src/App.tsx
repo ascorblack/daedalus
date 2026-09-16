@@ -18,6 +18,7 @@ import * as passkeys from "./passkeys";
 import { back, migrateLegacyLocation, navigate, pathFor, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
 import { Counts, MoreSheet, Palette, PaletteItem, Rail, TabBar, go, screenTitle, useMedia, useShortcuts } from "./shell";
 import { Capabilities, SelfDevMode, visibleScreens } from "./capabilities";
+import { ChangeStrip } from "./change";
 import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
 
@@ -90,7 +91,9 @@ export function App() {
   const inbox = useQuery<{ unread: number }>(authed ? "/api/inbox/unread" : null, { pollMs: 20000, staleMs: 5000 });
   // What this installation can do decides what the app offers. Until the answer arrives the nav is the
   // one a server install has: hiding a destination and putting it back a moment later reads as a glitch.
-  const caps = useQuery<Capabilities>(authed ? "/api/capabilities" : null, { pollMs: 300000, staleMs: 60000 });
+  // A minute rather than five: the mode never changes, but whether a change of the agent's own is
+  // waiting for a restart does, and that is a banner the operator should not have to reload to see.
+  const caps = useQuery<Capabilities>(authed ? "/api/capabilities" : null, { pollMs: 60000, staleMs: 20000 });
   const selfdev: SelfDevMode = caps.data?.selfdev.mode ?? "server";
   const proposals = useQuery<{ status: string }[]>(authed && selfdev !== "off" ? "/api/proposals" : null, { pollMs: 60000, staleMs: 30000 });
   const counts: Counts = { inbox: inbox.data?.unread ?? 0, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
@@ -307,6 +310,7 @@ export function App() {
       {wide && <Rail screen={route.screen} counts={counts} selfdev={selfdev} collapsed={railCollapsed} onToggle={toggleRail} onPalette={openPalette} />}
       <div ref={main} className={`main ${sessionId ? "chat-open" : ""}`}>
         {offline && <div className="offline-strip" role="status">No connection to the bot · retrying…</div>}
+        <ChangeStrip caps={caps} />
         <PasskeyNudge />
         {content}
       </div>

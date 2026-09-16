@@ -1043,6 +1043,17 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 /* ── rail collapse, palette, offline strip ──────────────────────────────────────────────── */
 .offline-strip { position: sticky; top: 0; z-index: 13; text-align: center; padding: 6px 12px; font-size: 12.5px; color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--bg)); border-bottom: 1px solid color-mix(in srgb, var(--warn) 30%, transparent); }
 .main.chat-open .offline-strip { flex: none; }
+
+/* The agent's own changes. Three states, one shape: waiting for a restart, applied, refused. */
+.change-strip { position: sticky; top: 0; z-index: 13; display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; padding: 10px 14px; font-size: 13px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.change-strip.pending { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg)); border-bottom-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+.change-strip.done { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, var(--bg)); border-bottom-color: color-mix(in srgb, var(--ok) 30%, transparent); }
+.change-strip.failed { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--bg)); border-bottom-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+.change-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.change-text span { color: var(--text); opacity: .85; overflow-wrap: anywhere; }
+.change-problem { color: var(--warn); }
+.change-actions { display: flex; gap: 8px; flex: none; }
+.main.chat-open .change-strip { flex: none; }
 .nudge-strip { position: sticky; top: 0; z-index: 13; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; padding: 7px 12px; font-size: 12.5px; color: var(--fg-2); background: var(--surface-1); border-bottom: 1px solid var(--line); }
 .nudge-strip a { color: var(--primary); font-weight: 600; }
 .main.chat-open .nudge-strip { flex: none; }

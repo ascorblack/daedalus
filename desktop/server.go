@@ -255,6 +255,8 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		go func() { _ = s.app.Stop(ctx) }()
 	case "update":
 		go func() { _ = s.app.Update(ctx) }()
+	case "apply":
+		go func() { _ = s.app.Apply(ctx) }()
 	case "open":
 		go func() { _, _ = s.app.Open(ctx) }()
 	default:
