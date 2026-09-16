@@ -136,6 +136,10 @@ services:
   # The only container that can talk to Docker. It rebuilds and replaces the agent container when
   # the supervisor drops a trigger file; the agent container itself never sees the docker socket.
   # It needs no network of its own: the daemon does the building and pulling.
+  #
+  # It belongs to server self-development: its presence is one of the prerequisites the capability
+  # probe looks for (`[self_change] mode`, daedalus/host/capabilities.py). An installation that sets
+  # the mode to "local" or "off" never drops a trigger file, and can leave this service out.
   rebuilder:
     image: docker:cli
     restart: unless-stopped

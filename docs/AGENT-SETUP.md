@@ -30,7 +30,11 @@ Ask these once, together; do not start until you have the answers.
 3. **A public address, or not.** A domain that already points at this server (for HTTPS) or "no".
 4. **The daily spend cap** in USD (default 20).
 5. **Self-development.** A fine-grained GitHub token limited to the two repositories they fork
-   (`daedalus`, `protocore-exp`), with Contents and Pull requests read/write — or "later".
+   (`daedalus`, `protocore-exp`), with Contents and Pull requests read/write — or "later", or "never".
+   This answer decides `[self_change] mode` (see §7): with the token, the checkouts and the
+   `rebuilder` service the installation resolves to `server`; without the token, to `local` — the
+   agent edits its own checkout and the change applies on a restart; "never" is `mode = "off"`, and
+   the tools, the API, the app screen and the prompt section all go with it.
 
 ## 2. Install
 
@@ -54,7 +58,7 @@ Fill `.env` (secrets do NOT go here; it is mounted into the agent container):
 | `SEARXNG_SECRET` | any random string (`openssl rand -hex 16`) |
 | `DAEDALUS_COMPOSE_PROJECT_DIR`, `DAEDALUS_COMPOSE_FILE`, `DAEDALUS_CORE_PROJECT_DIR` | absolute paths: the `daedalus` checkout, its `deploy/compose.yaml`, the `protocore-exp` checkout |
 | `SERVICES_PUBLIC_HOST` | the server's LAN or public address (the operator opens agent-hosted services at `<host>:<port>`) |
-| `GITHUB_TOKEN` | the self-development token, or empty |
+| `GITHUB_TOKEN` | the self-development token, or empty (empty resolves self-development to `local`) |
 
 Fill `../daedalus-secrets/keyproxy.env` with the provider keys (`DEEPSEEK_API_KEY=…`, `OPENROUTER_API_KEY=…`,
 `OPENCODE_API_KEY=…`; a self-hosted endpoint is `VLLM_BASE_URL`/`VLLM_API_KEY` in `.env`).
@@ -132,12 +136,27 @@ Two shapes; both keep every feature:
 2. Settings → Models shows the configured presets; Usage shows the call you just made.
 3. `docker logs deploy-daedalus-1 | grep -i error` shows nothing about providers.
 
-## 7. Updating
+## 7. Updating, and whether the agent may update itself
 
-The agent updates itself through pull requests the operator approves; the supervisor pulls `main`,
-preflights and restarts (rolling back on failure). To update by hand: `git -C ~/daedalus pull`,
-`git -C ~/protocore-exp pull`, then `docker compose … up -d --build`. Never edit files inside the
-`daedalus` checkout on the server: the supervisor resets it to `origin/main` on every rebuild.
+`[self_change] mode` in `config.toml` decides what the agent may do to its own code. Left at `auto`
+— the default — it is worked out at startup from what the installation has:
+
+| resolved | needs | what the agent gets |
+|---|---|---|
+| `server` | `GITHUB_TOKEN`, an `origin` on both checkouts the token may push to, and the `rebuilder` service (or the supervisor socket) | `SelfWorkspace`, `SelfPropose`, `SelfRebuild`, `SelfRollback`, the proposals API and the Changes screen |
+| `local` | writable git checkouts of `daedalus` and `protocore-exp` | `SelfWorkspace` only: it edits the checkout, and the change applies on a restart |
+| `off` | — | nothing: no tools, no `/api/proposals`, no Changes screen, no self-development text in the prompt |
+
+Set the mode explicitly to overrule the resolution — `mode = "off"` on an installation the operator
+does not want changing itself. `daedalus doctor` (and `GET /api/capabilities`) names the mode, the
+reasons behind it, and anything a mode you chose yourself is missing. A change takes effect on the
+next restart.
+
+In `server` mode the agent updates itself through pull requests the operator approves; the supervisor
+pulls `main`, preflights and restarts (rolling back on failure). To update by hand: `git -C
+~/daedalus pull`, `git -C ~/protocore-exp pull`, then `docker compose … up -d --build`. In `server`
+mode never edit files inside the `daedalus` checkout on the server: the supervisor resets it to
+`origin/main` on every rebuild.
 
 ## 8. What to report back
 

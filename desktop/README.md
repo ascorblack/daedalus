@@ -133,6 +133,17 @@ the app, extra providers and the search APIs — are edited in `data/.env` and
 `data/daedalus-secrets/keyproxy.env` afterwards, exactly as on a server. `deploy/env.example` and
 `deploy/keyproxy.env.example` in the checkout describe every key.
 
+## Self-development on a desktop install
+
+A desktop install has the two checkouts and usually no GitHub token, so the capability probe resolves
+`[self_change] mode` to **`local`**: the agent gets `SelfWorkspace` and edits its own code in the
+checkout the stack runs from, with no fork, no remote and no pull request. The app marks the Changes
+screen `local`. Give the install a `GITHUB_TOKEN` with Contents and Pull requests on both forks and it
+resolves to `server` instead — the full worktree → pull request → approval → rebuild workflow.
+Set `mode = "off"` in the configuration and the subsystem is not there at all: no tools, no screen, no
+`/api/proposals`, and nothing in the prompt about changing its own code. `daedalus doctor` names the
+mode it resolved and what a mode you chose yourself is missing.
+
 ## Disk
 
 The images are not small, and the agent's own image is the reason:
