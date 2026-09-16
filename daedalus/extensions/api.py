@@ -24,15 +24,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Respon
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from protocore.contracts.memory import MemoryScope
-from protocore.contracts.types import (
-    COMPACTION_SUMMARY_METADATA_KEY,
-    Message,
-    MessageRole,
-    TextBlock,
-    ThinkingBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-)
+from protocore.contracts.types import ToolResultBlock, ToolUseBlock
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -43,9 +35,9 @@ from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import tts_configured
-from daedalus.host import prompts
-from daedalus.host.prompts import DEFAULT_RULES, split_headline
+from daedalus.host.prompts import DEFAULT_RULES
 from daedalus.host.session_runner import TENANT, Attachment
+from daedalus.host.transcript_view import message_view
 from daedalus.providers.openai_compat import UsageRecord
 from daedalus.security import redact
 from daedalus.stores import pairing, passkeys
@@ -555,9 +547,6 @@ def restore_masked_mcp(current: dict[str, Any], patch: dict[str, Any]) -> None:
                         del values[key]
 
 
-_SUMMARY_WRAP_RE = re.compile(r"</?compacted-turn[^>]*>")
-
-
 def _deep_merge(base: Any, patch: dict[str, Any]) -> dict[str, Any]:
     out = dict(base) if isinstance(base, dict) else {}
     for key, value in patch.items():
@@ -566,72 +555,9 @@ def _deep_merge(base: Any, patch: dict[str, Any]) -> dict[str, Any]:
 
 
 WEBHOOK_MAX_BYTES = 2 * 1024 * 1024
-_NUDGE_MARKERS = ("[internal control", "tool repeatedly failed with the same error", "has been disabled for the rest of this run", "The run has reached its budget")
-
-
-def _looks_like_core_nudge(text: str) -> bool:
-    head = text.lstrip()[:400]
-    return any(marker in head for marker in _NUDGE_MARKERS)
-
-
-TOOL_RESULT_PREVIEW_CHARS = 4000
-"""Characters of a tool result the transcript listing carries; the rest comes from the tool-result endpoint."""
 
 MAX_TRANSCRIPT_PAGE = 2000
 """Turns one request may ask for. Beyond this a client is asking for a session, not a page."""
-
-
-def message_view(message: Message) -> dict[str, Any]:
-    text: list[str] = []
-    thinking: list[str] = []
-    tool_calls: list[dict[str, Any]] = []
-    tool_results: list[dict[str, Any]] = []
-    for block in message.content_blocks:
-        if isinstance(block, TextBlock):
-            text.append(block.text)
-        elif isinstance(block, ThinkingBlock):
-            thinking.append(block.text)
-        elif isinstance(block, ToolUseBlock):
-            try:
-                args = json.loads(block.arguments_json or "{}")
-            except json.JSONDecodeError:
-                args = {"raw": block.arguments_json}
-            tool_calls.append({"id": block.tool_call_id, "name": block.name, "arguments": redact.shared().redact_any(args)})
-        elif isinstance(block, ToolResultBlock):
-            # The listing carries a preview; the full text (a skill body, a long command output) is one request away.
-            tool_results.append({"id": block.tool_call_id, "content": redact.redact(block.content[:TOOL_RESULT_PREVIEW_CHARS]), "is_error": block.is_error, "length": len(block.content)})
-    compaction = message.metadata.get("daedalus.compaction") if isinstance(message.metadata, dict) else None
-    is_summary = bool(message.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)) if isinstance(message.metadata, dict) else False
-    body = prompts.without_turn_context("".join(text))
-    if is_summary:
-        body = _SUMMARY_WRAP_RE.sub("", body).strip()
-        # A summary without the host's record came from the core mid-run; the host's own (auto/manual) sit between runs.
-        compaction = compaction or {"reason": "core"}
-    origin = message.metadata.get("daedalus.origin") if isinstance(message.metadata, dict) else None
-    delivery = message.metadata.get("daedalus.delivery") if isinstance(message.metadata, dict) else None
-    internal = message.role is MessageRole.user and not is_summary and (
-        origin == "core" or delivery == "drained" or (origin != "operator" and _looks_like_core_nudge(body))
-    )
-    headline = ""
-    if message.role is MessageRole.assistant:
-        body, headline = split_headline(body)
-        body = redact.redact(body)
-    archived = message.metadata.get("daedalus.archived") if isinstance(message.metadata, dict) else None
-    return {
-        "role": message.role.value,
-        "summary": is_summary,
-        "internal": internal,
-        "origin": origin or ("operator" if message.role is MessageRole.user and not internal else ""),
-        "seq": message.metadata.get("daedalus.seq") if isinstance(message.metadata, dict) else None,
-        "compaction": compaction,
-        "archived": archived,
-        "headline": headline,
-        "text": body,
-        "thinking": "".join(thinking) or (message.reasoning_content or ""),
-        "tool_calls": tool_calls,
-        "tool_results": tool_results,
-        "created_at": message.created_at.isoformat(),
-    }
 
 
 _TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -971,9 +897,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if state is None:
             raise HTTPException(404, "no such session")
         tail = max(1, min(tail, MAX_TRANSCRIPT_PAGE))
-        source = await manager.transcript(session_id, tail=tail, before=before)
+        messages = await manager.transcript_page(session_id, tail=tail, before=before)
         oldest, _newest = await manager.sessions.transcript_bounds(session_id)
-        first_seq = next((s for s in (m.metadata.get("daedalus.seq") for m in source) if isinstance(s, int)), 0)
+        first_seq = next((v["seq"] for v in messages if isinstance(v.get("seq"), int)), 0)
         status = "running" if state.running else "waiting" if state.pending else "compacting" if state.compacting else "idle"
         usage = await app.db.fetchone(
             "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cache_read_tokens) ch, sum(cost_usd) usd FROM usage_events WHERE session_id = ?",
@@ -1013,7 +939,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "leader_title": leader.session.title if leader is not None else None,
             "subagents": subagents,
             "verifications": dict(await app.db.fetchone("SELECT count(*) total, sum(passed) passed FROM verifications WHERE session_id = ?", (session_id,)) or {}),
-            "messages": [message_view(m) for m in source],
+            "messages": messages,
             "first_seq": first_seq,
             "has_older": bool(first_seq and oldest and first_seq > oldest),
             "usage": dict(usage) if usage else {},

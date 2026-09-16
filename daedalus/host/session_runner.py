@@ -48,6 +48,7 @@ from daedalus.host.hooks import DaedalusHookManager
 from daedalus.host.policy import Decision, Policy, Rule, canonical
 from daedalus.host.services import SessionServices, locator
 from daedalus.host.skills import DirectorySkillStore
+from daedalus.host.transcript_view import TranscriptViewBuilder, message_view
 from daedalus.mcp.manager import McpManager, blocked_for
 from daedalus.providers.chain import build_chain
 from daedalus.providers.registry import ProviderRegistry
@@ -162,7 +163,7 @@ class SessionManager:
         self.settings = settings
         self.config = config
         self.db = db
-        self.sessions = SqliteSessionStore(db)
+        self.sessions = SqliteSessionStore(db, view=TranscriptViewBuilder())
         self.runs = SqliteRunStore(db)
         self.events = SqliteEventStream(db)
         self.usage = SqliteUsageSink(db)
@@ -453,31 +454,56 @@ class SessionManager:
                     rows = list(history)[-tail:] if tail > 0 else history
         if before:
             return rows
+        live = await self._unpersisted(session_id, {self.sessions.transcript_key(m) for m in rows})
+        if not live:
+            return rows
+        rows = rows + live
+        return rows[-tail:] if tail > 0 else rows
+
+    async def transcript_page(self, session_id: str, *, tail: int = 600, before: int = 0) -> list[dict[str, Any]]:
+        """The page as the app draws it: stored views for what is persisted, built on the spot for what is not.
+
+        Nothing here parses a message or runs a redaction pattern for a row that was already
+        written — that was done once, when the row was appended.
+        """
+        views = await self.sessions.list_transcript_views(session_id, limit=tail, before_seq=before)
+        if not views and not before:
+            seeded = await self.transcript(session_id, tail=tail)  # legacy session: seeds the transcript from the history
+            if seeded:
+                views = await self.sessions.list_transcript_views(session_id, limit=tail)
+        if before:
+            return views
+        live = await self._unpersisted(session_id, set())  # a view carries no key: the transcript is asked instead
+        if not live:
+            return views
+        views = views + [message_view(m) for m in live]
+        return views[-tail:] if tail > 0 else views
+
+    async def _unpersisted(self, session_id: str, known_keys: set[str]) -> list[Message]:
+        """What the live engine holds and the transcript does not yet, in transcript order.
+
+        Against one page alone the dedup would re-show every live message older than it, so
+        what the page does not settle is asked of the transcript by key: one indexed query,
+        and the answer does not depend on how much of the session was read.
+        """
         state = self._states.get(session_id)
-        if state is not None and state.engine is not None and state.running:
-            # Against the loaded page alone the dedup would re-show every live message older than
-            # it, so what the page does not settle is asked of the transcript by key: one indexed
-            # query, and the answer does not depend on how much of the session was read.
-            known = {self.sessions.transcript_key(m) for m in rows}
-            candidates = [m for m in state.engine.history if self.sessions.transcript_key(m) not in known]
-            if candidates and tail > 0:
-                keys = [self.sessions.transcript_key(m) for m in candidates]
-                persisted = await self.sessions.transcript_keys_present(session_id, keys)
-                candidates = [m for m in candidates if self.sessions.transcript_key(m) not in persisted]
-            live = candidates
-            # A queued steer or follow-up is written to the transcript when it is submitted; the core
-            # later places the same text into its history as a fresh user message with a timestamp of
-            # its own, which the key-based dedup cannot recognise. Marking live user messages the host
-            # did not write itself as the core's is what the persisted sync (from_history) does, and it
-            # keeps the operator's words from appearing twice while the run is still going.
-            rows = rows + [
-                m.model_copy(update={"metadata": {**m.metadata, "daedalus.origin": "core"}})
-                if m.role is MessageRole.user and "daedalus.origin" not in m.metadata and not m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)
-                else m
-                for m in live
-            ]
-            return rows[-tail:] if tail > 0 else rows
-        return rows
+        if state is None or state.engine is None or not state.running:
+            return []
+        candidates = [m for m in state.engine.history if self.sessions.transcript_key(m) not in known_keys]
+        if candidates:
+            persisted = await self.sessions.transcript_keys_present(session_id, [self.sessions.transcript_key(m) for m in candidates])
+            candidates = [m for m in candidates if self.sessions.transcript_key(m) not in persisted]
+        # A queued steer or follow-up is written to the transcript when it is submitted; the core
+        # later places the same text into its history as a fresh user message with a timestamp of
+        # its own, which the key-based dedup cannot recognise. Marking live user messages the host
+        # did not write itself as the core's is what the persisted sync (from_history) does, and it
+        # keeps the operator's words from appearing twice while the run is still going.
+        return [
+            m.model_copy(update={"metadata": {**m.metadata, "daedalus.origin": "core"}})
+            if m.role is MessageRole.user and "daedalus.origin" not in m.metadata and not m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)
+            else m
+            for m in candidates
+        ]
 
     async def list_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = await self.sessions.list_sessions(TENANT, limit=limit)

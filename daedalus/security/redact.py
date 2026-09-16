@@ -24,6 +24,7 @@ Mini App views (the display path), and the logging filter.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import sys
@@ -76,9 +77,25 @@ class Redactor:
 
     def __init__(self, values: Iterable[str] = ()) -> None:
         self._values: list[str] = []
+        self._fingerprint = ""
         self.add_values(values)
 
+    def fingerprint(self) -> str:
+        """Short digest of what this redactor masks by value.
+
+        A redacted view can be stored and reused, but only while the redactor is the one that
+        produced it: a secret configured afterwards must not stay visible in a view computed
+        before it. Callers that keep a redacted copy store this beside it and recompute when
+        it no longer matches. The shapes are part of the code, so the code's own version
+        belongs in the caller's key, not here.
+        """
+        if not self._fingerprint:
+            digest = hashlib.sha256("\n".join(self._values).encode("utf-8", "surrogateescape")).hexdigest()
+            self._fingerprint = digest[:12]
+        return self._fingerprint
+
     def add_values(self, values: Iterable[str]) -> None:
+        self._fingerprint = ""
         for value in values:
             if isinstance(value, str) and len(value.strip()) >= MIN_VALUE_LENGTH:
                 cleaned = value.strip()
@@ -89,6 +106,7 @@ class Redactor:
 
     def replace_values(self, values: Iterable[str]) -> None:
         self._values = []
+        self._fingerprint = ""
         self.add_values(values)
 
     @property

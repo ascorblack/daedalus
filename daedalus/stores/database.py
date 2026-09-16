@@ -435,6 +435,14 @@ MIGRATIONS: list[str] = [
         last_used_at TEXT
     );
     """,
+    # 23 — the shape the app draws for a row, stored beside the row. Deriving it cost about a
+    # millisecond a message, almost all of it secret redaction, and it was derived again for
+    # every one of the six hundred turns of every session open. view_key names the code and the
+    # redactor that produced the copy, so a row is recomputed when either has moved on.
+    """
+    ALTER TABLE transcript ADD COLUMN view TEXT;
+    ALTER TABLE transcript ADD COLUMN view_key TEXT NOT NULL DEFAULT '';
+    """,
 ]
 
 

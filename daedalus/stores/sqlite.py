@@ -7,7 +7,7 @@ import json
 import re
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from protocore.contracts.events import IEventStream
 from protocore.contracts.run import IRunStore, RunNotFoundError
@@ -62,9 +62,23 @@ def fts_query(query: str) -> str:
     return " ".join(f'"{t.replace(chr(34), "")}"*' for t in tokens if t)
 
 
+class TranscriptView(Protocol):
+    """What turns a transcript row into the shape a client draws, and names its own version.
+
+    The store keeps the result beside the row and never looks inside it; the host supplies
+    the implementation (:class:`daedalus.host.transcript_view.TranscriptViewBuilder`), which
+    is why the view can depend on redaction and prompts without the store doing so.
+    """
+
+    def key(self) -> str: ...
+
+    def build(self, message: Message) -> dict[str, Any]: ...
+
+
 class SqliteSessionStore(ISessionStore):
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, *, view: TranscriptView | None = None) -> None:
         self._db = db
+        self._view = view
 
     async def create(self, session: Session) -> None:
         await self._db.execute(
@@ -161,13 +175,23 @@ class SqliteSessionStore(ISessionStore):
                 continue
             seen.add(key)
             candidates.append((key, message))
+        # The caller hands over the whole history every round and almost all of it is already
+        # here. Asking which keys are present is one indexed query; without it every round
+        # serialised — and, since the view is built here, redacted — a history's worth of
+        # messages to write one. INSERT OR IGNORE below still settles a race.
+        if len(candidates) > 1:
+            present = await self.transcript_keys_present(session_id, [key for key, _ in candidates])
+            candidates = [(key, message) for key, message in candidates if key not in present]
+        if not candidates:
+            return 0
         added = 0
         last_seq = 0
         async with self._db.transaction() as conn:
             # UNIQUE(session_id, key) + INSERT OR IGNORE is the dedup; rowcount says whether the row is new.
             for key, message in candidates:
                 cursor = await conn.execute(
-                    "INSERT OR IGNORE INTO transcript(session_id, key, message) VALUES (?, ?, ?)", (session_id, key, message.model_dump_json())
+                    "INSERT OR IGNORE INTO transcript(session_id, key, message, view, view_key) VALUES (?, ?, ?, ?, ?)",
+                    (session_id, key, message.model_dump_json(), *self._view_of(message)),
                 )
                 if cursor.rowcount:
                     await conn.execute("UPDATE sessions SET last_message_at = ? WHERE id = ?", (_now(), session_id))
@@ -269,6 +293,54 @@ class SqliteSessionStore(ISessionStore):
             out.extend(int(r["seq"]) for r in rows)
         return sorted(out)
 
+    def _view_of(self, message: Message) -> tuple[str | None, str]:
+        """The stored view of a message and the key naming what produced it, for the row's two columns."""
+        if self._view is None:
+            return None, ""
+        return json.dumps(self._view.build(message), default=str, ensure_ascii=False), self._view.key()
+
+    async def list_transcript_views(self, session_id: str, *, limit: int = 0, before_seq: int = 0) -> list[dict[str, Any]]:
+        """One page of the session as the app draws it, without parsing a message.
+
+        Rows whose stored view was produced by older code or an older redactor are rebuilt
+        from the message and written back, so the next read of the page is free again.
+        """
+        if self._view is None:
+            return [self._view_only_fallback(m) for m in await self.list_transcript(session_id, limit=limit, before_seq=before_seq)]
+        params: list[Any] = [session_id]
+        where = "session_id = ?"
+        if before_seq > 0:
+            where += " AND seq < ?"
+            params.append(before_seq)
+        if limit > 0:
+            params.append(limit)
+            rows = await self._db.fetchall(
+                f"SELECT seq, view, view_key, message FROM (SELECT seq, view, view_key, message FROM transcript WHERE {where} ORDER BY seq DESC LIMIT ?) ORDER BY seq",
+                tuple(params),
+            )
+        else:
+            rows = await self._db.fetchall(f"SELECT seq, view, view_key, message FROM transcript WHERE {where} ORDER BY seq", tuple(params))
+        current = self._view.key()
+        out: list[dict[str, Any]] = []
+        stale: list[tuple[str, str, int]] = []
+        for row in rows:
+            seq = int(row["seq"])
+            if row["view"] and row["view_key"] == current:
+                view = json.loads(row["view"])
+            else:
+                message = Message.model_validate_json(row["message"])
+                view = self._view.build(message)
+                stale.append((json.dumps(view, default=str, ensure_ascii=False), current, seq))
+            view["seq"] = seq
+            out.append(view)
+        if stale:
+            await self._db.executemany("UPDATE transcript SET view = ?, view_key = ? WHERE seq = ?", stale)
+        return out
+
+    def _view_only_fallback(self, message: Message) -> dict[str, Any]:
+        """A store built without a view builder still answers, with the message itself."""
+        return {"seq": message.metadata.get("daedalus.seq"), "role": message.role.value, "text": "".join(b.text for b in message.content_blocks if isinstance(b, TextBlock))}
+
     async def transcript_keys_present(self, session_id: str, keys: Sequence[str]) -> set[str]:
         """Which of ``keys`` the transcript already holds; the UNIQUE(session_id, key) index answers it."""
         found: set[str] = set()
@@ -354,8 +426,9 @@ class SqliteSessionStore(ISessionStore):
         row = await self._db.fetchone("SELECT seq FROM transcript WHERE session_id = ? AND key = ?", (session_id, key))
         if row is None:
             return False
+        view, view_key = self._view_of(message)
         async with self._db.transaction() as conn:
-            await conn.execute("UPDATE transcript SET message = ? WHERE session_id = ? AND key = ?", (message.model_dump_json(), session_id, key))
+            await conn.execute("UPDATE transcript SET message = ?, view = ?, view_key = ? WHERE session_id = ? AND key = ?", (message.model_dump_json(), view, view_key, session_id, key))
             await conn.execute("DELETE FROM transcript_fts WHERE session_id = ? AND seq = ?", (session_id, int(row["seq"])))
             text = message_text(message)
             if text:
