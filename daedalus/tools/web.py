@@ -58,7 +58,9 @@ async def web_fetch(context: ToolContext, url: str, max_chars: int | None = None
     name="WebSearch",
     description=(
         "Search the web and return the top results with snippets. Optional: language (ISO code such as 'ru' or 'en'), "
-        "time_range ('day', 'week', 'month' or 'year'), domains (comma-separated sites to search within)."
+        "time_range ('day', 'week', 'month' or 'year'), domains (comma-separated sites to search within). "
+        "Before the second search of a turn, load the 'websearch' skill: it carries the follow-up budget, the "
+        "dedupe rule and the stopping rule that keep a research turn from looping."
     ),
 )
 async def web_search(

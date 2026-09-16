@@ -151,7 +151,7 @@ The PR text passes a public-text gate (nothing about your machine leaks into a p
 | Quality | `Verify` — a check with a criterion, recorded as a receipt; `LearningReport` |
 | Self | `SelfWorkspace`, `SelfPropose`, `SelfRebuild`, `SelfRollback` |
 | Planning | `BoardAdd` / `BoardUpdate` / `BoardList` / `BoardGet` — the agent's own board (shared with its subagents; tasks you post to nobody in particular are on every board), with acceptance criteria, checklists, dependencies and a per-agent work-in-progress limit; `PLAN.md` in the workspace is its rendering |
-| Extensions | `Skill` (31 bundled skills: design systems, web QA, writing, scheduling…), `Mcp*` with OAuth, `SendFile` (attached under the answer in the app too), `StaySilent` |
+| Extensions | `Skill` (33 bundled skills: design systems, web QA, writing, scheduling, comparable variants, figures, search discipline…), `Mcp*` with OAuth, `SendFile` (attached under the answer in the app too), `StaySilent` |
 
 Every tool can be switched off per session from the app, and a **mode** (`quick`, `deep`, `careful`) bundles limits and extra rules.
 
