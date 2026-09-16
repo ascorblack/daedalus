@@ -7,6 +7,7 @@ smoke gate and run on demand: ``uv run pytest tests/integration -q``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import os
 import subprocess
@@ -103,3 +104,44 @@ async def test_rebuild_applies_good_commit_and_rolls_back_bad_one(scratch: dict[
     assert result.startswith("rolled back"), result
     assert sup.head(scratch["bot"]) == base
     await asyncio.sleep(0)
+
+
+async def test_a_preflight_leaves_the_running_environment_exactly_as_it_was(scratch: dict[str, Path], tmp_path: Path) -> None:
+    """The virtualenv the bot imports from is not the preflight's to write to.
+
+    ``uv`` writes to whatever UV_PROJECT_ENVIRONMENT names, and the image names the running bot's —
+    so a preflight used to reconcile the live environment with the candidate's lock, take out
+    whatever the image had installed beside it, and leave editable pointers into a detached
+    candidate checkout behind, whether the change passed or was refused.
+    """
+    live_venv = scratch["bot"] / ".venv"
+    os.environ["UV_PROJECT_ENVIRONMENT"] = str(live_venv)
+    sup = _load_supervisor(
+        {
+            "DAEDALUS_BOT_REPO": str(scratch["bot"]),
+            "DAEDALUS_CORE_REPO": str(scratch["core"]),
+            "DAEDALUS_STATE": str(tmp_path / "state"),
+            "DAEDALUS_WORKSPACES": str(tmp_path / "workspaces"),
+            "DAEDALUS_SUPERVISOR_SOCKET": str(tmp_path / "state" / "sup.sock"),
+            "DAEDALUS_BOT_CMD": "sleep 3600",
+        }
+    )
+    # Something the image installed beside the lock: an exact sync of this environment removes it.
+    beside_the_lock = live_venv / "lib" / "python3.12" / "site-packages" / "_installed_by_the_image.pth"
+    beside_the_lock.write_text("")
+
+    before = _fingerprint(live_venv)
+    ok, transcript = sup.preflight(scratch["bot"], sync=True)
+    assert ok, transcript[-3000:]
+    assert _fingerprint(live_venv) == before, "the preflight wrote to the virtualenv the bot runs from"
+    assert beside_the_lock.exists(), "the preflight pruned a package the image installed"
+    assert sup.venv_ready(sup.PREFLIGHT_VENV), "the preflight's own environment was not built"
+
+
+def _fingerprint(venv: Path) -> list[tuple[str, int, str]]:
+    """Every file in the virtualenv, by path, size and digest."""
+    out = []
+    for path in sorted(p for p in venv.rglob("*") if p.is_file()):
+        raw = path.read_bytes()
+        out.append((str(path.relative_to(venv)), len(raw), hashlib.sha256(raw).hexdigest()))
+    return out
