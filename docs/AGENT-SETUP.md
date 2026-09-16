@@ -6,13 +6,14 @@ a file; every check names what it must print. Ask the operator only for what the
 
 ## 0. What you are installing
 
-Daedalus is a personal, self-developing agent: a Docker Compose stack of five containers (the agent, a
-key proxy that holds provider keys, SearXNG for web search, a rebuilder, and optionally a local Telegram
-Bot API server). The operator talks to it in a web app (a PWA, installable on a phone) and, optionally,
-in Telegram. Read `README.md` once; it is short.
+Daedalus is a personal, self-developing agent: a Docker Compose stack of two containers from one image
+(the agent, and a key proxy that holds provider keys), plus three optional ones behind profiles —
+`search` (a self-hosted SearXNG), `selfdev` (the rebuilder, which a server that develops itself needs)
+and `telegram` (a local Bot API server). The operator talks to it in a web app (a PWA, installable on a
+phone) and, optionally, in Telegram. Read `README.md` once; it is short.
 
 Requirements on the server: Docker Engine with the compose plugin (`docker compose version`), 4 GB of
-RAM free, 10 GB of disk (the agent image carries Chromium), outbound HTTPS. A public HTTPS address is
+RAM free, 5 GB of disk, outbound HTTPS. A public HTTPS address is
 optional: without it the operator opens the app over an SSH tunnel or a VPN; with it the app is a
 proper PWA and Telegram's Mini App works.
 
@@ -66,12 +67,13 @@ Start:
 docker compose -f deploy/compose.yaml --env-file .env --profile telegram up -d --build
 # without Telegram
 docker compose -f deploy/compose.yaml --env-file .env up -d --build
+# a server that develops itself also needs the rebuilder: add --profile selfdev
 ```
 
-The first build takes several minutes (Chromium, Node, the Python environment). Check:
+The first build takes a few minutes (the Python environment and the Mini App). Check:
 
 ```bash
-docker compose -f deploy/compose.yaml --env-file .env ps        # daedalus, keyproxy, searxng, rebuilder (+ telegram-bot-api) "running"
+docker compose -f deploy/compose.yaml --env-file .env ps        # daedalus, keyproxy (+ whatever profiles are on) "running"
 docker logs deploy-daedalus-1 2>&1 | grep -E "bot started|pairing link|polling"     # "pairing link written to …" without Telegram
 ```
 
