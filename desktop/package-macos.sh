@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Turns the two macOS binaries into a double-clickable Daedalus.app inside a zip.
 #
+# The bundle is also where two things the launcher cannot do for itself live: the icon the Dock
+# shows, and the daedalus:// scheme, which on macOS is declared in the Info.plist and registered by
+# Launch Services rather than written by a running process.
+#
 # Three things about macOS decide the shape of this script. A raw Mach-O file downloaded in a
 # browser has no execute bit, so Finder opens it in a text editor instead of running it — only a
 # bundle is double-clickable. A bundle survives a zip only if the zip keeps its symlinks and
@@ -73,6 +77,18 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>
+  <!-- daedalus://open/<session-id> opens that conversation. Launch Services reads this when it
+       first sees the bundle, and hands the link to the launcher, which either shows it or passes it
+       to the launcher already running. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>com.ascorblack.daedalus.desktop</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>daedalus</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

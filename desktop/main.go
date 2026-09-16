@@ -34,6 +34,10 @@ commands:
   pair        print a fresh pairing link for signing in to the app
   uninstall   remove the containers, networks and volumes
 
+A daedalus:// link may be given instead of a command — daedalus://open/<session-id> opens that
+conversation. A launcher that is already running is brought to the front and handed the link; a
+second one never starts.
+
 flags:
   --data DIR  where the checkouts, the keys and the environment live
               (default: ./data, or data/ beside the app when run from Daedalus.app)
@@ -53,6 +57,7 @@ func main() {
 
 type options struct {
 	command  string
+	link     string
 	data     string
 	port     int
 	setup    bool
@@ -109,6 +114,10 @@ func run(argv []string) error {
 	case "update":
 		return app.Update(ctx)
 	case "open":
+		if FocusRunning(ctx, paths, opts.link) {
+			fmt.Println("the launcher already running here was brought to the front")
+			return nil
+		}
 		url, err := app.Open(ctx)
 		if err != nil {
 			fmt.Println("open this yourself:", url)
@@ -131,33 +140,74 @@ func run(argv []string) error {
 }
 
 // startCommand is the whole first run: the page for the questions when there are questions to ask,
-// then the stack, then the browser. The launcher keeps serving its page afterwards so the buttons
-// work, whether the start succeeded or not; closing it leaves the containers running.
+// then the stack, then the app. What shows it is decided once, by what the machine can do — the
+// launcher's own window, a browser in application mode, or a tab — and everything after that is the
+// same whichever it turned out to be. Closing it leaves the containers running.
 func startCommand(ctx context.Context, app *App, opts options) error {
+	// A second launch is not a second installation. Two launchers reconciling one compose project,
+	// two windows on one app and two answers on one port are all the same mistake, so the second
+	// hands its link to the first, asks it to come to the front, and stops.
+	if FocusRunning(ctx, app.paths, opts.link) {
+		fmt.Println("Daedalus is already running here; it has been brought to the front.")
+		return nil
+	}
+	if err := app.paths.EnsureDirs(); err != nil {
+		return err
+	}
+	// Links are registered with the desktop on a first start, since a folder with an executable in
+	// it has no installer to do it. Nothing depends on it working.
+	if err := RegisterScheme(app.paths); err != nil {
+		fmt.Fprintln(os.Stderr, "daedalus:// links are not registered with this desktop:", err.Error())
+	}
 	server := NewServer(app, opts.port)
 	if err := server.Start(); err != nil {
 		// A page that cannot listen is not a reason to refuse to start the stack.
 		fmt.Fprintln(os.Stderr, err.Error())
 		server = nil
 	}
-	if server != nil {
-		defer server.Stop(context.Background())
-	}
-	// showing records that the launcher's page is already in front of the operator, so it is not
-	// opened a second time in another tab.
-	showing := false
-	if !app.paths.Configured() || opts.setup {
-		if server == nil {
+	if server == nil {
+		if !app.paths.Configured() || opts.setup {
 			return errors.New("the setup page needs a free port: pass --port")
 		}
-		fmt.Println("Set Daedalus up at", server.URL())
-		_ = OpenBrowser(ctx, server.URL())
-		showing = true
-		if err := server.WaitForSetup(ctx); err != nil {
+		// No page to show and nothing to keep open: the stack is started, the app is opened, and
+		// the terminal is the only place a failure can be read, so it is returned.
+		if err := app.Start(ctx); err != nil {
 			return err
 		}
+		url := app.OpenURL(ctx)
+		fmt.Println("opening", url)
+		_ = OpenBrowser(ctx, url)
+		return nil
 	}
-	if server != nil && !showing && Bundled() {
+	defer server.Stop(context.Background())
+	// The surface is made after the page is listening, because the first thing it shows is that
+	// page: the status, the buttons, and on a first start the questions.
+	surface := OpenSurface(app.paths, server.URL())
+	server.SetWindowed(surface.Windowed())
+	server.OnFocus(surface.Focus)
+	go bringUp(ctx, app, server, surface, opts)
+	surface.Run(ctx)
+	return nil
+}
+
+// bringUp is the work, off the thread the window needs: the questions, the stack, and then the app
+// in whatever is showing it. It reports nothing back — every failure it meets is already on the
+// launcher's page, which is what the operator is looking at.
+func bringUp(ctx context.Context, app *App, server *Server, surface *Surface, opts options) {
+	// showing records that the launcher's page is already in front of the operator, so it is not
+	// opened a second time in another tab. A window is already showing it.
+	showing := surface.Windowed()
+	if !app.paths.Configured() || opts.setup {
+		fmt.Println("Set Daedalus up at", server.URL())
+		if !showing {
+			_ = OpenBrowser(ctx, server.URL())
+			showing = true
+		}
+		if err := server.WaitForSetup(ctx); err != nil {
+			return
+		}
+	}
+	if !showing && Bundled() {
 		// Started from Finder the browser is the only window there is, and a first start pulls
 		// several gigabytes before the app itself answers. The launcher's page is where that
 		// progress is, so it is opened before the work rather than after it.
@@ -165,30 +215,44 @@ func startCommand(ctx context.Context, app *App, opts options) error {
 		showing = true
 	}
 	if err := app.Start(ctx); err != nil {
-		if server == nil {
-			return err
-		}
 		// Double-clicked from Finder there is no terminal to read and no shell to try again in, and
 		// the commonest failure by far — Docker not installed, or installed and not started — is one
 		// the operator fixes in a minute and then wants a button for. App.Start has already recorded
-		// what happened for the page to show, so the launcher opens that page and stays on it.
+		// what happened for the page to show, so the launcher stays on that page.
 		fmt.Fprintln(os.Stderr, err.Error())
 		if !showing {
 			_ = OpenBrowser(ctx, server.URL())
 		}
 		fmt.Printf("The launcher is at %s — it says what went wrong, and starts the stack once that is fixed.\n", server.URL())
-		<-ctx.Done()
-		return nil
+		return
 	}
 	url := app.OpenURL(ctx)
-	fmt.Println("opening", url)
-	_ = OpenBrowser(ctx, url)
-	if server == nil {
-		return nil
+	if opts.link != "" {
+		// Opened by following a link, what the operator asked for is the thing at the end of it,
+		// not the app's front page.
+		url = DeepLinkTarget(opts.link, AppURL(APIPort(app.paths)))
 	}
-	fmt.Printf("The launcher is at %s — leave it running for the buttons, or close it with Ctrl+C: the stack keeps running.\n", server.URL())
-	<-ctx.Done()
-	return nil
+	fmt.Println("opening", url)
+	surface.Show(ctx, url)
+	if !surface.Windowed() {
+		fmt.Printf("The launcher is at %s — leave it running for the buttons, or close it with Ctrl+C: the stack keeps running.\n", server.URL())
+	}
+	watch(ctx, app)
+}
+
+// watch tells the desktop when the installation has something for the operator. A machine with no
+// way to show a notification says so once and is not asked again.
+func watch(ctx context.Context, app *App) {
+	off := false
+	app.Watch(ctx, func(n Notification) {
+		if off {
+			return
+		}
+		if err := Notify(n); err != nil {
+			off = true
+			app.log("desktop notifications are off: %v", err)
+		}
+	})
 }
 
 // setupCommand asks the questions and stops there, for an operator who wants to change a key
@@ -261,6 +325,12 @@ func parseArgs(argv []string) (options, error) {
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return opts, fmt.Errorf("no such flag: %s\n\n%s", arg, usage)
+			}
+			// A link is what the operating system passes when the operator follows one, and it
+			// arrives in the place a command would. It is not a command: it says what to show.
+			if IsDeepLink(arg) {
+				opts.link = arg
+				continue
 			}
 			if opts.command != "" {
 				return opts, fmt.Errorf("one command at a time: %s and %s", opts.command, arg)

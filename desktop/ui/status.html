@@ -11,7 +11,7 @@
 <main class="wrap">
   <header class="head">
     <h1>Daedalus</h1>
-    <p class="sub">Running from <code>{{.Status.Data}}</code>. Closing this launcher leaves the stack running.</p>
+    <p class="sub">Running from <code>{{.Status.Data}}</code>. {{if .Windowed}}Closing this window leaves the stack running — it keeps running in the background and comes back with the machine.{{else}}Closing this launcher leaves the stack running.{{end}}</p>
   </header>
 
   <p class="banner warn" id="alert" hidden></p>

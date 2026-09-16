@@ -4,6 +4,12 @@
 # file is not something a person can double-click, and on macOS Finder opens it in a text editor
 # instead. The macOS archive holds an application bundle, signed and — when the secrets are there —
 # notarized, so that opening it is the ordinary thing it looks like.
+#
+# The builds are on native runners and not cross-compiled from one, because the window is the
+# operating system's own web view and reaching it means cgo. The exception is Linux, which is built
+# with `-tags nowebview` and no cgo at all: a Linux binary linked against WebKitGTK cannot start on
+# a machine without it, so the Linux archives keep the browser fallback and keep running everywhere.
+# That is also why both Linux architectures still come off one runner.
 name: desktop
 
 on:
@@ -15,58 +21,84 @@ permissions:
   contents: write
 
 jobs:
-  binaries:
+  # One test job, on the runner that has nothing to install. Both builds are checked: the one this
+  # repository ships on Linux, and the `nowebview` tag every platform can be built with.
+  test:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - run: go vet ./...
+        working-directory: desktop
+      - run: go test ./...
+        working-directory: desktop
+      - run: go vet -tags nowebview ./...
+        working-directory: desktop
+      - run: go test -tags nowebview ./...
+        working-directory: desktop
+
+  binaries:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon and Intel are built on the machines they run on and joined into one
+          # universal executable by the packaging job.
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+          - runner: macos-13
+            goos: darwin
+            goarch: amd64
+          # The Windows runner has the compiler cgo needs; WebView2 is the user's to have, and the
+          # launcher asks the registry for it before it tries to open a window.
+          - runner: windows-latest
+            goos: windows
+            goarch: amd64
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            tags: nowebview
+            cgo: "0"
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            tags: nowebview
+            cgo: "0"
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
-          # The module has no dependencies, so there is nothing worth caching.
-          cache: false
 
-      - run: go vet ./...
-        working-directory: desktop
-      - run: go test ./...
-        working-directory: desktop
-
-      - name: Cross-compile
+      - name: Build
         working-directory: desktop
         env:
           VERSION: ${{ github.ref_name }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo || '1' }}
+          TAGS: ${{ matrix.tags }}
         run: |
           mkdir -p dist/bin
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
-            goos="${target%/*}"; goarch="${target#*/}"
-            out="dist/bin/daedalus-desktop-$goos-$goarch"
-            case "$goos" in windows) out="$out.exe";; esac
-            echo "building $out"
-            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-              go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$out" .
-          done
-
-      - name: Pack Linux and Windows
-        working-directory: desktop
-        run: |
-          mkdir -p dist/archives stage
-          # The tarball keeps the executable's mode, which is the whole point of shipping one: the
-          # file comes out of it runnable, with nothing to chmod first.
-          for arch in amd64 arm64; do
-            cp "dist/bin/daedalus-desktop-linux-$arch" stage/daedalus-desktop
-            chmod +x stage/daedalus-desktop
-            tar -czf "dist/archives/daedalus-desktop-linux-$arch.tar.gz" -C stage daedalus-desktop
-            rm stage/daedalus-desktop
-          done
-          cp dist/bin/daedalus-desktop-windows-amd64.exe stage/daedalus-desktop.exe
-          (cd stage && zip -q ../dist/archives/daedalus-desktop-windows-amd64.zip daedalus-desktop.exe)
-          rm -rf stage
-          ls -l dist/archives
+          out="dist/bin/daedalus-desktop-$GOOS-$GOARCH"
+          case "$GOOS" in windows) out="$out.exe";; esac
+          echo "building $out"
+          go build -tags "$TAGS" -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$out" .
+          ls -l "$out"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: desktop-dist
-          path: desktop/dist
+          name: desktop-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: desktop/dist/bin
           retention-days: 1
 
   # The bundle is built on macOS because only macOS has lipo, sips, iconutil, codesign and
@@ -80,8 +112,27 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: desktop-dist
-          path: desktop/dist
+          pattern: desktop-*
+          merge-multiple: true
+          path: desktop/dist/bin
+
+      - name: Pack Linux and Windows
+        working-directory: desktop
+        run: |
+          mkdir -p dist/archives stage
+          # The tarball keeps the executable's mode, which is the whole point of shipping one: the
+          # file comes out of it runnable, with nothing to chmod first. An artifact does not keep
+          # that mode, so it is set again here.
+          for arch in amd64 arm64; do
+            cp "dist/bin/daedalus-desktop-linux-$arch" stage/daedalus-desktop
+            chmod +x stage/daedalus-desktop
+            tar -czf "dist/archives/daedalus-desktop-linux-$arch.tar.gz" -C stage daedalus-desktop
+            rm stage/daedalus-desktop
+          done
+          cp dist/bin/daedalus-desktop-windows-amd64.exe stage/daedalus-desktop.exe
+          (cd stage && zip -q ../dist/archives/daedalus-desktop-windows-amd64.zip daedalus-desktop.exe)
+          rm -rf stage
+          ls -l dist/archives
 
       - name: Build, sign and notarize Daedalus.app
         working-directory: desktop
@@ -119,9 +170,10 @@ jobs:
           fi
           cat > dist/notes.md <<NOTES
           Daedalus on your own machine: one folder, Docker, and this launcher. It clones the two
-          repositories, asks for the keys on a page in your browser, starts the stack and opens the app.
-          **Docker Desktop (macOS, Windows) or Docker Engine with the compose plugin (Linux) has to be
-          installed and running** — the launcher never installs it for you.
+          repositories, asks for the keys on a page of its own, starts the stack and opens the app —
+          on macOS and Windows in a window of its own, on Linux in a browser window with nothing
+          around it. **Docker Desktop (macOS, Windows) or Docker Engine with the compose plugin
+          (Linux) has to be installed and running** — the launcher never installs it for you.
 
           ### Install it in one line — macOS and Linux
 
@@ -139,7 +191,7 @@ jobs:
           | macOS (Apple Silicon and Intel) | \`Daedalus-macOS.zip\` | Unzip it into a folder of its own. $mac_open |
           | Linux x86-64 | \`daedalus-desktop-linux-amd64.tar.gz\` | \`tar -xzf\` it into an empty folder and run \`./daedalus-desktop\`. |
           | Linux ARM64 | \`daedalus-desktop-linux-arm64.tar.gz\` | \`tar -xzf\` it into an empty folder and run \`./daedalus-desktop\`. |
-          | Windows x86-64 | \`daedalus-desktop-windows-amd64.zip\` | \`Expand-Archive daedalus-desktop-windows-amd64.zip -DestinationPath Daedalus\` in PowerShell, then run \`daedalus-desktop.exe\`. The executable is unsigned, so SmartScreen warns once: **More info → Run anyway**. |
+          | Windows x86-64 | \`daedalus-desktop-windows-amd64.zip\` | \`Expand-Archive daedalus-desktop-windows-amd64.zip -DestinationPath Daedalus\` in PowerShell, then run \`daedalus-desktop.exe\`. The executable is unsigned, so SmartScreen warns once: **More info → Run anyway**. The window needs the WebView2 runtime, which Windows 11 and any machine with a current Edge already has; without it the launcher opens a browser instead. |
 
           The launcher makes everything else — the checkouts, the keys, the database — inside the folder
           you put it in, so deleting that folder deletes the installation.
