@@ -239,3 +239,32 @@ async def test_the_capabilities_carry_the_restart_banner_and_the_restart_route(t
         assert (await client.post("/api/self/restart")).status_code == 401  # it restarts the installation; not for anyone
         answer = await client.post("/api/self/restart", headers=headers)
     assert answer.status_code == 200 and "restart" in answer.json()["result"]  # no supervisor here: it says so rather than pretending
+
+
+def test_the_launcher_applies_a_change_through_the_supervisors_preflight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """``daedalus self restart`` is what the desktop launcher's Apply runs inside the container.
+
+    The button used to stop the containers and start them again, which comes back on whatever the
+    checkout holds with nothing having checked it; this is the op the preflight is on.
+    """
+    from daedalus import __main__ as cli
+    from daedalus import supervisor_client
+
+    asked: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_call(socket_path: Path, op: str, **params: object) -> str:
+        asked.append((op, params))
+        return "checking the change and restarting"
+
+    monkeypatch.setattr(supervisor_client, "call", fake_call)
+    argv = ["--state-dir", str(tmp_path / "state"), "--workspaces-dir", str(tmp_path / "ws"), "self", "restart", "--reason", "the launcher's Apply"]
+    assert cli.main(argv) == 0
+    assert asked == [("restart", {"reason": "the launcher's Apply"})]
+    assert "checking the change and restarting" in capsys.readouterr().out
+
+    # No supervisor to ask: it says so and fails, so the launcher knows to say what it is falling back to.
+    async def unavailable(socket_path: Path, op: str, **params: object) -> str:
+        raise supervisor_client.SupervisorUnavailable("no socket")
+
+    monkeypatch.setattr(supervisor_client, "call", unavailable)
+    assert cli.main(argv) == 2

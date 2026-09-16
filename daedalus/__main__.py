@@ -5,6 +5,7 @@
 ``daedalus run``    — run one agent session from the terminal (no Telegram).
 ``daedalus doctor`` — check the deployment (config, state, git, providers); ``--fix`` applies safe repairs.
 ``daedalus auth pair`` — mint a one-time link that signs a browser in, for an installation without Telegram.
+``daedalus self restart`` — ask the supervisor to preflight the checkout and restart onto it if it passes.
 """
 
 from __future__ import annotations
@@ -145,6 +146,28 @@ async def cmd_auth(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_self(args: argparse.Namespace) -> int:
+    """Ask the supervisor to apply what the checkout holds — the same op the app's Apply sends.
+
+    The launcher runs this inside the container, because the supervisor's socket is not on the host.
+    A plain stop and start of the containers would come back on whatever the checkout says without
+    anything having checked it; this is the path the preflight is on.
+    """
+    from daedalus import supervisor_client  # Lazy: each subcommand imports only what it runs
+
+    settings = _settings(args)
+    try:
+        result = await supervisor_client.call(settings.supervisor_socket, "restart", reason=args.reason)
+    except supervisor_client.SupervisorUnavailable as exc:
+        print(f"no supervisor to ask ({exc}); this installation applies a change by starting over", file=sys.stderr)
+        return 2
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(result)
+    return 0
+
+
 async def cmd_db(args: argparse.Namespace) -> int:
     from daedalus.stores.database import Database  # Lazy: each subcommand imports only what it runs
 
@@ -185,6 +208,10 @@ def build_parser() -> argparse.ArgumentParser:
     auth = sub.add_parser("auth", help="ways into the app that need no Telegram")
     auth_sub = auth.add_subparsers(dest="auth_command", required=True)
     auth_sub.add_parser("pair", help="mint a one-time pairing link and print it")
+    itself = sub.add_parser("self", help="the agent's own code")
+    itself_sub = itself.add_subparsers(dest="self_command", required=True)
+    restart = itself_sub.add_parser("restart", help="preflight what the checkout holds and restart onto it if it passes")
+    restart.add_argument("--reason", default="operator request")
     database = sub.add_parser("db", help="maintenance of the state database")
     database_sub = database.add_subparsers(dest="db_command", required=True)
     database_sub.add_parser("vacuum", help="rewrite the file, reclaiming free pages and switching it to incremental auto-vacuum")
@@ -239,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         handler_.addFilter(_DiagFilter())
     install_logging_filter(shared())
     _install_task_dump()
-    handler = {"check": cmd_check, "run": cmd_run, "serve": cmd_serve, "doctor": cmd_doctor, "bench": cmd_bench, "auth": cmd_auth, "db": cmd_db}[args.command]
+    handler = {"check": cmd_check, "run": cmd_run, "serve": cmd_serve, "doctor": cmd_doctor, "bench": cmd_bench, "auth": cmd_auth, "db": cmd_db, "self": cmd_self}[args.command]
     return asyncio.run(handler(args))
 
 

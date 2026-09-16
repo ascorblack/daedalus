@@ -160,11 +160,14 @@ desktop version can improve itself too. The agent works in a worktree exactly as
 checks; instead of `SelfPropose` it calls `SelfApply`, which fast-forwards its commits onto the checkout's
 own branch — one readable line of history, no remote, and its `Co-authored-by: Daedalus` trailer intact,
 because nothing here is published. The app then shows **"Changes are ready — restart to apply"** with the
-summary and a **Restart** button; the launcher's status page shows the same, and its Stop and Start do the
-same thing, as does closing the window and opening it again. The restart is not a leap of faith: the
-supervisor checks out that commit into a detached worktree of its own, runs `uv sync` (only if `uv.lock` or
-`pyproject.toml` changed), `compileall`, `daedalus check` and the smoke tests there, and stops the running
-bot only once they pass. A change that fails is taken back out of the checkout and the app says why. A
+summary and a **Restart** button; the launcher's status page shows the same and its **Restart to apply**
+goes the same way. The restart is not a leap of faith: the supervisor checks out that commit into a
+detached worktree of its own, runs `uv sync` (only if `uv.lock` or `pyproject.toml` changed, in either
+repository), `compileall`, `daedalus check` and the smoke tests there — in a virtualenv of its own, so a
+change that is refused has touched nothing the running bot imports — and stops the running bot only once
+they pass. The launcher's plain **Stop** and **Start**, and closing the window and opening it again, are a
+different thing: they bring the stack back up on whatever the checkout holds, with none of that run. They
+are how you start over, not how you apply a change. A change that fails is taken back out of the checkout and the app says why. A
 change that passes the checks but cannot stay up — three starts dying within ten minutes — puts the last
 known-good commit back by itself, and the app says that too; the commit is still in the checkout's
 history, on the branch the agent committed it to. A change to the `Dockerfile` or the system packages is

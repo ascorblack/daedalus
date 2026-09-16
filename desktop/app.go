@@ -130,7 +130,8 @@ func (a *App) start(ctx context.Context) error {
 }
 
 // Stop leaves the containers in place but stopped. The restart policy is unless-stopped, so they
-// stay down until the launcher is asked to start them again.
+// stay down until the launcher is asked to start them again. A Stop followed by a Start applies
+// whatever the checkout holds without preflighting it — Apply is the one that checks first.
 func (a *App) Stop(ctx context.Context) error {
 	if err := a.begin("stop"); err != nil {
 		return err
@@ -154,10 +155,12 @@ func (a *App) stop(ctx context.Context) error {
 	return err
 }
 
-// Apply restarts the stack onto the change the agent committed to the checkout. It is a stop and a
-// start and nothing more: the checkout is what runs, so the containers coming back up is the whole
-// of applying a local change — the same thing that happens when the operator closes the window and
-// opens it again. The supervisor checks the commit on the way and keeps the old code if it fails.
+// Apply restarts the stack onto the change the agent committed to the checkout — through the
+// supervisor, which is what makes it an apply rather than a restart. The supervisor checks the
+// commit on a detached copy of itself first and keeps the running code when the checks do not pass;
+// stopping and starting the containers instead would come back on whatever the checkout says with
+// nothing having looked at it. That path is still here, as the fallback for a stack whose
+// supervisor cannot be reached, and it says what it is giving up.
 func (a *App) Apply(ctx context.Context) error {
 	if err := a.begin("apply"); err != nil {
 		return err
@@ -168,18 +171,32 @@ func (a *App) Apply(ctx context.Context) error {
 }
 
 func (a *App) apply(ctx context.Context) error {
-	a.log("restarting to apply the change")
+	a.log("checking the change and restarting onto it")
+	answer, err := SupervisorRestart(ctx, a.paths, a.Telegram())
+	if err == nil {
+		if answer != "" {
+			a.log("%s", answer)
+		}
+		a.forgetChange()
+		return nil
+	}
+	a.log("the supervisor could not be asked (%s); starting the stack over instead, which applies the change without checking it first", err)
 	if err := a.stop(ctx); err != nil {
 		return err
 	}
 	if err := a.start(ctx); err != nil {
 		return err
 	}
-	// The container has just come up and has a new answer; the cached one is from before the restart.
+	a.forgetChange()
+	return nil
+}
+
+// forgetChange drops the cached answer about the agent's own code: the container has just been
+// restarted, or has just been told to restart, and whatever it said before that is from before.
+func (a *App) forgetChange() {
 	a.mu.Lock()
 	a.changeAt = time.Time{}
 	a.mu.Unlock()
-	return nil
 }
 
 // Update moves both checkouts to what is published, refreshes the images and restarts. The agent's

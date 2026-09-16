@@ -43,7 +43,11 @@ func coreRemote() string {
 	return defaultCoreRemote
 }
 
-// repoPath is the owner/repo of a git remote, whatever form the remote is written in.
+// repoPath is the owner/repo of a git remote, whatever form the remote is written in — and only
+// when the remote is on GitHub. The tarball comes from codeload.github.com, so a remote pointing
+// anywhere else would be answered with a GitHub repository of the same owner and name: a different
+// repository, downloaded and unpacked without a word. Dropping the host here is what makes
+// fetchTarball's error the one the operator sees.
 func repoPath(remote string) string {
 	rest := strings.TrimSuffix(strings.TrimSpace(remote), ".git")
 	if _, after, ok := strings.Cut(rest, "://"); ok {
@@ -56,6 +60,10 @@ func repoPath(remote string) string {
 	}
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) < 3 {
+		return ""
+	}
+	host, _, _ := strings.Cut(parts[0], ":") // a port on the host, which GitHub never has
+	if host != "github.com" && host != "www.github.com" {
 		return ""
 	}
 	return parts[1] + "/" + parts[2]
@@ -97,6 +105,9 @@ func fetchTarball(ctx context.Context, url string) ([]byte, error) {
 // Files already there are overwritten and everything else in dir is left alone, so a checkout keeps
 // its .git, its .env and whatever the agent built in it.
 func unpackTarball(archive []byte, dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 	zipped, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
 		return err
@@ -124,16 +135,24 @@ func unpackTarball(archive []byte, dir string) error {
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := ensureParents(dir, target); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := ensureParents(dir, filepath.Dir(target)); err != nil {
 				return err
 			}
 			mode := os.FileMode(header.Mode).Perm()
 			if mode == 0 {
 				mode = 0o644
+			}
+			// A link where the file goes is not followed: it is taken out and the file written in
+			// its place. Cleaning the entry's own name is only half of keeping an archive inside
+			// the checkout it is unpacked into.
+			if info, err := os.Lstat(target); err == nil && info.Mode()&os.ModeSymlink != 0 {
+				if err := os.Remove(target); err != nil {
+					return err
+				}
 			}
 			file, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 			if err != nil {
@@ -146,16 +165,46 @@ func unpackTarball(archive []byte, dir string) error {
 			if err := file.Close(); err != nil {
 				return err
 			}
-		case tar.TypeSymlink:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			os.Remove(target)
-			if err := os.Symlink(header.Linkname, target); err != nil {
-				return err
-			}
+		default:
+			// A published source tree is files and directories. Everything else an archive may
+			// carry — a symlink, a hard link, a device node — is refused rather than skipped: a
+			// checkout missing a link it expected is a failure worth seeing, and a link is how an
+			// archive nobody checked writes outside the folder it was unpacked into.
+			return fmt.Errorf("archive entry %q is not a file or a directory (type %q); the checkouts are plain source trees", name, string(header.Typeflag))
 		}
 	}
+}
+
+// ensureParents makes the directories from root down to target, one segment at a time, and refuses
+// to walk through a symbolic link. MkdirAll would happily follow one that is already there — put
+// there by the agent, or by an archive unpacked before this check existed — and every file below
+// that segment would then be written outside the checkout.
+func ensureParents(root, target string) error {
+	relative, err := filepath.Rel(root, target)
+	if err != nil {
+		return err
+	}
+	if relative == "." {
+		return nil
+	}
+	current := root
+	for _, segment := range strings.Split(relative, string(os.PathSeparator)) {
+		current = filepath.Join(current, segment)
+		info, err := os.Lstat(current)
+		switch {
+		case os.IsNotExist(err):
+			if err := os.Mkdir(current, 0o755); err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		case info.Mode()&os.ModeSymlink != 0:
+			return fmt.Errorf("%q is a symbolic link; an archive is not unpacked through one", current)
+		case !info.IsDir():
+			return fmt.Errorf("%q is not a directory", current)
+		}
+	}
+	return nil
 }
 
 // safeJoin refuses a name that would land outside dir. An archive is downloaded code and is treated
@@ -224,8 +273,22 @@ func removeTracked(ctx context.Context, p Paths, dir, name string) error {
 		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+		pruneEmpty(dir, filepath.Dir(target))
 	}
 	return nil
+}
+
+// pruneEmpty removes the directories a deleted file leaves behind, up to but never including the
+// checkout root. A directory dropped upstream would otherwise survive every update as an empty
+// shell. A directory that still holds something — an untracked file, a virtualenv — makes Remove
+// fail, which is the signal to stop climbing.
+func pruneEmpty(root, dir string) {
+	for dir != root && strings.HasPrefix(dir, root+string(os.PathSeparator)) {
+		if os.Remove(dir) != nil {
+			return
+		}
+		dir = filepath.Dir(dir)
+	}
 }
 
 type repo struct {

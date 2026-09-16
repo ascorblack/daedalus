@@ -145,3 +145,131 @@ func TestUnpackOverwritesWithoutEmptyingTheCheckout(t *testing.T) {
 		t.Fatalf("the .env did not survive the update: %q", body)
 	}
 }
+
+// A symlink entry is the other half of keeping an archive inside the checkout: the entry's own name
+// is cleaned, but a link laid down first and traversed by a later entry writes wherever it points.
+func TestASymlinkEntryIsRefused(t *testing.T) {
+	var buf bytes.Buffer
+	zipped := gzip.NewWriter(&buf)
+	archive := tar.NewWriter(zipped)
+	if err := archive.WriteHeader(&tar.Header{Name: "daedalus-abc/escape", Typeflag: tar.TypeSymlink, Linkname: "../../victim", Mode: 0o777}); err != nil {
+		t.Fatal(err)
+	}
+	body := "OWNED BY THE ARCHIVE\n"
+	if err := archive.WriteHeader(&tar.Header{Name: "daedalus-abc/escape/authorized_keys", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(body))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archive.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zipped.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	if err := os.MkdirAll(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(dir, "home", "checkout")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := unpackTarball(buf.Bytes(), checkout)
+	if err == nil {
+		t.Fatal("a symlink entry was accepted")
+	}
+	if !strings.Contains(err.Error(), "not a file or a directory") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(victim, "authorized_keys")); !os.IsNotExist(err) {
+		t.Fatal("the archive wrote outside the checkout")
+	}
+}
+
+// And a link already in the checkout is not what a write follows either: the archive may have been
+// unpacked before this was checked, or the agent may have made one.
+func TestAWriteDoesNotFollowALinkAlreadyInTheCheckout(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(dir, "checkout")
+	if err := os.MkdirAll(filepath.Join(checkout, "deploy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "taken"), filepath.Join(checkout, "README.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(checkout, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := unpackTarball(tarGz(t, "daedalus-abc", map[string]string{"README.md": "new"}), checkout); err != nil {
+		t.Fatal(err)
+	}
+	if body, _ := os.ReadFile(filepath.Join(checkout, "README.md")); string(body) != "new" {
+		t.Fatalf("the file was not written in the link's place: %q", body)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "taken")); !os.IsNotExist(err) {
+		t.Fatal("the write followed the link")
+	}
+	// A directory in the path that is a link is refused rather than walked through.
+	err := unpackTarball(tarGz(t, "daedalus-abc", map[string]string{"linked/pwned": "x"}), checkout)
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("a link in the path was walked through: %v", err)
+	}
+}
+
+// The tarball comes from codeload.github.com, so a remote that is not on GitHub must fail rather
+// than fetch the GitHub repository of the same owner and name — a different repository entirely.
+func TestANonGitHubRemoteIsNotFetchedFromGitHub(t *testing.T) {
+	for _, remote := range []string{
+		"https://gitlab.com/someone/daedalus",
+		"git@gitlab.com:someone/daedalus.git",
+		"ssh://git@git.example.invalid/someone/daedalus",
+		"https://github.example.invalid/someone/daedalus",
+	} {
+		if got := tarballURL(remote); got != "" {
+			t.Fatalf("%s: got %q, want no URL at all", remote, got)
+		}
+	}
+	if _, err := fetchTarball(context.Background(), tarballURL("https://gitlab.com/someone/daedalus")); err == nil {
+		t.Fatal("a non-GitHub remote was fetched")
+	}
+}
+
+// A directory dropped upstream must not survive an update as an empty shell.
+func TestRemovingTrackedFilesTakesTheDirectoriesWithThem(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"gone/deep/file.py", "kept/file.py", "kept/untracked.log"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(name))), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"gone/deep/file.py", "kept/file.py"} {
+		target, err := safeJoin(dir, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		pruneEmpty(dir, filepath.Dir(target))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "gone")); !os.IsNotExist(err) {
+		t.Fatal("an empty directory survived the update")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "kept", "untracked.log")); err != nil {
+		t.Fatalf("a directory that still holds something was removed: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("the checkout root was removed: %v", err)
+	}
+}

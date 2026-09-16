@@ -82,6 +82,26 @@ func MintPairing(ctx context.Context, p Paths, telegram bool) (string, error) {
 	return firstPairingURL(out), nil
 }
 
+// SupervisorRestart asks the supervisor to apply what the checkout holds. The socket it listens on
+// is inside the container — it is not published anywhere the host can reach — so the request goes
+// in the way every other one does, through the container's own command line.
+//
+// The supervisor answers as soon as it has taken the request, not when the change is live: the
+// preflight is minutes of work and the bot serves on the old revision throughout it. What comes
+// back is the sentence the app shows.
+func SupervisorRestart(ctx context.Context, p Paths, telegram bool) (string, error) {
+	out, err := composeQuiet(ctx, p, telegram, supervisorRestartArgs()...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// supervisorRestartArgs is the command that carries the request into the container.
+func supervisorRestartArgs() []string {
+	return []string{"exec", "-T", "daedalus", containerPython, "-m", "daedalus", "self", "restart", "--reason", "the launcher's Apply"}
+}
+
 // pairingFromFile reads what stat and cat printed together: the file's modification time as an
 // epoch second on the first line, the link on what follows. A zero `after` means this launcher did
 // not start the stack and has nothing to measure the file against, so the file is taken as it is.

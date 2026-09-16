@@ -102,3 +102,19 @@ func portOf(t *testing.T, raw string) string {
 	}
 	return parsed.Port()
 }
+
+// Apply goes through the supervisor, which preflights the commit and keeps the running code when the
+// checks do not pass. A stop and a start would come back on whatever the checkout holds with nothing
+// having looked at it, which is what the button used to do.
+func TestApplyAsksTheSupervisorRatherThanRestartingTheContainers(t *testing.T) {
+	args := supervisorRestartArgs()
+	want := []string{"exec", "-T", "daedalus", containerPython, "-m", "daedalus", "self", "restart", "--reason", "the launcher's Apply"}
+	if len(args) != len(want) {
+		t.Fatalf("got %v", args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("got %v, want %v", args, want)
+		}
+	}
+}
