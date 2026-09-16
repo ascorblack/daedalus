@@ -11,8 +11,16 @@ if ("serviceWorker" in navigator && window.location.protocol === "https:") {
 }
 
 const root = createRoot(document.getElementById("root")!);
-root.render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+const render = () =>
+  root.render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>,
+  );
+
+// Inside Telegram the first thing the app asks is who the reader is, and that answer is in the
+// initData Telegram's own script provides. Outside it, __tgReady is already settled and the app
+// renders in the same tick.
+const ready = (window as unknown as { __tgReady?: Promise<void> }).__tgReady;
+if (ready) void ready.then(render);
+else render();
