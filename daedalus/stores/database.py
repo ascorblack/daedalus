@@ -443,6 +443,16 @@ MIGRATIONS: list[str] = [
     ALTER TABLE transcript ADD COLUMN view TEXT;
     ALTER TABLE transcript ADD COLUMN view_key TEXT NOT NULL DEFAULT '';
     """,
+    # 24 — the working history is written the way it changes: a round appends its new rows, and
+    # only a rewrite of the sequence (a compaction, a revert, a clear) starts a generation, which
+    # is written whole and replaces the one before it. Every round used to delete and re-insert
+    # the lot. ``key`` is the message identity the append compares against, so it can see whether
+    # what it was handed continues what is stored or replaces it.
+    """
+    ALTER TABLE session_messages ADD COLUMN gen INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE session_messages ADD COLUMN key TEXT NOT NULL DEFAULT '';
+    CREATE INDEX session_messages_by_gen ON session_messages(session_id, gen, seq);
+    """,
 ]
 
 

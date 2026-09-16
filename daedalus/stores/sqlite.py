@@ -102,10 +102,13 @@ class SqliteSessionStore(ISessionStore):
             raise SessionNotFoundError(session_id)
         return _row_to_session(row)
 
+    CURRENT_GEN = "(SELECT coalesce(max(gen), 0) FROM session_messages WHERE session_id = ?)"
+    """The generation a session's working history is currently in; older ones are not read."""
+
     async def append_message(self, session_id: str, tenant_id: str, message: Message) -> None:
         await self._db.execute(
-            "INSERT INTO session_messages(session_id, tenant_id, message) VALUES (?, ?, ?)",
-            (session_id, tenant_id, message.model_dump_json()),
+            f"INSERT INTO session_messages(session_id, tenant_id, gen, key, message) VALUES (?, ?, {self.CURRENT_GEN}, ?, ?)",
+            (session_id, tenant_id, session_id, self.transcript_key(message), message.model_dump_json()),
         )
         await self._db.execute(
             "UPDATE sessions SET last_message_at = ? WHERE id = ?", (_now(), session_id)
@@ -115,9 +118,9 @@ class SqliteSessionStore(ISessionStore):
         self, session_id: str, tenant_id: str, *, limit: int = 100, offset: int = 0
     ) -> Sequence[Message]:
         rows = await self._db.fetchall(
-            "SELECT message FROM session_messages WHERE session_id = ? AND tenant_id = ?"
+            f"SELECT message FROM session_messages WHERE session_id = ? AND tenant_id = ? AND gen = {self.CURRENT_GEN}"
             " ORDER BY seq LIMIT ? OFFSET ?",
-            (session_id, tenant_id, limit, offset),
+            (session_id, tenant_id, session_id, limit, offset),
         )
         return [Message.model_validate_json(r["message"]) for r in rows]
 
@@ -440,12 +443,47 @@ class SqliteSessionStore(ISessionStore):
         return (row["key"], Message.model_validate_json(row["message"])) if row else None
 
     async def replace_messages(self, session_id: str, tenant_id: str, messages: Sequence[Message]) -> None:
-        rows = [(session_id, tenant_id, m.model_dump_json()) for m in messages]
+        """Start a new generation of the working history: the sequence itself changed.
+
+        A compaction, a revert or a clear replaces the history rather than continuing it. The
+        new generation is written whole and the one before it dropped, in one transaction, so a
+        reader never sees a half-written history and never sees two.
+        """
+        row = await self._db.fetchone("SELECT coalesce(max(gen), 0) + 1 next FROM session_messages WHERE session_id = ?", (session_id,))
+        gen = int(row["next"]) if row else 1
+        rows = [(session_id, tenant_id, gen, self.transcript_key(m), m.model_dump_json()) for m in messages]
         async with self._db.transaction() as conn:
-            await conn.execute("DELETE FROM session_messages WHERE session_id = ?", (session_id,))
             await conn.executemany(
-                "INSERT INTO session_messages(session_id, tenant_id, message) VALUES (?, ?, ?)", rows
+                "INSERT INTO session_messages(session_id, tenant_id, gen, key, message) VALUES (?, ?, ?, ?, ?)", rows
             )
+            await conn.execute("DELETE FROM session_messages WHERE session_id = ? AND gen < ?", (session_id, gen))
+
+    async def sync_messages(self, session_id: str, tenant_id: str, messages: Sequence[Message]) -> int:
+        """Bring the stored working history up to what the engine holds; returns rows written.
+
+        Nearly every round adds to the end of the same sequence, so what is already stored is
+        left where it is and only the new messages are appended. When the sequence did not grow
+        but changed — a compaction rewrote it — the whole thing becomes a new generation, which
+        is the only time this table is rewritten.
+        """
+        keys = [self.transcript_key(m) for m in messages]
+        rows = await self._db.fetchall(
+            f"SELECT key FROM session_messages WHERE session_id = ? AND gen = {self.CURRENT_GEN} ORDER BY seq", (session_id, session_id)
+        )
+        stored = [str(r["key"]) for r in rows]
+        if stored != keys[: len(stored)]:
+            await self.replace_messages(session_id, tenant_id, messages)
+            return len(messages)
+        fresh = list(messages)[len(stored) :]
+        if not fresh:
+            return 0
+        gen_row = await self._db.fetchone("SELECT coalesce(max(gen), 0) gen FROM session_messages WHERE session_id = ?", (session_id,))
+        gen = int(gen_row["gen"]) if gen_row else 0
+        await self._db.executemany(
+            "INSERT INTO session_messages(session_id, tenant_id, gen, key, message) VALUES (?, ?, ?, ?, ?)",
+            [(session_id, tenant_id, gen, self.transcript_key(m), m.model_dump_json()) for m in fresh],
+        )
+        return len(fresh)
 
 
 def _row_to_session(row: Any) -> Session:

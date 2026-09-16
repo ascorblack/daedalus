@@ -1421,7 +1421,9 @@ class SessionManager:
                                 live[li] = annotated
                                 break
             await self.sessions.append_transcript(session_id, history, from_history=True)
-            await self.sessions.replace_messages(session_id, TENANT, history)
+            # A round adds to the end of the history it was given; only a rewrite of the
+            # sequence starts a generation, and that is not what a round does.
+            await self.sessions.sync_messages(session_id, TENANT, history)
 
     async def _start_run(
         self, state: SessionState, message: Message | None, *, continue_turn: bool = False
