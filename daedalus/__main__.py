@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -140,6 +141,22 @@ async def cmd_auth(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_db(args: argparse.Namespace) -> int:
+    from daedalus.stores.database import Database  # Lazy: each subcommand imports only what it runs
+
+    settings = _settings(args)
+    db = Database(settings.db_path)
+    await db.open()
+    try:
+        started = time.monotonic()
+        before, after = await db.vacuum()
+    finally:
+        await db.close()
+    print(f"{before / 1e6:.1f} MB -> {after / 1e6:.1f} MB in {time.monotonic() - started:.1f}s")
+    print("The file is now on incremental auto-vacuum; freed pages are given back as the bot runs.")
+    return 0
+
+
 async def cmd_serve(args: argparse.Namespace) -> int:
     from daedalus.app import serve  # Lazy: each subcommand imports only what it runs
 
@@ -164,6 +181,9 @@ def build_parser() -> argparse.ArgumentParser:
     auth = sub.add_parser("auth", help="ways into the app that need no Telegram")
     auth_sub = auth.add_subparsers(dest="auth_command", required=True)
     auth_sub.add_parser("pair", help="mint a one-time pairing link and print it")
+    database = sub.add_parser("db", help="maintenance of the state database")
+    database_sub = database.add_subparsers(dest="db_command", required=True)
+    database_sub.add_parser("vacuum", help="rewrite the file, reclaiming free pages and switching it to incremental auto-vacuum")
     bench = sub.add_parser("bench", help="run a task manifest headless and record pass/turns/tokens/cost per task")
     bench.add_argument("manifest", help="JSON manifest: {name, tasks: [{id, prompt, setup, check, files, timeout_minutes, tags}], tools_off}")
     bench.add_argument("--preset", default=None, help="model preset id for every task (default: the configured default)")
@@ -215,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
         handler_.addFilter(_DiagFilter())
     install_logging_filter(shared())
     _install_task_dump()
-    handler = {"check": cmd_check, "run": cmd_run, "serve": cmd_serve, "doctor": cmd_doctor, "bench": cmd_bench, "auth": cmd_auth}[args.command]
+    handler = {"check": cmd_check, "run": cmd_run, "serve": cmd_serve, "doctor": cmd_doctor, "bench": cmd_bench, "auth": cmd_auth, "db": cmd_db}[args.command]
     return asyncio.run(handler(args))
 
 

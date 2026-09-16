@@ -53,6 +53,7 @@ class Scheduler:
         self._active: dict[str, str] = {}  # schedule id -> session id while a run is active
         self._active_runs: dict[str, str] = {}  # schedule id -> run id, so a session's other runs are not mistaken for the task's
         self._delivering: dict[str, list[int]] = {}  # session id -> lazy note ids folded into a message not yet started
+        self._maintained_at: datetime | None = None  # last database housekeeping pass
 
     @property
     def root(self) -> Path:
@@ -274,6 +275,26 @@ class Scheduler:
         inbox = self._inbox()
         if inbox is not None:
             await inbox.prune(self.app.config.scheduler.inbox_keep_days)
+        await self._maintain_database(now)
+
+    async def _maintain_database(self, now: datetime) -> None:
+        """The database's own housekeeping, on the tick that already runs: sweep old events, reclaim pages.
+
+        Per-run trimming bounds a run and nothing bounded the table; and with auto_vacuum
+        incremental, freed pages are handed back only when something asks for them.
+        """
+        ops = self.app.config.ops
+        due = self._maintained_at is None or now - self._maintained_at >= timedelta(minutes=ops.db_maintenance_minutes)
+        if not due or self.app.manager is None:
+            return
+        self._maintained_at = now
+        try:
+            dropped = await self.app.manager.events.prune(keep_days=ops.events_keep_days, max_rows=ops.events_max_rows)
+            pages = await self.app.db.reclaim()
+            if dropped or pages:
+                logger.warning("database maintenance: %d event rows dropped, %d pages reclaimed", dropped, pages)
+        except Exception:  # noqa: BLE001 — housekeeping must never take the tick down
+            logger.exception("database maintenance failed")
 
     async def _record_start_failure(self, schedule: dict[str, Any], error: str) -> None:
         """A run that could not even start counts as a failure and is reported; the slot was consumed."""

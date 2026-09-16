@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from collections.abc import AsyncIterator, Sequence
@@ -576,6 +577,19 @@ class SqliteEventStream(IEventStream):
     their own table (latest wins) rather than appended to the log.
     """
 
+    LIVE_ONLY = ("content_block_delta", "tool_use_input_delta")
+    """Streaming fragments: a subscriber that is watching wants them, and nothing else ever does.
+
+    They were the larger part of the event log — one autocommit transaction per token, kept
+    for the fifteen minutes until the run ended and the log was trimmed — and the text they
+    carry is in the transcript by the time the message stops. They are fanned out and dropped.
+    """
+
+    BY_REFERENCE = {"tool_surface_advertised": "tools"}
+    """Events whose payload repeats the same large value run after run: the value is kept once
+    under its digest and the row names the digest. The whole tool surface is thirty kilobytes
+    and identical across hundreds of runs."""
+
     def __init__(self, db: Database) -> None:
         self._db = db
         self._subscribers: dict[str, list[asyncio.Queue[Event | None]]] = {}
@@ -584,8 +598,23 @@ class SqliteEventStream(IEventStream):
     def bind_run(self, run_id: str, session_id: str) -> None:
         self._session_of_run[run_id] = session_id
 
+    async def _payload_by_reference(self, event: Event) -> dict[str, Any]:
+        """The payload as it is stored: a repeated large member replaced by its digest."""
+        field = self.BY_REFERENCE.get(event.name)
+        value = event.payload.get(field) if field else None
+        if field is None or value is None:
+            return event.payload
+        body = json.dumps(value, default=str, sort_keys=True)
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+        await self._db.execute("INSERT OR IGNORE INTO kv(key, value) VALUES (?, ?)", (f"event_blob:{digest}", body))
+        return {**event.payload, field: {"digest": digest, "count": len(value) if isinstance(value, (list, dict)) else 1}}
+
     async def emit(self, event: Event) -> None:
         tenant_id = str(event.payload.get("tenant_id") or "default")
+        if event.name in self.LIVE_ONLY:
+            for queue in list(self._subscribers.get(event.run_id, [])):
+                queue.put_nowait(event)
+            return
         if event.name == "state_snapshot":
             snapshot = event.payload.get("snapshot") or {}
             await self._db.execute(
@@ -610,7 +639,7 @@ class SqliteEventStream(IEventStream):
                 event.run_id,
                 tenant_id,
                 event.name,
-                json.dumps(event.payload, default=str),
+                json.dumps(await self._payload_by_reference(event), default=str),
                 event.created_at.isoformat(),
             ),
         )
@@ -649,6 +678,27 @@ class SqliteEventStream(IEventStream):
             " (SELECT seq FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT ?)",
             (run_id, run_id, max_len),
         )
+
+    async def prune(self, *, keep_days: int, max_rows: int) -> int:
+        """Drop the event log of runs that are over and old; returns how many rows went.
+
+        ``trim`` bounds a run, and every finished run sits at its cap — but runs accumulate
+        for as long as the installation does, so the log has no ceiling without this. The
+        transcript is the record; events are what the live view was fed.
+        """
+        cutoff = (datetime.now(UTC) - timedelta(days=keep_days)).isoformat()
+        before = await self._db.fetchone("SELECT count(*) c FROM events")
+        await self._db.execute("DELETE FROM events WHERE created_at < ?", (cutoff,))
+        await self._db.execute(
+            "DELETE FROM events WHERE seq NOT IN (SELECT seq FROM events ORDER BY seq DESC LIMIT ?)", (max_rows,)
+        )
+        # A kept blob is the tool surface of some run; one that no surviving row names is gone with it.
+        await self._db.execute(
+            "DELETE FROM kv WHERE key LIKE 'event_blob:%'"
+            " AND NOT EXISTS (SELECT 1 FROM events WHERE payload LIKE '%' || substr(kv.key, 12) || '%')"
+        )
+        after = await self._db.fetchone("SELECT count(*) c FROM events")
+        return int(before["c"] or 0) - int(after["c"] or 0) if before and after else 0
 
     def close_run(self, run_id: str) -> None:
         for queue in self._subscribers.get(run_id, []):

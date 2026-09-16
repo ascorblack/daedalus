@@ -456,6 +456,17 @@ MIGRATIONS: list[str] = [
 ]
 
 
+CACHE_PAGES = -65536
+"""Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
+open walks straight through."""
+WAL_AUTOCHECKPOINT_PAGES = 2000
+"""Write-ahead log pages before a checkpoint folds them back into the file (~8 MiB). Under one
+long-lived connection the default lets the log grow into the tens of megabytes."""
+VACUUM_PAGES = 1000
+"""Free pages handed back to the filesystem per maintenance pass (~4 MiB), so reclaiming a
+large freelist is spread over passes rather than holding the lock for all of it at once."""
+
+
 class Database:
     """A single shared aiosqlite connection guarded by a lock."""
 
@@ -472,7 +483,43 @@ class Database:
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
+        # Takes effect for a database created here; an existing one keeps whatever it was made
+        # with until a full VACUUM rewrites it (``daedalus db vacuum``).
+        await self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+        await self._conn.execute(f"PRAGMA cache_size={CACHE_PAGES}")
+        await self._conn.execute("PRAGMA temp_store=MEMORY")
+        await self._conn.execute(f"PRAGMA wal_autocheckpoint={WAL_AUTOCHECKPOINT_PAGES}")
         await self._migrate()
+
+    async def reclaim(self) -> int:
+        """Hand a bounded number of free pages back to the filesystem; returns how many.
+
+        Deleted rows leave their pages on the freelist, and nothing gives them back on its own.
+        A database that was created before incremental auto-vacuum was asked for cannot do this
+        at all — it says so, and ``daedalus db vacuum`` is what converts it.
+        """
+        row = await self.fetchone("PRAGMA auto_vacuum")
+        if row is None or int(row[0]) != 2:
+            return 0
+        before = await self.fetchone("PRAGMA freelist_count")
+        if before is None or not int(before[0]):
+            return 0
+        await self.execute(f"PRAGMA incremental_vacuum({VACUUM_PAGES})")
+        after = await self.fetchone("PRAGMA freelist_count")
+        return int(before[0]) - int(after[0]) if after is not None else 0
+
+    async def vacuum(self) -> tuple[int, int]:
+        """Rewrite the whole file, converting it to incremental auto-vacuum; returns (before, after) bytes.
+
+        This is the one-off that a database made before the setting needs, and the only way to
+        give back a freelist that has already grown large. It holds the connection for the
+        whole rewrite, which on a several-hundred-megabyte file is measured in seconds.
+        """
+        before = self.path.stat().st_size
+        await self.execute("PRAGMA auto_vacuum=INCREMENTAL")
+        await self.execute("VACUUM")
+        await self.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return before, self.path.stat().st_size
 
     async def close(self) -> None:
         if self._conn is not None:

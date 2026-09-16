@@ -624,6 +624,13 @@ class OpsConfig(BaseModel):
     delivery_keep_days: int = Field(default=7, ge=1)
     events_keep_per_run: int = Field(default=300, ge=10)
     """Core events kept per finished run (the transcript is the record; events feed the live view)."""
+    events_keep_days: int = Field(default=7, ge=1)
+    """Age past which a finished run's events are dropped. Per-run trimming bounds a run, not the table:
+    runs accumulate for as long as the installation does."""
+    events_max_rows: int = Field(default=100_000, ge=1000)
+    """Hard ceiling on the event log, whatever the age sweep left."""
+    db_maintenance_minutes: int = Field(default=60, ge=5)
+    """How often the event sweep and the incremental vacuum run."""
     doctor_min_free_gb: float = Field(default=1.0, ge=0)
     doctor_workspaces_warn_gb: float = Field(default=20.0, ge=0)
     doctor_stale_snapshot_hours: int = Field(default=24, ge=1)
