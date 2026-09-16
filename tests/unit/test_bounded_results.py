@@ -37,14 +37,39 @@ def test_a_tool_called_outside_a_session_falls_back_to_the_configured_default() 
     assert len(ok(ctx, "x" * 200_000).content) < 61_000
 
 
-def test_an_error_is_not_clipped_by_the_result_builder(tmp_path: Path) -> None:
-    # An error says what went wrong and is short by construction; clipping it
-    # would cut the explanation, which is the whole of its value.
+def test_an_error_is_clipped_on_the_same_terms_as_a_success(tmp_path: Path) -> None:
+    # A failure is not automatically small — a build that dies after ten
+    # thousand lines of output is a tool result the model carries like any
+    # other, so it is under the same budget.
     locator.register(SessionServices(session_id="err", workspace_dir=tmp_path, max_tool_output_chars=2_000))
+    ctx = _ctx("err")
     try:
-        assert len(error(_ctx("err"), "y" * 5_000).content) == 5_000
+        result = error(ctx, "head" + "y" * 50_000 + "tail", note="kept")
+        assert result.is_error and len(result.content) < 2_100
+        # Head and tail both survive: the line that names a failure is as often
+        # the last one as the first.
+        assert result.content.startswith("head") and result.content.endswith("tail")
+        assert "characters omitted" in result.content
+        assert result.metadata == {"note": "kept"}
+        assert error(ctx, "short").content == "short"
     finally:
         locator.unregister("err")
+
+
+async def test_a_failing_command_still_names_its_spill_file(tmp_path: Path) -> None:
+    # The framed error paths clip their body with the frame reserve, so the
+    # second clip in error() never lands on the line saying where the rest went.
+    from daedalus.tools.shell import exec_command
+
+    locator.register(SessionServices(session_id="fail", workspace_dir=tmp_path, max_tool_output_chars=2_000))
+    ctx = ToolContext(tenant_id="t", run_id="r", session_id="fail", metadata={"tool_call_id": "call-fail"})
+    try:
+        result = await exec_command().invoke(ctx, {"command": "for i in $(seq 1 3000); do echo line-$i; done; exit 3"})
+        spill = tmp_path / ".exec" / "call-fail.log"
+        assert result.is_error and result.metadata["exit_code"] == 3
+        assert str(spill) in result.content and len(result.content) <= 2_000
+    finally:
+        locator.unregister("fail")
 
 
 async def test_read_refuses_a_binary_file(tmp_path: Path) -> None:

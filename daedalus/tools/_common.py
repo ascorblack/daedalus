@@ -61,8 +61,19 @@ def ok(context: ToolContext, content: str, **metadata: object) -> ToolResult:
 
 
 def error(context: ToolContext, content: str, **metadata: object) -> ToolResult:
+    """A failed result, under the same budget as a successful one.
+
+    A failure is not automatically small: a build that dies after ten thousand
+    lines of compiler output, a Verify miss carrying the whole test log, an Edit
+    whose near-miss window is long. The model has to carry it in the transcript
+    either way, so it is clipped on the same terms — head and tail, because the
+    line that names the failure is as often the last one as the first.
+    """
     return ToolResult(
-        tool_call_id=call_id(context), content=content, is_error=True, metadata=dict(metadata)
+        tool_call_id=call_id(context),
+        content=clip(content, output_limit(context), note="one call returns at most this much"),
+        is_error=True,
+        metadata=dict(metadata),
     )
 
 
