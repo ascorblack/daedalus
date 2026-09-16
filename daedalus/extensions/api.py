@@ -74,6 +74,11 @@ SESSION_COOKIE = "daedalus_session"
 SESSION_TTL = 30 * 24 * 3600
 VOICE_AUDIO_MAX = 25 << 20
 """One spoken utterance, not a recording session: anything larger is a mistake, not speech."""
+VOICE_SAY_MAX_CHARS = 4000
+"""One utterance in words. Dictation runs long, a pasted document is not speech: past this it is refused."""
+VOICE_TTS_MAX_CHARS = 2000
+"""One sentence to read aloud. The page only ever sends what ``split_sentences`` cut, and the speech
+endpoint is usually metered by the character, so an unbounded body is somebody else's bill."""
 
 
 def validate_login_widget(data: dict[str, Any], bot_token: str, *, max_age: int = LOGIN_WIDGET_MAX_AGE) -> dict[str, Any]:
@@ -1207,6 +1212,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/voice/say")
     async def voice_say(body: VoiceSayBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """One utterance the browser already turned into words."""
+        if len(body.text) > VOICE_SAY_MAX_CHARS:
+            raise HTTPException(413, f"an utterance may be up to {VOICE_SAY_MAX_CHARS} characters")
         try:
             run_id = await voice().say(body.text)
         except ValueError as exc:
@@ -1224,20 +1231,19 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         suffix = Path(audio.filename or "").suffix or mimetypes.guess_extension((audio.content_type or "").split(";")[0]) or ".webm"
         target = settings.state_dir / "tmp" / f"utterance-{secrets.token_hex(4)}{suffix}"
         target.parent.mkdir(parents=True, exist_ok=True)
-        size = 0
-        with target.open("wb") as fh:
-            while chunk := await audio.read(1 << 20):
-                size += len(chunk)
-                if size > VOICE_AUDIO_MAX:
-                    fh.close()
-                    target.unlink(missing_ok=True)
-                    raise HTTPException(413, f"an utterance may be up to {VOICE_AUDIO_MAX >> 20} MB")
-                fh.write(chunk)
         try:
+            size = 0
+            with target.open("wb") as fh:
+                while chunk := await audio.read(1 << 20):
+                    size += len(chunk)
+                    if size > VOICE_AUDIO_MAX:
+                        raise HTTPException(413, f"an utterance may be up to {VOICE_AUDIO_MAX >> 20} MB")
+                    fh.write(chunk)
             transcript = await transcribe(target, effective_asr(app.config.asr, manager))
         except TranscriptionError as exc:
             raise HTTPException(502, str(exc)) from exc
         finally:
+            # A client that aborts mid-upload leaves a part file behind unless the write is in here too.
             target.unlink(missing_ok=True)
         try:
             run_id = await extension.say(transcript)
@@ -1261,6 +1267,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def voice_tts(body: VoiceSpeakBody, _: dict[str, Any] = Depends(auth)) -> StreamingResponse:
         """One sentence read aloud by the configured endpoint; 404 tells the page to use the browser's own voice."""
         extension = voice()
+        if len(body.text) > VOICE_TTS_MAX_CHARS:
+            raise HTTPException(413, f"a sentence may be up to {VOICE_TTS_MAX_CHARS} characters")
         if not tts_configured(app.config.voice.tts):
             raise HTTPException(404, "no speech endpoint is configured; the browser speaks this one itself")
         if not body.text.strip():

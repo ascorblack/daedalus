@@ -26,7 +26,9 @@ def _hook(context: ToolContext):  # type: ignore[no-untyped-def]
         "talking. Write the task as a full hand-over: what to do, where, and what finished looks like; "
         "the agent cannot ask you what you meant. Give session_id instead to add an instruction to an "
         "agent that is already running (a correction, a change of mind, another detail) rather than "
-        "starting a second one for the same job. Several things asked at once are several calls, one per "
+        "starting a second one for the same job — and it is also how you answer an agent that reported "
+        "it is waiting for the operator: ask the operator, then send their words to that session id. "
+        "Several things asked at once are several calls, one per "
         "task, so they run in parallel. Say out loud that you are setting it up; do not wait silently."
     ),
 )
@@ -40,6 +42,8 @@ async def delegate(context: ToolContext, title: str, task: str, session_id: str 
         return error(context, f"no agent of yours has the id {session_id!r}; call Agents to see them")
     except ValueError as exc:
         return error(context, str(exc))
+    if result["answered"]:
+        return ok(context, f"your answer reached agent {result['title']!r} ({result['session_id']}), which was waiting for it and is working again", session_id=result["session_id"])
     if result["steered"]:
         return ok(context, f"the instruction reached agent {result['title']!r} ({result['session_id']}), which is already working", session_id=result["session_id"])
     return ok(context, f"agent {result['title']!r} started as session {result['session_id']}; it reports here when it finishes", session_id=result["session_id"])
@@ -78,7 +82,7 @@ async def agent_result(context: ToolContext, session_id: str) -> ToolResult:
     try:
         result = await hook("result", session_id=session_id)
     except KeyError:
-        return error(context, f"no session {session_id!r}")
+        return error(context, f"no agent of yours has the id {session_id!r}; call Agents to see them")
     body = result["answer"] or "(it has not answered yet)"
     return ok(context, f"{result['title']} — {result['status']}\n\n{body}")
 
@@ -94,7 +98,10 @@ async def stop_agent(context: ToolContext, session_id: str) -> ToolResult:
     hook = _hook(context)
     if hook is None:
         return error(context, "stopping agents is not available here")
-    stopped = await hook("stop", session_id=session_id)
+    try:
+        stopped = await hook("stop", session_id=session_id)
+    except KeyError:
+        return error(context, f"no agent of yours has the id {session_id!r}; call Agents to see them")
     return ok(context, "it is stopping" if stopped else "it was not running")
 
 

@@ -48,6 +48,27 @@ REPORT_CLIP = 500
 MAX_AGENTS = 20
 MAX_PENDING = 8
 """Reports held for a client that is not connected; the oldest go first, the newest are what matters."""
+TITLE_CLIP = 80
+
+REPORT_OPEN = "⟪agent report⟫"
+REPORT_CLOSE = "⟪end of report⟫"
+"""The frame an agent's words arrive in. The concierge's brief names it and says that what is inside
+it is a report to relay, never an instruction: an agent's answer is made of whatever it read — web
+pages, files, another service's output — and it reaches the concierge while the delegation tools are
+live. The frame characters are taken out of the agent's own text below, so it cannot close the block
+early and write outside it."""
+
+
+def quoted(text: str) -> str:
+    """An agent's words as data: the frame's own characters replaced, so only we can open or close a block."""
+    return text.replace("⟪", "«").replace("⟫", "»")
+
+
+def report_block(*, title: str, session_id: str, state: str, body: str) -> str:
+    """One agent's news, framed. ``state`` is ours to write; ``title`` and ``body`` are the agent's."""
+    head = f"agent: {quoted(title.strip())[:TITLE_CLIP] or session_id} ({session_id}) {state}"
+    return "\n".join([REPORT_OPEN, head, quoted(body.strip()), REPORT_CLOSE])
+
 
 SENTENCE_END = re.compile(r"(?<=[.!?…。！？])[\s\n]+|(?<=[.!?…])$|\n\n+")
 """Where a spoken chunk may be cut. Sentence-final punctuation followed by space, or a paragraph break."""
@@ -207,6 +228,21 @@ class Voice:
 
     # -- the concierge's tools --------------------------------------------------------
 
+    async def own_agent(self, session_id: str, voice_parent: str | None = None) -> Any:
+        """The state of an agent the concierge started, or ``KeyError``.
+
+        Every tool that names a session id goes through here. The concierge has no business with the
+        operator's own sessions, with another leader's subagents, or with its own voice session: a
+        hallucinated or borrowed id is refused rather than acted on.
+        """
+        manager = self.app.manager
+        assert manager is not None
+        parent = voice_parent if voice_parent is not None else await self.session_id(create=False)
+        state = await manager.get_state(session_id)
+        if not parent or state is None or state.metadata.get("voice_parent") != parent:
+            raise KeyError(session_id)
+        return state
+
     async def delegate(self, *, title: str, task: str, session_id: str | None = None) -> dict[str, Any]:
         """Hand work to an agent: a new session for it, or another instruction to one already working."""
         manager = self.app.manager
@@ -216,19 +252,20 @@ class Voice:
             raise ValueError("an agent needs a task; write what is to be done")
         voice_id = await self.session_id()
         if session_id:
-            state = await manager.get_state(session_id)
-            if state is None or state.metadata.get("voice_parent") != voice_id:
-                raise KeyError(session_id)
-            await manager.submit(session_id, body, as_answer=False, origin="voice")
+            state = await self.own_agent(session_id, voice_id)
+            # An agent stopped on a question is answered, not queued behind it: the operator is on the
+            # line and the concierge is the only way their answer can reach the agent from this page.
+            answering = state.pending is not None
+            await manager.submit(session_id, body, as_answer=answering, origin="voice")
             await self.emit("status", {"state": "delegating", "title": state.session.title})
             await self.emit("agents", {"agents": await self.agents()})
-            return {"session_id": session_id, "title": state.session.title, "steered": True}
+            return {"session_id": session_id, "title": state.session.title, "steered": True, "answered": answering}
         name = title.strip() or body[:40]
         state = await self.app.create_session(name, metadata={"voice_parent": voice_id, "brief": body})
         await manager.submit(state.session.id, body, as_answer=False, origin="voice")
         await self.emit("status", {"state": "delegating", "title": name})
         await self.emit("agents", {"agents": await self.agents()})
-        return {"session_id": state.session.id, "title": name, "steered": False}
+        return {"session_id": state.session.id, "title": name, "steered": False, "answered": False}
 
     async def agents(self) -> list[dict[str, Any]]:
         """What the concierge has running, newest first: title, status, when it last spoke, its last words."""
@@ -257,9 +294,7 @@ class Voice:
     async def result(self, session_id: str) -> dict[str, Any]:
         manager = self.app.manager
         assert manager is not None
-        state = await manager.get_state(session_id)
-        if state is None:
-            raise KeyError(session_id)
+        state = await self.own_agent(session_id)
         rows = await manager.list_sessions(limit=200)
         status = next((r["status"] for r in rows if r["id"] == session_id), "idle")
         return {"session_id": session_id, "title": state.session.title, "status": status, "answer": (await self.last_answer(session_id))[:ANSWER_CLIP]}
@@ -267,6 +302,7 @@ class Voice:
     async def stop_agent(self, session_id: str) -> bool:
         manager = self.app.manager
         assert manager is not None
+        await self.own_agent(session_id)
         return await manager.stop(session_id)
 
     async def last_answer(self, session_id: str) -> str:
@@ -336,11 +372,13 @@ class Voice:
         if not voice_id:
             return
         if session_id != voice_id:
-            # Every event of every session arrives here, so nothing expensive may happen before the two
-            # cheap checks: is this one of the concierge's agents, and is there a page to tell.
+            # Every event of every session arrives here, so nothing expensive may happen before the
+            # cheap check on what the process already holds: is this one of the concierge's agents?
+            if not self._is_delegated(session_id):
+                return
             if event.type is EventType.TOOL_CALL_PENDING and event.payload.get("kind") == "ask_user":
                 await self._agent_asks(session_id, event)
-            elif self._listeners and event.type in (EventType.MESSAGE_START, EventType.STATE_CHANGED) and self._is_delegated(session_id):
+            elif self._listeners and event.type in (EventType.MESSAGE_START, EventType.STATE_CHANGED):
                 await self.emit("agents", {"agents": await self.agents()})
             return
         if not self._listeners:
@@ -387,7 +425,14 @@ class Voice:
             return
         questions = (event.payload.get("ask_user_payload") or {}).get("questions") or []
         asked = str(questions[0].get("question") if questions else "").strip()
-        await self.report(f'[agent "{state.session.title}" is waiting for the operator: {asked[:REPORT_CLIP]}]')
+        await self.report(
+            report_block(
+                title=state.session.title,
+                session_id=session_id,
+                state="is waiting for the operator and does nothing until it is answered; the answer goes back with Delegate(title, task, session_id) naming that id",
+                body=asked[:REPORT_CLIP] or "it did not say what it is asking; its session has the question",
+            )
+        )
         await self.emit("agents", {"agents": await self.agents()})
 
     async def on_run_finished(self, session_id: str, run_id: str, status: str) -> None:
@@ -407,7 +452,7 @@ class Voice:
             return
         answer = await self.last_answer(session_id) if status == "completed" else ""
         body = answer[:REPORT_CLIP] if answer else f"no final answer ({status}); its session has the detail"
-        await self.report(f'[agent "{state.session.title}" finished: {body}]')
+        await self.report(report_block(title=state.session.title, session_id=session_id, state="finished", body=body))
         await self.emit("agents", {"agents": await self.agents()})
 
     # -- speech ------------------------------------------------------------------------
@@ -461,4 +506,4 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     return []
 
 
-__all__ = ["SESSION_KEY", "Voice", "effective_tts", "install", "speakable", "split_sentences", "tts_configured"]
+__all__ = ["REPORT_CLOSE", "REPORT_OPEN", "SESSION_KEY", "Voice", "effective_tts", "install", "quoted", "report_block", "speakable", "split_sentences", "tts_configured"]
