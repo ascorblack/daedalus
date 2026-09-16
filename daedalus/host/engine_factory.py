@@ -137,11 +137,12 @@ def build_engine(
     extra_notes: str = "",
     blocked_tools: set[str] | None = None,
     mode: ModeConfig | None = None,
+    voice: bool = False,
 ) -> QueryEngine:
     primary_provider, primary_model = rungs[0]
     model = model_name or primary_model
     all_tools = {t.name for t in deps.tool_registry.list_all()}
-    sections = (
+    sections = prompts.concierge_sections(answer_language=config.answer_language, agents=extra_notes) if voice else (
         prompts.PERSONA,
         prompts.rules_section(config.prompt.rules),
         prompts.language_section(config.answer_language),

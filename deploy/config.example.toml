@@ -121,3 +121,21 @@ general_topic_id = 0
 status_edit_interval_seconds = 1.0
 inbound_merge_window_seconds = 1.5
 verbosity = 1
+
+# The voice page: the operator speaks to a small fast model (the concierge) which answers itself
+# when it can and hands real work to agent sessions. Pick a model that replies in a second or two;
+# a thinking model makes the conversation wait. Speech in comes from the browser's own recognition,
+# with the [asr] endpoint as the fallback for browsers that have none.
+[voice]
+enabled = true
+preset = "openrouter.qwen-qwen3.7-flash"
+
+# Reading the answer out loud. Empty url and provider = the browser's own synthesiser.
+# Any OpenAI-compatible /audio/speech endpoint works: a hosted one, or a local server.
+[voice.tts]
+provider = ""            # a provider id from [providers]; its base URL and key are used
+url = ""                 # or an endpoint of its own, e.g. "http://speech:8880/v1"
+api_key = ""
+model = "gpt-4o-mini-tts"
+voice = "alloy"
+format = "mp3"           # mp3 | opus | pcm
