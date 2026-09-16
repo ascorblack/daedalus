@@ -43,7 +43,7 @@ from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import tts_configured
-from daedalus.host import prompts
+from daedalus.host import capabilities, prompts
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import TENANT, Attachment
 from daedalus.providers.openai_compat import UsageRecord
@@ -655,6 +655,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     manager = app.manager
     assert manager is not None
     settings = app.settings
+    # The manager resolved this on the way up; resolving it again here costs nothing and keeps the
+    # routes buildable around a stand-in manager (the auth tests build the app without one).
+    caps = getattr(manager, "capabilities", None) or capabilities.resolve(settings, app.config)
     secret_cache: dict[str, bytes] = {}
     secret_lock = asyncio.Lock()
 
@@ -2159,6 +2162,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "heartbeat": heartbeat.status() if heartbeat is not None else None,  # type: ignore[attr-defined]
         }
 
+    @api.get("/api/capabilities")
+    async def capability_report(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """What this installation can do and why — the app hides what is not there instead of offering it."""
+        return caps.as_dict()
+
     # -- doctor -------------------------------------------------------------------------
 
     def _doctor_context(fix: bool) -> DoctorContext:
@@ -2245,13 +2253,22 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     # -- proposals ------------------------------------------------------------------
 
+    def selfdev_on() -> None:
+        """The proposals API answers only where changes are proposed at all.
+
+        With the mode off the answer is 404, not an empty list: an empty list reads like "no changes
+        yet" and the app would keep a navigation entry for a screen that can never fill.
+        """
+        if caps.selfdev.mode == "off":
+            raise HTTPException(404, "self-development is off in this installation")
+
     @api.get("/api/proposals")
-    async def proposals(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+    async def proposals(_: dict[str, Any] = Depends(auth), __: None = Depends(selfdev_on)) -> list[dict[str, Any]]:
         rows = await app.db.fetchall("SELECT * FROM change_proposals ORDER BY created_at DESC LIMIT 100")
         return [dict(r) for r in rows]
 
     @api.get("/api/proposals/{proposal_id}/diff")
-    async def proposal_diff(proposal_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+    async def proposal_diff(proposal_id: str, _: dict[str, Any] = Depends(auth), __: None = Depends(selfdev_on)) -> dict[str, Any]:
         row = await app.db.fetchone("SELECT * FROM change_proposals WHERE id = ?", (proposal_id,))
         if row is None:
             raise HTTPException(404, "no such proposal")
@@ -2266,7 +2283,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return {"id": proposal_id, "diff": diff[:400_000]}
 
     @api.post("/api/proposals/{proposal_id}/decide")
-    async def decide(proposal_id: str, body: DecisionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+    async def decide(proposal_id: str, body: DecisionBody, _: dict[str, Any] = Depends(auth), __: None = Depends(selfdev_on)) -> dict[str, Any]:
         selfdev = app.extensions.get("selfdev")
         if selfdev is None:
             raise HTTPException(503, "self-development is not installed")

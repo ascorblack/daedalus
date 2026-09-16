@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from daedalus.config import RuntimeConfig, Settings
+from daedalus.host import capabilities
 from daedalus.providers.pricing import pricing_table
 from daedalus.providers.registry import _is_vendor_host
 from daedalus.security.redact import redact as redact_text
@@ -58,7 +59,7 @@ class DoctorContext:
 
 async def run_checks(ctx: DoctorContext) -> list[Check]:
     checks: list[Check] = []
-    for probe in (_config, _telegram, _state, _git_probe, _supervisor, _runtime, _providers, _github_org):
+    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _runtime, _providers, _github_org):
         try:
             checks.extend(await probe(ctx))
         except Exception as exc:  # noqa: BLE001 — one broken probe must not hide the others
@@ -255,6 +256,33 @@ def _git_cmd(repo: Path, *args: str) -> tuple[int, str]:
         return 1, str(exc)
 
 
+def _selfdev_mode(ctx: DoctorContext) -> str:
+    """The resolved mode: the running manager's answer, or the same resolution done again."""
+    manager_caps = getattr(ctx.manager, "capabilities", None) if ctx.manager is not None else None
+    if manager_caps is not None:
+        return str(manager_caps.selfdev.mode)
+    return capabilities.resolve_selfdev(ctx.settings, ctx.config).mode
+
+
+async def _selfdev(ctx: DoctorContext) -> list[Check]:
+    """Which self-development mode this installation runs in, and whether it can honour it."""
+    manager_caps = getattr(ctx.manager, "capabilities", None) if ctx.manager is not None else None
+    selfdev = manager_caps.selfdev if manager_caps is not None else capabilities.resolve_selfdev(ctx.settings, ctx.config)
+    how = "resolved from what is installed" if selfdev.configured == "auto" else f"set to {selfdev.configured!r} in the configuration"
+    out = [Check("self-development", True, f"{selfdev.mode} ({how})", "ok")]
+    if selfdev.missing:
+        out.append(
+            Check(
+                "self-development prerequisites",
+                False,
+                f"mode {selfdev.mode} is set but {', '.join(selfdev.missing)} is missing",
+                "warn",
+                f"provide what is missing, or set [self_change] mode to \"auto\" and let the resolution pick the mode this installation can honour ({'; '.join(selfdev.reasons[1:])})",
+            )
+        )
+    return out
+
+
 async def _github_org(ctx: DoctorContext) -> list[Check]:
     """Whether the agent's own organisation is reachable and its token may create repositories there."""
     org = ctx.settings.daedalus_github_org.strip()
@@ -278,6 +306,9 @@ async def _github_org(ctx: DoctorContext) -> list[Check]:
 
 async def _git_probe(ctx: DoctorContext) -> list[Check]:
     out: list[Check] = []
+    mode = _selfdev_mode(ctx)
+    if mode == "off":
+        return []  # nothing here changes its own code: the state of the checkouts is not a health question
     if shutil.which("git") is None:
         return [Check("git", False, "git is not installed in this environment", "warn", "install git; the supervisor rebuild and the self-development tools need it")]
     for label, repo in (("bot repo", ctx.settings.bot_repo_dir), ("core repo", ctx.settings.core_repo_dir)):
@@ -290,6 +321,8 @@ async def _git_probe(ctx: DoctorContext) -> list[Check]:
         msg = f"{head} on {branch}" + (f", {len(dirty.splitlines())} uncommitted change(s)" if dirty else ", clean")
         ok = code == 0 and not dirty
         out.append(Check(label, ok, msg, "ok" if ok else "warn", "commit or discard local changes: a rebuild resets the checkout to origin/main"))
+        if mode != "server":
+            continue  # local mode has no remote to push to, so there is no push right to prove
         # Reading a public repository proves nothing about the token; only the server's answer to a push does.
         push_code, push_out = await asyncio.to_thread(_git_cmd, repo, "push", "--dry-run", "origin", "HEAD:refs/heads/doctor-permission-probe")
         can_push = push_code == 0 and "denied" not in push_out.lower()
@@ -300,6 +333,8 @@ async def _git_probe(ctx: DoctorContext) -> list[Check]:
 
 async def _supervisor(ctx: DoctorContext) -> list[Check]:
     sock = ctx.settings.supervisor_socket
+    if _selfdev_mode(ctx) == "off":
+        return []  # without self-development there is nothing for the supervisor to rebuild or roll back
     if not sock.exists():
         return [Check("supervisor", False, f"socket {sock} not present (development mode: no rebuild/rollback)", "warn", "run under the supervisor for self-updates")]
     selfdev = ctx.extensions.get("selfdev")
