@@ -144,7 +144,7 @@ The PR text passes a public-text gate (nothing about your machine leaks into a p
 | Files & shell | `Exec` (with an optional bubblewrap sandbox; `background=true` with `JobOutput` / `JobKill` / `JobList` for what outlives the call; a long `sleep` or a polling loop in the foreground is refused — reports and finished jobs arrive as messages), `Read`, `Write`, `Edit`, `Find`, `Search` |
 | Web | `WebFetch`, `WebSearch` — SearXNG by default; Serper, Tavily, Exa, Perplexity, Keenable through the key proxy |
 | Seeing | `ImageView` — a separate vision model answers questions about an image, so the main context never carries pixels |
-| Delegation | `SubAgent`, `SubAgentSend`, `SubAgentList`, `SpawnAgent`, `AskPeer` — helpers in the same workspace (a report wakes the leader when it is ready; an idle helper can be raised without a task), sibling sessions, named peers |
+| Delegation | `SubAgent`, `SubAgentSend`, `SubAgentList`, `SpawnAgent`, `AskPeer` — helpers in the same workspace (a report wakes the leader when it is ready; an idle helper can be raised without a task; `tools_off` takes tools away from a helper, so a launch it must not make is impossible rather than discouraged), sibling sessions, named peers |
 | Time | `ScheduleCreate`, `LoopNext`, `IntentCreate` — cron, self-paced loops, standing intents on inbound events |
 | Hosting | `ServiceStart` / `ServiceStop` / `ServiceLogs` — processes that outlive the turn, on ports you can reach and share |
 | Memory | `Remember`, `Recall`, `Forget`, `HistorySearch`, `HistoryExpand` |
