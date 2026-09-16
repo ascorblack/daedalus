@@ -291,3 +291,37 @@ async def test_verify_large_output_streams_digest_and_caps_head(settings: Settin
     head_cap = max(OUTPUT_HEAD_CHARS, state.services.max_tool_output_chars) * 4
     assert f"output {size} B, first {min(size, head_cap)} B kept" in result.content
     await manager.close()
+
+
+async def test_one_walk_answers_both_the_size_cap_and_the_excludes(tmp_path: Path, monkeypatch) -> None:
+    """The snapshot path walked the workspace three times before every turn; it walks it once."""
+    import os as os_module
+
+    from daedalus.host.checkpoints import Checkpoints, scan_workspace
+
+    workspace = tmp_path / "ws"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "a.txt").write_text("x" * 100, encoding="utf-8")
+    (workspace / "node_modules").mkdir()
+    (workspace / "node_modules" / "big.bin").write_text("y" * 5000, encoding="utf-8")
+    clone = workspace / "vendor" / "clone"
+    (clone / ".git").mkdir(parents=True)
+    (clone / "file.txt").write_text("z" * 4000, encoding="utf-8")
+
+    scan = scan_workspace(workspace)
+    assert scan.nested == ("vendor/clone",)
+    assert scan.size == 100  # the derived directory and the nested repository are both out
+
+    walks = 0
+    real_walk = os_module.walk
+
+    def counting(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal walks
+        walks += 1
+        return real_walk(*args, **kwargs)
+
+    monkeypatch.setattr(os_module, "walk", counting)
+    sha = await Checkpoints(workspace).snapshot("before", scan=scan_workspace(workspace))
+    assert sha and walks == 1
+    excludes = (workspace / ".checkpoints" / "info" / "exclude").read_text(encoding="utf-8")
+    assert "/vendor/clone/" in excludes and "node_modules/" in excludes

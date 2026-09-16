@@ -42,7 +42,7 @@ from protocore.tools.memory import build_memory_tools
 
 from daedalus.config import VOICE_ONLY_TOOLS, VOICE_TOOLS, RuntimeConfig, Settings
 from daedalus.host import prompts
-from daedalus.host.checkpoints import CheckpointError, Checkpoints, workspace_size
+from daedalus.host.checkpoints import CheckpointError, Checkpoints, scan_workspace
 from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
 from daedalus.host.hooks import DaedalusHookManager
 from daedalus.host.policy import Decision, Policy, Rule, canonical
@@ -814,13 +814,15 @@ class SessionManager:
         """Snapshot the workspace (bounded by ``ops.checkpoint_max_gb``); returns the commit id or None."""
         limit = self.config.ops.checkpoint_max_gb
         try:
-            if limit and await asyncio.to_thread(workspace_size, state.workspace) > limit * 1e9:
+            # One walk answers both the size cap and the excludes; it used to be three.
+            scan = await asyncio.to_thread(scan_workspace, state.workspace)
+            if limit and scan.size > limit * 1e9:
                 if not state.checkpoint_capped:
                     state.checkpoint_capped = True
                     logger.warning("session %s: workspace exceeds ops.checkpoint_max_gb=%s; no snapshots, revert restores the history only", state.session.id, limit)
                 return None
             state.checkpoint_capped = False
-            sha = await Checkpoints(state.workspace).snapshot(f"{kind} seq={seq} run={run_id}")
+            sha = await Checkpoints(state.workspace).snapshot(f"{kind} seq={seq} run={run_id}", scan=scan)
         except (CheckpointError, OSError) as exc:
             logger.warning("checkpoint failed for %s: %s", state.session.id, exc)
             return None

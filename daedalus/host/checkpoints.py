@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -48,12 +49,12 @@ class Checkpoints:
             raise CheckpointError(f"git {' '.join(args[:2])} failed: {err.decode('utf-8', 'replace').strip()[:300]}")
         return out.decode("utf-8", "replace")
 
-    async def ensure(self) -> None:
+    async def ensure(self, scan: WorkspaceScan | None = None) -> None:
         if not (self.git_dir / "HEAD").exists():
             self.workspace.mkdir(parents=True, exist_ok=True)
             await self._git("init", "-q")
             await self.relocate()
-        await self._write_excludes()
+        await self._write_excludes(scan)
 
     async def relocate(self) -> None:
         """Forget the work-tree path ``git init`` recorded, so a copied ``.checkpoints`` never points back at its origin."""
@@ -62,9 +63,12 @@ class Checkpoints:
         except CheckpointError:
             pass
 
-    async def _write_excludes(self) -> list[str]:
-        """Exclude derived directories and every nested git repository (a snapshot cannot hold those)."""
-        nested = await asyncio.to_thread(nested_repos, self.workspace)
+    async def _write_excludes(self, scan: WorkspaceScan | None = None) -> list[str]:
+        """Exclude derived directories and every nested git repository (a snapshot cannot hold those).
+
+        ``scan`` is the walk the caller has already done; without one this walks again.
+        """
+        nested = list((scan or await asyncio.to_thread(scan_workspace, self.workspace)).nested)
         exclude = self.git_dir / "info" / "exclude"
         exclude.parent.mkdir(parents=True, exist_ok=True)
         lines = [*EXCLUDES, *(f"/{path}/" for path in nested)]
@@ -73,9 +77,13 @@ class Checkpoints:
             exclude.write_text(text, encoding="utf-8")
         return nested
 
-    async def snapshot(self, label: str) -> str:
-        """Commit the current state of the workspace; returns the commit id."""
-        await self.ensure()
+    async def snapshot(self, label: str, *, scan: WorkspaceScan | None = None) -> str:
+        """Commit the current state of the workspace; returns the commit id.
+
+        ``scan`` is the walk the caller has already done for the size cap: the excludes come
+        out of the same pass rather than out of a second one.
+        """
+        await self.ensure(scan)
         await self._git("add", "-A", "--", ".")
         await self._git("commit", "-q", "--allow-empty", "-m", label[:200])
         return (await self._git("rev-parse", "HEAD")).strip()
@@ -107,33 +115,42 @@ class Checkpoints:
             return None
 
 
-def nested_repos(path: Path) -> list[str]:
-    """Relative paths of git repositories inside the workspace (clones, worktrees), a bounded walk."""
+@dataclass(frozen=True)
+class WorkspaceScan:
+    """What one walk of a workspace establishes: what a snapshot must exclude, and how big it would be."""
+
+    nested: tuple[str, ...]
+    size: int
+
+
+def scan_workspace(path: Path) -> WorkspaceScan:
+    """Walk the workspace once for both answers.
+
+    The snapshot path needed three of these walks before every turn — one to find the nested
+    repositories, one to size the tree (which found them again), one to write the excludes
+    (which found them a third time) — and on a workspace of a hundred thousand files that was
+    most of a second of every turn. The walk is not cached between turns on purpose: the
+    excludes are consumed by ``git add -A`` immediately afterwards, and a repository the agent
+    cloned during the turn must not be added to the snapshot because an older answer said it
+    was not there.
+    """
     found: list[str] = []
+    total = 0
     base_depth = len(path.parts)
     for root, dirs, files in os.walk(path):
         depth = len(Path(root).parts) - base_depth
-        if ".git" in dirs or ".git" in files:
-            if depth > 0:
-                found.append(Path(root).relative_to(path).as_posix())
-                dirs[:] = []
-                continue
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and d != ".git"] if depth < NESTED_SCAN_DEPTH else []
-    return sorted(found)
-
-
-def workspace_size(path: Path) -> int:
-    """Bytes a snapshot would have to hold: derived directories and nested repositories are skipped."""
-    total = 0
-    nested = {os.path.join(path, p) for p in nested_repos(path)}
-    for root, dirs, files in os.walk(path):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and os.path.join(root, d) not in nested]
+        if depth > 0 and depth <= NESTED_SCAN_DEPTH and (".git" in dirs or ".git" in files):
+            # A nested repository is neither snapshotted nor counted: git will not take it.
+            found.append(Path(root).relative_to(path).as_posix())
+            dirs[:] = []
+            continue
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for name in files:
             try:
                 total += os.lstat(os.path.join(root, name)).st_size
             except OSError:
                 pass
-    return total
+    return WorkspaceScan(nested=tuple(sorted(found)), size=total)
 
 
-__all__ = ["DIR_NAME", "CheckpointError", "Checkpoints", "nested_repos", "workspace_size"]
+__all__ = ["DIR_NAME", "CheckpointError", "Checkpoints", "WorkspaceScan", "scan_workspace"]
