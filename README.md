@@ -285,6 +285,7 @@ uv run python -m daedalus check                  # configuration and tool regist
 uv run python -m daedalus run -p "say hello"     # one session in the terminal
 uv run python -m daedalus serve                  # the bot
 uv run python -m daedalus auth pair              # a one-time link that signs a browser in
+uv run python -m daedalus db vacuum              # reclaim the database file after a schema upgrade
 uv run pytest -q                                 # tests
 (cd miniapp && npm install && npm run build)     # the app, served by the bot from miniapp/dist
 ```

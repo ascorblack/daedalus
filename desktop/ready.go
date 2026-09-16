@@ -17,6 +17,13 @@ const readyTimeout = 3 * time.Minute
 // a named Docker volume, so the file is read through the container rather than from the host.
 const pairingFile = "/srv/state/pairing-url"
 
+// containerPython is the interpreter inside the agent image. The image ships a virtualenv built at
+// build time and starts the bot straight from it (`DAEDALUS_BOT_CMD` in deploy/Dockerfile), so a
+// command the launcher runs in the container is run the same way. Going through `uv run` would ask
+// uv to reconcile that environment against the lock file on every call — a network round trip, and
+// an installed second copy of the two checkouts the image deliberately mounts instead.
+const containerPython = "/srv/venv/bin/python"
+
 // AppURL is the address of the app on this machine.
 func AppURL(port string) string { return "http://127.0.0.1:" + port + "/app/" }
 
@@ -68,7 +75,7 @@ func PairingURL(ctx context.Context, p Paths, telegram bool, after time.Time) st
 // harvested logs would be teaching the operator that a log file is a place to find a credential.
 func MintPairing(ctx context.Context, p Paths, telegram bool) (string, error) {
 	out, err := composeQuiet(ctx, p, telegram, "exec", "-T", "daedalus",
-		"uv", "run", "--frozen", "python", "-m", "daedalus", "auth", "pair")
+		containerPython, "-m", "daedalus", "auth", "pair")
 	if err != nil {
 		return "", err
 	}

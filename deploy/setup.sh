@@ -87,7 +87,7 @@ if [ ${#PROFILE[@]} -gt 0 ]; then
 else
   say "Open the app with the pairing link the bot wrote at startup (or mint a fresh one):"
   say "  docker exec deploy-daedalus-1 cat /srv/state/pairing-url"
-  say "  docker exec deploy-daedalus-1 uv run --frozen python -m daedalus auth pair"
+  say "  docker exec deploy-daedalus-1 /srv/venv/bin/python -m daedalus auth pair"
   say "A fresh link: docker compose -f deploy/compose.yaml exec daedalus python -m daedalus auth pair"
   say "Add a passkey in Settings → Security once you are in, and the link is never needed again."
   say "The app opens on \"Add a model\": pick a provider, pick a model from its own list, save. Until one exists, nothing can run."

@@ -95,7 +95,7 @@ passkey yet) the server writes a one-time **pairing link** to the state volume a
 ```bash
 docker exec deploy-daedalus-1 cat /srv/state/pairing-url
 # a new one at any time:
-docker exec deploy-daedalus-1 uv run --frozen python -m daedalus auth pair
+docker exec deploy-daedalus-1 /srv/venv/bin/python -m daedalus auth pair
 ```
 
 Give that link to the operator (it works once, for 30 minutes). Opening it signs the browser in. Then tell
@@ -119,7 +119,7 @@ This is the operator's decision, not yours: do not pick a model for them. If the
 which one and what it may cost first. You can confirm the state from the shell at any time:
 
 ```bash
-docker exec deploy-daedalus-1 uv run --frozen python -m daedalus check   # "model: none — …" until one is added
+docker exec deploy-daedalus-1 /srv/venv/bin/python -m daedalus check   # "model: none — …" until one is added
 ```
 
 ## 4. HTTPS (when there is a domain)
@@ -178,6 +178,18 @@ pulls `main`, preflights and restarts (rolling back on failure). To update by ha
 ~/daedalus pull`, `git -C ~/protocore-exp pull`, then `docker compose … up -d --build`. In `server`
 mode never edit files inside the `daedalus` checkout on the server: the supervisor resets it to
 `origin/main` on every rebuild.
+
+An update that carries a schema change migrates the database in place on the next start; nothing is
+asked of you. The one thing a migration cannot do is give back the space the old shape occupied — a
+file made before the incremental auto-vacuum setting keeps its freelist. Once, after such an update,
+on an installation whose database has grown:
+
+```bash
+docker exec deploy-daedalus-1 /srv/venv/bin/python -m daedalus db vacuum
+```
+
+It rewrites the file, hands the free pages back, and puts it on incremental auto-vacuum so the bot's
+own maintenance pass can do it from then on. The bot may be running.
 
 ## 8. What to report back
 

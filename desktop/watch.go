@@ -30,7 +30,7 @@ const tokenScript = "import json, sqlite3;" +
 // so once.
 func APIToken(ctx context.Context, p Paths, telegram bool) string {
 	out, err := composeQuiet(ctx, p, telegram, "exec", "-T", "daedalus",
-		"uv", "run", "--frozen", "python", "-c", tokenScript)
+		containerPython, "-c", tokenScript)
 	if err != nil {
 		return ""
 	}
