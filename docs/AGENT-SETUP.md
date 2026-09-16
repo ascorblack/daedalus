@@ -144,13 +144,24 @@ Two shapes; both keep every feature:
 | resolved | needs | what the agent gets |
 |---|---|---|
 | `server` | `GITHUB_TOKEN`, an `origin` on both checkouts the token may push to, and the `rebuilder` service (or the supervisor socket) | `SelfWorkspace`, `SelfPropose`, `SelfRebuild`, `SelfRollback`, the proposals API and the Changes screen |
-| `local` | writable git checkouts of `daedalus` and `protocore-exp` | `SelfWorkspace` only: it edits the checkout, and the change applies on a restart |
+| `local` | writable git checkouts of `daedalus` and `protocore-exp` | `SelfWorkspace` and `SelfApply`: it edits a worktree and commits into the checkout, and the change applies on a restart |
 | `off` | — | nothing: no tools, no `/api/proposals`, no Changes screen, no self-development text in the prompt |
 
 Set the mode explicitly to overrule the resolution — `mode = "off"` on an installation the operator
 does not want changing itself. `daedalus doctor` (and `GET /api/capabilities`) names the mode, the
 reasons behind it, and anything a mode you chose yourself is missing. A change takes effect on the
 next restart.
+
+In `local` mode — the desktop default — there is no pull request to approve: the agent commits into the
+checkout the installation runs from, and the app shows *"Changes are ready — restart to apply"* with a
+Restart button (`POST /api/self/restart`). The supervisor preflights that commit on a detached worktree of
+itself before it stops anything, keeps the running version if the checks fail, and puts the last
+known-good commit back on its own if the new one starts and dies three times inside ten minutes. Tell the
+operator that restarting the app is how a change goes live, and that closing and reopening it does the
+same. A change to `deploy/Dockerfile` or `deploy/apt-packages.txt` needs a new image, which a restart
+cannot deliver: the app says so and the fix is `docker compose … up -d --build` (or
+`daedalus-desktop update`). The virtualenv is on the `daedalus-venv` volume so it survives a replaced
+container; it is re-synced only when `uv.lock` or `pyproject.toml` changed.
 
 In `server` mode the agent updates itself through pull requests the operator approves; the supervisor
 pulls `main`, preflights and restarts (rolling back on failure). To update by hand: `git -C

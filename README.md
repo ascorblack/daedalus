@@ -155,7 +155,27 @@ The PR text passes a public-text gate (nothing about your machine leaks into a p
 | `local` | the agent edits the checkout this installation runs from; there is no fork and no PR, and the change applies after a restart | a writable git checkout of the host and the core |
 | `off` | the agent does not change its own code | — |
 
-What follows the mode: the `Self*` tools (absent in `off`, `SelfWorkspace` alone in `local`), the self-development extension, `/api/proposals`, the Changes screen in the app, the self-development part of the system prompt, and the doctor's GitHub checks. `GET /api/capabilities` and `daedalus doctor` both say which mode is running and why. Setting the mode explicitly overrides the resolution; the doctor then warns about whatever the chosen mode is missing. A change of mode takes effect on the next restart.
+**Local mode, step by step.** This is what a desktop install does, and it is the owner's rule that the
+desktop version can improve itself too. The agent works in a worktree exactly as above and runs the same
+checks; instead of `SelfPropose` it calls `SelfApply`, which fast-forwards its commits onto the checkout's
+own branch — one readable line of history, no remote, and its `Co-authored-by: Daedalus` trailer intact,
+because nothing here is published. The app then shows **"Changes are ready — restart to apply"** with the
+summary and a **Restart** button; the launcher's status page shows the same, and its Stop and Start do the
+same thing, as does closing the window and opening it again. The restart is not a leap of faith: the
+supervisor checks out that commit into a detached worktree of its own, runs `uv sync` (only if `uv.lock` or
+`pyproject.toml` changed), `compileall`, `daedalus check` and the smoke tests there, and stops the running
+bot only once they pass. A change that fails is taken back out of the checkout and the app says why. A
+change that passes the checks but cannot stay up — three starts dying within ten minutes — puts the last
+known-good commit back by itself, and the app says that too; the commit is still in the checkout's
+history, on the branch the agent committed it to. A change to the `Dockerfile` or the system packages is
+applied as far as a restart can take it and says plainly that the rest needs a new image.
+
+The same gates decide in both modes: a changed host module needs a passing `Verify` receipt that covers
+the bytes in the branch, an `execution_path` that names the code running it, and a summary that says what
+a large change replaces. What local mode drops is the review — there is no reviewer and nothing is
+published — so the restart is where you see the change, and the rollback is what catches what you did not.
+
+What follows the mode: the `Self*` tools (absent in `off`, `SelfWorkspace` and `SelfApply` in `local`, the pull-request four in `server`), the self-development extension, `/api/proposals`, `POST /api/self/restart`, the Changes screen and the restart banner in the app, the self-development part of the system prompt, and the doctor's GitHub checks. `GET /api/capabilities` and `daedalus doctor` both say which mode is running and why. Setting the mode explicitly overrides the resolution; the doctor then warns about whatever the chosen mode is missing. A change of mode takes effect on the next restart.
 
 ## The toolbox
 
@@ -169,7 +189,7 @@ What follows the mode: the `Self*` tools (absent in `off`, `SelfWorkspace` alone
 | Hosting | `ServiceStart` / `ServiceStop` / `ServiceLogs` — processes that outlive the turn, on ports you can reach and share |
 | Memory | `Remember`, `Recall`, `Forget`, `HistorySearch`, `HistoryExpand` |
 | Quality | `Verify` — a check with a criterion, recorded as a receipt; `LearningReport` |
-| Self | `SelfWorkspace`, `SelfPropose`, `SelfRebuild`, `SelfRollback` — registered according to `[self_change] mode`; on an installation that does not change its own code there are none |
+| Self | `SelfWorkspace` plus either `SelfApply` (local: commit into the running checkout, restart to apply) or `SelfPropose`, `SelfRebuild`, `SelfRollback` (server: pull request, rebuild, roll back) — registered according to `[self_change] mode`; on an installation that does not change its own code there are none |
 | Planning | `BoardAdd` / `BoardUpdate` / `BoardList` / `BoardGet` — the agent's own board (shared with its subagents; tasks you post to nobody in particular are on every board), with acceptance criteria, checklists, dependencies and a per-agent work-in-progress limit; `PLAN.md` in the workspace is its rendering |
 | Extensions | `Skill` (33 bundled skills: design systems, web QA, writing, scheduling, comparable variants, figures, search discipline…), `Mcp*` with OAuth, `SendFile` (attached under the answer in the app too), `StaySilent` |
 
