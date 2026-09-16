@@ -15,25 +15,48 @@ import { peek, useOffline, useQuery } from "./store";
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
 // chunk once it has been used, so a screen visited before opens offline too.
-const SessionsScreen = lazy(() => import("./screens/Sessions").then((m) => ({ default: m.SessionsScreen })));
-const InboxScreen = lazy(() => import("./screens/Inbox").then((m) => ({ default: m.InboxScreen })));
-const BoardScreen = lazy(() => import("./screens/Board").then((m) => ({ default: m.BoardScreen })));
-const SessionScreen = lazy(() => import("./screens/Session").then((m) => ({ default: m.SessionScreen })));
-const VoiceScreen = lazy(() => import("./screens/Voice").then((m) => ({ default: m.VoiceScreen })));
-const ProposalsScreen = lazy(() => import("./screens/Proposals").then((m) => ({ default: m.ProposalsScreen })));
-const SchedulesScreen = lazy(() => import("./screens/Schedules").then((m) => ({ default: m.SchedulesScreen })));
-const UsageScreen = lazy(() => import("./screens/Usage").then((m) => ({ default: m.UsageScreen })));
-const SettingsScreen = lazy(() => import("./screens/Settings").then((m) => ({ default: m.SettingsScreen })));
-const HealthScreen = lazy(() => import("./screens/Settings").then((m) => ({ default: m.HealthScreen })));
-const MemoryScreen = lazy(() => import("./screens/Memory").then((m) => ({ default: m.MemoryScreen })));
-const ServicesScreen = lazy(() => import("./screens/Services").then((m) => ({ default: m.ServicesScreen })));
-const LoginScreen = lazy(() => import("./screens/Login").then((m) => ({ default: m.LoginScreen })));
-const OnboardingScreen = lazy(() => import("./screens/AddModel").then((m) => ({ default: m.OnboardingScreen })));
+//
+// `lazy` remembers the promise it was given, rejection included, so a chunk that failed to arrive
+// once never arrives at all: re-rendering the screen replays the same rejection and only a reload
+// recovers. The target here is a phone on a flaky link, where a failed chunk is a normal event and
+// not a broken build, so the loader is retried a couple of times before the boundary sees it.
+function screen<T>(load: () => Promise<T>): () => Promise<T> {
+  return async () => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await load();
+      } catch (e) {
+        if (attempt >= 2) throw e;
+        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      }
+    }
+  };
+}
+
+/** A chunk that is not where the page thinks it is: the build moved under an open page. */
+function isChunkError(message: string): boolean {
+  return /dynamically imported|Importing a module script failed|error loading dynamically imported/i.test(message);
+}
+
+const SessionsScreen = lazy(screen(() => import("./screens/Sessions").then((m) => ({ default: m.SessionsScreen }))));
+const InboxScreen = lazy(screen(() => import("./screens/Inbox").then((m) => ({ default: m.InboxScreen }))));
+const BoardScreen = lazy(screen(() => import("./screens/Board").then((m) => ({ default: m.BoardScreen }))));
+const SessionScreen = lazy(screen(() => import("./screens/Session").then((m) => ({ default: m.SessionScreen }))));
+const VoiceScreen = lazy(screen(() => import("./screens/Voice").then((m) => ({ default: m.VoiceScreen }))));
+const ProposalsScreen = lazy(screen(() => import("./screens/Proposals").then((m) => ({ default: m.ProposalsScreen }))));
+const SchedulesScreen = lazy(screen(() => import("./screens/Schedules").then((m) => ({ default: m.SchedulesScreen }))));
+const UsageScreen = lazy(screen(() => import("./screens/Usage").then((m) => ({ default: m.UsageScreen }))));
+const SettingsScreen = lazy(screen(() => import("./screens/Settings").then((m) => ({ default: m.SettingsScreen }))));
+const HealthScreen = lazy(screen(() => import("./screens/Settings").then((m) => ({ default: m.HealthScreen }))));
+const MemoryScreen = lazy(screen(() => import("./screens/Memory").then((m) => ({ default: m.MemoryScreen }))));
+const ServicesScreen = lazy(screen(() => import("./screens/Services").then((m) => ({ default: m.ServicesScreen }))));
+const LoginScreen = lazy(screen(() => import("./screens/Login").then((m) => ({ default: m.LoginScreen }))));
+const OnboardingScreen = lazy(screen(() => import("./screens/AddModel").then((m) => ({ default: m.OnboardingScreen }))));
 
 /** The conversation is what the operator opens next, whatever screen they landed on: fetch it while the browser is idle. */
 function prefetchSession(): void {
   const idle = (window as { requestIdleCallback?: (cb: () => void) => void }).requestIdleCallback;
-  const pull = () => void import("./screens/Session");
+  const pull = () => void import("./screens/Session").catch(() => undefined);  // a prefetch that fails is not an error: the screen retries when it is opened
   if (idle) idle(pull);
   else window.setTimeout(pull, 2000);
 }
@@ -45,12 +68,16 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
   render() {
     if (this.state.error) {
+      // A chunk that will not load after three tries is not a transient link: the page is running a
+      // build whose files are no longer on the server. Clearing the error would replay the same
+      // failure — what recovers it is fetching the page again.
+      const stale = isChunkError(this.state.error.message);
       return (
         <div className="empty">
-          <b>Something broke in this screen</b>
-          <div>{this.state.error.message}</div>
-          <button className="btn" onClick={() => this.setState({ error: null })}>
-            Try again
+          <b>{stale ? "This screen belongs to an older version of the app" : "Something broke in this screen"}</b>
+          <div>{stale ? "The app was updated while this page was open." : this.state.error.message}</div>
+          <button className="btn" onClick={() => (stale ? location.reload() : this.setState({ error: null }))}>
+            {stale ? "Reload the app" : "Try again"}
           </button>
         </div>
       );

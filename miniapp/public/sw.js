@@ -1,13 +1,22 @@
 // Daedalus app shell: hashed assets and icons are cached on first use, the shell itself
 // is served network-first with the cache as the offline fallback, and the API is never cached.
-const CACHE = "daedalus-shell-v3";
+//
+// Two rules keep a deploy from breaking a page that is already open. Only an `ok` response is ever
+// written to the cache — a 404 or a 502 for a chunk during a deploy would otherwise be served as
+// that chunk from then on, and the screen would stay broken after the deploy finished. And the new
+// worker waits: it does not take over a page whose build it is about to delete the files of, so a
+// page opened on the previous build keeps its chunks until the reader reloads it.
+const CACHE = "daedalus-shell-v4";
 const SHELL = ["/app/", "/app/manifest.webmanifest", "/app/icons/icon-192.png", "/app/icons/icon-512.png"];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
+  // No skipWaiting: an open page is mid-session, and its lazy chunks are the ones this build
+  // replaces. The new worker activates when the last page on the old one has gone.
+  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)));
 });
 
 self.addEventListener("activate", (event) => {
+  // By now no page is running the build whose files these are.
   event.waitUntil(
     caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()),
   );
@@ -24,6 +33,8 @@ self.addEventListener("fetch", (event) => {
     // again without the network.
     event.respondWith(
       caches.match(request).then((hit) => hit || fetch(request).then((response) => {
+        // A 404 for a chunk means the build moved; caching it would make that permanent.
+        if (!response.ok) return response;
         const copy = response.clone();
         caches.open(CACHE).then((cache) => cache.put(request, copy));
         return response;
