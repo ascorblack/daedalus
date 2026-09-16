@@ -195,8 +195,11 @@ services:
       - ${DAEDALUS_COMPOSE_PROJECT_DIR:-..}:${DAEDALUS_COMPOSE_PROJECT_DIR:-/project}
       - ${DAEDALUS_CORE_PROJECT_DIR:-../../protocore-exp}:${DAEDALUS_CORE_PROJECT_DIR:-/project/../protocore-exp}
       - rebuild-trigger:/run/daedalus-rebuild
+    # The heartbeat is what makes this a rebuild channel the bot may promise: the compose file always
+    # names this service, so its presence in the file says nothing about whether anything is running.
     command: >
       sh -c 'while true; do
+        touch /run/daedalus-rebuild/alive;
         if [ -f /run/daedalus-rebuild/rebuild ]; then
           rm -f /run/daedalus-rebuild/rebuild;
           echo "rebuilding daedalus image";

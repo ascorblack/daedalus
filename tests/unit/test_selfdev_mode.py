@@ -8,6 +8,9 @@ general on purpose: whatever the mode, the prompt may not name a tool the sessio
 
 from __future__ import annotations
 
+import json
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +26,7 @@ from daedalus.host.policy import Policy
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.tools import discover_tools
+from tests.conftest import rebuilder_at
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SELF_TOOLS = ("SelfWorkspace", "SelfPropose", "SelfApply", "SelfRebuild", "SelfRollback")
@@ -38,6 +42,7 @@ def _settings(tmp_path: Path, **over: object) -> Settings:
         "telegram_bot_token": "",
         "owner_user_id": 0,
         "api_port": 0,
+        "rebuild_trigger_dir": rebuilder_at(tmp_path),
     }
     return Settings(_env_file=None, **{**values, **over})  # type: ignore[arg-type, call-arg]
 
@@ -73,6 +78,36 @@ def test_auto_resolves_from_what_is_really_there(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(capabilities, "rebuild_channel", lambda _settings: "")
     no_rebuild = capabilities.resolve_selfdev(_settings(tmp_path, github_token="stub"), _config("auto"))
     assert no_rebuild.mode == "local"
+
+
+def test_a_rebuilder_in_the_compose_file_is_not_a_rebuilder_that_is_running(tmp_path: Path) -> None:
+    """The shipped compose file always names the rebuilder — it is behind a profile that is off by
+    default — so the probe asks the trigger directory whether anything is answering there instead."""
+    settings = _settings(tmp_path, github_token="stub")
+    assert (settings.bot_repo_dir / "deploy" / "compose.yaml").read_text(encoding="utf-8").count("\n  rebuilder:") == 1
+    assert capabilities.rebuild_channel(settings) == "the compose rebuilder"
+
+    # Nothing behind the volume: an empty directory is what a stopped rebuilder leaves.
+    stopped = tmp_path / "stopped"
+    stopped.mkdir()
+    assert capabilities.rebuild_channel(_settings(tmp_path, github_token="stub", rebuild_trigger_dir=stopped)) == ""
+    assert capabilities.resolve_selfdev(_settings(tmp_path, github_token="stub", rebuild_trigger_dir=stopped), _config("auto")).mode == "local"
+
+    # A heartbeat old enough to be from a rebuilder that has since been stopped does not count either.
+    stale = rebuilder_at(tmp_path / "stale")
+    old_enough = time.time() - capabilities.REBUILDER_HEARTBEAT_SECONDS - 60
+    os.utime(stale / capabilities.REBUILDER_HEARTBEAT, (old_enough, old_enough))
+    assert capabilities.rebuild_channel(_settings(tmp_path, github_token="stub", rebuild_trigger_dir=stale)) == ""
+
+
+def test_the_resolved_mode_is_published_for_the_supervisor(tmp_path: Path) -> None:
+    """One resolution: the supervisor reads this file rather than probing the prerequisites again."""
+    settings = _settings(tmp_path, github_token="stub")
+    resolved = capabilities.resolve(settings, _config("auto"))
+    capabilities.publish(resolved, settings.state_dir)
+    written = json.loads((settings.state_dir / capabilities.PUBLISHED_FILE).read_text(encoding="utf-8"))
+    assert written["selfdev"]["mode"] == resolved.selfdev.mode == "server"
+    assert written["at"]
 
 
 def test_an_explicit_mode_wins_and_says_what_it_is_missing(tmp_path: Path) -> None:

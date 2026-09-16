@@ -17,12 +17,18 @@ prompt is assembled from it at startup. Changing it in the configuration takes e
 
 from __future__ import annotations
 
+import json
 import os
+import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from daedalus.config import RuntimeConfig, Settings
+
+PUBLISHED_FILE = "capabilities.json"
+"""Where the resolved capabilities are written in the state directory, for the supervisor to read."""
 
 SelfDevMode = Literal["off", "local", "server"]
 SELFDEV_MODES: tuple[SelfDevMode, ...] = ("off", "local", "server")
@@ -133,16 +139,46 @@ def has_origin(repo: Path) -> bool:
     return '[remote "origin"]' in text
 
 
+REBUILDER_HEARTBEAT = "alive"
+"""The file the rebuilder sidecar touches on every pass of its loop."""
+REBUILDER_HEARTBEAT_SECONDS = 120.0
+"""How stale that file may be and still mean a rebuilder is there. The sidecar's loop is five seconds;
+this is wide enough for a loaded host and far short of the sidecar having been stopped."""
+
+
 def rebuild_channel(settings: Settings) -> str:
-    """How a new build reaches the running process, or an empty string when nothing can deliver one."""
+    """How a new build reaches the running process, or an empty string when nothing can deliver one.
+
+    The rebuilder is asked whether it is running, not whether the compose file mentions it. The shipped
+    file always mentions it — the service is behind a profile that is off by default — so reading the
+    file said yes on every installation that had a checkout, and the trigger this promises would be
+    written into a directory nothing reads.
+    """
     if settings.supervisor_socket.exists():
         return "the supervisor socket"
-    compose = settings.bot_repo_dir / "deploy" / "compose.yaml"
+    heartbeat = settings.rebuild_trigger_dir / REBUILDER_HEARTBEAT
     try:
-        text = compose.read_text(encoding="utf-8")
+        age = time.time() - heartbeat.stat().st_mtime
     except OSError:
         return ""
-    return "the compose rebuilder" if "\n  rebuilder:" in text else ""
+    return "the compose rebuilder" if age <= REBUILDER_HEARTBEAT_SECONDS else ""
+
+
+def publish(capabilities: Capabilities, state_dir: Path) -> None:
+    """Write what was resolved where the supervisor can read it.
+
+    The supervisor decides whether a restart is preflighted, and it decides before the bot is up. Its
+    own probe of the same prerequisites is a second rule set that can — and did — disagree with this
+    one; what it reads instead is this file, from the start before. Best effort: a state directory that
+    cannot be written is not a reason not to start.
+    """
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / PUBLISHED_FILE).write_text(
+            json.dumps({"selfdev": capabilities.selfdev.as_dict(), "at": datetime.now(UTC).isoformat()}, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
 
 
 # -- resolution ---------------------------------------------------------------------------
@@ -205,12 +241,14 @@ def resolve(settings: Settings, config: RuntimeConfig) -> Capabilities:
 
 __all__ = [
     "ALL_SELFDEV_TOOLS",
+    "PUBLISHED_FILE",
     "SELFDEV_MODES",
     "SELFDEV_TOOLS",
     "Capabilities",
     "SelfDev",
     "SelfDevMode",
     "has_origin",
+    "publish",
     "rebuild_channel",
     "resolve",
     "resolve_selfdev",

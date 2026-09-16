@@ -183,6 +183,8 @@ class SessionManager:
         self.capabilities = capabilities.resolve(settings, config)
         """What this installation can do, decided once: the tools, the routes, the prompt and the
         app all read the same answer, and a configuration change reaches them on the next start."""
+        capabilities.publish(self.capabilities, settings.state_dir)
+        """And the supervisor reads it from there rather than resolving it a second time."""
         self._configure_redactor(settings, config)
         self.hooks = DaedalusHookManager(self.redactor, hooks_config=lambda: self.config.hooks)
         self._background: set[asyncio.Task[Any]] = set()

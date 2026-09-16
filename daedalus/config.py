@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     bot_repo_dir: Path = _REPO_ROOT
     core_repo_dir: Path = _REPO_ROOT.parent / "protocore-exp"
     supervisor_socket: Path = Path("/run/daedalus/supervisor.sock")
+    rebuild_trigger_dir: Path = Path("/run/daedalus-rebuild")
+    """Shared with the rebuilder sidecar — the only container that can reach Docker. It is a rebuild
+    channel only while something is on the other end of it, which the sidecar says by keeping a
+    heartbeat in this directory fresh."""
 
     chrome_path: str = ""
     """The headless Chromium the browser skills drive (``CHROME_PATH``). Set by the image tag that

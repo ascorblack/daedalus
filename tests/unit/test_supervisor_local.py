@@ -9,7 +9,10 @@ because at that point the app the operator would have used to undo it is the thi
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +47,47 @@ def test_the_mode_is_read_from_what_is_there_and_from_what_was_asked_for(tmp_pat
     assert sup.resolve_mode("off", repo=repo, token="t") == "off"
 
 
+def test_the_mode_the_bot_published_is_the_mode_the_supervisor_uses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two rule sets for one decision is a change restarting with no preflight: the bot's answer wins.
+
+    The supervisor's own probe is what a first boot has and nothing else — before the bot has ever
+    run there is no published answer to read.
+    """
+    sup = _load()
+    monkeypatch.setattr(sup, "PUBLISHED_CAPABILITIES", tmp_path / "capabilities.json")
+    repo = tmp_path / "daedalus"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "config").write_text('[remote "origin"]\n\turl = https://example.invalid/x.git\n')
+
+    assert sup.published_mode() == "", "nothing has been published yet"
+    assert sup.resolve_mode("auto", repo=repo, token="t", published=sup.published_mode()) == "server"
+
+    # The bot looked at the same installation and found no rebuild channel and no core remote.
+    (tmp_path / "capabilities.json").write_text(json.dumps({"selfdev": {"mode": "local", "configured": "auto"}}))
+    assert sup.published_mode() == "local"
+    assert sup.resolve_mode("auto", repo=repo, token="t", published=sup.published_mode()) == "local"
+    # The operator's word still wins over both, because the bot obeys it too.
+    assert sup.resolve_mode("server", repo=repo, token="t", published="local") == "server"
+    # Nonsense in the file is not a mode; the probe answers instead of the process refusing to start.
+    (tmp_path / "capabilities.json").write_text("{not json")
+    assert sup.published_mode() == ""
+    (tmp_path / "capabilities.json").write_text(json.dumps({"selfdev": {"mode": "whatever"}}))
+    assert sup.published_mode() == ""
+
+
+def test_a_linked_worktree_is_not_read_as_a_checkout_without_a_remote(tmp_path: Path) -> None:
+    """A worktree's .git is a file naming the main repository's; its remotes are the main one's."""
+    sup = _load()
+    main = tmp_path / "daedalus"
+    (main / ".git" / "worktrees" / "wt").mkdir(parents=True)
+    (main / ".git" / "config").write_text('[remote "origin"]\n\turl = https://example.invalid/x.git\n')
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'wt'}\n")
+    assert sup.has_origin(worktree) is True
+    assert sup.has_origin(tmp_path / "nothing") is False
+
+
 def test_only_the_image_files_ask_for_a_new_image() -> None:
     sup = _load()
     assert sup.needs_new_image({"deploy/Dockerfile"})
@@ -53,22 +97,42 @@ def test_only_the_image_files_ask_for_a_new_image() -> None:
     assert not sup.needs_new_image(set())
 
 
-def test_the_virtualenv_is_synced_only_when_it_has_to_be(tmp_path: Path) -> None:
+def test_the_virtualenv_is_synced_only_when_a_dependency_really_moved(tmp_path: Path) -> None:
     sup = _load()
-    venv = tmp_path / "venv"
-    (venv / "bin").mkdir(parents=True)
-    (venv / "bin" / "pytest").write_text("#!/bin/sh\n")
-    assert not sup.needs_dependency_sync({"daedalus/host/greeting.py"}, venv=venv)
-    assert sup.needs_dependency_sync({"uv.lock"}, venv=venv)
-    assert sup.needs_dependency_sync({"pyproject.toml"}, venv=venv)
-    # A volume that has just been created has nothing in it; the first start fills it once.
-    assert sup.needs_dependency_sync(set(), venv=tmp_path / "fresh")
-    # And one that `uv run --frozen` filled without the development extra cannot run the preflight's
-    # test step: skipping the sync there would fail the change on the missing runner.
-    bare = tmp_path / "bare"
-    (bare / "bin").mkdir(parents=True)
-    (bare / "bin" / "python3").write_text("")
-    assert sup.needs_dependency_sync(set(), venv=bare)
+    assert not sup.needs_dependency_sync({"daedalus/host/greeting.py"})
+    assert sup.needs_dependency_sync({"uv.lock"})
+    assert sup.needs_dependency_sync({"pyproject.toml"})
+    # The core is a path dependency: what it declares is declared into the same environment, and a
+    # requirement it adds never moves the bot's own lock.
+    assert sup.needs_dependency_sync(set(), {"pyproject.toml"})
+    assert not sup.needs_dependency_sync(set(), {"protocore/engine.py"})
+    # And nothing else is a reason. The preflight has a virtualenv of its own and never borrows the
+    # running bot's, so the state of that one can no longer ask for a sync of it.
+    assert not sup.needs_dependency_sync(set())
+    assert not sup.needs_dependency_sync(set(), set())
+
+
+def test_the_preflight_never_writes_to_the_bots_own_virtualenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``uv`` writes to whatever UV_PROJECT_ENVIRONMENT names, and the image names the running bot's.
+
+    Every command the preflight runs is given an environment that names the preflight's own instead:
+    a check of a change that fails must leave the installation it checked exactly as it was.
+    """
+    sup = _load()
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/srv/venv")
+    monkeypatch.setenv("VIRTUAL_ENV", "/srv/venv")
+    monkeypatch.setattr(sup, "PREFLIGHT_VENV", tmp_path / "preflight-venv")
+    seen: list[dict[str, str]] = []
+    monkeypatch.setattr(sup, "run", lambda cmd, cwd=None, timeout=0, env=None: (seen.append(dict(env or {})), (0, ""))[1])
+    monkeypatch.setattr(sup, "restore_owner", lambda repo: None)
+    monkeypatch.setattr(sup.shutil, "which", lambda name: None)
+
+    sup.preflight(tmp_path, sync=True)
+    assert seen, "the preflight ran nothing"
+    for env in seen:
+        assert env["UV_PROJECT_ENVIRONMENT"] == str(tmp_path / "preflight-venv")
+        assert "VIRTUAL_ENV" not in env
+    assert sup.bot_env()["UV_PROJECT_ENVIRONMENT"] == "/srv/venv", "the bot keeps the environment it runs from"
 
 
 def test_the_environment_is_synced_when_the_checkout_asks_for_something_else(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,7 +147,7 @@ def test_the_environment_is_synced_when_the_checkout_asks_for_something_else(tmp
 
     calls: list[list[str]] = []
 
-    def fake_run(cmd: list[str], *, cwd: Path | None = None, timeout: int = 1800) -> tuple[int, str]:
+    def fake_run(cmd: list[str], *, cwd: Path | None = None, timeout: int = 1800, env: dict[str, str] | None = None) -> tuple[int, str]:
         calls.append(cmd)
         return 0, ""
 
@@ -91,7 +155,7 @@ def test_the_environment_is_synced_when_the_checkout_asks_for_something_else(tmp
 
     # An environment with no stamp is one nothing vouches for: sync it and write down what it now holds.
     assert sup.sync_venv_if_stale(repo, venv=venv) is True
-    assert calls == [["uv", "sync", "--frozen"]]
+    assert calls == [["uv", "sync", "--frozen", "--inexact"]], "--inexact: what the image installed beside the lock is not this sync's to remove"
     assert (venv / ".daedalus-dependencies").read_text() == sup.dependency_digest(repo)
 
     # Stamped and unchanged: this is the released install's first start, and it runs no uv at all.
@@ -102,7 +166,7 @@ def test_the_environment_is_synced_when_the_checkout_asks_for_something_else(tmp
     # A checkout that declares something else — a hand update, or a change the agent landed here.
     (repo / "uv.lock").write_text("version = 1\n# one more package\n")
     assert sup.sync_venv_if_stale(repo, venv=venv) is True
-    assert calls == [["uv", "sync", "--frozen"]]
+    assert calls == [["uv", "sync", "--frozen", "--inexact"]]
 
     # A sync that failed leaves no stamp behind: the next start tries again rather than believing it.
     calls.clear()
@@ -125,15 +189,26 @@ def test_the_preflight_skips_the_sync_when_it_is_not_needed(tmp_path: Path, monk
     """The one sync a local change may cost happens inside the preflight, or not at all."""
     sup = _load()
     ran: list[list[str]] = []
-    monkeypatch.setattr(sup, "run", lambda cmd, cwd=None, timeout=0: (ran.append(cmd), (0, ""))[1])
+    seeded = tmp_path / "preflight-venv"
+    (seeded / "bin").mkdir(parents=True)
+    (seeded / "bin" / "pytest").write_text("")  # seeded by an earlier preflight and kept between them
+    monkeypatch.setattr(sup, "PREFLIGHT_VENV", seeded)
+    monkeypatch.setattr(sup, "run", lambda cmd, cwd=None, timeout=0, env=None: (ran.append(cmd), (0, ""))[1])
     monkeypatch.setattr(sup, "restore_owner", lambda repo: None)
     monkeypatch.setattr(sup.shutil, "which", lambda name: None)
 
     sup.preflight(tmp_path, sync=False)
     assert not any("sync" in cmd for cmd in ran)
-    assert ["uv", "run", "--frozen", "python", "-m", "compileall", "-q", "daedalus"] in ran
+    assert ["uv", "run", "--frozen", "--extra", "dev", "python", "-m", "compileall", "-q", "daedalus"] in ran
     ran.clear()
     sup.preflight(tmp_path, sync=True)
+    assert [cmd for cmd in ran if "sync" in cmd] == [["uv", "sync", "--frozen", "--extra", "dev"]]
+
+    # An environment that has never been seeded is filled whatever the caller asked for: there is
+    # nothing there to run the checks in.
+    ran.clear()
+    monkeypatch.setattr(sup, "PREFLIGHT_VENV", tmp_path / "never-seeded")
+    sup.preflight(tmp_path, sync=False)
     assert [cmd for cmd in ran if "sync" in cmd] == [["uv", "sync", "--frozen", "--extra", "dev"]]
 
 
@@ -152,19 +227,21 @@ def _harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, preflight_ok: b
     monkeypatch.setattr(sup, "LOG", tmp_path / "supervisor.log")
     venv = tmp_path / "venv"
     venv.mkdir()
-    (venv / "bin").mkdir()
-    (venv / "bin" / "pytest").write_text("")  # a virtualenv the preflight can run in, so only a dependency change syncs
     monkeypatch.setattr(sup, "VENV", venv)
-    monkeypatch.setattr(sup, "run", lambda cmd, cwd=None, timeout=0: (calls.append(f"run {' '.join(cmd)}"), (0, ""))[1])
+    preflight_venv = tmp_path / "preflight-venv"
+    (preflight_venv / "bin").mkdir(parents=True)
+    (preflight_venv / "bin" / "pytest").write_text("")  # seeded by an earlier preflight, so only a dependency change syncs
+    monkeypatch.setattr(sup, "PREFLIGHT_VENV", preflight_venv)
+    monkeypatch.setattr(sup, "run", lambda cmd, cwd=None, timeout=0, env=None: (calls.append(f"run {' '.join(cmd)}"), (0, ""))[1])
     monkeypatch.setattr(sup, "load_history", lambda: [{"bot": "good000000", "core": "core000000", "at": "2026-09-17T00:00:00+00:00"}])
     monkeypatch.setattr(sup, "git", lambda repo, *args: (calls.append(f"git {repo.name} {' '.join(args)}"), (0, "new1111111\n"))[1])
     monkeypatch.setattr(sup, "head", lambda repo: "new1111111")
     monkeypatch.setattr(sup, "prepare_candidate", lambda repo, ref="origin/main": (calls.append(f"candidate {repo.name} {ref}"), (True, ""))[1])
     monkeypatch.setattr(sup, "preflight", lambda repo, sync=True: (calls.append(f"preflight {repo} sync={sync}"), (preflight_ok, "transcript"))[1])
     supervisor = sup.Supervisor()
-    supervisor.mode = "local"
+    supervisor.configured = "local"
     supervisor.running_revision = "run0000000"
-    supervisor._changed_files = lambda old, new: set(changed or {"daedalus/host/greeting.py"})  # type: ignore[method-assign]
+    supervisor._changed_files = lambda old, new, repo=sup.BOT_REPO: set(changed or {"daedalus/host/greeting.py"})  # type: ignore[method-assign]
 
     async def stop_child() -> None:
         calls.append("stop")
@@ -226,12 +303,36 @@ async def test_a_dependency_change_buys_exactly_one_sync(monkeypatch: pytest.Mon
 
 async def test_the_rebuilder_is_never_asked_outside_server_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     sup, supervisor, _ = _harness(monkeypatch, tmp_path, preflight_ok=True)
-    monkeypatch.setattr(sup, "REBUILD_TRIGGER_DIR", tmp_path / "trigger")
-    (tmp_path / "trigger").mkdir()
+    trigger = tmp_path / "trigger"
+    trigger.mkdir()
+    monkeypatch.setattr(sup, "REBUILD_TRIGGER_DIR", trigger)
+    (trigger / sup.REBUILDER_HEARTBEAT).write_text("")
     assert supervisor._request_image_rebuild() is False
-    assert not (tmp_path / "trigger" / "rebuild").exists()
-    supervisor.mode = "server"
+    assert not (trigger / "rebuild").exists()
+    supervisor.configured = "server"
     assert supervisor._request_image_rebuild() is True
+
+
+async def test_the_trigger_is_not_written_where_no_rebuilder_collects_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The trigger directory is a volume mounted whether or not the sidecar behind it was started, so
+    its existence is not the question; the heartbeat the sidecar keeps fresh is."""
+    sup, supervisor, _ = _harness(monkeypatch, tmp_path, preflight_ok=True)
+    supervisor.configured = "server"
+    trigger = tmp_path / "trigger"
+    trigger.mkdir()
+    monkeypatch.setattr(sup, "REBUILD_TRIGGER_DIR", trigger)
+    assert supervisor._request_image_rebuild() is False, "an empty volume is not a rebuilder"
+    assert not (trigger / "rebuild").exists()
+
+    heartbeat = trigger / sup.REBUILDER_HEARTBEAT
+    heartbeat.write_text("")
+    stale = time.time() - sup.REBUILDER_HEARTBEAT_SECONDS - 60
+    os.utime(heartbeat, (stale, stale))
+    assert supervisor._request_image_rebuild() is False, "a heartbeat this old is from a sidecar that has stopped"
+
+    heartbeat.write_text("")
+    assert supervisor._request_image_rebuild() is True
+    assert (trigger / "rebuild").exists()
 
 
 async def test_a_restart_is_not_started_twice(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -243,7 +344,7 @@ async def test_a_restart_is_not_started_twice(monkeypatch: pytest.MonkeyPatch, t
 async def test_a_server_restart_just_goes_round_again(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """With a remote the running revision was preflighted when it was merged; there is nothing to check."""
     sup, supervisor, calls = _harness(monkeypatch, tmp_path, preflight_ok=False)
-    supervisor.mode = "server"
+    supervisor.configured = "server"
     assert await supervisor.restart("after a merge") == "restarting"
     assert supervisor.restart_requested.is_set()
     assert not any(c.startswith("preflight") for c in calls)
@@ -280,12 +381,68 @@ async def test_three_boots_that_die_young_put_the_last_known_good_commit_back(mo
     assert supervisor.failed_boots == [], "the count starts again from the revision that is running now"
 
 
+async def test_a_refused_core_change_is_taken_out_of_the_core_checkout_too(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A change the agent applied to the core alone leaves the bot's HEAD where it was.
+
+    Reverting only the bot would leave the refused core commit in the checkout for the next start —
+    any start, for any reason — to pick up, with nothing having checked it.
+    """
+    sup, supervisor, calls = _harness(monkeypatch, tmp_path, preflight_ok=False)
+    supervisor.running_revision = "new1111111"  # the bot is already on what is in its checkout
+    supervisor.running_core = "core000000"  # the core is not: the agent moved it a moment ago
+    await supervisor._apply_local("a change to the core")
+    assert "git protocore-exp reset --hard core000000" in calls
+    assert not any("git daedalus reset" in c for c in calls), "the bot checkout is where the running process is"
+    assert "protocore-exp back to core000000" in sup.last_change()["detail"]
+
+
 async def test_a_server_install_is_not_rolled_back_behind_the_operators_back(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     sup, supervisor, calls = _harness(monkeypatch, tmp_path, preflight_ok=True)
-    supervisor.mode = "server"
+    supervisor.configured = "server"
     for _ in range(5):
         assert await supervisor._note_failed_boot() is False
     assert not any("reset" in c for c in calls)
+
+
+async def test_the_rollback_does_not_swap_between_two_revisions_that_both_fail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """With A and B known good and a broken C: back to B, and when B cannot boot either, back to A —
+    never to B again. Choosing "the newest that is not the one that just died" alone is a loop of
+    three failed boots per swap, with no sleep between them."""
+    sup, supervisor, calls = _harness(monkeypatch, tmp_path, preflight_ok=True)
+    monkeypatch.setattr(
+        sup,
+        "load_history",
+        lambda: [
+            {"bot": "aaaaaaaaaa", "core": "core000000", "at": "2026-09-17T00:00:00+00:00"},
+            {"bot": "bbbbbbbbbb", "core": "core000000", "at": "2026-09-17T01:00:00+00:00"},
+        ],
+    )
+    heads = iter(["cccccccccc", "bbbbbbbbbb", "aaaaaaaaaa"])
+    current = {"bot": "cccccccccc"}
+    monkeypatch.setattr(sup, "head", lambda repo: current["bot"] if repo == sup.BOT_REPO else "core000000")
+
+    for expected in ("bbbbbbbbbb", "aaaaaaaaaa"):
+        calls.clear()
+        current["bot"] = next(heads)
+        for _ in range(sup.BOOT_THRESHOLD):
+            await supervisor._note_failed_boot()
+        assert f"git daedalus reset --hard {expected}" in calls
+
+    # Both have now been tried and neither boots: it says so instead of going round again.
+    calls.clear()
+    current["bot"] = next(heads)
+    for _ in range(sup.BOOT_THRESHOLD):
+        await supervisor._note_failed_boot()
+    assert not any("reset" in c for c in calls)
+    assert sup.last_change()["status"] == "no_rollback"
+
+    # A start that lives long enough clears the record: the next failure may go back to either again.
+    supervisor.tried_revisions.clear()
+    calls.clear()
+    current["bot"] = "cccccccccc"
+    for _ in range(sup.BOOT_THRESHOLD):
+        await supervisor._note_failed_boot()
+    assert "git daedalus reset --hard bbbbbbbbbb" in calls
 
 
 async def test_a_first_revision_that_cannot_boot_says_so_rather_than_guessing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
