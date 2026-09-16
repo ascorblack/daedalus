@@ -51,3 +51,9 @@ describe("renderMarkdown", () => {
     expect((html.match(/<\/details>/g) ?? []).length).toBe(1);
   });
 });
+
+it("the stash sentinel in model text cannot address a stashed element", () => {
+  const html = renderMarkdown("`a` \uE0000\uE000 and \uE0007\uE000");
+  expect(html).not.toContain("undefined");
+  expect((html.match(/<code>/g) ?? []).length).toBe(1);
+});

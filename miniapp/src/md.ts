@@ -37,6 +37,9 @@ const STASH = "\uE000";
 
 function inline(s: string): string {
   const codes: string[] = [];
+  // The sentinel is a private-use character nothing legitimately writes; text that carries it
+  // could otherwise address a stashed element by number, so it is dropped before stashing.
+  s = s.split(STASH).join("");
   s = s.replace(/`([^`\n]+)`/g, (_, c) => {
     codes.push(`<code>${escape(c)}</code>`);
     return ` ${STASH}${codes.length - 1}${STASH} `;
