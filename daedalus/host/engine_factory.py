@@ -44,6 +44,10 @@ class EngineDeps:
     """The ssh config whose described hosts the prompt lists; ``None`` lists nothing."""
     policy_gate: Callable[[str, str], Any] | None = None
     """``(session_id, run_id) -> IToolSafetyPolicy``: the host's tool policy bound to the session; ``None`` = no policy."""
+    selfdev_mode: str = "off"
+    """``off``/``local``/``server``, from the installation's capabilities: it decides which self-development
+    section the prompt carries and how the environment describes the operator's repositories. The safe default
+    is the one that promises nothing."""
 
 
 class PolicyAdapter:
@@ -155,7 +159,7 @@ def build_engine(
         prompts.rules_section(config.prompt.rules),
         prompts.language_section(config.answer_language),
         prompts.governance_section(deps.governance_path),
-        prompts.SELF_DEVELOPMENT,
+        prompts.self_development_section(deps.selfdev_mode),
         prompts.HISTORY,
         prompts.BOARD,
         prompts.SCHEDULING,
@@ -170,6 +174,7 @@ def build_engine(
             sandboxed=config.tools.exec.sandbox != "off",
             github_org=deps.github_org,
             ssh_hosts=prompts.ssh_hosts(deps.ssh_config) if deps.ssh_config else (),
+            selfdev_mode=deps.selfdev_mode,
         ),
     )
     engine_config = QueryEngineConfig(

@@ -23,6 +23,10 @@ def settings(tmp_path: Path) -> Settings:
         core_repo_dir=REPO_ROOT.parent / "protocore-exp",
         owner_user_id=1,
         telegram_bot_token="123:abc",
+        # The self-development prerequisites, stubbed: the checkouts and the compose rebuilder are really
+        # there in the repository under test, and this stands in for the token, so the capability probe
+        # resolves to server mode and the suite exercises the full surface.
+        github_token="stub-token-for-the-capability-probe",
     )
 
 

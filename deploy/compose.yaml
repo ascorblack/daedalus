@@ -166,6 +166,10 @@ services:
   # It needs no network of its own: the daemon does the building and pulling. Behind the "selfdev"
   # profile: a change that needs a new image is a change to the image's own recipe, which only an
   # installation that develops the server itself ever makes.
+  #
+  # It belongs to server self-development: its presence is one of the prerequisites the capability
+  # probe looks for (`[self_change] mode`, daedalus/host/capabilities.py). An installation that sets
+  # the mode to "local" or "off" never drops a trigger file, and can leave this service out.
   rebuilder:
     image: docker:cli
     profiles: [selfdev]

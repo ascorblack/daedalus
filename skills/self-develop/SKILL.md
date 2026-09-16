@@ -4,6 +4,16 @@ description: How to change your own code (host or core) safely: worktree, tests,
 ---
 # Self-development workflow
 
+This installation runs in one of three modes (`[self_change] mode`, shown by `GET /api/capabilities`
+and by the doctor). The tools you actually have say which one you are in:
+
+- **server** — all four `Self*` tools: the full workflow below, ending in a pull request.
+- **local** — `SelfWorkspace` only: there is no fork, no remote and no pull request here. Work through
+  steps 1-4, commit in the worktree, and tell the operator the change is ready; it applies after a
+  restart they trigger. Never push.
+- **off** — no `Self*` tool exists. This installation does not change its own code; do not look for
+  a way around that.
+
 1. `SelfWorkspace(repo, branch)` — get a worktree on `agent/<branch>` from `origin/main`.
    `repo` is `bot` (host: tools, providers, transport, Mini App, skills) or `core` (agent loop).
 2. Edit inside the worktree only. Layout of the host repository:
@@ -29,6 +39,7 @@ description: How to change your own code (host or core) safely: worktree, tests,
    nothing about the operator (addresses, hostnames, paths, accounts, workloads, circumstances) in
    commits, pull requests, code comments or docs. What you know about the operator stays in the session.
 5. `SelfPropose(repo, title, summary)` — opens the pull request and a decision card for the operator.
+   Server mode only; in local mode the commit in the worktree is the whole deliverable.
 6. After the merge, `SelfRebuild(reason)`. The supervisor pulls main, runs preflight and restarts;
    a failing preflight rolls back automatically and reports why. A rebuild asked for while one runs
    is queued and starts right after it — no need to ask again.

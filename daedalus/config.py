@@ -376,6 +376,12 @@ class McpConfig(BaseModel):
 
 
 class SelfChangeConfig(BaseModel):
+    mode: Literal["auto", "off", "local", "server"] = "auto"
+    """Whether this installation can change its own code, and how. ``server`` = worktree, pull
+    request, approval, merge, rebuild; ``local`` = a checkout edited in place and applied by a
+    restart; ``off`` = not at all. ``auto`` resolves it at startup from the prerequisites that are
+    really present (see ``daedalus.host.capabilities``); an explicit value wins, and the doctor says
+    so when what it needs is missing. A change takes effect on the next restart."""
     approval: ApprovalMode = "manual"
     auto_rebuild: bool = True
     rebuild_wait_minutes: int = Field(default=30, ge=1)

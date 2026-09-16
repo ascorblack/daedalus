@@ -41,7 +41,7 @@ from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
 
 from daedalus.config import VOICE_ONLY_TOOLS, VOICE_TOOLS, NoModelConfigured, RuntimeConfig, Settings
-from daedalus.host import prompts
+from daedalus.host import capabilities, prompts
 from daedalus.host.checkpoints import CheckpointError, Checkpoints, scan_workspace
 from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
 from daedalus.host.hooks import DaedalusHookManager
@@ -180,6 +180,9 @@ class SessionManager:
         self.workspace_units = PersistentWorkspace(db)
         self.skills = DirectorySkillStore(settings.skills_dir)
         self.redactor = redact.shared()
+        self.capabilities = capabilities.resolve(settings, config)
+        """What this installation can do, decided once: the tools, the routes, the prompt and the
+        app all read the same answer, and a configuration change reaches them on the next start."""
         self._configure_redactor(settings, config)
         self.hooks = DaedalusHookManager(self.redactor, hooks_config=lambda: self.config.hooks)
         self._background: set[asyncio.Task[Any]] = set()
@@ -220,7 +223,12 @@ class SessionManager:
         # New runs wait until resume_unfinished() has continued what the previous process left behind;
         # a process that finds nothing to resume (tests, a first start) opens the gate at once.
         self.recovering = recovering if recovering is not None else bool(await self.events.unfinished_snapshots())
+        # A tool this installation cannot honour is not registered at all: an unusable name in the
+        # list is an invitation the model accepts and a failure it cannot understand.
+        disabled = self.capabilities.selfdev.disabled_tools
         for tool in discover_tools():
+            if tool.name in disabled:
+                continue
             self.tools.register(tool)
         for tool in build_memory_tools(self.memory):
             self.tools.register(tool)
@@ -1358,6 +1366,7 @@ class SessionManager:
             github_org=self.settings.daedalus_github_org,
             ssh_config=Path.home() / ".ssh" / "config",
             policy_gate=self.policy_gate,
+            selfdev_mode=self.capabilities.selfdev.mode,
         )
         mode_name = str(state.metadata.get("mode") or "")
         mode = self.config.modes.get(mode_name) if mode_name else None
@@ -1948,6 +1957,7 @@ class SessionManager:
             protected_paths=(self.governance_path, Path("/opt/launcher"), self.settings.secrets_dir, self.settings.config_path, self.settings.db_path),
             egress_allow=cfg.egress_allow, rules=rules, workspace_roots=(self.settings.workspaces_dir,),
             operator_checkouts=(self.settings.bot_repo_dir, self.settings.core_repo_dir),
+            selfdev_mode=self.capabilities.selfdev.mode,
         )
 
     def policy_gate(self, session_id: str, run_id: str) -> Any:

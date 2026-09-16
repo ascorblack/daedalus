@@ -65,7 +65,7 @@ Loop agents wake up on an interval or when they say so; cron tasks run in fresh 
 <td valign="top">
 
 **🧬 Self-development**<br/>
-The agent edits its host or its core in a git worktree, opens a PR, you approve or reject with a reason in the chat. The supervisor pulls, runs preflight and restarts — and rolls back a bad build on its own.
+The agent edits its host or its core in a git worktree, opens a PR, you approve or reject with a reason in the chat. The supervisor pulls, runs preflight and restarts — and rolls back a bad build on its own. On an installation with no GitHub token the same editing stays local; on one that should not change itself at all, the whole subsystem is absent.
 
 </td>
 <td valign="top">
@@ -147,6 +147,16 @@ What makes them survive: runs resume from snapshots after a restart; a run the p
 
 The PR text passes a public-text gate (nothing about your machine leaks into a public repository), the diff is checked for references it must not carry, and `GOVERNANCE.md` — the rules the agent always sees and can never edit — is mounted read-only. Approval is manual by default; `/approval auto` hands it over when you trust it.
 
+**Not every installation does this.** `[self_change] mode` is `off`, `local` or `server`, and `auto` — the default — works out which one this installation can honour when it starts:
+
+| mode | what it means | what it needs |
+|---|---|---|
+| `server` | worktree → pull request → your approval → merge → rebuild, as above | a GitHub token, an `origin` on both checkouts, and a way to deliver a build (the supervisor socket or the compose `rebuilder`) |
+| `local` | the agent edits the checkout this installation runs from; there is no fork and no PR, and the change applies after a restart | a writable git checkout of the host and the core |
+| `off` | the agent does not change its own code | — |
+
+What follows the mode: the `Self*` tools (absent in `off`, `SelfWorkspace` alone in `local`), the self-development extension, `/api/proposals`, the Changes screen in the app, the self-development part of the system prompt, and the doctor's GitHub checks. `GET /api/capabilities` and `daedalus doctor` both say which mode is running and why. Setting the mode explicitly overrides the resolution; the doctor then warns about whatever the chosen mode is missing. A change of mode takes effect on the next restart.
+
 ## The toolbox
 
 | Area | Tools |
@@ -159,7 +169,7 @@ The PR text passes a public-text gate (nothing about your machine leaks into a p
 | Hosting | `ServiceStart` / `ServiceStop` / `ServiceLogs` — processes that outlive the turn, on ports you can reach and share |
 | Memory | `Remember`, `Recall`, `Forget`, `HistorySearch`, `HistoryExpand` |
 | Quality | `Verify` — a check with a criterion, recorded as a receipt; `LearningReport` |
-| Self | `SelfWorkspace`, `SelfPropose`, `SelfRebuild`, `SelfRollback` |
+| Self | `SelfWorkspace`, `SelfPropose`, `SelfRebuild`, `SelfRollback` — registered according to `[self_change] mode`; on an installation that does not change its own code there are none |
 | Planning | `BoardAdd` / `BoardUpdate` / `BoardList` / `BoardGet` — the agent's own board (shared with its subagents; tasks you post to nobody in particular are on every board), with acceptance criteria, checklists, dependencies and a per-agent work-in-progress limit; `PLAN.md` in the workspace is its rendering |
 | Extensions | `Skill` (33 bundled skills: design systems, web QA, writing, scheduling, comparable variants, figures, search discipline…), `Mcp*` with OAuth, `SendFile` (attached under the answer in the app too), `StaySilent` |
 
