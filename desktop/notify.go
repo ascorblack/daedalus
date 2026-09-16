@@ -23,7 +23,22 @@ func Notify(n Notification) error {
 	if strings.TrimSpace(n.Title) == "" {
 		n.Title = "Daedalus"
 	}
+	// The title and the body come from the agent's own inbox and from any page in the web view, and
+	// they are handed to a helper as arguments. A helper reads an argument beginning with "-" as one
+	// of its own options — another -e script for osascript, another flag for notify-send — so the
+	// argument boundary would be the only thing between an inbox entry and a shell. It is not asked
+	// to be: a leading dash is fenced off here, before any helper sees it.
+	n.Title = fenceDash(n.Title)
+	n.Body = fenceDash(n.Body)
 	return notify(n)
+}
+
+// fenceDash keeps text that starts with a dash from being read as an option by whatever shows it.
+func fenceDash(text string) string {
+	if strings.HasPrefix(strings.TrimSpace(text), "-") {
+		return " " + strings.TrimLeft(text, " \t")
+	}
+	return text
 }
 
 // combinedError turns a failed helper into one line that says which helper and what it printed.

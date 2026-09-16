@@ -50,6 +50,14 @@ func readInstance(p Paths) (instance, bool) {
 	if err := json.Unmarshal(data, &found); err != nil || found.Port == 0 || found.Token == "" {
 		return instance{}, false
 	}
+	// A launcher that was killed rather than stopped leaves the file behind, and by now anything at
+	// all may be listening on the port it names. The token in here authorises start, stop, update
+	// and apply, so it is not offered to whatever answers: the process that minted it has to be
+	// alive for the file to mean anything.
+	if found.PID > 0 && !processAlive(found.PID) {
+		RemoveInstance(p)
+		return instance{}, false
+	}
 	return found, true
 }
 
@@ -78,8 +86,15 @@ func FocusRunning(ctx context.Context, p Paths, link string) bool {
 	client := &http.Client{Timeout: 3 * time.Second}
 	response, err := client.Do(request)
 	if err != nil {
+		// Nothing there, or nothing that speaks this: the file is stale either way, and leaving it
+		// would mean handing the token over again on the next start.
+		RemoveInstance(p)
 		return false
 	}
 	defer response.Body.Close()
-	return response.StatusCode == http.StatusOK
+	if response.StatusCode != http.StatusOK {
+		RemoveInstance(p)
+		return false
+	}
+	return true
 }

@@ -9,6 +9,10 @@ import { api, Preset, Settings } from "../api";
 import { Icon } from "../icons";
 import { PageHeader } from "../shell";
 import { errorText, numInput } from "../ui";
+import { BLANK, ModelEntry, Picked, presetIdFor, priceFor, retyped } from "../models";
+
+export type { ModelEntry, Picked } from "../models";
+export { presetIdFor } from "../models";
 
 export type OnboardingState = {
   has_model: boolean;
@@ -17,18 +21,6 @@ export type OnboardingState = {
   providers: { id: string; kind: string; base_url: string; via_proxy: boolean; key_held: boolean | null; ready: boolean }[];
   needs: string[];
   message: string;
-};
-
-/** One model as an endpoint described it. Only the id is ever certain. */
-export type ModelEntry = {
-  id: string;
-  name?: string;
-  context_length?: number;
-  max_output_tokens?: number;
-  input_modalities?: string[];
-  images?: boolean;
-  reasoning?: boolean;
-  pricing?: { input?: number; output?: number; cache_hit?: number };
 };
 
 /** Not a provider id: the provider ids the server accepts cannot contain a space. */
@@ -53,11 +45,6 @@ function tokens(n: number): string {
   return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 }
 
-/** A model id turned into a preset id: the same rule the server accepts (letters, digits, . _ -). */
-export function presetIdFor(provider: string, model: string): string {
-  const slug = model.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "");
-  return `${provider}.${slug || "model"}`;
-}
 
 /** Step 1: which endpoint the model runs on. */
 function ProviderStep({ state, chosen, onPick }: { state: OnboardingState | null; chosen: string; onPick: (id: string) => void }) {
@@ -174,8 +161,6 @@ function ModelStep({ entries, loading, error, chosen, typed, onPick, onType, onR
   );
 }
 
-const BLANK: Preset = { provider: "", model: "", label: "", thinking: true, reasoning_effort: "medium", images: false, context_window: 128000, max_output_tokens: 32000 };
-
 /**
  * The flow itself. `onSaved` receives the preset id and the settings that came back; the caller
  * decides what happens next — the first model ends onboarding, a later one closes the sheet.
@@ -248,6 +233,14 @@ export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: str
     }));
   }
 
+  function typeModel(value: string) {
+    setTyped(value);
+    const next = retyped(value, { preset, pricing });
+    if (next.preset === preset) return;
+    setPreset(next.preset);
+    setPricing(next.pricing);
+  }
+
   const model = (typed.trim() || preset.model).trim();
   const ready = !!provider && provider !== CUSTOM && !!model;
 
@@ -258,9 +251,10 @@ export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: str
     try {
       // The price the endpoint published is stored on the provider, where costs are read from: a
       // model with no price anywhere is recorded as unmetered and counts against no cap.
-      if (pricing?.input !== undefined && pricing?.output !== undefined) {
+      const price = priceFor(model, { preset, pricing });
+      if (price) {
         const current = (await api.get<Settings>("/api/settings")).providers[provider]?.pricing ?? {};
-        await api.put<Settings>(`/api/providers/${encodeURIComponent(provider)}`, { pricing: { ...current, [model]: pricing } });
+        await api.put<Settings>(`/api/providers/${encodeURIComponent(provider)}`, { pricing: { ...current, [model]: price } });
       }
       const next = await api.put<Settings>(`/api/presets/${encodeURIComponent(id)}`, { ...preset, provider, model });
       onSaved(id, next);
@@ -294,7 +288,7 @@ export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: str
           </div>
         </div>
         {provider && provider !== CUSTOM ? (
-          <ModelStep entries={entries} loading={loading} error={lookupError} chosen={model} typed={typed} onPick={pickModel} onType={setTyped} onRetry={() => void lookup(provider)} />
+          <ModelStep entries={entries} loading={loading} error={lookupError} chosen={model} typed={typed} onPick={pickModel} onType={typeModel} onRetry={() => void lookup(provider)} />
         ) : (
           <div className="sub faint">Pick an endpoint above.</div>
         )}

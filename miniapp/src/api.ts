@@ -190,11 +190,13 @@ export type MessageView = {
   internal?: boolean;
   origin?: string;
   seq?: number | null;
+  /** The engine holds this one and the transcript does not yet: its `seq` is the one it will get. */
+  live?: boolean;
   compaction?: { reason: string; messages?: number; at?: string } | null;
   text: string;
   thinking: string;
   tool_calls: { id: string; name: string; arguments: Record<string, unknown> }[];
-  tool_results: { id: string; content: string; is_error: boolean; length?: number }[];
+  tool_results: { id: string; content: string; is_error: boolean; length?: number; clipped?: boolean }[];
   created_at: string;
 };
 

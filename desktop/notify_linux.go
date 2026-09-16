@@ -12,7 +12,8 @@ func notify(n Notification) error {
 	if _, err := exec.LookPath("notify-send"); err != nil {
 		return errors.New("notify-send is not installed, so the desktop has no way to be told")
 	}
-	args := []string{"--app-name=Daedalus", "--icon=daedalus-desktop", n.Title}
+	// "--" ends notify-send's options, so the summary and the body are text whatever they begin with.
+	args := []string{"--app-name=Daedalus", "--icon=daedalus-desktop", "--", n.Title}
 	if n.Body != "" {
 		args = append(args, n.Body)
 	}

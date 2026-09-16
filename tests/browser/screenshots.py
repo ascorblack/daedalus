@@ -23,6 +23,9 @@ from pathlib import Path
 
 from playwright.sync_api import Page, sync_playwright
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from api_stub import GATES, Unhandled  # noqa: E402
+
 BASE = os.environ.get("APP_URL", "http://127.0.0.1:8101/app")
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
 OUT = Path(os.environ.get("OUT", str(Path(__file__).parent)))
@@ -430,8 +433,17 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, CAPABILITIES)
     if rel == "/api/status":
         return respond(route, {"ok": True})
+    if rel in GATES:
+        return respond(route, GATES[rel])
+    # A route nobody taught this stub about is answered with nothing and reported at the end: the
+    # app grows gates (a model, the capabilities) that decide whether a screen is drawn at all, and
+    # one harness knowing about them while another does not is how the pictures and the numbers
+    # come to describe different apps.
+    UNHANDLED.record(rel)
     return respond(route, [])
 
+
+UNHANDLED = Unhandled()
 
 # ---- the shots ----------------------------------------------------------------------------
 
@@ -528,7 +540,7 @@ def run() -> int:
         stub.fresh = False  # type: ignore[attr-defined]
         phone.close()
         browser.close()
-    return 0
+    return UNHANDLED.report()
 
 
 if __name__ == "__main__":

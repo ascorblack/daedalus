@@ -8,10 +8,15 @@ page runs at a CPU throttle that stands in for a mid-range phone.
     cd miniapp && npm run build
     python3 tests/browser/perf_session.py                 # 600 and 1200 messages, 4x throttle
     python3 tests/browser/perf_session.py --messages 600 --seconds 8 --rate 4 --json out.json
+    python3 tests/browser/perf_session.py --live null     # the run's newest message with no row number
 
 Reported per case: frames per second while streaming, the total and the worst long task (a task
 over 50 ms blocks the main thread visibly), DOM nodes, JS heap, and what the app pulled from the
 API during the window — the count and the bytes, which is what a refetch per event costs.
+
+The tail of a running session is the case that decides whether any of the rest matters: the
+newest message or two are in the engine and not in the transcript yet, and how the API describes
+them is what ``--live`` selects. Read ``session_bytes`` for the answer.
 """
 from __future__ import annotations
 
@@ -26,6 +31,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from api_stub import GATES, Unhandled  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "miniapp" / "dist"
@@ -74,9 +82,35 @@ def message(seq: int, total: int) -> dict:
     }
 
 
+def live_row(seq: int) -> dict | None:
+    """The message the run is in the middle of, as the API returns it before the transcript has it.
+
+    The transcript is written by a task of its own, so a read that lands during a run routinely
+    catches one message the engine holds and the rows do not. ``--live seq`` is what the API returns
+    for it now: the number the row is going to get, and a mark saying the number is not settled yet.
+    ``--live null`` is what it returned before, a row with no number at all, which the app has to
+    read as a hole in the history — the case this harness could not see, and the one that costs a
+    re-read of the whole session on every event.
+    """
+    if Stub.live == "off":
+        return None
+    text = Stub.streaming
+    if not text:
+        return None
+    row = {"role": "assistant", "seq": seq, "text": text, "thinking": "", "tool_calls": [], "tool_results": [], "created_at": NOW.isoformat()}
+    if Stub.live == "null":
+        row["seq"] = None
+    else:
+        row["live"] = True
+    return row
+
+
 def detail(messages: int, tail: int, before: int | None) -> dict:
     """The session as the API returns it. The cursor is answered only with --cursor: today's API has none."""
     rows = [message(i + 1, messages) for i in range(messages)] + list(Stub.written)
+    live = live_row(len(rows) + 1)
+    if live is not None:
+        rows = rows + [live]
     if before is not None and Stub.cursor:
         rows = [r for r in rows if (r["seq"] or 0) < before]
     rows = rows[-tail:] if tail > 0 else rows
@@ -117,9 +151,12 @@ class Stub(BaseHTTPRequestHandler):
     cursor = False  # whether `before=<seq>` is answered; today's API ignores it
     initial_tail = 0  # when set, the app's full read is answered with this many rows only
     written = []  # the messages the run has finished, as the transcript would hold them
+    streaming = ""  # the message the run is in the middle of, which the transcript does not hold yet
+    live = "seq"  # how an unpersisted message is returned: "seq" (today), "null" (before), "off"
     delta_ms = 20
     stop_every = 200
     served = []  # (path, bytes) of every /api read, so a refetch storm is visible as a number
+    unhandled = Unhandled()
     lock = threading.Lock()
 
     def log_message(self, *args: object) -> None:  # quiet
@@ -142,18 +179,6 @@ class Stub(BaseHTTPRequestHandler):
         self._send(body)
 
     def _payload(self, path: str, query: dict[str, str]) -> object:
-        if path == "/api/auth/me":
-            return {"user": "operator"}
-        if path == "/api/auth/config":
-            return {"passkeys": 1}
-        if path == "/api/inbox/unread":
-            return {"unread": 0}
-        if path in ("/api/proposals", "/api/schedules", "/api/commands", "/api/sessions"):
-            return []
-        if path == "/api/modes":
-            return {}
-        if path == "/api/asr":
-            return {"configured": False, "reason": "", "provider": "", "model": "", "max_seconds": 120, "autosend": False}
         if path.startswith("/api/usage/provider/"):
             return {"provider": "claude", "today": {"calls": 12, "cost_usd": 1.42}, "subscription": None, "balance": None}
         if path == f"/api/sessions/{SESSION_ID}":
@@ -165,6 +190,11 @@ class Stub(BaseHTTPRequestHandler):
                 tail = Stub.initial_tail or Stub.messages
             before = int(query["before"]) if query.get("before") else None
             return detail(Stub.messages, tail, before)
+        if path in GATES:
+            return GATES[path]
+        # Answering {} here is how this harness came to measure the "Add a model" screen for two
+        # minutes and then time out. An unrecognised path is reported and fails the run instead.
+        Stub.unhandled.record(path)
         return {}
 
     def _stream(self) -> None:
@@ -186,6 +216,7 @@ class Stub(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 n += 1
                 written += text
+                Stub.streaming = written
                 if n % Stub.stop_every == 0:
                     # The message the stream just finished is in the transcript from now on, the way
                     # the real one is by the time the app reads the end of the conversation.
@@ -193,6 +224,7 @@ class Stub(BaseHTTPRequestHandler):
                         seq = Stub.messages + len(Stub.written) + 1
                         Stub.written.append({"role": "assistant", "seq": seq, "text": written, "thinking": "", "tool_calls": [], "tool_results": [], "created_at": NOW.isoformat()})
                     written = ""
+                    Stub.streaming = ""
                     self.wfile.write(b"event: message_stop\ndata: {}\n\n")
                     self.wfile.write(b'event: state_changed\ndata: {"status": "running"}\n\n')
                     self.wfile.flush()
@@ -259,6 +291,7 @@ def run_case(browser, port: int, messages: int, seconds: float, rate: float, wid
     with Stub.lock:
         Stub.served.clear()
         Stub.written.clear()
+        Stub.streaming = ""
     context = browser.new_context(viewport={"width": width, "height": height}, device_scale_factor=2)
     page = context.new_page()
     cdp = context.new_cdp_session(page)
@@ -282,6 +315,7 @@ def run_case(browser, port: int, messages: int, seconds: float, rate: float, wid
     context.close()
     return {
         "messages": messages,
+        "live": Stub.live,
         "throttle": rate,
         "viewport": f"{width}x{height}",
         "open_ms": open_ms,
@@ -313,6 +347,7 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=844)
     ap.add_argument("--port", type=int, default=8123)
     ap.add_argument("--cursor", action="store_true", help="answer before=<seq> (the paginated API)")
+    ap.add_argument("--live", choices=["seq", "null", "off"], default="seq", help="how an unpersisted message is returned: seq (today), null (before it was numbered), off")
     ap.add_argument("--initial-tail", type=int, default=0, help="answer the app's full read with this many rows")
     ap.add_argument("--json", type=str, default="")
     args = ap.parse_args()
@@ -322,6 +357,7 @@ def main() -> int:
     sizes = args.messages or [600, 1200]
     Stub.cursor = args.cursor
     Stub.initial_tail = args.initial_tail
+    Stub.live = args.live
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Stub)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -334,14 +370,14 @@ def main() -> int:
             print(json.dumps(row))
         browser.close()
     server.shutdown()
-    head = ["messages", "fps", "frames_over_50ms", "worst_frame_ms", "blocked_ms", "worst_task_ms", "dom_nodes", "turns_in_dom", "heap_mb", "open_ms", "session_calls", "session_bytes"]
+    head = ["messages", "live", "fps", "frames_over_50ms", "worst_frame_ms", "blocked_ms", "worst_task_ms", "dom_nodes", "turns_in_dom", "heap_mb", "open_ms", "session_calls", "session_bytes"]
     print("\n| " + " | ".join(head) + " |")
     print("|" + "---|" * len(head))
     for r in rows:
         print("| " + " | ".join(str(r[h]) for h in head) + " |")
     if args.json:
         Path(args.json).write_text(json.dumps(rows, indent=2) + "\n")
-    return 0
+    return Stub.unhandled.report()
 
 
 if __name__ == "__main__":

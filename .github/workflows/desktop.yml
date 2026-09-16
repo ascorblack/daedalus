@@ -21,8 +21,9 @@ permissions:
   contents: write
 
 jobs:
-  # One test job, on the runner that has nothing to install. Both builds are checked: the one this
-  # repository ships on Linux, and the `nowebview` tag every platform can be built with.
+  # The tests, on the runner that has nothing to install. On Linux the window's build constraint
+  # (`!nowebview && (darwin || windows)`) excludes it, so both commands here compile the same code
+  # twice: nothing on this runner can see a mistake in window.go.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -39,8 +40,26 @@ jobs:
       - run: go test -tags nowebview ./...
         working-directory: desktop
 
+  # So the window is compiled where it exists, before the tag is built. Without this a syntax error
+  # in window.go passes `test` and surfaces in `binaries`, which is after the tag has been pushed.
+  window:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - run: go build ./...
+        working-directory: desktop
+      - run: go vet ./...
+        working-directory: desktop
+
   binaries:
-    needs: test
+    needs: [test, window]
     strategy:
       fail-fast: false
       matrix:

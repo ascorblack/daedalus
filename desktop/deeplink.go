@@ -149,7 +149,9 @@ func registerSchemeLinux(exe string) error {
 		"Type=Application\n" +
 		"Name=Daedalus\n" +
 		"Comment=Daedalus on this machine\n" +
-		"Exec=" + exe + " %u\n" +
+		// Quoted per the Desktop Entry spec: unquoted, a launcher unpacked into a path with a space
+		// in it is split into arguments and daedalus:// links stop working with nothing said.
+		"Exec=\"" + exe + "\" %u\n" +
 		"Terminal=false\n" +
 		"Categories=Development;Utility;\n" +
 		"MimeType=x-scheme-handler/" + linkScheme + ";\n" +

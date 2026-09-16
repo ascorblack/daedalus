@@ -124,10 +124,21 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   );
 
   const [offline, setOffline] = useState(false);
+  // What the screen holds, kept where code can read it without waiting for a render: a merge has to
+  // decide whether the history has a hole in it before React gets to the next commit.
+  const msgs = useRef<MessageView[]>([]);
+  // Reads overlap — an event read and the safety-net poll — and they come back in whatever order the
+  // network gives them. Only the newest one is allowed to land, so a slow older answer cannot put an
+  // older status back on the screen.
+  const readSeq = useRef(0);
   const load = useCallback(
     async (quiet = false) => {
+      const mine = ++readSeq.current;
       try {
-        setDetail(await api.get<SessionDetail>(`/api/sessions/${id}`));
+        const next = await api.get<SessionDetail>(`/api/sessions/${id}`);
+        if (mine !== readSeq.current) return;
+        msgs.current = next.messages;
+        setDetail(next);
         setOffline(false);
       } catch (e) {
         // Timers and the event stream retry by themselves: one banner in the header, not a toast every few seconds.
@@ -138,23 +149,35 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     [id, toast],
   );
 
+  // A different session is a different conversation: nothing the last one held may be folded into it,
+  // and an answer still on its way belongs to the one that was left.
+  useEffect(() => {
+    msgs.current = [];
+    readSeq.current++;
+    return () => forgetDisclosed(id);
+  }, [id]);
+
   // A run changes the end of the conversation and nothing else, so a run's events are answered by
   // reading the end of it. `TAIL_AFTER_EVENT` messages is more than a round adds; when it turns out
   // not to reach what the screen already holds, `reconcile` says so and the whole thing is re-read.
   const refresh = useCallback(
     async (kind: "tail" | "state") => {
+      const mine = ++readSeq.current;
       try {
         const next = await api.get<SessionDetail>(`/api/sessions/${id}?tail=${kind === "tail" ? TAIL_AFTER_EVENT : 1}`);
+        if (mine !== readSeq.current) return;
         setOffline(false);
-        let whole = false;
-        setDetail((prev) => {
-          if (!prev) return next;
-          if (kind === "state") return { ...next, messages: prev.messages };
-          const merged = reconcile(prev.messages, next.messages);
-          whole = merged.gap;
-          return merged.gap ? prev : { ...next, messages: merged.messages };
-        });
-        if (whole) await load(true);
+        if (kind === "state") {
+          setDetail((prev) => (prev ? { ...next, messages: prev.messages } : next));
+          return;
+        }
+        const merged = reconcile(msgs.current, next.messages);
+        if (merged.gap) {
+          await load(true);
+          return;
+        }
+        msgs.current = merged.messages;
+        setDetail((prev) => (prev ? { ...next, messages: merged.messages } : next));
       } catch (e) {
         setOffline(true);
         void e;
@@ -193,12 +216,16 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   const [older, setOlder] = useState<"more" | "loading" | "done">("more");
   /** How far the reader was from the end when an older page went in, so they stay where they were. */
   const keepFromEnd = useRef<number | null>(null);
+  /** One page at a time: the rendered range asks as often as the reader scrolls. */
+  const olderBusy = useRef(false);
   const loadOlder = useCallback(async () => {
     const oldest = detail?.messages[0]?.seq;
     if (oldest == null || oldest <= 0) {
       setOlder("done");
       return;
     }
+    if (olderBusy.current) return;
+    olderBusy.current = true;
     setOlder("loading");
     try {
       const page = await api.get<SessionDetail>(`/api/sessions/${id}?before=${oldest}&tail=${OLDER_PAGE}`);
@@ -208,10 +235,13 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       }
       const el = scroller.current;
       keepFromEnd.current = el ? el.scrollHeight - el.scrollTop : null;
-      setDetail((prev) => (prev ? { ...prev, messages: prepend(prev.messages, page.messages) } : prev));
+      msgs.current = prepend(msgs.current, page.messages);
+      setDetail((prev) => (prev ? { ...prev, messages: msgs.current } : prev));
       setOlder(page.messages.length < OLDER_PAGE ? "done" : "more");
     } catch {
       setOlder("more");
+    } finally {
+      olderBusy.current = false;
     }
   }, [id, detail?.messages]);
 
@@ -411,6 +441,16 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   // and the line that says a page is on its way is not in its way.
   const pageable = older !== "done" && (detail?.messages.length ?? 0) >= OLDER_PAGE;
 
+  // The windowed list says when the oldest turn it holds is on screen. Held in a ref so the list
+  // does not re-register its scroll listener every time a message lands.
+  const wantOlder = useRef<() => void>(() => undefined);
+  useEffect(() => {
+    wantOlder.current = () => {
+      if (older === "more" && pageable) void loadOlder();
+    };
+  }, [older, pageable, loadOlder]);
+  const onTopOfList = useCallback(() => wantOlder.current(), []);
+
   // Follow the newest content only while the reader is at the bottom and not scrolling by hand.
   const pinBottom = useCallback(() => {
     const el = scroller.current;
@@ -447,6 +487,30 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       timers.forEach(clearTimeout);
     };
   }, [detail]);
+
+  // A rotation, a split pane opening, a desktop window resized: the list is a different width and
+  // every turn a different height. While the reader was at the end, the end is where they stay —
+  // the heights are re-measured over the next few frames, so the pin is repeated over them.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    const on = () => {
+      const el = scroller.current;
+      if (!el || !stick.current) return;
+      const pin = () => {
+        if (stick.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+      };
+      const timers = [0, 120, 400].map((ms) => window.setTimeout(pin, ms));
+      window.setTimeout(() => timers.forEach(clearTimeout), 600);
+    };
+    window.addEventListener("orientationchange", on);
+    window.addEventListener("resize", on);
+    vv?.addEventListener("resize", on);
+    return () => {
+      window.removeEventListener("orientationchange", on);
+      window.removeEventListener("resize", on);
+      vv?.removeEventListener("resize", on);
+    };
+  }, []);
 
   function jumpToBottom() {
     const el = scroller.current;
@@ -965,6 +1029,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
                   keys={turnKeys}
                   scroller={scroller}
                   pinned={() => stick.current}
+                  dragging={() => userScrolling.current}
+                  onTop={onTopOfList}
                   render={(i) => (
                     <Safe>
                       <TurnView turn={settled[i]} live={false} onTurnAction={turnAction} />
@@ -1506,6 +1572,38 @@ function shortModel(name?: string, max = 18): string {
 
 // ── turns ─────────────────────────────────────────────────────────────────────────────────
 
+// The windowed list unmounts a turn as soon as it leaves the overscan band, so what the reader
+// opened cannot live in the component: a step expanded and a long result fetched would both be gone
+// two screens later, and the result fetched again on the way back. It is held here instead, keyed by
+// session and by the row, and read back when the row mounts again — the same reason the markdown
+// render cache is module-level. What a session held is dropped when the screen leaves it.
+const disclosed = new Map<string, { open?: boolean; full?: string | null }>();
+
+function remember(key: string, patch: { open?: boolean; full?: string | null }): void {
+  disclosed.set(key, { ...disclosed.get(key), ...patch });
+}
+
+function forgetDisclosed(sessionId: string): void {
+  const prefix = `${sessionId}:`;
+  for (const key of [...disclosed.keys()]) if (key.startsWith(prefix)) disclosed.delete(key);
+}
+
+/** `useState` for a disclosure that has to survive its row leaving the window. */
+function useDisclosed(key: string, initial: boolean): [boolean, (next: boolean | ((o: boolean) => boolean)) => void] {
+  const [open, set] = useState(() => disclosed.get(key)?.open ?? initial);
+  const write = useCallback(
+    (next: boolean | ((o: boolean) => boolean)) => {
+      set((o) => {
+        const now = typeof next === "function" ? next(o) : next;
+        remember(key, { open: now });
+        return now;
+      });
+    },
+    [key],
+  );
+  return [open, write];
+}
+
 function fmtDuration(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return `${s}s`;
@@ -1519,7 +1617,8 @@ function stepCount(items: Activity[]): number {
 }
 
 const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork", seq: number) => void }) {
-  const [open, setOpen] = useState(live);
+  const { id: sessionId } = useContext(SessionContext);
+  const [open, setOpen] = useDisclosed(`${sessionId}:turn:${turn.key}`, live);
   const wasLive = useRef(live);
   useEffect(() => {
     // Expanded while the agent works; folds away once the turn is over.
@@ -1879,8 +1978,8 @@ function ThoughtBlock({ text }: { text: string }) {
 }
 
 function ToolRow({ item, nested }: { item: ToolItem; nested?: boolean }) {
-  const [open, setOpen] = useState(false);
-  const { workspace } = useContext(SessionContext);
+  const { id: sessionId, workspace } = useContext(SessionContext);
+  const [open, setOpen] = useDisclosed(`${sessionId}:tool:${item.id}`, false);
   const d = describe(item, workspace);
   const expanded = open || (item.running && item.name === "Exec");
   return (
@@ -2064,10 +2163,18 @@ function ToolTiming({ sessionId }: { sessionId: string }) {
 
 function ToolResultText({ item }: { item: ToolItem }) {
   const { id: sessionId } = useContext(SessionContext);
-  const [full, setFull] = useState<string | null>(null);
+  const key = `${sessionId}:result:${item.id}`;
+  const [full, setFullState] = useState<string | null>(() => disclosed.get(key)?.full ?? null);
+  const setFull = (text: string | null) => {
+    remember(key, { full: text });
+    setFullState(text);
+  };
   const [loading, setLoading] = useState(false);
   const text = full ?? item.result ?? "";
-  const clipped = full === null && item.length !== undefined && item.length > text.length;
+  // Whether there is more of it is the server's answer, not a comparison of lengths: what is on
+  // screen is a redacted preview and the length is the text's, so a redaction that shortens the
+  // preview would otherwise offer to fetch a result that is already whole.
+  const clipped = full === null && !!item.clipped && item.length !== undefined;
   async function loadAll() {
     setLoading(true);
     try {

@@ -142,7 +142,9 @@ func TestTheDesktopEntryIsWrittenWhereTheDesktopLooks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"MimeType=x-scheme-handler/daedalus;", "Exec=" + exe + " %u", "Name=Daedalus"} {
+	// The path is quoted: unquoted, a launcher living under a path with a space in it writes an
+	// Exec= line the desktop splits into arguments, and the links stop working with nothing said.
+	for _, want := range []string{"MimeType=x-scheme-handler/daedalus;", "Exec=\"" + exe + "\" %u", "Name=Daedalus"} {
 		if !strings.Contains(string(entry), want) {
 			t.Fatalf("the desktop entry does not carry %q:\n%s", want, entry)
 		}
@@ -231,4 +233,44 @@ func sessionLine(id, title, status string) struct {
 		Title  string `json:"title"`
 		Status string `json:"status"`
 	}{ID: id, Title: title, Status: status}
+}
+
+// A notification's title and body come from the agent's inbox and from the page in the web view,
+// and they are handed to a helper as arguments. One beginning with a dash would be read as an
+// option — another -e script for osascript, another flag for notify-send — so it is fenced first.
+func TestANotificationCannotBeginWithAnOption(t *testing.T) {
+	for _, text := range []string{"-e do shell script \"id\"", "  --title", "-"} {
+		if got := fenceDash(text); strings.HasPrefix(got, "-") {
+			t.Fatalf("%q was handed on as %q, which a helper reads as an option", text, got)
+		}
+	}
+	if got := fenceDash("A title"); got != "A title" {
+		t.Fatalf("an ordinary title was changed to %q", got)
+	}
+}
+
+// The handover file names the port and carries the token that authorises start, stop and update.
+// A launcher that was killed leaves it behind, and by then anything may be on that port.
+func TestAHandoverFromADeadLauncherIsNotBelieved(t *testing.T) {
+	paths := setupTempInstall(t)
+	if err := WriteInstance(paths, 45999, "a-token"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readInstance(paths); !ok {
+		t.Fatal("this launcher's own handover was not believed")
+	}
+	// A pid no process holds: the file is stale and is removed rather than trusted.
+	data, err := json.Marshal(instance{Port: 45999, Token: "a-token", PID: 4194303})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(instanceFile(paths), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readInstance(paths); ok {
+		t.Fatal("a handover from a process that is gone was believed")
+	}
+	if _, err := os.Stat(instanceFile(paths)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the stale handover was left where the next start will read it again")
+	}
 }

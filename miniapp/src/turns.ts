@@ -12,7 +12,7 @@ export type LiveTool = { id: string; name: string; args: string; result?: string
 export type LiveState = { text: string; thinking: string; tools: LiveTool[]; startedAt: number | null };
 export const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null };
 
-export type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean; length?: number };
+export type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean; length?: number; clipped?: boolean };
 export type NoteItem = { kind: "note"; text: string };
 export type ThinkItem = { kind: "thinking"; text: string };
 export type SummaryItem = { kind: "summary"; text: string; reason: string };
@@ -60,7 +60,7 @@ export function parseArgs(raw: string): Record<string, unknown> {
  * very same object, which is what keeps the view from reconciling the whole history.
  */
 export function buildTurns(messages: MessageView[], previous: readonly Turn[] = []): Turn[] {
-  const results = new Map<string, { content: string; is_error: boolean; length?: number }>();
+  const results = new Map<string, { content: string; is_error: boolean; length?: number; clipped?: boolean }>();
   for (const m of messages) for (const r of m.tool_results) results.set(r.id, r);
   const turns: Turn[] = [];
   const sigs: string[][] = [];
@@ -117,7 +117,7 @@ export function buildTurns(messages: MessageView[], previous: readonly Turn[] = 
       const running = r === undefined;
       if (running) current.pendingTools++;
       current.toolIds.push(c.id);
-      current.activity.push({ kind: "tool", id: c.id, name: c.name, args: c.arguments, result: r?.content, error: r?.is_error, running, length: r?.length });
+      current.activity.push({ kind: "tool", id: c.id, name: c.name, args: c.arguments, result: r?.content, error: r?.is_error, running, length: r?.length, clipped: r?.clipped });
       mark(`t${c.id}:${r ? `${r.content.length}${r.is_error ? "!" : ""}` : "-"}`);
     }
   });
@@ -148,7 +148,8 @@ export function applyLive(base: Turn | null, live: LiveState, now: number): Turn
       const lt = live.tools.find((x) => x.id === a.id);
       if (!lt || lt.result === undefined) return a;
       t.pendingTools--;
-      return { ...a, result: lt.result, error: lt.error, running: false };
+      // The stream carries the whole result, so what came over it is never cut short.
+      return { ...a, result: lt.result, error: lt.error, running: false, length: lt.result.length, clipped: false };
     });
   }
   const fresh = live.tools.filter((lt) => !t.toolIds.includes(lt.id));
@@ -162,7 +163,7 @@ export function applyLive(base: Turn | null, live: LiveState, now: number): Turn
   for (const lt of fresh) {
     const running = lt.result === undefined;
     if (running) t.pendingTools++;
-    t.activity.push({ kind: "tool", id: lt.id, name: lt.name, args: parseArgs(lt.args), result: lt.result, error: lt.error, running });
+    t.activity.push({ kind: "tool", id: lt.id, name: lt.name, args: parseArgs(lt.args), result: lt.result, error: lt.error, running, length: lt.result?.length, clipped: false });
   }
   if (live.text) t.answer = stripHeadline(live.text);
   t.endedAt = now;
@@ -188,27 +189,42 @@ const sameMessage = (a: MessageView, b: MessageView): boolean =>
  * (a revert, a cleared session), there is nothing to fold into and the caller re-reads it whole.
  * When nothing in the tail is new, the array that came in is handed back unchanged, so the turn
  * objects keep their identity and nothing re-renders.
+ *
+ * A running session ends in messages the engine holds and the transcript has not written yet. Their
+ * `seq` is the one the row is going to get, and they say so (`live`), because until the row exists
+ * the number is a promise rather than a fact: the tail is the only authority on them, so whatever
+ * the screen holds for them is dropped and what came in takes its place. They are never a gap —
+ * treating them as one costs a re-read of the whole session on every event of a run.
  */
 export function reconcile(known: readonly MessageView[], tail: readonly MessageView[]): Merge {
   if (!known.length) return { messages: tail.slice(), gap: false };
   if (!tail.length) return { messages: known.slice(), gap: false };
-  if (known.some((m) => m.seq == null) || tail.some((m) => m.seq == null)) return { messages: known.slice(), gap: true };
-  const maxKnown = known[known.length - 1].seq!;
-  const minTail = tail[0].seq!;
-  const maxTail = tail[tail.length - 1].seq!;
-  if (maxTail < maxKnown) return { messages: known.slice(), gap: true };
-  if (minTail > maxKnown + 1) return { messages: known.slice(), gap: true };
+  const settled = known.filter((m) => !m.live);
+  const fresh = tail.filter((m) => !m.live);
+  const live = tail.filter((m) => m.live);
+  // Nothing settled on either side to match on: the tail is all there is to go by.
+  if (!settled.length) return { messages: tail.slice(), gap: false };
+  if (settled.some((m) => m.seq == null) || fresh.some((m) => m.seq == null)) return { messages: known.slice(), gap: true };
+  const maxKnown = settled[settled.length - 1].seq!;
+  if (fresh.length) {
+    if (fresh[fresh.length - 1].seq! < maxKnown) return { messages: known.slice(), gap: true };
+    if (fresh[0].seq! > maxKnown + 1) return { messages: known.slice(), gap: true };
+  }
   const bySeq = new Map<number, MessageView>();
-  for (const m of known) bySeq.set(m.seq!, m);
+  for (const m of settled) bySeq.set(m.seq!, m);
   let changed = false;
-  for (const m of tail) {
+  for (const m of fresh) {
     const old = bySeq.get(m.seq!);
     if (old && sameMessage(old, m)) continue;
     changed = true;
     bySeq.set(m.seq!, m);
   }
-  if (!changed) return { messages: known as MessageView[], gap: false };
-  return { messages: [...bySeq.values()].sort((a, b) => a.seq! - b.seq!), gap: false };
+  // The live tail always trails what is settled, so what the screen holds for it sits at the end.
+  const heldLive = known.slice(settled.length);
+  const sameLive = live.length === heldLive.length && live.every((m, i) => sameMessage(m, heldLive[i]));
+  if (!changed && sameLive) return { messages: known as MessageView[], gap: false };
+  const base = changed ? [...bySeq.values()].sort((a, b) => a.seq! - b.seq!) : settled;
+  return { messages: live.length ? [...base, ...live] : base, gap: false };
 }
 
 /** An older page, put in front of what is on screen. Anything not actually older is dropped. */

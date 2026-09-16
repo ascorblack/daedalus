@@ -504,7 +504,13 @@ class SessionManager:
         live = await self._unpersisted(session_id, set())  # a view carries no key: the transcript is asked instead
         if not live:
             return views
-        views = views + [message_view(m) for m in live]
+        # The transcript is written by a task of its own, so during a run the newest message or two
+        # are not in it yet and have no row number. A view without one reads to the app as a hole in
+        # the history and costs it a re-read of the whole session on every event. So each gets the
+        # number its row will have when it is written, and is marked as live: the app matches the
+        # settled rows by number and takes the live tail as it comes.
+        base = int(views[-1].get("seq") or 0) if views else 0
+        views = views + [{**message_view(m), "seq": base + n, "live": True} for n, m in enumerate(live, start=1)]
         return views[-tail:] if tail > 0 else views
 
     async def _unpersisted(self, session_id: str, known_keys: set[str]) -> list[Message]:
