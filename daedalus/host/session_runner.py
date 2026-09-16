@@ -40,7 +40,7 @@ from protocore.tests_support.adapters import InMemoryToolRegistry
 from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
 
-from daedalus.config import RuntimeConfig, Settings
+from daedalus.config import VOICE_ONLY_TOOLS, VOICE_TOOLS, RuntimeConfig, Settings
 from daedalus.host import prompts
 from daedalus.host.checkpoints import CheckpointError, Checkpoints, workspace_size
 from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
@@ -1302,6 +1302,7 @@ class SessionManager:
             max_output_tokens=preset.max_output_tokens,
             extra_notes=self.notes_for(state),
             blocked_tools=self.blocked_tools_for(state),
+            voice=self.is_voice(state),
         )
         self._attach_hooks(engine, state)
         if chain is not None:
@@ -1727,12 +1728,21 @@ class SessionManager:
         known = {t.name for t in self.tools.list_all()}
         return {str(n) for n in (state.metadata.get("tools_off") or ()) if str(n) in known}
 
+    @staticmethod
+    def is_voice(state: SessionState) -> bool:
+        """Whether this is the voice session: the operator's spoken conversation with the concierge."""
+        return bool(state.metadata.get("voice"))
+
     def blocked_tools_for(self, state: SessionState) -> set[str]:
         """Everything this session may not call right now: disabled MCP servers' tools, the operator's switches,
         and the mode's rules. One computation for the engine build and for every live update, so a toggle in
         Settings cannot disarm a mode."""
         known = {t.name for t in self.tools.list_all()}
         blocked = blocked_for(self.mcp, self.mcp_enabled(state)) | self.tools_off(state)
+        # The concierge talks and hands work over; it may not read, write or run anything itself, and the
+        # tools that hand work over are its alone. Neither rule goes through a mode, so editing one cannot
+        # give a session being spoken to a shell, nor give a working agent a second way to spawn one.
+        blocked |= (known - set(VOICE_TOOLS)) if self.is_voice(state) else (known & set(VOICE_ONLY_TOOLS))
         mode = self.mode_for(state)
         if mode is not None:
             if mode.tools_only:

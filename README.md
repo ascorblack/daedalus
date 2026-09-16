@@ -75,6 +75,16 @@ Provider keys live in a key-proxy container that injects them into upstream call
 
 </td>
 </tr>
+<tr>
+<td valign="top">
+
+**🎙️ Voice (beta)**<br/>
+Talk to a small fast model that answers out loud in a second, hands anything substantial to an agent session while you keep talking, and tells you when one finishes. See *Voice mode* below.
+
+</td>
+<td valign="top"></td>
+<td valign="top"></td>
+</tr>
 </table>
 
 ## How it looks
@@ -277,7 +287,7 @@ daedalus/
   security/     redaction of secrets in what the model and the chat see
   transport/    Telegram (aiogram 3): topics, rich messages, voice, files
   extensions/   HTTP API + app, self-development, scheduler, loops, subagents,
-                services, board, peers, inbox, heartbeat, balance, MCP
+                services, board, peers, inbox, heartbeat, balance, voice, MCP
   bench/        headless task runner and the Harbor adapter
 launcher/       the supervisor (PID 1, never edited by the agent)
 miniapp/        Vite + React app (Telegram Mini App and browser); src/router.ts, shell.tsx,
@@ -289,6 +299,57 @@ desktop/        the launcher: one binary that runs the stack on a personal machi
 tests/          unit and integration tests; tests/browser drives the built app with a real mouse
 docs/           design and decisions (2026-09-06, historical), screenshots, diagrams
 ```
+
+## Voice mode (beta)
+
+`/app/voice` is a conversation, not a chat window. You talk; a small fast model — the *concierge* —
+answers out loud in a second or two. It is not the agent that does the work: it is the manager who
+stays on the line while the engineers work. Small talk, quick facts and "what is running?" it answers
+itself. Anything substantial it hands to a real agent session with `Delegate` and says so at once
+("one moment, I am setting that up"), so the conversation never stalls on a four-minute tool call.
+Several things asked at once become several agents, running in parallel. While they work you can keep
+talking: add an instruction to one that is already going, ask what came back, stop one. When an agent
+finishes, the report arrives in the conversation and the concierge summarises it in a sentence.
+
+The concierge is an ordinary session: its transcript is in the app under **Voice → Transcript**, its
+history is compacted like any other, and its calls appear in Usage. What it is not is an agent — its
+tools are `Delegate`, `Agents`, `AgentResult`, `StopAgent` and `WebSearch`, and nothing else. It has no
+shell, no files and no workspace; the agents beside it have all of that. That split is enforced by the
+host, not by the prompt, and no mode can widen it.
+
+```toml
+[voice]
+enabled = true
+preset = "openrouter.qwen-qwen3.7-flash"   # a preset from [presets]; pick a fast, no-thinking model
+
+[voice.tts]                  # reading the answer out loud; empty = the browser's own synthesiser
+provider = ""                # a provider id from [providers] — its base URL and key are used
+url = ""                     # or an endpoint of its own, e.g. a local speech server
+api_key = ""
+model = "gpt-4o-mini-tts"
+voice = "alloy"
+format = "mp3"               # mp3 | opus | pcm
+```
+
+**Hearing you.** Chrome, Edge and Safari recognise speech in the browser itself, streaming, with no
+server involved — that is the primary path and it costs nothing. Firefox has no such API: there the
+page records instead, cuts an utterance when you have been quiet for about a second, and posts it to
+be transcribed by the `[asr]` endpoint (the same one that transcribes voice notes in the chat). With
+neither, the page still works from the keyboard and says why the microphone is missing.
+
+**Speaking back.** With `[voice.tts]` empty the browser reads the answer with its own voice: nothing
+to install, and it sounds like it. Any OpenAI-compatible `/audio/speech` endpoint gives you a better
+one — a self-hosted server such as Kokoro-FastAPI or Piper on the private network, or a hosted model
+like `gpt-4o-mini-tts`. Set `provider` to reuse a configured provider's URL and key, or `url` and
+`api_key` for an endpoint of its own. The answer is spoken a sentence at a time as it is written, so
+speech starts before the model has finished the paragraph, and talking over it stops it.
+
+**Limits.** It is beta and it shows. Recognition quality is the browser's, and it mishears names and
+identifiers; barge-in cuts the audio but the concierge's turn keeps its own run until it settles; a
+delegated agent that stops to ask a question is reported to you but is answered in its own session,
+not by voice; reports arriving while no page is open are held and delivered together at the next
+connect, so a long silence can start with a summary of several agents at once. On iOS, audio plays
+only after the first tap on the page — take the mic once and it works for the session.
 
 ## Configuration
 

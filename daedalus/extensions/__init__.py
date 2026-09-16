@@ -29,6 +29,7 @@ EXTENSIONS = (
     "daedalus.extensions.loops",
     "daedalus.extensions.services",
     "daedalus.extensions.balance",
+    "daedalus.extensions.voice",
     "daedalus.extensions.api",
 )
 

@@ -8,8 +8,8 @@ import { Screen, navigate, pathFor } from "./router";
 
 export type Counts = { inbox?: number; changes?: number; services?: number; agents?: number };
 
-const TITLES: Record<Screen, string> = { agents: "Agents", inbox: "Inbox", board: "Board", changes: "Changes", schedules: "Schedules", services: "Services", memory: "Memory", usage: "Usage", health: "Health", settings: "Settings" };
-const ICONS: Record<Screen, IconName> = { agents: "bots", inbox: "inbox", board: "board", changes: "changes", schedules: "clock", services: "globe", memory: "bulb", usage: "chart", health: "check", settings: "settings" };
+const TITLES: Record<Screen, string> = { agents: "Agents", voice: "Voice", inbox: "Inbox", board: "Board", changes: "Changes", schedules: "Schedules", services: "Services", memory: "Memory", usage: "Usage", health: "Health", settings: "Settings" };
+const ICONS: Record<Screen, IconName> = { agents: "bots", voice: "mic", inbox: "inbox", board: "board", changes: "changes", schedules: "clock", services: "globe", memory: "bulb", usage: "chart", health: "check", settings: "settings" };
 
 export function screenTitle(s: Screen): string {
   return TITLES[s];
@@ -17,12 +17,14 @@ export function screenTitle(s: Screen): string {
 
 const PRIMARY: Screen[] = ["agents", "inbox", "board"];
 const GROUPS: { label: string; items: Screen[] }[] = [
-  { label: "Work", items: ["agents", "inbox", "board"] },
+  { label: "Work", items: ["agents", "voice", "inbox", "board"] },
   { label: "Autonomy", items: ["changes", "schedules", "services"] },
   { label: "Knowledge", items: ["memory"] },
   { label: "Observe", items: ["usage", "health"] },
 ];
-const MORE: Screen[] = ["changes", "schedules", "services", "memory", "usage", "health", "settings"];
+/** Screens that carry a beta tag beside their name: new, usable, not yet finished. */
+const BETA: Screen[] = ["voice"];
+const MORE: Screen[] = ["voice", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
 
 function countFor(s: Screen, counts: Counts): number {
   if (s === "inbox") return counts.inbox ?? 0;
@@ -96,6 +98,7 @@ export function MoreSheet({ screen, counts, onClose }: { screen: Screen; counts:
             <a key={s} href={pathFor(s)} className={`more-item ${screen === s ? "active" : ""}`} onClick={(e) => { go(e, pathFor(s)); onClose(); }}>
               <Icon name={ICONS[s]} size={22} />
               <span>{TITLES[s]}</span>
+              {BETA.includes(s) && <span className="beta-tag">beta</span>}
               {n > 0 && <span className="tab-badge">{n}</span>}
             </a>
           );
@@ -112,6 +115,7 @@ export function Rail({ screen, counts, collapsed, onToggle, onPalette }: { scree
       <a key={s} href={pathFor(s)} className={`rail-item ${screen === s ? "active" : ""}`} aria-current={screen === s ? "page" : undefined} onClick={(e) => go(e, pathFor(s))} title={collapsed ? TITLES[s] : undefined}>
         <Icon name={ICONS[s]} size={18} />
         <span className="rail-text">{TITLES[s]}</span>
+        {BETA.includes(s) && <span className="rail-text beta-tag">beta</span>}
         {n > 0 && <span className={`count ${s === "services" ? "ok" : s === "changes" ? "attn" : ""}`}>{n}</span>}
       </a>
     );
@@ -192,7 +196,7 @@ export function Palette({ items, onClose }: { items: PaletteItem[]; onClose: () 
   );
 }
 
-const GO_KEYS: Record<string, Screen> = { a: "agents", i: "inbox", b: "board", c: "changes", m: "memory", u: "usage", s: "settings" };
+const GO_KEYS: Record<string, Screen> = { a: "agents", v: "voice", i: "inbox", b: "board", c: "changes", m: "memory", u: "usage", s: "settings" };
 
 /** Keyboard on a desktop: Ctrl/⌘ K opens the palette, `g` then a letter goes to a screen. Never inside a text field. */
 export function useShortcuts(onPalette: () => void) {

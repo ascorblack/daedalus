@@ -10,7 +10,7 @@ import pytest
 from protocore.contracts.memory import MemoryScope
 from protocore.contracts.tools import ToolContext
 
-from daedalus.config import DEFAULT_MODES, LimitsConfig, RuntimeConfig
+from daedalus.config import DEFAULT_MODES, VOICE_ONLY_TOOLS, LimitsConfig, RuntimeConfig
 from daedalus.host.services import SessionServices, locator
 from daedalus.providers.openai_compat import apply_cache_control
 from daedalus.tools.files import EditMiss, apply_edit, nearest_window
@@ -96,15 +96,16 @@ async def test_plan_mode_is_an_allow_list_that_a_settings_toggle_cannot_disarm(s
     try:
         state = await manager.create_session("plan")
         known = {t.name for t in manager.tools.list_all()}
-        assert manager.blocked_tools_for(state) == set()
+        # A working session is blocked from the concierge's tools and from nothing else.
+        assert manager.blocked_tools_for(state) == set(VOICE_ONLY_TOOLS)
         await manager.set_mode(state.session.id, "plan")
         blocked = manager.blocked_tools_for(state)
         assert {"Exec", "Verify", "Write", "Edit", "MultiEdit", "SendFile", "SelfPropose", "SubAgent", "AskPeer", "McpEnable", "ServiceStart"} <= blocked
-        assert blocked == known - set(plan.tools_only)
+        assert blocked == (known - set(plan.tools_only)) | set(VOICE_ONLY_TOOLS)
         await manager.set_tools_off(state.session.id, ["WebSearch"])
         assert "Exec" in manager.blocked_tools_for(state) and "WebSearch" in manager.blocked_tools_for(state)
         await manager.set_mode(state.session.id, "")
-        assert manager.blocked_tools_for(state) == {"WebSearch"}
+        assert manager.blocked_tools_for(state) == {"WebSearch"} | set(VOICE_ONLY_TOOLS)
     finally:
         await manager.close()
 

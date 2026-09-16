@@ -487,6 +487,38 @@ class AsrConfig(BaseModel):
     """Send the transcript to the agent without the confirm step (dictation is error-prone; off by default)."""
 
 
+class TtsConfig(BaseModel):
+    """Text-to-speech for the voice page: any OpenAI-compatible ``/audio/speech`` endpoint.
+
+    Empty means the browser speaks the answer itself with its own synthesiser, which every
+    modern browser has; a server endpoint is worth configuring for a voice that sounds human
+    (a hosted one, or a local Kokoro/Piper server on the private network).
+    """
+
+    provider: str = ""
+    """A configured provider id whose base URL and key are used, exactly as ``[asr]`` does; empty = ``url``/``api_key``."""
+    url: str = ""
+    """Base URL (``https://api.openai.com/v1``, a local speech server, …); empty = the browser's own synthesiser."""
+    api_key: str = ""
+    model: str = "gpt-4o-mini-tts"
+    voice: str = "alloy"
+    format: Literal["mp3", "opus", "pcm"] = "mp3"
+    timeout_seconds: float = Field(default=60.0, ge=5)
+
+
+class VoiceConfig(BaseModel):
+    """The voice page: a small fast model the operator talks to, which hands real work to agent sessions.
+
+    ``preset`` should name a model that answers in a second or two — a conversation stalls where a
+    thinking model would merely be slow. The default is the cheapest no-thinking preset in the table.
+    """
+
+    enabled: bool = True
+    preset: str = "openrouter.qwen-qwen3.7-flash"
+    """The concierge's model preset; pick a fast one (no thinking, or low effort)."""
+    tts: TtsConfig = Field(default_factory=TtsConfig)
+
+
 class ModeConfig(BaseModel):
     """A named bundle of run limits and behaviour a session can switch to."""
 
@@ -526,6 +558,14 @@ DEFAULT_MODES: dict[str, ModeConfig] = {
     "deep": ModeConfig(max_iterations=400, usd_per_run=15.0, description="long autonomous work with a high budget", prompt="Mode: deep. Work autonomously to completion; verify with Verify; ask only when a choice is genuinely the operator's."),
     "careful": ModeConfig(max_iterations=100, description="ask before anything irreversible", prompt="Mode: careful. Before any irreversible action (deleting, pushing, sending, paying, changing configuration) ask with AskUser and wait."),
 }
+
+
+VOICE_TOOLS = ["Delegate", "Agents", "AgentResult", "StopAgent", "WebSearch"]
+"""Everything the concierge may call: hand work to an agent, look at the agents, stop one, and answer a
+quick factual question itself. Nothing that reads, writes or runs anything — that is what the agents are for."""
+
+VOICE_ONLY_TOOLS = ["Delegate", "Agents", "AgentResult", "StopAgent"]
+"""The tools that exist for the concierge alone; every other session is blocked from them (it has SpawnAgent)."""
 
 
 class WebhookConfig(BaseModel):
@@ -733,6 +773,7 @@ class RuntimeConfig(BaseModel):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)
     asr: AsrConfig = Field(default_factory=AsrConfig)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
     board: BoardConfig = Field(default_factory=BoardConfig)
     peers: PeersConfig = Field(default_factory=PeersConfig)
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
@@ -981,4 +1022,8 @@ __all__ = [
     "OpsConfig",
     "WebhookConfig",
     "VisionConfig",
+    "VoiceConfig",
+    "TtsConfig",
+    "VOICE_TOOLS",
+    "VOICE_ONLY_TOOLS",
 ]

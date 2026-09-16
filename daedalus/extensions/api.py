@@ -42,6 +42,7 @@ from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
+from daedalus.extensions.voice import tts_configured
 from daedalus.host import prompts
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import TENANT, Attachment
@@ -71,6 +72,13 @@ INIT_DATA_MAX_AGE = 24 * 3600
 LOGIN_WIDGET_MAX_AGE = 24 * 3600
 SESSION_COOKIE = "daedalus_session"
 SESSION_TTL = 30 * 24 * 3600
+VOICE_AUDIO_MAX = 25 << 20
+"""One spoken utterance, not a recording session: anything larger is a mistake, not speech."""
+VOICE_SAY_MAX_CHARS = 4000
+"""One utterance in words. Dictation runs long, a pasted document is not speech: past this it is refused."""
+VOICE_TTS_MAX_CHARS = 2000
+"""One sentence to read aloud. The page only ever sends what ``split_sentences`` cut, and the speech
+endpoint is usually metered by the character, so an unbounded body is somebody else's bill."""
 
 
 def validate_login_widget(data: dict[str, Any], bot_token: str, *, max_age: int = LOGIN_WIDGET_MAX_AGE) -> dict[str, Any]:
@@ -152,6 +160,14 @@ class PasskeyLoginBody(BaseModel):
 class SendMessageBody(BaseModel):
     text: str
     steer: bool = False
+
+
+class VoiceSayBody(BaseModel):
+    text: str
+
+
+class VoiceSpeakBody(BaseModel):
+    text: str
 
 
 class AnswerBody(BaseModel):
@@ -1153,6 +1169,117 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         finally:
             target.unlink(missing_ok=True)
         return {"transcript": transcript, "text": voice_note_text(transcript), "autosend": app.config.asr.autosend}
+
+    # -- voice: the concierge page ---------------------------------------------------
+
+    def voice() -> Any:
+        """The voice extension, or a plain refusal: the page is optional and can be switched off."""
+        extension = app.extensions.get("voice")
+        if extension is None:
+            raise HTTPException(503, "the voice page is not installed")
+        if not app.config.voice.enabled:
+            raise HTTPException(503, "the voice page is switched off in the configuration")
+        return extension
+
+    @api.get("/api/voice")
+    async def voice_status(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """What the page needs to decide how to listen and how to speak: the model, the endpoints, the agents."""
+        extension = app.extensions.get("voice")
+        if extension is None or not app.config.voice.enabled:
+            return {"enabled": False, "session_id": "", "model": "", "tts": {"configured": False}, "stt": {"configured": False}, "agents": [], "listening": False}
+        return await extension.state()
+
+    @api.get("/api/voice/stream")
+    async def voice_stream(request: Request, _: dict[str, Any] = Depends(auth)) -> StreamingResponse:
+        """The concierge's half of the conversation: a status chip, the answer as it is written, a sentence at a time to speak."""
+        extension = voice()
+
+        async def gen():  # type: ignore[no-untyped-def]
+            async with extension.listen() as queue:
+                yield "event: hello\ndata: {}\n\n"
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    try:
+                        name, payload = await asyncio.wait_for(queue.get(), timeout=15)
+                    except TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
+                    yield f"event: {name}\ndata: {json.dumps(payload, default=str)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @api.post("/api/voice/say")
+    async def voice_say(body: VoiceSayBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """One utterance the browser already turned into words."""
+        if len(body.text) > VOICE_SAY_MAX_CHARS:
+            raise HTTPException(413, f"an utterance may be up to {VOICE_SAY_MAX_CHARS} characters")
+        try:
+            run_id = await voice().say(body.text)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"run_id": run_id}
+
+    @api.post("/api/voice/audio")
+    async def voice_audio(audio: UploadFile = File(...), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """One utterance as a recording, for a browser with no speech recognition of its own."""
+        extension = voice()
+        if not asr_configured(app.config.asr):
+            raise HTTPException(409, "speech-to-text is not configured (Settings → Tools → Voice notes)")
+        suffix = Path(audio.filename or "").suffix or mimetypes.guess_extension((audio.content_type or "").split(";")[0]) or ".webm"
+        target = settings.state_dir / "tmp" / f"utterance-{secrets.token_hex(4)}{suffix}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            size = 0
+            with target.open("wb") as fh:
+                while chunk := await audio.read(1 << 20):
+                    size += len(chunk)
+                    if size > VOICE_AUDIO_MAX:
+                        raise HTTPException(413, f"an utterance may be up to {VOICE_AUDIO_MAX >> 20} MB")
+                    fh.write(chunk)
+            transcript = await transcribe(target, effective_asr(app.config.asr, manager))
+        except TranscriptionError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        finally:
+            # A client that aborts mid-upload leaves a part file behind unless the write is in here too.
+            target.unlink(missing_ok=True)
+        try:
+            run_id = await extension.say(transcript)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"transcript": transcript, "run_id": run_id}
+
+    @api.post("/api/voice/interrupt")
+    async def voice_interrupt(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Barge-in: the operator talked over the answer, so the answer stops."""
+        return {"stopped": await voice().interrupt()}
+
+    @api.post("/api/voice/new")
+    async def voice_new(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Start the conversation over; the previous one stays as a session of its own."""
+        return {"session_id": await voice().new_session()}
+
+    @api.post("/api/voice/tts")
+    async def voice_tts(body: VoiceSpeakBody, _: dict[str, Any] = Depends(auth)) -> StreamingResponse:
+        """One sentence read aloud by the configured endpoint; 404 tells the page to use the browser's own voice."""
+        extension = voice()
+        if len(body.text) > VOICE_TTS_MAX_CHARS:
+            raise HTTPException(413, f"a sentence may be up to {VOICE_TTS_MAX_CHARS} characters")
+        if not tts_configured(app.config.voice.tts):
+            raise HTTPException(404, "no speech endpoint is configured; the browser speaks this one itself")
+        if not body.text.strip():
+            raise HTTPException(400, "nothing to say")
+        try:
+            chunks, media_type = await extension.speech(body.text.strip())
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"the speech endpoint could not be reached: {type(exc).__name__}") from exc
+        return StreamingResponse(chunks, media_type=media_type)
 
     @api.post("/api/sessions/{session_id}/answer")
     async def answer(session_id: str, body: AnswerBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
