@@ -226,7 +226,7 @@ def needs_new_image(changed: set[str]) -> bool:
     return any(path in changed for path in REBUILD_TRIGGER_FILES) or any(path.startswith("launcher/") for path in changed)
 
 
-def needs_dependency_sync(changed: set[str], *, venv: Path = VENV) -> bool:
+def needs_dependency_sync(changed: set[str], *, venv: Path | None = None) -> bool:
     """Whether the virtualenv has to be synced before this revision can run.
 
     Two reasons, and no others: the revision declares different dependencies, or there is no virtualenv
@@ -234,7 +234,7 @@ def needs_dependency_sync(changed: set[str], *, venv: Path = VENV) -> bool:
     """
     if any(path in changed for path in DEPENDENCY_FILES):
         return True
-    return not (venv / "pyvenv.cfg").is_file()
+    return not ((venv or VENV) / "pyvenv.cfg").is_file()
 
 
 def unhealthy_boots(history: list[float], now: float, *, window: float = BOOT_WINDOW_SECONDS) -> list[float]:
