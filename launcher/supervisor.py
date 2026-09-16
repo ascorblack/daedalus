@@ -186,10 +186,16 @@ def load_history() -> list[dict[str, Any]]:
     return []
 
 
-def record_good() -> None:
+def record_good(bot: str | None = None, core: str | None = None) -> None:
+    """Record a revision that has run for two healthy minutes.
+
+    The shas are passed in, not read from the checkout: where a change lands in the checkout while the
+    old process is still serving — which is exactly what local self-development does — reading HEAD here
+    would mark a revision known-good that has never started, and the automatic rollback trusts this list.
+    """
     GOOD_DIR.mkdir(parents=True, exist_ok=True)
     history = load_history()
-    entry = {"bot": head(BOT_REPO), "core": head(CORE_REPO), "at": datetime.now(UTC).isoformat()}
+    entry = {"bot": bot or head(BOT_REPO), "core": core or head(CORE_REPO), "at": datetime.now(UTC).isoformat()}
     if history and history[-1]["bot"] == entry["bot"] and history[-1]["core"] == entry["core"]:
         return
     history.append(entry)
@@ -403,7 +409,8 @@ class Supervisor:
         self.mode = resolve_mode(CONFIGURED_MODE, repo=BOT_REPO, token=os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GITHUB_DAEDALUS_TOKEN", ""))
         self.restart_task: asyncio.Task[None] | None = None
         self.running_revision = ""
-        """The commit the child was started on. Not the last known-good one: a revision becomes known-good
+        self.running_core = ""
+        """The commits the child was started on. Not the last known-good one: a revision becomes known-good
         only after two healthy minutes, and a change refused before then would otherwise be taken back out
         past a change that is already running."""
         self.failed_boots: list[float] = []
@@ -419,8 +426,8 @@ class Supervisor:
         self.child = await asyncio.create_subprocess_exec(
             "bash", "-lc", BOT_CMD, cwd=str(BOT_REPO), env=bot_env(), start_new_session=True
         )
-        self.running_revision = head(BOT_REPO)
-        log(f"bot started pid={self.child.pid} bot={self.running_revision[:10]} core={head(CORE_REPO)[:10]}")
+        self.running_revision, self.running_core = head(BOT_REPO), head(CORE_REPO)
+        log(f"bot started pid={self.child.pid} bot={self.running_revision[:10]} core={self.running_core[:10]}")
 
     async def stop_child(self, *, graceful_seconds: float = 25.0) -> None:
         child = self.child
@@ -440,10 +447,10 @@ class Supervisor:
                 pass
             await child.wait()
 
-    async def _record_good_when_healthy(self, child: asyncio.subprocess.Process) -> None:
-        await asyncio.sleep(120)
+    async def _record_good_when_healthy(self, child: asyncio.subprocess.Process, bot: str, core: str) -> None:
+        await asyncio.sleep(HEALTHY_SECONDS)
         if child.returncode is None:
-            record_good()
+            record_good(bot, core)
 
     async def run_loop(self) -> None:
         while self.want_running:
@@ -451,7 +458,7 @@ class Supervisor:
             assert self.child is not None
             if self.health_task is not None:
                 self.health_task.cancel()
-            self.health_task = asyncio.create_task(self._record_good_when_healthy(self.child))
+            self.health_task = asyncio.create_task(self._record_good_when_healthy(self.child, self.running_revision, self.running_core))
             started = time.monotonic()
             waiter = asyncio.create_task(self.child.wait())
             restart = asyncio.create_task(self.restart_requested.wait())

@@ -208,6 +208,19 @@ async def test_a_server_restart_just_goes_round_again(monkeypatch: pytest.Monkey
     assert not any(c.startswith("preflight") for c in calls)
 
 
+async def test_known_good_records_the_revision_that_ran_not_what_is_in_the_checkout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A local change lands in the checkout while the old process is still serving. Reading HEAD when the
+    health timer fires would mark a revision known-good that has never started — and the rollback trusts
+    this list."""
+    sup = _load()
+    monkeypatch.setattr(sup, "GOOD_DIR", tmp_path / "good")
+    monkeypatch.setattr(sup, "HISTORY", tmp_path / "good" / "history.json")
+    monkeypatch.setattr(sup, "LOG", tmp_path / "supervisor.log")
+    monkeypatch.setattr(sup, "head", lambda repo: "checkout00")  # the agent's change, committed a moment ago
+    sup.record_good("running000", "core000000")
+    assert sup.load_history() == [{"bot": "running000", "core": "core000000", "at": sup.load_history()[0]["at"]}]
+
+
 # -- the automatic rollback ------------------------------------------------------------------
 
 
