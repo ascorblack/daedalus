@@ -283,6 +283,8 @@ a { color: var(--accent); text-decoration: none; }
 .chat-scroll { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; padding:6px 14px 16px; }
 .timeline { display:flex; flex-direction:column; gap:14px; }
 .turn { display:flex; flex-direction:column; gap:6px; }
+.turn-slot { display:flex; flex-direction:column; min-width:0; }
+.older-note { text-align:center; min-height:18px; }
 .msg.user { align-self:flex-end; max-width:86%; min-width:0; background:var(--card-2); color:var(--fg); padding:10px 14px; border-radius:20px; border-bottom-right-radius:6px; margin-bottom:6px; word-break:break-word; }
 .msg.user p { margin:0; }
 .msg.user p + p { margin-top:6px; }

@@ -115,6 +115,27 @@ export function codeBlock(code: string, lang = ""): string {
 const LIST_RE = /^\s*(?:[-*+]|\d+[.)])\s+/;
 const TABLE_SEP_RE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 
+/**
+ * The rendering of a message that is settled: keyed by the message's seq and the length of its
+ * text, and checked against the text itself, so a turn that scrolls out of the window and back in
+ * costs nothing. Only settled messages are put here; streaming text is parsed as it grows.
+ */
+const rendered = new Map<string, { text: string; html: string }>();
+const RENDER_CACHE_MAX = 400;
+
+export function renderCached(key: string, text: string): string {
+  const k = `${key}:${text.length}`;
+  const hit = rendered.get(k);
+  if (hit && hit.text === text) return hit.html;
+  const html = renderMarkdown(text);
+  rendered.set(k, { text, html });
+  if (rendered.size > RENDER_CACHE_MAX) {
+    const oldest = rendered.keys().next();
+    if (!oldest.done) rendered.delete(oldest.value);
+  }
+  return html;
+}
+
 export function renderMarkdown(text: string): string {
   const out: string[] = [];
   const lines = text.replace(/\r\n?/g, "\n").split("\n");

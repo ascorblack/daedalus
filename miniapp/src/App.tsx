@@ -1,24 +1,38 @@
-import { Component, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Component, Suspense, lazy, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, SessionSummary, telegram } from "./api";
 import { StatusLabel } from "./components";
 import { ConfirmHost, Sheet, ToastHost, toast as showToast } from "./dialogs";
-import { SessionsScreen } from "./screens/Sessions";
-import { InboxScreen } from "./screens/Inbox";
-import { BoardScreen } from "./screens/Board";
-import { SessionScreen } from "./screens/Session";
-import { VoiceScreen } from "./screens/Voice";
-import { ProposalsScreen } from "./screens/Proposals";
-import { SchedulesScreen } from "./screens/Schedules";
-import { UsageScreen } from "./screens/Usage";
-import { HealthScreen, SettingsScreen } from "./screens/Settings";
-import { MemoryScreen } from "./screens/Memory";
-import { ServicesScreen } from "./screens/Services";
-import { AuthConfig, LoginScreen } from "./screens/Login";
+import type { AuthConfig } from "./screens/Login";
 import * as passkeys from "./passkeys";
 import { back, migrateLegacyLocation, navigate, pathFor, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
 import { Counts, MoreSheet, Palette, PaletteItem, Rail, TabBar, go, screenTitle, useMedia, useShortcuts } from "./shell";
 import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
+
+// One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
+// settings, the usage charts and the conversation view as well. The service worker keeps each
+// chunk once it has been used, so a screen visited before opens offline too.
+const SessionsScreen = lazy(() => import("./screens/Sessions").then((m) => ({ default: m.SessionsScreen })));
+const InboxScreen = lazy(() => import("./screens/Inbox").then((m) => ({ default: m.InboxScreen })));
+const BoardScreen = lazy(() => import("./screens/Board").then((m) => ({ default: m.BoardScreen })));
+const SessionScreen = lazy(() => import("./screens/Session").then((m) => ({ default: m.SessionScreen })));
+const VoiceScreen = lazy(() => import("./screens/Voice").then((m) => ({ default: m.VoiceScreen })));
+const ProposalsScreen = lazy(() => import("./screens/Proposals").then((m) => ({ default: m.ProposalsScreen })));
+const SchedulesScreen = lazy(() => import("./screens/Schedules").then((m) => ({ default: m.SchedulesScreen })));
+const UsageScreen = lazy(() => import("./screens/Usage").then((m) => ({ default: m.UsageScreen })));
+const SettingsScreen = lazy(() => import("./screens/Settings").then((m) => ({ default: m.SettingsScreen })));
+const HealthScreen = lazy(() => import("./screens/Settings").then((m) => ({ default: m.HealthScreen })));
+const MemoryScreen = lazy(() => import("./screens/Memory").then((m) => ({ default: m.MemoryScreen })));
+const ServicesScreen = lazy(() => import("./screens/Services").then((m) => ({ default: m.ServicesScreen })));
+const LoginScreen = lazy(() => import("./screens/Login").then((m) => ({ default: m.LoginScreen })));
+
+/** The conversation is what the operator opens next, whatever screen they landed on: fetch it while the browser is idle. */
+function prefetchSession(): void {
+  const idle = (window as { requestIdleCallback?: (cb: () => void) => void }).requestIdleCallback;
+  const pull = () => void import("./screens/Session");
+  if (idle) idle(pull);
+  else window.setTimeout(pull, 2000);
+}
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
@@ -85,6 +99,7 @@ export function App() {
   const openPalette = useCallback(() => setPalette(true), []);
   useShortcuts(openPalette);
   const offline = useOffline();
+  useEffect(prefetchSession, []);
   // Inside Telegram every request carries initData; outside, the browser needs a token or the session cookie.
   const [authed, setAuthed] = useState<boolean | null>(() => (telegram()?.initData ? true : null));
   const inbox = useQuery<{ unread: number }>(authed ? "/api/inbox/unread" : null, { pollMs: 20000, staleMs: 5000 });
@@ -240,7 +255,11 @@ export function App() {
   if (authed === null) return <div className="app"><div className="empty">Loading…</div></div>;
   if (authed === false) {
     // Outside the shell on purpose: the shell's wide layout reserves the rail's column, and a login page has no rail.
-    return <LoginScreen onDone={() => setAuthed(true)} />;
+    return (
+      <Suspense fallback={<div className="app"><div className="empty">Loading…</div></div>}>
+        <LoginScreen onDone={() => setAuthed(true)} />
+      </Suspense>
+    );
   }
 
   const sessionId = route.session;
@@ -295,7 +314,7 @@ export function App() {
       <div ref={main} className={`main ${sessionId ? "chat-open" : ""}`}>
         {offline && <div className="offline-strip" role="status">No connection to the bot · retrying…</div>}
         <PasskeyNudge />
-        {content}
+        <Suspense fallback={<div className="empty">Loading…</div>}>{content}</Suspense>
       </div>
       {palette && <Palette items={paletteItems()} onClose={() => setPalette(false)} />}
       {!wide && !sessionId && <TabBar screen={route.screen} counts={counts} onMore={() => setMore((m) => !m)} moreOpen={more} />}

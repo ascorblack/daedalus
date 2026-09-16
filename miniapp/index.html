@@ -15,7 +15,25 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/app/icons/icon-192.png" />
     <link rel="apple-touch-icon" href="/app/icons/apple-touch-icon.png" />
     <title>Daedalus</title>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <!--
+      Telegram's script is only of use inside Telegram, and fetching it from another origin before
+      the first paint costs every cold open a round trip. It loads asynchronously; the app waits for
+      it only when the page really is a Mini App, and not longer than it takes to open by itself.
+    -->
+    <script>
+      window.__tgReady = new Promise(function (resolve) {
+        var wanted = false;
+        try {
+          wanted = typeof window.TelegramWebviewProxy !== "undefined" || /tgWebApp/.test(location.hash) || /tgWebApp/.test(location.search);
+        } catch (e) {
+          wanted = false;
+        }
+        if (!wanted || (window.Telegram && window.Telegram.WebApp)) return resolve();
+        window.__tgDone = resolve;
+        setTimeout(resolve, 1500);
+      });
+    </script>
+    <script async src="https://telegram.org/js/telegram-web-app.js" onload="window.__tgDone && window.__tgDone()" onerror="window.__tgDone && window.__tgDone()"></script>
   </head>
   <body>
     <div id="root"></div>
