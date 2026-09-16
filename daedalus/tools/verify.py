@@ -27,6 +27,14 @@ from daedalus.tools._common import FRAME_CHARS, clip, error, ok, services_for, t
 from daedalus.tools.shell import SandboxUnavailable, sandbox_argv, shell_environment
 
 OUTPUT_HEAD_CHARS = 2000
+#: How much of a model-written string the receipt line repeats. The criterion
+#: and the dependency note are free text with no bound anywhere in the call
+#: path, and they sit in the one line that has to survive: a header long enough
+#: to push the framed result back over the per-call budget makes `ok`/`error`
+#: clip it a second time, and that clip drops the middle — where the line saying
+#: where the rest of the output went is written. The whole text is kept in the
+#: verifications row, which is what the receipt dialog shows.
+RECEIPT_TEXT_CHARS = 200
 OUTPUT_TAIL_CHARS = 8000
 
 # A runner's own footer. Anchored at the start of a line and ending in a duration, because the footer
@@ -456,10 +464,18 @@ async def _receipt(context: ToolContext, services: Any, manager: Any, criterion:
             )
             receipt_id = f"v{cursor.lastrowid}"
     deps = (dependencies or "").strip()
-    header = f"{'✅ verified' if passed else '❌ NOT verified'}: {criterion} — exit {exit_code}{' (timed out' + ('; the process group survived the kill' if kill_failed else '') + ')' if timed_out else ''} · receipt {receipt_id or 'not recorded'} · digest {digest} · at {at}" + (f" · output {total_bytes} B, first {len(head)} B kept" if truncated else "") + (f" · deps: {deps}" if deps else "") + (f" · tree {tree}" if tree else "") + (f" · covers {len(digests)} changed file" + ("s" if len(digests) != 1 else "") if digests else "") + (f" · tests {tests_run} run" + (f", {tests_skipped} skipped" if tests_skipped else "") if tests_run is not None else "") + (" · sandbox=workspace" if sandboxed else "")
-    body = clip(output, max(services.max_tool_output_chars - FRAME_CHARS, FRAME_CHARS), note="write the output to a file for the rest")
+    header = f"{'✅ verified' if passed else '❌ NOT verified'}: {_receipt_text(criterion)} — exit {exit_code}{' (timed out' + ('; the process group survived the kill' if kill_failed else '') + ')' if timed_out else ''} · receipt {receipt_id or 'not recorded'} · digest {digest} · at {at}" + (f" · output {total_bytes} B, first {len(head)} B kept" if truncated else "") + (f" · deps: {_receipt_text(deps)}" if deps else "") + (f" · tree {tree}" if tree else "") + (f" · covers {len(digests)} changed file" + ("s" if len(digests) != 1 else "") if digests else "") + (f" · tests {tests_run} run" + (f", {tests_skipped} skipped" if tests_skipped else "") if tests_run is not None else "") + (" · sandbox=workspace" if sandboxed else "")
+    # Sized against what the header actually leaves, not against a fixed reserve
+    # a long receipt line would overrun.
+    body = clip(output, max(services.max_tool_output_chars - len(header) - FRAME_CHARS, FRAME_CHARS), note="write the output to a file for the rest")
     text = f"{header}\n{body}" if body.strip() else header
     return ok(context, text, receipt=receipt_id, passed=passed, exit_code=exit_code) if passed else error(context, text, receipt=receipt_id, passed=passed, exit_code=exit_code)
+
+
+def _receipt_text(text: str) -> str:
+    """The head of a model-written string, on one line, for the receipt header."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= RECEIPT_TEXT_CHARS else flat[: RECEIPT_TEXT_CHARS - 1] + "…"
 
 
 TOOLS = [verify]

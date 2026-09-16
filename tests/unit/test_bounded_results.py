@@ -72,6 +72,32 @@ async def test_a_failing_command_still_names_its_spill_file(tmp_path: Path) -> N
         locator.unregister("fail")
 
 
+async def test_a_long_criterion_cannot_clip_the_line_that_says_where_the_output_went(tmp_path: Path) -> None:
+    # The receipt line carries the criterion, which the model writes and nothing
+    # bounds. Long enough, it pushes the framed result over the budget, ok()
+    # clips a second time, and that clip drops the middle — where the note
+    # saying where the rest of the output went is written.
+    from daedalus.tools.verify import verify
+
+    locator.register(SessionServices(session_id="receipt", workspace_dir=tmp_path, max_tool_output_chars=2_000))
+    ctx = ToolContext(tenant_id="t", run_id="r", session_id="receipt", metadata={"tool_call_id": "call-receipt"})
+    try:
+        result = await verify().invoke(
+            ctx,
+            {
+                "criterion": "the suite passes " * 300,
+                "command": "for i in $(seq 1 2000); do echo line-$i; done",
+                "dependencies": "a container shell " * 100,
+            },
+        )
+        first = result.content.splitlines()[0]
+        assert first.startswith("✅ verified") and len(first) < 700
+        assert "write the output to a file for the rest" in result.content
+        assert len(result.content) <= 2_000
+    finally:
+        locator.unregister("receipt")
+
+
 async def test_read_refuses_a_binary_file(tmp_path: Path) -> None:
     locator.register(SessionServices(session_id="bin", workspace_dir=tmp_path))
     try:

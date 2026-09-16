@@ -21,6 +21,8 @@ _MAX_LINE_CHARS = 2000
 #: does not carry one; a compiled object, an archive or an image carries one
 #: early, and 8 KiB is past every plausible text header.
 _BINARY_SNIFF_CHARS = 8192
+
+
 def _line_allowance(text: str, lines: int, budget: int) -> int:
     """How many lines of this file fit in one call's budget.
 
@@ -67,18 +69,21 @@ async def read_file(
         f"{start + i + 1:>6}\t{line[:_MAX_LINE_CHARS]}" for i, line in enumerate(window)
     )
     header = ""
-    if size > budget:
+    # The budget is in characters, so the file is measured in characters too:
+    # `size` is bytes, and for a file that is mostly not Latin the two differ by
+    # a factor that would fire this header on a file comfortably under budget.
+    if len(text) > budget:
         # The model asked for a file it cannot be shown whole. Say so before
         # the lines, not after: a slice read as the whole file is how a wrong
         # answer gets written confidently.
         if len(lines) <= 1:
             header = (
-                f"[{target}: {size} bytes on a single line — one call shows at most "
+                f"[{target}: {len(text)} characters on a single line — one call shows at most "
                 f"{_MAX_LINE_CHARS} characters of it; use Exec with cut/sed, or Grep, for the rest]\n"
             )
         else:
             header = (
-                f"[{target}: {size} bytes, {len(lines)} lines — showing lines "
+                f"[{target}: {len(text)} characters, {len(lines)} lines — showing lines "
                 f"{start + 1}-{start + len(window)} of them]\n"
             )
     footer = ""
