@@ -63,6 +63,25 @@ def fts_query(query: str) -> str:
     return " ".join(f'"{t.replace(chr(34), "")}"*' for t in tokens if t)
 
 
+def snippet(text: str, query: str, *, window: int = 160) -> str:
+    """A window of ``text`` around the first query word, with every query word bracketed.
+
+    fts5 renders this itself when it keeps a copy of the indexed text; a contentless index
+    does not keep one, and the transcript row it points at has the text anyway.
+    """
+    words = [w for w in (t.lower() for t in _FTS_TOKEN_RE.findall(query)) if w]
+    flat = " ".join(text.split())
+    if not words or not flat:
+        return flat[:window]
+    lowered = flat.lower()
+    at = min((p for p in (lowered.find(w) for w in words) if p >= 0), default=-1)
+    start = max(0, at - window // 3) if at >= 0 else 0
+    start = flat.rfind(" ", 0, start) + 1 if start else 0
+    cut = flat[start : start + window]
+    marked = _FTS_TOKEN_RE.sub(lambda m: f"[{m.group(0)}]" if m.group(0).lower().startswith(tuple(words)) else m.group(0), cut)
+    return ("… " if start else "") + marked + (" …" if start + window < len(flat) else "")
+
+
 class TranscriptView(Protocol):
     """What turns a transcript row into the shape a client draws, and names its own version.
 
@@ -204,10 +223,7 @@ class SqliteSessionStore(ISessionStore):
                     last_seq = max(last_seq, int(cursor.lastrowid or 0))
                     text = message_text(message)
                     if text:
-                        await conn.execute(
-                            "INSERT INTO transcript_fts(session_id, seq, role, text) VALUES (?, ?, ?, ?)",
-                            (session_id, cursor.lastrowid, message.role.value, text),
-                        )
+                        await conn.execute("INSERT INTO transcript_fts(rowid, text) VALUES (?, ?)", (cursor.lastrowid, text))
             if added:
                 # Rows written here are indexed here; the backfill watermark must never fall behind them.
                 await conn.execute(
@@ -246,10 +262,7 @@ class SqliteSessionStore(ISessionStore):
                     message = Message.model_validate_json(row["message"])
                     text = message_text(message)
                     if text:
-                        await conn.execute(
-                            "INSERT INTO transcript_fts(session_id, seq, role, text) VALUES (?, ?, ?, ?)",
-                            (row["session_id"], row["seq"], message.role.value, text),
-                        )
+                        await conn.execute("INSERT INTO transcript_fts(rowid, text) VALUES (?, ?)", (row["seq"], text))
                         indexed += 1
                 watermark = int(rows[-1]["seq"])
                 await conn.execute(
@@ -259,25 +272,39 @@ class SqliteSessionStore(ISessionStore):
             await asyncio.sleep(0)  # let the loop breathe between batches
         return indexed
 
+    SNIPPET_WINDOW = 160
+    """Characters of context a search hit is shown with, centred on the first match."""
+
     async def search_transcript(self, query: str, *, session_id: str | None, limit: int = 10) -> list[dict[str, Any]]:
-        """Full-text search; ``session_id=None`` searches every session. Returns seq, role, session, snippet."""
+        """Full-text search; ``session_id=None`` searches every session. Returns seq, role, session, snippet.
+
+        The index is contentless, so the hit names a transcript row and the row supplies the
+        text — which is where it was all along. A handful of rows are read per search.
+        """
         match = fts_query(query)
         if not match:
             return []
-        if session_id is None:
-            rows = await self._db.fetchall(
-                "SELECT f.seq, f.role, f.session_id, snippet(transcript_fts, 3, '[', ']', ' … ', 24) snippet, s.title"
-                " FROM transcript_fts f LEFT JOIN sessions s ON s.id = f.session_id"
-                " WHERE transcript_fts MATCH ? ORDER BY bm25(transcript_fts) LIMIT ?",
-                (match, limit),
+        where = " AND t.session_id = ?" if session_id is not None else ""
+        params: list[Any] = [match] + ([session_id] if session_id is not None else []) + [limit]
+        rows = await self._db.fetchall(
+            "SELECT t.seq, t.session_id, t.message, s.title FROM transcript_fts f"
+            " JOIN transcript t ON t.seq = f.rowid LEFT JOIN sessions s ON s.id = t.session_id"
+            f" WHERE transcript_fts MATCH ?{where} ORDER BY bm25(transcript_fts) LIMIT ?",
+            tuple(params),
+        )
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            message = Message.model_validate_json(row["message"])
+            out.append(
+                {
+                    "seq": int(row["seq"]),
+                    "session_id": row["session_id"],
+                    "role": message.role.value,
+                    "title": row["title"] if session_id is None else None,
+                    "snippet": snippet(message_text(message), query, window=self.SNIPPET_WINDOW),
+                }
             )
-        else:
-            rows = await self._db.fetchall(
-                "SELECT f.seq, f.role, f.session_id, snippet(transcript_fts, 3, '[', ']', ' … ', 24) snippet, NULL title"
-                " FROM transcript_fts f WHERE f.session_id = ? AND transcript_fts MATCH ? ORDER BY bm25(transcript_fts) LIMIT ?",
-                (session_id, match, limit),
-            )
-        return [dict(r) for r in rows]
+        return out
 
     async def expand_transcript(self, session_id: str, from_seq: int, to_seq: int) -> list[tuple[int, Message]]:
         rows = await self._db.fetchall(
@@ -433,10 +460,10 @@ class SqliteSessionStore(ISessionStore):
         view, view_key = self._view_of(message)
         async with self._db.transaction() as conn:
             await conn.execute("UPDATE transcript SET message = ?, view = ?, view_key = ? WHERE session_id = ? AND key = ?", (message.model_dump_json(), view, view_key, session_id, key))
-            await conn.execute("DELETE FROM transcript_fts WHERE session_id = ? AND seq = ?", (session_id, int(row["seq"])))
+            await conn.execute("DELETE FROM transcript_fts WHERE rowid = ?", (int(row["seq"]),))
             text = message_text(message)
             if text:
-                await conn.execute("INSERT INTO transcript_fts(session_id, seq, role, text) VALUES (?, ?, ?, ?)", (session_id, int(row["seq"]), message.role.value, text))
+                await conn.execute("INSERT INTO transcript_fts(rowid, text) VALUES (?, ?)", (int(row["seq"]), text))
         return True
 
     async def transcript_row(self, session_id: str, seq: int) -> tuple[str, Message] | None:

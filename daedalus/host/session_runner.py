@@ -566,6 +566,8 @@ class SessionManager:
                 await conn.execute("DELETE FROM snapshots WHERE run_id = ?", (row["id"],))
             await conn.execute("DELETE FROM runs WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM session_messages WHERE session_id = ?", (session_id,))
+            # The index points at transcript rows by number; it goes with them, or it answers for rows that are gone.
+            await conn.execute("DELETE FROM transcript_fts WHERE rowid IN (SELECT seq FROM transcript WHERE session_id = ?)", (session_id,))
             await conn.execute("DELETE FROM transcript WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM live_control WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM pending_questions WHERE session_id = ?", (session_id,))

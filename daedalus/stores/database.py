@@ -453,6 +453,19 @@ MIGRATIONS: list[str] = [
     ALTER TABLE session_messages ADD COLUMN key TEXT NOT NULL DEFAULT '';
     CREATE INDEX session_messages_by_gen ON session_messages(session_id, gen, seq);
     """,
+    # 25 — the full-text index stops keeping its own copy of every message. A plain fts5 table
+    # stores the indexed text verbatim in a shadow table, which here was a second copy of the
+    # transcript: a third of the whole database, duplicating text the transcript already holds.
+    # Contentless, the index holds only the index; the row it points at is the transcript row,
+    # which is where the text for a snippet comes from now. Dropping the kv watermark is what
+    # makes the store rebuild the index from the transcript on the next start.
+    """
+    DROP TABLE transcript_fts;
+    CREATE VIRTUAL TABLE transcript_fts USING fts5(
+        text, content = '', contentless_delete = 1, tokenize = 'unicode61 remove_diacritics 2'
+    );
+    DELETE FROM kv WHERE key = 'transcript_fts_watermark';
+    """,
 ]
 
 
