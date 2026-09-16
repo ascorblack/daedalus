@@ -20,15 +20,12 @@ const projectName = "daedalus"
 // defaultImageOwner is the namespace the published images live in when the remote does not name one.
 const defaultImageOwner = "ascorblack"
 
-// agentImage and keyproxyImage are what the launcher prefers over a local build. The namespace
-// follows the remote the checkout comes from: a fork's code running upstream's image is a mismatch
-// nothing would report. A fork that publishes no images has nothing to pull, and the start falls
-// back to building, which is what happens on a platform without a published image anyway.
+// agentImage is what the launcher prefers over a local build, and the only image the installation
+// builds or pulls: the key proxy is a second container from it, and git runs in a third. The
+// namespace follows the remote the checkout comes from: a fork's code running upstream's image is a
+// mismatch nothing would report. A fork that publishes no image has nothing to pull, and the start
+// falls back to building, which is what happens on a platform without a published image anyway.
 func agentImage() string { return "ghcr.io/" + imageOwner(botRemote()) + "/daedalus:latest" }
-
-func keyproxyImage() string {
-	return "ghcr.io/" + imageOwner(botRemote()) + "/daedalus-keyproxy:latest"
-}
 
 // imageOwner is the owner segment of a git remote — github.com/<owner>/<repo> — in the lowercase a
 // registry namespace has to be, whatever case the account is written in.

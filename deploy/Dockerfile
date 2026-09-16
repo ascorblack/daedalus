@@ -1,47 +1,111 @@
 # Daedalus runtime image. The agent may edit this file; a change triggers an image rebuild.
-FROM ubuntu:24.04
+#
+# Three stages. The environment is assembled where a compiler and a Node are allowed to live, and
+# only the results — the virtualenv and the built Mini App — are copied into the image that ships.
+# Two targets come out of it: `runtime` (the default, and what `:latest` is) and `browser`, which
+# adds Playwright and a headless Chromium shell for the browser skills. They share every layer up
+# to the last one, so having both costs the difference, not twice the image.
+
+FROM ubuntu:24.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
-    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
-    PATH="/root/.local/bin:/usr/local/bin:${PATH}"
+    UV_PROJECT_ENVIRONMENT=/srv/venv \
+    UV_PYTHON=/usr/bin/python3.12 \
+    UV_PYTHON_DOWNLOADS=never \
+    PATH="/srv/venv/bin:/usr/local/bin:${PATH}"
+# UV_PYTHON + UV_PYTHON_DOWNLOADS: the interpreter is the one apt already installed. Left to itself
+# uv downloads a second CPython of its own next to it, which nothing ever runs.
 
 COPY deploy/apt-packages.txt /tmp/apt-packages.txt
 RUN apt-get update \
     && xargs -a /tmp/apt-packages.txt apt-get install -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /usr/share/doc /usr/share/man /usr/share/info /usr/share/lintian /usr/share/perl/*/pod
 
-# GitHub CLI (pull requests), Node (Mini App build), uv. No Docker client: the container is the boundary.
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends gh nodejs \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && uv python install 3.12 \
+# uv builds and syncs the environment; it stays in the image because the supervisor's preflight runs
+# `uv sync` when the agent changes a dependency. uvx goes: nothing in the image runs a tool from an
+# ephemeral environment any more.
+# No Node, no GitHub CLI, no compiler — the first two build the Mini App and the third builds a
+# wheel, and both of those happen in a builder stage.
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh \
+    && rm -f /usr/local/bin/uvx \
     && git config --system --add safe.directory '*'
 
-# Headless Chromium for the browser skills (Playwright's own build, shared by the Python package pinned in
-# pyproject and by `npx lighthouse` through CHROME_PATH). The browser lives outside the virtualenv so a
-# rebuild of the venv never re-downloads it.
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN uvx --from playwright==1.62.0 playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/* \
-    && ln -s "$(find /opt/pw-browsers -type f -name chrome -path '*chrome-linux*' | head -1)" /usr/local/bin/chromium
-ENV CHROME_PATH=/usr/local/bin/chromium
+
+# -- the virtualenv ---------------------------------------------------------------------------
+# Built from the lock file alone, so the stage needs neither checkout. The two path dependencies —
+# the bot itself and the core — are left out here and reach the interpreter as source paths in the
+# final stage: they are bind-mounted at run time and the agent edits them, so an installed copy
+# would be a stale second copy.
+FROM base AS venv
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY pyproject.toml uv.lock ./
+RUN uv venv /srv/venv \
+    && uv export --frozen --no-emit-project --no-emit-package protocore --format requirements-txt -o /build/requirements.txt \
+    && uv export --frozen --extra browser --no-emit-project --no-emit-package protocore --format requirements-txt -o /build/requirements-browser.txt \
+    && uv pip install --python /srv/venv/bin/python --no-cache --requirements /build/requirements.txt
+
+
+# -- the Mini App -----------------------------------------------------------------------------
+# The bundle is not in git, and the runtime image has no Node to build one. Built here and baked in;
+# the supervisor copies it into a checkout that has none.
+FROM node:22-slim AS miniapp
+
+WORKDIR /build
+COPY miniapp/package.json miniapp/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY miniapp ./
+RUN npm run build
+
+
+# -- what ships -------------------------------------------------------------------------------
+FROM base AS runtime
+
+COPY --from=venv /srv/venv /srv/venv
+COPY --from=miniapp /build/dist /opt/miniapp-dist
+# The bot and the core are mounted, not installed: pointing the interpreter at the mounted checkouts
+# is what an editable install would have written anyway, and it needs no sync at the first start.
+RUN printf '%s\n' /srv/daedalus /srv/protocore-exp > /srv/venv/lib/python3.12/site-packages/_daedalus_checkouts.pth
 
 # The supervisor lives outside the repositories the agent can change.
 COPY launcher /opt/launcher
+# The key proxy runs from this image as a second container with its own environment; see
+# deploy/compose.yaml. Its dependencies are already in the virtualenv above.
+COPY deploy/keyproxy /opt/keyproxy
 
 WORKDIR /srv/daedalus
 # The virtualenv lives outside the mounted checkout so host and container never share one.
-ENV UV_PROJECT_ENVIRONMENT=/srv/venv \
-    DAEDALUS_BOT_REPO=/srv/daedalus \
+ENV DAEDALUS_BOT_REPO=/srv/daedalus \
     DAEDALUS_CORE_REPO=/srv/protocore-exp \
     DAEDALUS_STATE=/srv/state \
     DAEDALUS_WORKSPACES=/srv/workspaces \
-    DAEDALUS_SUPERVISOR_SOCKET=/run/daedalus/supervisor.sock
+    DAEDALUS_SUPERVISOR_SOCKET=/run/daedalus/supervisor.sock \
+    DAEDALUS_BAKED_APP=/opt/miniapp-dist \
+    DAEDALUS_BOT_CMD="/srv/venv/bin/python -m daedalus serve"
 
 ENTRYPOINT ["python3", "/opt/launcher/supervisor.py"]
+
+
+# -- the browser variant ----------------------------------------------------------------------
+# `:browser` = the image above plus Playwright and the headless Chromium shell (not the full
+# Chromium build, which is half again as large and drags a GPU stack in with it). The browser lives
+# outside the virtualenv so a re-sync of the environment never re-downloads it.
+FROM runtime AS browser
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+COPY --from=venv /build/requirements-browser.txt /tmp/requirements-browser.txt
+COPY deploy/apt-packages-browser.txt /tmp/apt-packages-browser.txt
+RUN apt-get update \
+    && grep -v '^#' /tmp/apt-packages-browser.txt | xargs apt-get install -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* /usr/share/doc /usr/share/man \
+    && uv pip install --python /srv/venv/bin/python --no-cache --requirements /tmp/requirements-browser.txt \
+    && playwright install chromium-headless-shell \
+    && rm -rf /root/.cache \
+    && ln -s "$(find /opt/pw-browsers -type f -name chrome-headless-shell | head -1)" /usr/local/bin/chromium
+ENV CHROME_PATH=/usr/local/bin/chromium

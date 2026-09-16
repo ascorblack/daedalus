@@ -19,9 +19,16 @@
 #
 # Networks: "telegram" (bot ⇄ local Bot API), "keys" (bot ⇄ key proxy), "search" (bot ⇄ SearXNG).
 #
-# Telegram is optional. The local Bot API server is behind the "telegram" profile, so the stack comes up
-# without it (`docker compose … up -d`); add `--profile telegram` when TELEGRAM_BOT_TOKEN is set. With no
-# token the bot never calls the Bot API host, so its absence costs nothing.
+# One image: the agent's. The key proxy is a second container from it with another command, and the
+# services that are not the agent are behind profiles, so an install pulls one image and runs two
+# containers. The profiles, none of them on by default:
+#   --profile telegram   the local Bot API server, for files over 20 MB. Needs TELEGRAM_API_ID/HASH;
+#                        with no bot token the bot never calls it, so its absence costs nothing.
+#   --profile search     a self-hosted SearXNG. WebSearch answers without it (DuckDuckGo directly);
+#                        with it running, it is the fallback the tool walks to.
+#   --profile selfdev    the rebuilder, which is the only container that can reach Docker. It exists
+#                        to build a new agent image when the agent changes one; an installation that
+#                        does not develop itself never needs it.
 services:
   daedalus:
     stop_grace_period: 40s  # the supervisor drains the bot for 25 s before killing it; Docker must wait longer
@@ -83,14 +90,19 @@ services:
     depends_on:
       keyproxy:
         condition: service_healthy
+      # Only when the "search" profile is on: without it WebSearch goes to DuckDuckGo directly.
       searxng:
         condition: service_started
+        required: false
 
-  # The default backend of the WebSearch tool: a metasearch over Bing, Brave, DuckDuckGo, Google (CSE), Mojeek and
-  # Wikipedia with a JSON API, reachable only from the agent container. Settings in deploy/searxng/settings.yml;
-  # the agent picks another backend (or a paid API through the key proxy) in the Mini App.
+  # A metasearch over Bing, Brave, DuckDuckGo, Google (CSE), Mojeek and Wikipedia with a JSON API,
+  # reachable only from the agent container. Settings in deploy/searxng/settings.yml. Behind the
+  # "search" profile and off by default: it is 382 MB for a better version of a search WebSearch can
+  # already do keylessly, so it is a choice, not a prerequisite. Started, it becomes the fallback the
+  # tool walks to; the agent picks it (or a paid API through the key proxy) as the backend in the Mini App.
   searxng:
     image: searxng/searxng:2026.9.8-3fdc6d753
+    profiles: [search]
     restart: unless-stopped
     environment:
       SEARXNG_BASE_URL: http://searxng:8080/
@@ -108,16 +120,32 @@ services:
   # budget is spent (the supervisor's flag or its own read of the database). Reachable only from the
   # agent container over the private "keys" network; it holds nothing but the keys it injects.
   keyproxy:
+    # The agent's image, started as the key proxy instead of as the agent: proxy.py needs httpx and
+    # aiohttp, which the agent's virtualenv already has, and a second image bought nothing. The
+    # isolation is the container, not the image — its own process, its own network, its own uid, and
+    # an env_file the agent's container never sees. deploy/keyproxy/Dockerfile is still there for
+    # anyone who wants the standalone image; it is no longer published.
     build:
-      context: keyproxy
-    image: daedalus-keyproxy:local
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: daedalus:local
     restart: unless-stopped
+    # The image's entrypoint is the supervisor, which is not what this container is; it is replaced
+    # rather than appended to.
+    entrypoint: ["/srv/venv/bin/python"]
+    command: ["/opt/keyproxy/proxy.py"]
+    healthcheck:
+      test: ["CMD", "/srv/venv/bin/python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:3200/healthz', timeout=2).status == 200 else 1)"]
+      interval: 15s
+      timeout: 3s
+      start_period: 5s
     # The operator's uid: the CLI login files below are 0600 and the proxy refreshes them in place.
-    user: "1000:1000"
+    user: "${DAEDALUS_KEYPROXY_UID:-1000}:${DAEDALUS_KEYPROXY_GID:-1000}"
     env_file:
       - ${DAEDALUS_SECRETS_FILE:-../../daedalus-secrets/keyproxy.env}
     environment:
       HOME: /home/keyproxy
+      PYTHONPATH: /opt/keyproxy
       KEYPROXY_PORT: "3200"
       KEYPROXY_BUDGET_FLAG: /srv/state/BUDGET_EXCEEDED
       KEYPROXY_BUDGET_DB: /srv/state/daedalus.sqlite
@@ -135,9 +163,12 @@ services:
 
   # The only container that can talk to Docker. It rebuilds and replaces the agent container when
   # the supervisor drops a trigger file; the agent container itself never sees the docker socket.
-  # It needs no network of its own: the daemon does the building and pulling.
+  # It needs no network of its own: the daemon does the building and pulling. Behind the "selfdev"
+  # profile: a change that needs a new image is a change to the image's own recipe, which only an
+  # installation that develops the server itself ever makes.
   rebuilder:
     image: docker:cli
+    profiles: [selfdev]
     restart: unless-stopped
     network_mode: none
     working_dir: ${DAEDALUS_COMPOSE_PROJECT_DIR:-/project}

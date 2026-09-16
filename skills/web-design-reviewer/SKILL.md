@@ -1,6 +1,7 @@
 ---
 name: web-design-reviewer
 description: Visual inspection of a live site with headless Chromium to find and fix layout, responsive, consistency and CSS/accessibility issues at source level. Not for automated E2E testing.
+requires: browser
 ---
 # Web Design Reviewer
 

@@ -41,6 +41,10 @@ def parse_skill_markdown(text: str) -> tuple[dict[str, str], str]:
     return meta, text[match.end() :]
 
 
+def _csv(value: object) -> list[str]:
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
 def render_skill_markdown(name: str, description: str, body: str) -> str:
     return f"---\nname: {name}\ndescription: {description}\n---\n{body.lstrip()}"
 
@@ -193,20 +197,30 @@ class DirectorySkillStore(ISkillStore):
             )
         return refs
 
-    def params_of(self, skill_id: str) -> list[str]:
-        """The parameters a skill declares in its front matter (``params: name, count``): the ``{{name}}`` placeholders
-        of its body, which the Skill tool fills from ``args`` so a skill can be a recipe rather than only advice."""
+    def _meta_of(self, skill_id: str) -> dict[str, str]:
+        """The front matter of a skill named by id or by name; empty when there is none to read."""
         entry = self._dir(skill_id) / ENTRY
         if not entry.is_file():
             loaded = self._by_name(skill_id)
             if loaded is None:
-                return []
+                return {}
             entry = self._dir(loaded[0].id) / ENTRY
         try:
             meta, _ = parse_skill_markdown(entry.read_text(encoding="utf-8"))
         except OSError:
-            return []
-        return [p.strip() for p in str(meta.get("params", "")).split(",") if p.strip()]
+            return {}
+        return meta
+
+    def params_of(self, skill_id: str) -> list[str]:
+        """The parameters a skill declares in its front matter (``params: name, count``): the ``{{name}}`` placeholders
+        of its body, which the Skill tool fills from ``args`` so a skill can be a recipe rather than only advice."""
+        return _csv(self._meta_of(skill_id).get("params", ""))
+
+    def requires_of(self, skill_id: str) -> list[str]:
+        """What a skill declares it cannot work without (``requires: browser``). The Skill tool turns an
+        unmet requirement into the first line of the skill, so the model reads "not installed" before the
+        instructions that would have it call a tool this installation does not have."""
+        return _csv(self._meta_of(skill_id).get("requires", ""))
 
     async def load_file(self, tenant_id: str, skill_id: str, path: str) -> bytes | None:
         skill_dir = self._dir(skill_id)

@@ -18,13 +18,18 @@ dependencies = [
     "tomli-w>=1.0",
     "mcp>=2.1.1",
     "python-multipart>=0.0.32",
-    # Skills: webapp-testing / web-design-reviewer drive a headless Chromium; canvas-design draws with Pillow.
-    "playwright==1.62.0",
-    "pillow>=11.0",
     "webauthn>=3.0.0",
 ]
 
 [project.optional-dependencies]
+# What the skills that drive a browser or draw pixels need, and nothing else does: no module under
+# daedalus/ imports either of these. Playwright plus its Chromium is a third of the runtime image and
+# most sessions never open a page, so both are an opt-in — the published ":browser" image tag carries
+# them, the default one says they are not installed.
+browser = [
+    "playwright==1.62.0",  # webapp-testing, web-design-reviewer, accessibility, core-web-vitals
+    "pillow>=11.0",        # canvas-design
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

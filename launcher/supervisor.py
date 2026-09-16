@@ -35,6 +35,9 @@ STATE = Path(os.environ.get("DAEDALUS_STATE", "/srv/state"))
 WORKSPACES = Path(os.environ.get("DAEDALUS_WORKSPACES", "/srv/workspaces"))
 SOCKET = Path(os.environ.get("DAEDALUS_SUPERVISOR_SOCKET", "/run/daedalus/supervisor.sock"))
 BOT_CMD = os.environ.get("DAEDALUS_BOT_CMD", "uv run --frozen python -m daedalus serve")
+BAKED_APP = Path(os.environ.get("DAEDALUS_BAKED_APP", "/opt/miniapp-dist"))
+"""The Mini App bundle built into the image. The runtime image carries no Node, so a checkout that
+has never been built gets this copy instead of a build that cannot run."""
 REBUILD_TRIGGER_DIR = Path(os.environ.get("DAEDALUS_REBUILD_TRIGGER_DIR", "/run/daedalus-rebuild"))
 """Shared with the rebuilder sidecar (the only container that holds the docker socket)."""
 USD_PER_DAY = float(os.environ.get("USD_PER_DAY", "0") or 0)
@@ -214,11 +217,25 @@ def build_app_if_missing(repo: Path) -> None:
     """A fresh checkout has no built app: the bundle is not in git, and a rebuild builds it on the candidate.
 
     The first start of an installation — a clone the desktop launcher or a setup script just made —
-    would otherwise serve 404 at /app until the first merged pull request. Built once here, in the
-    tree about to run; a failure is logged and the bot still starts (the API and Telegram work
-    without the app)."""
+    would otherwise serve 404 at /app until the first merged pull request. Where there is a Node the
+    app is built once here, in the tree about to run; where there is not — the runtime image, which
+    carries no toolchain — the copy built into the image is put in its place. Either way a failure is
+    logged and the bot still starts (the API and Telegram work without the app)."""
     miniapp = repo / "miniapp"
-    if (miniapp / "dist" / "index.html").is_file() or not (miniapp / "package.json").exists() or not shutil.which("npm"):
+    if (miniapp / "dist" / "index.html").is_file() or not (miniapp / "package.json").exists():
+        return
+    if not shutil.which("npm"):
+        if not (BAKED_APP / "index.html").is_file():
+            log("no built app in the checkout, no npm to build one and none baked into the image; /app answers 503")
+            return
+        log("no built app in the checkout; installing the one built into the image")
+        try:
+            shutil.copytree(BAKED_APP, miniapp / "dist", dirs_exist_ok=True)
+            log("app installed")
+        except OSError as exc:
+            log(f"could not install the built-in app: {exc}")
+        finally:
+            restore_owner(repo)
         return
     log("no built app in the checkout; building it before the first start")
     try:

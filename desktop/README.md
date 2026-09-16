@@ -51,13 +51,16 @@ live in. The executable is not signed, so SmartScreen warns once: *More info →
    Finder inherits a PATH that has none of them in it. Without Docker the launcher says what to
    install, on its own page as well as in the terminal, and waits there: Docker Desktop on macOS and
    Windows, Docker Engine with the compose plugin on Linux.
-2. The two repositories are cloned into the folder, with `git` running in a container: git is not
-   expected on the host either.
+2. The two repositories are fetched into the folder as GitHub tarballs and committed there, with
+   `git` running inside the agent's own image: git is not expected on the host either, and no image
+   is downloaded that the stack does not already need. Each checkout is a real local history with
+   no remote — an update is the next commit on top of it.
 3. A page opens at `http://127.0.0.1:8770` and asks for a model provider key, optionally the
    Telegram values, and a daily spending cap. Telegram is optional — without it you use the app in
    the browser.
-4. The images are pulled (or built, if there is no published image for your platform), the stack
-   comes up, and the browser opens the app.
+4. The image is pulled (or built, if there is no published image for your platform), the stack
+   comes up, and the browser opens the app. There is one image and two containers from it: the
+   agent, and the key proxy that holds the provider keys.
 
 Closing the launcher does not stop anything: the containers are `restart: unless-stopped` and come
 back with the machine. The launcher's page is only a remote control.
@@ -77,7 +80,7 @@ Daedalus/
       keyproxy.env          provider keys (0600) — outside every folder the agent can read
       ssh/                  keys and config for hosts the agent may reach; may stay empty
     .env                    what compose interpolates and the agent container reads
-    compose.desktop.yaml    the launcher's override: the published images, Telegram made optional
+    compose.desktop.yaml    the launcher's override: the published image, Telegram made optional
 ```
 
 `data/` is next to the `.app` when the launcher runs from a bundle, and next to the working
@@ -90,9 +93,10 @@ unchanged. Provider keys are deliberately not in `.env`: that file is mounted in
 container, and the key proxy's file is not.
 
 To move an installation, move the whole folder. To use a fork, set `DAEDALUS_GIT_REMOTE` and
-`DAEDALUS_CORE_GIT_REMOTE` before the first run: the images are pulled from the fork owner's
-namespace as well, so a fork's code never runs upstream's image. A fork that publishes no images has
-nothing to pull, and the first start builds them locally instead.
+`DAEDALUS_CORE_GIT_REMOTE` before the first run: the image is pulled from the fork owner's namespace
+as well, so a fork's code never runs upstream's image. A fork that publishes no image has nothing to
+pull, and the first start builds it locally instead. Both remotes must be GitHub repositories — the
+checkouts are fetched from `codeload.github.com`, not cloned.
 
 Double-clicked from Finder there is no terminal to read, so the launcher's page opens in the browser
 first and everything — the progress, a Docker that is not installed or not started, and the buttons
@@ -135,23 +139,28 @@ the app, extra providers and the search APIs — are edited in `data/.env` and
 
 ## Disk
 
-The images are not small, and the agent's own image is the reason:
+One image, and the key proxy is a second container from it:
 
 | Image | Size on disk | Why |
 |---|---|---|
-| `ghcr.io/ascorblack/daedalus` | ~4 GB | Ubuntu, Python, Node, the GitHub CLI and a headless Chromium for the browser tools |
-| `searxng/searxng` | ~500 MB | the self-hosted search behind the WebSearch tool |
-| `aiogram/telegram-bot-api` | ~250 MB | the local Bot API server; only with Telegram on |
-| `ghcr.io/ascorblack/daedalus-keyproxy` | ~200 MB | the container that holds the provider keys |
-| `docker:cli` | ~100 MB | the rebuilder |
+| `ghcr.io/ascorblack/daedalus` | ~480 MB (~115 MB to pull) | Ubuntu, Python, uv, the environment, the built Mini App. Runs the agent and the key proxy |
+| `aiogram/telegram-bot-api` | ~66 MB | the local Bot API server; only with Telegram on |
 
-Budget **about 6 GB for the images**, plus the volumes: the database and the agent's memory are
-megabytes, but the per-session workspaces grow with what the agent downloads and builds. `uninstall`
-without `--keep-data` removes the volumes; the images are removed with `docker image prune -a`.
+Budget **about half a gigabyte for the image**, plus the volumes: the database and the agent's
+memory are megabytes, but the per-session workspaces grow with what the agent downloads and builds.
+`uninstall` without `--keep-data` removes the volumes; images are removed with `docker image prune -a`.
 
-On Apple Silicon there may be no published image for `linux/arm64` yet. The launcher notices that
-the pull failed and builds the image locally instead — the first start then takes several minutes
-and needs the build dependencies to download, but everything after it is the same.
+What is not in it, and what it costs to add:
+
+| | Size | How |
+|---|---|---|
+| the browser skills (Playwright, a headless Chromium, Pillow) | +~550 MB | run the `:browser` tag of the same image; it shares every layer below the last |
+| a self-hosted SearXNG | +~382 MB | `--profile search`. Without it `WebSearch` goes to DuckDuckGo directly |
+| the rebuilder, for a server that builds its own images | +~237 MB | `--profile selfdev` |
+
+The image is published for `linux/amd64` and `linux/arm64`, so Apple Silicon pulls it like
+everything else. If a pull fails anyway the launcher builds locally instead — a few minutes the
+first time, and everything after it is the same.
 
 ## Building it yourself
 

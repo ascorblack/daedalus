@@ -70,7 +70,6 @@ func TestOverrideNamesThePublishedImagesAndFreesTelegram(t *testing.T) {
 	text := string(body)
 	for _, want := range []string{
 		agentImage(),
-		keyproxyImage(),
 		`profiles: ["telegram"]`,
 		// Without required:false the whole project refuses to load while the profile is off,
 		// because daedalus depends on a service that is not in the project.
@@ -82,17 +81,18 @@ func TestOverrideNamesThePublishedImagesAndFreesTelegram(t *testing.T) {
 	}
 }
 
-func TestGitRunsInAContainerOverTheDataFolder(t *testing.T) {
+func TestGitRunsInTheAgentImageOverTheDataFolder(t *testing.T) {
 	paths, err := NewPaths(filepath.Join(t.TempDir(), "data"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := strings.Join(gitArgs(paths, "clone", "--depth", cloneDepth, botRemote(), "/work/daedalus"), " ")
-	if !strings.Contains(args, paths.Data+":/work") || !strings.Contains(args, gitImage) {
+	args := strings.Join(gitArgs(paths, "-C", "/work/daedalus", "status"), " ")
+	if !strings.Contains(args, paths.Data+":/work") {
 		t.Fatalf("git would not see the data folder: %s", args)
 	}
-	if !strings.Contains(args, "--depth 50") {
-		t.Fatalf("the clone has no history for the supervisor to roll back to: %s", args)
+	// The agent image, not an image of its own: a second one would be a second download for one binary.
+	if !strings.Contains(args, "--entrypoint git "+agentImage()) {
+		t.Fatalf("git does not run in the agent image: %s", args)
 	}
 	if os.Getuid() >= 0 && !strings.Contains(args, fmt.Sprintf("--user %d:%d", os.Getuid(), os.Getgid())) {
 		t.Fatalf("the checkout would belong to root, and the launcher could not write .env into it: %s", args)
@@ -112,9 +112,6 @@ func TestAForkOverridesTheRemote(t *testing.T) {
 func TestTheImageFollowsTheRemote(t *testing.T) {
 	t.Setenv("DAEDALUS_GIT_REMOTE", "https://github.com/Someone-Else/daedalus")
 	if got := agentImage(); got != "ghcr.io/someone-else/daedalus:latest" {
-		t.Fatalf("got %q", got)
-	}
-	if got := keyproxyImage(); got != "ghcr.io/someone-else/daedalus-keyproxy:latest" {
 		t.Fatalf("got %q", got)
 	}
 	for remote, want := range map[string]string{

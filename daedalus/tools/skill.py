@@ -10,6 +10,7 @@ from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
+from daedalus.host.toolchain import status as toolchain_status
 from daedalus.host.services import locator
 from daedalus.tools._common import error, ok
 
@@ -39,6 +40,8 @@ async def load_skill(context: ToolContext, skill: str, args: dict[str, Any] | No
             body = body.replace("{{" + name + "}}", value)
         if missing:
             body = f"[This skill takes parameters: {', '.join(params)}. Not given: {', '.join(missing)} — their {{{{placeholders}}}} are left as they are.]\n\n" + body
+    for note in _unmet(store, bundle.manifest.id):
+        body = f"[{note}]\n\n" + body
     files = [f for f in await store.list_files(context.tenant_id, bundle.manifest.id) if f.path != "SKILL.md"]
     listing = _listing(files)
     text = f"# Skill: {bundle.manifest.name}\n{bundle.manifest.description}\n\n{body}"
@@ -47,6 +50,18 @@ async def load_skill(context: ToolContext, skill: str, args: dict[str, Any] | No
         where = f"{root}/{bundle.manifest.id}/" if root else f"skills/{bundle.manifest.id}/"
         text += f"\n\nFiles in this skill (under {where}; read or run them from there):\n{listing}"
     return ok(context, text, skill_id=bundle.manifest.id)
+
+
+def _unmet(store: Any, skill_id: str) -> list[str]:
+    """The requirements this installation does not meet, said before the skill body rather than
+    discovered halfway through it by an import that fails."""
+    requires = store.requires_of(skill_id) if hasattr(store, "requires_of") else []
+    notes = []
+    for requirement in requires:
+        state = toolchain_status(requirement)
+        if state != "ok":
+            notes.append(f"This skill needs something this installation does not have: {state} Say so rather than following instructions that cannot work here.")
+    return notes
 
 
 LISTING_MAX_FILES = 40

@@ -51,7 +51,7 @@ Every screen is an address under `/app`: agents, live transcripts, the files an 
 <td width="33%" valign="top">
 
 **🛠️ Real tools**<br/>
-Shell, files, search, web fetch and search (self-hosted SearXNG), a vision model for images, verification runs, MCP servers per session, skills the agent loads on demand.
+Shell, files, search, web fetch and search (keyless out of the box, self-hosted SearXNG behind a profile), a vision model for images, verification runs, MCP servers per session, skills the agent loads on demand.
 
 </td>
 </tr>
@@ -180,6 +180,21 @@ By hand instead: clone `protocore-exp` next to this repository, copy `deploy/env
 checkout, `chmod 600`), then `docker compose -f deploy/compose.yaml --env-file .env up -d --build`. With a
 bot token add `--profile telegram`, which also starts the local Bot API server (files up to 2 GB, instead of
 Telegram's 20 MB, and it needs `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from https://my.telegram.org/apps).
+
+The stack is one image — about 480 MB, 115 MB to pull — and two containers from it: the agent, and
+the key proxy that holds the provider keys. Everything else is a profile, and none of them is on by
+default:
+
+| `--profile` | What it starts | Cost |
+|---|---|---|
+| `telegram` | the local Bot API server: files up to 2 GB instead of 20 MB | ~66 MB |
+| `search` | a self-hosted SearXNG. Without it `WebSearch` goes to DuckDuckGo directly; with it, SearXNG is the backend the tool falls back to | ~382 MB |
+| `selfdev` | the rebuilder, the only container that can reach Docker. Needed only to build a new agent image, which is what a change to the image's own recipe asks for | ~237 MB |
+
+The browser skills — driving a page with Playwright, drawing with Pillow — are not in the default
+image either: they are a third of it and most sessions never open a page. Run the `:browser` tag
+instead (`ghcr.io/ascorblack/daedalus:browser`, about 1 GB) where they are wanted; without it the
+skills say so instead of writing scripts that cannot run, and `daedalus doctor` says it too.
 
 ### Signing in without Telegram
 

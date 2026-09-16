@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from daedalus.config import RuntimeConfig, Settings
+from daedalus.host.toolchain import status as toolchain_status
 from daedalus.providers.pricing import pricing_table
 from daedalus.providers.registry import _is_vendor_host
 from daedalus.security.redact import redact as redact_text
@@ -130,6 +131,11 @@ async def _config(ctx: DoctorContext) -> list[Check]:
     status = await asyncio.to_thread(bwrap_status)
     usable = status == "ok"
     out.append(Check("exec sandbox", sandbox == "off" or usable, f"{sandbox}" + (f" (available: {status})" if sandbox == "off" else ("" if usable else f" requested but unavailable — Exec runs unsandboxed: {status}")), "ok" if sandbox == "off" or usable else "warn", "give the container cap_add SYS_ADMIN and security_opt seccomp=unconfined (see deploy/compose.yaml), then rebuild"))
+    # Informational, not warnings: an installation that never opens a page or runs npx is not a broken one.
+    browser = await asyncio.to_thread(toolchain_status, "browser")
+    out.append(Check("browser tools", browser == "ok", "Playwright, a headless Chromium and Pillow are here" if browser == "ok" else browser, "ok" if browser == "ok" else "info", "run the `:browser` tag of the agent image if the browser skills are wanted"))
+    node = await asyncio.to_thread(toolchain_status, "node")
+    out.append(Check("node", node == "ok", "available" if node == "ok" else node, "ok" if node == "ok" else "info", "the skills that shell out to npx cannot run here; nothing else needs it"))
     out.append(Check("per-run spend cap", cfg.limits.usd_per_run > 0, f"${cfg.limits.usd_per_run:.2f} per run, ${st.usd_per_day:.2f} per day" if cfg.limits.usd_per_run > 0 else f"no per-run cap (daily cap ${st.usd_per_day:.2f})", "ok" if cfg.limits.usd_per_run > 0 else "warn", "set limits.usd_per_run in Settings"))
     return out
 
