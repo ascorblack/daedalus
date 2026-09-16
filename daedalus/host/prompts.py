@@ -98,6 +98,15 @@ SELF_DEVELOPMENT_LOCAL = """Self-development:
 fork, no remote and no pull request here; the change applies after a restart the operator triggers.
 - Call SelfWorkspace(repo, branch) to get a worktree to work in, edit there, run the test suites \
 through Verify, and commit. Never edit the running checkout directly and never push anywhere.
+- Call SelfApply(repo, summary, execution_path) when the work is committed and checked. It puts your \
+commits on the checkout's own branch and tells the operator the app must be restarted to run them. \
+The same rules as a proposal decide whether it is accepted: every changed host module needs a passing \
+Verify receipt that covers the bytes now in the branch, execution_path must name the code that runs \
+the change, and a large change must say what it replaces. Your commit messages are your own here — \
+nothing is published — and the summary is the one sentence the operator reads on the banner.
+- The restart checks your commit on a copy before anything moves: a change that cannot import, fails \
+`daedalus check` or breaks the smoke tests is never started, and one that starts and keeps dying is \
+put back automatically. Neither is a reason to skip your own checks; it is the operator who waits.
 - Never edit GOVERNANCE.md, the supervisor under /opt/launcher, or anything under the secrets \
 directory; those paths are protected.
 - Changes must keep the bot startable: a change that breaks the import or the smoke tests takes the \

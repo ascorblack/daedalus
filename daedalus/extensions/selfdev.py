@@ -1,4 +1,11 @@
-"""Self-development: worktrees, pull requests, approval cards, rebuild and rollback."""
+"""Self-development: worktrees, pull requests, approval cards, rebuild and rollback.
+
+Two shapes, one set of gates. With a remote and a token the change leaves as a pull request the operator
+approves; without one — a desktop or a native install — the same worktree, the same Verify receipts and the
+same size and relevance rules end in a commit on the checkout's own branch and a notice that the app has to
+be restarted to run it. Nothing about the change is weaker locally; what is missing is the review, and the
+restart is where the operator sees it.
+"""
 
 from __future__ import annotations
 
@@ -32,6 +39,13 @@ logger = logging.getLogger(__name__)
 
 REPOS = ("bot", "core")
 RECEIPT_COMMAND_CHARS = 160
+
+PENDING_FILE = "pending.json"
+"""The change waiting for a restart, under ``<state>/selfdev``. A file rather than a row, because the
+launcher outside the container reads it too, and it must outlive a database that is being migrated."""
+RESULT_FILE = "result.json"
+"""What became of the last change: written by the supervisor when it refuses or reverses one, and by the
+host when the restart brought it up."""
 
 
 
@@ -446,14 +460,34 @@ def size_gate(added_lines: int, new_modules: dict[str, int], summary: str) -> No
     )
 
 
+IMAGE_FILES = ("deploy/Dockerfile", "deploy/compose.yaml", "deploy/apt-packages.txt")
+"""Files a restart cannot apply: they describe the environment, and only a new image carries them."""
+
+
+def _one_line(summary: str) -> str:
+    """The summary as one line, for a banner that has room for one."""
+    line = " ".join(summary.split())
+    return line if len(line) <= 160 else line[:159] + "…"
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 class SelfDevelopment:
-    def __init__(self, app: Application) -> None:
+    def __init__(self, app: Application, mode: str = "server") -> None:
         self.app = app
+        self.mode = mode
         s = app.settings
         self.repos = {
             "bot": RepoSpec("bot", s.bot_repo_dir, s.state_dir / "worktrees" / "bot"),
             "core": RepoSpec("core", s.core_repo_dir, s.state_dir / "worktrees" / "core"),
         }
+        self.selfdev_dir = s.state_dir / "selfdev"
         self._reason_waits: dict[tuple[int, int], str] = {}  # (chat_id, thread_id) -> proposal id
         self._background: set[asyncio.Task[None]] = set()
 
@@ -480,8 +514,20 @@ class SelfDevelopment:
             raise GitError(f"unknown repo {name!r}; use one of {REPOS}")
         return self.repos[name]
 
+    async def base_ref(self, repo: RepoSpec) -> str:
+        """What a worktree branches from and what its diff is measured against.
+
+        With a remote that is ``origin/main``, which is where the change is going. Without one it is the
+        branch the checkout has open — the code that is running — because that is both where the change
+        starts and where it lands.
+        """
+        if self.mode == "server":
+            return "origin/main"
+        name = (await self.git(repo, "rev-parse", "--abbrev-ref", "HEAD")).strip()
+        return name if name and name != "HEAD" else (await self.git(repo, "rev-parse", "HEAD")).strip()
+
     async def workspace(self, repo_name: str, branch: str) -> Path:
-        """Create (or reuse) a worktree for ``agent/<branch>`` off ``origin/main``."""
+        """Create (or reuse) a worktree for ``agent/<branch>`` off the branch point this mode uses."""
         repo = self.repo(repo_name)
         slug = self.slug_of(branch) or uuid.uuid4().hex[:8]
         full_branch = slug if slug.startswith("agent/") else f"agent/{slug}"
@@ -489,12 +535,14 @@ class SelfDevelopment:
         if target.exists():
             return target
         repo.worktrees.mkdir(parents=True, exist_ok=True)
-        await self.git(repo, "fetch", "--prune", "origin")
+        if self.mode == "server":
+            await self.git(repo, "fetch", "--prune", "origin")
+        base = await self.base_ref(repo)
         try:
-            await self.git(repo, "worktree", "add", "-B", full_branch, str(target), "origin/main")
+            await self.git(repo, "worktree", "add", "-B", full_branch, str(target), base)
         except GitError:
             await self.git(repo, "worktree", "prune")
-            await self.git(repo, "worktree", "add", "-B", full_branch, str(target), "origin/main")
+            await self.git(repo, "worktree", "add", "-B", full_branch, str(target), base)
         await self.git(repo, "config", "user.name", "daedalus", cwd=target)
         await self.git(repo, "config", "user.email", "daedalus@localhost", cwd=target)
         return target
@@ -551,14 +599,10 @@ class SelfDevelopment:
                 f"{', '.join(dict.fromkeys(leaks))}. Describe the change on its own terms and propose again."
             )
         since = await self._branch_started(spec, worktree)
-        changed_files = [f for f in (await self.git(spec, "diff", "--name-only", "origin/main...HEAD", cwd=worktree)).split("\n") if f.strip()]
+        changed_files, added_total, new_modules = await self._change_facts(spec, worktree, "origin/main")
         if repo == "bot":
             relevance_gate(worktree, changed_files, execution_path)
             evidence_gate(worktree, changed_files, await self.receipt_rows(session_id, since=since) if session_id else [], execution_path)
-        numstat = await self.git(spec, "diff", "--numstat", "origin/main...HEAD", cwd=worktree)
-        added_total = sum(int(a) for a, _, _ in (line.split("\t", 2) for line in numstat.splitlines() if "\t" in line) if a.isdigit())
-        new_files = [f for f in (await self.git(spec, "diff", "--name-only", "--diff-filter=A", "origin/main...HEAD", cwd=worktree)).split("\n") if f.endswith(".py") and not f.startswith("tests/")]
-        new_modules = {f: sum(1 for _ in (worktree / f).open(encoding="utf-8")) if (worktree / f).is_file() else 0 for f in new_files}
         size_gate(added_total, new_modules, summary)
         await self.git(spec, "push", "-u", "origin", head_branch, "--force-with-lease", cwd=worktree)
         receipts = await self.receipts_for(session_id, since=since) if session_id else ""
@@ -596,19 +640,144 @@ class SelfDevelopment:
         await self._send_card(proposal_id, repo, title, summary + receipts, pr_url, diffstat)
         return f"PR #{pr_number} opened: {pr_url}. Waiting for the operator's decision."
 
-    async def _branch_started(self, spec: RepoSpec, worktree: Path) -> str | None:
-        """When the branch diverged from main: receipts older than that are not evidence for it.
+    async def _change_facts(self, spec: RepoSpec, worktree: Path, base: str) -> tuple[list[str], int, dict[str, int]]:
+        """What the branch changes against ``base``: the files, the lines it adds, and the size of each
+        module it introduces. The three gates read this and nothing else about the diff."""
+        changed = [f for f in (await self.git(spec, "diff", "--name-only", f"{base}...HEAD", cwd=worktree)).split("\n") if f.strip()]
+        numstat = await self.git(spec, "diff", "--numstat", f"{base}...HEAD", cwd=worktree)
+        added = sum(int(a) for a, _, _ in (line.split("\t", 2) for line in numstat.splitlines() if "\t" in line) if a.isdigit())
+        new_files = [f for f in (await self.git(spec, "diff", "--name-only", "--diff-filter=A", f"{base}...HEAD", cwd=worktree)).split("\n") if f.endswith(".py") and not f.startswith("tests/")]
+        return changed, added, {f: sum(1 for _ in (worktree / f).open(encoding="utf-8")) if (worktree / f).is_file() else 0 for f in new_files}
+
+    async def _branch_started(self, spec: RepoSpec, worktree: Path, base: str = "origin/main") -> str | None:
+        """When the branch diverged from its base: receipts older than that are not evidence for it.
 
         The merge base's commit date, not the branch's first commit: a Verify run before the first
         commit still counts, and an amend or rebase (which the leak gate itself asks for) does not
         move the window.
         """
         try:
-            base = (await self.git(spec, "merge-base", "origin/main", "HEAD", cwd=worktree)).strip()
-            stamp = (await self.git(spec, "log", "-1", "--format=%cI", base, cwd=worktree)).strip() if base else ""
+            point = (await self.git(spec, "merge-base", base, "HEAD", cwd=worktree)).strip()
+            stamp = (await self.git(spec, "log", "-1", "--format=%cI", point, cwd=worktree)).strip() if point else ""
         except GitError:
             return None
         return datetime.fromisoformat(stamp).astimezone(UTC).isoformat() if stamp else None
+
+    # -- local apply ----------------------------------------------------------------
+
+    async def apply(self, *, repo: str, summary: str, session_id: str | None, branch: str | None = None, execution_path: str | None = None) -> str:
+        """Put the branch's commits on the checkout's own branch and ask for a restart.
+
+        The same three gates as a proposal: the change must sit on a named execution path, be covered by
+        passing Verify receipts, and say what it replaces when it is large. What is left out is everything
+        about a public repository — there is no remote, no pull request and no reader but the operator, so
+        the commit messages are the agent's own and a ``Co-authored-by`` line is welcome in them.
+
+        The branch is fast-forwarded into the checkout, which keeps the history one line that reads in
+        order. The worktree and the branch stay: the agent's local git is its own working record, and a
+        change the preflight refuses is still reachable there.
+        """
+        spec = self.repo(repo)
+        worktree = await self._worktree_for(spec, branch)
+        status = await self.git(spec, "status", "--porcelain", cwd=worktree)
+        if status.strip():
+            raise GitError("the worktree has uncommitted changes; commit them first")
+        base = await self.base_ref(spec)
+        head_branch = (await self.git(spec, "rev-parse", "--abbrev-ref", "HEAD", cwd=worktree)).strip()
+        ahead = (await self.git(spec, "rev-list", "--count", f"{base}..HEAD", cwd=worktree)).strip()
+        if ahead == "0":
+            raise GitError(f"the branch has no commits beyond {base}")
+        since = await self._branch_started(spec, worktree, base)
+        changed_files, added_total, new_modules = await self._change_facts(spec, worktree, base)
+        if repo == "bot":
+            relevance_gate(worktree, changed_files, execution_path)
+            evidence_gate(worktree, changed_files, await self.receipt_rows(session_id, since=since) if session_id else [], execution_path)
+        size_gate(added_total, new_modules, summary)
+        commit = (await self.git(spec, "rev-parse", "HEAD", cwd=worktree)).strip()
+        await self._fast_forward(spec, head_branch, base)
+        needs_image = any(f in IMAGE_FILES for f in changed_files) or any(f.startswith("launcher/") for f in changed_files)
+        line = _one_line(summary)
+        self._write_pending({"repo": repo, "commit": commit, "branch": head_branch, "summary": line, "files": changed_files[:40], "needs_image": needs_image, "session_id": session_id, "at": datetime.now(UTC).isoformat()})
+        answer = (
+            f"committed to the {repo} checkout as {commit[:10]} on {base} ({len(changed_files)} file"
+            f"{'s' if len(changed_files) != 1 else ''}, +{added_total} lines). The app now shows 'restart to apply'; the change starts "
+            "running when the operator restarts it — from the banner in the app, the launcher, or by closing and reopening the app. "
+            "The restart preflights this commit first and keeps the running version if the checks fail."
+        )
+        if needs_image:
+            answer += " This change also rewrites the image (the Dockerfile, the system packages or the supervisor), which a restart cannot replace: the operator has to run an update."
+        return answer
+
+    async def _fast_forward(self, spec: RepoSpec, branch: str, base: str) -> None:
+        """Move the checkout's branch onto the agent's commits, in a straight line.
+
+        The branch was cut from this very tip, so it fast-forwards. If something moved it since — an
+        operator's own commit, an earlier apply — the agent's branch is rebased onto it once and the
+        merge is tried again, because a merge commit here buys nothing and reads as noise in a history
+        whose whole purpose is to be readable by hand.
+        """
+        try:
+            await self.git(spec, "merge", "--ff-only", branch)
+            return
+        except GitError:
+            logger.warning("the checkout moved since the branch was cut; rebasing %s onto %s", branch, base)
+        await self.git(spec, "rebase", base, branch, cwd=spec.worktrees / self.slug_of(branch))
+        await self.git(spec, "merge", "--ff-only", branch)
+
+    def _write_pending(self, record: dict[str, Any]) -> None:
+        self.selfdev_dir.mkdir(parents=True, exist_ok=True)
+        (self.selfdev_dir / PENDING_FILE).write_text(json.dumps(record, indent=2))
+
+    def pending_change(self) -> dict[str, Any] | None:
+        """The change waiting for a restart, or ``None``."""
+        return _read_json(self.selfdev_dir / PENDING_FILE)
+
+    def last_change(self) -> dict[str, Any] | None:
+        """What became of the last change that was applied, refused or reversed."""
+        return _read_json(self.selfdev_dir / RESULT_FILE)
+
+    async def reconcile(self) -> None:
+        """On the way up: did the pending change make it, or did the supervisor refuse it?
+
+        Three answers. The checkout is at the commit, so it is running — applied. The supervisor left a
+        result for this commit, so it was refused or reversed and its own words are the explanation. Or
+        neither, and the change is still waiting for the restart that has not happened yet.
+        """
+        pending = self.pending_change()
+        if not pending:
+            return
+        spec = self.repo(str(pending.get("repo") or "bot"))
+        commit = str(pending.get("commit") or "")
+        try:
+            running = (await self.git(spec, "rev-parse", "HEAD")).strip()
+        except GitError:
+            return
+        result = self.last_change() or {}
+        if running == commit:
+            outcome = {"status": "applied", "detail": str(result.get("detail") or "the change is live")}
+        elif str(result.get("commit") or "") == commit:
+            outcome = {"status": str(result.get("status") or "unknown"), "detail": str(result.get("detail") or "")}
+        else:
+            return
+        record = {**pending, **outcome, "resolved_at": datetime.now(UTC).isoformat()}
+        self.selfdev_dir.mkdir(parents=True, exist_ok=True)
+        (self.selfdev_dir / RESULT_FILE).write_text(json.dumps(record, indent=2))
+        (self.selfdev_dir / PENDING_FILE).unlink(missing_ok=True)
+        if outcome["status"] != "applied":
+            inbox = self.app.extensions.get("inbox")
+            if inbox is not None:
+                await inbox.post("selfdev", f"The change '{pending.get('summary')}' was not applied", outcome["detail"], severity="warning")
+        await self._notify_session(
+            pending.get("session_id"),
+            f"Your change '{pending.get('summary')}' — {outcome['status']}. {outcome['detail']}",
+        )
+
+    async def restart_to_apply(self, reason: str) -> str:
+        """Ask the supervisor to check the change in the checkout and restart onto it."""
+        try:
+            return str(await supervisor_client.call(self.app.settings.supervisor_socket, "restart", reason=reason))
+        except supervisor_client.SupervisorUnavailable as exc:
+            return f"nothing here can restart the app ({exc}); close it and open it again to apply the change"
 
     async def receipt_rows(self, session_id: str, *, since: str | None = None, hours: int = 24) -> list[dict[str, Any]]:
         since = since or (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
@@ -825,9 +994,10 @@ class SelfDevelopment:
 
 
 async def install(app: Application) -> list[asyncio.Task[None]]:
-    selfdev = SelfDevelopment(app)
-    app.extensions["selfdev"] = selfdev
     assert app.manager is not None
+    mode = app.manager.capabilities.selfdev.mode
+    selfdev = SelfDevelopment(app, mode)
+    app.extensions["selfdev"] = selfdev
 
     async def self_workspace(*, repo: str, branch: str, session_id: str | None = None, **_: Any) -> str:
         path = await selfdev.workspace(repo, branch)
@@ -848,11 +1018,21 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     async def self_rollback(*, steps_back: int = 0, reason: str = "", **_: Any) -> str:
         return await selfdev.rollback(steps_back, reason)
 
-    mode = app.manager.capabilities.selfdev.mode
+    async def self_apply(*, repo: str, summary: str, session_id: str | None = None, branch: str | None = None, execution_path: str | None = None, **_: Any) -> str:
+        try:
+            return await selfdev.apply(repo=repo, summary=summary, session_id=session_id, branch=branch, execution_path=execution_path)
+        except GitError as exc:
+            raise RuntimeError(f"the change was not applied: {exc}") from exc  # the tool turns it into an error result, not a success that reads like one
+
     # The hooks follow the tools: in local mode a worktree is the whole surface — there is no remote to
     # open a pull request against and no image to rebuild — so only the hook behind a registered tool is
     # installed. The hook that applies a local change belongs beside this one when it exists.
     app.manager.service_hooks["self_workspace"] = self_workspace
+    if mode == "local":
+        app.manager.service_hooks["self_apply"] = self_apply
+        # The restart the agent asked for has either happened or been refused since this process last ran;
+        # whichever it was, the app has to be able to say so before anyone asks again.
+        await selfdev.reconcile()
     if mode == "server":
         app.manager.service_hooks.update(
             {

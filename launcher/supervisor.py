@@ -7,8 +7,13 @@ Responsibilities, and nothing more:
 * on ``rebuild``: preflight ``origin/main`` on a candidate checkout while the bot keeps
   running, then move both repositories to it and restart; a revision that fails the
   preflight never touches the running bot;
+* on ``restart``: apply what the checkout already holds. Where the checkout is the only
+  place a change lives (no remote to pull from), the same preflight runs on a detached
+  worktree of the commit that is there, and the bot restarts only if it passes;
 * on ``rollback``: check out an earlier known-good revision and restart;
 * on ``panic``: kill the whole process tree immediately;
+* roll back by itself when a revision cannot boot: three short-lived starts inside ten
+  minutes put the last known-good commit back;
 * enforce the daily spend cap by reading the bot's usage table.
 
 Commands arrive as JSON lines on a unix socket. Standard library only.
@@ -47,10 +52,28 @@ LIMIT_FLAG = STATE / "BUDGET_EXCEEDED"
 LOG = STATE / "supervisor.log"
 
 REBUILD_TRIGGER_FILES = ("deploy/Dockerfile", "deploy/compose.yaml", "deploy/apt-packages.txt")
+DEPENDENCY_FILES = ("uv.lock", "pyproject.toml")
+"""A change to one of these is the only reason to sync the virtualenv: it lives on a volume that outlives the
+container, so syncing it when nothing declared a dependency is minutes of waiting for no difference."""
 CANDIDATE = STATE / "preflight"
-"""Detached checkouts of origin/main, one per repository under the names the running checkouts have, so the
-bot repository's ``../protocore-exp`` path dependency resolves to the candidate core. The preflight runs here
-while the bot keeps serving on the old revision; the running checkouts move only once it passes."""
+"""Detached checkouts of the revision about to run, one per repository under the names the running checkouts
+have, so the bot repository's ``../protocore-exp`` path dependency resolves to the candidate core. The
+preflight runs here while the bot keeps serving on the old revision; the running checkouts move only once it
+passes."""
+VENV = Path(os.environ.get("UV_PROJECT_ENVIRONMENT", "/srv/venv"))
+SELFDEV_DIR = STATE / "selfdev"
+APPLY_RESULT = SELFDEV_DIR / "result.json"
+"""What the last apply attempt did, for the bot to read after it comes back up and show in the app. The
+supervisor writes it when it refuses or reverses a change; the bot writes it when the change is live."""
+CONFIGURED_MODE = os.environ.get("DAEDALUS_SELFDEV_MODE", "auto")
+"""``server``, ``local``, ``off`` or ``auto``; the same value the bot resolves for itself. The supervisor
+resolves it again from what it can see, because it decides before the bot is running."""
+
+HEALTHY_SECONDS = 120
+"""A start that lasts this long is what ``record_good`` calls healthy; one that does not is a failed boot."""
+BOOT_WINDOW_SECONDS = 600
+BOOT_THRESHOLD = 3
+"""Three failed boots inside ten minutes — the boot guard's own numbers — mean the revision cannot run."""
 
 
 def log(message: str) -> None:
@@ -174,21 +197,88 @@ def record_good() -> None:
     log(f"recorded known-good bot={entry['bot'][:10]} core={entry['core'][:10]}")
 
 
+def has_origin(repo: Path) -> bool:
+    """Whether the checkout has somewhere to push to. Read from the git configuration rather than asked of
+    git: this decides how a restart behaves and must not depend on a subprocess that can hang."""
+    config = repo / ".git" / "config"
+    try:
+        return '[remote "origin"]' in config.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def resolve_mode(configured: str, *, repo: Path, token: str) -> str:
+    """Which self-development this installation does, decided the way the bot decides it.
+
+    ``server`` needs a remote to pull from and a token to reach it; ``local`` needs only the checkout,
+    because the change is already in it. An explicit setting is taken as given — the operator's word is
+    what the bot obeys too, and the two must not disagree about which preflight runs.
+    """
+    if configured in ("off", "local", "server"):
+        return configured
+    if has_origin(repo) and token.strip():
+        return "server"
+    return "local" if (repo / ".git").exists() else "off"
+
+
+def needs_new_image(changed: set[str]) -> bool:
+    """Whether the change rewrites the environment rather than the code that runs in it."""
+    return any(path in changed for path in REBUILD_TRIGGER_FILES) or any(path.startswith("launcher/") for path in changed)
+
+
+def needs_dependency_sync(changed: set[str], *, venv: Path = VENV) -> bool:
+    """Whether the virtualenv has to be synced before this revision can run.
+
+    Two reasons, and no others: the revision declares different dependencies, or there is no virtualenv
+    yet — a fresh volume on a first start, which is seeded from the image and is otherwise left alone.
+    """
+    if any(path in changed for path in DEPENDENCY_FILES):
+        return True
+    return not (venv / "pyvenv.cfg").is_file()
+
+
+def unhealthy_boots(history: list[float], now: float, *, window: float = BOOT_WINDOW_SECONDS) -> list[float]:
+    """The failed boots still inside the window, newest last. A record from the future is a clock step,
+    not evidence, and would otherwise never age out."""
+    return [t for t in history if now - window <= t <= now]
+
+
+def write_result(status: str, commit: str, detail: str) -> None:
+    """Record what the last apply attempt did where the bot and the launcher can both read it."""
+    try:
+        SELFDEV_DIR.mkdir(parents=True, exist_ok=True)
+        APPLY_RESULT.write_text(json.dumps({"status": status, "commit": commit, "detail": detail[-2000:], "at": datetime.now(UTC).isoformat()}, indent=2))
+    except OSError as exc:
+        log(f"could not record the apply result: {exc}")
+
+
+def last_change() -> dict[str, Any] | None:
+    """What the last apply attempt did, or ``None`` when nothing has been applied here."""
+    try:
+        return dict(json.loads(APPLY_RESULT.read_text()))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def candidate_dir(repo: Path) -> Path:
     return CANDIDATE / repo.name
 
 
-def prepare_candidate(repo: Path) -> tuple[bool, str]:
-    """Put a detached checkout of origin/main next to the others under CANDIDATE, reusing its venv and
+def prepare_candidate(repo: Path, ref: str = "origin/main") -> tuple[bool, str]:
+    """Put a detached checkout of ``ref`` next to the others under CANDIDATE, reusing its venv and
     node_modules from last time; the object store is the repository's own (a worktree), so this is a checkout,
-    not a clone."""
+    not a clone.
+
+    ``ref`` is ``origin/main`` when the revision comes from a remote and a commit sha when it comes from the
+    checkout itself — the only difference between preflighting a merge and preflighting a local change.
+    """
     target = candidate_dir(repo)
     CANDIDATE.mkdir(parents=True, exist_ok=True)
     if not (target / ".git").exists():
         git(repo, "worktree", "prune")
-        code, out = git(repo, "worktree", "add", "--detach", "--force", str(target), "origin/main")
+        code, out = git(repo, "worktree", "add", "--detach", "--force", str(target), ref)
         return code == 0, out
-    code, out = git(target, "checkout", "--detach", "--force", "origin/main")
+    code, out = git(target, "checkout", "--detach", "--force", ref)
     if code != 0:
         return False, out
     code, out = git(target, "clean", "-fd", "--exclude=.venv", "--exclude=node_modules", "--exclude=miniapp/node_modules")
@@ -254,14 +344,20 @@ def reap_zombies(keep: set[int]) -> int:
     return reaped
 
 
-def preflight(repo: Path) -> tuple[bool, str]:
-    """Dependencies, Mini App build, import, config and smoke tests in the tree about to run."""
+def preflight(repo: Path, *, sync: bool = True) -> tuple[bool, str]:
+    """Dependencies, Mini App build, import, config and smoke tests in the tree about to run.
+
+    ``sync`` is what decides whether the virtualenv is rebuilt. It is on for a revision pulled from a remote,
+    where anything may have changed; a local change passes it only when the change touched the files that
+    declare a dependency, so the one sync that is needed happens here and nowhere else.
+    """
     steps: list[tuple[list[str], Path]] = [
-        (["uv", "sync", "--frozen", "--extra", "dev"], repo),
         (["uv", "run", "--frozen", "python", "-m", "compileall", "-q", "daedalus"], repo),
         (["uv", "run", "--frozen", "python", "-m", "daedalus", "check"], repo),
         (["uv", "run", "--frozen", "python", "-m", "pytest", "-q", "-x", "tests/smoke", "tests/unit/test_boundaries.py", "tests/unit/test_redact.py", "tests/unit/test_reachability.py"], repo),
     ]
+    if sync:
+        steps.insert(0, (["uv", "sync", "--frozen", "--extra", "dev"], repo))
     miniapp = repo / "miniapp"
     if (miniapp / "package.json").exists() and shutil.which("npm"):
         steps.insert(1, (["npm", "ci", "--no-audit", "--no-fund"], miniapp))
@@ -291,6 +387,13 @@ class Supervisor:
         self.queued_rebuild: str | None = None
         """The reason of a rebuild asked for while another was running: it runs right after, so a pull
         request merged during a rebuild is not left undeployed until someone asks again."""
+        self.mode = resolve_mode(CONFIGURED_MODE, repo=BOT_REPO, token=os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GITHUB_DAEDALUS_TOKEN", ""))
+        self.restart_task: asyncio.Task[None] | None = None
+        self.failed_boots: list[float] = []
+        """When each of the recent starts died before it was healthy. Three inside the window and the
+        revision goes back to the last known-good one by itself: a change that cannot boot cannot be
+        undone from the app, because the app is what is not coming up."""
+        log(f"self-development mode: {self.mode} (configured {CONFIGURED_MODE})")
 
     # -- child lifecycle ------------------------------------------------------------
 
@@ -351,13 +454,122 @@ class Supervisor:
                 await self.restart_requested.wait()
                 self.restart_requested.clear()
                 continue
-            if uptime > 120:
+            if uptime > HEALTHY_SECONDS:
                 self.backoff = 2.0
+                self.failed_boots.clear()
             else:
                 self.backoff = min(self.backoff * 2, 120.0)
+                if await self._note_failed_boot():
+                    continue  # the checkout moved back; start the old revision at once rather than after the backoff
             await asyncio.sleep(self.backoff)
 
+    async def _note_failed_boot(self) -> bool:
+        """Record a start that died before it was healthy; roll back at the threshold.
+
+        Only where the change lives in the checkout: with a remote, the revision that cannot boot was
+        merged and pulled, and putting it back is the operator's ``rollback``, not the supervisor's guess.
+        Returns whether the checkout was moved.
+        """
+        self.failed_boots = unhealthy_boots([*self.failed_boots, time.time()], time.time())
+        if self.mode != "local" or len(self.failed_boots) < BOOT_THRESHOLD:
+            return False
+        log(f"{len(self.failed_boots)} failed boots within {BOOT_WINDOW_SECONDS // 60} minutes; going back to the last known-good revision")
+        self.failed_boots.clear()
+        return await self._auto_rollback()
+
+    async def _auto_rollback(self) -> bool:
+        """Put the last known-good commit back, so the next start is one that has run before."""
+        async with self.lock:
+            broken = head(BOT_REPO)
+            history = load_history()
+            target = next((h for h in reversed(history) if h["bot"] != broken), None)
+            if target is None:
+                write_result("no_rollback", broken, f"{BOOT_THRESHOLD} failed boots and no earlier known-good revision to go back to")
+                log("no earlier known-good revision recorded; staying where we are")
+                return False
+            self._checkout(target["bot"], target["core"])
+            changed = self._changed_files(target["bot"], broken)
+            if needs_dependency_sync(changed):
+                await asyncio.to_thread(lambda: run(["uv", "sync", "--frozen", "--extra", "dev"], cwd=BOT_REPO, timeout=1200))
+            write_result(
+                "rolled_back",
+                broken,
+                f"{BOOT_THRESHOLD} starts in a row died within {HEALTHY_SECONDS}s, so the change was reversed: "
+                f"bot {broken[:10]} → {target['bot'][:10]} (known good since {target['at']}). The commit is still in the checkout's history.",
+            )
+            log(f"rolled back to bot={target['bot'][:10]} core={target['core'][:10]}")
+            return True
+
     # -- operations -----------------------------------------------------------------
+
+    async def restart(self, reason: str) -> str:
+        """Apply what the checkout holds.
+
+        With a remote there is nothing to check — the revision running is the revision that was merged and
+        preflighted — so the bot simply goes round again. Where the change lives only in the checkout, the
+        commit that is there has been seen by nothing but the agent that wrote it: it is preflighted on a
+        detached worktree of itself first, and the bot is stopped only once that passes.
+        """
+        if self.mode != "local":
+            self.restart_requested.set()
+            return "restarting"
+        if self.lock.locked() or (self.restart_task is not None and not self.restart_task.done()):
+            return "a restart, rebuild or rollback is already running; this one is not started twice"
+        self.restart_task = asyncio.create_task(self._apply_local(reason))
+        return "checking the change and restarting: it applies if the checks pass, and the running version is kept if they do not"
+
+    async def _apply_local(self, reason: str) -> None:
+        """Preflight the commit in the checkout and restart on it; keep the running one if it fails."""
+        async with self.lock:
+            target = head(BOT_REPO)
+            history = load_history()
+            previous = history[-1]["bot"] if history else target
+            log(f"restart requested: {reason} (bot {previous[:10]} → {target[:10]})")
+            changed = self._changed_files(previous, target)
+            stopped = False
+            try:
+                for repo in (BOT_REPO, CORE_REPO):
+                    ok, out = await asyncio.to_thread(prepare_candidate, repo, head(repo))
+                    if not ok:
+                        write_result("preflight_failed", target, f"a checkout of the change could not be made: {out[-800:]}")
+                        return
+                sync = needs_dependency_sync(changed)
+                ok, transcript = await asyncio.to_thread(preflight, candidate_dir(BOT_REPO), sync=sync)
+                if not ok:
+                    log("preflight failed on the local change; the running bot is untouched")
+                    FAILED.parent.mkdir(parents=True, exist_ok=True)
+                    FAILED.write_text(f"restart ({reason}) failed preflight at {datetime.now(UTC).isoformat()}\nthe bot kept running on bot={previous[:10]}\n\n{transcript[-6000:]}")
+                    await self._revert_to(previous, target, transcript)
+                    return
+                FAILED.unlink(missing_ok=True)
+                detail = "the change is live"
+                if needs_new_image(changed):
+                    # The environment itself changed, and nothing here can replace it: say so rather than
+                    # asking a rebuilder that a local installation does not have.
+                    detail = "the code change is live, but this change also rewrites the image (the Dockerfile, the packages or the supervisor). Run an update to build a new image; until then the old environment is what runs."
+                    log("the change touches the image; no rebuild is attempted in local mode")
+                await self.stop_child()
+                stopped = True
+                write_result("applied", target, detail)
+            finally:
+                # Only a change that passed gets the bot restarted. A refused one leaves the process
+                # running the code it already has, which is the code the checkout was put back to.
+                if stopped:
+                    self.restart_requested.set()
+
+    async def _revert_to(self, good: str, broken: str, transcript: str) -> None:
+        """Take the refused commit back out of the running checkout.
+
+        The preflight ran on a copy, so nothing that failed has run — but the commit is in the checkout,
+        and the next start would pick it up without anyone asking for it. The commit itself is not lost:
+        the branch the agent committed on still points at it.
+        """
+        if good == broken:
+            write_result("preflight_failed", broken, f"the checks did not pass, so the change was not applied:\n{transcript[-1500:]}")
+            return
+        code, out = git(BOT_REPO, "reset", "--hard", good)
+        note = "" if code == 0 else f" The checkout could not be moved back ({out[-300:]}); it still holds the change."
+        write_result("preflight_failed", broken, f"the checks did not pass, so the change was not applied and the checkout was put back to {good[:10]}.{note}\n\n{transcript[-1500:]}")
 
     async def rebuild(self, reason: str) -> str:
         """Acknowledge at once; the work runs in the background and reports through LAST_REBUILD.
@@ -466,6 +678,10 @@ class Supervisor:
 
     def _request_image_rebuild(self) -> bool:
         """Hand the image rebuild to the rebuilder sidecar through the shared trigger directory."""
+        if self.mode != "server":
+            # Only a server installation has a rebuilder; anywhere else the trigger file would sit there
+            # unread and the operator would be told a rebuild was under way that nothing is doing.
+            return False
         if not REBUILD_TRIGGER_DIR.is_dir():
             return False
         (REBUILD_TRIGGER_DIR / "rebuild").write_text(datetime.now(UTC).isoformat() + "\n")
@@ -533,6 +749,8 @@ class Supervisor:
             "last_rebuild": LAST_REBUILD.read_text()[-500:] if LAST_REBUILD.exists() else None,
             "usd_per_day": USD_PER_DAY,
             "budget_exceeded": LIMIT_FLAG.exists(),
+            "selfdev_mode": self.mode,
+            "last_change": last_change(),
         }
 
     # -- socket ---------------------------------------------------------------------
@@ -551,8 +769,7 @@ class Supervisor:
             elif op == "panic":
                 result = await self.panic()
             elif op == "restart":
-                self.restart_requested.set()
-                result = "restarting"
+                result = await self.restart(str(request.get("reason") or "operator request"))
             else:
                 result = f"unknown op {op!r}"
             writer.write((json.dumps({"ok": True, "result": result}) + "\n").encode("utf-8"))

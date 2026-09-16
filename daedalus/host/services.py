@@ -32,6 +32,8 @@ class SessionServices:
     send_file: SendFileFn | None = None
     schedule: ScheduleFn | None = None
     self_propose: SelfDevFn | None = None
+    self_apply: SelfDevFn | None = None
+    """Commit a worktree branch into the running checkout, where there is no remote to propose it to."""
     self_rebuild: SelfDevFn | None = None
     self_rollback: SelfDevFn | None = None
     spawn_agent: Callable[..., Awaitable[str]] | None = None

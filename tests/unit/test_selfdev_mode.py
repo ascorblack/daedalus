@@ -25,7 +25,8 @@ from daedalus.stores.database import Database
 from daedalus.tools import discover_tools
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SELF_TOOLS = ("SelfWorkspace", "SelfPropose", "SelfRebuild", "SelfRollback")
+SELF_TOOLS = ("SelfWorkspace", "SelfPropose", "SelfApply", "SelfRebuild", "SelfRollback")
+SERVER_TOOLS = ("SelfWorkspace", "SelfPropose", "SelfRebuild", "SelfRollback")
 
 
 def _settings(tmp_path: Path, **over: object) -> Settings:
@@ -88,12 +89,13 @@ def test_an_explicit_mode_wins_and_says_what_it_is_missing(tmp_path: Path) -> No
 
 def test_each_mode_registers_exactly_the_tools_it_can_honour() -> None:
     assert capabilities.SELFDEV_TOOLS["off"] == frozenset()
-    assert capabilities.SELFDEV_TOOLS["local"] == {"SelfWorkspace"}
-    assert capabilities.SELFDEV_TOOLS["server"] == set(SELF_TOOLS)
+    assert capabilities.SELFDEV_TOOLS["local"] == {"SelfWorkspace", "SelfApply"}
+    assert capabilities.SELFDEV_TOOLS["server"] == set(SERVER_TOOLS)
     assert capabilities.ALL_SELFDEV_TOOLS == set(SELF_TOOLS) == {t.name for t in discover_tools() if t.name.startswith("Self")}
     off = capabilities.SelfDev(mode="off", configured="off")
     assert off.disabled_tools == set(SELF_TOOLS)
     assert capabilities.SelfDev(mode="local", configured="local").disabled_tools == {"SelfPropose", "SelfRebuild", "SelfRollback"}
+    assert capabilities.SelfDev(mode="server", configured="server").disabled_tools == {"SelfApply"}
 
 
 # -- what the modes do to the running installation ----------------------------------------
@@ -105,7 +107,7 @@ async def _manager(tmp_path: Path, db: Database, mode: str) -> SessionManager:
     return manager
 
 
-@pytest.mark.parametrize(("mode", "present"), [("off", ()), ("local", ("SelfWorkspace",)), ("server", SELF_TOOLS)])
+@pytest.mark.parametrize(("mode", "present"), [("off", ()), ("local", ("SelfWorkspace", "SelfApply")), ("server", SERVER_TOOLS)])
 async def test_the_tool_registry_follows_the_mode(tmp_path: Path, db: Database, mode: str, present: tuple[str, ...]) -> None:
     manager = await _manager(tmp_path, db, mode)
     try:
@@ -209,7 +211,7 @@ async def test_capabilities_report_the_mode_and_the_reasons(tmp_path: Path, db: 
         assert (await client.get("/api/capabilities")).status_code == 401  # it says what this installation is; not to anyone
         body = (await client.get("/api/capabilities", headers={"X-Daedalus-Token": "tok"})).json()
     assert body["selfdev"]["mode"] == "local" and body["selfdev"]["configured"] == "auto"
-    assert body["selfdev"]["tools"] == ["SelfWorkspace"]
+    assert body["selfdev"]["tools"] == ["SelfApply", "SelfWorkspace"]
     assert any("no GitHub token" in reason for reason in body["selfdev"]["reasons"])
 
 

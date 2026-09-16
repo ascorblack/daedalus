@@ -29,10 +29,9 @@ SELFDEV_MODES: tuple[SelfDevMode, ...] = ("off", "local", "server")
 
 SELFDEV_TOOLS: dict[SelfDevMode, frozenset[str]] = {
     "off": frozenset(),
-    # Local mode has a checkout and no remote: a worktree to work in is the part that already means
-    # something. The tool that applies a local change — commit, preflight, restart — joins this set
-    # when it exists; nothing else has to change here for it.
-    "local": frozenset({"SelfWorkspace"}),
+    # Local mode has a checkout and no remote: a worktree to work in, and a tool that commits it into the
+    # checkout the process runs from. There is nothing to propose to and no image to rebuild.
+    "local": frozenset({"SelfWorkspace", "SelfApply"}),
     "server": frozenset({"SelfWorkspace", "SelfPropose", "SelfRebuild", "SelfRollback"}),
 }
 """The self-development tools each mode registers. Every tool a mode leaves out is not registered at
@@ -69,12 +68,22 @@ class SelfDev:
 
 @dataclass(frozen=True, slots=True)
 class Capabilities:
-    """Everything the app tells its surfaces about what this installation can do."""
+    """Everything the app tells its surfaces about what this installation can do.
+
+    The mode is decided once and never changes; the two change fields do, so they are passed in by whoever
+    reports the capabilities rather than resolved here — ``dataclasses.replace`` on the resolved value, so
+    there is one shape the app reads and no second route to poll for a banner.
+    """
 
     selfdev: SelfDev
+    restart_required: dict[str, Any] | None = None
+    """The change committed to the checkout and waiting for a restart, or ``None``."""
+    last_change: dict[str, Any] | None = None
+    """What became of the change before it: applied, refused by the preflight, or reversed after it could
+    not boot. What the app shows once the restart is over."""
 
     def as_dict(self) -> dict[str, Any]:
-        return {"selfdev": self.selfdev.as_dict()}
+        return {"selfdev": self.selfdev.as_dict(), "restart_required": self.restart_required, "last_change": self.last_change}
 
 
 # -- prerequisite probes ------------------------------------------------------------------
