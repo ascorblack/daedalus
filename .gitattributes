@@ -1,0 +1,10 @@
+# Source is text, and a diff is how a change is reviewed. A single stray NUL
+# would otherwise make git call a file binary and print "Bin 9422 -> 9747
+# bytes" where the change should be.
+*.ts text diff
+*.tsx text diff
+*.js text diff
+*.py text diff
+*.md text diff
+*.css text diff
+*.toml text diff

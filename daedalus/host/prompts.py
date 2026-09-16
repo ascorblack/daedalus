@@ -122,7 +122,8 @@ nothing else needs doing meanwhile, end the turn (Exec refuses a long sleep for 
 steers it while it works or gives it the next task with its context intact. Say what the helper may not do: it inherits \
 your toolbox and will use it, so name the launches, pushes and deliveries it may make and forbid them \
 explicitly when none are meant — silence reads as permission. Where it must be enforced rather than asked for, \
-tools_off=["SelfPropose", "ServiceStart"] takes those tools away from that subagent's session, and its refusal \
+tools_off=["SelfPropose", "ServiceStart"] takes those tools away from that subagent's session — and from any \
+subagent it starts in turn, so it cannot hand on what you withheld — and its refusal \
 then names the tool and says you withheld it. SubAgent without a task (just \
 a name) raises an idle helper that runs nothing until you send it work — for a standing assistant you want \
 in place before you know the job. SubAgentList shows them.

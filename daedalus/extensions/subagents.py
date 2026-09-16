@@ -150,7 +150,11 @@ class Subagents:
             model = model.strip()
             if model not in models:
                 raise ValueError(f"unknown model {model!r}; choose one of: {', '.join(models)}")
-        withheld = self.withhold(tools_off)
+        # Withholding runs down the tree, not just one level: a subagent that keeps SubAgent would
+        # otherwise hand a grandchild the very tool its leader took away from it, and tools_off would
+        # be a request rather than the enforcement it is sold as. Names the leader carries are already
+        # known to the registry, so only the new ones are checked.
+        withheld = sorted(set(self.withhold(tools_off)) | {str(n) for n in (leader.metadata.get("tools_off") or ())})
         label = (name or task.splitlines()[0])[:48].strip()  # type: ignore[union-attr]
         taken = {c["name"] for c in await self.children(leader_id)}
         if label in taken:

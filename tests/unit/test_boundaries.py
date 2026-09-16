@@ -144,3 +144,21 @@ def test_in_function_imports_state_their_reason() -> None:
                 if not LAZY_RE.search(span):
                     offenders.append(f"{rel}:{inner.lineno}")
     assert offenders == [], "annotate with '# Lazy: <reason>' or move the import to the top"
+
+
+def test_no_source_file_is_stored_with_a_nul_byte() -> None:
+    """A NUL makes git call the file binary, and the change lands as a byte count.
+
+    The mini app's markdown renderer stashed code spans behind a NUL sentinel for a
+    while, which cost every edit to that file its diff. Nothing is reviewable that
+    nobody can read, so the sentinel is a private-use code point written as an escape.
+    """
+    roots = (PKG, ROOT / "miniapp" / "src", ROOT / "tests")
+    suffixes = {".py", ".ts", ".tsx", ".js", ".css", ".md", ".toml"}
+    binary = [
+        path
+        for root in roots
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.suffix in suffixes and b"\x00" in path.read_bytes()
+    ]
+    assert binary == []
