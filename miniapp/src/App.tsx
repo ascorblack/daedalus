@@ -17,6 +17,7 @@ import { AuthConfig, LoginScreen } from "./screens/Login";
 import * as passkeys from "./passkeys";
 import { back, migrateLegacyLocation, navigate, pathFor, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
 import { Counts, MoreSheet, Palette, PaletteItem, Rail, TabBar, go, screenTitle, useMedia, useShortcuts } from "./shell";
+import { Capabilities, SelfDevMode, visibleScreens } from "./capabilities";
 import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
 
@@ -83,13 +84,17 @@ export function App() {
     });
   };
   const openPalette = useCallback(() => setPalette(true), []);
-  useShortcuts(openPalette);
   const offline = useOffline();
   // Inside Telegram every request carries initData; outside, the browser needs a token or the session cookie.
   const [authed, setAuthed] = useState<boolean | null>(() => (telegram()?.initData ? true : null));
   const inbox = useQuery<{ unread: number }>(authed ? "/api/inbox/unread" : null, { pollMs: 20000, staleMs: 5000 });
-  const proposals = useQuery<{ status: string }[]>(authed ? "/api/proposals" : null, { pollMs: 60000, staleMs: 30000 });
+  // What this installation can do decides what the app offers. Until the answer arrives the nav is the
+  // one a server install has: hiding a destination and putting it back a moment later reads as a glitch.
+  const caps = useQuery<Capabilities>(authed ? "/api/capabilities" : null, { pollMs: 300000, staleMs: 60000 });
+  const selfdev: SelfDevMode = caps.data?.selfdev.mode ?? "server";
+  const proposals = useQuery<{ status: string }[]>(authed && selfdev !== "off" ? "/api/proposals" : null, { pollMs: 60000, staleMs: 30000 });
   const counts: Counts = { inbox: inbox.data?.unread ?? 0, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
+  useShortcuts(openPalette, selfdev);
 
   useEffect(() => {
     if (authed !== null) return;
@@ -232,7 +237,7 @@ export function App() {
     const sessions = peek<SessionSummary[]>("/api/sessions") ?? [];
     return [
       { id: "new-agent", label: "New agent", icon: "plus", run: () => navigate(pathFor("agents", null, { new: "1" })) },
-      ...SCREENS.map((s) => ({ id: `go-${s}`, label: `Go to ${screenTitle(s)}`, icon: "back" as const, run: () => navigate(pathFor(s)) })),
+      ...visibleScreens(SCREENS, selfdev).map((s) => ({ id: `go-${s}`, label: `Go to ${screenTitle(s)}`, icon: "back" as const, run: () => navigate(pathFor(s)) })),
       ...sessions.map((s) => ({ id: `s-${s.id}`, label: s.title, hint: s.model ?? "", icon: "bots" as const, run: () => open(s.id) })),
     ];
   };
@@ -278,7 +283,15 @@ export function App() {
         {route.screen === "voice" && <VoiceScreen onOpen={open} />}
         {route.screen === "inbox" && <InboxScreen onOpen={open} toast={showToast} />}
         {route.screen === "board" && <BoardScreen onOpen={open} toast={showToast} selected={route.detail} />}
-        {route.screen === "changes" && <ProposalsScreen toast={showToast} selected={route.detail} />}
+        {route.screen === "changes" &&
+          (selfdev === "off" ? (
+            <div className="empty">
+              <b>This installation does not change its own code</b>
+              <div>Self-development is off; there is nothing to review here.</div>
+            </div>
+          ) : (
+            <ProposalsScreen toast={showToast} selected={route.detail} />
+          ))}
         {route.screen === "schedules" && <SchedulesScreen toast={showToast} onOpen={open} selected={route.detail} />}
         {route.screen === "services" && <ServicesScreen onOpen={open} toast={showToast} />}
         {route.screen === "memory" && <MemoryScreen toast={showToast} onOpen={open} />}
@@ -291,15 +304,15 @@ export function App() {
 
   return (
     <div className={`app ${railCollapsed ? "rail-collapsed" : ""}`}>
-      {wide && <Rail screen={route.screen} counts={counts} collapsed={railCollapsed} onToggle={toggleRail} onPalette={openPalette} />}
+      {wide && <Rail screen={route.screen} counts={counts} selfdev={selfdev} collapsed={railCollapsed} onToggle={toggleRail} onPalette={openPalette} />}
       <div ref={main} className={`main ${sessionId ? "chat-open" : ""}`}>
         {offline && <div className="offline-strip" role="status">No connection to the bot · retrying…</div>}
         <PasskeyNudge />
         {content}
       </div>
       {palette && <Palette items={paletteItems()} onClose={() => setPalette(false)} />}
-      {!wide && !sessionId && <TabBar screen={route.screen} counts={counts} onMore={() => setMore((m) => !m)} moreOpen={more} />}
-      {more && <MoreSheet screen={route.screen} counts={counts} onClose={() => setMore(false)} />}
+      {!wide && !sessionId && <TabBar screen={route.screen} counts={counts} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} />}
+      {more && <MoreSheet screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMore(false)} />}
       {picking && sessionId && <SessionPicker exclude={sessionId} onPick={(id) => { navigate(sessionPath(sessionId, id)); setPicking(false); }} onClose={() => setPicking(false)} />}
       <ToastHost />
       <ConfirmHost />

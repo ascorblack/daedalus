@@ -5,8 +5,13 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Icon, IconName } from "./icons";
 import { Sheet } from "./dialogs";
 import { Screen, navigate, pathFor } from "./router";
+import { SelfDevMode, screenTag, visibleScreens } from "./capabilities";
 
 export type Counts = { inbox?: number; changes?: number; services?: number; agents?: number };
+
+function tagFor(s: Screen, selfdev: SelfDevMode): string {
+  return screenTag(s, selfdev, BETA);
+}
 
 const TITLES: Record<Screen, string> = { agents: "Agents", voice: "Voice", inbox: "Inbox", board: "Board", changes: "Changes", schedules: "Schedules", services: "Services", memory: "Memory", usage: "Usage", health: "Health", settings: "Settings" };
 const ICONS: Record<Screen, IconName> = { agents: "bots", voice: "mic", inbox: "inbox", board: "board", changes: "changes", schedules: "clock", services: "globe", memory: "bulb", usage: "chart", health: "check", settings: "settings" };
@@ -60,9 +65,10 @@ export function PageHeader({ title, subtitle, actions, back, children }: { title
   );
 }
 
-export function TabBar({ screen, counts, onMore, moreOpen }: { screen: Screen; counts: Counts; onMore: () => void; moreOpen: boolean }) {
-  const inMore = MORE.includes(screen);
-  const moreCount = MORE.reduce((n, s) => n + countFor(s, counts), 0);
+export function TabBar({ screen, counts, selfdev, onMore, moreOpen }: { screen: Screen; counts: Counts; selfdev: SelfDevMode; onMore: () => void; moreOpen: boolean }) {
+  const more = visibleScreens(MORE, selfdev);
+  const inMore = more.includes(screen);
+  const moreCount = more.reduce((n, s) => n + countFor(s, counts), 0);
   return (
     <nav className="tabbar" aria-label="Primary">
       {PRIMARY.map((s) => {
@@ -88,17 +94,18 @@ export function TabBar({ screen, counts, onMore, moreOpen }: { screen: Screen; c
   );
 }
 
-export function MoreSheet({ screen, counts, onClose }: { screen: Screen; counts: Counts; onClose: () => void }) {
+export function MoreSheet({ screen, counts, selfdev, onClose }: { screen: Screen; counts: Counts; selfdev: SelfDevMode; onClose: () => void }) {
   return (
     <Sheet onClose={onClose} size="narrow" className="more-sheet" title="More">
       <div className="more-grid">
-        {MORE.map((s) => {
+        {visibleScreens(MORE, selfdev).map((s) => {
           const n = countFor(s, counts);
+          const tag = tagFor(s, selfdev);
           return (
             <a key={s} href={pathFor(s)} className={`more-item ${screen === s ? "active" : ""}`} onClick={(e) => { go(e, pathFor(s)); onClose(); }}>
               <Icon name={ICONS[s]} size={22} />
               <span>{TITLES[s]}</span>
-              {BETA.includes(s) && <span className="beta-tag">beta</span>}
+              {tag && <span className="beta-tag">{tag}</span>}
               {n > 0 && <span className="tab-badge">{n}</span>}
             </a>
           );
@@ -108,14 +115,15 @@ export function MoreSheet({ screen, counts, onClose }: { screen: Screen; counts:
   );
 }
 
-export function Rail({ screen, counts, collapsed, onToggle, onPalette }: { screen: Screen; counts: Counts; collapsed: boolean; onToggle: () => void; onPalette: () => void }) {
+export function Rail({ screen, counts, selfdev, collapsed, onToggle, onPalette }: { screen: Screen; counts: Counts; selfdev: SelfDevMode; collapsed: boolean; onToggle: () => void; onPalette: () => void }) {
   const item = (s: Screen) => {
     const n = countFor(s, counts);
+    const tag = tagFor(s, selfdev);
     return (
       <a key={s} href={pathFor(s)} className={`rail-item ${screen === s ? "active" : ""}`} aria-current={screen === s ? "page" : undefined} onClick={(e) => go(e, pathFor(s))} title={collapsed ? TITLES[s] : undefined}>
         <Icon name={ICONS[s]} size={18} />
         <span className="rail-text">{TITLES[s]}</span>
-        {BETA.includes(s) && <span className="rail-text beta-tag">beta</span>}
+        {tag && <span className="rail-text beta-tag">{tag}</span>}
         {n > 0 && <span className={`count ${s === "services" ? "ok" : s === "changes" ? "attn" : ""}`}>{n}</span>}
       </a>
     );
@@ -131,12 +139,14 @@ export function Rail({ screen, counts, collapsed, onToggle, onPalette }: { scree
         <span className="rail-text">Search…</span>
         <kbd className="rail-text">⌘K</kbd>
       </button>
-      {GROUPS.map((g) => (
-        <div key={g.label} className="rail-group">
-          <div className="rail-label">{g.label}</div>
-          {g.items.map(item)}
-        </div>
-      ))}
+      {GROUPS.map((g) => visibleScreens(g.items, selfdev)).map((items, i) =>
+        items.length === 0 ? null : (
+          <div key={GROUPS[i].label} className="rail-group">
+            <div className="rail-label">{GROUPS[i].label}</div>
+            {items.map(item)}
+          </div>
+        ),
+      )}
       <div className="rail-group bottom">
         {item("settings")}
         <button className="rail-item collapse" onClick={onToggle} title={collapsed ? "Expand the rail" : "Collapse the rail"} aria-label={collapsed ? "Expand the rail" : "Collapse the rail"} aria-expanded={!collapsed}>
@@ -199,7 +209,7 @@ export function Palette({ items, onClose }: { items: PaletteItem[]; onClose: () 
 const GO_KEYS: Record<string, Screen> = { a: "agents", v: "voice", i: "inbox", b: "board", c: "changes", m: "memory", u: "usage", s: "settings" };
 
 /** Keyboard on a desktop: Ctrl/⌘ K opens the palette, `g` then a letter goes to a screen. Never inside a text field. */
-export function useShortcuts(onPalette: () => void) {
+export function useShortcuts(onPalette: () => void, selfdev: SelfDevMode) {
   useEffect(() => {
     let pendingG = 0;
     const onKey = (e: KeyboardEvent) => {
@@ -215,7 +225,7 @@ export function useShortcuts(onPalette: () => void) {
         pendingG = Date.now();
         return;
       }
-      if (pendingG && Date.now() - pendingG < 1200 && GO_KEYS[e.key]) {
+      if (pendingG && Date.now() - pendingG < 1200 && GO_KEYS[e.key] && visibleScreens([GO_KEYS[e.key]], selfdev).length) {
         e.preventDefault();
         navigate(pathFor(GO_KEYS[e.key]));
       }
@@ -223,7 +233,7 @@ export function useShortcuts(onPalette: () => void) {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onPalette]);
+  }, [onPalette, selfdev]);
 }
 
 /** Whether a media query matches, kept current as the window changes. */
