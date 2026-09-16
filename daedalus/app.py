@@ -88,12 +88,12 @@ class Application:
         headline, _, body = text.partition("\n")
         await inbox.post(kind, headline.strip().strip("*_ ") or kind, body.strip(), severity=severity)  # type: ignore[attr-defined]
 
-    async def create_session(self, title: str, *, metadata: dict[str, Any] | None = None, workspace: Path | None = None) -> SessionState:
+    async def create_session(self, title: str, *, metadata: dict[str, Any] | None = None, workspace: Path | None = None, project_id: str | None = None) -> SessionState:
         """A session with its chat topic where Telegram is configured, a plain session where it is not."""
         assert self.manager is not None
         if self.front is None:
-            return await self.manager.create_session(title, workspace=workspace, metadata=metadata)
-        state, _binding = await self.front.create_session_topic(title, metadata=metadata)
+            return await self.manager.create_session(title, workspace=workspace, metadata=metadata, project_id=project_id)
+        state, _binding = await self.front.create_session_topic(title, metadata=metadata, project_id=project_id)
         if workspace is not None and state.workspace != workspace:
             # create_session_topic gives the session a directory of its own; the caller asked for this one.
             state.workspace = workspace

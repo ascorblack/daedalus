@@ -11,6 +11,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,6 +57,7 @@ from daedalus.security import redact
 from daedalus.stores.blobs import FileBlobStore
 from daedalus.stores.database import Database
 from daedalus.stores.persistent import PersistentMemory, PersistentWorkspace
+from daedalus.stores.projects import Project, ProjectStore
 from daedalus.stores.sqlite import (
     LiveControlStore,
     SqliteEventStream,
@@ -146,6 +148,9 @@ class SessionState:
     """Length of the working history when the current run began: what this run added starts here."""
     checkpoint_capped: bool = False
     """Set once the size cap has suppressed a snapshot, so the warning is logged once per session."""
+    project: Project | None = None
+    """The project this session works in: its root is the workspace, and the only place the session's
+    tools may reach. ``None`` is a session with a directory of its own."""
     observed_prompt_tokens: int = 0
     """The host's own estimate of the next prompt after it rewrote the history, until a real call
     measures one. A compaction makes every earlier measurement describe a history that is gone."""
@@ -175,6 +180,7 @@ class SessionManager:
         self.events = SqliteEventStream(db)
         self.usage = SqliteUsageSink(db)
         self.live = LiveControlStore(db)
+        self.projects = ProjectStore(db)
         self.blobs = FileBlobStore(settings.blobs_dir)
         self.memory = PersistentMemory(db)
         self.workspace_units = PersistentWorkspace(db)
@@ -431,16 +437,24 @@ class SessionManager:
         session_id: str | None = None,
         workspace: Path | None = None,
         metadata: dict[str, Any] | None = None,
+        project_id: str | None = None,
     ) -> SessionState:
         sid = session_id or uuid.uuid4().hex[:12]
+        project = await self.projects.get(project_id) if project_id else None
+        if project_id and project is None:
+            raise KeyError(project_id)
         # A session may work in a directory that is not its own (a subagent in its leader's, a session the
         # operator attached to an existing workspace): the metadata names it, and get_state reads the same key.
+        # A project overrides both: its root IS the workspace, and moving the project moves every session in it,
+        # which is why the project is the stored link and the directory is derived from it.
         named = (metadata or {}).get("workspace")
-        workspace = workspace or (Path(str(named)) if named else self.workspace_for(sid))
+        workspace = project.root if project is not None else (workspace or (Path(str(named)) if named else self.workspace_for(sid)))
         (workspace / "inbox").mkdir(parents=True, exist_ok=True)
         session = Session(id=sid, tenant_id=TENANT, title=title, metadata=dict(metadata or {}))
         await self.sessions.create(session)
-        state = SessionState(session=session, workspace=workspace, metadata=dict(metadata or {}))
+        if project is not None:
+            await self.projects.attach(sid, project.id)
+        state = SessionState(session=session, workspace=workspace, metadata=dict(metadata or {}), project=project)
         self._states[sid] = state
         self.register_services(state)
         return state
@@ -457,9 +471,10 @@ class SessionManager:
             session = await self.sessions.get(session_id, TENANT)
         except Exception:
             return None
-        workspace = Path(session.metadata.get("workspace") or self.workspace_for(session_id))
+        project = await self.projects.for_session(session_id)
+        workspace = project.root if project is not None else Path(session.metadata.get("workspace") or self.workspace_for(session_id))
         (workspace / "inbox").mkdir(parents=True, exist_ok=True)
-        state = SessionState(session=session, workspace=workspace, metadata=dict(session.metadata))
+        state = SessionState(session=session, workspace=workspace, metadata=dict(session.metadata), project=project)
         self._states[session_id] = state
         self.register_services(state)
         return state
@@ -541,6 +556,7 @@ class SessionManager:
 
     async def list_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = await self.sessions.list_sessions(TENANT, limit=limit)
+        projects = await self.projects.by_session()
         out: list[dict[str, Any]] = []
         for session in rows:
             state = self._states.get(session.id)
@@ -563,6 +579,7 @@ class SessionManager:
                     "last_message_at": session.last_message_at.isoformat(),
                     "run_id": state.run_id if state else None,
                     "metadata": session.metadata,
+                    "project_id": projects.get(session.id),
                 }
             )
         return out
@@ -883,7 +900,16 @@ class SessionManager:
     # -- checkpoints, revert, fork ------------------------------------------------------
 
     async def checkpoint(self, state: SessionState, *, kind: str, seq: int | None = None, run_id: str | None = None) -> str | None:
-        """Snapshot the workspace (bounded by ``ops.checkpoint_max_gb``); returns the commit id or None."""
+        """Snapshot the workspace (bounded by ``ops.checkpoint_max_gb``); returns the commit id or None.
+
+        A project is not snapshotted unless the operator asked for it. A session workspace holds what
+        one agent made; a project root is the operator's own repository, and committing it into
+        ``.checkpoints`` before every turn and after every run is a cost the undo does not repay on a
+        tree that already has a history of its own. Switched on in the project's settings, it behaves
+        exactly as a workspace does, size cap included.
+        """
+        if state.project is not None and not state.project.settings.snapshots:
+            return None
         limit = self.config.ops.checkpoint_max_gb
         try:
             # One walk answers both the size cap and the excludes; it used to be three.
@@ -1122,6 +1148,25 @@ class SessionManager:
             removed.append(entry.name)
         return removed
 
+    async def reload_project(self, project: Project | None, project_id: str) -> None:
+        """Point the sessions of ``project_id`` at what the project is now — a new root, new settings, or gone.
+
+        A session already loaded in this process holds its workspace and its services; without this,
+        a renamed root would reach only the sessions opened after it, and the ones already open would
+        keep writing into the old folder.
+        """
+        for state in self._states.values():
+            if state.project is None or state.project.id != project_id:
+                continue
+            state.project = project
+            if project is not None:
+                state.workspace = project.root
+            else:
+                state.workspace = Path(state.session.metadata.get("workspace") or self.workspace_for(state.session.id))
+            with suppress(OSError):
+                (state.workspace / "inbox").mkdir(parents=True, exist_ok=True)
+            self.register_services(state)
+
     def running_run_ids(self) -> set[str]:
         return {s.run_id for s in self._states.values() if s.run_id and (s.running or s.pending is not None)}
 
@@ -1134,6 +1179,7 @@ class SessionManager:
                 self.governance_path,
                 Path("/opt/launcher"),
                 self.settings.secrets_dir,
+                self.settings.state_dir,
                 self.settings.config_path,
                 self.settings.db_path,
             ),
@@ -1148,6 +1194,9 @@ class SessionManager:
             self_rollback=hooks.get("self_rollback"),
             progress=_bind(hooks.get("progress"), state.session.id),
             writable=[q for p in (state.session.metadata.get("worktrees") or []) if str(p).startswith("/") for q in worktree_writable_paths(Path(str(p)))],
+            # In a project, the root is both the workspace and the wall: the sandbox binds it writable
+            # (it is ``workspace_dir``) and ``resolve`` refuses everything outside it and the worktrees above.
+            project_root=state.project.root if state.project is not None else None,
             extra={"skill_store": self.skills, "manager": self, "vision": _LiveVision(self), "jobs": self._jobs.setdefault(state.session.id, {})},
         )
         state.services = services
@@ -1423,6 +1472,7 @@ class SessionManager:
             session_id=state.session.id,
             session_title=state.session.title,
             workspace=state.workspace,
+            project=state.project.name if state.project is not None else "",
             rungs=rungs,
             provider_chain=chain,
             model_name=rungs[0][1],
