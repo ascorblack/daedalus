@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +122,36 @@ func TestSecondLaunchFocusesTheFirst(t *testing.T) {
 	server.Stop(context.Background())
 	if _, err := os.Stat(filepath.Join(paths.Data, "launcher.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("a stopped launcher still claims the installation")
+	}
+}
+
+func TestTheDesktopEntryIsWrittenWhereTheDesktopLooks(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the desktop entry is the Linux registration")
+	}
+	paths := setupTempInstall(t)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "share"))
+	if err := RegisterScheme(paths); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := os.ReadFile(filepath.Join(os.Getenv("XDG_DATA_HOME"), "applications", "daedalus-desktop.desktop"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"MimeType=x-scheme-handler/daedalus;", "Exec=" + exe + " %u", "Name=Daedalus"} {
+		if !strings.Contains(string(entry), want) {
+			t.Fatalf("the desktop entry does not carry %q:\n%s", want, entry)
+		}
+	}
+	// The marker records which executable was registered, so a start that changes nothing does
+	// nothing, and a launcher that has moved registers itself again.
+	recorded, err := os.ReadFile(filepath.Join(paths.Data, "scheme.txt"))
+	if err != nil || strings.TrimSpace(string(recorded)) != exe {
+		t.Fatalf("the registration was not recorded: %q %v", recorded, err)
 	}
 }
 
