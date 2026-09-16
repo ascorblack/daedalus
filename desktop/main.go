@@ -34,6 +34,10 @@ commands:
   pair        print a fresh pairing link for signing in to the app
   uninstall   remove the containers, networks and volumes
 
+A daedalus:// link may be given instead of a command — daedalus://open/<session-id> opens that
+conversation. A launcher that is already running is brought to the front and handed the link; a
+second one never starts.
+
 flags:
   --data DIR  where the checkouts, the keys and the environment live
               (default: ./data, or data/ beside the app when run from Daedalus.app)
@@ -53,6 +57,7 @@ func main() {
 
 type options struct {
 	command  string
+	link     string
 	data     string
 	port     int
 	setup    bool
@@ -109,6 +114,10 @@ func run(argv []string) error {
 	case "update":
 		return app.Update(ctx)
 	case "open":
+		if FocusRunning(ctx, paths, opts.link) {
+			fmt.Println("the launcher already running here was brought to the front")
+			return nil
+		}
 		url, err := app.Open(ctx)
 		if err != nil {
 			fmt.Println("open this yourself:", url)
@@ -135,8 +144,20 @@ func run(argv []string) error {
 // launcher's own window, a browser in application mode, or a tab — and everything after that is the
 // same whichever it turned out to be. Closing it leaves the containers running.
 func startCommand(ctx context.Context, app *App, opts options) error {
+	// A second launch is not a second installation. Two launchers reconciling one compose project,
+	// two windows on one app and two answers on one port are all the same mistake, so the second
+	// hands its link to the first, asks it to come to the front, and stops.
+	if FocusRunning(ctx, app.paths, opts.link) {
+		fmt.Println("Daedalus is already running here; it has been brought to the front.")
+		return nil
+	}
 	if err := app.paths.EnsureDirs(); err != nil {
 		return err
+	}
+	// Links are registered with the desktop on a first start, since a folder with an executable in
+	// it has no installer to do it. Nothing depends on it working.
+	if err := RegisterScheme(app.paths); err != nil {
+		fmt.Fprintln(os.Stderr, "daedalus:// links are not registered with this desktop:", err.Error())
 	}
 	server := NewServer(app, opts.port)
 	if err := server.Start(); err != nil {
@@ -163,6 +184,7 @@ func startCommand(ctx context.Context, app *App, opts options) error {
 	// page: the status, the buttons, and on a first start the questions.
 	surface := OpenSurface(app.paths, server.URL())
 	server.SetWindowed(surface.Windowed())
+	server.OnFocus(surface.Focus)
 	go bringUp(ctx, app, server, surface, opts)
 	surface.Run(ctx)
 	return nil
@@ -205,6 +227,11 @@ func bringUp(ctx context.Context, app *App, server *Server, surface *Surface, op
 		return
 	}
 	url := app.OpenURL(ctx)
+	if opts.link != "" {
+		// Opened by following a link, what the operator asked for is the thing at the end of it,
+		// not the app's front page.
+		url = DeepLinkTarget(opts.link, AppURL(APIPort(app.paths)))
+	}
 	fmt.Println("opening", url)
 	surface.Show(ctx, url)
 	if !surface.Windowed() {
@@ -282,6 +309,12 @@ func parseArgs(argv []string) (options, error) {
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return opts, fmt.Errorf("no such flag: %s\n\n%s", arg, usage)
+			}
+			// A link is what the operating system passes when the operator follows one, and it
+			// arrives in the place a command would. It is not a command: it says what to show.
+			if IsDeepLink(arg) {
+				opts.link = arg
+				continue
 			}
 			if opts.command != "" {
 				return opts, fmt.Errorf("one command at a time: %s and %s", opts.command, arg)

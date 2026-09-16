@@ -35,6 +35,10 @@ type Server struct {
 
 	http *http.Server
 
+	// focus is what a second launch asks this one to do: come to the front, at the link it was
+	// opened with. It is set by whoever owns the window; without one it opens the app in a browser.
+	focus func(ctx context.Context, url string)
+
 	// windowed records that the page is being shown in the launcher's own window rather than in a
 	// browser, which changes one sentence on it: what closing it does.
 	windowed bool
@@ -78,8 +82,13 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/setup", s.handleSetup)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/action/", s.handleAction)
+	mux.HandleFunc("/focus", s.handleFocus)
 	mux.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(mustSub()))))
 	s.http = &http.Server{Handler: s.sameOrigin(mux), ReadHeaderTimeout: 10 * time.Second}
+	// The installation now has an owner, and a second launch reads this to find it.
+	if err := WriteInstance(s.app.paths, s.port, s.csrf); err != nil {
+		fmt.Println("a second launch will not find this one:", err)
+	}
 	go func() {
 		if err := s.http.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Println("the launcher page stopped:", err)
@@ -89,6 +98,7 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) Stop(ctx context.Context) {
+	RemoveInstance(s.app.paths)
 	if s.http != nil {
 		_ = s.http.Shutdown(ctx)
 	}
@@ -96,6 +106,47 @@ func (s *Server) Stop(ctx context.Context) {
 
 // SetWindowed says that this page is inside the launcher's own window.
 func (s *Server) SetWindowed(windowed bool) { s.windowed = windowed }
+
+// OnFocus records what to do when a second launch asks for the front.
+func (s *Server) OnFocus(focus func(ctx context.Context, url string)) { s.focus = focus }
+
+// Port is the port the page ended up on, which is not the one that was asked for when that one was
+// taken or when zero asked the operating system to choose.
+func (s *Server) Port() int { return s.port }
+
+// Token is the secret this process minted. It is handed to a second launch through the file in the
+// data folder and never leaves the machine.
+func (s *Server) Token() string { return s.csrf }
+
+// handleFocus is the whole of the single-instance protocol: a second launch of the launcher posts
+// here instead of starting anything, with the deep link it was opened with when it has one, and
+// exits. It answers 200 only when it is really us — the token is per process, and the file that
+// carries it is written by this process and readable only by its owner.
+func (s *Server) handleFocus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "post to focus the launcher", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.hasToken(r.Header.Get(csrfHeader)) {
+		refuse(w)
+		return
+	}
+	var body struct {
+		URL string `json:"url"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	target := ""
+	if IsDeepLink(body.URL) {
+		target = DeepLinkTarget(body.URL, AppURL(APIPort(s.app.paths)))
+	}
+	if s.focus != nil {
+		// The asking launcher is waiting for an answer, and showing a window is the running
+		// launcher's own business.
+		go s.focus(context.Background(), target)
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"focused":true}`))
+}
 
 // WaitForSetup blocks until the form has been submitted, or the context ends.
 func (s *Server) WaitForSetup(ctx context.Context) error {
