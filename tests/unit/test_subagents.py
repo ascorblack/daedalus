@@ -160,3 +160,52 @@ async def test_subagent_send_steers_a_running_one_and_restarts_a_kept_one(app: A
     finally:
         state.task.cancel()  # type: ignore[union-attr]
         state.task = None
+
+
+async def test_withheld_tools_are_taken_away_from_the_child_session(app: Any) -> None:
+    """tools_off is enforced by the host: the child's session carries the switch and its brief says who set it."""
+    manager: SessionManager = app.manager
+    subs = Subagents(app)
+    leader = await manager.create_session("lead")
+    _capture(manager)
+    result = await subs.spawn(leader_id=leader.session.id, task="review the diff", tools_off=["SelfPropose", "ServiceStart"])
+    child = await manager.get_state(result["session_id"])
+    assert child is not None
+    assert child.metadata["tools_off"] == ["SelfPropose", "ServiceStart"]
+    assert manager.tools_off(child) == {"SelfPropose", "ServiceStart"}
+    assert manager.blocked_tools_for(child) >= {"SelfPropose", "ServiceStart"}
+    assert "SelfPropose" in child.metadata["brief"] and "withheld" in child.metadata["brief"]
+
+
+async def test_a_withheld_tool_stays_withheld_from_the_grandchild(app: Any) -> None:
+    """A child that keeps SubAgent cannot hand on what its leader took away from it."""
+    manager: SessionManager = app.manager
+    subs = Subagents(app)
+    leader = await manager.create_session("lead")
+    _capture(manager)
+    first = await subs.spawn(leader_id=leader.session.id, task="review the diff", tools_off=["ServiceStart"])
+    second = await subs.spawn(leader_id=first["session_id"], task="run the server")
+    grandchild = await manager.get_state(second["session_id"])
+    assert grandchild is not None
+    assert grandchild.metadata["tools_off"] == ["ServiceStart"]
+    # The check that matters is the one the engine build and every live update make.
+    assert "ServiceStart" in manager.blocked_tools_for(grandchild)
+    assert "ServiceStart" in grandchild.metadata["brief"]
+
+    # A grandchild that withholds something of its own keeps both.
+    third = await subs.spawn(leader_id=first["session_id"], task="and this", tools_off=["SelfPropose"])
+    other = await manager.get_state(third["session_id"])
+    assert other is not None
+    assert other.metadata["tools_off"] == ["SelfPropose", "ServiceStart"]
+
+
+async def test_withholding_an_unknown_tool_is_refused_rather_than_ignored(app: Any) -> None:
+    manager: SessionManager = app.manager
+    subs = Subagents(app)
+    leader = await manager.create_session("lead")
+    _capture(manager)
+    with pytest.raises(ValueError, match="no such tool"):
+        await subs.spawn(leader_id=leader.session.id, task="t", tools_off=["SelfPropse"])
+    result = await subs.spawn(leader_id=leader.session.id, task="t")
+    child = await manager.get_state(result["session_id"])
+    assert child is not None and "tools_off" not in child.metadata

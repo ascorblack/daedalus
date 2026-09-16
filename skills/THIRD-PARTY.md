@@ -40,3 +40,40 @@ directory). Everything else is the upstream text under the upstream licence.
 | `frontend-design/apps` | [meliwat/awesome-ios-design-md](https://github.com/meliwat/awesome-ios-design-md) | `design-md/*/* (38 apps)` | `5d3aeca` | MIT |
 | `frontend-design/references` | [joshuadavidthomas/agent-skills](https://github.com/joshuadavidthomas/agent-skills) | `frontend-design-principles (folded)` | `516dee7` | MIT |
 | `frontend-design/references` | [MengTo/Skills](https://github.com/MengTo/Skills) | `build-awwwards-quality-sites, glass-dark-ui (folded)` | `321c769` | MIT |
+| `figures` | [alphaXiv/OpenResearch](https://github.com/alphaXiv/OpenResearch) | `agent-skills/orx-figures` | `325eb50` | MIT |
+
+## MIT licence
+
+`skills/figures` carries code (a matplotlib style module and a TikZ scaffold), so its licence
+travels with it. The other MIT-licensed rows above are prose under the same terms, with the
+copyright held by their own repositories.
+
+```
+MIT License
+
+Copyright (c) 2026 alphaXiv
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+`skills/figures` is `agent-skills/orx-figures` adapted to this host: the style module and the TikZ
+scaffold keep their code, renamed `figstyle.py` and `tikz-preamble.tex`; the destinations, the
+citation form and the commands are this agent's. `skills/variants` and `skills/websearch` are
+written here, and the protocol in each owes its shape to `orx-experiment-tree` and `orx-lit-review`
+in the same repository at the same commit.

@@ -691,6 +691,19 @@ body.resizing iframe { pointer-events: none; }
 .file-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; color: var(--fg); font: inherit; font-size: 13px; cursor: pointer; max-width: 100%; }
 .file-chip:hover { background: var(--card-2); }
 
+/* ── what an answer cites: a file at its lines, a run receipt ──────────────────────────── */
+.evidence { display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%; margin: 0 1px; padding: 1px 7px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--fg); font: inherit; font-size: 0.92em; line-height: 1.5; cursor: pointer; vertical-align: baseline; }
+.evidence:hover { background: var(--card-2); border-color: var(--accent); }
+.evidence .chip-text { font-family: var(--mono); font-size: 0.94em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 28ch; }
+.evidence .chip-lines { color: var(--muted); font-family: var(--mono); font-size: 0.94em; }
+.evidence.run .chip-text { font-family: inherit; max-width: 34ch; }
+.filetext.lined { display: block; overflow: auto; padding: 8px 0; }
+.filetext.lined .line { display: flex; gap: 10px; padding: 0 10px; white-space: pre-wrap; word-break: break-word; }
+.filetext.lined .line.cited { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.filetext.lined .linenum { flex: 0 0 auto; min-width: 4ch; text-align: right; color: var(--muted); user-select: none; }
+.filetext.lined .linebody { flex: 1; min-width: 0; }
+.receipt-claim { margin: 0 0 4px; }
+
 /* ── the preview dialog ────────────────────────────────────────────────────────────────── */
 .sheet.preview { max-height: 92%; }
 .preview-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

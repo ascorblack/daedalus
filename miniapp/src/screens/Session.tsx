@@ -4,7 +4,7 @@ import { api, AsrStatus, LoopView, ProviderUsage, Schedule, SlashCommand, Messag
 import { Dot, STATUS_WORD, ServiceRow, Status, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, timeAgo } from "../components";
 import { OverflowMenu, Sheet, confirmDialog, Overlay } from "../dialogs";
 import { commandPreview, plainPreview, untilShort } from "../format";
-import { codeBlock, renderMarkdown } from "../md";
+import { EVIDENCE_EVENT, EvidenceRequest, codeBlock, renderMarkdown } from "../md";
 import { confirmAsync, enterSends, errorText, fmtBytes, fmtTok, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
 import { AuthImg, FilePreview, PreviewSource, canPreview, fileGlyph, previewKind, sessionBase } from "../preview";
@@ -180,6 +180,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   const userScrolling = useRef(false);
   const [atBottom, setAtBottom] = useState(true);
   const [preview, setPreview] = useState<PreviewSource | null>(null);
+  const [receipt, setReceipt] = useState<string | null>(null);
   const [dragging, setDragging] = useState(0);
   const [providerUsage, setProviderUsage] = useState<ProviderUsage | null>(null);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
@@ -707,6 +708,26 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
 
   void tick;
   const sessionCtx = useMemo(() => ({ id, workspace: detail?.workspace ?? "", preview: setPreview }), [id, detail?.workspace]);
+
+  // What the answer cited, clicked: a file opens at the lines it named, a Verify receipt opens as a
+  // receipt, and any other run id is a background job — its log is a file in the workspace.
+  useEffect(() => {
+    const workspace = detail?.workspace ?? "";
+    const on = (e: Event) => {
+      const cited = (e as CustomEvent<EvidenceRequest>).detail;
+      if (!cited) return;
+      if (cited.kind === "run") {
+        if (/^v\d+$/.test(cited.id)) setReceipt(cited.id);
+        else setPreview({ base: sessionBase(id), path: `.jobs/${cited.id}.log` });
+        return;
+      }
+      const rel = workspaceRelative(cited.path, workspace);
+      if (rel) setPreview({ base: sessionBase(id), path: rel, lines: cited.lines });
+      else toast(`${cited.path} is outside this workspace`);
+    };
+    document.addEventListener(EVIDENCE_EVENT, on);
+    return () => document.removeEventListener(EVIDENCE_EVENT, on);
+  }, [id, detail?.workspace, toast]);
   return (
     <div className={`chat ${pane ? `pane pane-${pane}` : ""}`} onDragEnter={(e) => { if (e.dataTransfer?.types.includes("Files")) setDragging((d) => d + 1); }} onDragLeave={() => setDragging((d) => Math.max(0, d - 1))} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
       {dragging > 0 && <div className="dropzone"><Icon name="attach" size={28} /> Drop files to attach</div>}
@@ -1144,6 +1165,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       )}
 
       {preview && <FilePreview src={preview} onClose={() => setPreview(null)} />}
+
+      {receipt && <ReceiptDialog sessionId={id} receipt={receipt} onClose={() => setReceipt(null)} />}
 
       {picker && (
         <Overlay><div className="sheet-backdrop" onClick={() => setPicker(null)}>
@@ -1844,6 +1867,52 @@ function ToolCard({ item }: { item: ToolItem }) {
   else parts.push(<div key="c" dangerouslySetInnerHTML={{ __html: codeBlock(JSON.stringify(a, null, 2), "args") }} />);
   if (item.result !== undefined) parts.push(<ToolResultText key="r" item={item} />);
   return <div className="toolcard">{parts}</div>;
+}
+
+type Verification = { id: number; criterion: string; command: string; exit_code: number; passed: number; output_head: string; duration_ms: number; at: string; sandboxed: number; dependencies: string; tests_run: number | null };
+
+/** A cited Verify receipt: what was claimed, the command that checked it, and how it ended. */
+function ReceiptDialog({ sessionId, receipt, onClose }: { sessionId: string; receipt: string; onClose: () => void }) {
+  const [row, setRow] = useState<Verification | null | undefined>(undefined);
+  useEffect(() => {
+    let gone = false;
+    api
+      .get<Verification[]>(`/api/sessions/${sessionId}/verifications`)
+      .then((rows) => !gone && setRow(rows.find((r) => `v${r.id}` === receipt) ?? null))
+      .catch(() => !gone && setRow(null));
+    return () => {
+      gone = true;
+    };
+  }, [sessionId, receipt]);
+  return (
+    <Overlay>
+      <div className="sheet-backdrop" onClick={onClose}>
+        <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={`receipt ${receipt}`}>
+          <div className="grip" />
+          <h3>Receipt {receipt}</h3>
+          <div className="sheet-body">
+            {row === undefined && <div className="empty">Loading…</div>}
+            {row === null && <div className="empty">No receipt {receipt} in this session — the agent may have cited a run it did not make.</div>}
+            {row && (
+              <>
+                <p className="receipt-claim">
+                  <b>{row.passed ? "✅ verified" : "❌ not verified"}</b> — {row.criterion}
+                </p>
+                <div className="sub">
+                  exit {row.exit_code} · {(row.duration_ms / 1000).toFixed(1)}s · {timeAgo(row.at)}
+                  {row.tests_run !== null && ` · ${row.tests_run} tests`}
+                  {row.sandboxed ? " · sandboxed" : ""}
+                  {row.dependencies && ` · depends on ${row.dependencies}`}
+                </div>
+                <div dangerouslySetInnerHTML={{ __html: codeBlock(row.command, "sh") }} />
+                {row.output_head && <pre className="filetext">{row.output_head}</pre>}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </Overlay>
+  );
 }
 
 const SessionContext = createContext<{ id: string; workspace: string; preview: (src: PreviewSource) => void }>({ id: "", workspace: "", preview: () => undefined });

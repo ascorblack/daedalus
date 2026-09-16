@@ -6,7 +6,7 @@ from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
 from daedalus.transport.telegram.markdown import markdown_to_html, split_message
-from daedalus.transport.telegram.render import RunRenderer, RunView
+from daedalus.transport.telegram.render import RunRenderer, RunView, flatten_evidence
 
 
 class FakeOutbox:
@@ -122,3 +122,22 @@ async def test_streaming_disables_itself_when_drafts_are_refused(tmp_path: Path)
     await renderer.handle(_evt(EventType.CONTENT_BLOCK_DELTA, delta={"type": "text_delta", "text": "y"}))
     await asyncio.sleep(0.05)
     assert len(outbox.drafts) == 1 and renderer.streaming is False
+
+
+def test_evidence_tags_become_readable_text() -> None:
+    """Telegram has nothing to click, so a file tag degrades to path:lines and a run tag to its label."""
+    assert flatten_evidence('fixed in <file path="daedalus/tools/web.py" lines="20-40"/>.') == "fixed in daedalus/tools/web.py:20-40."
+    assert flatten_evidence('see <file path="notes.md" />') == "see notes.md"
+    assert flatten_evidence('<run id="v12" label="14 passed"/> now') == "14 passed (run v12) now"
+    assert flatten_evidence('<run id="job-3-1"/>') == "run job-3-1"
+    assert flatten_evidence("a <b>bold</b> tag and <file/> stay out of it") == "a <b>bold</b> tag and <file/> stay out of it"
+
+
+async def test_the_final_answer_carries_no_raw_evidence_tags(tmp_path: Path) -> None:
+    outbox = FakeOutbox()
+    renderer = RunRenderer(outbox, RunView(run_id="r1", model="m"), edit_interval=0.0)
+    await renderer.handle(_evt(EventType.MESSAGE_START))
+    await renderer.handle(_evt(EventType.CONTENT_BLOCK_DELTA, delta={"type": "text_delta", "text": 'done: <file path="a/b.py" lines="1-3"/>'}))
+    await renderer.handle(_evt(EventType.MESSAGE_STOP, stop_reason="end_turn"))
+    await renderer.finish("completed", workspace=tmp_path)
+    assert [t for t, md in outbox.sent if md] == ["done: a/b.py:1-3"]

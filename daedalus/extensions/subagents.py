@@ -46,6 +46,12 @@ BRIEF = (
     "subagents of your own, and end with a final reply that contains everything the leader needs."
 )
 
+WITHHELD = (
+    "\n\nYour leader withheld these tools from this session: {names}. They are not missing by accident and "
+    "there is no way around them. If the task cannot be finished without one, say so in your report, name the "
+    "tool and say the leader withheld it — do not improvise a substitute."
+)
+
 IDLE_BRIEF = (
     "You are a subagent of session {leader}: a standing helper. You were started without a task and wait "
     "for the leader's messages; each one arrives via SubAgentSend and is a job to do. Work in the shared "
@@ -117,6 +123,7 @@ class Subagents:
         expects: str | None = None,
         deliverable: str | None = None,
         persona: str | None = None,
+        tools_off: list[str] | None = None,
     ) -> dict[str, Any]:
         manager = self.app.manager
         assert manager is not None
@@ -143,6 +150,11 @@ class Subagents:
             model = model.strip()
             if model not in models:
                 raise ValueError(f"unknown model {model!r}; choose one of: {', '.join(models)}")
+        # Withholding runs down the tree, not just one level: a subagent that keeps SubAgent would
+        # otherwise hand a grandchild the very tool its leader took away from it, and tools_off would
+        # be a request rather than the enforcement it is sold as. Names the leader carries are already
+        # known to the registry, so only the new ones are checked.
+        withheld = sorted(set(self.withhold(tools_off)) | {str(n) for n in (leader.metadata.get("tools_off") or ())})
         label = (name or task.splitlines()[0])[:48].strip()  # type: ignore[union-attr]
         taken = {c["name"] for c in await self.children(leader_id)}
         if label in taken:
@@ -159,9 +171,13 @@ class Subagents:
             "subagent_expects": (expects or "").strip(),
             "subagent_deliverable": (deliverable or "").strip(),
             "workspace": str(leader.workspace),
-            "brief": (IDLE_BRIEF if idle else BRIEF).format(leader=leader_id) + (f"\n\n[persona: {persona}]\n{persona_text}" if idle and persona_text else ""),
+            "brief": (IDLE_BRIEF if idle else BRIEF).format(leader=leader_id)
+            + (WITHHELD.format(names=", ".join(withheld)) if withheld else "")
+            + (f"\n\n[persona: {persona}]\n{persona_text}" if idle and persona_text else ""),
             "unattended": True,
         }
+        if withheld:
+            metadata["tools_off"] = withheld
         for key in ("mode", "mcp"):
             if leader.metadata.get(key) is not None:
                 metadata[key] = leader.metadata[key]
@@ -201,6 +217,24 @@ class Subagents:
         if not wait:
             return result
         return await self._collect(cid, result, timeout_minutes)
+
+    def withhold(self, names: list[str] | None) -> list[str]:
+        """The tools the leader takes away from this subagent, checked against the registry.
+
+        Negative authorization: a helper inherits the leader's toolbox and uses what it finds, so a
+        launch that must not happen is removed rather than discouraged. An unknown name is refused
+        instead of ignored — a typo that silently withholds nothing would read as enforcement.
+        """
+        wanted = sorted({str(n).strip() for n in (names or []) if str(n).strip()})
+        if not wanted:
+            return []
+        manager = self.app.manager
+        assert manager is not None
+        known = {t.name for t in manager.tools.list_all()}
+        unknown = [n for n in wanted if n not in known]
+        if unknown:
+            raise ValueError(f"no such tool(s) to withhold: {', '.join(unknown)}")
+        return wanted
 
     def personas(self) -> list[str]:
         """The named stances a subagent can take: one markdown file each under ``personas/`` in the host repository."""

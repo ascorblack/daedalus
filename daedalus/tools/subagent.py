@@ -30,7 +30,10 @@ def _hook(context: ToolContext):  # type: ignore[no-untyped-def]
         "short item against the report and marks the missing ones), `persona` gives the subagent a stance "
         "(critic, skeptic, simplifier, security, researcher — an independent reviewer that does not share your "
         "context is worth more than a second pass of your own), `deliverable` names a workspace-relative file that must exist when it reports "
-        "(checked by the host, not by the subagent's word). Omit `task` and give a `name` to raise a "
+        "(checked by the host, not by the subagent's word), `tools_off` lists tools the subagent may NOT call "
+        "(e.g. [\"SelfPropose\", \"ServiceStart\"]): the host removes them from its session, so a forbidden "
+        "launch is impossible rather than merely discouraged — say so in the task too, since the helper "
+        "otherwise assumes your whole toolbox. Omit `task` and give a `name` to raise a "
         "helper without work: it is created idle, costs nothing until you use it, is kept, and takes "
         "its jobs through SubAgentSend(name, text) — use it when you want a standing helper (its own "
         "model, its own persona) before you know what to hand it."
@@ -47,12 +50,13 @@ async def sub_agent(
     expects: str | None = None,
     deliverable: str | None = None,
     persona: str | None = None,
+    tools_off: list[str] | None = None,
 ) -> ToolResult:
     hook = _hook(context)
     if hook is None:
         return error(context, "subagents are not available")
     try:
-        result = await hook("spawn", leader_id=context.session_id, task=task, model=model, name=name, wait=wait, timeout_minutes=timeout_minutes, keep=keep, expects=expects, deliverable=deliverable, persona=persona)
+        result = await hook("spawn", leader_id=context.session_id, task=task, model=model, name=name, wait=wait, timeout_minutes=timeout_minutes, keep=keep, expects=expects, deliverable=deliverable, persona=persona, tools_off=list(tools_off or []))
     except (ValueError, RuntimeError) as exc:
         return error(context, str(exc))
     return _report(context, result, started=True)
