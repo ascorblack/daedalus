@@ -27,6 +27,11 @@ DDG_HTML = """
 <a class="result__snippet" href="https://github.com/searxng/searxng">The repository.</a></div>
 """
 
+ONE_RESULT = """
+<div class="result"><a rel="nofollow" class="result__a" href="https://a.example/">A</a>
+<a class="result__snippet" href="https://a.example/">sa</a></div>
+"""
+
 
 def _config(**search: Any) -> WebToolsConfig:
     config = WebToolsConfig()
@@ -50,13 +55,13 @@ async def test_searxng_maps_results_and_passes_filters() -> None:
             "unresponsive_engines": [["qwant", "CAPTCHA"]],
         })
     )
-    outcome = await websearch.search(_query(language="ru", time_range="month", domains=("docs.searxng.org",)), _config())
+    outcome = await websearch.search(_query(language="ru", time_range="month", domains=("docs.searxng.org",)), _config(backend="searxng"))
     assert outcome.backend == "searxng" and [h.url for h in outcome.hits] == ["https://docs.searxng.org/dev/search_api.html", "https://example.org/"]
     assert outcome.hits[0].source == "brave,bing" and outcome.hits[0].score == 6.5 and outcome.hits[1].published.startswith("2026-09-01")
     params = dict(route.calls[0].request.url.params)
     assert params["format"] == "json" and params["language"] == "ru" and params["time_range"] == "month" and params["q"] == "searxng json api site:docs.searxng.org"
     assert "engines" not in params and not outcome.fallback_used
-    engines = _config(searxng=WebToolsConfig().search.searxng.model_copy(update={"engines": "google,bing"}))
+    engines = _config(backend="searxng", searxng=WebToolsConfig().search.searxng.model_copy(update={"engines": "google,bing"}))
     await websearch.search(_query(), engines)
     assert dict(route.calls[1].request.url.params)["engines"] == "google,bing"
 
@@ -64,14 +69,14 @@ async def test_searxng_maps_results_and_passes_filters() -> None:
 @respx.mock
 async def test_searxng_with_every_engine_down_is_an_error_not_an_empty_answer() -> None:
     respx.get("http://searxng:8080/search").mock(return_value=httpx.Response(200, json={"results": [], "unresponsive_engines": [["google", "Suspended: too many requests"], ["brave", "CAPTCHA"]]}))
-    outcome = await websearch.search(_query(), _config(fallback=[]))
+    outcome = await websearch.search(_query(), _config(backend="searxng", fallback=[]))
     assert outcome.backend == "" and "google (Suspended: too many requests)" in outcome.attempts[0].error and "brave (CAPTCHA)" in outcome.attempts[0].error
 
 
 @respx.mock
 async def test_searxng_without_json_output_explains_itself() -> None:
     respx.get("http://searxng:8080/search").mock(return_value=httpx.Response(403, text="forbidden"))
-    outcome = await websearch.search(_query(), _config(fallback=[]))
+    outcome = await websearch.search(_query(), _config(backend="searxng", fallback=[]))
     assert outcome.backend == "" and "search.formats" in outcome.attempts[0].error
 
 
@@ -79,12 +84,13 @@ async def test_searxng_without_json_output_explains_itself() -> None:
 async def test_fallback_runs_when_the_backend_fails_or_is_empty() -> None:
     respx.get("http://searxng:8080/search").mock(side_effect=[httpx.ConnectError("down"), httpx.Response(200, json={"results": []})])
     respx.post("https://html.duckduckgo.com/html/").mock(return_value=httpx.Response(200, text=DDG_HTML))
-    outcome = await websearch.search(_query(), _config())
+    chain = _config(backend="searxng", fallback=["duckduckgo"])
+    outcome = await websearch.search(_query(), chain)
     assert outcome.backend == "duckduckgo" and outcome.fallback_used and [a.backend for a in outcome.attempts] == ["searxng", "duckduckgo"]
     assert "ConnectError" in outcome.attempts[0].error
     assert [h.url for h in outcome.hits] == ["https://docs.searxng.org/", "https://github.com/searxng/searxng"]
     assert outcome.hits[0].title == "SearXNG docs" and outcome.hits[0].snippet == "Documentation of SearXNG."
-    empty = await websearch.search(_query(), _config())
+    empty = await websearch.search(_query(), chain)
     assert empty.backend == "duckduckgo" and empty.attempts[0].error == "" and empty.attempts[0].hits == 0
 
 
@@ -145,7 +151,10 @@ def test_catalogue_lists_every_backend_with_key_needs() -> None:
 
 @respx.mock
 async def test_tool_validates_arguments_and_reports_the_backend() -> None:
-    respx.get("http://searxng:8080/search").mock(return_value=httpx.Response(200, json={"results": [{"url": "https://a.example/", "title": "A", "content": "sa", "engines": ["bing"]}]}))
+    # Nothing of the stack is running: SearXNG is behind a profile that is off by default, so the
+    # tool has to answer out of the box through the backend that needs nothing installed.
+    searxng = respx.get("http://searxng:8080/search").mock(side_effect=httpx.ConnectError("no such host"))
+    respx.post("https://html.duckduckgo.com/html/").mock(return_value=httpx.Response(200, text=ONE_RESULT))
     locator.register(SessionServices(session_id="ws-test", workspace_dir=Path("/tmp"), extra={"manager": SimpleNamespace(config=RuntimeConfig())}))
     context = ToolContext(tenant_id="daedalus", run_id="r1", session_id="ws-test", metadata={"tool_call_id": "c1"})
     try:
@@ -155,7 +164,8 @@ async def test_tool_validates_arguments_and_reports_the_backend() -> None:
         assert empty.is_error
         result = await web_search().invoke(context, {"query": "a", "domains": "A.example, b.example"})
         assert not result.is_error and result.content == "- A\n  https://a.example/\n  sa"
-        assert result.metadata["backend"] == "searxng" and result.metadata["count"] == 1 and result.metadata["fallback_used"] is False
+        assert result.metadata["backend"] == "duckduckgo" and result.metadata["count"] == 1 and result.metadata["fallback_used"] is False
+        assert not searxng.called, "the default backend reached for a container that is not running"
     finally:
         locator.unregister("ws-test")
 
@@ -165,7 +175,9 @@ def test_old_duckduckgo_fields_migrate_into_the_search_section() -> None:
     assert _migrate(raw)
     config = RuntimeConfig.model_validate(raw)
     assert config.tools.web.search.duckduckgo.url == "https://lite.duckduckgo.com/lite/" and config.tools.web.search.duckduckgo.region == "ru-ru"
-    assert config.tools.web.search.results == 5 and config.tools.web.search.timeout_seconds == 12.0 and config.tools.web.search.backend == "searxng"
+    # The old section named no backend; the migrated one gets the default, which is the same engine
+    # those fields configured.
+    assert config.tools.web.search.results == 5 and config.tools.web.search.timeout_seconds == 12.0 and config.tools.web.search.backend == "duckduckgo"
     assert not _migrate_web_search({"tools": {"web": {"search": {"backend": "serper"}}}})
 
 

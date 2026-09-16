@@ -241,10 +241,14 @@ class WebSearchConfig(BaseModel):
     Every backend maps onto the same tool contract, so switching here changes nothing the
     model sees. Keyed backends point at the key proxy and stay unavailable until the key
     is in ``keyproxy.env``.
+
+    The default is the one that needs nothing installed. SearXNG answers better, but it is a
+    container and 382 MB of it, so it is a choice an operator makes (``--profile search``) rather
+    than the price of having a search tool at all; where it runs, it is the first fallback.
     """
 
-    backend: str = "searxng"
-    fallback: list[str] = Field(default_factory=lambda: ["duckduckgo"])
+    backend: str = "duckduckgo"
+    fallback: list[str] = Field(default_factory=lambda: ["searxng"])
     """Tried in order when the backend errors or returns nothing."""
     results: int = Field(default=8, ge=1, le=30)
     timeout_seconds: float = Field(default=30.0, ge=1, le=600)
