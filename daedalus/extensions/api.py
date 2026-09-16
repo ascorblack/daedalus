@@ -62,6 +62,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 INIT_DATA_MAX_AGE = 24 * 3600
+KEYPROXY_CACHE_SECONDS = 5.0
+"""How long the key proxy's answer about its upstreams is reused. It is read once per app load and a
+proxy that does not answer costs the whole timeout; a few seconds is well inside a first screen."""
 
 
 LOGIN_WIDGET_MAX_AGE = 24 * 3600
@@ -497,7 +500,10 @@ async def lookup_openai_models(
     errors: list[str] = []
     owns_client = client is None
     if client is None:
-        client = httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0), follow_redirects=True)
+        # No redirects: the base URL is the operator's and the request carries their key. httpx
+        # drops the header across origins, so this is defence in depth — and a models endpoint that
+        # answers with a redirect is a misconfiguration worth seeing rather than following.
+        client = httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0), follow_redirects=False)
     try:
         for url in candidates:
             try:
@@ -965,7 +971,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         messages = await manager.transcript_page(session_id, tail=tail, before=before)
         oldest, _newest = await manager.sessions.transcript_bounds(session_id)
         first_seq = next((v["seq"] for v in messages if isinstance(v.get("seq"), int)), 0)
-        status = "running" if state.running else "waiting" if state.pending else "compacting" if state.compacting else "idle"
+        # Compacting first: a compaction between runs happens on a task of its own, and a session
+        # reported as running while it summarises is a run the app draws that nobody started.
+        status = "compacting" if state.compacting else "running" if state.running else "waiting" if state.pending else "idle"
         usage = await app.db.fetchone(
             "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cache_read_tokens) ch, sum(cost_usd) usd FROM usage_events WHERE session_id = ?",
             (session_id,),
@@ -2374,18 +2382,35 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 return parts[0] + "//" + parts[2]
         return ""
 
+    upstreams_cache: dict[str, Any] = {"at": 0.0, "value": None, "client": None}
+
+    def keyproxy_client() -> httpx.AsyncClient:
+        """One client for the health probe, kept for the life of the app rather than built per call."""
+        client = upstreams_cache["client"]
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(timeout=5.0)
+            upstreams_cache["client"] = client
+        return client
+
     async def keyproxy_upstreams() -> list[str] | None:
-        """Upstream names the key proxy holds a key for; None when it cannot be asked."""
+        """Upstream names the key proxy holds a key for; None when it cannot be asked.
+
+        Cached for a few seconds and asked through one client: this is on the path of the first
+        screen, and a key proxy that hangs made every app load wait out the timeout again.
+        """
         origin = _keyproxy_origin()
         if not origin:
             return None
+        if upstreams_cache["at"] and time.monotonic() - float(upstreams_cache["at"]) < KEYPROXY_CACHE_SECONDS:
+            return upstreams_cache["value"]  # type: ignore[return-value]
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(origin + "/healthz")
+            response = await keyproxy_client().get(origin + "/healthz")
             names = response.json().get("upstreams") if response.status_code == 200 else None
         except (httpx.HTTPError, ValueError):
             return None
-        return [str(n) for n in names] if isinstance(names, list) else None
+        value = [str(n) for n in names] if isinstance(names, list) else None
+        upstreams_cache.update(at=time.monotonic(), value=value)
+        return value
 
     @api.get("/api/onboarding")
     async def onboarding(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

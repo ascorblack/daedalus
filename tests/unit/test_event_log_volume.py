@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
-from protocore.contracts.types import Event
+import pytest
+from protocore.contracts.types import Event, Run, RunStatus
 
 from daedalus.stores.database import Database
-from daedalus.stores.sqlite import SqliteEventStream
+from daedalus.stores.sqlite import SqliteEventStream, SqliteRunStore
 
 
 def _event(name: str, run_id: str = "r1", **payload: object) -> Event:
@@ -72,3 +76,53 @@ async def test_the_sweep_keeps_the_log_under_its_ceiling(db: Database) -> None:
     await events.prune(keep_days=365, max_rows=10)
     rows = await db.fetchall("SELECT payload FROM events ORDER BY seq")
     assert len(rows) == 10 and '"index": 29' in rows[-1]["payload"]
+
+
+async def test_a_freelist_nothing_can_reclaim_is_named_once_with_the_command(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """An existing database keeps the auto_vacuum it was created with, so incremental reclaim does
+    nothing on it and says nothing. The space is real — hundreds of megabytes on a long-lived
+    install — and `daedalus db vacuum` is the only way back, which nothing ever mentioned."""
+    path = tmp_path / "legacy.sqlite"
+    raw = sqlite3.connect(path)
+    raw.execute("PRAGMA auto_vacuum=NONE")
+    raw.execute("CREATE TABLE big (id INTEGER PRIMARY KEY, body TEXT)")
+    raw.executemany("INSERT INTO big(body) VALUES (?)", [("x" * 4000,) for _ in range(4000)])
+    raw.commit()
+    raw.execute("DELETE FROM big")
+    raw.commit()
+    raw.close()
+
+    db = Database(path)
+    await db.open()
+    try:
+        assert int((await db.fetchone("PRAGMA auto_vacuum"))[0]) == 0
+        with caplog.at_level(logging.WARNING):
+            assert await db.reclaim() == 0
+            assert await db.reclaim() == 0
+        said = [r.getMessage() for r in caplog.records if "daedalus db vacuum" in r.getMessage()]
+        assert len(said) == 1, "the operator is told once per process, not on every maintenance tick"
+        assert "cannot be given back" in said[0]
+
+        # And once the file is rewritten the reclaim works and the warning has nothing to say.
+        before, after = await db.vacuum()
+        assert after < before
+        assert int((await db.fetchone("PRAGMA auto_vacuum"))[0]) == 2
+    finally:
+        await db.close()
+
+
+async def test_the_age_sweep_leaves_a_run_that_is_still_going(db: Database) -> None:
+    """A loop or a long agent run outlives events_keep_days; sweeping by age alone would take its
+    early events out from under the live view while it is still producing more."""
+    events = SqliteEventStream(db)
+    runs = SqliteRunStore(db)
+    old = (datetime.now(UTC) - timedelta(days=40)).isoformat()
+    for run_id, status in (("finished", RunStatus.completed), ("ongoing", RunStatus.running)):
+        await runs.create(Run(id=run_id, tenant_id="daedalus", session_id="s", status=status))
+        await events.emit(_event("run.started", run_id=run_id))
+        await db.execute("UPDATE events SET created_at = ? WHERE run_id = ?", (old, run_id))
+
+    dropped = await events.prune(keep_days=30, max_rows=10_000)
+    assert dropped == 1
+    left = {str(r["run_id"]) for r in await db.fetchall("SELECT DISTINCT run_id FROM events")}
+    assert left == {"ongoing"}

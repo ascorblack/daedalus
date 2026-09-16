@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Any
 from croniter import croniter
 from protocore.contracts.types import MessageRole, TextBlock
 
+from daedalus.config import NO_MODEL_MESSAGE, NoModelConfigured
+
 if TYPE_CHECKING:
     from daedalus.app import Application
 
@@ -267,6 +269,13 @@ class Scheduler:
                 if stale:
                     await self._post("schedule_missed", f"Late run of '{row['name']}'", f"It was due {row['next_run_at']} (the bot was down); running now.", severity="notice")
                 await self.fire(schedule)
+            except NoModelConfigured:
+                # Not this schedule's failure and not something it can recover from by being counted
+                # against: the slot is skipped, the operator is told once, and the schedule is still
+                # there when a model is added. Counted as a failure, a fresh install would switch off
+                # every schedule it ships before anyone had configured a model.
+                await self._advance(schedule, ran=False)
+                await self._post("schedule_no_model", f"'{row['name']}' was skipped", NO_MODEL_MESSAGE, severity="notice")
             except Exception as exc:  # noqa: BLE001 — one bad task must not skip the rest of the tick
                 logger.exception("schedule %s could not fire", row["id"])
                 await self._record_start_failure(schedule, f"{type(exc).__name__}: {exc}")

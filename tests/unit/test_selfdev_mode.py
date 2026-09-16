@@ -18,6 +18,7 @@ import httpx
 import pytest
 
 from daedalus.app import Application
+from daedalus.bench.manifest import DEFAULT_TOOLS_OFF
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions import enabled
 from daedalus.extensions.api import build_app
@@ -26,6 +27,7 @@ from daedalus.host.policy import Policy
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.tools import discover_tools
+from daedalus.tools import skill as skill_tool
 from tests.conftest import rebuilder_at
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -183,6 +185,34 @@ async def test_the_prompt_never_names_a_tool_the_session_does_not_have(tmp_path:
             assert "Self-development" not in prompt
         if mode == "local":
             assert "after a restart the operator triggers" in prompt and "SelfWorkspace" in prompt
+    finally:
+        await manager.close()
+
+
+@pytest.mark.parametrize("mode", ["off", "local", "server"])
+async def test_nothing_the_session_reads_names_a_self_tool_it_does_not_have(tmp_path: Path, db: Database, mode: str) -> None:
+    """The prompt was swept for this; the tool descriptions, the tool results and the shipped skills
+    were not. They are read by the same model in the same session, and a name in any of them is an
+    invitation the model accepts and a failure it cannot understand."""
+    manager = await _manager(tmp_path, db, mode)
+    try:
+        registered = {t.name for t in manager.tools.list_all()}
+        absent = sorted(set(SELF_TOOLS) - registered)
+        texts: dict[str, str] = {f"tool {t.name}": t.definition.description or "" for t in manager.tools.list_all()}
+        for path in sorted((REPO_ROOT / "skills").rglob("SKILL.md")):
+            if path.parent.name == "self-develop":
+                continue  # it is the reference for all three modes and names each one's tools on purpose
+            texts[f"skill {path.parent.name}"] = path.read_text(encoding="utf-8")
+        texts["the skill draft's instructions"] = skill_tool._how_to_ship(manager, "a-slug")
+        texts["the bench manifest"] = " ".join(DEFAULT_TOOLS_OFF)
+        for where, text in texts.items():
+            for name in absent:
+                if where == "the bench manifest":
+                    continue  # a list of names to withhold is the one place they all belong
+                assert name not in text, f"{where} names {name}, which this installation does not register"
+        # And a benchmark run withholds every one of them, whatever the mode: a bench on a local
+        # installation would otherwise be able to apply a change to the installation it measures.
+        assert set(SELF_TOOLS) <= set(DEFAULT_TOOLS_OFF)
     finally:
         await manager.close()
 

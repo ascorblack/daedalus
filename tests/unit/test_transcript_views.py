@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from protocore.contracts.types import Message, MessageRole, Session, TextBlock, ToolResultBlock
 
 from daedalus.host.transcript_view import TOOL_RESULT_PREVIEW_CHARS, TranscriptViewBuilder, message_view
@@ -54,3 +56,18 @@ async def test_a_listed_tool_result_carries_a_preview_and_says_how_long_it_is(db
     assert len(view["tool_results"][0]["content"]) == TOOL_RESULT_PREVIEW_CHARS
     assert view["tool_results"][0]["length"] == len(body)
     assert TOOL_RESULT_PREVIEW_CHARS <= 1000  # a listing is a listing; the expand endpoint has the rest
+
+
+def test_a_new_secret_shape_invalidates_the_stored_views_by_itself() -> None:
+    """A stored view is what the app draws. Adding a provider's key format without remembering to
+    bump a hand-written number left every view already stored showing the secret it was added for."""
+    builder = TranscriptViewBuilder()
+    before = builder.key()
+    assert redact.shapes_digest() in before
+    shapes = redact._SHAPES
+    try:
+        redact._SHAPES = (*shapes, ("a_new_provider", re.compile(r"\bnp-[a-z0-9]{32}\b")))
+        assert builder.key() != before, "a view stored before the shape existed would still be served"
+    finally:
+        redact._SHAPES = shapes
+    assert builder.key() == before

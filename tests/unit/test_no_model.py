@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -197,6 +198,29 @@ async def scheduled_run(i: Install) -> str:
     return str(raised.value)
 
 
+async def scheduled_tick_on_a_modelless_install(i: Install) -> str:
+    """A schedule that comes due here is skipped, not counted against — and not switched off.
+
+    ``fire`` raising is the right answer to being called; the tick around it decides what that
+    means. Counted as a start failure, a fresh install would lose every schedule it ships before
+    anyone had configured a model, and adding one later would not bring them back.
+    """
+    from daedalus.extensions.scheduler import Scheduler
+
+    scheduler = Scheduler(i.app)
+    await scheduler.create(name="daily", prompt="check the mail", cron="* * * * *", run_at=None)
+    await i.db.execute("UPDATE schedules SET next_run_at = ?", ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(),))
+    for _ in range(i.config.scheduler.max_failures + 1):
+        await i.db.execute("UPDATE schedules SET next_run_at = ?", ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(),))
+        await scheduler.tick()
+    row = dict((await i.db.fetchall("SELECT * FROM schedules"))[0])
+    assert int(row["enabled"]) == 1, "the schedule was switched off for an installation that had no model"
+    assert int(row["failure_count"]) == 0, "a missing model is not the schedule's failure"
+    posted = [dict(r) for r in await i.db.fetchall("SELECT * FROM inbox WHERE kind = 'schedule_no_model'")]
+    assert posted, "nothing told the operator the schedule was skipped"
+    return str(posted[0]["body"])
+
+
 async def subagent(i: Install) -> str:
     from daedalus.extensions.subagents import Subagents
 
@@ -227,6 +251,7 @@ ENTRY_POINTS: dict[str, Callable[[Install], Awaitable[str]]] = {
     "doctor": doctor,
     "voice concierge": voice_concierge,
     "schedule": scheduled_run,
+    "schedule tick": scheduled_tick_on_a_modelless_install,
     "subagent": subagent,
     "manager.submit": manager_submit,
 }

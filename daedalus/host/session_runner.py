@@ -212,6 +212,10 @@ class SessionManager:
         self.shutting_down = False
         self.recovering = True
         """True from construction until boot recovery has decided the fate of every run the previous process left behind."""
+        self.index_rebuild: dict[str, int] | None = None
+        """How far the search index still has to be rebuilt, while it is being rebuilt. A search that
+        answers "nothing" from an index that has not reached those rows yet reads as "that was never
+        said" — to the operator and to the agent asking it of its own history."""
         self.budget_flag = settings.state_dir / "BUDGET_EXCEEDED"
         self._capped_runs: set[str] = set()
         """Runs already stopped at the per-run cap (the stop is cooperative; the notice fires once)."""
@@ -237,6 +241,7 @@ class SessionManager:
         self.tools.register(AskUserTool())
         self.service_hooks.setdefault("mcp", self.mcp_service)
         locator.default = None
+        self.index_rebuild = None
         self._backfill_task = asyncio.create_task(self._backfill_index(), name="transcript-index")
         self._backfill_task.add_done_callback(_log_task_failure)
         # Its own task, not a background write: the flush that waits for those would wait for a day.
@@ -245,7 +250,13 @@ class SessionManager:
         logger.warning("tools registered: %s", ", ".join(sorted(t.name for t in self.tools.list_all())))
 
     async def _backfill_index(self) -> None:
-        indexed = await self.sessions.backfill_transcript_index()
+        def progress(done: int, total: int) -> None:
+            self.index_rebuild = None if done >= total else {"done": done, "total": total}
+
+        try:
+            indexed = await self.sessions.backfill_transcript_index(progress)
+        finally:
+            self.index_rebuild = None
         if indexed:
             logger.warning("transcript search index: %d older turns indexed", indexed)
 
@@ -653,13 +664,22 @@ class SessionManager:
         if cfg.auto_ratio <= 0 or state.pending is not None or self.shutting_down:
             return
         ratio = 1.0 if required_only else cfg.auto_ratio
-        status = await self.context_status(state)
-        if not status["window"] or status["tokens"] < ratio * status["window"] or status["messages"] < cfg.min_messages:
+
+        def below(status: dict[str, Any]) -> bool:
+            return not status["window"] or status["tokens"] < ratio * status["window"] or status["messages"] < cfg.min_messages
+
+        if below(await self.context_status(state)):
             return
         async with state.lock:
+            # Asked again behind the lock: two callers that both saw a full window — a manual compaction
+            # racing this one, or the check on the way into a run racing the one after a run — serialise
+            # here, and the second would otherwise summarise a history the first has already replaced.
+            status = await self.context_status(state)
+            if below(status) or (state.running and state.task is not asyncio.current_task()):
+                return  # a run started while this waited: it compacts after that one instead
             try:
                 started = time.monotonic()
-                await self._compact_locked(state, "", keep_recent=cfg.keep_recent_messages, reason="auto", own_task_ok=True)
+                await self._compact_locked(state, "", keep_recent=cfg.keep_recent_messages, reason="auto", own_task_ok=True)  # own_task_ok: the required_only call runs inside the run's own task
                 after = await self.context_status(state)
                 logger.warning("session %s: auto-compacted %d → %d messages in %.0fs (prompt was %d of %d tokens)", state.session.id, status["messages"], after["messages"], time.monotonic() - started, status["tokens"], status["window"])
                 for hook in self.compaction_hooks:
@@ -1598,11 +1618,14 @@ class SessionManager:
                     await callback(session_id, run_id, status)
                 except Exception:  # noqa: BLE001
                     logger.exception("run-finished callback failed")
-            if status in ("completed", "failed", "cancelled"):
-                await self._maybe_auto_compact(state)
             if status in ("completed", "failed"):
                 # A run that ended in an error still owes an answer to what arrived meanwhile.
                 await self._drain_leftover_follow_ups(state)
+            if status in ("completed", "failed", "cancelled"):
+                # On a task of its own, and not awaited here: a summariser call is a minute or two,
+                # and while this task is unfinished the session reads as running — which blocks the
+                # next message in submit() and tells the app a run is in progress that is not one.
+                self._spawn_background(self._maybe_auto_compact(state), f"auto-compact:{session_id}")
             if status == "completed":
                 state.overflow_streak = 0
                 state.outage_streak = 0
@@ -1667,7 +1690,7 @@ class SessionManager:
         if status["messages"] >= cfg.min_messages:
             async with state.lock:
                 try:
-                    await self._compact_locked(state, "", keep_recent=cfg.keep_recent_messages, reason="auto", own_task_ok=True)
+                    await self._compact_locked(state, "", keep_recent=cfg.keep_recent_messages, reason="auto", own_task_ok=True)  # own_task_ok: the required_only call runs inside the run's own task
                 except RuntimeError as exc:
                     logger.warning("session %s: overflow recovery could not compact: %s", state.session.id, exc)
                     return

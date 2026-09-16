@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 MIGRATIONS: list[str] = [
     # 1 — core stores
@@ -487,6 +490,7 @@ class Database:
         self.path = path
         self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
+        self._warned_about_freelist = False
 
     async def open(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -508,11 +512,13 @@ class Database:
         """Hand a bounded number of free pages back to the filesystem; returns how many.
 
         Deleted rows leave their pages on the freelist, and nothing gives them back on its own.
-        A database that was created before incremental auto-vacuum was asked for cannot do this
-        at all — it says so, and ``daedalus db vacuum`` is what converts it.
+        A database that was created before incremental auto-vacuum was asked for cannot do this at
+        all — it says so, once, naming the command that converts it, because the alternative is a
+        file that quietly keeps hundreds of megabytes nothing will ever use again.
         """
         row = await self.fetchone("PRAGMA auto_vacuum")
         if row is None or int(row[0]) != 2:
+            await self._warn_about_a_freelist_nothing_can_reclaim()
             return 0
         before = await self.fetchone("PRAGMA freelist_count")
         if before is None or not int(before[0]):
@@ -520,6 +526,29 @@ class Database:
         await self.execute(f"PRAGMA incremental_vacuum({VACUUM_PAGES})")
         after = await self.fetchone("PRAGMA freelist_count")
         return int(before[0]) - int(after[0]) if after is not None else 0
+
+    FREELIST_WARNING_SHARE = 0.05
+    """How much of the file may sit on an unreclaimable freelist before it is worth saying so."""
+
+    async def _warn_about_a_freelist_nothing_can_reclaim(self) -> None:
+        """A database made before the setting keeps it until a full VACUUM rewrites the file, and
+        incremental reclaim silently does nothing there. Said once per process, with the command."""
+        if self._warned_about_freelist:
+            return
+        self._warned_about_freelist = True
+        free = await self.fetchone("PRAGMA freelist_count")
+        size = await self.fetchone("PRAGMA page_count")
+        pages, total = int(free[0]) if free else 0, int(size[0]) if size else 0
+        if not total or pages < total * self.FREELIST_WARNING_SHARE:
+            return
+        page_size = await self.fetchone("PRAGMA page_size")
+        bytes_free = pages * (int(page_size[0]) if page_size else 4096)
+        logger.warning(
+            "%.0f MB of %s (%d free pages) cannot be given back: this database was created before incremental auto-vacuum and keeps that setting until the file is rewritten. Run `daedalus db vacuum` to reclaim it.",
+            bytes_free / 1e6,
+            self.path,
+            pages,
+        )
 
     async def vacuum(self) -> tuple[int, int]:
         """Rewrite the whole file, converting it to incremental auto-vacuum; returns (before, after) bytes.

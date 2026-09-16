@@ -79,8 +79,9 @@ new round never hangs off the baseline — it hangs off the previous round's win
    that is what produces the flat fan.
 3. **Branch each option off the round's parent** (the baseline for the first round, the previous
    winner afterwards), commit only the change that option is about, and leave the command alone.
-   `SelfWorkspace(repo, branch)` gives you a worktree for your own repositories; for anything else
-   `git worktree add` in the workspace does the same. One branch per variant, named for the idea.
+   Where this installation gives you a worktree tool for its own repositories, use it; for anything
+   else — and on an installation that does not change its own code — `git worktree add` in the
+   workspace does the same. One branch per variant, named for the idea.
 4. **Measure with the fixed command through `Verify`**, one variant at a time, or in parallel when
    nothing is shared (do not measure two variants at once on a machine where they contend for the
    same CPU, GPU or port — that measures the contention). Record the receipt id against the

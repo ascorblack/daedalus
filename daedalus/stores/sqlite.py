@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -28,6 +28,10 @@ from protocore.contracts.types import (
 
 from daedalus.providers.openai_compat import UsageRecord, UsageSink
 from daedalus.stores.database import Database
+
+UNFINISHED_RUN_STATUSES = ", ".join(f"'{status.value}'" for status in (RunStatus.queued, RunStatus.running, RunStatus.paused))
+"""The statuses of a run that is not over. Its events are what the live view reads and what a resume
+replays, so nothing sweeps them by age."""
 
 
 def _now() -> str:
@@ -132,13 +136,15 @@ class SqliteSessionStore(ISessionStore):
             raise SessionNotFoundError(session_id)
         return _row_to_session(row)
 
-    CURRENT_GEN = "(SELECT coalesce(max(gen), 0) FROM session_messages WHERE session_id = ?)"
-    """The generation a session's working history is currently in; older ones are not read."""
+    CURRENT_GEN = "(SELECT coalesce(max(gen), 0) FROM session_messages WHERE session_id = ? AND tenant_id = ?)"
+    """The generation a session's working history is currently in; older ones are not read. Filtered by
+    tenant like every read and every write of this table: a read that missed the filter would answer
+    with an empty history and the write after it would delete another tenant's generations."""
 
     async def append_message(self, session_id: str, tenant_id: str, message: Message) -> None:
         await self._db.execute(
             f"INSERT INTO session_messages(session_id, tenant_id, gen, key, message) VALUES (?, ?, {self.CURRENT_GEN}, ?, ?)",
-            (session_id, tenant_id, session_id, self.transcript_key(message), message.model_dump_json()),
+            (session_id, tenant_id, session_id, tenant_id, self.transcript_key(message), message.model_dump_json()),
         )
         await self._db.execute(
             "UPDATE sessions SET last_message_at = ? WHERE id = ?", (_now(), session_id)
@@ -150,7 +156,7 @@ class SqliteSessionStore(ISessionStore):
         rows = await self._db.fetchall(
             f"SELECT message FROM session_messages WHERE session_id = ? AND tenant_id = ? AND gen = {self.CURRENT_GEN}"
             " ORDER BY seq LIMIT ? OFFSET ?",
-            (session_id, tenant_id, session_id, limit, offset),
+            (session_id, tenant_id, session_id, tenant_id, limit, offset),
         )
         return [Message.model_validate_json(r["message"]) for r in rows]
 
@@ -251,22 +257,33 @@ class SqliteSessionStore(ISessionStore):
 
     BACKFILL_BATCH = 500
 
-    async def backfill_transcript_index(self) -> int:
+    async def backfill_transcript_index(self, progress: Callable[[int, int], None] | None = None) -> int:
         """Index transcript rows written before the full-text table existed; returns how many.
 
         Works up from a watermark in ``kv`` in batches, each in its own short transaction, so a
-        large transcript is indexed without holding the connection for the whole pass.
+        large transcript is indexed without holding the connection for the whole pass. ``progress``
+        is called with (rows walked, rows to walk) after each batch: while this runs a search finds
+        nothing in what it has not reached yet, and "nothing" reads as "that was never said".
         """
         watermark_row = await self._db.kv_get("transcript_fts_watermark", None)
-        counts = await self._db.fetchone("SELECT (SELECT count(*) FROM transcript_fts) fts, (SELECT count(*) FROM transcript) rows")
+        counts = await self._db.fetchone(
+            "SELECT (SELECT count(*) FROM transcript_fts) fts, (SELECT count(*) FROM transcript) rows,"
+            " (SELECT count(*) FROM transcript WHERE seq > ?) pending",
+            (int(watermark_row or 0),),
+        )
+        total = int(counts["pending"]) if counts else 0
         if watermark_row is None or (counts is not None and int(counts["fts"]) > int(counts["rows"])):
             # No watermark yet, or more index rows than transcript rows (an older indexer double-counted):
             # the index is derived data, so rebuild it from the transcript rather than reason about it.
             await self._db.execute("DELETE FROM transcript_fts")
             await self._db.kv_set("transcript_fts_watermark", 0)
             watermark_row = 0
+            total = int(counts["rows"]) if counts else 0
         watermark = int(watermark_row or 0)
         indexed = 0
+        walked = 0
+        if progress is not None and total:
+            progress(0, total)
         while True:
             rows = await self._db.fetchall(
                 "SELECT seq, session_id, message FROM transcript WHERE seq > ? ORDER BY seq LIMIT ?", (watermark, self.BACKFILL_BATCH)
@@ -285,7 +302,12 @@ class SqliteSessionStore(ISessionStore):
                     "INSERT INTO kv(key, value) VALUES ('transcript_fts_watermark', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (json.dumps(watermark),),
                 )
+            walked += len(rows)
+            if progress is not None and total:
+                progress(min(walked, total), total)
             await asyncio.sleep(0)  # let the loop breathe between batches
+        if progress is not None and total:
+            progress(total, total)
         return indexed
 
     SNIPPET_WINDOW = 160
@@ -517,14 +539,14 @@ class SqliteSessionStore(ISessionStore):
         new generation is written whole and the one before it dropped, in one transaction, so a
         reader never sees a half-written history and never sees two.
         """
-        row = await self._db.fetchone("SELECT coalesce(max(gen), 0) + 1 next FROM session_messages WHERE session_id = ?", (session_id,))
+        row = await self._db.fetchone("SELECT coalesce(max(gen), 0) + 1 next FROM session_messages WHERE session_id = ? AND tenant_id = ?", (session_id, tenant_id))
         gen = int(row["next"]) if row else 1
         rows = [(session_id, tenant_id, gen, self.transcript_key(m), m.model_dump_json()) for m in messages]
         async with self._db.transaction() as conn:
             await conn.executemany(
                 "INSERT INTO session_messages(session_id, tenant_id, gen, key, message) VALUES (?, ?, ?, ?, ?)", rows
             )
-            await conn.execute("DELETE FROM session_messages WHERE session_id = ? AND gen < ?", (session_id, gen))
+            await conn.execute("DELETE FROM session_messages WHERE session_id = ? AND tenant_id = ? AND gen < ?", (session_id, tenant_id, gen))
 
     async def sync_messages(self, session_id: str, tenant_id: str, messages: Sequence[Message]) -> int:
         """Bring the stored working history up to what the engine holds; returns rows written.
@@ -536,7 +558,7 @@ class SqliteSessionStore(ISessionStore):
         """
         keys = [self.transcript_key(m) for m in messages]
         rows = await self._db.fetchall(
-            f"SELECT key FROM session_messages WHERE session_id = ? AND gen = {self.CURRENT_GEN} ORDER BY seq", (session_id, session_id)
+            f"SELECT key FROM session_messages WHERE session_id = ? AND tenant_id = ? AND gen = {self.CURRENT_GEN} ORDER BY seq", (session_id, tenant_id, session_id, tenant_id)
         )
         stored = [str(r["key"]) for r in rows]
         if stored != keys[: len(stored)]:
@@ -545,7 +567,7 @@ class SqliteSessionStore(ISessionStore):
         fresh = list(messages)[len(stored) :]
         if not fresh:
             return 0
-        gen_row = await self._db.fetchone("SELECT coalesce(max(gen), 0) gen FROM session_messages WHERE session_id = ?", (session_id,))
+        gen_row = await self._db.fetchone("SELECT coalesce(max(gen), 0) gen FROM session_messages WHERE session_id = ? AND tenant_id = ?", (session_id, tenant_id))
         gen = int(gen_row["gen"]) if gen_row else 0
         await self._db.executemany(
             "INSERT INTO session_messages(session_id, tenant_id, gen, key, message) VALUES (?, ?, ?, ?, ?)",
@@ -749,13 +771,22 @@ class SqliteEventStream(IEventStream):
     async def prune(self, *, keep_days: int, max_rows: int) -> int:
         """Drop the event log of runs that are over and old; returns how many rows went.
 
+        "Over" is read from the run's status, not from the age of the row: the age sweep is what
+        keeps the table bounded and the status is what keeps it from taking a run in progress.
+
         ``trim`` bounds a run, and every finished run sits at its cap — but runs accumulate
         for as long as the installation does, so the log has no ceiling without this. The
         transcript is the record; events are what the live view was fed.
         """
         cutoff = (datetime.now(UTC) - timedelta(days=keep_days)).isoformat()
         before = await self._db.fetchone("SELECT count(*) c FROM events")
-        await self._db.execute("DELETE FROM events WHERE created_at < ?", (cutoff,))
+        # Only the events of runs that are over. By wall-clock age alone, a run still going after
+        # ``keep_days`` — a loop, a long-running agent — would lose its early events while it runs.
+        await self._db.execute(
+            "DELETE FROM events WHERE created_at < ? AND (run_id IS NULL OR run_id NOT IN"
+            f" (SELECT id FROM runs WHERE status IN ({UNFINISHED_RUN_STATUSES})))",
+            (cutoff,),
+        )
         await self._db.execute(
             "DELETE FROM events WHERE seq NOT IN (SELECT seq FROM events ORDER BY seq DESC LIMIT ?)", (max_rows,)
         )

@@ -80,3 +80,23 @@ async def test_rows_written_before_the_generations_existed_are_rewritten_once(db
     await store.sync_messages("g4", TENANT, [*old, _msg("new")])
     assert {gen for _, gen in await _rows(db, "g4")} == {1}
     assert [b.text for m in await store.list_messages("g4", TENANT, limit=100) for b in m.content_blocks] == ["old one", "old two", "new"]
+
+
+async def test_another_tenants_history_is_neither_read_nor_deleted(db: Database) -> None:
+    """Single-tenant today, so this is not a live bug — but the reads filtered by tenant and the
+    writes did not, so a read with the wrong tenant answered "empty" and the write that followed
+    deleted the generations of the tenant that did have a history."""
+    store = SqliteSessionStore(db)
+    await store.create(Session(id="shared", tenant_id="daedalus", title="t"))
+    theirs = [Message(role=MessageRole.user, content_blocks=[TextBlock(text=f"m{i}")]) for i in range(5)]
+    await store.replace_messages("shared", "daedalus", theirs)
+
+    assert await store.list_messages("shared", "other", limit=100) == []
+    await store.replace_messages("shared", "other", [Message(role=MessageRole.user, content_blocks=[TextBlock(text="mine")])])
+    kept = await store.list_messages("shared", "daedalus", limit=100)
+    assert len(kept) == 5, "the other tenant's write took this history with it"
+    assert [b.text for m in await store.list_messages("shared", "other", limit=100) for b in m.content_blocks] == ["mine"]
+
+    await store.append_message("shared", "other", Message(role=MessageRole.user, content_blocks=[TextBlock(text="and this")]))
+    assert len(await store.list_messages("shared", "daedalus", limit=100)) == 5
+    assert len(await store.list_messages("shared", "other", limit=100)) == 2

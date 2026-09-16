@@ -32,7 +32,9 @@ from daedalus.host.prompts import split_headline
 from daedalus.security import redact
 
 VIEW_VERSION = 1
-"""Bumped whenever the shape below changes; stored views from an older version are recomputed."""
+"""Bumped whenever the shape below changes; stored views from an older version are recomputed. It
+covers this file only — what the redactor masks is covered by the key, by value and by shape, so a
+new secret format does not depend on anyone remembering this number."""
 
 TOOL_RESULT_PREVIEW_CHARS = 400
 """Characters of a tool result a listed turn carries. The whole text is one request away
@@ -105,8 +107,14 @@ class TranscriptViewBuilder:
     """Builds and keys the stored view. Held by the store, which knows nothing else about it."""
 
     def key(self) -> str:
-        """Version of the code and of the redactor that a stored view was produced by."""
-        return f"{VIEW_VERSION}.{redact.shared().fingerprint()}"
+        """Version of the code and of the redactor that a stored view was produced by.
+
+        Three parts, because there are three ways a stored view can go stale: this file's shape, the
+        secret values the redactor was given, and the secret shapes the build knows. The last one
+        used to ride on ``VIEW_VERSION`` being bumped by hand, and a shape added without that left
+        every view already stored showing the secret it was added for.
+        """
+        return f"{VIEW_VERSION}.{redact.shapes_digest()}.{redact.shared().fingerprint()}"
 
     def build(self, message: Message) -> dict[str, Any]:
         return message_view(message)

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
+import httpx
 from protocore.contracts.llm import LLMResponse
 from protocore.contracts.types import Message, MessageRole, StopReason, TextBlock, ToolResultBlock, ToolUseBlock
 
 from daedalus.config import Settings
+from daedalus.extensions.api import build_app
 from daedalus.host.session_runner import (
     SessionManager,
     compaction_cut,
@@ -233,4 +236,56 @@ async def test_a_run_cannot_start_while_the_history_is_being_rewritten(settings:
         await asyncio.sleep(0.05)
         assert started == [] and not task.done()
     assert await task == "run-id" and started == ["run"]
+    await manager.close()
+
+
+async def test_two_callers_over_the_ratio_compact_once(settings: Settings, db: Database) -> None:
+    """The ratio is tested before the lock, so two callers can both pass it — a manual compaction
+    racing the one after a run, or the check on the way into a run racing it. The second would
+    summarise a history the first has already replaced; it asks again behind the lock instead."""
+    config = model_config()
+    config.compaction.auto_ratio = 0.5
+    config.compaction.keep_recent_messages = 2
+    config.compaction.min_messages = 4
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    state = await manager.create_session("twice")
+    history = [_op("one"), Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="a")]), _op("two"), Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="b")]), _op("three"), Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="c")])]
+    await manager.sessions.replace_messages(state.session.id, "daedalus", history)
+    await manager.sessions.append_transcript(state.session.id, history)
+    _, preset = manager.config.preset()
+    provider = manager.providers.get(preset.provider)
+    calls: list[str] = []
+    started = asyncio.Event()
+
+    async def slow_complete(request: Any) -> LLMResponse:
+        calls.append("summarised")
+        started.set()
+        await asyncio.sleep(0.05)
+        return LLMResponse(message=Message(role=MessageRole.assistant, content_blocks=[TextBlock(text=SECTIONED)]), stop_reason=StopReason.end_turn)
+
+    provider.complete_text = slow_complete  # type: ignore[method-assign]
+    await manager.usage.record(UsageRecord(provider_id=provider.endpoint.id, model="m", purpose="stream", raw={}, normalized={"input_tokens": 120_000}, cost_usd=0.0, duration_ms=1, run_id="r1", session_id=state.session.id))
+
+    await asyncio.gather(manager._maybe_auto_compact(state), manager._maybe_auto_compact(state))
+    assert started.is_set()
+    assert calls == ["summarised"], "the second caller summarised a history the first had already replaced"
+    await manager.close()
+
+
+async def test_a_compaction_between_runs_does_not_report_a_run(settings: Settings, db: Database) -> None:
+    """It happens on a task of its own now: while it summarises, the session is not running — the
+    next message does not wait on it, and the app is told what is really happening."""
+    config = model_config()
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    state = await manager.create_session("status")
+    assert not state.running
+    state.compacting = {"reason": "auto", "stage": "summarising", "messages": 40}
+    application = SimpleNamespace(settings=settings, config=config, db=db, manager=manager, front=None, extensions={})
+    api = build_app(application, "tok")  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api), base_url="http://test") as client:  # type: ignore[arg-type]
+        answer = await client.get(f"/api/sessions/{state.session.id}", headers={"X-Daedalus-Token": "tok"})
+    assert answer.status_code == 200
+    assert answer.json()["status"] == "compacting", "the stream says compacting; the polled state must not say running"
     await manager.close()

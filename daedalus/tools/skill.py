@@ -88,9 +88,8 @@ def _listing(files: list[Any]) -> str:
     description=(
         "Save a skill you distilled from this session as a draft: name (lowercase, hyphens), a one-line description "
         "that says when to use it, and the body (the procedure, the pitfalls, the commands that worked). The draft is "
-        "written under the state directory; to make it a real skill, copy the directory into skills/ in a worktree of "
-        "the host repository and open a pull request with SelfPropose. A skill earns its place with a case where it "
-        "made the difference, so say which task produced it."
+        "written under the state directory; the result says how to make it a real skill on this installation. "
+        "A skill earns its place with a case where it made the difference, so say which task produced it."
     ),
 )
 async def skill_draft(context: ToolContext, name: str, description: str, body: str, params: str | None = None) -> ToolResult:
@@ -111,7 +110,22 @@ async def skill_draft(context: ToolContext, name: str, description: str, body: s
     front = f"---\nname: {slug}\ndescription: {description}\n" + (f"params: {params.strip()}\n" if params and params.strip() else "") + "---\n"
     body = manager.redactor.redact(body.strip())  # a draft may become public through a pull request: no secrets in it
     (directory / "SKILL.md").write_text(front + body + "\n", encoding="utf-8")
-    return ok(context, f"draft saved at {directory}/SKILL.md (session {context.session_id}). To ship it: SelfWorkspace('bot', 'skill-{slug}'), copy the directory into skills/{slug}/ there, Verify with `uv run pytest tests/unit/test_skill_catalogue.py -q` from that worktree (the catalogue test loads every skill), commit, SelfPropose with execution_path='daedalus.host.skills'.", path=str(directory))
+    return ok(context, f"draft saved at {directory}/SKILL.md (session {context.session_id}). {_how_to_ship(manager, slug)}", path=str(directory))
+
+
+def _how_to_ship(manager: Any, slug: str) -> str:
+    """How a draft becomes a skill here — named in the tools this installation actually registered.
+
+    The route differs by self-development mode, and a route through a tool that is not registered is
+    an instruction the model cannot follow and does not know why.
+    """
+    mode = getattr(getattr(manager, "capabilities", None), "selfdev", None)
+    checks = "Verify with `uv run pytest tests/unit/test_skill_catalogue.py -q` from that worktree (the catalogue test loads every skill)"
+    if getattr(mode, "mode", "off") == "server":
+        return f"To ship it: SelfWorkspace('bot', 'skill-{slug}'), copy the directory into skills/{slug}/ there, {checks}, commit, SelfPropose with execution_path='daedalus.host.skills'."
+    if getattr(mode, "mode", "off") == "local":
+        return f"To ship it: SelfWorkspace('bot', 'skill-{slug}'), copy the directory into skills/{slug}/ there, {checks}, commit, SelfApply — the change is live after the restart it asks for."
+    return f"This installation does not change its own code, so the draft stays where it is: copy the directory into skills/{slug}/ of the host repository by hand to make it a skill."
 
 
 TOOLS = [load_skill, skill_draft]

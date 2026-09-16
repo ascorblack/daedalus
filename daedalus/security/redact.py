@@ -72,6 +72,18 @@ _SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+def shapes_digest() -> str:
+    """Short digest of the secret *shapes* this build knows.
+
+    The values a redactor masks are its own and change while it runs; the shapes are part of the
+    code and change when the code does. A caller that stores a redacted copy keys it on both, so
+    that adding a new provider's key format invalidates every stored copy by itself — remembering
+    to bump a hand-written version number is what leaves the secret visible in what the app draws.
+    """
+    digest = hashlib.sha256("\n".join(f"{name}:{pattern.pattern}" for name, pattern in _SHAPES).encode("utf-8"))
+    return digest.hexdigest()[:12]
+
+
 class Redactor:
     """Replace configured secret values and secret-shaped strings with a mask."""
 
@@ -86,8 +98,8 @@ class Redactor:
         A redacted view can be stored and reused, but only while the redactor is the one that
         produced it: a secret configured afterwards must not stay visible in a view computed
         before it. Callers that keep a redacted copy store this beside it and recompute when
-        it no longer matches. The shapes are part of the code, so the code's own version
-        belongs in the caller's key, not here.
+        it no longer matches. The shapes are not here because they are not this object's: they
+        come from the code, and ``shapes_digest`` is what covers them.
         """
         if not self._fingerprint:
             digest = hashlib.sha256("\n".join(self._values).encode("utf-8", "surrogateescape")).hexdigest()
@@ -245,4 +257,4 @@ def redact(text: str) -> str:
     return _shared.redact(text)
 
 
-__all__ = ["MASK", "REF_RE", "Redactor", "RedactingFilter", "install_logging_filter", "redact", "shared"]
+__all__ = ["MASK", "REF_RE", "Redactor", "RedactingFilter", "install_logging_filter", "redact", "shapes_digest", "shared"]

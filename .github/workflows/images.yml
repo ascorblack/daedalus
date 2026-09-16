@@ -37,6 +37,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Make room for the image
+        if: matrix.target == 'browser'
+        # The browser image carries a headless Chromium, twice over here (both architectures under
+        # emulation), and the runner's default free space is not enough for it.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 

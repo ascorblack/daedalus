@@ -31,7 +31,7 @@ def _hook(context: ToolContext):  # type: ignore[no-untyped-def]
         "(critic, skeptic, simplifier, security, researcher — an independent reviewer that does not share your "
         "context is worth more than a second pass of your own), `deliverable` names a workspace-relative file that must exist when it reports "
         "(checked by the host, not by the subagent's word), `tools_off` lists tools the subagent may NOT call "
-        "(e.g. [\"SelfPropose\", \"ServiceStart\"]): the host removes them from its session, so a forbidden "
+        "(e.g. [\"Exec\", \"ServiceStart\"]): the host removes them from its session, so a forbidden "
         "launch is impossible rather than merely discouraged — say so in the task too, since the helper "
         "otherwise assumes your whole toolbox. Omit `task` and give a `name` to raise a "
         "helper without work: it is created idle, costs nothing until you use it, is kept, and takes "

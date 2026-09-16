@@ -41,6 +41,11 @@ async def history_search(context: ToolContext, query: str, limit: int = 10, all_
         return error(context, "history is not available in this session")
     hits = await store.search_transcript(query, session_id=None if all_sessions else context.session_id, limit=max(1, min(int(limit), 50)))
     if not hits:
+        rebuilding = getattr(services_for(context).extra.get("manager"), "index_rebuild", None)
+        if rebuilding:
+            # Not the same answer as "nothing matches": the index is derived from the transcript and
+            # is rebuilt in the background after an upgrade, and what it has not reached is invisible.
+            return ok(context, f"no turns match {query!r} yet — the search index is still being rebuilt ({rebuilding['done']} of {rebuilding['total']} turns). Ask again in a moment, or read the turns directly with HistoryExpand.")
         return ok(context, f"no turns match {query!r}")
     lines = []
     for h in hits:
