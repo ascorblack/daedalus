@@ -32,4 +32,5 @@ class Spa(SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     os.chdir(ROOT)
     port = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("PORT", "8899"))
-    ThreadingHTTPServer(("0.0.0.0", port), Spa).serve_forever()
+    # Loopback: this serves a build to a browser on this machine and has no business on the network.
+    ThreadingHTTPServer(("127.0.0.1", port), Spa).serve_forever()
