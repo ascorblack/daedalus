@@ -117,7 +117,9 @@ export function App() {
   // What this installation can do decides what the app offers. Until the answer arrives the nav is the
   // one a server install has: hiding a destination and putting it back a moment later reads as a glitch.
   const caps = useQuery<Capabilities>(authed ? "/api/capabilities" : null, { pollMs: 300000, staleMs: 60000 });
-  const selfdev: SelfDevMode = caps.data?.selfdev.mode ?? "server";
+  // The answer is read defensively: a bot too old to have the route, or one that answers something
+  // this app does not recognise, must not take the whole shell down over a nav label.
+  const selfdev: SelfDevMode = caps.data?.selfdev?.mode ?? "server";
   const proposals = useQuery<{ status: string }[]>(authed && selfdev !== "off" ? "/api/proposals" : null, { pollMs: 60000, staleMs: 30000 });
   const counts: Counts = { inbox: inbox.data?.unread ?? 0, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
   useShortcuts(openPalette, selfdev);

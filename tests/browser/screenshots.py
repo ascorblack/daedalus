@@ -338,6 +338,11 @@ CATALOGUE = [
 ]
 
 
+# The installation in the pictures develops itself on a server: it has both checkouts, a token and a
+# rebuilder, so Changes is in the nav and carries no qualifying tag.
+CAPABILITIES = {"selfdev": {"mode": "server", "configured": "auto", "reasons": ["checkouts: both writable", "token: configured", "remotes: both have an origin", "rebuild: the rebuilder service"], "missing": [], "tools": ["SelfPropose", "SelfRebuild", "SelfRollback", "SelfWorkspace"]}}
+
+
 # ---- the stub API -------------------------------------------------------------------------
 
 
@@ -421,6 +426,8 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, {"configured": False, "reason": "", "provider": "", "model": "", "max_seconds": 120, "autosend": False})
     if rel == "/api/heartbeat":
         return respond(route, {"enabled": True, "armed": True, "interval_minutes": 60, "active_hours": "08:00-23:00", "preset": "", "max_runs_per_day": 24, "last_run": ago(minutes=35), "runs_today": 9, "session_id": None, "running": False, "file": "/srv/state/HEARTBEAT.md", "text": "Check the services and the board; write to the inbox only when something needs me."})
+    if rel == "/api/capabilities":
+        return respond(route, CAPABILITIES)
     if rel == "/api/status":
         return respond(route, {"ok": True})
     return respond(route, [])
