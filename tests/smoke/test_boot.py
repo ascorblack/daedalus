@@ -6,6 +6,7 @@ import importlib
 import pkgutil
 
 from daedalus.config import RuntimeConfig, Settings
+from daedalus.host.capabilities import ALL_SELFDEV_TOOLS
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 
@@ -28,8 +29,12 @@ async def test_manager_starts_and_registers_tools(settings: Settings, db: Databa
     manager = SessionManager(settings, RuntimeConfig(), db=db)
     await manager.start()
     names = {t.name for t in manager.tools.list_all()}
-    for required in ("Exec", "Read", "Write", "Edit", "Find", "Search", "AskUser", "SendFile", "SelfPropose", "ScheduleCreate", "Skill"):
+    for required in ("Exec", "Read", "Write", "Edit", "Find", "Search", "AskUser", "SendFile", "ScheduleCreate", "Skill"):
         assert required in names
+    # The self-development tools depend on the installation, and this is the supervisor's preflight: it
+    # runs in whatever installation is being checked. Naming one of them here would fail a desktop
+    # install — which has a checkout and no remote — on the gate rather than on the change.
+    assert names & ALL_SELFDEV_TOOLS == set(manager.capabilities.selfdev.tools)
     skills = await manager.skills.list("daedalus")
     assert {s.name for s in skills} >= {"self-develop", "telegram-output", "scheduling"}
     await manager.close()
