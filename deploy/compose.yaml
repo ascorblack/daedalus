@@ -19,7 +19,9 @@
 #     A named volume rather than the container's writable layer: replacing the container would otherwise
 #     throw away every `uv sync` and the next start would install everything again. Docker seeds an empty
 #     named volume from what the image holds at that path, so an image that bakes the virtualenv still
-#     starts with it; a sync only runs afterwards when uv.lock or pyproject.toml changed.
+#     starts with it. The environment carries a stamp of the dependency files it was built from, so a sync
+#     runs afterwards only when the checkout declares something the environment was not built for — which
+#     covers a change that landed here, and a hand update the volume would otherwise outlive silently.
 #   telegram-bot-api-data -> /var/lib/telegram-bot-api  files the local Bot API server stores
 #
 # Networks: "telegram" (bot ⇄ local Bot API), "keys" (bot ⇄ key proxy), "search" (bot ⇄ SearXNG).

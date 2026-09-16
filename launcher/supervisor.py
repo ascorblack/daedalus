@@ -22,6 +22,7 @@ Commands arrive as JSON lines on a unix socket. Standard library only.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -64,6 +65,12 @@ have, so the bot repository's ``../protocore-exp`` path dependency resolves to t
 preflight runs here while the bot keeps serving on the old revision; the running checkouts move only once it
 passes."""
 VENV = Path(os.environ.get("UV_PROJECT_ENVIRONMENT", "/srv/venv"))
+VENV_STAMP = VENV / ".daedalus-dependencies"
+"""What the virtualenv on the volume was built for. The image bakes the environment and bakes this file with
+it, and Docker seeds the volume from the image the first time, so a released install starts without running
+uv at all. Afterwards the volume outlives the image: a checkout that declares different dependencies — a hand
+update, a newer tarball than the image, a change that landed here — would otherwise run against the
+environment of whatever version created the volume, and would do it silently."""
 SELFDEV_DIR = STATE / "selfdev"
 APPLY_RESULT = SELFDEV_DIR / "result.json"
 """What the last apply attempt did, for the bot to read after it comes back up and show in the app. The
@@ -244,6 +251,41 @@ def venv_ready(venv: Path) -> bool:
     change, which reads as a broken change and is not one.
     """
     return any((venv / d / name).exists() for d in ("bin", "Scripts") for name in ("pytest", "pytest.exe"))
+
+
+def dependency_digest(repo: Path) -> str:
+    """A digest of the files that declare what the environment must hold."""
+    digest = hashlib.sha256()
+    for name in DEPENDENCY_FILES:
+        path = repo / name
+        digest.update(path.read_bytes() if path.exists() else b"")
+    return digest.hexdigest()
+
+
+def sync_venv_if_stale(repo: Path, *, venv: Path | None = None) -> bool:
+    """Bring the environment up to what this checkout asks for, and only then.
+
+    Returns whether a sync was run. The development extra is deliberately left out: nothing the bot itself
+    does needs a test runner, and the preflight adds it on its own terms when it needs one (``venv_ready``).
+    """
+    venv = venv or VENV
+    stamp = venv / VENV_STAMP.name
+    want = dependency_digest(repo)
+    try:
+        if stamp.read_text().strip() == want:
+            return False
+    except OSError:
+        pass  # no stamp: an environment from before this file, or one built by hand
+    log("the environment was built for other dependencies than this checkout declares; syncing")
+    code, out = run(["uv", "sync", "--frozen"], cwd=repo, timeout=1200)
+    if code != 0:
+        log(f"the sync failed; starting on the environment that is there\n{out}")
+        return True
+    try:
+        stamp.write_text(want)
+    except OSError as exc:
+        log(f"the environment is synced but its stamp could not be written ({exc}); the next start syncs again")
+    return True
 
 
 def needs_dependency_sync(changed: set[str], *, venv: Path | None = None) -> bool:
@@ -884,6 +926,7 @@ async def main() -> int:
     GOOD_DIR.mkdir(parents=True, exist_ok=True)
     if not load_history():
         record_good()
+    await asyncio.to_thread(sync_venv_if_stale, BOT_REPO)
     await asyncio.to_thread(build_app_if_missing, BOT_REPO)
     tasks = [
         asyncio.create_task(supervisor.serve_socket()),

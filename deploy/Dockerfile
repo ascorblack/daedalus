@@ -46,10 +46,15 @@ RUN apt-get update \
 
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
+# The last step stamps the environment with what it was built for. The runtime mounts a volume over
+# /srv/venv and Docker seeds it from here, so the first start finds the stamp already matching the checkout
+# and runs no uv at all; a checkout that later declares different dependencies no longer matches it, and
+# the supervisor syncs before it starts the bot.
 RUN uv venv /srv/venv \
     && uv export --frozen --no-emit-project --no-emit-package protocore --format requirements-txt -o /build/requirements.txt \
     && uv export --frozen --extra browser --no-emit-project --no-emit-package protocore --format requirements-txt -o /build/requirements-browser.txt \
-    && uv pip install --python /srv/venv/bin/python --no-cache --requirements /build/requirements.txt
+    && uv pip install --python /srv/venv/bin/python --no-cache --requirements /build/requirements.txt \
+    && python3 -c "import hashlib, pathlib; d = hashlib.sha256(); [d.update(pathlib.Path(n).read_bytes()) for n in ('uv.lock', 'pyproject.toml')]; pathlib.Path('/srv/venv/.daedalus-dependencies').write_text(d.hexdigest())"
 
 
 # -- the Mini App -----------------------------------------------------------------------------

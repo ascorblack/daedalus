@@ -71,6 +71,47 @@ def test_the_virtualenv_is_synced_only_when_it_has_to_be(tmp_path: Path) -> None
     assert sup.needs_dependency_sync(set(), venv=bare)
 
 
+def test_the_environment_is_synced_when_the_checkout_asks_for_something_else(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The virtualenv outlives the image that seeded it, so it is checked against the checkout, not assumed."""
+    sup = _load()
+    repo = tmp_path / "daedalus"
+    repo.mkdir()
+    (repo / "uv.lock").write_text("version = 1\n")
+    (repo / "pyproject.toml").write_text("[project]\nname = 'daedalus'\n")
+    venv = tmp_path / "venv"
+    venv.mkdir()
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], *, cwd: Path | None = None, timeout: int = 1800) -> tuple[int, str]:
+        calls.append(cmd)
+        return 0, ""
+
+    monkeypatch.setattr(sup, "run", fake_run)
+
+    # An environment with no stamp is one nothing vouches for: sync it and write down what it now holds.
+    assert sup.sync_venv_if_stale(repo, venv=venv) is True
+    assert calls == [["uv", "sync", "--frozen"]]
+    assert (venv / ".daedalus-dependencies").read_text() == sup.dependency_digest(repo)
+
+    # Stamped and unchanged: this is the released install's first start, and it runs no uv at all.
+    calls.clear()
+    assert sup.sync_venv_if_stale(repo, venv=venv) is False
+    assert calls == []
+
+    # A checkout that declares something else — a hand update, or a change the agent landed here.
+    (repo / "uv.lock").write_text("version = 1\n# one more package\n")
+    assert sup.sync_venv_if_stale(repo, venv=venv) is True
+    assert calls == [["uv", "sync", "--frozen"]]
+
+    # A sync that failed leaves no stamp behind: the next start tries again rather than believing it.
+    calls.clear()
+    (repo / "pyproject.toml").write_text("[project]\nname = 'daedalus'\nversion = '2'\n")
+    monkeypatch.setattr(sup, "run", lambda cmd, **kw: (1, "resolution failed"))
+    assert sup.sync_venv_if_stale(repo, venv=venv) is True
+    assert (venv / ".daedalus-dependencies").read_text() != sup.dependency_digest(repo)
+
+
 def test_the_boot_window_forgets_old_failures_and_ignores_impossible_ones() -> None:
     sup = _load()
     now = 10_000.0
