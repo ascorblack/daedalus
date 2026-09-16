@@ -336,9 +336,11 @@ class Voice:
         if not voice_id:
             return
         if session_id != voice_id:
+            # Every event of every session arrives here, so nothing expensive may happen before the two
+            # cheap checks: is this one of the concierge's agents, and is there a page to tell.
             if event.type is EventType.TOOL_CALL_PENDING and event.payload.get("kind") == "ask_user":
                 await self._agent_asks(session_id, event)
-            elif event.type in (EventType.MESSAGE_START, EventType.STATE_CHANGED):
+            elif self._listeners and event.type in (EventType.MESSAGE_START, EventType.STATE_CHANGED) and self._is_delegated(session_id):
                 await self.emit("agents", {"agents": await self.agents()})
             return
         if not self._listeners:
@@ -365,6 +367,12 @@ class Voice:
             await self.emit("status", {"state": "delegating", "title": title})
         elif event.type is EventType.ERROR:
             await self.emit("error", {"message": str(event.payload.get("message") or "the run failed")})
+
+    def _is_delegated(self, session_id: str) -> bool:
+        """Whether the concierge started this session, read from what the process already holds."""
+        manager = self.app.manager
+        state = manager.live_state(session_id) if manager is not None else None
+        return state is not None and state.metadata.get("voice_parent") == self._id
 
     async def _flush_draft(self, run_id: str) -> None:
         tail = speakable(self._drafts.pop(run_id, ""))
