@@ -35,6 +35,10 @@ type Server struct {
 
 	http *http.Server
 
+	// windowed records that the page is being shown in the launcher's own window rather than in a
+	// browser, which changes one sentence on it: what closing it does.
+	windowed bool
+
 	once  sync.Once
 	saved chan struct{} // closed when the setup form has been written
 }
@@ -89,6 +93,9 @@ func (s *Server) Stop(ctx context.Context) {
 		_ = s.http.Shutdown(ctx)
 	}
 }
+
+// SetWindowed says that this page is inside the launcher's own window.
+func (s *Server) SetWindowed(windowed bool) { s.windowed = windowed }
 
 // WaitForSetup blocks until the form has been submitted, or the context ends.
 func (s *Server) WaitForSetup(ctx context.Context) error {
@@ -152,6 +159,7 @@ type pageData struct {
 	DockerMissing string
 	LauncherURL   string
 	CSRF          string
+	Windowed      bool
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -211,7 +219,7 @@ func clearedFields(values []string) map[string]bool {
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, name string) {
 	status := s.app.Status(r.Context())
-	data := pageData{Setup: CurrentSetup(s.app.paths), Status: status, LauncherURL: s.URL(), CSRF: s.csrf}
+	data := pageData{Setup: CurrentSetup(s.app.paths), Status: status, LauncherURL: s.URL(), CSRF: s.csrf, Windowed: s.windowed}
 	if status.Docker == "" {
 		data.DockerMissing = dockerMissing
 	}
