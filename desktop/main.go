@@ -237,6 +237,22 @@ func bringUp(ctx context.Context, app *App, server *Server, surface *Surface, op
 	if !surface.Windowed() {
 		fmt.Printf("The launcher is at %s — leave it running for the buttons, or close it with Ctrl+C: the stack keeps running.\n", server.URL())
 	}
+	watch(ctx, app)
+}
+
+// watch tells the desktop when the installation has something for the operator. A machine with no
+// way to show a notification says so once and is not asked again.
+func watch(ctx context.Context, app *App) {
+	off := false
+	app.Watch(ctx, func(n Notification) {
+		if off {
+			return
+		}
+		if err := Notify(n); err != nil {
+			off = true
+			app.log("desktop notifications are off: %v", err)
+		}
+	})
 }
 
 // setupCommand asks the questions and stops there, for an operator who wants to change a key
