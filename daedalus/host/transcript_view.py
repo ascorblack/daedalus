@@ -31,7 +31,7 @@ from daedalus.host import prompts
 from daedalus.host.prompts import split_headline
 from daedalus.security import redact
 
-VIEW_VERSION = 1
+VIEW_VERSION = 2
 """Bumped whenever the shape below changes; stored views from an older version are recomputed."""
 
 TOOL_RESULT_PREVIEW_CHARS = 400
@@ -66,7 +66,18 @@ def message_view(message: Message) -> dict[str, Any]:
             tool_calls.append({"id": block.tool_call_id, "name": block.name, "arguments": redact.shared().redact_any(args)})
         elif isinstance(block, ToolResultBlock):
             # The listing carries a preview; the full text (a skill body, a long command output) is one request away.
-            tool_results.append({"id": block.tool_call_id, "content": redact.redact(block.content[:TOOL_RESULT_PREVIEW_CHARS]), "is_error": block.is_error, "length": len(block.content)})
+            # Whether there is more to fetch is decided here, on the text itself: the length the app
+            # is told is the text's, while what it holds is a redacted preview, and a secret that
+            # redacts to something shorter would otherwise read as a result cut short.
+            tool_results.append(
+                {
+                    "id": block.tool_call_id,
+                    "content": redact.redact(block.content[:TOOL_RESULT_PREVIEW_CHARS]),
+                    "is_error": block.is_error,
+                    "length": len(block.content),
+                    "clipped": len(block.content) > TOOL_RESULT_PREVIEW_CHARS,
+                }
+            )
     compaction = message.metadata.get("daedalus.compaction") if isinstance(message.metadata, dict) else None
     is_summary = bool(message.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)) if isinstance(message.metadata, dict) else False
     body = prompts.without_turn_context("".join(text))

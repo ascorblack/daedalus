@@ -163,6 +163,48 @@ describe("reconcile", () => {
     const out = reconcile(history, history.slice(3));
     expect(buildTurns(out.messages, turns)[0]).toBe(turns[0]);
   });
+
+  // What the engine holds and the transcript has not written yet arrives with the row number it is
+  // going to get and says it is live. Reading that as a hole in the history is what made every
+  // event of a run re-read the whole session.
+  const live = (seq: number, text: string) => msg(seq, { text, live: true });
+
+  it("folds a live tail in without calling it a gap", () => {
+    const out = reconcile(history, [history[3], live(5, "still writing")]);
+    expect(out.gap).toBe(false);
+    expect(out.messages).toHaveLength(5);
+    expect(out.messages[4].text).toBe("still writing");
+  });
+
+  it("replaces the live tail it already holds instead of keeping both", () => {
+    const once = reconcile(history, [live(5, "still")]);
+    const twice = reconcile(once.messages, [live(5, "still writ")]);
+    expect(twice.gap).toBe(false);
+    expect(twice.messages).toHaveLength(5);
+    expect(twice.messages[4].text).toBe("still writ");
+  });
+
+  it("takes the row over the live copy of it once it is written", () => {
+    const once = reconcile(history, [live(5, "done")]);
+    const settled = reconcile(once.messages, [answer(5, "done")]);
+    expect(settled.gap).toBe(false);
+    expect(settled.messages).toHaveLength(5);
+    expect(settled.messages[4].live).toBeUndefined();
+  });
+
+  it("holds the array still when the live tail said the same thing twice", () => {
+    const once = reconcile(history, [live(5, "still")]);
+    const again = reconcile(once.messages, [history[3], live(5, "still")]);
+    expect(again.messages).toBe(once.messages);
+  });
+
+  it("still asks for a whole read when a settled row carries no seq", () => {
+    expect(reconcile(history, [{ ...history[3], seq: null }]).gap).toBe(true);
+  });
+
+  it("still asks for a whole read when the settled tail does not reach what is on screen", () => {
+    expect(reconcile(history, [answer(40, "much later"), live(41, "…")]).gap).toBe(true);
+  });
 });
 
 describe("older pages", () => {

@@ -28,10 +28,16 @@ export type WindowedProps = {
   threshold?: number;
   /** True while the screen is pinned to the bottom: the anchor must not fight the pin. */
   pinned?: () => boolean;
+  /** True while the reader has a finger or a wheel on the list: the anchor must not fight them either. */
+  dragging?: () => boolean;
+  /** The first item is in the window: whatever comes before it, if anything does, is wanted now. */
+  onTop?: () => void;
 };
 
-export function Windowed({ keys, render, scroller, estimate = 260, overscan = 900, gap = 14, threshold = 60, pinned }: WindowedProps) {
+export function Windowed({ keys, render, scroller, estimate = 260, overscan = 900, gap = 14, threshold = 60, pinned, dragging, onTop }: WindowedProps) {
   const sizes = useRef(new Map<string, number>());
+  /** The width every stored height was measured at: at another width they describe nothing. */
+  const width = useRef(0);
   /** The item the reader is looking at and where the list put it, so it can be put back there. */
   const anchor = useRef<{ key: string; offset: number } | null>(null);
   const [, bump] = useState(0);
@@ -63,8 +69,12 @@ export function Windowed({ keys, render, scroller, estimate = 260, overscan = 90
     let end = start;
     while (end < keys.length && off[end] < bottom) end++;
     end = Math.max(end, start + 1);
+    // The oldest item the list holds is on screen, so the page before it is what the reader is
+    // reaching for. Asking on the rendered range rather than on a distance in pixels is what makes
+    // this reliable: a re-measured guess above the reader moves the pixels and does not move this.
+    if (start === 0) onTop?.();
     setRange((r) => (r.start === start && r.end === end ? r : { start, end }));
-  }, [keys.length, overscan, scroller]);
+  }, [keys.length, overscan, scroller, onTop]);
 
   // A new list (a message arrived, an older page was put in front) moves every offset below it.
   useEffect(() => {
@@ -106,6 +116,15 @@ export function Windowed({ keys, render, scroller, estimate = 260, overscan = 90
   useLayoutEffect(() => {
     const host = scroller.current;
     if (!host || !windowed) return;
+    // A turn is as tall as the list is wide. A rotation, a pane opening, a desktop window resized:
+    // every height remembered — and the average the unmeasured ones are guessed at — describes a
+    // width that is gone, so the spacers would put the reader screens away from where they were.
+    const now = host.clientWidth;
+    if (now && width.current && now !== width.current) {
+      sizes.current.clear();
+      anchor.current = null;
+    }
+    if (now) width.current = now;
     let dirty = false;
     for (const slot of host.querySelectorAll<HTMLElement>("[data-slot]")) {
       const key = slot.dataset.slot!;
@@ -116,7 +135,9 @@ export function Windowed({ keys, render, scroller, estimate = 260, overscan = 90
       }
     }
     const held = anchor.current;
-    if (held && !pinned?.()) {
+    // While a finger or a wheel is on the list the reader is driving it; adding to `scrollTop` under
+    // them is felt as the list pulling back, and it is what kept a flick to the top from arriving.
+    if (held && !pinned?.() && !dragging?.()) {
       const i = keys.indexOf(held.key);
       const now = i >= 0 ? offsets.current[i] : undefined;
       if (now !== undefined && now !== held.offset) {
