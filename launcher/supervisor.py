@@ -226,15 +226,28 @@ def needs_new_image(changed: set[str]) -> bool:
     return any(path in changed for path in REBUILD_TRIGGER_FILES) or any(path.startswith("launcher/") for path in changed)
 
 
+def venv_ready(venv: Path) -> bool:
+    """Whether the virtualenv can run the preflight.
+
+    Not merely whether it exists: the preflight's last step is the test suite, and a virtualenv synced
+    without the ``dev`` extra — which is what ``uv run --frozen`` leaves behind when it starts the bot —
+    has no test runner in it. Such an environment fails the preflight on the runner rather than on the
+    change, which reads as a broken change and is not one.
+    """
+    return any((venv / d / name).exists() for d in ("bin", "Scripts") for name in ("pytest", "pytest.exe"))
+
+
 def needs_dependency_sync(changed: set[str], *, venv: Path | None = None) -> bool:
     """Whether the virtualenv has to be synced before this revision can run.
 
-    Two reasons, and no others: the revision declares different dependencies, or there is no virtualenv
-    yet — a fresh volume on a first start, which is seeded from the image and is otherwise left alone.
+    Two reasons, and no others: the revision declares different dependencies, or the virtualenv is not
+    one the preflight can run in — a volume seeded from an image without the development extra, or a
+    fresh one. Otherwise the environment on the volume is left exactly as it is, which is the point of
+    keeping it on a volume at all.
     """
     if any(path in changed for path in DEPENDENCY_FILES):
         return True
-    return not ((venv or VENV) / "pyvenv.cfg").is_file()
+    return not venv_ready(venv or VENV)
 
 
 def unhealthy_boots(history: list[float], now: float, *, window: float = BOOT_WINDOW_SECONDS) -> list[float]:

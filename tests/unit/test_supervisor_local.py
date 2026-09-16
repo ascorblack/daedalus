@@ -53,16 +53,22 @@ def test_only_the_image_files_ask_for_a_new_image() -> None:
     assert not sup.needs_new_image(set())
 
 
-def test_the_virtualenv_is_synced_only_when_the_dependencies_changed_or_it_is_empty(tmp_path: Path) -> None:
+def test_the_virtualenv_is_synced_only_when_it_has_to_be(tmp_path: Path) -> None:
     sup = _load()
     venv = tmp_path / "venv"
-    venv.mkdir()
-    (venv / "pyvenv.cfg").write_text("home = /usr\n")
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "pytest").write_text("#!/bin/sh\n")
     assert not sup.needs_dependency_sync({"daedalus/host/greeting.py"}, venv=venv)
     assert sup.needs_dependency_sync({"uv.lock"}, venv=venv)
     assert sup.needs_dependency_sync({"pyproject.toml"}, venv=venv)
     # A volume that has just been created has nothing in it; the first start fills it once.
     assert sup.needs_dependency_sync(set(), venv=tmp_path / "fresh")
+    # And one that `uv run --frozen` filled without the development extra cannot run the preflight's
+    # test step: skipping the sync there would fail the change on the missing runner.
+    bare = tmp_path / "bare"
+    (bare / "bin").mkdir(parents=True)
+    (bare / "bin" / "python3").write_text("")
+    assert sup.needs_dependency_sync(set(), venv=bare)
 
 
 def test_the_boot_window_forgets_old_failures_and_ignores_impossible_ones() -> None:
@@ -105,7 +111,8 @@ def _harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, preflight_ok: b
     monkeypatch.setattr(sup, "LOG", tmp_path / "supervisor.log")
     venv = tmp_path / "venv"
     venv.mkdir()
-    (venv / "pyvenv.cfg").write_text("home = /usr\n")  # a virtualenv that is already there, so only a dependency change syncs
+    (venv / "bin").mkdir()
+    (venv / "bin" / "pytest").write_text("")  # a virtualenv the preflight can run in, so only a dependency change syncs
     monkeypatch.setattr(sup, "VENV", venv)
     monkeypatch.setattr(sup, "run", lambda cmd, cwd=None, timeout=0: (calls.append(f"run {' '.join(cmd)}"), (0, ""))[1])
     monkeypatch.setattr(sup, "load_history", lambda: [{"bot": "good000000", "core": "core000000", "at": "2026-09-17T00:00:00+00:00"}])
