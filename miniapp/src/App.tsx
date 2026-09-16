@@ -6,6 +6,7 @@ import { SessionsScreen } from "./screens/Sessions";
 import { InboxScreen } from "./screens/Inbox";
 import { BoardScreen } from "./screens/Board";
 import { SessionScreen } from "./screens/Session";
+import { VoiceScreen } from "./screens/Voice";
 import { ProposalsScreen } from "./screens/Proposals";
 import { SchedulesScreen } from "./screens/Schedules";
 import { UsageScreen } from "./screens/Usage";
@@ -274,6 +275,7 @@ export function App() {
     content = (
       <ErrorBoundary key={route.screen}>
         {route.screen === "agents" && <SessionsScreen onOpen={open} toast={showToast} />}
+        {route.screen === "voice" && <VoiceScreen onOpen={open} />}
         {route.screen === "inbox" && <InboxScreen onOpen={open} toast={showToast} />}
         {route.screen === "board" && <BoardScreen onOpen={open} toast={showToast} selected={route.detail} />}
         {route.screen === "changes" && <ProposalsScreen toast={showToast} selected={route.detail} />}

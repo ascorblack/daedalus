@@ -1070,3 +1070,46 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .sent-file.image .tool-image { max-height: 320px; }
 .sent-file.file-chip { max-width: 100%; min-height: 40px; }
 .sent-file .truncate { max-width: 260px; }
+
+/* ── voice: the mic, what was said, and the agents it started ──────────────────────────── */
+.beta-tag { margin-left: 6px; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.rail-item .beta-tag { margin-left: 0; }
+.voice-beta { padding: 2px 8px; font-size: 11px; vertical-align: middle; }
+/* Wide by design: the conversation takes the room it needs and the agents stand beside it, not under it. */
+.voice-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); gap: 14px; align-items: start; }
+.voice-stage { display: grid; justify-items: center; gap: 14px; padding: 28px 18px 20px; min-height: min(72vh, 620px); align-content: start; }
+.voice-status { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.mic-button {
+  position: relative; width: 132px; height: 132px; border-radius: 50%; border: 1px solid var(--line-strong);
+  background: var(--surface-2); color: var(--fg); cursor: pointer; display: grid; place-items: center;
+  transition: background .15s, transform .08s ease, color .15s;
+}
+.mic-button:hover:not(:disabled) { background: var(--surface-3); }
+.mic-button:active:not(:disabled) { transform: scale(0.97); }
+.mic-button:disabled { opacity: .4; cursor: default; }
+.mic-button.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.mic-ring { position: absolute; inset: -6px; border-radius: 50%; border: 2px solid transparent; }
+.mic-button.on .mic-ring { border-color: color-mix(in srgb, var(--accent) 55%, transparent); animation: mic-pulse 1.8s ease-out infinite; }
+@keyframes mic-pulse { 0% { transform: scale(1); opacity: .9; } 100% { transform: scale(1.22); opacity: 0; } }
+.voice-hint { text-align: center; }
+.voice-captions { width: min(100%, 720px); display: grid; gap: 8px; text-align: center; min-height: 96px; }
+.voice-asked { margin: 0; color: var(--fg-2); font-size: 14px; }
+.voice-heard { margin: 0; color: var(--fg-3); font-style: italic; }
+.voice-said { margin: 0; font-size: 19px; line-height: 1.45; overflow-wrap: anywhere; }
+.voice-said.empty-line { min-height: 1.45em; }
+.voice-problem { margin: 0; color: var(--bad); font-size: 13.5px; }
+.voice-compose { width: min(100%, 720px); display: flex; gap: 8px; margin-top: auto; }
+.voice-compose .field { flex: 1; }
+.voice-why { width: min(100%, 720px); text-align: center; }
+.voice-agents { display: grid; gap: 8px; align-content: start; }
+.voice-agents-head { margin: 4px 2px 2px; font-size: 14px; font-weight: 600; }
+.voice-agents-empty { padding: 8px 2px; }
+.voice-agent { width: 100%; text-align: left; border: 1px solid var(--line); cursor: pointer; }
+.voice-agent-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.voice-agent-top b { min-width: 0; }
+@media (max-width: 900px) {
+  .voice-grid { grid-template-columns: minmax(0, 1fr); }
+  .voice-stage { min-height: 0; padding: 20px 12px 16px; }
+  .mic-button { width: 112px; height: 112px; }
+  .voice-said { font-size: 17px; }
+}

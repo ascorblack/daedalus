@@ -6,9 +6,9 @@ import { useEffect, useState } from "react";
 
 export const BASE = "/app";
 
-export type Screen = "agents" | "inbox" | "board" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings";
+export type Screen = "agents" | "voice" | "inbox" | "board" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings";
 
-export const SCREENS: Screen[] = ["agents", "inbox", "board", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
+export const SCREENS: Screen[] = ["agents", "voice", "inbox", "board", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
 
 export type Route = {
   screen: Screen;

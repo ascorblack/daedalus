@@ -7,6 +7,7 @@ import { api, telegram, HeartbeatStatus, Preset, ProviderConf, SearchBackendInfo
 import { confirmAsync, errorText, numInput } from "../ui";
 import * as passkeys from "../passkeys";
 import { timeAgo } from "../components";
+import { VoiceSettings } from "./Voice";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "openai_compat"];
 
@@ -958,12 +959,13 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
   );
 }
 
-type Section = "models" | "rules" | "limits" | "tools" | "chat" | "security" | "heartbeat" | "about";
+type Section = "models" | "rules" | "limits" | "tools" | "voice" | "chat" | "security" | "heartbeat" | "about";
 const SECTIONS: { id: Section; label: string; hint: string; icon: IconName }[] = [
   { id: "models", label: "Models & providers", hint: "which model opens a session, the fallbacks, the clients", icon: "model" },
   { id: "rules", label: "Working rules", hint: "the standing instructions and how self-changes are approved", icon: "pen" },
   { id: "limits", label: "Limits & budget", hint: "spend caps, iterations, context compaction, balance alerts", icon: "chart" },
   { id: "tools", label: "Tools & search", hint: "web search backends, fetch, exec, speech, vision", icon: "wrench" },
+  { id: "voice", label: "Voice (beta)", hint: "the concierge model, the speech endpoints, what this browser can do", icon: "mic" },
   { id: "chat", label: "Chat & scheduler", hint: "Telegram behaviour and scheduled runs", icon: "inbox" },
   { id: "security", label: "Security", hint: "the passkeys that sign this browser in", icon: "key" },
   { id: "heartbeat", label: "Heartbeat", hint: "the periodic check-in run", icon: "loop" },
@@ -1139,6 +1141,8 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
         );
       case "tools":
         return <ToolsTab s={s} save={save} />;
+      case "voice":
+        return <VoiceSettings />;
       case "chat":
         return (
           <div className="card">

@@ -1,0 +1,359 @@
+// Voice: the operator talks, a small fast model answers out loud, and the work goes to agents.
+//
+// The page is a conversation, not a transcript reader: one big control to take the mic, the words
+// being said under it, the answer as it is spoken, and beside it the agents the concierge started —
+// each one a tap away from its own session, where the actual work is visible.
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api } from "../api";
+import { Dot, StatusLabel, timeAgo } from "../components";
+import { Icon } from "../icons";
+import { pathFor, sessionPath } from "../router";
+import { PageHeader, go } from "../shell";
+import { useQuery } from "../store";
+import { errorText, haptic } from "../ui";
+import { Listener, Speaker, createRecognition, createRecorder, createSpeaker, recognitionSupported, recorderSupported, sendUtterance, voiceLang } from "../voice";
+
+type Agent = { session_id: string; title: string; status: string; last_message_at: string; answer: string };
+type VoiceState = {
+  enabled: boolean;
+  session_id: string;
+  model: string;
+  tts: { configured: boolean; reason?: string; voice?: string; model?: string };
+  stt: { configured: boolean; reason?: string };
+  agents: Agent[];
+  listening: boolean;
+};
+
+type Phase = "idle" | "listening" | "thinking" | "speaking" | "delegating";
+
+const PHASE_WORD: Record<Phase, string> = { idle: "Ready", listening: "Listening", thinking: "Thinking", speaking: "Speaking", delegating: "Setting that up" };
+
+export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
+  const { data: state, refresh } = useQuery<VoiceState>("/api/voice", { staleMs: 10000, pollMs: 60000 });
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [delegating, setDelegating] = useState("");
+  const [heard, setHeard] = useState("");
+  const [said, setSaid] = useState("");
+  const [lastAsked, setLastAsked] = useState("");
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [problem, setProblem] = useState("");
+  const [typed, setTyped] = useState("");
+  const [micOn, setMicOn] = useState(false);
+  const speaker = useRef<Speaker | null>(null);
+  const listener = useRef<Listener | null>(null);
+  const lang = useMemo(() => voiceLang(), []);
+  const serverTts = !!state?.tts.configured;
+  const canRecognise = recognitionSupported();
+  const canRecord = recorderSupported() && !!state?.stt.configured;
+  const canTalk = canRecognise || canRecord;
+
+  useEffect(() => {
+    setAgents(state?.agents ?? []);
+  }, [state?.agents]);
+
+  // The stream handler is built once, on mount; what it needs of the live state it reads through a ref.
+  const micOnRef = useRef(false);
+  useEffect(() => {
+    micOnRef.current = micOn;
+  }, [micOn]);
+
+  // ── the concierge's half of the conversation ────────────────────────────────────────────
+  useEffect(() => {
+    let stop = false;
+    const controller = new AbortController();
+    void (async () => {
+      let backoff = 1000;
+      while (!stop) {
+        try {
+          const response = await fetch("/api/voice/stream", { headers: api.authHeaders(), signal: controller.signal });
+          if (!response.body) return;
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          backoff = 1000;
+          while (!stop) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const frames = buffer.split("\n\n");
+            buffer = frames.pop() ?? "";
+            for (const frame of frames) {
+              const event = /^event: (.*)$/m.exec(frame)?.[1];
+              const data = /^data: (.*)$/m.exec(frame)?.[1];
+              if (!event || !data) continue;
+              try {
+                handle(event, JSON.parse(data));
+              } catch {
+                /* one malformed frame must not end the stream */
+              }
+            }
+          }
+        } catch {
+          /* aborted or dropped: reconnect below */
+        }
+        if (stop) return;
+        await new Promise((r) => setTimeout(r, backoff));
+        backoff = Math.min(backoff * 2, 15000);
+      }
+    })();
+    function handle(event: string, p: Record<string, any>) {
+      if (event === "partial") setSaid(String(p.text ?? ""));
+      else if (event === "say") speaker.current?.say(String(p.text ?? ""));
+      else if (event === "agents") setAgents((p.agents ?? []) as Agent[]);
+      else if (event === "error") setProblem(String(p.message ?? "the concierge stopped"));
+      else if (event === "done") setPhase((f) => (f === "thinking" || f === "delegating" ? "idle" : f));
+      else if (event === "status") {
+        const next = String(p.state ?? "idle");
+        setDelegating(next === "delegating" ? String(p.title ?? "") : "");
+        setPhase((f) => (next === "idle" ? (f === "speaking" ? f : micOnRef.current ? "listening" : "idle") : (next as Phase)));
+      }
+    }
+    return () => {
+      stop = true;
+      controller.abort();
+    };
+  }, []);
+
+  // ── speaking ─────────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    speaker.current = createSpeaker({ server: serverTts, lang, onSpeaking: (on) => setPhase((f) => (on ? "speaking" : f === "speaking" ? (micOnRef.current ? "listening" : "idle") : f)) });
+    return () => {
+      speaker.current?.stop();
+      speaker.current = null;
+    };
+  }, [serverTts, lang]);
+
+  // ── what the operator says ───────────────────────────────────────────────────────────────
+  const send = useCallback(async (text: string) => {
+    const body = text.trim();
+    if (!body) return;
+    setLastAsked(body);
+    setHeard("");
+    setSaid("");
+    setProblem("");
+    setPhase("thinking");
+    try {
+      await api.post("/api/voice/say", { text: body });
+    } catch (e) {
+      setProblem(errorText(e));
+      setPhase("idle");
+    }
+  }, []);
+
+  const bargeIn = useCallback(() => {
+    speaker.current?.cancel();
+    void api.post("/api/voice/interrupt", {}).catch(() => undefined);
+  }, []);
+
+  const startMic = useCallback(async () => {
+    speaker.current?.unlock();
+    const handlers = {
+      onInterim: (t: string) => setHeard(t),
+      onFinal: (t: string) => void send(t),
+      onSpeechStart: () => bargeIn(),
+      onError: (m: string) => setProblem(m),
+    };
+    const l = canRecognise
+      ? createRecognition(lang, handlers)
+      : createRecorder({
+          ...handlers,
+          onUtterance: async (blob) => {
+            setPhase("thinking");
+            try {
+              const text = await sendUtterance(blob);
+              if (text.trim()) {
+                setLastAsked(text.trim());
+                setHeard("");
+                setSaid("");
+              } else setPhase("idle");
+            } catch (e) {
+              setProblem(errorText(e));
+              setPhase("idle");
+            }
+          },
+        });
+    listener.current = l;
+    await l.start();
+    setMicOn(true);
+    setPhase("listening");
+    haptic("medium");
+  }, [bargeIn, canRecognise, lang, send]);
+
+  const stopMic = useCallback(() => {
+    listener.current?.stop();
+    listener.current = null;
+    setMicOn(false);
+    setHeard("");
+    setPhase((f) => (f === "listening" ? "idle" : f));
+  }, []);
+
+  useEffect(() => () => listener.current?.stop(), []);
+
+  async function newConversation() {
+    stopMic();
+    speaker.current?.cancel();
+    setSaid("");
+    setLastAsked("");
+    setAgents([]);
+    try {
+      await api.post("/api/voice/new", {});
+      await refresh();
+    } catch (e) {
+      setProblem(errorText(e));
+    }
+  }
+
+  if (state && !state.enabled) {
+    return (
+      <>
+        <PageHeader title={<VoiceTitle />} />
+        <div className="screen wide">
+          <div className="empty">
+            <b>The voice page is switched off</b>
+            <div>Turn it on in the configuration under [voice], then reload.</div>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  const phaseNow: Phase = delegating ? "delegating" : phase;
+  return (
+    <>
+      <PageHeader
+        title={<VoiceTitle />}
+        subtitle={state ? `${state.model} · ${serverTts ? "server voice" : "browser voice"}` : "…"}
+        actions={
+          <>
+            {state?.session_id && (
+              <a className="btn ghost small" href={sessionPath(state.session_id)} onClick={(e) => go(e, sessionPath(state.session_id))}>
+                Transcript
+              </a>
+            )}
+            <button className="btn small" onClick={() => void newConversation()}>
+              New conversation
+            </button>
+          </>
+        }
+      />
+      <div className="screen wide voice">
+        <div className="voice-grid">
+          <section className="voice-stage card">
+            <div className="voice-status">
+              <span className={`chip ${phaseNow === "idle" ? "" : "accent"}`}>
+                <Dot status={phaseNow === "idle" ? "idle" : phaseNow === "listening" ? "waiting" : "running"} />
+                {PHASE_WORD[phaseNow]}
+                {delegating && `: ${delegating}`}
+              </span>
+              {!serverTts && <span className="chip">browser voice</span>}
+            </div>
+
+            <button
+              className={`mic-button ${micOn ? "on" : ""}`}
+              onClick={() => (micOn ? stopMic() : void startMic())}
+              disabled={!canTalk}
+              aria-pressed={micOn}
+              aria-label={micOn ? "Stop listening" : "Start listening"}
+            >
+              <Icon name="mic" size={40} />
+              <span className="mic-ring" aria-hidden />
+            </button>
+            <div className="voice-hint sub">{!canTalk ? "This browser cannot listen; type below instead." : micOn ? "Talk. Tap again to stop." : "Tap to talk."}</div>
+
+            <div className="voice-captions">
+              {lastAsked && <p className="voice-asked">{lastAsked}</p>}
+              {heard && <p className="voice-heard">{heard}</p>}
+              {said ? <p className="voice-said">{said}</p> : <p className="voice-said empty-line sub">{micOn ? "…" : ""}</p>}
+              {problem && <p className="voice-problem">{problem}</p>}
+            </div>
+
+            <form
+              className="voice-compose"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const text = typed;
+                setTyped("");
+                void send(text);
+              }}
+            >
+              <input className="field" placeholder="…or type an utterance" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label="Type an utterance" />
+              <button className="btn primary" type="submit" disabled={!typed.trim()}>
+                <Icon name="send" size={16} />
+              </button>
+            </form>
+            {!canTalk && (
+              <div className="sub voice-why">
+                {recognitionSupported()
+                  ? ""
+                  : state?.stt.configured
+                    ? "This browser has no speech recognition, so recordings are transcribed on the server."
+                    : "This browser has no speech recognition and no transcription endpoint is configured (Settings → Tools → Voice notes)."}
+              </div>
+            )}
+          </section>
+
+          <aside className="voice-agents">
+            <h2 className="voice-agents-head">
+              Agents<span className="sub">{agents.length ? ` · ${agents.length}` : ""}</span>
+            </h2>
+            {agents.length === 0 && <div className="sub voice-agents-empty">Nothing delegated yet. Ask for something that takes real work and it appears here.</div>}
+            {agents.map((a) => (
+              <button key={a.session_id} className="card row pressable voice-agent" onClick={() => onOpen(a.session_id)}>
+                <div className="grow">
+                  <div className="voice-agent-top">
+                    <b className="truncate">{a.title}</b>
+                    <StatusLabel status={a.status} />
+                  </div>
+                  {a.answer && <div className="sub clamp-2">{a.answer}</div>}
+                  <div className="sub num">{timeAgo(a.last_message_at)}</div>
+                </div>
+              </button>
+            ))}
+          </aside>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function VoiceTitle() {
+  return (
+    <>
+      Voice <span className="chip accent voice-beta">beta</span>
+    </>
+  );
+}
+
+/** The Settings card: what the page runs on and what it can and cannot do here. */
+export function VoiceSettings() {
+  const { data } = useQuery<VoiceState>("/api/voice", { staleMs: 10000 });
+  if (!data) return <div className="sub">Loading…</div>;
+  return (
+    <div className="card">
+      <div className="section-title" style={{ marginTop: 0 }}>Voice (beta)</div>
+      <div className="sub">A small fast model the operator talks to. It answers what it can itself and hands real work to agent sessions, then reports when they finish.</div>
+      <div className="kv">
+        <span>Enabled</span>
+        <b>{data.enabled ? "yes" : "no — set enabled in [voice]"}</b>
+      </div>
+      <div className="kv">
+        <span>Model</span>
+        <b>{data.model || "—"}</b>
+      </div>
+      <div className="kv">
+        <span>Speech out</span>
+        <b>{data.tts.configured ? `server · ${data.tts.model} · ${data.tts.voice}` : data.tts.reason || "the browser's own synthesiser ([voice.tts] is empty)"}</b>
+      </div>
+      <div className="kv">
+        <span>Speech in</span>
+        <b>{recognitionSupported() ? "this browser recognises speech itself" : data.stt.configured ? "recorded here, transcribed on the server" : "not available in this browser, and no transcription endpoint is configured"}</b>
+      </div>
+      <div className="btnrow">
+        <a className="btn small" href={pathFor("voice")} onClick={(e) => go(e, pathFor("voice"))}>
+          Open the voice page
+        </a>
+      </div>
+    </div>
+  );
+}
