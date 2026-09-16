@@ -23,7 +23,7 @@ from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
 from daedalus.security import redact
-from daedalus.tools._common import clip, error, ok, services_for, tool_config
+from daedalus.tools._common import FRAME_CHARS, clip, error, ok, services_for, tool_config
 from daedalus.tools.shell import SandboxUnavailable, sandbox_argv, shell_environment
 
 OUTPUT_HEAD_CHARS = 2000
@@ -457,7 +457,7 @@ async def _receipt(context: ToolContext, services: Any, manager: Any, criterion:
             receipt_id = f"v{cursor.lastrowid}"
     deps = (dependencies or "").strip()
     header = f"{'✅ verified' if passed else '❌ NOT verified'}: {criterion} — exit {exit_code}{' (timed out' + ('; the process group survived the kill' if kill_failed else '') + ')' if timed_out else ''} · receipt {receipt_id or 'not recorded'} · digest {digest} · at {at}" + (f" · output {total_bytes} B, first {len(head)} B kept" if truncated else "") + (f" · deps: {deps}" if deps else "") + (f" · tree {tree}" if tree else "") + (f" · covers {len(digests)} changed file" + ("s" if len(digests) != 1 else "") if digests else "") + (f" · tests {tests_run} run" + (f", {tests_skipped} skipped" if tests_skipped else "") if tests_run is not None else "") + (" · sandbox=workspace" if sandboxed else "")
-    body = clip(output, services.max_tool_output_chars, note="write the output to a file for the rest")
+    body = clip(output, max(services.max_tool_output_chars - FRAME_CHARS, FRAME_CHARS), note="write the output to a file for the rest")
     text = f"{header}\n{body}" if body.strip() else header
     return ok(context, text, receipt=receipt_id, passed=passed, exit_code=exit_code) if passed else error(context, text, receipt=receipt_id, passed=passed, exit_code=exit_code)
 

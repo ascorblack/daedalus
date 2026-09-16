@@ -19,7 +19,7 @@ from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
-from daedalus.tools._common import clip, error, ok, services_for, tool_config
+from daedalus.tools._common import FRAME_CHARS, clip, error, ok, services_for, tool_config
 
 _warned_missing_bwrap = False
 _bwrap_state: str | None = None
@@ -170,7 +170,7 @@ async def exec_command(
     if services.exec_backend is not None:
         outcome = await services.exec_backend.run(command, cwd=str(workdir), env=env, timeout=limit)
         elapsed = time.monotonic() - started
-        body = clip(outcome.output, services.max_tool_output_chars, note="write to a file for the full output")
+        body = clip(outcome.output, max(services.max_tool_output_chars - FRAME_CHARS, FRAME_CHARS), note="write to a file for the full output")
         header = f"exit_code={outcome.exit_code} elapsed={elapsed:.1f}s cwd={workdir}" + (f" TIMED OUT after {limit:.0f}s" if outcome.timed_out else "")
         if outcome.timed_out:
             header += REMOTE_TIMEOUT_HINT
@@ -193,9 +193,18 @@ async def exec_command(
         env=environment,
         start_new_session=True,
     )
-    limit_chars = services.max_tool_output_chars
-    head_cap = int(limit_chars * 0.7) * 4  # bytes; the model sees at most limit_chars characters, UTF-8 needs up to 4 bytes each
-    tail_cap = int(limit_chars * 0.25) * 4
+    # The budget belongs to the whole result, so the head and the tail are sized
+    # against what is left once the exit-code header and the omitted-bytes note
+    # have had their room.
+    limit_chars = max(services.max_tool_output_chars - FRAME_CHARS, FRAME_CHARS)
+    head_chars = int(limit_chars * 0.7)
+    tail_chars = int(limit_chars * 0.25)
+    # Bytes, and deliberately generous: one character costs up to 4 of them, so
+    # these caps are what it takes to be sure the head and tail buffers hold
+    # enough. They bound MEMORY, not the answer — the answer is cut in
+    # characters below, which is the unit the model's budget is counted in.
+    head_cap = head_chars * 4
+    tail_cap = tail_chars * 4
     chunks: list[bytes] = []
     tail_chunks: deque[bytes] = deque()
     tail_size = 0
@@ -267,17 +276,19 @@ async def exec_command(
             await proc.wait()
         if spill_fh is not None:
             spill_fh.close()
-    head_text = b"".join(chunks).decode("utf-8", "replace")
+    head_text = b"".join(chunks).decode("utf-8", "replace")[:head_chars]
+    tail_text = b"".join(tail_chunks).decode("utf-8", "replace")[-tail_chars:] if tail_chars else ""
     elapsed = time.monotonic() - started
-    kept = sum(len(c) for c in chunks) + tail_size
-    if total > kept:
-        tail_text = b"".join(tail_chunks).decode("utf-8", "replace")
+    # What the model is actually shown, measured back in bytes so the figure
+    # below and the spill file speak the same unit as the stream they describe.
+    shown = len(head_text.encode("utf-8", "replace")) + len(tail_text.encode("utf-8", "replace"))
+    if total > shown:
         where = f"full output in {spill}" if spill_written else "the rest was not kept; write the output to a file"
         if spill_written and spill_written < total:
             where = f"the first {spill_written} bytes are in {spill}; write the output to a file for the rest"
-        body = head_text + f"\n\n[... {total - kept} of {total} bytes omitted — {where} ...]\n\n" + tail_text
+        body = head_text + f"\n\n[... {total - shown} of {total} bytes omitted — {where} ...]\n\n" + tail_text
     else:
-        body = head_text
+        body = head_text + tail_text
     header = f"exit_code={proc.returncode} elapsed={elapsed:.1f}s cwd={workdir}" + (" sandbox=workspace" if sandboxed else "")
     if timed_out:
         header += f" TIMED OUT after {limit:.0f}s (process group killed)" + LOCAL_TIMEOUT_HINT

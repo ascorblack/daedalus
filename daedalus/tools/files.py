@@ -13,10 +13,25 @@ from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
-from daedalus.tools._common import clip, error, ok, services_for
+from daedalus.tools._common import FRAME_CHARS, clip, error, ok, output_limit, services_for
 from daedalus.tools.shell import shell_environment
 
 _MAX_LINE_CHARS = 2000
+#: How far into a file to look for a NUL before calling it binary. A text file
+#: does not carry one; a compiled object, an archive or an image carries one
+#: early, and 8 KiB is past every plausible text header.
+_BINARY_SNIFF_CHARS = 8192
+def _line_allowance(text: str, lines: int, budget: int) -> int:
+    """How many lines of this file fit in one call's budget.
+
+    ``limit`` is the model's ask and it is often a round number chosen without
+    knowing the file — 400 lines of a minified bundle is megabytes. The ask is
+    honoured up to what the budget can actually carry, measured on this file's
+    own average line, so a call returns a window the model can read rather than
+    a clip in the middle of one.
+    """
+    average = max(1, len(text) // max(lines, 1)) + 8  # + the line-number column
+    return max(1, budget // min(average, _MAX_LINE_CHARS + 8))
 
 
 @tool(
@@ -37,21 +52,47 @@ async def read_file(
     if await fs.is_dir(target):
         entries = await fs.listdir(target)
         return ok(context, f"{target} is a directory with {len(entries)} entries:\n" + "\n".join(entries[:500]))
+    size = await fs.size(target)
     try:
         text = await fs.read_text(target)
     except UnicodeDecodeError:
-        size = await fs.size(target)
-        return error(context, f"{target} is binary ({size} bytes); use exec with a suitable tool")
+        return error(context, _binary_refusal(target, size))
+    if "\x00" in text[:_BINARY_SNIFF_CHARS]:
+        return error(context, _binary_refusal(target, size))
+    budget = output_limit(context)
     lines = text.splitlines()
     start = max(offset, 1) - 1
-    window = lines[start : start + max(limit, 1)]
+    window = lines[start : start + max(1, min(max(limit, 1), _line_allowance(text, len(lines), budget)))]
     numbered = "\n".join(
         f"{start + i + 1:>6}\t{line[:_MAX_LINE_CHARS]}" for i, line in enumerate(window)
     )
+    header = ""
+    if size > budget:
+        # The model asked for a file it cannot be shown whole. Say so before
+        # the lines, not after: a slice read as the whole file is how a wrong
+        # answer gets written confidently.
+        if len(lines) <= 1:
+            header = (
+                f"[{target}: {size} bytes on a single line — one call shows at most "
+                f"{_MAX_LINE_CHARS} characters of it; use Exec with cut/sed, or Grep, for the rest]\n"
+            )
+        else:
+            header = (
+                f"[{target}: {size} bytes, {len(lines)} lines — showing lines "
+                f"{start + 1}-{start + len(window)} of them]\n"
+            )
     footer = ""
     if start + len(window) < len(lines):
         footer = f"\n[{len(lines) - start - len(window)} more lines; continue with offset={start + len(window) + 1}]"
-    return ok(context, clip(numbered, services.max_tool_output_chars) + footer, total_lines=len(lines))
+    body = clip(numbered, max(budget - FRAME_CHARS, FRAME_CHARS))
+    return ok(context, header + body + footer, total_lines=len(lines))
+
+
+def _binary_refusal(target: Path, size: int) -> str:
+    return (
+        f"{target} is binary ({size} bytes) and would be unreadable as text. "
+        "Use ImageView if it is an image, or Exec with file/xxd/strings to look at it."
+    )
 
 
 @tool(
