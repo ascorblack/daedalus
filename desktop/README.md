@@ -2,13 +2,18 @@
 
 `daedalus-desktop` is one small program — `Daedalus.app` on macOS — that turns a folder into a
 running Daedalus. It clones the two
-repositories, asks the handful of questions the stack needs on a page in your browser, writes the
+repositories, asks the handful of questions the stack needs on a page of its own, writes the
 same environment files a server install uses, and runs `docker compose` against the repository's own
 `deploy/compose.yaml`. Nothing is installed on the host: **Docker is the only requirement**, and the
 launcher never installs it for you.
 
-It is about 8 MB, or twice that as the universal macOS build, and carries no runtime with it.
-Everything that runs is in containers.
+On macOS and Windows it opens a window: the system's own web view, which shows the launcher's page
+while the stack comes up and the app itself once it answers. On Linux it opens a browser window with
+nothing around it — no tabs, no address bar — and falls back to the default browser. [The window](#the-window)
+says why the three are not the same.
+
+It is about 8 MB without the window and 10–12 MB with it, twice that as the universal macOS build,
+and carries no runtime with it. Everything that runs is in containers.
 
 ## Get it
 
@@ -25,10 +30,10 @@ curl -fsSL https://raw.githubusercontent.com/ascorblack/daedalus/main/desktop/in
 
 | Machine | File | What is in it |
 |---|---|---|
-| macOS, both kinds | `Daedalus-macOS.zip` | `Daedalus.app` — one universal build for Apple Silicon and Intel |
-| Linux x86-64 | `daedalus-desktop-linux-amd64.tar.gz` | `daedalus-desktop`, already executable |
-| Linux ARM64 | `daedalus-desktop-linux-arm64.tar.gz` | `daedalus-desktop`, already executable |
-| Windows x86-64 | `daedalus-desktop-windows-amd64.zip` | `daedalus-desktop.exe` |
+| macOS, both kinds | `Daedalus-macOS.zip` | `Daedalus.app` — one universal build for Apple Silicon and Intel, with the window |
+| Linux x86-64 | `daedalus-desktop-linux-amd64.tar.gz` | `daedalus-desktop`, already executable; opens a browser window |
+| Linux ARM64 | `daedalus-desktop-linux-arm64.tar.gz` | `daedalus-desktop`, already executable; opens a browser window |
+| Windows x86-64 | `daedalus-desktop-windows-amd64.zip` | `daedalus-desktop.exe`, with the window |
 
 Unpack it into a folder of its own — the installation is made **inside that folder**, so deleting
 the folder deletes the installation.
@@ -53,14 +58,18 @@ live in. The executable is not signed, so SmartScreen warns once: *More info →
    Windows, Docker Engine with the compose plugin on Linux.
 2. The two repositories are cloned into the folder, with `git` running in a container: git is not
    expected on the host either.
-3. A page opens at `http://127.0.0.1:8770` and asks for a model provider key, optionally the
-   Telegram values, and a daily spending cap. Telegram is optional — without it you use the app in
-   the browser.
+3. A page opens at `http://127.0.0.1:8770` — in the launcher's own window where there is one — and
+   asks for a model provider key, optionally the Telegram values, and a daily spending cap. Telegram
+   is optional — without it you use the app in that window.
 4. The images are pulled (or built, if there is no published image for your platform), the stack
-   comes up, and the browser opens the app.
+   comes up, and the same window moves to the app.
 
-Closing the launcher does not stop anything: the containers are `restart: unless-stopped` and come
-back with the machine. The launcher's page is only a remote control.
+Closing the launcher — the window, or Ctrl+C in the terminal — does not stop anything: the
+containers are `restart: unless-stopped` and come back with the machine. The launcher's page is only
+a remote control.
+
+Starting the launcher a second time against the same folder does not start a second one. It brings
+the first to the front, hands it the link it was opened with if it was opened with one, and exits.
 
 ## The folder
 
@@ -78,6 +87,10 @@ Daedalus/
       ssh/                  keys and config for hosts the agent may reach; may stay empty
     .env                    what compose interpolates and the agent container reads
     compose.desktop.yaml    the launcher's override: the published images, Telegram made optional
+    window.json             where the window was and how big, restored on the next start
+    launcher.json           the running launcher's port and token (0600) — how a second launch finds it
+    scheme.txt              which executable daedalus:// links are registered to
+    browser-profile/        only when the app is shown in a browser window rather than the launcher's own
 ```
 
 `data/` is next to the `.app` when the launcher runs from a bundle, and next to the working
@@ -98,6 +111,59 @@ Double-clicked from Finder there is no terminal to read, so the launcher's page 
 first and everything — the progress, a Docker that is not installed or not started, and the buttons
 to try again — is on it. The launcher keeps serving that page whether the start succeeded or not;
 closing it leaves the containers running.
+
+## The window
+
+What shows the app is decided when the launcher starts, by what the machine can actually do, and
+never by a setting. Three steps, and none of them is a hard failure:
+
+1. **The launcher's own window** — the operating system's web view: WKWebView on macOS, WebView2 on
+   Windows. Nothing is bundled to provide it and nothing is downloaded; the window is about 2–4 MB
+   of binary. The title is *Daedalus*, and the size and position it was left at are remembered in
+   `data/window.json` and restored on the next start.
+2. **A Chromium-family browser in application mode** — `--app=<url>` in Chrome, Edge, Brave or
+   Chromium, which is a window with the page in it and no tabs, address bar or bookmarks. It gets a
+   profile of its own in `data/browser-profile`, so it is separate from your browsing and keeps its
+   own session. The browsers are looked for on `PATH` and in the places their installers put them,
+   because a program started from Finder or Explorer inherits a `PATH` with none of them in it.
+3. **The default browser** — a tab, which is what the launcher has always done.
+
+**Windows** needs the WebView2 runtime for step 1. Windows 11 has it, and so does any machine whose
+Edge is current; the launcher asks the registry before it tries, and quietly takes step 2 when the
+answer is no. Microsoft's Evergreen bootstrapper installs it in a minute if you would rather have
+the window.
+
+**Linux does not get step 1 at all**, and that is deliberate. `webview_go` links GTK and WebKitGTK at
+load time, so a binary built with it does not start on a machine without those libraries — it does
+not fall back, and it does not warn; it fails to start. One binary that runs on every Linux is worth
+more than a window of our own, so the published Linux builds begin at step 2. If you want the
+window on Linux, you have the source: install `libgtk-3-dev` and `libwebkit2gtk-4.0-dev` and run
+`go build` without `-tags nowebview` — and then that binary needs those libraries wherever it runs.
+
+Whatever is showing it, closing it leaves the stack running.
+
+### Links
+
+`daedalus://open/<session-id>` opens that conversation, from anywhere the desktop can follow a link.
+The launcher registers the scheme once per executable, with no installer and no administrator:
+
+| | How |
+|---|---|
+| macOS | `CFBundleURLTypes` in the bundle's `Info.plist`, read by Launch Services when it first sees the app |
+| Windows | a key under `HKCU\Software\Classes\daedalus`, written on a first start |
+| Linux | `~/.local/share/applications/daedalus-desktop.desktop` with `MimeType=x-scheme-handler/daedalus`, which also gives the launcher its name and icon in the desktop's menu |
+
+A link handed to a launcher that is already running goes to that one; it never starts a second.
+
+### Notifications
+
+The launcher watches the stack and tells the desktop when the inbox gains an entry or an agent has
+stopped and is waiting for an answer — `osascript` on macOS, a toast through PowerShell on Windows,
+`notify-send` on Linux. Nothing is bundled for it; a machine without `notify-send` says so once in
+the launcher's log and is not asked again. It is a poll of the app's own status endpoint every 20
+seconds, using the token the app minted for itself, which the launcher reads out of the state
+database through the container and keeps in memory only. An installation where that token cannot be
+read gets no notifications and says so; nothing else changes.
 
 ## Commands
 
@@ -163,6 +229,11 @@ cd desktop
 ./build.sh            # GO_IMAGE=golang:1.23 by default; VERSION= to stamp a version
 ```
 
+Those are `nowebview` builds — the browser fallback, no window. The window is cgo, and cgo is not
+cross-compiled: a windowed macOS build is made on macOS and a windowed Windows build on Windows,
+which is what the release workflow's matrix of native runners does. To build the windowed launcher
+for the machine you are on, `go build -trimpath -o daedalus-desktop .`.
+
 `./package-macos.sh VERSION AMD64 ARM64 OUTPUT_DIR` turns the two macOS binaries into
 `Daedalus.app` inside `Daedalus-macOS.zip` — one universal executable made with `lipo`, the
 `Info.plist`, an `AppIcon.icns` built from `docs/brand/avatar-bot.png`, a signature, and the zip
@@ -170,11 +241,16 @@ made with `ditto -c -k --keepParent`. It needs macOS: `lipo`, `sips`, `iconutil`
 `notarytool` are all Apple's. Without the signing secrets in the environment it signs ad-hoc and
 says so, which is also what happens in CI when the secrets are not set.
 
-The module has no dependencies outside the standard library. Tests:
+The module has one dependency outside the standard library — `github.com/webview/webview_go`, the
+web view, pinned to a commit because the project publishes no tags. Tests, for both builds:
 
 ```bash
-docker run --rm -v "$PWD":/src -w /src -e GOFLAGS=-mod=mod -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod golang:1.23 go test ./...
+docker run --rm -v "$PWD":/src -w /src -e GOFLAGS=-mod=mod -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod golang:1.23 \
+  sh -c 'go vet ./... && go test ./... && go vet -tags nowebview ./... && go test -tags nowebview ./...'
 ```
+
+On Linux both of those are the same build, since the window is not compiled in there; the cgo build
+is exercised by the release workflow on macOS and Windows runners.
 
 ## Signing releases
 
