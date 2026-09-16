@@ -1077,7 +1077,7 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .voice-beta { padding: 2px 8px; font-size: 11px; vertical-align: middle; }
 /* Wide by design: the conversation takes the room it needs and the agents stand beside it, not under it. */
 .voice-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); gap: 14px; align-items: start; }
-.voice-stage { display: grid; justify-items: center; gap: 14px; padding: 28px 18px 20px; min-height: min(72vh, 620px); align-content: start; }
+.voice-stage { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 32px 18px 20px; min-height: min(70vh, 600px); }
 .voice-status { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 .mic-button {
   position: relative; width: 132px; height: 132px; border-radius: 50%; border: 1px solid var(--line-strong);
@@ -1092,7 +1092,7 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .mic-button.on .mic-ring { border-color: color-mix(in srgb, var(--accent) 55%, transparent); animation: mic-pulse 1.8s ease-out infinite; }
 @keyframes mic-pulse { 0% { transform: scale(1); opacity: .9; } 100% { transform: scale(1.22); opacity: 0; } }
 .voice-hint { text-align: center; }
-.voice-captions { width: min(100%, 720px); display: grid; gap: 8px; text-align: center; min-height: 96px; }
+.voice-captions { width: min(100%, 720px); display: grid; gap: 8px; text-align: center; padding: 8px 0; }
 .voice-asked { margin: 0; color: var(--fg-2); font-size: 14px; }
 .voice-heard { margin: 0; color: var(--fg-3); font-style: italic; }
 .voice-said { margin: 0; font-size: 19px; line-height: 1.45; overflow-wrap: anywhere; }
@@ -1109,7 +1109,13 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .voice-agent-top b { min-width: 0; }
 @media (max-width: 900px) {
   .voice-grid { grid-template-columns: minmax(0, 1fr); }
-  .voice-stage { min-height: 0; padding: 20px 12px 16px; }
-  .mic-button { width: 112px; height: 112px; }
+  /* On a phone the mic has to be under the thumb, so the captions move above it and the control sits
+     at the bottom of the card, just over the composer and the tab bar. */
+  .voice-stage { min-height: 54vh; padding: 16px 12px; justify-content: flex-end; }
+  .voice-status { order: -3; }
+  .voice-captions { order: -2; margin-bottom: auto; }
+  .mic-button { width: 116px; height: 116px; }
+  .voice-hint { font-size: 12.5px; }
+  .voice-compose { margin-top: 12px; }
   .voice-said { font-size: 17px; }
 }

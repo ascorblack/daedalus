@@ -297,6 +297,11 @@ class Voice:
         finally:
             self._listeners.discard(queue)
 
+    @property
+    def held(self) -> list[str]:
+        """Reports waiting for a page to connect, oldest first."""
+        return list(self._pending)
+
     async def flush_pending(self) -> None:
         """Everything the agents said to an empty room, delivered as one turn so the concierge speaks it once."""
         if not self._pending:

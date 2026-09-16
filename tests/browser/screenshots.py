@@ -288,6 +288,21 @@ def png(width: int, height: int) -> bytes:
 PHONE_PNG = png(390, 520)
 
 
+VOICE = {
+    "enabled": True,
+    "session_id": S2,
+    "model": "Qwen 3.7 Flash",
+    "tts": {"configured": True, "reason": "", "voice": "alloy", "model": "kokoro"},
+    "stt": {"configured": True, "reason": ""},
+    "agents": [
+        {"session_id": S1, "title": "Bakery site", "status": "running", "last_message_at": ago(seconds=40), "answer": "Rewriting the menu page so the seasonal section reads from one JSON file."},
+        {"session_id": S3, "title": "Support inbox", "status": "idle", "last_message_at": ago(minutes=52), "answer": "Answered nine of eleven; two went on the board as they need a price decision."},
+        {"session_id": S4, "title": "Weekly digest", "status": "waiting", "last_message_at": ago(minutes=4), "answer": "Which week should the digest cover — the one that just ended, or the running one?"},
+    ],
+    "listening": True,
+}
+
+
 # ---- the stub API -------------------------------------------------------------------------
 
 
@@ -361,6 +376,8 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, {"quick": {}, "deep": {}, "careful": {}, "plan": {}})
     if rel == "/api/commands":
         return respond(route, [])
+    if rel == "/api/voice":
+        return respond(route, VOICE)
     if rel == "/api/asr":
         return respond(route, {"configured": False, "reason": "", "provider": "", "model": "", "max_seconds": 120, "autosend": False})
     if rel == "/api/heartbeat":
@@ -433,6 +450,7 @@ def run() -> int:
         shot(page, "files-preview", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_files_and_preview, settle=1200)
         shot(page, "session-share", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_share, settle=800)
         shot(page, "workspaces", "agents", before=open_workspaces)
+        shot(page, "voice", "voice")
         shot(page, "board", "board")
         shot(page, "inbox", "inbox")
         shot(page, "cron", "schedules")
@@ -447,6 +465,7 @@ def run() -> int:
         page.route("**/api/**", stub)
         shot(page, "phone-bots", "agents")
         shot(page, "phone-session", f"agents/{S1}", wait=".chat-scroll .timeline", before=expand_steps, settle=300)
+        shot(page, "phone-voice", "voice")
         shot(page, "phone-memory", "memory")
         phone.close()
         browser.close()
