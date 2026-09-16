@@ -53,11 +53,16 @@ live in. The executable is not signed, so SmartScreen warns once: *More info →
    Windows, Docker Engine with the compose plugin on Linux.
 2. The two repositories are cloned into the folder, with `git` running in a container: git is not
    expected on the host either.
-3. A page opens at `http://127.0.0.1:8770` and asks for a model provider key, optionally the
-   Telegram values, and a daily spending cap. Telegram is optional — without it you use the app in
-   the browser.
+3. A page opens at `http://127.0.0.1:8770` and asks for a provider key, optionally the Telegram
+   values, and a daily spending cap. Telegram is optional — without it you use the app in the
+   browser.
 4. The images are pulled (or built, if there is no published image for your platform), the stack
    comes up, and the browser opens the app.
+5. **The app asks for a model, and that is the last step.** A key is an address; which model runs on
+   it — and what it costs — is yours to pick, so the installation ships with none. The app opens on
+   *Add a model*: choose the endpoint, choose a model from the list it serves (its context window,
+   its modalities and its prices are shown), save. Nothing runs before that, and everything does
+   after it. Later ones are added the same way from Settings → Models.
 
 Closing the launcher does not stop anything: the containers are `restart: unless-stopped` and come
 back with the machine. The launcher's page is only a remote control.
