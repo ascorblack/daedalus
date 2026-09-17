@@ -886,6 +886,7 @@ class SessionManager:
             engine.compaction_state = CompactionState()
         state.history_keys = [self.sessions.transcript_key(m) for m in rebuilt]
         await self.sessions.replace_messages(session_id, TENANT, rebuilt)
+        _forget_persisted(state)
         await self.sessions.append_transcript(session_id, [message])
         return summary
 
@@ -1059,6 +1060,7 @@ class SessionManager:
                 state.engine.compaction_state = CompactionState()
             state.history_keys = [self.sessions.transcript_key(m) for m in kept]
             await self.sessions.replace_messages(session_id, TENANT, kept)
+            _forget_persisted(state)
             # Input queued during the undone turns and any run snapshot that could resume them are pre-revert by definition.
             await self.live.save_queues(session_id, [], [])
             for run in await self.db.fetchall("SELECT id FROM runs WHERE session_id = ?", (session_id,)):
@@ -1103,6 +1105,7 @@ class SessionManager:
                 state.engine.compaction_state = CompactionState()
             state.history_keys = []
             await self.sessions.replace_messages(session_id, TENANT, [])
+            _forget_persisted(state)
             await self.live.save_queues(session_id, [], [])
             for run in await self.db.fetchall("SELECT id FROM runs WHERE session_id = ?", (session_id,)):
                 await self.events.delete_snapshot(run["id"])
@@ -1166,6 +1169,7 @@ class SessionManager:
                 history.pop()
             await self.sessions.replace_messages(target.session.id, TENANT, history)
             target.history_keys = [self.sessions.transcript_key(m) for m in history]
+            _forget_persisted(target)
             copied = False
             if target.workspace == source.workspace:
                 # Both sessions are in the same project: the folder is the operator's and there is one
@@ -1597,20 +1601,47 @@ class SessionManager:
                 list(getattr(eng, "_follow_up_queue", []) or []),
             )
 
-        def persist_session_history(eng: QueryEngine) -> None:
-            history = list(eng.history)
+        def start_persist(history: list[Message], fresh: list[Message] | None) -> None:
             previous = state.history_keys
             state.history_keys = [self.sessions.transcript_key(m) for m in history]
-            task = asyncio.get_running_loop().create_task(self._persist_history(state, history, previous, state.persist_gen))
+            task = asyncio.get_running_loop().create_task(
+                self._persist_history(state, history, previous, state.persist_gen, fresh=fresh)
+            )
             state.persist_tasks.add(task)
             task.add_done_callback(_log_task_failure)
+            task.add_done_callback(_forget_if_dropped(state))
             task.add_done_callback(state.persist_tasks.discard)
+
+        def persist_session_history(eng: QueryEngine) -> None:
+            """The whole working history, for a core that cannot say what changed."""
+            start_persist(list(eng.history), None)
+
+        def persist_history_delta(eng: QueryEngine, delta: Any) -> None:
+            """What the round added — or the whole history, when the sequence itself changed.
+
+            The core remembers what it last handed over, so the store is told "these two are
+            new" instead of being handed eight hundred messages to write again. A rewrite (a
+            compaction, a revert, rows the host dropped) says so, and then the history becomes
+            a new generation exactly as it did before.
+            """
+            start_persist(list(delta.history), None if delta.rewritten else list(delta.appended))
 
         engine.reload_live_control = reload_live_control  # type: ignore[attr-defined]
         engine.persist_live_control = persist_live_control  # type: ignore[attr-defined]
+        # Both are attached: a core that knows about the delta calls the second and never the
+        # first, and one that does not calls the first and never looks for the second.
         engine.persist_session_history = persist_session_history  # type: ignore[attr-defined]
+        engine.persist_history_delta = persist_history_delta  # type: ignore[attr-defined]
 
-    async def _persist_history(self, state: SessionState, history: list[Message], previous_keys: list[str], gen: int | None = None) -> None:
+    async def _persist_history(
+        self,
+        state: SessionState,
+        history: list[Message],
+        previous_keys: list[str],
+        gen: int | None = None,
+        *,
+        fresh: list[Message] | None = None,
+    ) -> None:
         """Persist the working history and the transcript, then label fresh summaries with what they replaced.
 
         A compaction summary the core just produced is tagged with the transcript seqs of the
@@ -1624,12 +1655,12 @@ class SessionManager:
                 return
             current = {self.sessions.transcript_key(m) for m in history}
             removed = [k for k in previous_keys if k not in current]
-            fresh = [i for i, m in enumerate(history) if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in m.metadata]
-            if fresh:
+            unlabelled = [i for i, m in enumerate(history) if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in m.metadata]
+            if unlabelled:
                 seqs = await self.sessions.transcript_seqs(session_id, removed) if removed else []
                 if removed and len(seqs) < len(removed):
                     logger.warning("session %s: %d of %d archived turns were never in the transcript", session_id, len(removed) - len(seqs), len(removed))
-                for index in fresh:
+                for index in unlabelled:
                     original = history[index]
                     if seqs:
                         contiguous = seqs[-1] - seqs[0] + 1 == len(seqs)
@@ -1648,10 +1679,15 @@ class SessionManager:
                             if lm.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in lm.metadata and self.sessions.transcript_key(lm) == key:
                                 live[li] = annotated
                                 break
-            await self.sessions.append_transcript(session_id, history, from_history=True)
+            await self.sessions.append_transcript(session_id, fresh if fresh is not None else history, from_history=True)
             # A round adds to the end of the history it was given; only a rewrite of the
-            # sequence starts a generation, and that is not what a round does.
-            await self.sessions.sync_messages(session_id, TENANT, history)
+            # sequence starts a generation, and that is not what a round does. ``fresh`` is
+            # what the round added, when the caller knows; ``None`` means it does not, and
+            # the stored history is brought up to this one the long way.
+            if fresh is None:
+                await self.sessions.sync_messages(session_id, TENANT, history)
+            elif fresh:
+                await self.sessions.append_messages(session_id, TENANT, fresh)
 
     async def _start_run(
         self, state: SessionState, message: Message | None, *, continue_turn: bool = False
@@ -2705,6 +2741,38 @@ def worktree_writable_paths(worktree: Path) -> list[Path]:
             pass
         paths.append(extra)
     return paths
+
+
+def _forget_persisted(state: SessionState) -> None:
+    """Tell the core that what it believes the store holds is no longer there.
+
+    The core remembers the history it last handed over and appends onto it. Rows this host
+    dropped or rebuilt — a compaction, a revert, a cleared history, a fork's fresh copy — are
+    not there to be appended onto, and the next round would add its messages to a generation
+    that no longer contains what came before them. Forgetting makes the next hand-over a
+    rewrite, which is what it is. A core that rewrote the history every round has nothing to
+    forget and does not carry this.
+    """
+    engine = state.engine
+    forget = getattr(engine, "forget_persisted_history", None) if engine is not None else None
+    if callable(forget):
+        forget()
+
+
+def _forget_if_dropped(state: SessionState) -> Callable[[asyncio.Task[None]], None]:
+    """Take back the promise if the write the hook returned on never landed.
+
+    The hook returns as soon as the write is a task, which tells the core the round is
+    recorded. When that task fails or is cancelled, it is not, and the core would go on
+    appending after messages that were never written. Forgetting makes the next hand-over a
+    rewrite, which writes the missing ones with everything else.
+    """
+
+    def done(task: asyncio.Task[None]) -> None:
+        if task.cancelled() or task.exception() is not None:
+            _forget_persisted(state)
+
+    return done
 
 
 def _log_task_failure(task: asyncio.Task[None]) -> None:

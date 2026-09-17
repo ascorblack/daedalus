@@ -548,6 +548,25 @@ class SqliteSessionStore(ISessionStore):
             )
             await conn.execute("DELETE FROM session_messages WHERE session_id = ? AND tenant_id = ? AND gen < ?", (session_id, tenant_id, gen))
 
+    async def append_messages(self, session_id: str, tenant_id: str, messages: Sequence[Message]) -> int:
+        """Add messages to the end of the current generation; returns rows written.
+
+        What a round does, and all it does. The caller already knows these messages are new —
+        the engine told it so — which is why this does not read the stored keys back to find
+        out: that read walked every row of the session, once per round, to learn something
+        nobody was in doubt about. Only a caller that cannot say what changed needs
+        :meth:`sync_messages`.
+        """
+        fresh = list(messages)
+        if not fresh:
+            return 0
+        await self._db.executemany(
+            "INSERT INTO session_messages(session_id, tenant_id, gen, key, message)"
+            f" VALUES (?, ?, {self.CURRENT_GEN}, ?, ?)",
+            [(session_id, tenant_id, session_id, tenant_id, self.transcript_key(m), m.model_dump_json()) for m in fresh],
+        )
+        return len(fresh)
+
     async def sync_messages(self, session_id: str, tenant_id: str, messages: Sequence[Message]) -> int:
         """Bring the stored working history up to what the engine holds; returns rows written.
 
@@ -679,6 +698,15 @@ class SqliteEventStream(IEventStream):
     under its digest and the row names the digest. The whole tool surface is thirty kilobytes
     and identical across hundreds of runs."""
 
+    SURFACE_DIGEST = "tool_surface_digest"
+    SURFACE_DESCRIBED = "tool_surface_described"
+    """The runtime names the surface it advertised and says whether this advertisement carries
+    the descriptions. It sends them the first time it sees a digest and not again, so the copy
+    kept here is the copy that must last: an advertisement without them is the same surface
+    under the same digest, not a smaller one, and it must not replace what is stored. Where
+    the runtime says nothing — an older one — every advertisement is full and the digest is
+    taken from the value itself."""
+
     def __init__(self, db: Database) -> None:
         self._db = db
         self._subscribers: dict[str, list[asyncio.Queue[Event | None]]] = {}
@@ -688,15 +716,41 @@ class SqliteEventStream(IEventStream):
         self._session_of_run[run_id] = session_id
 
     async def _payload_by_reference(self, event: Event) -> dict[str, Any]:
-        """The payload as it is stored: a repeated large member replaced by its digest."""
+        """The payload as it is stored: a repeated large member replaced by its digest.
+
+        The digest is the runtime's when it named one, so every advertisement of one surface
+        lands on one key whether or not it carried the descriptions. A described advertisement
+        is the full copy and overwrites; an undescribed one fills the key only if nothing is
+        there, so the names-only copy can never displace the descriptions.
+        """
         field = self.BY_REFERENCE.get(event.name)
         value = event.payload.get(field) if field else None
         if field is None or value is None:
             return event.payload
         body = json.dumps(value, default=str, sort_keys=True)
-        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
-        await self._db.execute("INSERT OR IGNORE INTO kv(key, value) VALUES (?, ?)", (f"event_blob:{digest}", body))
+        named = event.payload.get(self.SURFACE_DIGEST)
+        digest = str(named)[:32] if named else hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+        described = bool(event.payload.get(self.SURFACE_DESCRIBED, True))
+        if described:
+            await self._db.execute(
+                "INSERT INTO kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (f"event_blob:{digest}", body),
+            )
+        else:
+            await self._db.execute("INSERT OR IGNORE INTO kv(key, value) VALUES (?, ?)", (f"event_blob:{digest}", body))
         return {**event.payload, field: {"digest": digest, "count": len(value) if isinstance(value, (list, dict)) else 1}}
+
+    async def tool_surface(self, digest: str) -> list[dict[str, Any]] | None:
+        """The tool surface kept under ``digest``, descriptions and all, or ``None``.
+
+        What a reader of an advertisement uses when the advertisement did not carry the
+        schema: the surface travels once per digest and is looked up by name after that.
+        """
+        row = await self._db.fetchone("SELECT value FROM kv WHERE key = ?", (f"event_blob:{str(digest)[:32]}",))
+        if row is None:
+            return None
+        loaded = json.loads(row["value"])
+        return loaded if isinstance(loaded, list) else None
 
     async def emit(self, event: Event) -> None:
         tenant_id = str(event.payload.get("tenant_id") or "default")
