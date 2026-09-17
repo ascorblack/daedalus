@@ -220,6 +220,8 @@ export type SessionDetail = {
   workspace_name?: string;
   workspace_own?: boolean;
   workspace_sessions?: { id: string; title: string }[];
+  /** The project this session works in, where it works in one: its root is the whole of the agent's reach. */
+  project?: ProjectRef | null;
   pending: { questions: Question[] } | null;
   model: string;
   provider?: string;
@@ -253,8 +255,11 @@ export type Project = {
   /** Whether the bot can reach the folder from where it runs. False in Docker until the folder is mounted. */
   reachable: boolean;
   writable: boolean;
-  sessions: { id: string; title: string }[];
+  sessions: { id: string; title: string; running?: boolean }[];
 };
+
+/** A project as a session names it: everything but the list of agents, which a session view has no use for. */
+export type ProjectRef = Omit<Project, "sessions">;
 
 export type Workspace = { name: string; path: string; sessions: { id: string; title: string }[]; files: number; size: number; mtime: number; own_session: boolean; kind: "session" | "schedule" | "heartbeat" | "named"; schedule: string | null };
 

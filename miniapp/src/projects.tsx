@@ -117,8 +117,12 @@ export function AddProjectSheet({ onClose, onAdded, toast }: { onClose: () => vo
       toast(errorText(e));
     }
   }, [name, toast]);
+  // The server answers 400 on a path that is not absolute, but it answers it into a toast; the
+  // mistake belongs beside the field it was made in.
+  const typed = root.trim();
+  const rootProblem = typed && !(typed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(typed)) ? "a project folder is a full path: it starts with / (or a drive letter on Windows)" : "";
   async function add() {
-    if (!name.trim() || !root.trim() || busy) return;
+    if (!name.trim() || !typed || rootProblem || busy) return;
     setBusy(true);
     try {
       const created = await api.post<Project>("/api/projects", { name: name.trim(), root: root.trim(), snapshots });
@@ -140,7 +144,7 @@ export function AddProjectSheet({ onClose, onAdded, toast }: { onClose: () => vo
         <input id="project-root" className="field mono" value={root} onChange={(e) => setRoot(e.target.value)} placeholder="/home/you/projects/bakery" onKeyDown={(e) => e.key === "Enter" && add()} />
         {canPickFolder() && <button className="btn" onClick={browse} title="Choose a folder"><Icon name="folder" size={15} /> Browse</button>}
       </div>
-      <div className="sub">The full path of the folder on this machine. Everything an agent of this project reads or writes stays inside it.</div>
+      <div className={rootProblem ? "sub attn" : "sub"}>{rootProblem || "The full path of the folder on this machine. Everything an agent of this project reads or writes stays inside it."}</div>
       <label className="toggle-row">
         <input type="checkbox" checked={snapshots} onChange={(e) => setSnapshots(e.target.checked)} />
         <span>Snapshots</span>
@@ -148,7 +152,7 @@ export function AddProjectSheet({ onClose, onAdded, toast }: { onClose: () => vo
       </label>
       <div className="sheet-foot">
         <button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn primary" onClick={add} disabled={busy || !name.trim() || !root.trim()}>Add</button>
+        <button className="btn primary" onClick={add} disabled={busy || !name.trim() || !typed || !!rootProblem}>Add</button>
       </div>
     </Sheet>
   );
@@ -180,9 +184,12 @@ export function ProjectSettingsSheet({ project, onClose, onRemoved, toast }: { p
   }
   async function remove() {
     const agents = project.sessions.length;
-    const body = agents
-      ? `${agents} agent${agents === 1 ? "" : "s"} work${agents === 1 ? "s" : ""} in it. They keep their history and go back to a directory of their own, which is empty. Not one file of the folder is deleted.`
-      : "The folder and everything in it stays exactly as it is; only the project is forgotten.";
+    const running = project.sessions.filter((s) => s.running);
+    const body = running.length
+      ? `${running.map((s) => s.title).join(", ")} ${running.length === 1 ? "is" : "are"} working in it right now, so this will be refused until ${running.length === 1 ? "it stops" : "they stop"}: removing the project mid-turn would move the folder under ${running.length === 1 ? "it" : "them"}.`
+      : agents
+        ? `${agents} agent${agents === 1 ? "" : "s"} work${agents === 1 ? "s" : ""} in it. They keep their history and go back to a directory of their own, which is empty. Not one file of the folder is deleted.`
+        : "The folder and everything in it stays exactly as it is; only the project is forgotten.";
     if (!(await confirmAsync(`Remove the project "${project.name}"?`, { body, action: "Remove" }))) return;
     try {
       await api.delete(`/api/projects/${encodeURIComponent(project.id)}?detach=1`);
@@ -204,7 +211,7 @@ export function ProjectSettingsSheet({ project, onClose, onRemoved, toast }: { p
           ? project.writable
             ? "Reachable from where the bot runs."
             : "Reachable, but read-only from where the bot runs: agents can read it and not write it."
-          : "Not reachable from where the bot runs. In Docker a folder has to be mounted into the container — the launcher does that and restarts the stack."}
+          : "Not reachable from where the bot runs. In Docker a folder has to be mounted into the container at the same path: the launcher offers to write that mount and restart the stack, and the desktop README has the entry to add by hand where it cannot."}
       </div>
       <label className="toggle-row">
         <input type="checkbox" checked={snapshots} onChange={(e) => setSnapshots(e.target.checked)} />

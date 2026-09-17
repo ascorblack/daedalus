@@ -106,7 +106,13 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     async (kind: "revert" | "fork", seq: number) => {
       try {
         if (kind === "revert") {
-          if (!(await confirmAsync("Revert to this turn?", { body: "Everything after it leaves the working history and the workspace files are restored where a snapshot exists (nested git repositories stay as they are). The transcript keeps everything.", action: "Revert" }))) return;
+          // With snapshots off — which is a project's default — there is nothing to put the files
+          // back from, and the operator should read that before clicking rather than in the toast after.
+          const noSnapshots = detail?.project?.settings.snapshots === false;
+          const body = noSnapshots
+            ? "Everything after it leaves the working history. The files are NOT restored: this project has snapshots switched off, so only the history is undone. The transcript keeps everything."
+            : "Everything after it leaves the working history and the workspace files are restored where a snapshot exists (nested git repositories stay as they are). The transcript keeps everything.";
+          if (!(await confirmAsync("Revert to this turn?", { body, action: "Revert" }))) return;
           const r = await api.post<{ dropped: number; workspace_restored: boolean; untouched: string[] }>(`/api/sessions/${id}/revert`, { seq });
           const ws = r.workspace_restored ? (r.untouched.length ? `, workspace restored (${r.untouched.length} nested repo(s) untouched)` : ", workspace restored") : ", files not restored (no snapshot)";
           toast(`reverted: ${r.dropped} message(s) removed${ws}`);
@@ -120,7 +126,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [id, toast],
+    [id, toast, detail?.project?.settings.snapshots],
   );
 
   const [offline, setOffline] = useState(false);
@@ -1004,6 +1010,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
               <div className="sheet-section-title">Advanced</div>
               <div className="kv"><span>Session id</span><button className="linkbtn mono" onClick={async () => toast((await copyText(id)) ? "id copied" : id)} title="copy">{id}</button></div>
               <div className="kv"><span>Workspace</span><button className="linkbtn mono truncate" onClick={async () => toast((await copyText(detail.workspace)) ? "path copied" : detail.workspace)} title={detail.workspace}>{detail.workspace_own === false ? detail.workspace_name : detail.workspace}</button></div>
+              {detail.project && <div className="kv"><span>Project</span><span className="truncate" title={detail.project.root}>{detail.project.name} — everything it reads or writes stays in this folder</span></div>}
               {detail.run_id && <div className="kv"><span>Run id</span><span className="mono">{detail.run_id}</span></div>}
               <div className="btnrow">
                 <button className="btn small" onClick={exportMarkdown}><Icon name="download" size={14} /> Export as Markdown</button>
@@ -1144,11 +1151,22 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
                 </div>
               )}
               <div className="aside-row"><Icon name="chart" size={16} /><span className="grow">{fmtTok(detail.usage.i)}↑ {fmtTok(detail.usage.o)}↓ · {fmtUsd(detail.usage.usd)}</span></div>
-              <button className="aside-row link" onClick={() => setView(view === "files" ? "chat" : "files")} title={detail.workspace}>
+              {/* Where this agent works, and how far it reaches: in a project the folder is the name to
+                  show, because it is also the boundary — and whether snapshots are on decides what a
+                  Revert can put back. */}
+              <button className="aside-row link" onClick={() => setView(view === "files" ? "chat" : "files")} title={detail.project ? detail.project.root : detail.workspace}>
                 <Icon name="folder" size={16} />
-                <span className="grow name">{detail.workspace_own === false ? `workspace: ${detail.workspace_name}` : "own workspace"}</span>
+                <span className="grow name">{detail.project ? `project: ${detail.project.name}` : detail.workspace_own === false ? `workspace: ${detail.workspace_name}` : "own workspace"}</span>
                 {detail.workspace_sessions && detail.workspace_sessions.length > 0 && <span className="sub" title={detail.workspace_sessions.map((w) => w.title).join(", ")}>+{detail.workspace_sessions.length} session{detail.workspace_sessions.length === 1 ? "" : "s"}</span>}
               </button>
+              {detail.project && (
+                <div className="aside-row project-root" title={`everything this agent reads or writes stays inside ${detail.project.root}`}>
+                  <span className="grow mono sub">{detail.project.root}</span>
+                  <span className="badge" title={detail.project.settings.snapshots ? "every turn is snapshotted, so Revert can put the files back" : "Revert undoes the history only: this project has snapshots switched off"}>
+                    {detail.project.settings.snapshots ? "snapshots" : "no snapshots"}
+                  </span>
+                </div>
+              )}
               {detail.workspace_sessions && detail.workspace_sessions.length > 0 && detail.workspace_sessions.slice(0, 4).map((w) => (
                 <button key={w.id} className="aside-row link" onClick={() => onOpen?.(w.id)} title="a session working in the same workspace">
                   <span className="dot" style={{ background: "var(--muted)" }} /><span className="grow name sub">{w.title}</span>

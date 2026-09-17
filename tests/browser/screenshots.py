@@ -10,6 +10,10 @@ operator's own sessions. Build the app, serve it with tests/browser/serve_app.py
     APP_URL=http://127.0.0.1:8101/app OUT=docs/screenshots python3 tests/browser/screenshots.py
 
 One PNG per screen lands in OUT (default: the directory this file is in).
+
+CHROMIUM points at the browser to drive and defaults to /usr/local/bin/chromium, which is where a
+container puts one. On a machine that installed its browser through Playwright it has to be set, or
+the launch fails on a path that is not there.
 """
 from __future__ import annotations
 
@@ -50,8 +54,8 @@ LOOP = {"mode": "interval", "interval_seconds": 5400, "status": "active", "run_c
 P1, P2 = "9f3c2a1b7d40", "2e7b5c9a1f88"
 
 PROJECTS = [
-    {"id": P1, "name": "Bakery site", "root": "/home/operator/work/bakery", "created_at": ago(days=9), "settings": {"snapshots": True}, "reachable": True, "writable": True, "sessions": [{"id": "a1b2c3d4e5f6", "title": "Bakery site"}, {"id": "b2c3d4e5f6a1", "title": "Bakery site: photos"}, {"id": "e5f6a1b2c3d4", "title": "Bakery site (fork @412)"}]},
-    {"id": P2, "name": "Expenses", "root": "/home/operator/work/expenses", "created_at": ago(days=4), "settings": {"snapshots": False}, "reachable": True, "writable": True, "sessions": [{"id": "f6a1b2c3d4e5", "title": "Expense tracker"}]},
+    {"id": P1, "name": "Bakery site", "root": "/home/operator/work/bakery", "created_at": ago(days=9), "settings": {"snapshots": True}, "reachable": True, "writable": True, "sessions": [{"id": "a1b2c3d4e5f6", "title": "Bakery site", "running": True}, {"id": "b2c3d4e5f6a1", "title": "Bakery site: photos", "running": False}, {"id": "e5f6a1b2c3d4", "title": "Bakery site (fork @412)", "running": False}]},
+    {"id": P2, "name": "Expenses", "root": "/home/operator/work/expenses", "created_at": ago(days=4), "settings": {"snapshots": False}, "reachable": True, "writable": True, "sessions": [{"id": "f6a1b2c3d4e5", "title": "Expense tracker", "running": False}]},
     # A folder added but not mounted yet: in Docker that is a restart away, and the app says so.
     {"id": "5a8d1c0b6e22", "name": "Courier rates", "root": "/home/operator/documents/courier", "created_at": ago(hours=2), "settings": {"snapshots": False}, "reachable": False, "writable": False, "sessions": []},
 ]
@@ -130,10 +134,14 @@ QUESTION = {"questions": [{"question": "The digest has 14 items this week; keep 
 def detail(id_: str) -> dict:
     s = next(x for x in SESSIONS if x["id"] == id_)
     messages = MESSAGES if id_ == S1 else MESSAGES_S2 if id_ == S2 else [{"role": "user", "seq": 1, "text": "Start.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(hours=1)}, {"role": "assistant", "seq": 2, "text": "Started. Waiting for the sheet.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(hours=1)}]
+    project = next((p for p in PROJECTS if p["id"] == s["project_id"]), None)
+    # A project session works in the project root, and the server answers exactly that: the folder is
+    # not a directory of the session's own, and its name is the folder's.
+    workspace = project["root"] if project else f"/srv/workspaces/{s['workspace']}"
     return {
         "id": id_, "title": s["title"], "status": "idle" if id_ != S4 else "waiting", "run_id": None, "compacting": None,
-        "workspace": f"/srv/workspaces/{s['workspace']}", "workspace_name": s["workspace"], "workspace_own": s["workspace_own"],
-        "project": next((p for p in PROJECTS if p["id"] == s["project_id"]), None),
+        "workspace": workspace, "workspace_name": workspace.rsplit("/", 1)[-1], "workspace_own": False if project else s["workspace_own"],
+        "project": project,
         "workspace_sessions": [{"id": S2, "title": "Bakery site: photos"}] if id_ == S1 else [{"id": S1, "title": "Bakery site"}] if id_ == S2 else [],
         "pending": QUESTION if id_ == S4 else None, "model": s["model"], "provider": "claude" if id_ == S1 else "opencode",
         "messages": messages, "mode": "", "usd_cap": 4.0, "brief": "Site of a small bakery. Static HTML, no frameworks; the owner edits data files, never markup.", "spawned_by": None, "tools_off": [],
