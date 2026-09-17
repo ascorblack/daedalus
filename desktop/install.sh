@@ -56,11 +56,20 @@ base="https://github.com/$repo/releases/download/$tag"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT INT TERM
 
+# Both downloads retry: a name that fails to resolve for a second, or a connection that drops, is
+# the ordinary weather of a laptop on a VPN, and the message tells a missing file apart from that.
+fetch() {
+  # fetch <url> <file> <what>: retries on any error, then says which of the two kinds it was.
+  err="$(curl -fL --retry 4 --retry-delay 2 --retry-all-errors --progress-bar -o "$2" "$1" 2>&1 >/dev/null)" && return 0
+  case "$err" in
+    *"error: 404"*) fail "$tag has no $3. See https://github.com/$repo/releases/tag/$tag." ;;
+    *) fail "Could not download $3 (${err##*curl: }). Check the network and run the installer again." ;;
+  esac
+}
+
 say "Downloading $asset from ${tag}..."
-curl -fL --progress-bar -o "$work/$asset" "$base/$asset" ||
-  fail "$tag has no $asset. See https://github.com/$repo/releases/tag/$tag."
-curl -fsSL -o "$work/SHA256SUMS" "$base/SHA256SUMS" ||
-  fail "$tag publishes no SHA256SUMS; refusing to install something unverifiable."
+fetch "$base/$asset" "$work/$asset" "$asset"
+fetch "$base/SHA256SUMS" "$work/SHA256SUMS" "SHA256SUMS"
 
 # The checksum is the whole reason a release publishes SHA256SUMS: a download that was truncated or
 # tampered with in transit is caught here rather than by a launcher that fails to run.
