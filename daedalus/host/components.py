@@ -324,8 +324,8 @@ class Registry:
         Which is why it is here at all — the disk the voice pickers have taken is the number an
         operator looks for when a portable installation stops being small, and it was on no page.
         """
-        from daedalus.speech import catalog as stt_catalog
-        from daedalus.speech import tts_catalog
+        from daedalus.speech import catalog as stt_catalog  # Lazy: answers without the speech extra
+        from daedalus.speech import tts_catalog  # Lazy: same
 
         catalogue = stt_catalog.MODELS if kind == "stt" else tts_catalog.VOICES
         root = self.settings.state_dir / "models" / kind
@@ -374,7 +374,7 @@ class Registry:
         return probe
 
     def _bwrap(self) -> Status:
-        from daedalus.tools.shell import bwrap_status
+        from daedalus.tools.shell import bwrap_status  # Lazy: the probe is a subprocess, cached
 
         answer = bwrap_status()
         if answer == "ok":

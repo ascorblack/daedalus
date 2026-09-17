@@ -173,7 +173,7 @@ class Installer:
         that outlives the fact it caches is how a finished install goes on reading as missing.
         """
         if component_id == components.SPEECH:
-            from daedalus.speech import service as speech_service
+            from daedalus.speech import service as speech_service  # Lazy: only once an install lands
 
             speech_service.forget_engine()
 

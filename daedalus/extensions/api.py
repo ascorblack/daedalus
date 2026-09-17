@@ -753,6 +753,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     # The manager resolved this on the way up; resolving it again here costs nothing and keeps the
     # routes buildable around a stand-in manager (the auth tests build the app without one).
     caps = getattr(manager, "capabilities", None) or capabilities.resolve(settings, app.config)
+    # The installer is the application's, so that an install outlives the request that started it.
+    # A stand-in application built by a test that cares about something else gets one of its own
+    # rather than a missing attribute in the middle of an unrelated route.
+    installer = getattr(app, "components", None) or component_install.Installer(settings)
     secret_cache: dict[str, bytes] = {}
     secret_lock = asyncio.Lock()
 
@@ -1772,14 +1776,14 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             return {"installed": True, "message": "the speech engine is already installed"}
         status = component_registry().status(component_list.SPEECH)
         try:
-            app.components.start(status)
+            installer.start(status)
         except component_install.Busy as exc:
             if exc.component_id != component_list.SPEECH:
                 raise HTTPException(409, f"{exc.component_id} is installing; one at a time") from None
         except component_install.NotInstallable as exc:
             raise HTTPException(501 if settings.native else 409, exc.reason) from None
-        await app.components.wait(component_list.SPEECH)
-        frame = app.components.progress_of(component_list.SPEECH) or {}
+        await installer.wait(component_list.SPEECH)
+        frame = installer.progress_of(component_list.SPEECH) or {}
         if frame.get("state") != "installed":
             raise HTTPException(502, str(frame.get("error") or "the speech engine could not be installed"))
         speech_service.forget_engine()
@@ -1893,7 +1897,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         Built per call rather than held: every answer on this page is a measurement, and the one thing
         an operator does here is change what the measurement would say.
         """
-        return component_list.Registry(settings, app.config, installer=app.components)
+        return component_list.Registry(settings, app.config, installer=installer)
 
     @api.get("/api/components")
     async def components_view(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -1914,7 +1918,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if status.state == "installed":
             return {"id": component_id, "state": "installed", "step": "", "error": "", "restart_required": False}
         try:
-            return app.components.start(status)
+            return installer.start(status)
         except component_install.Busy as exc:
             raise HTTPException(409, f"{exc.component_id} is installing; one at a time") from None
         except component_install.NotInstallable as exc:
@@ -1925,7 +1929,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         """Stop an install where the step underneath can be stopped — which is not all of them."""
         if component_id not in component_list.CATALOGUE:
             raise HTTPException(404, f"no such component: {component_id}")
-        return {"cancelled": app.components.cancel(component_id)}
+        return {"cancelled": installer.cancel(component_id)}
 
     @api.post("/api/components/restart")
     async def components_restart(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -1935,7 +1939,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         what was asked for rather than what happened.
         """
         try:
-            return {"result": await app.components.restart()}
+            return {"result": await installer.restart()}
         except component_install.NotInstallable as exc:
             raise HTTPException(501, f"{exc.reason}{chr(10) + chr(10) + exc.fix if exc.fix else ''}") from None
         except launcher_bridge.LauncherUnavailable as exc:
@@ -1946,8 +1950,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         """Install progress as it happens, so a three-hundred-megabyte download looks like one."""
 
         async def gen():  # type: ignore[no-untyped-def]
-            async with app.components.watch() as queue:
-                for frame in app.components.all_progress():
+            async with installer.watch() as queue:
+                for frame in installer.all_progress():
                     yield f"data: {json.dumps(frame)}\n\n"
                 waiting = asyncio.ensure_future(queue.get())
                 try:
