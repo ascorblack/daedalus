@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -44,6 +45,15 @@ func ReadChange(ctx context.Context, p Paths, telegram bool) ChangeNotice {
 		return ChangeNotice{}
 	}
 	return parseChangeNotice(out)
+}
+
+// ReadChangeNative reads the same two files where they are ordinary files: in native mode the state
+// directory is a folder under the data directory and nothing has to be asked of anyone. The two are
+// pasted into the shape the container's command prints, so one parser serves both — the thing that
+// decides what the page says is tested once and cannot drift between the modes.
+func ReadChangeNative(p Paths) ChangeNotice {
+	state := filepath.Join(p.State, "selfdev")
+	return parseChangeNotice(pendingMarker + "\n" + readFile(filepath.Join(state, "pending.json")) + "\n" + resultMarker + "\n" + readFile(filepath.Join(state, "result.json")))
 }
 
 // parseChangeNotice turns the two printed files into the one line the page shows. A change waiting
@@ -100,6 +110,15 @@ func (a *App) change(ctx context.Context) ChangeNotice {
 	a.mu.Unlock()
 	if time.Since(at) < changeMaxAge {
 		return cached
+	}
+	if a.Native() {
+		// Reading two small files costs nothing, so there is nothing to cache for; the cache is
+		// still filled, because the page asks through the same method in both modes.
+		notice := ReadChangeNative(a.paths)
+		a.mu.Lock()
+		a.changeNotice, a.changeAt = notice, time.Now()
+		a.mu.Unlock()
+		return notice
 	}
 	notice := ReadChange(ctx, a.paths, a.Telegram())
 	a.mu.Lock()

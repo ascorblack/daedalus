@@ -99,8 +99,14 @@ func openWindow(p Paths, title, url string) (*Window, error) {
 	if err := view.Bind("__daedalusNotify", func(title, body, link string) { _ = Notify(Notification{Title: title, Body: body, Link: link}) }); err != nil {
 		return nil, err
 	}
+	// Choosing a folder on the machine, for a page that wants to name one — a project's root. A
+	// browser cannot do it and the launcher can; see folder.go for what the page has to check.
+	if err := view.Bind("__daedalusPickFolder", PickFolder); err != nil {
+		return nil, err
+	}
 	view.Init(`window.daedalus = Object.assign(window.daedalus || {}, {
   notify: (title, body, link) => window.__daedalusNotify(String(title || ""), String(body || ""), String(link || "")),
+  pickFolder: () => window.__daedalusPickFolder(),
   window: true,
 });`)
 	view.Navigate(url)

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -68,6 +70,22 @@ func PairingURL(ctx context.Context, p Paths, telegram bool, after time.Time) st
 		return ""
 	}
 	return pairingFromFile(out, after)
+}
+
+// NativePairingURL reads the link the server left in the state directory, which in native mode is a
+// file the launcher can simply open. The same freshness rule as the container's: a link written
+// before this launcher brought the installation up has most likely been spent, and sending the
+// operator to a spent link is worse than sending them to the login screen.
+func NativePairingURL(p Paths, after time.Time) string {
+	path := filepath.Join(p.State, "pairing-url")
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	if !after.IsZero() && info.ModTime().Before(after.Truncate(time.Second)) {
+		return ""
+	}
+	return parsePairingURL(readFile(path))
 }
 
 // MintPairing asks the container for a fresh link. This is the only other way the launcher comes by

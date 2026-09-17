@@ -15,6 +15,11 @@ import (
 // paths do exactly the same thing to the stack.
 type App struct {
 	paths Paths
+	// mode is which of the two shapes this installation has. It is resolved before anything is
+	// started and every method below asks it once: the launcher does the same things either way,
+	// and only how it does them differs.
+	mode   Mode
+	native *Native
 
 	mu      sync.Mutex
 	lines   []string
@@ -37,7 +42,29 @@ type App struct {
 // file: the real logs come from docker.
 const logLimit = 200
 
-func NewApp(p Paths) *App { return &App{paths: p} }
+func NewApp(p Paths) *App {
+	app := &App{paths: p, mode: StoredMode(p)}
+	app.native = NewNative(p, app.log)
+	return app
+}
+
+// SetMode is how the command line and the setup page tell the launcher which shape to run in. It is
+// set before anything starts and does not change while it is running.
+func (a *App) SetMode(mode Mode) {
+	a.mu.Lock()
+	a.mode = mode
+	a.mu.Unlock()
+}
+
+// Mode is the shape in force.
+func (a *App) Mode() Mode {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.mode
+}
+
+// Native reports whether this installation runs without a container.
+func (a *App) Native() bool { return a.Mode() == ModeNative }
 
 // log records a line and echoes it to the terminal, so the operator sees the same progress whether
 // they are watching the window the launcher runs in or the page in the browser.
@@ -91,10 +118,13 @@ func (a *App) Start(ctx context.Context) error {
 }
 
 func (a *App) start(ctx context.Context) error {
+	if a.Native() {
+		return a.startNative(ctx)
+	}
 	if err := CheckDocker(ctx); err != nil {
 		return err
 	}
-	if err := EnsureRepos(ctx, a.paths, a.log); err != nil {
+	if err := EnsureRepos(ctx, a.paths, dockerGit(a.paths), a.log); err != nil {
 		return err
 	}
 	if err := WriteOverride(a.paths); err != nil {
@@ -129,6 +159,19 @@ func (a *App) start(ctx context.Context) error {
 	return nil
 }
 
+// startNative is the same sequence without a container in it: the runtime instead of the images,
+// the launcher's own child processes instead of compose, and the same wait for /app to answer.
+func (a *App) startNative(ctx context.Context) error {
+	a.mu.Lock()
+	a.startedAt, a.paired = time.Now(), false
+	a.mu.Unlock()
+	if err := a.native.Start(ctx); err != nil {
+		return err
+	}
+	a.log("the app is up at %s", AppURL(APIPort(a.paths)))
+	return nil
+}
+
 // Stop leaves the containers in place but stopped. The restart policy is unless-stopped, so they
 // stay down until the launcher is asked to start them again. A Stop followed by a Start applies
 // whatever the checkout holds without preflighting it — Apply is the one that checks first.
@@ -142,6 +185,11 @@ func (a *App) Stop(ctx context.Context) error {
 }
 
 func (a *App) stop(ctx context.Context) error {
+	if a.Native() {
+		a.log("stopping the agent")
+		a.native.Stop(ctx)
+		return nil
+	}
 	if err := CheckDocker(ctx); err != nil {
 		return err
 	}
@@ -172,7 +220,7 @@ func (a *App) Apply(ctx context.Context) error {
 
 func (a *App) apply(ctx context.Context) error {
 	a.log("checking the change and restarting onto it")
-	answer, err := SupervisorRestart(ctx, a.paths, a.Telegram())
+	answer, err := a.supervisorRestart(ctx)
 	if err == nil {
 		if answer != "" {
 			a.log("%s", answer)
@@ -191,12 +239,47 @@ func (a *App) apply(ctx context.Context) error {
 	return nil
 }
 
+// supervisorRestart carries the request to the supervisor. It is the same request either way; what
+// differs is whether it has to cross into a container to get there.
+func (a *App) supervisorRestart(ctx context.Context) (string, error) {
+	if a.Native() {
+		return a.native.Apply(ctx, "the launcher's Apply")
+	}
+	return SupervisorRestart(ctx, a.paths, a.Telegram())
+}
+
 // forgetChange drops the cached answer about the agent's own code: the container has just been
 // restarted, or has just been told to restart, and whatever it said before that is from before.
 func (a *App) forgetChange() {
 	a.mu.Lock()
 	a.changeAt = time.Time{}
 	a.mu.Unlock()
+}
+
+// StopOnQuit ends what the launcher is holding up when the launcher itself is going away. It is a
+// no-op in Docker mode, where the containers are the operator's to leave running.
+func (a *App) StopOnQuit() {
+	if !a.Native() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	a.log("stopping the agent, because the launcher is closing")
+	a.native.Stop(ctx)
+}
+
+// InstallExtra fetches one of the optional halves of the portable runtime. Only native mode has
+// them: a Docker installation gets node and the browser from the image tag it runs.
+func (a *App) InstallExtra(ctx context.Context, name string) error {
+	if !a.Native() {
+		return errors.New("the runtime extras belong to native mode; in Docker mode the browser comes with the :browser image")
+	}
+	if err := a.begin("installing " + name); err != nil {
+		return err
+	}
+	err := a.native.InstallExtra(ctx, name)
+	a.end(err)
+	return err
 }
 
 // Update moves both checkouts to what is published, refreshes the images and restarts. The agent's
@@ -211,13 +294,25 @@ func (a *App) Update(ctx context.Context) error {
 }
 
 func (a *App) update(ctx context.Context) error {
+	if a.Native() {
+		// The processes are stopped first: an update rewrites the tree they are running out of, and
+		// a running bot half-way through a file swap is a crash with a confusing log.
+		a.native.Stop(ctx)
+		if err := a.native.Ensure(ctx); err != nil {
+			return err
+		}
+		if err := UpdateRepos(ctx, a.paths, a.native.gitRunner(), a.log); err != nil {
+			return err
+		}
+		return a.start(ctx)
+	}
 	if err := CheckDocker(ctx); err != nil {
 		return err
 	}
-	if err := EnsureRepos(ctx, a.paths, a.log); err != nil {
+	if err := EnsureRepos(ctx, a.paths, dockerGit(a.paths), a.log); err != nil {
 		return err
 	}
-	if err := UpdateRepos(ctx, a.paths, a.log); err != nil {
+	if err := UpdateRepos(ctx, a.paths, dockerGit(a.paths), a.log); err != nil {
 		return err
 	}
 	return a.start(ctx)
@@ -235,6 +330,19 @@ func (a *App) Uninstall(ctx context.Context, keepData bool) error {
 }
 
 func (a *App) uninstall(ctx context.Context, keepData bool) error {
+	if a.Native() {
+		a.native.Stop(ctx)
+		if keepData {
+			a.log("the agent is stopped; %s still holds the runtime, the state and your keys", a.paths.Data)
+			return nil
+		}
+		a.log("removing the downloaded runtime")
+		if err := os.RemoveAll(a.paths.Runtime); err != nil {
+			return err
+		}
+		a.log("the runtime is gone; %s still holds the checkouts, the state and your keys — delete it by hand when you are done with it", a.paths.Data)
+		return nil
+	}
 	if err := CheckDocker(ctx); err != nil {
 		return err
 	}
@@ -277,14 +385,22 @@ func (a *App) OpenURL(ctx context.Context) string {
 	if paired {
 		return app
 	}
-	// Every compose call reads the override, and `open` on its own has not written it yet.
-	if err := WriteOverride(a.paths); err != nil {
-		return app
-	}
-	telegram := a.Telegram()
-	url := PairingURL(ctx, a.paths, telegram, started)
-	if url == "" {
-		url, _ = MintPairing(ctx, a.paths, telegram)
+	var url string
+	if a.Native() {
+		url = NativePairingURL(a.paths, started)
+		if url == "" {
+			url, _ = a.Pair(ctx)
+		}
+	} else {
+		// Every compose call reads the override, and `open` on its own has not written it yet.
+		if err := WriteOverride(a.paths); err != nil {
+			return app
+		}
+		telegram := a.Telegram()
+		url = PairingURL(ctx, a.paths, telegram, started)
+		if url == "" {
+			url, _ = MintPairing(ctx, a.paths, telegram)
+		}
 	}
 	if url == "" {
 		return app
@@ -299,6 +415,16 @@ func (a *App) OpenURL(ctx context.Context) string {
 // no passkey enrolled yet. The link opens once and expires; the stack has to be running, because it
 // is the container that mints it.
 func (a *App) Pair(ctx context.Context) (string, error) {
+	if a.Native() {
+		out, err := a.native.RunPython(ctx, "-m", "daedalus", "auth", "pair")
+		if err != nil {
+			return "", err
+		}
+		if url := firstPairingURL(out); url != "" {
+			return url, nil
+		}
+		return "", errors.New("no link was printed; check that the agent is running with `daedalus-desktop status`")
+	}
 	if err := CheckDocker(ctx); err != nil {
 		return "", err
 	}
@@ -318,6 +444,9 @@ func (a *App) Pair(ctx context.Context) (string, error) {
 // Status is what the status command prints and what the page renders.
 type Status struct {
 	Data       string   `json:"data"`
+	Mode       string   `json:"mode"`
+	ModeDetail string   `json:"mode_detail"`
+	Ports      string   `json:"ports"`
 	Configured bool     `json:"configured"`
 	Repos      bool     `json:"repos"`
 	Docker     string   `json:"docker"`
@@ -337,6 +466,8 @@ func (a *App) Status(ctx context.Context) Status {
 	a.mu.Lock()
 	status := Status{
 		Data:       a.paths.Data,
+		Mode:       string(a.mode),
+		ModeDetail: a.mode.Describe(),
 		Configured: a.paths.Configured(),
 		Repos:      exists(a.paths.Bot) && exists(a.paths.Core),
 		AppURL:     AppURL(APIPort(a.paths)),
@@ -346,6 +477,12 @@ func (a *App) Status(ctx context.Context) Status {
 		Log:        append([]string(nil), a.lines...),
 	}
 	a.mu.Unlock()
+	if a.Native() {
+		status.Ports = NativePorts(a.paths)
+		status.Running = a.native.Running()
+		status.Change = a.change(ctx)
+		return status
+	}
 	status.Docker = DockerVersion(ctx)
 	if status.Docker != "" && status.Configured {
 		status.Running = a.running(ctx)
@@ -395,10 +532,16 @@ func (a *App) PrintStatus(ctx context.Context) {
 		telegram = "on"
 	}
 	fmt.Printf("data         %s\n", status.Data)
+	fmt.Printf("mode         %s\n", status.ModeDetail)
 	fmt.Printf("setup        %s\n", setup)
 	fmt.Printf("checkouts    %s\n", repos)
-	fmt.Printf("docker       %s\n", docker)
-	fmt.Printf("containers   %d running\n", status.Running)
+	if a.Native() {
+		fmt.Printf("processes    %d running\n", status.Running)
+		fmt.Printf("ports        %s\n", status.Ports)
+	} else {
+		fmt.Printf("docker       %s\n", docker)
+		fmt.Printf("containers   %d running\n", status.Running)
+	}
 	fmt.Printf("telegram     %s\n", telegram)
 	fmt.Printf("app          %s\n", status.AppURL)
 	if status.Change.Pending {

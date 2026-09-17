@@ -11,7 +11,8 @@
 <main class="wrap">
   <header class="head">
     <h1>Daedalus</h1>
-    <p class="sub">Running from <code>{{.Status.Data}}</code>. {{if .Windowed}}Closing this window leaves the stack running — it keeps running in the background and comes back with the machine.{{else}}Closing this launcher leaves the stack running.{{end}}</p>
+    <p class="sub">Running from <code>{{.Status.Data}}</code> in <strong>{{.Status.ModeDetail}}</strong>.</p>
+    <p class="sub">{{if .Native}}Closing this {{if .Windowed}}window{{else}}launcher{{end}} stops the agent: it is a process under the launcher, not a container, and an agent nobody can see is one nobody can stop. A run in flight is saved and picks up where it left off on the next start.{{else}}{{if .Windowed}}Closing this window leaves the stack running — it keeps running in the background and comes back with the machine.{{else}}Closing this launcher leaves the stack running.{{end}}{{end}}</p>
   </header>
 
   <p class="banner warn" id="alert" hidden></p>
@@ -25,8 +26,8 @@
   </section>
 
   <section class="cards">
-    <div class="card stat"><span class="label">Docker</span><span class="value" id="docker">…</span></div>
-    <div class="card stat"><span class="label">Containers</span><span class="value" id="containers">…</span></div>
+    <div class="card stat"><span class="label">{{if .Native}}Runs on{{else}}Docker{{end}}</span><span class="value" id="docker">…</span></div>
+    <div class="card stat"><span class="label">{{if .Native}}Processes{{else}}Containers{{end}}</span><span class="value" id="containers">…</span></div>
     <div class="card stat"><span class="label">Telegram</span><span class="value" id="telegram">…</span></div>
     <div class="card stat"><span class="label">App</span><a class="value link" id="appurl" href="{{.Status.AppURL}}">{{.Status.AppURL}}</a></div>
   </section>
@@ -45,7 +46,7 @@
   <section class="card">
     <h2>What the launcher is doing</h2>
     <pre class="log" id="log">nothing yet</pre>
-    <p class="hint">The stack's own logs: <code>daedalus-desktop logs -f</code>.</p>
+    <p class="hint">{{if .Native}}The agent&rsquo;s own logs are files: <code>{{.Status.Data}}/runtime/logs/</code>. Ports in use: <span id="ports">…</span>.{{else}}The stack&rsquo;s own logs: <code>daedalus-desktop logs -f</code>.{{end}}</p>
   </section>
 </main>
 <script src="/assets/app.js"></script>

@@ -94,3 +94,11 @@ button[disabled] { opacity: 0.5; cursor: default; }
 /* The agent's own changes: the one card on this page that asks for a decision. */
 .card.change { border-color: rgba(45, 212, 191, 0.45); }
 .card.change p { margin: 6px 0 12px; color: var(--muted); }
+
+/* The mode question on the setup page: two blocks the operator reads rather than a dropdown, because
+   what is being chosen is how much isolation the installation has. */
+.modes { display: grid; gap: .75rem; }
+.mode { display: grid; gap: .25rem; padding: .75rem .9rem; border: 1px solid var(--line, #2a2a30); border-radius: 8px; cursor: pointer; }
+.mode:has(input:checked) { border-color: var(--accent, #6ea8fe); }
+.mode input { margin-right: .5rem; }
+.mode-name { font-weight: 600; }

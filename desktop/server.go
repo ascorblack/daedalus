@@ -211,6 +211,11 @@ type pageData struct {
 	LauncherURL   string
 	CSRF          string
 	Windowed      bool
+	// Mode is what the installation runs in, and Suggested is what the first run offers before the
+	// operator has said. They differ only on a first run: afterwards the suggestion is the choice.
+	Mode      string
+	Suggested string
+	Native    bool
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -234,6 +239,15 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		if !s.hasToken(r.PostFormValue("csrf")) {
 			refuse(w)
 			return
+		}
+		// The mode is stored beside the configuration rather than in it: it decides how the
+		// launcher starts things, which is the launcher's business and not the agent's.
+		if mode, err := ParseMode(r.PostFormValue("mode")); err == nil && mode != ModeUnset {
+			if err := StoreMode(s.app.paths, mode); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			s.app.SetMode(mode)
 		}
 		setup := Setup{
 			DeepseekKey:   r.PostFormValue("deepseek"),
@@ -270,8 +284,13 @@ func clearedFields(values []string) map[string]bool {
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, name string) {
 	status := s.app.Status(r.Context())
-	data := pageData{Setup: CurrentSetup(s.app.paths), Status: status, LauncherURL: s.URL(), CSRF: s.csrf, Windowed: s.windowed}
-	if status.Docker == "" {
+	data := pageData{Setup: CurrentSetup(s.app.paths), Status: status, LauncherURL: s.URL(), CSRF: s.csrf, Windowed: s.windowed, Mode: status.Mode, Native: s.app.Native()}
+	data.Suggested = status.Mode
+	if data.Suggested == "" {
+		data.Suggested = string(SuggestMode(r.Context()))
+	}
+	// Docker's absence is only news to an installation that means to use it.
+	if status.Docker == "" && !s.app.Native() {
 		data.DockerMissing = dockerMissing
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -286,7 +305,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Status
 		DockerMissing string `json:"docker_missing"`
 	}{Status: status}
-	if status.Docker == "" {
+	if status.Docker == "" && !s.app.Native() {
 		body.DockerMissing = dockerMissing
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -318,6 +337,15 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		go func() { _ = s.app.Apply(ctx) }()
 	case "open":
 		go func() { _, _ = s.app.Open(ctx) }()
+	case "extra/node", "extra/browser":
+		// The optional halves of the runtime, fetched when something needs them rather than on
+		// every install. Native only: in Docker mode the browser comes with the :browser image.
+		name := strings.TrimPrefix(action, "extra/")
+		go func() {
+			if err := s.app.InstallExtra(ctx, name); err != nil {
+				s.app.log("%s could not be installed: %v", name, err)
+			}
+		}()
 	default:
 		http.Error(w, "no such action", http.StatusNotFound)
 		return
