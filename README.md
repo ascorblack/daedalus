@@ -377,6 +377,10 @@ Nothing here is a tier: it is the same program, and each row is a real consequen
 
 ### Signing in without Telegram
 
+<p align="center">
+  <img src="docs/screenshots/login.png" alt="The login screen: a passkey, or the one-time pairing link, with the language picker in the corner of the card" width="70%" />
+</p>
+
 A start with no other way in (no bot, no passkey yet) writes a one-time **pairing link** to `pairing-url` in the
 state directory, readable by its owner only. Open it once and this browser is signed in; it expires after 30
 minutes, is spent on first use, and using one revokes the rest. A fresh one:
