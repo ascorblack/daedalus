@@ -26,6 +26,7 @@ from daedalus.speech import catalog
 from daedalus.speech.engine import SAMPLE_RATE, Partial, SpeechError, resolve, rms, to_float
 from daedalus.speech.models import DownloadError, Downloads, sha256_of, verify, view
 from daedalus.speech.service import LocalSpeech, decode_file, is_ogg
+from daedalus.speech.tts_service import LocalTts
 
 # -- the catalog ------------------------------------------------------------------------------
 
@@ -730,10 +731,14 @@ class FakeApp:
         self.front: Any = None
         self.extensions: dict[str, Any] = {}
         self.speech = LocalSpeech(self.settings.state_dir, self.config)
+        # The API reads both halves of speech on one request: /api/voice says which recogniser
+        # listens and which voice speaks, so a fake with only the listening half falls over there.
+        self.tts = LocalTts(self.settings.state_dir, self.config)
 
     async def save_config(self, config: RuntimeConfig) -> None:
         self.config = config
         self.speech.config = config
+        self.tts.config = config
 
 
 @pytest.fixture
