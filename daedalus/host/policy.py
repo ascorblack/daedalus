@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import posixpath
 import re
 import shlex
@@ -34,7 +35,14 @@ _SEVERITY = {ALLOW: 0, ASK: 1, DENY: 2}
 OPERATORS = {";", "&&", "||", "|", "(", ")", "&"}
 KEYWORDS = {"if", "then", "elif", "else", "fi", "do", "done", "while", "until", "for", "case", "esac", "in", "select", "function", "{", "}", "!", "[[", "]]", "[", "]", "coproc"}
 """Shell reserved words: they precede a simple command without being one, so `then rm -rf /` is `rm -rf /`."""
-REDIRECTS = {"<", ">", ">>", "<<", "<<<", "2>", "2>>", "&>", "&>>", ">|"}
+REDIRECTS = {"<", ">", ">>", "<<", "<<<", "<&", "2>", "2>>", "&>", "&>>", ">|"}
+WRITE_REDIRECTS = (">", ">>", "&>", "&>>", ">|")
+READ_REDIRECTS = ("<", "<<<", "<&")
+"""The other direction. The lexer folds ``2<`` into ``2`` and ``<``, and ``<&3`` into ``<&`` and ``3``,
+so one token is enough to find the operand of every input redirection there is."""
+OPTIONS_WITH_PATH = {"-C", "--directory", "--cwd", "-o", "--output", "-i", "--input", "-f", "--file", "-T", "--upload-file", "-t", "--target-directory", "-d", "--data", "--data-binary", "--data-raw", "-F", "--form", "--config"}
+"""Options whose value is a file or a directory rather than a setting. Read for what a command
+touches, not for what it writes: ``curl -T`` uploads and ``-o`` downloads, and both name a path."""
 WRAPPERS = {"sudo", "nohup", "time", "nice", "env", "exec", "command", "builtin", "stdbuf", "timeout"}
 SHELLS = {"bash", "sh", "zsh", "dash"}
 NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "netcat", "telnet", "ftp", "socat"}
@@ -208,11 +216,22 @@ def _flags(words: Iterable[str]) -> str:
 
 
 def _redirect_targets(words: list[str]) -> list[str]:
-    targets = []
-    for i, w in enumerate(words):
-        if w in (">", ">>", "&>", "&>>", ">|") and i + 1 < len(words):
-            targets.append(words[i + 1])
-    return targets
+    return _operands_after(words, WRITE_REDIRECTS)
+
+
+def _read_targets(words: list[str]) -> list[str]:
+    """The files a command reads through a redirection.
+
+    A rule that only reads ``>`` guards the direction that writes a secret and leaves open the one
+    that sends it: ``grep . < keyproxy.env`` and ``curl -d @keyproxy.env`` both hand the file to
+    something else. These operands are reads, so they belong with the paths a command touches and
+    not with the paths it writes.
+    """
+    return _operands_after(words, READ_REDIRECTS)
+
+
+def _operands_after(words: list[str], tokens: tuple[str, ...]) -> list[str]:
+    return [words[i + 1] for i, w in enumerate(words) if w in tokens and i + 1 < len(words)]
 
 
 def _without_redirects(words: list[str]) -> list[str]:
@@ -352,24 +371,129 @@ def expand_home(path: str, home: str) -> str:
         return _norm(path)
     if path == "~" or path.startswith("~/"):
         return _norm(home + path[1:])
+    if path.startswith("~"):
+        # `~dev/.ssh/id_rsa` is the same file as `~/.ssh/id_rsa` to the shell that runs it, and it
+        # was a way of naming it the rules did not read at all.
+        name, slash, rest = path[1:].partition("/")
+        return _norm(_home_of(name, home) + slash + rest)
     for form in ("$HOME", "${HOME}"):
         if path == form or path.startswith(form + "/"):
             return _norm(home + path[len(form) :])
     return _norm(path)
 
 
+def _home_of(user: str, home: str) -> str:
+    """Another user's home folder. Asked of the password database, and where there is no answer —
+    no such user, or a platform without one — guessed as a sibling of this one's, because a path
+    that cannot be resolved is still a path into somebody's home and is not to be waved through."""
+    try:
+        import pwd  # Lazy: POSIX only, and only this one case needs it
+
+        return pwd.getpwnam(user).pw_dir
+    except (ImportError, KeyError):
+        return posixpath.join(posixpath.dirname(home.rstrip("/")) or "/home", user)
+
+
+def real_path(path: str, base: str = "") -> str:
+    """Where a path lands on the filesystem: resolved against ``base`` when it is relative, symlinks
+    followed, a tail that does not exist yet left alone.
+
+    Folding ``..`` textually is not enough for a rule the agent can write against. The session
+    workspace is the agent's own to write, so a link it makes there reads, to ``normpath``, as a
+    path inside its own workspace and points wherever it likes.
+    """
+    try:
+        return os.path.realpath(path if posixpath.isabs(path) else posixpath.join(base, path))
+    except (OSError, ValueError):
+        return _norm(path)
+
+
+def sealed_root(path: str, roots: Iterable[str], *, base: str = "") -> str | None:
+    """The root of ``roots`` that ``path`` lands in, or ``None``.
+
+    The one answer to "is this path sealed?", asked of the filesystem rather than of the spelling,
+    and asked by everything that names a path: the shell rules over a command's operands, the file
+    tools over their arguments, and the file API over what a browser asks for. Written once so that
+    a tool cannot be the one that forgot, which is how the first version of this leaked a key file
+    through ``Read`` while ``Write`` refused the same path.
+    """
+    real = real_path(path, base)
+    for root in roots:
+        resolved = real_path(str(root))
+        if real == resolved or real.startswith(resolved.rstrip("/") + "/"):
+            return resolved
+    return None
+
+
+def real_under(path: str, roots: Iterable[str], *, base: str = "") -> bool:
+    return sealed_root(path, roots, base=base) is not None
+
+
+def _option_operands(words: list[str]) -> list[str]:
+    """The values of the options that take a path rather than a setting, in either direction.
+
+    ``curl -T secrets.env`` uploads a file and ``curl -o`` writes one; ``-C`` and ``--cwd`` move the
+    command somewhere else before it runs, which makes the directory an operand of it. The ``@``
+    forms belong here too: ``curl -d @file`` reads the file and posts it, and the word begins with a
+    character that no filter looking for a path would keep.
+    """
+    out: list[str] = []
+    for i, w in enumerate(words):
+        value = ""
+        if w in OPTIONS_WITH_PATH and i + 1 < len(words):
+            value = words[i + 1]
+        elif w.startswith("--") and "=" in w and w.split("=", 1)[0] in OPTIONS_WITH_PATH:
+            value = w.split("=", 1)[1]
+        if not value:
+            continue
+        # `-d @file` and `-F field=@file`: the payload is the file, not the word.
+        out.append(value.split("=@", 1)[1] if "=@" in value else value.lstrip("@"))
+    return out
+
+
+def _archive_members(words: list[str]) -> list[str]:
+    """What ``tar -C dir member …`` really names: the members are read from, or written into, ``dir``.
+
+    Without this, ``-C`` is a directory nobody objects to and the members are relative words that
+    resolve against the workspace, so a whole sealed directory archives out under a question that
+    reads like a backup.
+    """
+    if not words or words[0].rsplit("/", 1)[-1] != "tar":
+        return []
+    directory, members, skip = "", [], False
+    for i, w in enumerate(words[1:]):
+        if skip:
+            skip = False
+            continue
+        if w in ("-C", "--directory") and i + 2 < len(words):
+            directory, skip = words[i + 2], True
+            continue
+        if w.startswith("--directory="):
+            directory = w.split("=", 1)[1]
+            continue
+        if w.startswith("-"):
+            skip = w in ("-f", "--file") or (not w.startswith("--") and w.endswith("f"))
+            continue
+        members.append(w)
+    return [posixpath.join(directory, m) for m in members] if directory else []
+
+
 def path_operands(words: list[str]) -> list[str]:
     """Every operand of one simple command that names a file on the machine.
 
-    Its plain arguments, the operands of its redirections, and the destinations only the command's own
-    flags reveal (``cp -t``, ``curl -o``, ``tar -C``, ``dd of=``) — the same reading ``_written_paths``
-    already does, widened from where a command writes to what it touches at all. Only operands written
-    as absolute paths or against the home folder count: a relative one is resolved against the session's
-    workspace, and a word that is not a path must not be read as one.
+    Its plain arguments, the operands of its redirections in both directions, the members an archive
+    takes from a directory of its own, and the paths only the command's own options reveal (``cp -t``,
+    ``curl -o``, ``curl -d @``, ``tar -C``, ``dd of=``) — the same reading ``_written_paths`` already
+    does, widened from where a command writes to what it touches at all.
+
+    A relative operand is never skipped. It is resolved against the directory the command runs in,
+    which is where the shell would resolve it: ``cat ../../daedalus-secrets/keyproxy.env`` names the
+    key file as plainly as the absolute form does. A word that is not a path at all resolves inside
+    the session's own workspace, which is open, so reading it as one costs nothing.
     """
     head = words[0].lstrip("\\").rsplit("/", 1)[-1]
-    seen = [words[0], *(w for w in _without_redirects(words)[1:] if not w.startswith("-")), *_redirect_targets(words), *_written_paths(head, words)]
-    return [w for w in dict.fromkeys(seen) if w.startswith(("/", "~", "$HOME", "${HOME}"))]
+    seen = [words[0], *(w for w in _without_redirects(words)[1:] if not w.startswith("-")), *_redirect_targets(words), *_read_targets(words), *_option_operands(words), *_archive_members(words), *_written_paths(head, words)]
+    return [w for w in dict.fromkeys(seen) if w and not w.startswith("-")]
 
 
 def argument_paths(arguments: Any) -> list[str]:
@@ -399,7 +523,7 @@ def _under(path: str, roots: Iterable[str]) -> bool:
 class Policy:
     """The rule set: built-ins plus the operator's, evaluated per call."""
 
-    def __init__(self, *, protected_paths: Iterable[Path] = (), egress_allow: Iterable[str] = (), rules: Iterable[Rule] = (), workspace_roots: Iterable[Path] = (), operator_checkouts: Iterable[Path] = (), selfdev_mode: str = "server", native: bool = False, home_dir: Path | str = "", project_roots: Iterable[Path] = (), sealed_paths: Iterable[Path] = ()) -> None:
+    def __init__(self, *, protected_paths: Iterable[Path] = (), egress_allow: Iterable[str] = (), rules: Iterable[Rule] = (), workspace_roots: Iterable[Path] = (), operator_checkouts: Iterable[Path] = (), selfdev_mode: str = "server", native: bool = False, home_dir: Path | str = "", project_roots: Iterable[Path] = (), sealed_paths: Iterable[Path] = (), base_dir: Path | str = "") -> None:
         self.protected = [str(p) for p in protected_paths]
         self.egress_allow = [e for e in egress_allow if e.strip()]
         self.rules = list(rules)
@@ -410,10 +534,13 @@ class Policy:
         self.home = str(home_dir) if home_dir else ""
         self.project_roots = [str(p) for p in project_roots]
         self.sealed = [str(p) for p in sealed_paths]
+        self.base_dir = str(base_dir) if base_dir else ""
+        """Where a relative path is resolved from when the call does not say: the session's own
+        workspace, which is where the file tools resolve theirs and where Exec runs by default."""
 
     # -- the machine's own paths ------------------------------------------------------
 
-    def _host_paths(self, paths: Iterable[str]) -> Decision | None:
+    def _host_paths(self, paths: Iterable[str], *, base: str = "") -> Decision | None:
         """The two rules a machine needs and a container does not, over the paths a call names.
 
         In Docker mode this answers nothing at all, and that is deliberate rather than an omission:
@@ -424,19 +551,27 @@ class Policy:
         Natively the agent is a process of the operator's own user. Everything the container used to
         make impossible is now merely impolite, so the installation's own files are refused outright
         and the rest of the operator's home is a question rather than a silence.
+
+        Every path is read as the filesystem will read it: relative to ``base`` (the directory the
+        command runs in, or the session's workspace) and through the symlinks it is made of. The
+        open roots are the ones the operator opened — the workspaces, the projects, the checkouts.
+        The protected paths are deliberately not among them: they are a superset of the sealed set,
+        so listing them here exempted the whole state directory, the operator's own pairing link
+        included, from the question the rest of their home gets.
         """
         if not self.native:
             return None
-        open_roots = self.workspace_roots + self.operator_checkouts + self.project_roots + self.protected
+        open_roots = self.workspace_roots + self.operator_checkouts + self.project_roots
+        where = base or self.base_dir or (self.workspace_roots[0] if self.workspace_roots else "")
         asked: Decision | None = None
         for raw in paths:
             path = expand_home(str(raw), self.home)
-            if not path.startswith("/"):
-                continue
+            if path.startswith(("~", "$")):
+                continue  # a home form with no home to resolve it against: nothing to compare
             target = path.rstrip("*").rstrip("/") or "/"
-            if _under(target, self.sealed):
+            if sealed_root(target, self.sealed, base=where) is not None:
                 return Decision(DENY, f"{raw}: {INSTALLATION_REASON}", "host.installation")
-            if asked is None and self.home and _under(target, [self.home]) and not _under(target, open_roots):
+            if asked is None and self.home and real_under(target, [self.home], base=where) and not real_under(target, open_roots, base=where):
                 asked = Decision(ASK, f"{raw}: {HOME_REASON}", "host.home")
         return asked
 
@@ -447,7 +582,7 @@ class Policy:
         hosts = hosts_in(segments)
         worst = Decision(ALLOW, hosts=hosts)
         checkouts = list(self.operator_checkouts)
-        where = _norm(cwd) if cwd else ""
+        where = real_path(cwd, self.base_dir) if cwd else self.base_dir
 
         def escalate(action: str, reason: str, rule: str) -> None:
             nonlocal worst
@@ -467,7 +602,7 @@ class Policy:
                     escalate(DENY, f"sleep {' '.join(words[1:])}: {WAIT_REASON}", "shell.wait")
         for words in segments:
             if words[0] == "cd" and len(words) > 1:
-                where = _norm(words[1]) if words[1].startswith("/") else where  # a `cd` earlier in the line moves every later command
+                where = real_path(expand_home(words[1], self.home), where)  # a `cd` earlier in the line moves every later command
             head = words[0].lstrip("\\")
             if head.startswith("/") and head.count("/") >= 2:
                 head = head.rsplit("/", 1)[-1]  # /bin/rm is rm
@@ -484,7 +619,7 @@ class Policy:
                 recursive = "r" in flags or "R" in flags or "--recursive" in words or "-r" in words
                 if recursive and any(t in DANGEROUS_TARGETS or t.rstrip("/") in DANGEROUS_TARGETS for t in plain):
                     escalate(DENY, f"recursive delete of {', '.join(plain)}", "shell.rm_root")
-                elif recursive and any(_under(t, self.protected + checkouts) for t in plain):
+                elif recursive and any(real_under(t, self.protected + checkouts, base=where) for t in plain):
                     escalate(DENY, f"recursive delete inside a protected path ({', '.join(plain)})", "shell.rm_protected")
                 elif recursive and self.workspace_roots and any(t.rstrip("/") in self.workspace_roots or t.rstrip("/").endswith("/*") and t.rstrip("/*") in self.workspace_roots for t in plain):
                     escalate(DENY, "recursive delete of every workspace at once", "shell.rm_workspaces")
@@ -496,19 +631,19 @@ class Policy:
                 escalate(DENY, f"recursive `{head}` on a system path", "shell.chmod_root")
             for target in _written_paths(head, words):
                 normed = _norm(target)
-                if _under(normed, self.protected + checkouts if head != "sed" else self.protected):
+                if real_under(normed, self.protected + checkouts if head != "sed" else self.protected, base=where):
                     escalate(DENY, f"writing to a protected path ({target})", "shell.protected_write")
                 elif normed in DANGEROUS_TARGETS or normed.rstrip("/*") in _DANGEROUS_BASES[1:]:
                     escalate(DENY, f"writing into a system directory ({target})", "shell.system_write")
-            if (host := self._host_paths(path_operands(words))) is not None:
+            if (host := self._host_paths(path_operands(words), base=where)) is not None:
                 escalate(host.action, host.reason, host.rule)
             if head == "git":
                 sub, at = _git_subcommand(words)
                 if sub == "push":
                     if any(w in ("-f", "--force") for w in words) and "--force-with-lease" not in words:
                         escalate(ASK, "a forced push (use --force-with-lease, or ask)", "git.force_push")
-                    origin = _norm(at) if at else where
-                    if (origin and _under(origin, checkouts)) or any(_under(_norm(w), checkouts) for w in words[1:]):
+                    origin = real_path(expand_home(at, self.home), where) if at else where
+                    if (origin and real_under(origin, checkouts)) or any(real_under(_norm(w), checkouts, base=where) for w in words[1:]):
                         escalate(DENY, f"pushing from the operator's checkout; {PUSH_REASON.get(self.selfdev_mode, PUSH_REASON["server"])}", "git.operator_push")
         if self.egress_allow:
             blocked = [h for h in hosts if not host_allowed(h, self.egress_allow)]
@@ -587,4 +722,4 @@ class Policy:
         return rows
 
 
-__all__ = ["ALLOW", "ASK", "DENY", "SHELL_TOOLS", "Decision", "Policy", "Rule", "approval_key", "argument_paths", "canonical", "expand_home", "host_allowed", "hosts_in", "path_operands", "shell_segments"]
+__all__ = ["ALLOW", "ASK", "DENY", "SHELL_TOOLS", "Decision", "Policy", "Rule", "approval_key", "argument_paths", "canonical", "expand_home", "host_allowed", "hosts_in", "path_operands", "real_path", "real_under", "sealed_root", "shell_segments"]

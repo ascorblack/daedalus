@@ -2037,7 +2037,7 @@ class SessionManager:
 
     # -- tool policy ---------------------------------------------------------------
 
-    def policy(self) -> Policy:
+    def policy(self, *, base_dir: Path | str = "") -> Policy:
         cfg = self.config.policy
         rules = [Rule(id=r.id or f"config.{i}", tool=r.tool or "*", action=r.action, note=r.note, pattern=r.pattern, source="config") for i, r in enumerate(cfg.rules, 1)]
         return Policy(
@@ -2050,6 +2050,9 @@ class SessionManager:
             home_dir=Path.home() if self.settings.native else "",
             project_roots=self.projects.roots,
             sealed_paths=self.settings.sealed_paths,
+            # Where a relative path is resolved from, so that `../../daedalus-secrets/keyproxy.env`
+            # is read as the file it names rather than as a word with no slash at the front.
+            base_dir=base_dir,
         )
 
     def protected_paths(self) -> tuple[Path, ...]:
@@ -2072,7 +2075,8 @@ class SessionManager:
 
     def policy_gate(self, session_id: str, run_id: str) -> Any:
         """The policy bound to one session: grants are the session's, the egress log names the run."""
-        policy = self.policy()
+        state = self._states.get(session_id)
+        policy = self.policy(base_dir=state.workspace if state is not None else self.workspace_for(session_id))
 
         def decide(tool: str, arguments: dict[str, Any]) -> Decision:
             state = self._states.get(session_id)

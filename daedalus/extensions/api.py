@@ -38,6 +38,7 @@ from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, veri
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import tts_configured
 from daedalus.host import capabilities
+from daedalus.host.policy import sealed_root
 from daedalus.host.prompts import DEFAULT_RULES
 from daedalus.host.session_runner import TENANT, Attachment
 from daedalus.host.transcript_view import message_view
@@ -1928,6 +1929,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         target = (root / rel).resolve()
         if root.resolve() not in target.parents and target != root.resolve():
             raise HTTPException(400, "path escapes the workspace")
+        if sealed_root(str(target), [str(p) for p in manager.protected_paths()]) is not None:
+            # The containment above is what normally keeps this pane inside the operator's own work.
+            # This is the same answer the tools get, asked again here: a root that ever comes to sit
+            # over part of the installation must not open it through a browser either.
+            raise HTTPException(403, "that path is part of the installation, not of its work")
         return target
 
     def _read_path(root: Path, path: str) -> dict[str, Any]:

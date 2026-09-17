@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 
@@ -15,6 +17,18 @@ def call_id(context: ToolContext) -> str:
 
 def services_for(context: ToolContext) -> SessionServices:
     return locator.get(context.session_id)
+
+
+def refuse_protected(context: ToolContext, services: SessionServices, target: Path, verb: str) -> ToolResult | None:
+    """The refusal every tool that opens a path owes, or ``None`` when the path is the session's own.
+
+    It is here rather than in each tool because the tools that forgot it were exactly the ones that
+    mattered: the writers checked and ``Read`` did not, so the provider keys were refused to anything
+    that would have changed them and handed to the one call that only wanted to see them.
+    """
+    if services.is_protected(target):
+        return error(context, f"{target} is protected and cannot be {verb} by tools")
+    return None
 
 
 def tool_config(context: ToolContext):  # type: ignore[no-untyped-def]
@@ -88,4 +102,4 @@ def clip(text: str, limit: int, *, note: str = "") -> str:
     return head + marker + tail
 
 
-__all__ = ["FRAME_CHARS", "call_id", "clip", "error", "ok", "output_limit", "services_for", "tool_config"]
+__all__ = ["FRAME_CHARS", "call_id", "clip", "error", "ok", "output_limit", "refuse_protected", "services_for", "tool_config"]

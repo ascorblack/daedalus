@@ -9,7 +9,7 @@ from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import Message, MessageRole, TextBlock, ToolResult
 from protocore.tools.decorator import tool
 
-from daedalus.tools._common import error, ok, services_for
+from daedalus.tools._common import error, ok, refuse_protected, services_for
 
 MAX_IMAGE_BYTES = 20_000_000
 SUPPORTED = {"image/png", "image/jpeg", "image/webp", "image/gif"}
@@ -28,6 +28,8 @@ SUPPORTED = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 async def image_view(context: ToolContext, path: str, task: str, detail: str = "focused") -> ToolResult:
     services = services_for(context)
     target = services.resolve(path)
+    if refusal := refuse_protected(context, services, target, "read"):
+        return refusal
     if not target.is_file():
         return error(context, f"no such file: {target}")
     mime = mimetypes.guess_type(target.name)[0] or ""

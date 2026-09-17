@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from daedalus.host.filesystem import ExecBackend, LocalFS, ShellFS
+from daedalus.host.policy import sealed_root
 
 ProgressFn = Callable[[str], Awaitable[None]]
 SendFileFn = Callable[[Path, str | None], Awaitable[str]]
@@ -97,18 +98,13 @@ class SessionServices:
         return False
 
     def is_protected(self, path: Path) -> bool:
-        try:
-            resolved = path.resolve()
-        except OSError:
-            resolved = path
-        for protected in self.protected_paths:
-            try:
-                p = protected.resolve()
-            except OSError:
-                p = protected
-            if resolved == p or p in resolved.parents:
-                return True
-        return False
+        """Whether ``path`` is part of the installation rather than of its work.
+
+        The same function the shell rules ask, over the same list, so that a path Exec is refused is
+        not one a file tool opens: it resolves the symlinks and the ``..`` first, and it resolves a
+        relative path against this session's workspace, which is where the tools resolve theirs.
+        """
+        return sealed_root(str(path), [str(p) for p in self.protected_paths], base=str(self.workspace_dir)) is not None
 
 
 class ServiceLocator:

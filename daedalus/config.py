@@ -164,6 +164,11 @@ class Settings(BaseSettings):
     launcher_path: Path | None = Field(default_factory=lambda: env_path("DAEDALUS_LAUNCHER"))
     """The launcher's own executable, natively. It starts this process, restarts it and can replace
     it, which is the whole reason the agent is not allowed to touch it."""
+    env_file_path: Path | None = Field(default_factory=lambda: env_path("DAEDALUS_ENV_FILE"))
+    """The environment file the launcher owns, natively. It holds the Telegram bot token and the API
+    hash — full control of one of the two front doors — and is therefore the installation's, not the
+    agent's. ``None`` in a container, where the file is interpolated into a compose project the agent
+    cannot reach anyway."""
 
     rebuild_trigger_dir: Path = Path("/run/daedalus-rebuild")
     """Shared with the rebuilder sidecar — the only container that can reach Docker. It is a rebuild
@@ -235,18 +240,25 @@ class Settings(BaseSettings):
         """What the agent may neither read nor write: the parts of the installation that are the
         installation rather than its work.
 
-        The provider keys, the state database and the journals beside it, the secret that opens the
-        restart channel, the launcher's own executable and the runtime the process is executing out
-        of. In a container none of this needs saying — the keys are in another container, the state
-        is a volume the policy already refuses to write, and there is no launcher binary to protect.
-        On the operator's machine the agent runs as the operator, and a file mode protects nothing
-        from a process that owns it.
+        The provider keys, the whole state directory, the launcher's own executable, the file it
+        keeps the Telegram credentials in, and the runtime the process is executing out of. In a
+        container none of this needs saying — the keys are in another container, the state is a
+        volume the policy already refuses to write, and there is no launcher binary to protect. On
+        the operator's machine the agent runs as the operator, and a file mode protects nothing from
+        a process that owns it.
+
+        The state directory is sealed whole rather than by naming the files inside it. Enumerating
+        them sealed the database and left beside it the rollback journal that holds the same rows,
+        ``config.toml``, the session files and the one-shot link that signs the operator in — the
+        installation itself, none of which is the agent's work.
         """
-        paths = [self.secrets_dir, self.db_path, Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm"), self.supervisor_token_path]
+        paths = [self.secrets_dir, self.state_dir]
         if self.runtime_dir is not None:
             paths.append(self.runtime_dir)
         if self.launcher_path is not None:
             paths.append(self.launcher_path)
+        if self.env_file_path is not None:
+            paths.append(self.env_file_path)
         return tuple(paths)
 
     @property

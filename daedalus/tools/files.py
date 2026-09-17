@@ -13,7 +13,7 @@ from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
-from daedalus.tools._common import FRAME_CHARS, clip, error, ok, output_limit, services_for
+from daedalus.tools._common import FRAME_CHARS, clip, error, ok, output_limit, refuse_protected, services_for
 from daedalus.tools.shell import shell_environment
 
 _MAX_LINE_CHARS = 2000
@@ -49,6 +49,8 @@ async def read_file(
     services = services_for(context)
     fs = services.fs
     target = services.resolve(path)
+    if refusal := refuse_protected(context, services, target, "read"):
+        return refusal
     if not await fs.exists(target):
         return error(context, f"no such file: {target}")
     if await fs.is_dir(target):
@@ -107,8 +109,8 @@ def _binary_refusal(target: Path, size: int) -> str:
 async def write_file(context: ToolContext, path: str, content: str) -> ToolResult:
     services = services_for(context)
     target = services.resolve(path)
-    if services.is_protected(target):
-        return error(context, f"{target} is protected and cannot be written by tools")
+    if refusal := refuse_protected(context, services, target, "written"):
+        return refusal
     try:
         await services.fs.write_text(target, content)
     except OSError as exc:
@@ -130,8 +132,8 @@ async def edit_file(
 ) -> ToolResult:
     services = services_for(context)
     target = services.resolve(path)
-    if services.is_protected(target):
-        return error(context, f"{target} is protected and cannot be edited by tools")
+    if refusal := refuse_protected(context, services, target, "edited"):
+        return refusal
     fs = services.fs
     if not await fs.is_file(target):
         return error(context, f"no such file: {target}")
@@ -247,8 +249,8 @@ def apply_edit(text: str, old: str, new: str, *, replace_all: bool = False) -> t
 async def multi_edit(context: ToolContext, path: str, edits: list[dict[str, Any]]) -> ToolResult:
     services = services_for(context)
     target = services.resolve(path)
-    if services.is_protected(target):
-        return error(context, f"{target} is protected and cannot be edited by tools")
+    if refusal := refuse_protected(context, services, target, "edited"):
+        return refusal
     fs = services.fs
     if not await fs.is_file(target):
         return error(context, f"no such file: {target}")
@@ -322,6 +324,8 @@ async def find_files(
 ) -> ToolResult:
     services = services_for(context)
     root = services.resolve(path)
+    if refusal := refuse_protected(context, services, root, "listed"):
+        return refusal
     if not await services.fs.is_dir(root):
         return error(context, f"not a directory: {root}")
     matches = await services.fs.find(root, pattern, limit)
@@ -345,6 +349,8 @@ async def search_files(
 ) -> ToolResult:
     services = services_for(context)
     root = services.resolve(path)
+    if refusal := refuse_protected(context, services, root, "searched"):
+        return refusal
     code, text, err = await services.fs.search(root, pattern, glob=glob, case_insensitive=case_insensitive, limit=limit)
     if code == 1:
         return ok(context, "(no matches)", count=0)

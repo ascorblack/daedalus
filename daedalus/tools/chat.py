@@ -8,7 +8,7 @@ from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
-from daedalus.tools._common import error, ok, services_for
+from daedalus.tools._common import error, ok, refuse_protected, services_for
 
 
 @tool(
@@ -24,6 +24,8 @@ from daedalus.tools._common import error, ok, services_for
 async def send_file(context: ToolContext, path: str, caption: str | None = None) -> ToolResult:
     services = services_for(context)
     target = services.resolve(path)
+    if refusal := refuse_protected(context, services, target, "sent"):
+        return refusal
     if not target.is_file():
         return error(context, f"no such file: {target}")
     if services.send_file is None:
