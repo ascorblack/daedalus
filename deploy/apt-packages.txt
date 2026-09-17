@@ -12,3 +12,4 @@ openssh-client
 less
 procps
 bubblewrap
+opus-tools

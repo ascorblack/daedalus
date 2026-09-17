@@ -40,16 +40,11 @@ from protocore.runtime.events.types import EventType
 from daedalus.config import NO_MODEL_MESSAGE, NoModelConfigured, RuntimeConfig, Settings
 from daedalus.host.prompts import DEFAULT_RULES, split_headline
 from daedalus.host.session_runner import Attachment, SessionManager, SessionState
+from daedalus.speech.service import LocalSpeech, recogniser_available, transcribe_recording
 from daedalus.stores.sqlite import DeliveryLedger
 from daedalus.transport.telegram.markdown import markdown_to_html, split_message, strip_tags
 from daedalus.transport.telegram.render import Outbox, RunRenderer, RunView
-from daedalus.transport.telegram.voice import (
-    TranscriptionError,
-    asr_configured,
-    effective_asr,
-    transcribe,
-    voice_note_text,
-)
+from daedalus.transport.telegram.voice import TranscriptionError, voice_note_text
 
 logger = logging.getLogger(__name__)
 
@@ -361,11 +356,16 @@ class TelegramFront:
         manager: SessionManager,
         *,
         save_config: Callable[[RuntimeConfig], Awaitable[None]],
+        speech: LocalSpeech | None = None,
     ) -> None:
         self.settings = settings
         self.config = config
         self.manager = manager
         self.save_config = save_config
+        self.speech = speech if speech is not None else LocalSpeech(settings.state_dir, config)
+        """Local speech recognition, which answers before any endpoint is asked. Handed in by the
+        application so the front and the API share one models directory and one loaded model; built
+        here only for a front constructed on its own, as the tests do."""
         api = TelegramAPIServer.from_base(settings.telegram_api_base, is_local=settings.telegram_local_mode)
         self.bot = Bot(
             settings.telegram_bot_token,
@@ -1393,7 +1393,7 @@ class TelegramFront:
         if self.config.telegram.reactions:
             await TelegramOutbox(self.bot, message.chat.id, None).react(message.message_id, RUN_REACTIONS["received"])
         attachment = await self._download(message, state)  # may take a while for big files
-        if attachment is not None and (message.voice or (message.audio and (message.audio.mime_type or "") in SPEECH_MIME_TYPES)) and asr_configured(self.config.asr):
+        if attachment is not None and (message.voice or (message.audio and (message.audio.mime_type or "") in SPEECH_MIME_TYPES)) and recogniser_available(self.speech, self.config):
             if await self._voice_to_text(message, state, attachment, text):
                 return
         buffer = self._buffers.setdefault(key, InboundBuffer())
@@ -1416,7 +1416,7 @@ class TelegramFront:
             await message.reply(f"🎙 {duration}s is over the transcription limit ({self.config.asr.max_seconds}s); the file is attached as is.")
             return False
         try:
-            transcript = await transcribe(attachment.path, effective_asr(self.config.asr, self.manager))
+            transcript = await transcribe_recording(self.speech, self.config, self.manager, attachment.path)
         except TranscriptionError as exc:
             await message.reply(f"🎙 could not transcribe ({exc}); the file is attached as is.")
             return False

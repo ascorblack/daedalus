@@ -47,7 +47,7 @@ export function recorderSupported(): boolean {
 export type Listener = {
   start: () => Promise<void>;
   stop: () => void;
-  kind: "recognition" | "recorder";
+  kind: "recognition" | "recorder" | "local";
 };
 
 export type ListenerHandlers = {

@@ -156,8 +156,44 @@ async def _config(ctx: DoctorContext) -> list[Check]:
     out.append(Check("browser tools", browser == "ok", "Playwright, a headless Chromium and Pillow are here" if browser == "ok" else browser, "ok" if browser == "ok" else "info", browser_fix))
     node = await asyncio.to_thread(toolchain_status, "node")
     out.append(Check("node", node == "ok", "available" if node == "ok" else node, "ok" if node == "ok" else "info", node_fix))
+    out.append(await asyncio.to_thread(_local_speech, ctx))
     out.append(Check("per-run spend cap", cfg.limits.usd_per_run > 0, f"${cfg.limits.usd_per_run:.2f} per run, ${st.usd_per_day:.2f} per day" if cfg.limits.usd_per_run > 0 else f"no per-run cap (daily cap ${st.usd_per_day:.2f})", "ok" if cfg.limits.usd_per_run > 0 else "warn", "set limits.usd_per_run in Settings"))
     return out
+
+
+def _local_speech(ctx: DoctorContext) -> Check:
+    """Whether speech is recognised here, and whether everything that takes is actually present.
+
+    Three things have to line up — a model chosen, that model downloaded, and the engine's wheel
+    installed — and each is fixed differently, so the line says which one is missing rather than a
+    bare "not working".
+    """
+    from daedalus.speech import catalog  # Lazy: the doctor must load on an install that never selected a model
+    from daedalus.speech.models import Downloads  # Lazy: same
+    from daedalus.speech.service import converter_present  # Lazy: same
+
+    chosen = ctx.config.stt.local_model
+    if not chosen:
+        return Check("local speech", True, "none: a transcription endpoint or the browser does the listening", "ok",
+                     "pick a model in Settings → Voice → Speech recognition to recognise speech on this machine")
+    try:
+        model = catalog.get(chosen)
+    except KeyError:
+        return Check("local speech", False, f"{chosen} is configured but is not in the catalog", "fail",
+                     "pick a model again in Settings → Voice → Speech recognition")
+    if not Downloads(ctx.settings.state_dir / "models" / "stt").is_installed(model.id):
+        return Check("local speech", False, f"{model.label} is selected but was never downloaded", "fail",
+                     "download it in Settings → Voice → Speech recognition")
+    try:
+        import sherpa_onnx  # noqa: F401  # Lazy: the engine is an optional extra and this asks whether it is here
+    except ImportError:
+        fix = ("the launcher installs it on demand: `daedalus-desktop install speech`"
+               if ctx.settings.native else "install the speech extra in the runtime: `uv sync --extra speech`")
+        return Check("local speech", False, f"{model.label} is downloaded but the speech engine is not installed", "fail", fix)
+    if not model.streaming and not converter_present():
+        return Check("local speech", True, f"{model.label} active; ffmpeg is missing, so only plain WAV can be read", "warn",
+                     "install ffmpeg so Telegram voice notes and the site's recordings can be converted")
+    return Check("local speech", True, f"{model.label} active ({'streaming' if model.streaming else 'whole utterances'})", "ok")
 
 
 async def _telegram(ctx: DoctorContext) -> list[Check]:

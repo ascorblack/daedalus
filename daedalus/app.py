@@ -17,6 +17,7 @@ from typing import Any
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.boot_guard import BootGuard
 from daedalus.host.session_runner import SessionManager, SessionState
+from daedalus.speech.service import LocalSpeech
 from daedalus.stores.database import Database
 from daedalus.transport.telegram.front import TelegramFront
 
@@ -34,10 +35,19 @@ class Application:
         self.extensions: dict[str, object] = {}
         self.stopping = asyncio.Event()
         self._shut_down = False
+        # The local speech models: a directory listing and a configuration read, no engine and no
+        # model until something actually asks for words.
+        self.speech = LocalSpeech(settings.state_dir, self.config)
         self.guard = BootGuard(settings.state_dir, window_minutes=self.config.ops.boot_loop_window_minutes, threshold=self.config.ops.boot_loop_threshold)
 
     async def save_config(self, config: RuntimeConfig) -> None:
+        was = self.config.stt
         self.config = config
+        self.speech.config = config
+        if (was.local_model, was.local_language, was.local_threads) != (config.stt.local_model, config.stt.local_language, config.stt.local_threads):
+            # A different model, language or thread count is a different recogniser; the loaded one
+            # is now the wrong one and holds most of a gigabyte while being it.
+            self.speech.forget()
         config.save(self.settings.config_path)
         if self.manager is not None:
             self.manager.reload_config(config)
@@ -50,7 +60,7 @@ class Application:
         if self.settings.telegram_bot_token and not self.settings.owner_user_id:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is set without OWNER_USER_ID: the bot would not know whose messages to answer")
         if self.settings.telegram_bot_token:
-            self.front = TelegramFront(self.settings, self.config, self.manager, save_config=self.save_config)
+            self.front = TelegramFront(self.settings, self.config, self.manager, save_config=self.save_config, speech=self.speech)
         await self._install_extensions()
         await self._report_startup()
         if self.guard.skip_recovery:
@@ -162,6 +172,7 @@ class Application:
         try:
             for task in self.background:
                 task.cancel()
+            await self.speech.downloads.close()
             if self.manager is not None:
                 await self.manager.close()
             if self.front is not None:
