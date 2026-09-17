@@ -79,6 +79,19 @@ say "Checksum matches."
 mkdir -p "$dir"
 target="$(cd "$dir" && pwd)"
 
+# The same folder again is an update: the launcher is replaced and everything it made - the
+# checkouts, the keys, the models, the database under data/ - stays where it is. A running launcher
+# is asked to quit first, because a binary swapped under a running process is the old one until it
+# exits, and the next launch would only bring that old window to the front.
+if [ -d "$target/data" ]; then
+  say "Updating the installation in ${target} (your data stays)."
+  if pkill -x daedalus-desktop 2>/dev/null; then
+    say "Closing the running launcher..."
+    n=0
+    while pgrep -x daedalus-desktop >/dev/null 2>&1 && [ "$n" -lt 30 ]; do sleep 1; n=$((n + 1)); done
+  fi
+fi
+
 if [ "$platform" = "macos" ]; then
   rm -rf "$target/Daedalus.app"
   # ditto, not unzip: the bundle carries symlinks and the signature's own extended attributes, and
