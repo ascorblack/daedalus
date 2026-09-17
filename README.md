@@ -82,7 +82,12 @@ Provider keys live in a key-proxy container that injects them into upstream call
 Talk to a small fast model that answers out loud in a second, hands anything substantial to an agent session while you keep talking, and tells you when one finishes. See *Voice mode* below.
 
 </td>
-<td valign="top"></td>
+<td valign="top">
+
+**📁 Projects**<br/>
+Add a folder of your own — a repository, a directory of documents — and the agents you start in it work there. The folder is the whole of their reach: every path they read, write or run in is inside it, and one that leads out is refused, not followed. Several agents share one project and see the same files; an agent started without one still gets a scratch directory of its own, as before.
+
+</td>
 <td valign="top"></td>
 </tr>
 </table>
@@ -114,6 +119,12 @@ Talk to a small fast model that answers out loud in a second, hands anything sub
 <td align="center"><sub>Workspace files with previews and uploads</sub></td>
 <td align="center"><sub>The boards the agents keep: every task says whose it is</sub></td>
 </tr>
+<tr>
+<td colspan="2"><img src="docs/screenshots/projects.png" alt="Projects: the folders you added, the agents working in each, and one folder not mounted yet" /></td>
+</tr>
+<tr>
+<td colspan="2" align="center"><sub>Projects — a folder you add is where its agents work, and the only place they can reach</sub></td>
+</tr>
 </table>
 
 <p align="center">
@@ -136,6 +147,8 @@ Five containers, one job each. The agent container has no provider keys and no d
 ## A run, step by step
 
 <p align="center"><img src="docs/diagrams/run.png" alt="A run: the message, the prompt, the tool loop with steers, the streamed answer, the snapshot and compaction" width="88%" /></p>
+
+Where a run happens: a session works either in a **project** — a folder you added, which is both its working directory and the limit of its reach; every path it resolves is checked against that root, so a `..`, an absolute path elsewhere and a symlink out of the tree are one refusal — or, with no project, in a scratch directory of its own under the workspaces root, which is how every session worked before projects existed and still works today. Snapshots are on for a scratch workspace and off for a project until you turn them on: a project root is your repository, and committing it twice a turn costs more than the undo repays.
 
 What makes long sessions work: the **transcript** keeps everything, the **working history** the model sees is compacted into summaries when it grows (with `HistoryExpand` to read the originals back; the app shows the compaction with a progress bar while it runs), a **revert** restores the history *and* the workspace to any earlier turn, a **fork** starts a new session from one (with its own copy of the files, listed under its origin), and `/clear` starts over while keeping the files.
 
