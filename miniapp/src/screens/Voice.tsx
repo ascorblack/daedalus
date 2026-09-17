@@ -23,7 +23,7 @@ import { useQuery } from "../store";
 import { errorText, haptic } from "../ui";
 import { createLocalListener, localListenSupported } from "../stt";
 import { sttFrame } from "../sttview";
-import type { AgentNews, Listener, Speaker, VoiceUi } from "../voice";
+import type { AgentNews, Listener, Speaker, VoicePreset, VoiceUi } from "../voice";
 import {
   IDLE_VOICE,
   agentNote,
@@ -32,6 +32,7 @@ import {
   createRecorder,
   createSpeaker,
   micReady,
+  modelRow,
   orbVisual,
   recognitionSupported,
   recorderSupported,
@@ -46,7 +47,12 @@ type Agent = AgentNews;
 type VoiceState = {
   enabled: boolean;
   session_id: string;
+  /** The model in use, as it is written on a page: a preset's label, or provider/model when it has none. */
   model: string;
+  /** The preset the operator chose; "" is "whatever the default is", which `using` resolves. */
+  preset?: string;
+  using?: string;
+  presets?: VoicePreset[];
   tts?: {
     configured: boolean;
     reason?: string;
@@ -431,6 +437,9 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
 
   const ready = micReady(ui);
   const agents = ui.agents;
+  // Only the one question the page can act on: an installation with no model quick enough to hold a
+  // conversation is told where to get one, rather than left to wonder why every answer is late.
+  const model = modelRow(state);
   return (
     <>
       <PageHeader
@@ -519,6 +528,14 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
               </button>
             </form>
             <div className="sub voice-why">{canTalk ? t("voice.listening.with", { what: recogniser }) : t("voice.recogniser.none")}</div>
+            {model.addFast && (
+              <div className="sub voice-why">
+                {t("voice.card.model.none")}{" "}
+                <a href={pathFor("settings", "models")} onClick={(e) => go(e, pathFor("settings", "models"))}>
+                  {t("voice.card.model.add")}
+                </a>
+              </div>
+            )}
           </section>
 
           <aside className="voice-agents">
@@ -583,8 +600,26 @@ function spokenLine(data: VoiceState): string {
 
 /** The Settings card: what the page runs on and what it can and cannot do here. */
 export function VoiceSettings() {
-  const { data } = useQuery<VoiceState>("/api/voice", { staleMs: 10000 });
+  const { data, refresh } = useQuery<VoiceState>("/api/voice", { staleMs: 10000 });
+  const [saving, setSaving] = useState(false);
+  const [problem, setProblem] = useState("");
+  // The model is chosen here because this is where the operator came looking for it. It is the one
+  // thing on this card that is written rather than reported, and the reading that follows the write
+  // is the server's, not the app's guess at what it did.
+  const pick = async (preset: string) => {
+    setSaving(true);
+    setProblem("");
+    try {
+      await api.put("/api/voice/model", { preset });
+      await refresh();
+    } catch (e) {
+      setProblem(errorText(e));
+    } finally {
+      setSaving(false);
+    }
+  };
   if (!data) return <div className="sub">{t("common.loading")}</div>;
+  const row = modelRow(data);
   const local = data.stt?.local;
   return (
     <div className="card">
@@ -596,8 +631,27 @@ export function VoiceSettings() {
       </div>
       <div className="kv">
         <span>{t("voice.card.model")}</span>
-        <b>{data.model || "—"}</b>
+        <select className="field" style={{ margin: 0, maxWidth: "60%" }} value={row.value} disabled={saving} aria-label={t("voice.card.model")} onChange={(e) => void pick(e.target.value)}>
+          <option value="">{row.fallback ? t("voice.card.model.default.named", { model: row.fallback }) : t("voice.card.model.default")}</option>
+          {row.choices.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.slow ? t("voice.card.model.option.slow", { label: c.label, detail: c.detail }) : `${c.label} — ${c.detail}`}
+            </option>
+          ))}
+        </select>
       </div>
+      <div className="sub">
+        {t("voice.card.model.hint")} {row.warn && <span className="chip attn">{t(row.warn)}</span>}
+      </div>
+      {row.addFast && (
+        <div className="sub">
+          {t("voice.card.model.none")}{" "}
+          <a href={pathFor("settings", "models")} onClick={(e) => go(e, pathFor("settings", "models"))}>
+            {t("voice.card.model.add")}
+          </a>
+        </div>
+      )}
+      {problem && <div className="sub" style={{ color: "var(--bad)" }}>{problem}</div>}
       <div className="kv">
         <span>{t("voice.card.out")}</span>
         <b>{spokenLine(data)}</b>

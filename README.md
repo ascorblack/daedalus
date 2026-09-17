@@ -506,6 +506,10 @@ host, not by the prompt, and no mode can widen it.
 [voice]
 enabled = true
 preset = "openrouter.qwen-qwen3.7-flash"   # a preset from [presets]; pick a fast, no-thinking model
+                                           # chosen in the app too: Settings -> Voice -> Model, which
+                                           # lists the presets and warns about the slow ones. Empty
+                                           # means the default model. A change applies to the next
+                                           # thing you say, with no restart.
 
 [voice.tts]                  # reading the answer out loud, in the order it is tried
 local_voice = ""             # a voice downloaded onto this machine: "ru-dmitri", "en-amy", ...

@@ -27,9 +27,10 @@ from daedalus.extensions.voice import (
     tts_configured,
 )
 from daedalus.host.session_runner import SessionManager
+from daedalus.speech.service import LocalSpeech
 from daedalus.speech.tts_service import LocalTts
 from daedalus.stores.database import Database
-from tests.support.models import model_config
+from tests.support.models import DEFAULT_PRESET, FALLBACK_PRESET, VISION_PRESET, model_config, presets
 
 
 @pytest.fixture
@@ -592,3 +593,106 @@ def test_voice_defaults_name_a_fast_model_and_no_speech_endpoint() -> None:
     assert VoiceConfig().tts.format == "mp3"
     assert tts_configured(TtsConfig(url="http://speech.invalid/v1")) is True
     assert tts_configured(TtsConfig(provider="openrouter")) is True
+
+
+# -- the model the concierge answers with --------------------------------------------------
+
+
+@pytest.fixture
+async def picking(settings: Settings, db: Database) -> Any:
+    """The API over a real session manager and a real config file: what a model change has to move."""
+    settings.telegram_bot_token = ""
+    settings.owner_user_id = 1
+    manager = SessionManager(settings, model_config(), db=db)
+    await manager.start()
+    application = SimpleNamespace(
+        settings=settings,
+        config=manager.config,
+        db=db,
+        manager=manager,
+        front=None,
+        guard=None,
+        extensions={},
+        speech=LocalSpeech(settings.state_dir, manager.config),
+        tts=LocalTts(settings.state_dir, manager.config),
+    )
+
+    async def create_session(title: str, *, metadata: dict[str, Any] | None = None, workspace: Any = None, project_id: str | None = None) -> Any:
+        return await manager.create_session(title, metadata=metadata, workspace=workspace, project_id=project_id)
+
+    async def save_config(config: RuntimeConfig) -> None:
+        application.config = config
+        application.speech.config = config
+        application.tts.config = config
+        config.save(settings.config_path)
+        manager.reload_config(config)
+
+    application.create_session = create_session
+    application.save_config = save_config
+    voice = Voice(application)
+    application.extensions["voice"] = voice
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(application, "tok")), base_url="http://test") as c:  # type: ignore[arg-type]
+        c.app = application  # type: ignore[attr-defined]
+        c.voice = voice  # type: ignore[attr-defined]
+        yield c
+    await manager.close()
+
+
+HEADERS = {"X-Daedalus-Token": "tok"}
+
+
+async def test_the_page_lists_what_there_is_to_pick_and_which_one_is_in_use(picking: Any) -> None:
+    body = (await picking.get("/api/voice", headers=HEADERS)).json()
+    assert [p["id"] for p in body["presets"]] == list(presets())
+    assert body["preset"] == VISION_PRESET and body["using"] == VISION_PRESET
+    assert body["model"] == "Qwen 3.7 Flash (vision)"
+    # The judgement the page warns on is made here: the concierge's own preset is fast, the default
+    # one thinks and may write an essay, and the page has to be able to say so before it is chosen.
+    by_id = {p["id"]: p for p in body["presets"]}
+    assert by_id[VISION_PRESET]["fast"] is True
+    assert by_id[DEFAULT_PRESET]["fast"] is False and by_id[DEFAULT_PRESET]["thinking"] is True
+
+
+async def test_an_unknown_preset_is_refused_and_an_empty_one_means_the_default(picking: Any) -> None:
+    refused = await picking.put("/api/voice/model", json={"preset": "nothing.at-all"}, headers=HEADERS)
+    assert refused.status_code == 400
+    assert picking.app.config.voice.preset == VISION_PRESET  # nothing was written
+
+    body = (await picking.put("/api/voice/model", json={"preset": ""}, headers=HEADERS)).json()
+    assert picking.app.config.voice.preset == ""
+    # Empty is a choice, not a gap: the page is told which model that comes out as, so the card can
+    # name the model the operator is in fact talking to instead of showing a dash.
+    assert body["preset"] == "" and body["using"] == DEFAULT_PRESET
+    assert body["model"] == f"deepseek/{presets()[DEFAULT_PRESET].model}"
+
+
+async def test_the_chosen_model_is_written_to_the_file_and_survives_a_reload(picking: Any) -> None:
+    assert (await picking.put("/api/voice/model", json={"preset": FALLBACK_PRESET}, headers=HEADERS)).status_code == 200
+    reloaded = RuntimeConfig.load(picking.app.settings.config_path)
+    assert reloaded.voice.preset == FALLBACK_PRESET
+    # The rest of the file came through the round trip too: a model change is not a reset. (Loading
+    # a file adds the presets a seed contributes, so the table read back is this one and more.)
+    assert reloaded.model.preset == DEFAULT_PRESET and set(presets()) <= set(reloaded.presets)
+
+
+async def test_the_next_utterance_is_answered_by_the_model_just_chosen(picking: Any) -> None:
+    voice, manager = picking.voice, picking.app.manager
+    submitted = _capture(manager)
+    session_id = await voice.session_id()
+    assert (await manager.live.load(session_id))["preset"] == VISION_PRESET
+
+    assert (await picking.put("/api/voice/model", json={"preset": FALLBACK_PRESET}, headers=HEADERS)).status_code == 200
+    # The standing conversation is moved at once — no restart, no new session — and the engine the
+    # next run builds reads exactly this.
+    assert (await manager.live.load(session_id))["preset"] == FALLBACK_PRESET
+
+    # And a change made outside the app (the file edited by hand, then reloaded) reaches the same
+    # session at the utterance after it rather than at the next conversation.
+    await picking.app.save_config(picking.app.config.model_copy(update={"voice": picking.app.config.voice.model_copy(update={"preset": VISION_PRESET})}))
+    await voice.say("what is the time")
+    assert submitted and submitted[-1][0] == session_id
+    assert (await manager.live.load(session_id))["preset"] == VISION_PRESET
+
+    # Emptying it takes the override off rather than leaving the last model pinned to the session.
+    assert (await picking.put("/api/voice/model", json={"preset": ""}, headers=HEADERS)).status_code == 200
+    assert not (await manager.live.load(session_id))["preset"]

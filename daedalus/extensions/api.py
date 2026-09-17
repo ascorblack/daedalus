@@ -47,7 +47,7 @@ from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
-from daedalus.extensions.voice import tts_configured
+from daedalus.extensions.voice import model_options, tts_configured
 from daedalus.host import capabilities
 from daedalus.host.policy import sealed_root
 from daedalus.host.prompts import DEFAULT_RULES
@@ -217,6 +217,12 @@ class VoiceSayBody(BaseModel):
 
 class VoiceSpeakBody(BaseModel):
     text: str
+
+
+class VoiceModelBody(BaseModel):
+    """Which model preset the concierge answers with; empty means the default one."""
+
+    preset: str = ""
 
 
 class AnswerBody(BaseModel):
@@ -1413,12 +1419,28 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(503, "the voice page is switched off in the configuration")
         return extension
 
-    @api.get("/api/voice")
-    async def voice_status(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """What the page needs to decide how to listen and how to speak: the model, the endpoints, the agents."""
+    async def voice_view() -> dict[str, Any]:
+        """What the page needs to decide how to listen and how to speak: the model, the endpoints, the agents.
+
+        Both the page's poll and the model change answer with this, so a change is shown by the same
+        reading that a reload would produce rather than by what the app hoped it had just done.
+        """
         extension = app.extensions.get("voice")
         if extension is None or not app.config.voice.enabled:
-            return {"enabled": False, "session_id": "", "model": "", "tts": {"configured": False}, "stt": {"configured": False}, "agents": [], "listening": False}
+            # The model is still named and still choosable with the page switched off: which model a
+            # concierge would answer with is a decision the operator can make before switching it on.
+            return {
+                "enabled": False,
+                "session_id": "",
+                "preset": app.config.voice.preset,
+                "using": "",
+                "model": "",
+                "presets": model_options(app.config),
+                "tts": {"configured": False},
+                "stt": {"configured": False},
+                "agents": [],
+                "listening": False,
+            }
         state = await extension.state()
         # Which recogniser the page should use is decided here rather than in the extension: the
         # extension knows about endpoints, and a local model is not one.
@@ -1457,6 +1479,37 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             stt["error"] = ""
         state["stt"] = stt
         return state
+
+    @api.get("/api/voice")
+    async def voice_status(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return await voice_view()
+
+    @api.put("/api/voice/model")
+    async def voice_model(body: VoiceModelBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Choose the model the concierge answers with, from the app rather than from the file.
+
+        An unknown preset is refused rather than written: an id that names nothing would be read back
+        as "the default", and the operator would be looking at a choice the installation had quietly
+        declined to make. Empty is the one id that means that on purpose.
+        """
+        preset = body.preset.strip()
+        if preset and preset not in app.config.presets:
+            raise HTTPException(400, f"no such model preset {preset!r}")
+        raw = app.config.model_dump(mode="json")
+        raw["voice"]["preset"] = preset
+        try:
+            new_config = type(app.config).model_validate(raw)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(400, str(exc)) from exc
+        await app.save_config(new_config)
+        if app.front is not None:
+            app.front.config = new_config
+        extension = app.extensions.get("voice")
+        if extension is not None:
+            # The standing conversation is pointed at the new model now, so the next thing said into
+            # the microphone is answered by it — no restart, no new conversation.
+            await extension.apply_model()  # type: ignore[attr-defined]
+        return await voice_view()
 
     @api.get("/api/voice/stream")
     async def voice_stream(request: Request, _: dict[str, Any] = Depends(auth)) -> StreamingResponse:

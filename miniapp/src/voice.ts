@@ -595,6 +595,54 @@ export function agentNote(a: AgentNews): AgentNote {
   return { line: (a.answer ?? "").trim(), when: a.last_message_at, waiting, live: false };
 }
 
+// ── which model the concierge answers with ─────────────────────────────────────────────────
+
+/** One model preset as `/api/voice` lists it; `fast` is the server's judgement, not the page's. */
+export type VoicePreset = {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
+  thinking: boolean;
+  max_output_tokens: number;
+  fast: boolean;
+};
+
+/** One line of the Model select: what it is called, and what it is, in the parentheses after it. */
+export type ModelChoice = { id: string; label: string; detail: string; slow: boolean };
+
+/**
+ * The Model row, worked out once from what `/api/voice` said.
+ *
+ * `slow` on a choice, and `warn` on the row, are the same question asked of a candidate and of the
+ * model actually in use: a thinking model, or one allowed to write at length, answers a spoken
+ * question long after the operator stopped waiting for it. `addFast` is the harder case — an
+ * installation where every model is like that has nothing to pick, so the row says where to get one
+ * instead of pretending the choice exists.
+ */
+export type ModelRow = {
+  value: string;
+  choices: ModelChoice[];
+  /** Why the model in use is the wrong kind for a conversation, as a table key; "" when it is right. */
+  warn: string;
+  /** The model an empty choice comes out as, for the first option to name; "" when one is chosen. */
+  fallback: string;
+  addFast: boolean;
+};
+
+export function modelRow(state: { preset?: string; using?: string; presets?: VoicePreset[] } | null | undefined): ModelRow {
+  const presets = state?.presets ?? [];
+  const chosen = state?.preset ?? "";
+  const using = presets.find((p) => p.id === (state?.using || chosen));
+  return {
+    value: chosen,
+    choices: presets.map((p) => ({ id: p.id, label: p.label || p.id, detail: `${p.provider} · ${p.model}`, slow: !p.fast })),
+    warn: !using || using.fast ? "" : using.thinking ? "voice.card.model.slow" : "voice.card.model.long",
+    fallback: !chosen && using ? using.label || using.id : "",
+    addFast: presets.length === 0 || !presets.some((p) => p.fast),
+  };
+}
+
 // ── what the page is doing, as one value ───────────────────────────────────────────────────
 //
 // The page has six things it can be doing and eleven things that can change which — the operator's
