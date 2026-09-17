@@ -162,10 +162,17 @@ def key_status() -> dict[str, dict[str, Any]]:
 
 
 def agent_call(request: web.Request) -> bool:
-    """Whether this request carries the bot's own API token, which only the bot can read from its database."""
+    """Whether this request carries the bot's own API token, which only the bot can read from its database.
+
+    Compared as bytes: headers arrive decoded as latin-1, so a caller can put a non-ASCII character
+    in one, and ``compare_digest`` on two ``str`` refuses to compare those at all — a refusal that
+    came back as a 500 with a traceback instead of the 403 this is.
+    """
     token = agent_api_token()
     offered = request.headers.get("x-daedalus-token", "")
-    return bool(token) and bool(offered) and secrets.compare_digest(offered, token)
+    if not token or not offered:
+        return False
+    return secrets.compare_digest(offered.encode("utf-8", "surrogateescape"), token.encode("utf-8", "surrogateescape"))
 
 
 async def handle_keys(request: web.Request) -> web.Response:

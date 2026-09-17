@@ -37,6 +37,8 @@ from daedalus.config import (
     ModelPresetConfig,
     ProviderConfig,
     is_keyproxy_url,
+    keyproxy_base,
+    keyproxy_unresolved,
     keyproxy_upstream,
 )
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
@@ -73,6 +75,8 @@ logger = logging.getLogger(__name__)
 
 INIT_DATA_MAX_AGE = 24 * 3600
 KEYPROXY_CACHE_SECONDS = 5.0
+"""How long the key proxy's answer about its upstreams is reused. It is read once per app load and a
+proxy that does not answer costs the whole timeout; a few seconds is well inside a first screen."""
 
 
 def no_credential(kind: str, name: str) -> str:
@@ -87,8 +91,6 @@ def no_credential(kind: str, name: str) -> str:
     if kind == "endpoint":
         return f"{name} did not answer, and it holds no credential to retry with."
     return f"{name} has no key in the key proxy, so it cannot be asked what it serves. Add one and restart, or add the endpoint and its own key below."
-"""How long the key proxy's answer about its upstreams is reused. It is read once per app load and a
-proxy that does not answer costs the whole timeout; a few seconds is well inside a first screen."""
 
 
 LOGIN_WIDGET_MAX_AGE = 24 * 3600
@@ -2549,11 +2551,14 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return mask_provider_keys(data)
 
     def _keyproxy_origin() -> str:
-        for provider in app.config.providers.values():
-            if is_keyproxy_url(provider.base_url):
-                parts = provider.base_url.split("/", 3)
-                return parts[0] + "//" + parts[2]
-        return ""
+        """The one address this bot sends its own API token to, or "" when there is nothing to ask.
+
+        It is the address the launcher gave this process, never one read back out of a provider
+        entry: the provider list is written through this API, so deriving it from there turned
+        "can add a model" into "can be handed the admin token" — the caller chose the host.
+        """
+        base = keyproxy_base()
+        return base if any(is_keyproxy_url(p.base_url) for p in app.config.providers.values()) else ""
 
     upstreams_cache: dict[str, Any] = {"at": 0.0, "value": None, "client": None}
 
@@ -2607,12 +2612,19 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         said so, or the endpoint is reached directly and the configuration is the whole truth about
         it. ``key_kind`` says what a missing credential would be, which decides what the app tells
         the operator to do about it.
+
+        An endpoint that may be the key proxy at an address this process was never given is the
+        third case: it is not asked — the token goes to one address only — and it is not guessed
+        about either, so it reads as unknown rather than as ready.
         """
         via_proxy = is_keyproxy_url(pc.base_url)
         if via_proxy:
             row = (keys or {}).get(keyproxy_upstream(pc.base_url))
             key_held = None if keys is None else bool(row and row["configured"])
             key_kind = str(row["kind"]) if row else "api_key"
+        elif keyproxy_unresolved(pc.base_url):
+            key_held = None
+            key_kind = "api_key"
         else:
             # Reached directly: the registry builds an adapter only for an endpoint that can
             # authenticate, so being in `usable` is the answer, and an endpoint that needs no key

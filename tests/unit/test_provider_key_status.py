@@ -22,7 +22,8 @@ import httpx
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from daedalus.config import RuntimeConfig, Settings, is_keyproxy_url, keyproxy_upstream
+from daedalus import doctor
+from daedalus.config import RuntimeConfig, Settings, is_keyproxy_url, keyproxy_unresolved, keyproxy_upstream
 from daedalus.extensions import api as api_module
 from daedalus.extensions.api import build_app
 from daedalus.host.session_runner import SessionManager
@@ -90,6 +91,14 @@ async def test_keys_answers_the_agent_and_nobody_else(monkeypatch: pytest.Monkey
         response = await client.get("/keys", headers={"x-daedalus-token": "tok"})
         assert response.status == 200
         assert "deepseek" in (await response.json())["upstreams"]
+
+
+async def test_a_token_header_that_is_not_ascii_is_refused_not_a_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Headers arrive decoded as latin-1, so a caller can put anything in one; the answer is still 403."""
+    monkeypatch.setattr(proxy, "agent_api_token", lambda: "tok")
+    async with TestClient(TestServer(proxy.make_app())) as client:
+        response = await client.get("/keys", headers={"x-daedalus-token": "tok\u00ff"})
+        assert response.status == 403
 
 
 async def test_a_known_upstream_with_no_key_says_so_instead_of_404(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -164,7 +173,10 @@ def test_a_loopback_key_proxy_is_recognised_as_one(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("KEYPROXY_BASE_URL", NATIVE_BASE)
     assert is_keyproxy_url(NATIVE_BASE + "/deepseek") is True
     assert keyproxy_upstream(NATIVE_BASE + "/claude/v1") == "claude"
+    assert is_keyproxy_url("http://keyproxy:3200/openrouter") is False, "that is a container's address, not this machine's"
+    monkeypatch.delenv("KEYPROXY_BASE_URL", raising=False)
     assert is_keyproxy_url("http://keyproxy:3200/openrouter") is True, "a container still reaches it by name"
+    monkeypatch.setenv("KEYPROXY_BASE_URL", NATIVE_BASE)
     assert is_keyproxy_url("http://10.0.0.5:9000/v1") is False
     assert keyproxy_upstream("http://10.0.0.5:9000/v1") == ""
 
@@ -260,3 +272,61 @@ async def test_an_endpoint_that_lists_nothing_says_so_in_its_own_words(client: h
     response = await client.post("/api/providers/lookup-models", json={"provider": "openrouter"}, headers=H)
     assert response.status_code == 502
     assert "this endpoint does not list models" in response.json()["detail"]
+
+
+# -- where the token goes ------------------------------------------------------------------------
+
+
+async def test_the_token_is_offered_to_the_proxys_own_address_and_to_nothing_else(client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The provider list is operator-writable, so it may not decide where a credential is sent.
+
+    An endpoint added through Add a model with the word in its URL used to become the address the
+    bot asked for keys — with the bot's own API token in the header, which is the token that opens
+    every route of this API.
+    """
+    seen: list[httpx.Request] = []
+    _keyproxy_answering(monkeypatch, ONE_KEY, seen=seen)
+    hostile = {"kind": "openai_compat", "base_url": "https://evil.example.com/keyproxy/v1", "api_key": ""}
+    assert (await client.put("/api/providers/hostile", json=hostile, headers=H)).status_code == 200
+
+    body = (await client.get("/api/onboarding", headers=H)).json()
+    entry = next(p for p in body["providers"] if p["id"] == "hostile")
+    assert entry["via_proxy"] is False, "a provider URL that merely says keyproxy was believed"
+    assert [r.url.host for r in seen if r.headers.get("x-daedalus-token")] == ["127.0.0.1"]
+    assert not [r for r in seen if r.url.host == "evil.example.com"], "the bot called a host it was never pointed at"
+
+    lookup = await client.post("/api/providers/lookup-models", json={"provider": "hostile"}, headers=H)
+    assert lookup.status_code in (400, 502)
+    assert not [r for r in seen if r.url.host == "evil.example.com" and r.headers.get("x-daedalus-token")]
+
+
+def test_an_address_nobody_gave_this_process_is_not_guessed_at(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no KEYPROXY_BASE_URL the bot cannot recognise its own proxy, and says so instead of assuming.
+
+    The silent version of this reported six ready endpoints on a machine holding one key: a loopback
+    provider read as an endpoint that needs no proxy, so nothing was ever asked about it.
+    """
+    monkeypatch.delenv("KEYPROXY_BASE_URL", raising=False)
+    assert is_keyproxy_url("http://127.0.0.1:3200/deepseek") is False, "the token would go to whatever is on that port"
+    assert keyproxy_unresolved("http://127.0.0.1:3200/deepseek") is True
+    assert keyproxy_unresolved("https://evil.example.com/keyproxy/v1") is False
+    monkeypatch.setenv("KEYPROXY_BASE_URL", NATIVE_BASE)
+    assert keyproxy_unresolved(NATIVE_BASE + "/deepseek") is False
+    assert keyproxy_unresolved("http://127.0.0.1:9999/v1") is False, "the address is known; this is just another endpoint"
+
+
+async def test_the_doctor_says_when_the_proxy_address_is_missing(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> None:
+    monkeypatch.delenv("KEYPROXY_BASE_URL", raising=False)
+    config = _config()  # the loopback addresses a native install holds, with nothing to match them against
+    ctx = doctor.DoctorContext(settings=settings, config=config)
+    checks = await doctor._keyproxy(ctx)
+    assert len(checks) == 1 and checks[0].ok is False and "KEYPROXY_BASE_URL" in checks[0].message
+    monkeypatch.setenv("KEYPROXY_BASE_URL", NATIVE_BASE)
+    assert (await doctor._keyproxy(ctx))[0].ok is True
+
+
+def test_a_base_url_without_a_scheme_is_answered_not_raised() -> None:
+    """A provider saved with a bare host reached ``/api/onboarding``, which is the first screen."""
+    assert keyproxy_upstream("my-keyproxy-host") == ""
+    assert is_keyproxy_url("my-keyproxy-host") is False
+    assert keyproxy_unresolved("my-keyproxy-host") is False

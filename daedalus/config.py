@@ -16,6 +16,7 @@ import sys
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import tomli_w
 from pydantic import BaseModel, Field, field_validator
@@ -66,6 +67,14 @@ def env_path(name: str) -> Path | None:
 CONTAINER_KEYPROXY_BASE = "http://keyproxy:3200"
 """Where the key proxy answers inside a compose project: a service name on a private network."""
 
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+"""Addresses that mean "this machine", where a key proxy is indistinguishable from anything else."""
+
+
+def keyproxy_configured() -> bool:
+    """Whether this process was told where its key proxy is, rather than assuming the container's."""
+    return bool(os.environ.get("KEYPROXY_BASE_URL", "").strip())
+
 
 def keyproxy_base() -> str:
     """Where the key proxy answers. In a container it is a service name on a private network; on a
@@ -74,25 +83,41 @@ def keyproxy_base() -> str:
 
 
 def is_keyproxy_url(url: str) -> bool:
-    """Whether a base URL goes through this installation's key proxy.
+    """Whether a base URL is an address on this installation's key proxy — and nothing else.
 
-    A container reaches the proxy by service name, so the word is in the URL; a native installation
-    reaches it on a loopback port, where nothing in the address says what it is. Testing for the
-    word alone made every native install look as if it held its own keys — and report every endpoint
-    as ready, because the proxy was never asked.
+    The bot sends the proxy its own API token, so this decides where a credential goes and is
+    written as such: an address is the proxy's when it is under the one base this process was
+    given, and the word ``keyproxy`` appearing anywhere in a URL means nothing at all. Testing for
+    the word sent the token to whatever host an operator typed into *Add a model* — and, before
+    that, made every native install look as if it held its own keys, because a loopback address
+    says nothing about what is behind it and the proxy was never asked.
     """
     if not url:
         return False
     base = keyproxy_base()
-    return url.startswith(base + "/") or url == base or "keyproxy" in url
+    return url == base or url.startswith(base + "/")
+
+
+def keyproxy_unresolved(url: str) -> bool:
+    """Whether this may be the key proxy at an address this process was never told about.
+
+    A native installation reaches the proxy on a loopback port that the launcher passes in the
+    environment. A bot started without it — a unit file, a bare ``python -m daedalus``, a shell
+    that did not come from the launcher — cannot tell a proxy port from any other local server, and
+    the honest answer about such an endpoint is that nobody knows. It is not asked for keys and it
+    is not called ready; the doctor says why.
+    """
+    if not url or is_keyproxy_url(url) or keyproxy_configured():
+        return False
+    host = urlsplit(url).hostname or ""
+    return host in LOOPBACK_HOSTS or host == "keyproxy"
 
 
 def keyproxy_upstream(url: str) -> str:
     """The upstream name a key-proxy base URL addresses (``…:3200/deepseek`` → ``deepseek``), or ""."""
     if not is_keyproxy_url(url):
         return ""
-    base = keyproxy_base() if url.startswith(keyproxy_base()) else url.split("/", 3)[0] + "//" + url.split("/", 3)[2]
-    tail = url[len(base):].strip("/")
+    tail = url[len(keyproxy_base()) :].strip("/")
     return tail.split("/", 1)[0] if tail else ""
 
 

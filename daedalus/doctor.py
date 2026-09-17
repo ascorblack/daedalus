@@ -20,14 +20,18 @@ from typing import Any
 import httpx
 
 from daedalus import supervisor_client
-from daedalus.config import RuntimeConfig, Settings
+from daedalus.config import RuntimeConfig, Settings, keyproxy_base, keyproxy_configured, keyproxy_unresolved
 from daedalus.host import capabilities
 from daedalus.host.toolchain import status as toolchain_status
 from daedalus.providers.pricing import pricing_table
 from daedalus.providers.registry import _is_vendor_host
 from daedalus.security.redact import redact as redact_text
 from daedalus.tools.shell import bwrap_status, native_sandbox_note
-from protocore.runtime import token_counting
+
+try:  # the core's compiled token estimator, which an older core does not carry
+    from protocore.runtime import token_counting
+except ImportError:  # pragma: no cover — taken by a run against a core without the module
+    token_counting = None  # type: ignore[assignment]
 
 PROBE_TIMEOUT = 6.0
 """Default per-probe timeout; the configured value (``ops.doctor_probe_timeout_seconds``) wins."""
@@ -62,7 +66,7 @@ class DoctorContext:
 
 async def run_checks(ctx: DoctorContext) -> list[Check]:
     checks: list[Check] = []
-    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _token_counter, _runtime, _providers, _github_org):
+    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _token_counter, _runtime, _keyproxy, _providers, _github_org):
         try:
             checks.extend(await probe(ctx))
         except Exception as exc:  # noqa: BLE001 — one broken probe must not hide the others
@@ -414,8 +418,11 @@ async def _token_counter(ctx: DoctorContext) -> list[Check]:
     The fallback (``estimate_tokens_python``) runs at a few MB/s and is re-run on every tool
     surface each round; the compiled one is roughly thirty times faster on the same input. This
     just reports which one is wired up — see the core's ``protocore.runtime.token_counting``
-    module for the estimator itself.
+    module for the estimator itself. A core without the module answers "unknown" rather than
+    taking the whole API down with it at import time: the host runs under either core.
     """
+    if token_counting is None:
+        return [Check("token counter", True, "unknown: this core has no token_counting module to ask", "info")]
     active = token_counting.NATIVE_ACTIVE
     return [
         Check(
@@ -458,6 +465,31 @@ async def _runtime(ctx: DoctorContext) -> list[Check]:
         if row and row["c"]:
             out.append(Check("deliveries", False, f"{row['c']} answer(s) could not be delivered to Telegram", "warn", "they are in the Mini App transcript and answer.md in the workspace"))
     return out
+
+
+async def _keyproxy(ctx: DoctorContext) -> list[Check]:
+    """Whether this process knows where its key proxy is, and says so when it does not.
+
+    The bot sends the proxy its own API token, so it is asked at one address only: the one the
+    launcher passes in ``KEYPROXY_BASE_URL``. A bot started without it — a unit file, a bare
+    ``python -m daedalus``, a shell that did not come from the launcher — cannot recognise its own
+    proxy on a loopback port, so it asks nobody and reports those endpoints as unknown instead of
+    ready. That is a silent difference on the screen and a loud one here.
+    """
+    unresolved = sorted(pid for pid, provider in ctx.config.providers.items() if keyproxy_unresolved(provider.base_url))
+    if keyproxy_configured():
+        return [Check("key proxy", True, f"asked at {keyproxy_base()}", "ok")]
+    if not unresolved:
+        return []
+    return [
+        Check(
+            "key proxy",
+            False,
+            f"KEYPROXY_BASE_URL is not set, so {', '.join(unresolved)} cannot be told apart from any other local endpoint and are not asked for keys",
+            "warn",
+            "start the bot through the launcher, or set KEYPROXY_BASE_URL to the address the proxy listens on",
+        )
+    ]
 
 
 async def _providers(ctx: DoctorContext) -> list[Check]:
