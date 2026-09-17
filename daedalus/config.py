@@ -11,6 +11,7 @@ Two layers, deliberately separate:
 
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
@@ -20,6 +21,53 @@ from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def native_mode() -> bool:
+    """Whether this process is the agent running on the operator's own machine rather than in a
+    container. The launcher sets ``DAEDALUS_NATIVE`` when it starts the supervisor natively.
+
+    It is read from the environment and not from the configuration: the difference it makes is what
+    the paths and the defaults are, and those are decided before a configuration file is read.
+    """
+    return os.environ.get("DAEDALUS_NATIVE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def keyproxy_base() -> str:
+    """Where the key proxy answers. In a container it is a service name on a private network; on a
+    machine it is a port on the loopback interface, and the launcher says which."""
+    return os.environ.get("KEYPROXY_BASE_URL", "").strip().rstrip("/") or "http://keyproxy:3200"
+
+
+def _runtime_paths() -> list[str]:
+    """The directories this installation is made of, as the environment has them.
+
+    The container's are fixed, so a constant could name them. A native installation's are wherever
+    the operator dropped the launcher, and a constant naming ``/srv`` there would protect nothing
+    while looking exactly as if it did.
+    """
+    named = [
+        os.environ.get("STATE_DIR", "/srv/state"),
+        os.environ.get("BOT_REPO_DIR", "/srv/daedalus"),
+        os.environ.get("CORE_REPO_DIR", "/srv/protocore-exp"),
+    ]
+    if runtime_dir := os.environ.get("DAEDALUS_RUNTIME", "").strip():
+        named.append(runtime_dir)
+    return [str(Path(path)) for path in named if path.strip()]
+
+
+SYSTEM_NEVER_WRITABLE = ("/etc/ssl", "/usr/local", "/var/lib", "/opt/launcher", "/run/daedalus", "/run/daedalus-rebuild")
+"""Directories of the machine or the image that a sandbox is never opened onto, whichever mode this is."""
+
+
+def sandbox_never_writable() -> frozenset[str]:
+    """Directories the sandbox may never be told to write, for this installation.
+
+    The agent's own state, its checkouts and the runtime it runs out of, plus the system paths above.
+    Computed rather than written down, because in native mode the first three move with the
+    installation and a fixed list would name directories that are not there.
+    """
+    return frozenset(SYSTEM_NEVER_WRITABLE) | frozenset(_runtime_paths())
 
 ReasoningEffort = Literal["low", "medium", "high"]
 ApprovalMode = Literal["manual", "auto"]
@@ -68,11 +116,19 @@ class Settings(BaseSettings):
     telegram_api_hash: str = ""
     """Only the local Bot API server needs it; the bot reads it so the redactor can mask it."""
 
+    native: bool = Field(default_factory=native_mode)
+    """True when the agent is a process on the operator's machine rather than a container. It changes
+    what the defaults are — the paths, the address services are reached at, the sandbox — and what the
+    doctor has to say about the checks that only mean something inside a container."""
+
     state_dir: Path = Path("/srv/state")
     workspaces_dir: Path = Path("/srv/workspaces")
     bot_repo_dir: Path = _REPO_ROOT
     core_repo_dir: Path = _REPO_ROOT.parent / "protocore-exp"
     supervisor_socket: Path = Path("/run/daedalus/supervisor.sock")
+    supervisor_tcp: str = ""
+    """``host:port`` the supervisor listens on where unix sockets are not available (Windows); empty
+    everywhere else, and then the socket above is what is used. One or the other, never both."""
     rebuild_trigger_dir: Path = Path("/run/daedalus-rebuild")
     """Shared with the rebuilder sidecar — the only container that can reach Docker. It is a rebuild
     channel only while something is on the other end of it, which the sidecar says by keeping a
@@ -90,12 +146,27 @@ class Settings(BaseSettings):
     api_port: int = 8765
     services_port_range: str = "8100-8119"
     """Ports a session's services may listen on; the compose file publishes the same range from the container."""
-    services_public_host: str = ""
-    """The address the operator reaches those ports at (the docker host on the LAN); empty = shown as <host>."""
+    services_public_host: str = Field(default_factory=lambda: "127.0.0.1" if native_mode() else "")
+    """The address the operator reaches those ports at (the docker host on the LAN); empty = shown as <host>.
+    Natively there is no host but this one: a service the agent starts listens on the loopback interface of
+    the operator's own machine, and that is the address to open."""
     miniapp_public_url: str = ""
 
     usd_per_day: float = 20.0
     """Daily spend cap. Enforced by the supervisor from its own environment, never from config.toml."""
+
+    @property
+    def supervisor_address(self) -> str:
+        """Where the supervisor is asked for a restart, a rebuild or a rollback: a unix socket path,
+        or ``tcp://host:port`` where the platform has no unix sockets."""
+        if tcp := self.supervisor_tcp.strip():
+            return f"tcp://{tcp}"
+        return str(self.supervisor_socket)
+
+    @property
+    def sandbox_never_writable(self) -> frozenset[str]:
+        """This installation's own directories, which a sandbox is never opened onto."""
+        return frozenset(SYSTEM_NEVER_WRITABLE) | {str(self.state_dir), str(self.bot_repo_dir), str(self.core_repo_dir)}
 
     @property
     def config_path(self) -> Path:
@@ -225,7 +296,7 @@ class DuckDuckGoSearchConfig(BaseModel):
 class SerperSearchConfig(BaseModel):
     """Google results through serper.dev; the key lives in the key proxy (``KEYPROXY_KEY_SERPER``)."""
 
-    base_url: str = "http://keyproxy:3200/serper"
+    base_url: str = Field(default_factory=lambda: keyproxy_base() + "/serper")
     gl: str = ""
     """Country code for Google (``ru``, ``us``); empty = Google's default."""
     hl: str = ""
@@ -233,22 +304,22 @@ class SerperSearchConfig(BaseModel):
 
 
 class KeenableSearchConfig(BaseModel):
-    base_url: str = "http://keyproxy:3200/keenable"
+    base_url: str = Field(default_factory=lambda: keyproxy_base() + "/keenable")
     snippet_max_length: int = Field(default=600, ge=180, le=10_000)
 
 
 class TavilySearchConfig(BaseModel):
-    base_url: str = "http://keyproxy:3200/tavily"
+    base_url: str = Field(default_factory=lambda: keyproxy_base() + "/tavily")
     depth: Literal["basic", "advanced", "fast", "ultra-fast"] = "basic"
 
 
 class ExaSearchConfig(BaseModel):
-    base_url: str = "http://keyproxy:3200/exa"
+    base_url: str = Field(default_factory=lambda: keyproxy_base() + "/exa")
     type: Literal["auto", "instant", "fast", "deep"] = "auto"
 
 
 class PerplexitySearchConfig(BaseModel):
-    base_url: str = "http://keyproxy:3200/perplexity"
+    base_url: str = Field(default_factory=lambda: keyproxy_base() + "/perplexity")
 
 
 class WebSearchConfig(BaseModel):
@@ -288,8 +359,10 @@ class WebToolsConfig(BaseModel):
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
 
-SANDBOX_NEVER_WRITABLE = frozenset({"/srv/state", "/srv/daedalus", "/srv/protocore-exp", "/opt/launcher", "/run/daedalus", "/run/daedalus-rebuild", "/etc/ssl", "/usr/local", "/var/lib"})
-"""Directories the sandbox may never be told to write, however the config is edited."""
+SANDBOX_NEVER_WRITABLE = frozenset({"/srv/state", "/srv/daedalus", "/srv/protocore-exp"}) | frozenset(SYSTEM_NEVER_WRITABLE)
+"""The container's version of the list, kept as the name the rest of the code and the tests know.
+The one the validator really asks is :func:`sandbox_never_writable`, which adds this installation's
+own directories — in a container they are the same three."""
 
 
 class ExecToolsConfig(BaseModel):
@@ -310,7 +383,7 @@ class ExecToolsConfig(BaseModel):
             path = Path(raw)
             if not path.is_absolute():
                 raise ValueError(f"sandbox_extra_writable entries must be absolute paths: {raw!r}")
-            if len(path.parts) < 3 or str(path) in SANDBOX_NEVER_WRITABLE:
+            if len(path.parts) < 3 or str(path) in (SANDBOX_NEVER_WRITABLE | sandbox_never_writable()):
                 raise ValueError(f"{raw!r} would open too much to the sandbox; name a specific directory")
         return value
 
@@ -773,13 +846,13 @@ class RuntimeConfig(BaseModel):
     (Settings → Models → Add a model); ``deploy/config.example.toml`` shows the shape of an entry."""
     providers: dict[str, ProviderConfig] = Field(
         default_factory=lambda: {
-            "deepseek": ProviderConfig(kind="deepseek", base_url="http://keyproxy:3200/deepseek"),
-            "openrouter": ProviderConfig(kind="openrouter", base_url="http://keyproxy:3200/openrouter"),
+            "deepseek": ProviderConfig(kind="deepseek", base_url=keyproxy_base() + "/deepseek"),
+            "openrouter": ProviderConfig(kind="openrouter", base_url=keyproxy_base() + "/openrouter"),
             "vllm": ProviderConfig(kind="vllm", base_url=""),
-            "grok": ProviderConfig(kind="openai_compat", base_url="http://keyproxy:3200/grok/v1", timeout_seconds=900.0, pricing={"grok": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
-            "codex": ProviderConfig(kind="openai_compat", base_url="http://keyproxy:3200/codex/v1", timeout_seconds=900.0, pricing={"gpt": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
-            "claude": ProviderConfig(kind="openai_compat", base_url="http://keyproxy:3200/claude/v1", timeout_seconds=900.0, pricing={"claude": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
-            "opencode": ProviderConfig(kind="opencode", base_url="http://keyproxy:3200/opencode", timeout_seconds=900.0, pricing=OPENCODE_GO_PRICING),
+            "grok": ProviderConfig(kind="openai_compat", base_url=keyproxy_base() + "/grok/v1", timeout_seconds=900.0, pricing={"grok": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
+            "codex": ProviderConfig(kind="openai_compat", base_url=keyproxy_base() + "/codex/v1", timeout_seconds=900.0, pricing={"gpt": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
+            "claude": ProviderConfig(kind="openai_compat", base_url=keyproxy_base() + "/claude/v1", timeout_seconds=900.0, pricing={"claude": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}}),
+            "opencode": ProviderConfig(kind="opencode", base_url=keyproxy_base() + "/opencode", timeout_seconds=900.0, pricing=OPENCODE_GO_PRICING),
         }
     )
     prompt: PromptConfig = Field(default_factory=PromptConfig)
@@ -976,7 +1049,7 @@ def _seed_claude_subscription(raw: dict[str, Any]) -> bool:
     if isinstance(providers, dict) and "claude" not in providers:
         providers["claude"] = {
             "kind": "openai_compat",
-            "base_url": "http://keyproxy:3200/claude/v1",
+            "base_url": keyproxy_base() + "/claude/v1",
             "timeout_seconds": 900.0,
             "pricing": {"claude": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}},
         }

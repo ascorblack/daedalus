@@ -41,10 +41,14 @@ NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat",
 _DANGEROUS_BASES = ("/", "/srv", "/opt", "/etc", "/usr", "/var", "/home", "/root", "/boot", "/lib", "/lib64", "/bin", "/sbin", "/proc", "/sys", "/dev", "/run", "/tmp")
 DANGEROUS_TARGETS = {"~", "~/", "~/*", "$HOME", "$HOME/*", "${HOME}"} | {form for base in _DANGEROUS_BASES for form in (base, base.rstrip("/") + "/", base.rstrip("/") + "/*")}
 """What a recursive delete or a recursive chmod must never be aimed at: the machine's own directories, whole or globbed."""
-OPERATOR_CHECKOUTS = ("/srv/daedalus", "/srv/protocore-exp")
-"""The operator's repositories as mounted in the container: what the agent may do with them depends on the
-self-development mode, but pushing from them is never one of those things. The host adds the checkouts' real
-paths when it builds the policy."""
+CONTAINER_CHECKOUTS = ("/srv/daedalus", "/srv/protocore-exp")
+"""The operator's repositories where a container mounts them. What the agent may do with them depends on the
+self-development mode, but pushing from them is never one of those things.
+
+These are a fallback, not the answer: the host builds the policy with the checkouts' real paths from
+``Settings``, which is what they are on a native installation — a folder the operator chose, with nothing
+under ``/srv`` at all. Naming ``/srv`` there would guard a directory that does not exist while reading
+exactly as if it guarded the checkouts."""
 PUSH_REASON = {
     "server": "changes to the host and core go through SelfPropose",
     "local": "changes to the host and core stay in this checkout and apply after a restart",
@@ -337,7 +341,7 @@ class Policy:
         self.egress_allow = [e for e in egress_allow if e.strip()]
         self.rules = list(rules)
         self.workspace_roots = [str(p) for p in workspace_roots]
-        self.operator_checkouts = [*OPERATOR_CHECKOUTS, *(str(p) for p in operator_checkouts)]
+        self.operator_checkouts = [str(p) for p in operator_checkouts] or list(CONTAINER_CHECKOUTS)
         self.selfdev_mode = selfdev_mode
 
     # -- built-in judgement -----------------------------------------------------------

@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -33,6 +34,47 @@ class SandboxUnavailable(RuntimeError):
     """The configured sandbox cannot be created here; commands do not run unsandboxed instead."""
 
 
+def shell_argv(command: str, *, windows: bool | None = None) -> list[str]:
+    """The program and arguments that run one shell command on this platform.
+
+    Everywhere but Windows it is ``bash -lc``, as it has always been. Windows has no bash: the
+    portable runtime's git is MinGit, whose ``usr/bin/sh.exe`` is a dash, and that is what Exec runs
+    there. It is a POSIX shell and not a Git Bash — a command written with arrays or ``[[ ]]`` will
+    not run — which the tool's own description says rather than leaving the model to find out.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows:
+        return ["bash", "-lc", command]
+    return [windows_shell(), "-c", command]
+
+
+def windows_shell() -> str:
+    """The POSIX shell on a Windows installation: the one in the portable runtime's git, else
+    whatever a git already on the machine brings with it, else the bare name and a clear failure."""
+    if runtime := os.environ.get("DAEDALUS_RUNTIME", "").strip():
+        candidate = Path(runtime) / "git" / "usr" / "bin" / "sh.exe"
+        if candidate.exists():
+            return str(candidate)
+    if git := shutil.which("git"):
+        candidate = Path(git).resolve().parent.parent / "usr" / "bin" / "sh.exe"
+        if candidate.exists():
+            return str(candidate)
+    return "sh.exe"
+
+
+def native_sandbox_note() -> str:
+    """What the operator is told about isolation on a machine with no container around the agent.
+
+    Said once, plainly, in the doctor and in the README: what is gone and what is not. The policy
+    engine, the approval gates, the protected paths, the network allowlist and the spend caps are in
+    the agent and all still apply. The wall behind them is what a container was.
+    """
+    if sys.platform.startswith("linux"):
+        return "native mode: no container boundary — Exec runs as you. bubblewrap still confines it when tools.exec.sandbox = workspace."
+    return "native mode: no container boundary and no bubblewrap on this platform — Exec runs as you, with the policy rules and the approval gates as the only limits."
+
+
 def bwrap_status() -> str:
     """Whether bubblewrap can create namespaces in this container (Docker's default seccomp profile forbids it).
 
@@ -42,6 +84,12 @@ def bwrap_status() -> str:
     if _bwrap_state == "ok" or (_bwrap_state is not None and time.monotonic() - _bwrap_probed_at < PROBE_RETRY_SECONDS):
         return _bwrap_state
     _bwrap_probed_at = time.monotonic()
+    if not sys.platform.startswith("linux"):
+        # bubblewrap is a Linux facility built on user namespaces. There is nothing to probe for on
+        # macOS or Windows, and probing anyway would report it as missing software rather than as
+        # the platform it is.
+        _bwrap_state = f"bubblewrap is a Linux facility; {sys.platform} has no sandbox for Exec"
+        return _bwrap_state
     bwrap = shutil.which("bwrap")
     if bwrap is None:
         _bwrap_state = "bwrap is not installed"
@@ -63,7 +111,7 @@ async def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config
     the parent so a timeout kill cannot leave it behind. Everything else is entered read-only.
     """
     global _warned_missing_bwrap
-    plain = ["bash", "-lc", command]
+    plain = shell_argv(command)
     if getattr(exec_config, "sandbox", "off") != "workspace":
         return plain, False
     status = await asyncio.to_thread(bwrap_status)
@@ -84,7 +132,7 @@ async def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config
             continue
         bound.add(str(path))
         argv += ["--bind", str(path), str(path)]
-    return argv + ["bash", "-lc", command], True
+    return argv + shell_argv(command), True
 
 
 # Environment names a tool's subprocess may inherit. Everything else —

@@ -19,13 +19,14 @@ from typing import Any
 
 import httpx
 
+from daedalus import supervisor_client
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.host import capabilities
 from daedalus.host.toolchain import status as toolchain_status
 from daedalus.providers.pricing import pricing_table
 from daedalus.providers.registry import _is_vendor_host
 from daedalus.security.redact import redact as redact_text
-from daedalus.tools.shell import bwrap_status
+from daedalus.tools.shell import bwrap_status, native_sandbox_note
 
 PROBE_TIMEOUT = 6.0
 """Default per-probe timeout; the configured value (``ops.doctor_probe_timeout_seconds``) wins."""
@@ -60,7 +61,7 @@ class DoctorContext:
 
 async def run_checks(ctx: DoctorContext) -> list[Check]:
     checks: list[Check] = []
-    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _runtime, _providers, _github_org):
+    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _runtime, _providers, _github_org):
         try:
             checks.extend(await probe(ctx))
         except Exception as exc:  # noqa: BLE001 — one broken probe must not hide the others
@@ -133,12 +134,20 @@ async def _config(ctx: DoctorContext) -> list[Check]:
     sandbox = cfg.tools.exec.sandbox
     status = await asyncio.to_thread(bwrap_status)
     usable = status == "ok"
-    out.append(Check("exec sandbox", sandbox == "off" or usable, f"{sandbox}" + (f" (available: {status})" if sandbox == "off" else ("" if usable else f" requested but unavailable — Exec runs unsandboxed: {status}")), "ok" if sandbox == "off" or usable else "warn", "give the container cap_add SYS_ADMIN and security_opt seccomp=unconfined (see deploy/compose.yaml), then rebuild"))
+    sandbox_fix = "give the container cap_add SYS_ADMIN and security_opt seccomp=unconfined (see deploy/compose.yaml), then rebuild"
+    if st.native:
+        sandbox_fix = "set tools.exec.sandbox = off in Settings → Tools, or run this installation in Docker mode for a container boundary"
+    out.append(Check("exec sandbox", sandbox == "off" or usable, f"{sandbox}" + (f" (available: {status})" if sandbox == "off" else ("" if usable else f" requested but unavailable — Exec runs unsandboxed: {status}")), "ok" if sandbox == "off" or usable else "warn", sandbox_fix))
     # Informational, not warnings: an installation that never opens a page or runs npx is not a broken one.
     browser = await asyncio.to_thread(toolchain_status, "browser")
-    out.append(Check("browser tools", browser == "ok", "Playwright, a headless Chromium and Pillow are here" if browser == "ok" else browser, "ok" if browser == "ok" else "info", "run the `:browser` tag of the agent image if the browser skills are wanted"))
+    browser_fix = "run the `:browser` tag of the agent image if the browser skills are wanted"
+    node_fix = "the skills that shell out to npx cannot run here; nothing else needs it"
+    if st.native:
+        browser_fix = "the launcher installs it on demand: `daedalus-desktop` → the runtime extras, or `daedalus-desktop install browser`"
+        node_fix = "the launcher installs it on demand: `daedalus-desktop install node`; nothing but those skills needs it"
+    out.append(Check("browser tools", browser == "ok", "Playwright, a headless Chromium and Pillow are here" if browser == "ok" else browser, "ok" if browser == "ok" else "info", browser_fix))
     node = await asyncio.to_thread(toolchain_status, "node")
-    out.append(Check("node", node == "ok", "available" if node == "ok" else node, "ok" if node == "ok" else "info", "the skills that shell out to npx cannot run here; nothing else needs it"))
+    out.append(Check("node", node == "ok", "available" if node == "ok" else node, "ok" if node == "ok" else "info", node_fix))
     out.append(Check("per-run spend cap", cfg.limits.usd_per_run > 0, f"${cfg.limits.usd_per_run:.2f} per run, ${st.usd_per_day:.2f} per day" if cfg.limits.usd_per_run > 0 else f"no per-run cap (daily cap ${st.usd_per_day:.2f})", "ok" if cfg.limits.usd_per_run > 0 else "warn", "set limits.usd_per_run in Settings"))
     return out
 
@@ -340,23 +349,48 @@ async def _git_probe(ctx: DoctorContext) -> list[Check]:
 
 
 async def _supervisor(ctx: DoctorContext) -> list[Check]:
-    sock = ctx.settings.supervisor_socket
+    address = ctx.settings.supervisor_address
     if _selfdev_mode(ctx) == "off":
         return []  # without self-development there is nothing for the supervisor to rebuild or roll back
-    if not sock.exists():
-        return [Check("supervisor", False, f"socket {sock} not present (development mode: no rebuild/rollback)", "warn", "run under the supervisor for self-updates")]
+    if not supervisor_client.present(address):
+        return [Check("supervisor", False, f"{address} not present (development mode: no rebuild/rollback)", "warn", "run under the supervisor for self-updates")]
     selfdev = ctx.extensions.get("selfdev")
     if selfdev is None:
         return [Check("supervisor", True, "socket present", "ok")]
     try:
         status = await asyncio.wait_for(selfdev.supervisor_status(), timeout=_timeout(ctx))
     except Exception as exc:  # noqa: BLE001
-        return [Check("supervisor", False, f"status call failed: {type(exc).__name__}: {exc}", "fail", "restart the container; the supervisor is PID 1")]
+        hint = "restart the launcher; it is what keeps the supervisor running" if ctx.settings.native else "restart the container; the supervisor is PID 1"
+        return [Check("supervisor", False, f"status call failed: {type(exc).__name__}: {exc}", "fail", hint)]
     if not status:
         return [Check("supervisor", False, "no answer", "fail")]
     out = [Check("supervisor", True, f"bot {str(status.get('bot'))[:10]} core {str(status.get('core'))[:10]}, child {'running' if status.get('child_running') else 'stopped'}", "ok")]
     if status.get("failed"):
         out.append(Check("last rebuild", False, str(status["failed"])[:200], "warn", "fix the failing preflight step and /rebuild again"))
+    return out
+
+
+# Checks that only mean something one side or the other of a container boundary. Each says so rather
+# than being left out: an operator reading the doctor should see that the question was asked.
+CONTAINER_ONLY = (
+    ("container image", "the image the agent runs in is what carries its environment"),
+    ("image rebuild channel", "a new image is built by the rebuilder sidecar and the container replaced"),
+    ("published ports", "the ports a session's services listen on are published from the container to the host"),
+)
+
+
+async def _native(ctx: DoctorContext) -> list[Check]:
+    """What native mode is, and what the container-only checks have to say where there is no container."""
+    if not ctx.settings.native:
+        return []
+    out = [
+        Check("isolation", True, native_sandbox_note(), "info", "the policy rules, the approval gates, the protected paths, the egress allowlist and the spend caps all still apply"),
+        Check("services address", True, f"{ctx.settings.services_public_host or '127.0.0.1'}:{ctx.settings.services_port_range} — bound on this machine, not published from anywhere", "ok"),
+    ]
+    for name, why in CONTAINER_ONLY:
+        out.append(Check(name, True, f"not applicable (native): {why}", "info"))
+    git = shutil.which("git")
+    out.append(Check("portable runtime", bool(git), f"git {git}" if git else "git is not on PATH; the checkouts and self-development need it", "ok" if git else "fail", "install git, or start the launcher again — it puts the runtime's own on PATH"))
     return out
 
 

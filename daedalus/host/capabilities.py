@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from daedalus import supervisor_client
 from daedalus.config import RuntimeConfig, Settings
 
 PUBLISHED_FILE = "capabilities.json"
@@ -154,8 +155,8 @@ def rebuild_channel(settings: Settings) -> str:
     file said yes on every installation that had a checkout, and the trigger this promises would be
     written into a directory nothing reads.
     """
-    if settings.supervisor_socket.exists():
-        return "the supervisor socket"
+    if supervisor_client.present(settings.supervisor_address):
+        return "the supervisor" + (" on the loopback port" if settings.supervisor_tcp.strip() else " socket")
     heartbeat = settings.rebuild_trigger_dir / REBUILDER_HEARTBEAT
     try:
         age = time.time() - heartbeat.stat().st_mtime
