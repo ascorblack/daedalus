@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{.Lang}}">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -7,49 +7,56 @@
 <meta name="csrf" content="{{.CSRF}}" />
 <link rel="stylesheet" href="/assets/style.css" />
 </head>
-<body>
-<main class="wrap">
-  <header class="head">
-    <h1>Daedalus</h1>
-    <p class="sub">Running from <code>{{.Status.Data}}</code> in <strong>{{.Status.ModeDetail}}</strong>.</p>
-    <p class="sub">{{if .Native}}Closing this {{if .Windowed}}window{{else}}launcher{{end}} stops the agent: it is a process under the launcher, not a container, and an agent nobody can see is one nobody can stop. A run in flight is saved and picks up where it left off on the next start.{{else}}{{if .Windowed}}Closing this window leaves the stack running — it keeps running in the background and comes back with the machine.{{else}}Closing this launcher leaves the stack running.{{end}}{{end}}</p>
-    {{if .Native}}<p class="sub">No container boundary: Exec runs as you. The policy asks before a command or a file touches anything outside the project, refuses the installation&rsquo;s own files outright, and the approval gates, the network allowlist and the spend caps all still apply.</p>{{end}}
-  </header>
+<body data-page="status" data-lang="{{.Lang}}">
+{{template "topbar" .}}
 
-  <p class="banner warn" id="alert" hidden></p>
+<main class="page">
+  <div class="inner">
+    <header class="hero rise">
+      <h1>{{.T "status.title"}}</h1>
+      <p>{{if .Native}}{{.T "status.mode.native"}}{{else}}{{.T "status.mode.docker"}}{{end}} — <code>{{.Status.Data}}</code></p>
+      <p>{{if .Native}}{{.T "status.close.native"}}{{else}}{{.T "status.close.docker"}}{{end}}</p>
+    </header>
 
-  <section class="card change" id="change" hidden>
-    <h2 id="change-title"></h2>
-    <p id="change-body"></p>
-    <div class="actions">
-      <button class="primary" data-action="apply" id="change-apply" hidden>Restart to apply</button>
-    </div>
-  </section>
+    <p class="banner" id="alert" hidden></p>
 
-  <section class="cards">
-    <div class="card stat"><span class="label">{{if .Native}}Runs on{{else}}Docker{{end}}</span><span class="value" id="docker">…</span></div>
-    <div class="card stat"><span class="label">{{if .Native}}Processes{{else}}Containers{{end}}</span><span class="value" id="containers">…</span></div>
-    <div class="card stat"><span class="label">Telegram</span><span class="value" id="telegram">…</span></div>
-    <div class="card stat"><span class="label">App</span><a class="value link" id="appurl" href="{{.Status.AppURL}}">{{.Status.AppURL}}</a></div>
-  </section>
+    <section class="card decide rise" id="change" hidden style="--i: 1">
+      <h2 id="change-title"></h2>
+      <p id="change-body"></p>
+      <div class="actions">
+        <button class="primary" data-action="apply" id="change-apply" hidden>{{.T "change.apply"}}</button>
+      </div>
+    </section>
 
-  <section class="card">
-    <div class="actions">
-      <button class="primary" data-action="open">Open the app</button>
-      <button data-action="start">Start</button>
-      <button data-action="stop">Stop</button>
-      <button data-action="update">Update</button>
-      <a class="button" href="/setup">Change the configuration</a>
-      <span class="busy" id="busy"></span>
-    </div>
-  </section>
+    <section class="tiles">
+      <div class="card tile rise" style="--i: 1"><span class="label">{{if .Native}}{{.T "status.tile.runs"}}{{else}}{{.T "status.tile.docker"}}{{end}}</span><span class="value" id="docker">…</span></div>
+      <div class="card tile rise" style="--i: 2"><span class="label">{{if .Native}}{{.T "status.tile.processes"}}{{else}}{{.T "status.tile.containers"}}{{end}}</span><span class="value" id="containers">…</span></div>
+      <div class="card tile rise" style="--i: 3"><span class="label">{{.T "status.tile.telegram"}}</span><span class="value" id="telegram">…</span></div>
+      <div class="card tile rise" style="--i: 4"><span class="label">{{.T "status.tile.app"}}</span><a class="value" id="appurl" href="{{.Status.AppURL}}">{{.Status.AppURL}}</a></div>
+    </section>
 
-  <section class="card">
-    <h2>What the launcher is doing</h2>
-    <pre class="log" id="log">nothing yet</pre>
-    <p class="hint">{{if .Native}}The agent&rsquo;s own logs are files: <code>{{.Status.Data}}/runtime/logs/</code>. Ports in use: <span id="ports">…</span>.{{else}}The stack&rsquo;s own logs: <code>daedalus-desktop logs -f</code>.{{end}}</p>
-  </section>
+    <section class="card rise" style="--i: 5">
+      <div class="actions">
+        <button class="primary" data-action="open">{{.T "status.open"}}</button>
+        <button data-action="start">{{.T "status.start"}}</button>
+        <button data-action="stop">{{.T "status.stop"}}</button>
+        <button data-action="update">{{.T "status.update"}}</button>
+        <a class="button" href="/setup">{{.T "status.configure"}}</a>
+        <span class="busy" id="busy"></span>
+      </div>
+      {{if .Native}}<p class="note">{{.T "status.native.note"}}</p>{{end}}
+    </section>
+
+    <details class="panel rise" style="--i: 6">
+      <summary>{{.T "status.log"}}</summary>
+      <div class="body">
+        <pre class="log" id="log">{{.T "status.log.empty"}}</pre>
+        <p class="note">{{if .Native}}{{.T "status.logs.files"}} <code>{{.Status.Data}}/runtime/logs/</code> · {{.T "status.tile.ports"}}: <span id="ports">…</span>{{else}}{{.T "status.logs.command"}} <code>daedalus-desktop logs -f</code>{{end}}</p>
+      </div>
+    </details>
+  </div>
 </main>
+<script type="application/json" id="messages">{{.Messages}}</script>
 <script src="/assets/app.js"></script>
 </body>
 </html>
