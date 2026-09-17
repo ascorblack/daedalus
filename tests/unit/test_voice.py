@@ -11,14 +11,17 @@ import httpx
 import pytest
 from protocore.contracts.types import Message, MessageRole, TextBlock
 from protocore.runtime.events.types import EventType
+from starlette.middleware.gzip import GZipMiddleware
 
 from daedalus.config import VOICE_ONLY_TOOLS, VOICE_TOOLS, RuntimeConfig, Settings, TtsConfig, VoiceConfig
+from daedalus.extensions import voice as voice_module
 from daedalus.extensions.api import VOICE_SAY_MAX_CHARS, VOICE_TTS_MAX_CHARS, build_app
 from daedalus.extensions.voice import (
     REPORT_CLOSE,
     REPORT_OPEN,
     Voice,
     delta_text,
+    preferred_preset,
     progress_line,
     report_block,
     settles_interim,
@@ -668,7 +671,7 @@ async def test_one_reading_answers_everything_the_page_asks_of_it(picking: Any) 
     assert body["tts"]["kind"] in ("local", "endpoint", "browser")
 
 
-async def test_an_unknown_preset_is_refused_and_an_empty_one_means_the_default(picking: Any) -> None:
+async def test_an_unknown_preset_is_refused_and_an_empty_one_means_the_quickest_there_is(picking: Any) -> None:
     refused = await picking.put("/api/voice/model", json={"preset": "nothing.at-all"}, headers=HEADERS)
     assert refused.status_code == 400
     assert picking.app.config.voice.preset == VISION_PRESET  # nothing was written
@@ -676,9 +679,25 @@ async def test_an_unknown_preset_is_refused_and_an_empty_one_means_the_default(p
     body = (await picking.put("/api/voice/model", json={"preset": ""}, headers=HEADERS)).json()
     assert picking.app.config.voice.preset == ""
     # Empty is a choice, not a gap: the page is told which model that comes out as, so the card can
-    # name the model the operator is in fact talking to instead of showing a dash.
-    assert body["preset"] == "" and body["using"] == DEFAULT_PRESET
-    assert body["model"] == f"deepseek/{presets()[DEFAULT_PRESET].model}"
+    # name the model the operator is in fact talking to instead of showing a dash. And where the
+    # installation's default thinks — which is what a preset does unless it is told not to — that is
+    # not the model a spoken conversation gets: the first one in the table that answers at once is.
+    assert body["preset"] == "" and body["using"] == VISION_PRESET
+    assert body["model"] == "Qwen 3.7 Flash (vision)"
+
+
+def test_the_concierge_takes_the_default_only_when_the_default_is_quick() -> None:
+    config = model_config().model_copy(update={"voice": VoiceConfig(preset="")})
+    # The default thinks, so the concierge is moved off it and on to the one that does not.
+    assert preferred_preset(config) == VISION_PRESET
+    # A chosen preset is the choice, quick or not: the page warns, the operator decides.
+    assert preferred_preset(config.model_copy(update={"voice": VoiceConfig(preset=DEFAULT_PRESET)})) == DEFAULT_PRESET
+    # A default that is already quick needs no override at all, and the session is left unpinned.
+    quick = config.model_copy(update={"presets": {**config.presets, DEFAULT_PRESET: presets()[VISION_PRESET]}})
+    assert preferred_preset(quick) == ""
+    # Nothing quick anywhere: the default stands rather than a model being invented for the slot.
+    slow = config.model_copy(update={"presets": {DEFAULT_PRESET: presets()[DEFAULT_PRESET]}})
+    assert preferred_preset(slow) == ""
 
 
 async def test_the_chosen_model_is_written_to_the_file_and_survives_a_reload(picking: Any) -> None:
@@ -708,6 +727,129 @@ async def test_the_next_utterance_is_answered_by_the_model_just_chosen(picking: 
     assert submitted and submitted[-1][0] == session_id
     assert (await manager.live.load(session_id))["preset"] == VISION_PRESET
 
-    # Emptying it takes the override off rather than leaving the last model pinned to the session.
+    # Emptying it hands the session back to the quickest model there is rather than leaving the last
+    # one pinned to it — and the default here thinks, so "no choice" is not the default.
     assert (await picking.put("/api/voice/model", json={"preset": ""}, headers=HEADERS)).status_code == 200
-    assert not (await manager.live.load(session_id))["preset"]
+    assert (await manager.live.load(session_id))["preset"] == VISION_PRESET
+
+
+# -- the answer on its way to the ear ------------------------------------------------------
+
+
+async def _drain(voice: Voice) -> list[tuple[str, dict[str, Any]]]:
+    """Whatever the one connected page has been sent so far, in order."""
+    queue = next(iter(voice._listeners))  # noqa: SLF001 — the queue is the stream; there is no other way to read it
+    out: list[tuple[str, dict[str, Any]]] = []
+    while not queue.empty():
+        out.append(queue.get_nowait())
+    return out
+
+
+async def _writes(voice: Voice, session_id: str, run_id: str, *chunks: str) -> None:
+    for chunk in chunks:
+        await voice.on_event(session_id, SimpleNamespace(type=EventType.CONTENT_BLOCK_DELTA, run_id=run_id, payload={"delta": {"type": "text_delta", "text": chunk}}))
+
+
+async def test_a_sentence_is_spoken_while_the_concierge_is_still_writing_the_next_one(app: Any) -> None:
+    """Speech starts on the first full stop, not at the end of the turn.
+
+    This is the whole difference between a conversation and a wait: the answer above takes four
+    deltas to finish and the first sentence has to be out of the process after the second of them.
+    """
+    voice = Voice(app)
+    session_id = await voice.session_id()
+    async with voice.listen():
+        await voice.on_event(session_id, SimpleNamespace(type=EventType.MESSAGE_START, run_id="run-1", payload={}))
+        await _writes(voice, session_id, "run-1", "Eleven invoices went out. ")
+        said = [payload["text"] for name, payload in await _drain(voice) if name == "say"]
+        assert said == ["Eleven invoices went out."], "the first sentence waited for the end of the turn"
+
+        await _writes(voice, session_id, "run-1", "Two came back with the wrong VAT line. ", "Shall I redo them")
+        said = [payload["text"] for name, payload in await _drain(voice) if name == "say"]
+        assert said == ["Two came back with the wrong VAT line."]
+
+        # The tail that never got its full stop is spoken when the turn ends, and not before.
+        await voice.on_event(session_id, SimpleNamespace(type=EventType.MESSAGE_STOP, run_id="run-1", payload={"stop_reason": "end_turn"}))
+        assert [payload["text"] for name, payload in await _drain(voice) if name == "say"] == ["Shall I redo them"]
+
+
+async def test_nothing_is_said_to_an_empty_room_and_nothing_is_replayed_to_the_next_one(app: Any) -> None:
+    """A sentence written while no page is connected is dropped where it was written.
+
+    The operator hears an answer as it is spoken or not at all. Delivering it to the page that
+    connects next is how a question asked before lunch is answered out loud after it.
+    """
+    voice = Voice(app)
+    session_id = await voice.session_id()
+    await voice.on_event(session_id, SimpleNamespace(type=EventType.MESSAGE_START, run_id="run-1", payload={}))
+    await _writes(voice, session_id, "run-1", "Eleven invoices went out. ")
+    await voice.on_event(session_id, SimpleNamespace(type=EventType.MESSAGE_STOP, run_id="run-1", payload={"stop_reason": "end_turn"}))
+    async with voice.listen():
+        assert await _drain(voice) == []
+
+
+async def test_a_report_held_past_the_grace_is_dropped_rather_than_spoken_late(app: Any, monkeypatch: Any) -> None:
+    manager: SessionManager = app.manager
+    voice = Voice(app)
+    submitted = _capture(manager)
+    await voice.session_id()
+    monkeypatch.setattr(voice_module, "PENDING_GRACE_SECONDS", 0.05)
+    await voice.report(report_block(kind="final", title="a", session_id="s-a", state="finished", body="the digest is out"))
+    assert voice.held
+
+    await asyncio.sleep(0.1)
+    assert not voice.held, "a report older than the grace is still offered to the page that connects"
+    async with voice.listen():
+        pass
+    assert not submitted, "the concierge read out news from before the grace"
+    assert not voice.held
+
+    # Inside the grace it is exactly as it was: a page that dropped and came straight back hears it.
+    monkeypatch.setattr(voice_module, "PENDING_GRACE_SECONDS", 120.0)
+    await voice.report(report_block(kind="final", title="b", session_id="s-b", state="finished", body="and the invoices went"))
+    async with voice.listen():
+        pass
+    assert submitted and "and the invoices went" in submitted[-1][1]
+
+
+async def test_the_event_stream_leaves_the_process_a_frame_at_a_time_and_uncompressed(picking: Any) -> None:
+    """Nothing between the sentence and the browser may hold it back waiting for more of them.
+
+    A compressor is exactly such a thing: handed a frame the size of one sentence, it has every right
+    to keep it until it has enough to be worth a block, and the page would then hear the answer in
+    lumps or a long time after it was written. The application compresses everything else, so what
+    keeps the stream out of it is one content type in one exclusion list — a default of the library's
+    that an upgrade could quietly change, which is why it is read back here rather than assumed.
+
+    The stack under test is the application's own: the middleware is taken off the app as it was
+    installed, and driven over a response shaped exactly like ``/api/voice/stream``'s.
+    """
+    app = build_app(picking.app, "tok")
+    installed = next(m for m in app.user_middleware if m.cls is GZipMiddleware)
+    frames = [b"event: hello\ndata: {}\n\n", b'event: say\ndata: {"text": "Eleven invoices went out."}\n\n', b": keepalive\n\n"]
+
+    async def stream(scope: Any, receive: Any, send: Any) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]})
+        for frame in frames:
+            await send({"type": "http.response.body", "body": frame, "more_body": True})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    middleware = GZipMiddleware(stream, *installed.args, **installed.kwargs)
+    scope = {"type": "http", "method": "GET", "path": "/api/voice/stream", "headers": [(b"accept-encoding", b"gzip, deflate, br")]}
+    start: dict[str, Any] = {}
+    out: list[bytes] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.start":
+            start.update(message)
+        elif message["type"] == "http.response.body":
+            out.append(message.get("body", b""))
+
+    await middleware(scope, receive, send)
+    headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
+    assert "content-encoding" not in headers, "the event stream went out compressed"
+    # Every frame is its own write, byte for byte: nothing was held back for the next one.
+    assert [chunk for chunk in out if chunk] == frames

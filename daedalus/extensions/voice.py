@@ -68,6 +68,14 @@ APPROVALS_REMEMBERED = 8
 MAX_AGENTS = 20
 MAX_PENDING = 8
 """Reports held for a client that is not connected; the oldest go first, the newest are what matters."""
+PENDING_GRACE_SECONDS = 120.0
+"""How long a report for an empty room is still worth speaking when a page finally connects.
+
+A page that reconnects a second later — a dropped stream, a reload, a window brought back — should
+hear what it just missed. A page that connects half an hour later should not: the concierge would
+open the conversation by reading out news from a morning the operator has already moved past, and
+that is indistinguishable, from the chair, from the answer to the last question arriving late. Past
+the grace the line is dropped; the agent panel and the agent's own session still have it."""
 TITLE_CLIP = 80
 
 REPORT_OPEN = "⟪agent report⟫"
@@ -225,6 +233,25 @@ def fast_enough(preset: ModelPresetConfig) -> bool:
     return not preset.thinking and preset.max_output_tokens <= FAST_MAX_OUTPUT
 
 
+def preferred_preset(config: RuntimeConfig) -> str:
+    """The preset the concierge answers with, as an override to put on the session.
+
+    The operator's own choice, whenever they have made one. When they have not, the installation's
+    default preset is used only if it is fast enough to hold a conversation — and where it is not,
+    the first preset in the table that is takes its place. A default that thinks spends its first
+    seven seconds on a reasoning block the operator cannot hear, which is most of the delay between
+    asking a question out loud and hearing the answer begin; the table almost always has something
+    quicker in it, and the page says which one is talking.
+    """
+    chosen = config.voice.preset
+    if chosen in config.presets:
+        return chosen
+    fallback = config.default_preset()
+    if fallback is not None and fast_enough(fallback[1]):
+        return ""
+    return next((pid for pid, preset in config.presets.items() if fast_enough(preset)), "")
+
+
 def model_options(config: RuntimeConfig) -> list[dict[str, Any]]:
     """Every preset the concierge could be pointed at, as the app lists them.
 
@@ -252,7 +279,9 @@ class Voice:
     def __init__(self, app: Application) -> None:
         self.app = app
         self._listeners: set[asyncio.Queue[tuple[str, dict[str, Any]]]] = set()
-        self._pending: list[str] = []
+        self._pending: list[tuple[float, str]] = []
+        """What an agent said to an empty room, each line with the moment it was said: a report that
+        waited out ``PENDING_GRACE_SECONDS`` is not spoken at all rather than spoken late."""
         self._drafts: dict[str, str] = {}
         """Per run: the part of the concierge's answer that has not been handed to speech yet."""
         self._id = ""
@@ -310,9 +339,7 @@ class Voice:
         """
         manager = self.app.manager
         assert manager is not None
-        wanted = self.app.config.voice.preset
-        if wanted not in self.app.config.presets:
-            wanted = ""
+        wanted = preferred_preset(self.app.config)
         current = str((await manager.live.load(session_id)).get("preset") or "")
         if wanted == current:
             return wanted
@@ -365,7 +392,7 @@ class Voice:
             except RuntimeError as exc:
                 ready, reason = False, str(exc)
         chosen = config.preset if config.preset in self.app.config.presets else ""
-        resolved = self.app.config.default_preset(chosen)
+        resolved = self.app.config.default_preset(preferred_preset(self.app.config))
         return {
             "enabled": config.enabled,
             "session_id": await self.session_id(create=False),
@@ -396,7 +423,17 @@ class Voice:
     # -- what the operator says -------------------------------------------------------
 
     async def say(self, text: str) -> str:
-        """One utterance, already in words: a turn of the voice session like any other message."""
+        """One utterance, already in words: a turn of the voice session like any other message.
+
+        What it can wait on, because a page that is silent for half a minute deserves a list rather
+        than a guess. ``submit`` takes the session's own ``submit_lock``, which nothing outside this
+        conversation holds; it waits for the previous run of *this* session to have settled — the
+        snapshot behind the last answer — and for nothing else; and it starts the run rather than
+        queueing it, because the concierge is never left running between utterances. There is no
+        shared queue, no fleet limit and no board in front of it: an agent the concierge delegated to
+        runs in a session of its own and cannot hold this one up. Everything after that is the model,
+        which is why ``preferred_preset`` above cares so much about which one it is.
+        """
         body = text.strip()
         if not body:
             raise ValueError("nothing was said")
@@ -540,14 +577,22 @@ class Voice:
 
     @property
     def held(self) -> list[str]:
-        """Reports waiting for a page to connect, oldest first."""
-        return list(self._pending)
+        """Reports waiting for a page to connect, oldest first, without the ones that have gone stale."""
+        cutoff = time.monotonic() - PENDING_GRACE_SECONDS
+        return [line for at, line in self._pending if at >= cutoff]
 
     async def flush_pending(self) -> None:
-        """Everything the agents said to an empty room, delivered as one turn so the concierge speaks it once."""
-        if not self._pending:
+        """What the agents said to an empty room, if it is still worth saying, as one turn.
+
+        The stale ones are dropped here rather than at the moment they were made: a page that comes
+        back within the grace hears everything it missed, and one that comes back long afterwards is
+        not read a backlog.
+        """
+        cutoff = time.monotonic() - PENDING_GRACE_SECONDS
+        held = [line for at, line in self._pending if at >= cutoff]
+        self._pending = []
+        if not held:
             return
-        held, self._pending = self._pending, []
         try:
             await self.say_to_concierge("\n\n".join(held))
         except Exception:  # noqa: BLE001 — a report that cannot be delivered must not close the stream
@@ -568,7 +613,7 @@ class Voice:
                 return
             except Exception:  # noqa: BLE001
                 logger.exception("could not deliver an agent report to the concierge")
-        self._pending.append(text)
+        self._pending.append((time.monotonic(), text))
         del self._pending[:-MAX_PENDING]
 
     # -- events ------------------------------------------------------------------------
@@ -902,6 +947,7 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
 
 
 __all__ = [
+    "PENDING_GRACE_SECONDS",
     "REPORT_CLOSE",
     "REPORT_OPEN",
     "SESSION_KEY",
@@ -909,6 +955,7 @@ __all__ = [
     "delta_text",
     "effective_tts",
     "install",
+    "preferred_preset",
     "progress_line",
     "quoted",
     "report_block",
