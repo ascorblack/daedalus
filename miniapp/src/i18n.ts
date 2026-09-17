@@ -123,6 +123,23 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "voice.card.memory.later": { en: "loads when the voice page opens", ru: "загрузится, когда откроется голосовая страница" },
   "voice.card.open": { en: "Open the voice page", ru: "Открыть голосовую страницу" },
 
+  // The chip on an agent that has stopped and is waiting on somebody, and the things the microphone
+  // and the two listening transports can fail with. All of them reach the page as words a reader
+  // reads, so all of them are here rather than in the module that produces them.
+  "voice.agent.waiting.operator": { en: "Waiting for you", ru: "Ждёт вас" },
+  "voice.agent.waiting.approval": { en: "Waiting for approval", ru: "Ждёт подтверждения" },
+  "voice.error.mic": { en: "the microphone was refused", ru: "доступ к микрофону не дали" },
+  "voice.error.mic.blocked": {
+    en: "this browser would not start the microphone — the audio is blocked or suspended",
+    ru: "браузер не запустил микрофон — звук заблокирован или приостановлен",
+  },
+  "voice.error.recording.long": { en: "that recording is too long", ru: "эта запись слишком длинная" },
+  "voice.error.recording": { en: "the utterance was not accepted ({status})", ru: "реплику не приняли ({status})" },
+  "voice.error.stream.nomodel": { en: "no local speech model is selected", ru: "не выбрана модель распознавания" },
+  "voice.error.stream.refused": { en: "the stream was refused ({status})", ru: "поток не приняли ({status})" },
+  "voice.error.stream.stopped": { en: "the stream stopped", ru: "поток остановился" },
+  "voice.error.stream.open": { en: "the stream could not be opened", ru: "поток не открылся" },
+
   "voice.agents": { en: "Agents", ru: "Агенты" },
   "voice.agents.empty": {
     en: "Nothing delegated yet. Ask for something that takes real work and it appears here.",

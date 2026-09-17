@@ -13,10 +13,12 @@ import { describe, expect, it } from "vitest";
 
 const SOURCES = import.meta.glob("./**/*.{ts,tsx}", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 
-// The voice screens are translated through the same table, under `voice.*`, `stt.*` and `tts.*`,
-// and are read by this test like every other screen. What stays on this list is the machinery under
-// them — a reducer, two transports — which holds no words a reader ever sees.
-const ELSEWHERE = ["./voice.ts", "./stt.ts", "./tts.ts"];
+// Nothing is excused from this test. The voice modules were once on a list here, on the grounds that
+// a reducer and two transports hold no words anybody reads; they held four — the chip on a waiting
+// agent and three microphone failures — and they went on holding them in English on the Russian page
+// for as long as the list said they could not. An exclusion that is not audited is a hiding place, so
+// there is no list any more and a file that needs one has to earn it in `ALLOWED`, string by string.
+const ELSEWHERE: string[] = [];
 
 // Strings left in English on purpose, with the reason. Everything else has to come from the table.
 const ALLOWED: Record<string, string[]> = {

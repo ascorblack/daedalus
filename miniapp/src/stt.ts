@@ -15,6 +15,7 @@
 // the stream is opened — the model resamples, which it cannot do if it was told the wrong number.
 
 import { api } from "./api";
+import { t } from "./i18n";
 import type { Listener, ListenerHandlers } from "./voice";
 
 /** What the models want, and what the capture graph is asked for. Not necessarily what it gives. */
@@ -79,7 +80,7 @@ export function createLocalListener(h: ListenerHandlers): Listener {
   /** Ask the server for a stream, declaring the rate the graph actually settled on. */
   const open = async (hz: number) => {
     const response = await fetch(`/api/voice/listen/open?rate=${Math.round(hz)}`, { method: "POST", headers: api.authHeaders() });
-    if (!response.ok) throw new Error(response.status === 409 ? "no local speech model is selected" : `the stream was refused (${response.status})`);
+    if (!response.ok) throw new Error(response.status === 409 ? t("voice.error.stream.nomodel") : t("voice.error.stream.refused", { status: response.status }));
     const body = (await response.json()) as { stream: string; rate: number };
     streamId = body.stream;
     seq = 0;
@@ -91,7 +92,7 @@ export function createLocalListener(h: ListenerHandlers): Listener {
       headers: { "Content-Type": "application/octet-stream", ...api.authHeaders() },
       body,
     });
-    if (!response.ok) throw new Error(response.status === 409 ? "no local speech model is selected" : `the stream was refused (${response.status})`);
+    if (!response.ok) throw new Error(response.status === 409 ? t("voice.error.stream.nomodel") : t("voice.error.stream.refused", { status: response.status }));
     return (await response.json()) as { text: string; final: boolean };
   };
 
@@ -129,7 +130,7 @@ export function createLocalListener(h: ListenerHandlers): Listener {
     } catch (e) {
       // A single failure is a dropped request; three in a row is the feature not working, and the
       // operator should be told rather than left watching a microphone that hears nothing.
-      if (++failures >= 3) h.onError(e instanceof Error ? e.message : "the stream stopped");
+      if (++failures >= 3) h.onError(e instanceof Error ? e.message : t("voice.error.stream.stopped"));
     } finally {
       inflight = false;
       if (pending.length) inflightDone = drain();
@@ -166,21 +167,21 @@ export function createLocalListener(h: ListenerHandlers): Listener {
       wanted = false;
       void context.close();
       context = null;
-      h.onError("the microphone was refused");
+      h.onError(t("voice.error.mic"));
       return;
     }
     if (context.state === "suspended") await context.resume();
     if (context.state !== "running") {
       // A suspended graph is indistinguishable from a model that hears nothing, which is the worst
       // way for this to fail: the page would sit on "Listening" forever.
-      h.onError("this browser would not start the microphone — the audio is blocked or suspended");
+      h.onError(t("voice.error.mic.blocked"));
       stop();
       return;
     }
     try {
       await open(rate);
     } catch (e) {
-      h.onError(e instanceof Error ? e.message : "the stream could not be opened");
+      h.onError(e instanceof Error ? e.message : t("voice.error.stream.open"));
       stop();
       return;
     }

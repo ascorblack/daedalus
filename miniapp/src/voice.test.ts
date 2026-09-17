@@ -27,9 +27,9 @@ describe("agentNote", () => {
     expect(note).toEqual({ line: "the parser is fixed", when: "2026-09-17T10:00:00Z", waiting: "", live: false });
   });
 
-  it("says which agents are stopped and what is stopping them", () => {
-    expect(agentNote(agent({ waiting: "operator", progress: "which photos?" })).waiting).toBe("Waiting for you");
-    expect(agentNote(agent({ waiting: "approval", progress: "waiting for approval — Exec: rm -rf build" })).waiting).toBe("Waiting for approval");
+  it("says which agents are stopped and what is stopping them, as keys the panel translates", () => {
+    expect(agentNote(agent({ waiting: "operator", progress: "which photos?" })).waiting).toBe("voice.agent.waiting.operator");
+    expect(agentNote(agent({ waiting: "approval", progress: "waiting for approval — Exec: rm -rf build" })).waiting).toBe("voice.agent.waiting.approval");
     expect(agentNote(agent({ waiting: "" })).waiting).toBe("");
   });
 });

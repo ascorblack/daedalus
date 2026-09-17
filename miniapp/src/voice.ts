@@ -6,6 +6,7 @@
 // there is one, and the browser's synthesiser otherwise. The page picks; the screen only sees words.
 
 import { api } from "./api";
+import { t } from "./i18n";
 
 type RecognitionEvent = { resultIndex: number; results: { isFinal: boolean; 0: { transcript: string } }[] };
 type Recognition = {
@@ -86,7 +87,7 @@ export function createRecognition(lang: string, h: ListenerHandlers): Listener {
     };
     r.onerror = (e) => {
       // "no-speech" and "aborted" are the engine idling, not a failure worth telling the operator about.
-      if (e.error !== "no-speech" && e.error !== "aborted") h.onError(e.error === "not-allowed" ? "the microphone was refused" : e.error);
+      if (e.error !== "no-speech" && e.error !== "aborted") h.onError(e.error === "not-allowed" ? t("voice.error.mic") : e.error);
     };
     // Chrome ends the session on its own after a pause; while the operator wants the mic on, start it again.
     r.onend = () => {
@@ -150,7 +151,7 @@ export function createRecorder(h: ListenerHandlers & { onUtterance: (blob: Blob)
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
     } catch {
-      h.onError("the microphone was refused");
+      h.onError(t("voice.error.mic"));
       return;
     }
     const Ctx = window.AudioContext ?? window.webkitAudioContext!;
@@ -523,7 +524,7 @@ export async function sendUtterance(blob: Blob): Promise<string> {
   const form = new FormData();
   form.append("audio", blob, "utterance.webm");
   const response = await fetch("/api/voice/audio", { method: "POST", headers: api.authHeaders(), body: form });
-  if (!response.ok) throw new Error(response.status === 413 ? "that recording is too long" : `the utterance was not accepted (${response.status})`);
+  if (!response.ok) throw new Error(response.status === 413 ? t("voice.error.recording.long") : t("voice.error.recording", { status: response.status }));
   return String(((await response.json()) as { transcript?: string }).transcript ?? "");
 }
 
@@ -543,10 +544,14 @@ export type AgentNews = {
   waiting?: string;
 };
 
-/** The one line the panel shows for an agent, and when that line is from. */
+/** The one line the panel shows for an agent, and when that line is from. `waiting` is a table key. */
 export type AgentNote = { line: string; when: string; waiting: string; live: boolean };
 
-const WAITING_WORDS: Record<string, string> = { operator: "Waiting for you", approval: "Waiting for approval" };
+/** What an agent is stopped on, as a key in the table rather than as a word: the panel translates it. */
+const WAITING_KEYS: Record<string, string> = {
+  operator: "voice.agent.waiting.operator",
+  approval: "voice.agent.waiting.approval",
+};
 
 /**
  * What to show under an agent's title: its latest words and the moment they are from.
@@ -557,7 +562,7 @@ const WAITING_WORDS: Record<string, string> = { operator: "Waiting for you", app
  */
 export function agentNote(a: AgentNews): AgentNote {
   const progress = (a.progress ?? "").trim();
-  const waiting = WAITING_WORDS[a.waiting ?? ""] ?? "";
+  const waiting = WAITING_KEYS[a.waiting ?? ""] ?? "";
   if (progress) return { line: progress, when: a.progress_at || a.last_message_at, waiting, live: true };
   return { line: (a.answer ?? "").trim(), when: a.last_message_at, waiting, live: false };
 }

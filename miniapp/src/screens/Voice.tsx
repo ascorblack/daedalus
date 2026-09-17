@@ -526,7 +526,7 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
                   <div className="grow">
                     <div className="voice-agent-top">
                       <b className="truncate">{a.title}</b>
-                      {note.waiting ? <span className="chip accent">{note.waiting}</span> : <StatusLabel status={a.status} />}
+                      {note.waiting ? <span className="chip accent">{t(note.waiting)}</span> : <StatusLabel status={a.status} />}
                     </div>
                     {note.line && <div className={`sub clamp-2${note.live ? " voice-agent-live" : ""}`}>{note.line}</div>}
                     <div className="sub num">{timeAgo(note.when)}</div>
