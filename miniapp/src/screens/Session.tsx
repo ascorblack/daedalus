@@ -1,15 +1,16 @@
 import { Component, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { api, AsrStatus, LoopView, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
-import { Dot, STATUS_WORD, ServiceRow, Status, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, timeAgo } from "../components";
+import { Dot, ServiceRow, Status, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, statusWord, timeAgo } from "../components";
 import { OverflowMenu, Sheet, confirmDialog, Overlay } from "../dialogs";
-import { commandPreview, plainPreview, untilShort } from "../format";
+import { absDate, clock, commandPreview, plainPreview, shortDateTime, untilShort } from "../format";
 import { EVIDENCE_EVENT, EvidenceRequest, codeBlock, renderCached, renderMarkdown } from "../md";
 import { confirmAsync, enterSends, errorText, fmtBytes, fmtTok, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
 import { AuthImg, FilePreview, PreviewSource, canPreview, fileGlyph, previewKind, sessionBase } from "../preview";
 import { Activity, LiveStore, SummaryItem, ToolItem, Turn, applyLive, buildTurns, createLiveStore, isOlderPage, liveBase, prepend, reconcile } from "../turns";
 import { Windowed } from "../virtual";
+import { plural, t } from "../i18n";
 
 /**
  * Markdown parsed once per text. `cacheKey` names a message that will never change again, so its
@@ -86,7 +87,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   async function loopAction(a: string) {
     try {
       await api.post(`/api/sessions/${id}/loop/action`, { action: a });
-      toast(`loop: ${a}`);
+      toast(t("session.loop.action", { action: a }));
       load(true);
     } catch (e) {
       toast(errorText(e));
@@ -96,7 +97,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   async function setMode(mode: string) {
     try {
       await api.post(`/api/sessions/${id}/mode`, { mode: mode === "default" ? null : mode });
-      toast(`mode: ${mode} (from the next run)`);
+      toast(t("session.mode.toast", { mode }));
       load();
     } catch (e) {
       toast(errorText(e));
@@ -121,17 +122,19 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
           // With snapshots off — which is a project's default — there is nothing to put the files
           // back from, and the operator should read that before clicking rather than in the toast after.
           const noSnapshots = detail?.project?.settings.snapshots === false;
-          const body = noSnapshots
-            ? "Everything after it leaves the working history. The files are NOT restored: this project has snapshots switched off, so only the history is undone. The transcript keeps everything."
-            : "Everything after it leaves the working history and the workspace files are restored where a snapshot exists (nested git repositories stay as they are). The transcript keeps everything.";
-          if (!(await confirmAsync("Revert to this turn?", { body, action: "Revert" }))) return;
+          const body = t(noSnapshots ? "session.revert.body.nosnapshots" : "session.revert.body");
+          if (!(await confirmAsync(t("session.revert.title"), { body, action: t("session.revert.action") }))) return;
           const r = await api.post<{ dropped: number; workspace_restored: boolean; untouched: string[] }>(`/api/sessions/${id}/revert`, { seq });
-          const ws = r.workspace_restored ? (r.untouched.length ? `, workspace restored (${r.untouched.length} nested repo(s) untouched)` : ", workspace restored") : ", files not restored (no snapshot)";
-          toast(`reverted: ${r.dropped} message(s) removed${ws}`);
+          const ws = r.workspace_restored
+            ? r.untouched.length
+              ? t("session.reverted.ws.nested", { n: r.untouched.length })
+              : t("session.reverted.ws")
+            : t("session.reverted.ws.none");
+          toast(plural("session.reverted", r.dropped, { ws }));
           void readSnapshots();
         } else {
           const r = await api.post<{ id: string; title: string; messages: number }>(`/api/sessions/${id}/fork`, { seq });
-          toast(`forked into "${r.title}" (${r.messages} messages) — open it from the Agents tab`);
+          toast(t("session.fork.done", { title: r.title, n: r.messages }));
         }
         load();
       } catch (e) {
@@ -276,7 +279,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   const [transcribing, setTranscribing] = useState(false);
   async function onRecording(blob: Blob, seconds: number) {
     if (asr && seconds > asr.max_seconds) {
-      toast(`recording is ${seconds}s, the limit is ${asr.max_seconds}s`);
+      toast(t("session.transcribe.long", { n: seconds, max: asr.max_seconds }));
       return;
     }
     setTranscribing(true);
@@ -289,7 +292,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       const r = (await res.json()) as { transcript: string; text: string; autosend: boolean };
       if (r.autosend && !draft.trim()) {
         await api.post(`/api/sessions/${id}/messages`, { text: r.text });
-        toast(`sent: ${r.transcript.slice(0, 80)}`);
+        toast(t("session.transcribe.sent", { text: r.transcript.slice(0, 80) }));
         stick.current = true;
         load();
       } else {
@@ -338,12 +341,12 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   async function scheduleAction(sc: Schedule, action: "run" | "delete") {
     try {
       if (action === "delete") {
-        if (!(await confirmAsync(`Delete the scheduled task "${sc.name}"?`))) return;
+        if (!(await confirmAsync(t("session.sched.delete.title", { name: sc.name })))) return;
         await api.delete(`/api/schedules/${sc.id}`);
-        toast("task deleted");
+        toast(t("session.sched.deleted"));
       } else {
         const r = await api.post<{ session_id: string }>(`/api/schedules/${sc.id}/run`);
-        toast(r.session_id === id ? "running here" : "started in its own session");
+        toast(t(r.session_id === id ? "session.sched.runninghere" : "session.sched.runningown"));
         if (r.session_id !== id) onOpen?.(r.session_id);
       }
       loadSchedules();
@@ -608,7 +611,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   async function runCommand(line: string) {
     const name = line.slice(1).split(" ")[0].toLowerCase();
     const spec = commands.find((c) => c.name === name);
-    if (spec?.confirm && !(await confirmAsync(`Run /${name}?`))) return;
+    if (spec?.confirm && !(await confirmAsync(t("session.command.confirm", { name })))) return;
     setDraft("");
     if (textarea.current) textarea.current.style.height = "auto";
     try {
@@ -668,11 +671,11 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   }
 
   async function stop() {
-    if (!(await confirmDialog({ title: "Stop the run?", body: "The agent stops after its current step. You can send a new message afterwards.", action: "Stop run", danger: true }))) return;
+    if (!(await confirmDialog({ title: t("session.stop.title"), body: t("session.stop.body"), action: t("session.stop.action"), danger: true }))) return;
     try {
       await api.post(`/api/sessions/${id}/stop`);
       haptic("medium");
-      toast("stopping");
+      toast(t("session.stopping"));
     } catch (e) {
       toast(errorText(e));
     }
@@ -692,15 +695,15 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   async function compact() {
     setInfo(null);
     if (busy) {
-      toast("stop the run first");
+      toast(t("session.stopfirst"));
       return;
     }
-    if (!(await confirmAsync("Compact the history?", { body: "The whole working history is replaced by one structured summary; the agent keeps only that. The transcript stays.", action: "Compact", danger: false }))) return;
-    toast("compacting…");
+    if (!(await confirmAsync(t("session.compact.title"), { body: t("session.compact.body"), action: t("session.compact.action"), danger: false }))) return;
+    toast(t("session.compacting"));
     try {
       await api.post(`/api/sessions/${id}/compact`, { instructions: "" });
       await load();
-      toast("compacted");
+      toast(t("session.compacted"));
     } catch (e) {
       toast(errorText(e));
     }
@@ -709,13 +712,13 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   async function clearHistory() {
     setInfo(null);
     if (busy) {
-      toast("stop the run first");
+      toast(t("session.stopfirst"));
       return;
     }
-    if (!(await confirmAsync("Clear the history?", { body: "The agent starts over with an empty history. The workspace, the brief, the model and the loop stay; the transcript keeps the old turns.", action: "Clear history" }))) return;
+    if (!(await confirmAsync(t("session.clear.title"), { body: t("session.clear.body"), action: t("session.clear.action") }))) return;
     try {
       const r = await api.post<{ dropped: number }>(`/api/sessions/${id}/clear`);
-      toast(`history cleared: ${r.dropped} message(s) dropped`);
+      toast(plural("session.cleared", r.dropped));
       await load();
     } catch (e) {
       toast(errorText(e));
@@ -726,7 +729,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     try {
       const st = await api.get<any>("/api/settings");
       const def = st.presets?.[st.model?.preset];
-      setPicker({ presets: st.presets ?? {}, global: def ? def.label || `${def.provider}/${def.model}` : String(st.model?.preset ?? "default") });
+      setPicker({ presets: st.presets ?? {}, global: def ? def.label || `${def.provider}/${def.model}` : String(st.model?.preset ?? t("settings.heartbeat.default")) });
     } catch (e) {
       toast(errorText(e));
     }
@@ -736,7 +739,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     setPicker(null);
     try {
       const r = await api.post<{ model: string }>(`/api/sessions/${id}/model`, body);
-      toast(`model: ${r.model}`);
+      toast(t("session.model.picked", { model: r.model }));
       load();
     } catch (e) {
       toast(errorText(e));
@@ -745,7 +748,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
 
   async function remove() {
     setInfo(null);
-    if (!(await confirmAsync("Delete this session?", { body: "Its Telegram topic and its workspace go with it. The transcript is not kept.", action: "Delete session" }))) return;
+    if (!(await confirmAsync(t("session.delete.title"), { body: t("session.delete.body"), action: t("session.delete.action") }))) return;
     try {
       await api.delete(`/api/sessions/${id}`);
       onBack();
@@ -768,7 +771,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 5000);
     } catch (e) {
-      toast(`export failed: ${String(e)}`);
+      toast(t("session.export.failed", { error: String(e) }));
     }
   }
 
@@ -808,16 +811,16 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       }
       const rel = workspaceRelative(cited.path, workspace);
       if (rel) setPreview({ base: sessionBase(id), path: rel, lines: cited.lines });
-      else toast(`${cited.path} is outside this workspace`);
+      else toast(t("session.outside", { path: cited.path }));
     };
     document.addEventListener(EVIDENCE_EVENT, on);
     return () => document.removeEventListener(EVIDENCE_EVENT, on);
   }, [id, detail?.workspace, toast]);
   return (
     <div className={`chat ${pane ? `pane pane-${pane}` : ""}`} onDragEnter={(e) => { if (e.dataTransfer?.types.includes("Files")) setDragging((d) => d + 1); }} onDragLeave={() => setDragging((d) => Math.max(0, d - 1))} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
-      {dragging > 0 && <div className="dropzone"><Icon name="attach" size={28} /> Drop files to attach</div>}
+      {dragging > 0 && <div className="dropzone"><Icon name="attach" size={28} /> {t("session.drop")}</div>}
       <div className="chat-head">
-        <button className="iconbtn" onClick={onBack} aria-label={pane === "right" ? "Close this pane" : "Back"} title={pane === "right" ? "Close this pane" : "Back"}>
+        <button className="iconbtn" onClick={onBack} aria-label={t(pane === "right" ? "session.closepane" : "shell.back")} title={t(pane === "right" ? "session.closepane" : "shell.back")}>
           <Icon name={pane === "right" ? "close" : "back"} />
         </button>
         <div className="grow chat-identity" style={{ minWidth: 0 }}>
@@ -834,77 +837,77 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
               }}
             />
           ) : (
-            <button className="title chat-title" onClick={() => setInfo("session")} title="Session info">
+            <button className="title chat-title" onClick={() => setInfo("session")} title={t("session.info")}>
               {detail?.title ?? "…"}
             </button>
           )}
           <div className="sub meta">
             {(busy || status === "failed") && <Dot status={status} />}
-            {(busy || status === "failed") && <span className={`word ${status}`}>{STATUS_WORD[status]}</span>}
-            <button className="chip model" onClick={openPicker} title="Model for this session">
+            {(busy || status === "failed") && <span className={`word ${status}`}>{statusWord(status)}</span>}
+            <button className="chip model" onClick={openPicker} title={t("session.model.for")}>
               <Icon name="model" /> {shortModel(detail?.model, 22)}
             </button>
             {ctxPct !== null && ctxPct >= 60 && (
-              <button className={`chip ctx ${ctxPct >= 90 ? "bad" : "attn"}`} onClick={() => setInfo("context")} title={`context in use: ${detail!.context!.tokens.toLocaleString()} of ${detail!.context!.window.toLocaleString()} tokens`}>
-                ctx {ctxPct}%
+              <button className={`chip ctx ${ctxPct >= 90 ? "bad" : "attn"}`} onClick={() => setInfo("context")} title={t("session.ctx.title", { used: fmtInt(detail!.context!.tokens), window: fmtInt(detail!.context!.window) })}>
+                {t("session.ctx", { n: ctxPct })}
               </button>
             )}
             {detail?.subagents && detail.subagents.length > 0 && (
-              <button className={`chip ${subRunning ? "accent" : ""}`} onClick={() => setInfo("subagents")} title="Subagents">
+              <button className={`chip ${subRunning ? "accent" : ""}`} onClick={() => setInfo("subagents")} title={t("session.subagents.title")}>
                 {subRunning ? <Dot status="running" /> : null}
-                {detail.subagents.length} subagent{detail.subagents.length === 1 ? "" : "s"}{subRunning ? ` · ${subRunning} working` : ""}
+                {plural("session.subagents", detail.subagents.length)}{subRunning ? t("session.subagents.working", { n: subRunning }) : ""}
               </button>
             )}
             {detail?.loop && <button className={`chip loop ${detail.loop.status}`} onClick={() => setInfo("loop")} title={detail.loop.instruction}>{loopLabel(detail.loop).replace(/^loop · /, "loop · ")}</button>}
             {detail?.subagent_of && (
-              <button className="chip" onClick={() => onOpen?.(detail.subagent_of!)} title="open the leader session">
-                ↳ {detail.leader_title ?? "leader"}
+              <button className="chip" onClick={() => onOpen?.(detail.subagent_of!)} title={t("session.leader")}>
+                ↳ {detail.leader_title ?? t("session.leader.word")}
               </button>
             )}
-            {offline && <span className="offline">reconnecting…</span>}
+            {offline && <span className="offline">{t("session.reconnecting")}</span>}
           </div>
         </div>
         <div className="head-actions">
           {onToggleList && (
-            <button className={`iconbtn wide-only ${listOpen ? "on" : ""}`} onClick={onToggleList} aria-label="Sessions list" title="Sessions list beside the conversation">
+            <button className={`iconbtn wide-only ${listOpen ? "on" : ""}`} onClick={onToggleList} aria-label={t("session.list")} title={t("session.list.title")}>
               <Icon name="board" />
             </button>
           )}
-          <button className={`iconbtn wide-only ${asideOpen ? "on" : ""}`} onClick={() => setAsideOpen((v) => !v)} aria-label="Session panel" title="Session panel (usage, loop, cron, services)">
+          <button className={`iconbtn wide-only ${asideOpen ? "on" : ""}`} onClick={() => setAsideOpen((v) => !v)} aria-label={t("session.panel")} title={t("session.panel.title")}>
             <Icon name="columns" />
           </button>
-          <button className={`iconbtn wide-only ${view === "files" ? "on" : ""}`} onClick={() => setView(view === "files" ? "chat" : "files")} aria-label="Workspace files" title="Workspace files">
+          <button className={`iconbtn wide-only ${view === "files" ? "on" : ""}`} onClick={() => setView(view === "files" ? "chat" : "files")} aria-label={t("session.files")} title={t("session.files")}>
             <Icon name="folder" />
           </button>
           <OverflowMenu
-            label="Session actions"
+            label={t("session.actions")}
             items={[
-              { label: "Session info", icon: "settings", onSelect: () => setInfo("session") },
-              { label: view === "files" ? "Hide files" : "Workspace files", icon: "folder", onSelect: () => setView(view === "files" ? "chat" : "files") },
-              { label: view === "mcp" ? "Hide MCP servers" : "MCP servers", icon: "plug", onSelect: () => setView(view === "mcp" ? "chat" : "mcp") },
-              ...(onSplit ? [{ label: "Open another beside", icon: "split" as IconName, onSelect: onSplit }] : []),
-              { label: "Rename", icon: "pen", onSelect: () => setEditingTitle(detail?.title ?? "") },
-              { label: "Export as Markdown", icon: "download", onSelect: exportMarkdown },
+              { label: t("session.info"), icon: "settings", onSelect: () => setInfo("session") },
+              { label: t(view === "files" ? "session.files.hide" : "session.files"), icon: "folder", onSelect: () => setView(view === "files" ? "chat" : "files") },
+              { label: t(view === "mcp" ? "session.mcp.hide" : "session.mcp"), icon: "plug", onSelect: () => setView(view === "mcp" ? "chat" : "mcp") },
+              ...(onSplit ? [{ label: t("session.split"), icon: "split" as IconName, onSelect: onSplit }] : []),
+              { label: t("session.rename"), icon: "pen", onSelect: () => setEditingTitle(detail?.title ?? "") },
+              { label: t("session.export"), icon: "download", onSelect: exportMarkdown },
               "-",
-              { label: "Compact history", icon: "compact", onSelect: compact, disabled: busy },
-              { label: "Clear history…", icon: "trash", onSelect: clearHistory, disabled: busy, danger: true },
-              { label: "Delete session…", icon: "trash", onSelect: remove, danger: true },
+              { label: t("session.compact"), icon: "compact", onSelect: compact, disabled: busy },
+              { label: t("session.clear"), icon: "trash", onSelect: clearHistory, disabled: busy, danger: true },
+              { label: t("session.delete"), icon: "trash", onSelect: remove, danger: true },
             ]}
           />
         </div>
       </div>
 
       {info && detail && (
-        <Sheet title="Session info" onClose={() => setInfo(null)} className="session-info">
+        <Sheet title={t("session.info")} onClose={() => setInfo(null)} className="session-info">
               <section className="sheet-section" id="info-session">
-              <div className="sheet-section-title">Session</div>
-              <label className="field">Title</label>
+              <div className="sheet-section-title">{t("nav.agents")}</div>
+              <label className="field">{t("session.title")}</label>
               <input className="field" defaultValue={detail.title} onBlur={(e) => rename(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
-              <label className="field">Model</label>
+              <label className="field">{t("session.model")}</label>
               <button className="menu-item" onClick={() => { setInfo(null); openPicker(); }}>
-                {detail.model || "global default"} <span className="sub">change</span>
+                {detail.model || t("session.model.global")} <span className="sub">{t("session.model.change")}</span>
               </button>
-              <label className="field">Mode</label>
+              <label className="field">{t("session.mode")}</label>
               <select className="field" value={detail.mode || "default"} onChange={(e) => setMode(e.target.value)}>
                 {["default", ...modes].map((m) => (
                   <option key={m} value={m}>{m}</option>
@@ -912,49 +915,49 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
               </select>
               </section>
               <section className="sheet-section" id="info-usage">
-              <div className="sheet-section-title"><Icon name="chart" size={14} /> Usage</div>
-              <div className="kv"><span>Cost, all runs</span><b>{fmtUsd(detail.usage.usd)}</b></div>
-              <div className="kv"><span>Tokens in</span><b>{fmtInt(detail.usage.i)}</b></div>
-              <div className="kv"><span>Tokens out</span><b>{fmtInt(detail.usage.o)}</b></div>
-              {!!detail.usage.ch && <div className="kv"><span>Cache reads</span><b>{fmtInt(detail.usage.ch)}</b></div>}
-              <div className="kv"><span>Calls</span><b>{fmtInt(detail.usage.c)}</b></div>
+              <div className="sheet-section-title"><Icon name="chart" size={14} /> {t("session.usage")}</div>
+              <div className="kv"><span>{t("session.usage.cost")}</span><b>{fmtUsd(detail.usage.usd)}</b></div>
+              <div className="kv"><span>{t("session.usage.in")}</span><b>{fmtInt(detail.usage.i)}</b></div>
+              <div className="kv"><span>{t("session.usage.out")}</span><b>{fmtInt(detail.usage.o)}</b></div>
+              {!!detail.usage.ch && <div className="kv"><span>{t("session.usage.cache")}</span><b>{fmtInt(detail.usage.ch)}</b></div>}
+              <div className="kv"><span>{t("session.usage.calls")}</span><b>{fmtInt(detail.usage.c)}</b></div>
               </section>
               <section className="sheet-section" id="info-context">
-              <div className="sheet-section-title"><Icon name="compact" size={14} /> Context</div>
+              <div className="sheet-section-title"><Icon name="compact" size={14} /> {t("session.context")}</div>
               {detail.context && (
                 <>
                   <div className="kv">
-                    <span>In use</span>
+                    <span>{t("session.context.inuse")}</span>
                     <b>{ctxPct !== null ? `${ctxPct}% · ` : ""}{fmtTok(detail.context.tokens)}{detail.context.window > 0 ? ` / ${fmtTok(detail.context.window)}` : ""}</b>
                   </div>
                   {ctxPct !== null && <div className={`bar ${ctxPct >= 90 ? "bad" : ctxPct >= 60 ? "attn" : ""}`} style={{ ["--v" as string]: Math.min(100, ctxPct) }}><i /></div>}
-                  <div className="kv"><span>Working history</span><b>{detail.context.messages} messages · {detail.context.summaries} summaries · {detail.context.operator_turns} yours</b></div>
+                  <div className="kv"><span>{t("session.context.history")}</span><b>{t("session.context.messages", { n: detail.context.messages, s: detail.context.summaries, o: detail.context.operator_turns })}</b></div>
                 </>
               )}
               <ToolTiming sessionId={id} />
               <div className="btnrow">
-                <button className="btn small" onClick={compact} disabled={busy}><Icon name="compact" size={14} /> Compact history</button>
+                <button className="btn small" onClick={compact} disabled={busy}><Icon name="compact" size={14} /> {t("session.compact")}</button>
               </div>
               </section>
               <section className="sheet-section" id="info-loop">
-              <div className="sheet-section-title"><Icon name="loop" size={14} /> Loop{detail.loop ? ` · ${loopLabel(detail.loop).replace(/^loop · /, "")}` : ""}</div>
+              <div className="sheet-section-title"><Icon name="loop" size={14} /> {t("session.loop")}{detail.loop ? ` · ${loopLabel(detail.loop).replace(/^\S+ · /, "")}` : ""}</div>
               <LoopPanel sessionId={id} loop={detail.loop ?? null} onChange={() => load(true)} toast={toast} />
               </section>
               {detail.subagents && detail.subagents.length > 0 && (
                 <section className="sheet-section" id="info-subagents">
-                  <div className="sheet-section-title"><Icon name="spawn" size={14} /> Subagents · {detail.subagents.length}</div>
+                  <div className="sheet-section-title"><Icon name="spawn" size={14} /> {t("session.subagents.title")} · {detail.subagents.length}</div>
                   {detail.subagents.map((sa) => (
                     <button key={sa.session_id} className="aside-row link" onClick={() => { setInfo(null); onOpen?.(sa.session_id); }} title={`${sa.model} · ${sa.session_id}`}>
                       <Dot status={sa.running ? "running" : sa.status === "failed" ? "failed" : "done"} />
                       <span className="grow name">{sa.name || sa.session_id}</span>
-                      <span className="sub">{sa.running ? "working" : sa.status === "failed" ? "failed" : sa.kept ? "kept" : "done"}</span>
+                      <span className="sub">{sa.running ? statusWord("running").toLowerCase() : sa.status === "failed" ? statusWord("failed").toLowerCase() : sa.kept ? t("session.sub.kept") : statusWord("done").toLowerCase()}</span>
                     </button>
                   ))}
                 </section>
               )}
               {detail.services && detail.services.length > 0 && (
                 <section className="sheet-section" id="info-services">
-                  <div className="sheet-section-title"><Icon name="globe" size={14} /> Services</div>
+                  <div className="sheet-section-title"><Icon name="globe" size={14} /> {t("session.services")}</div>
                   {detail.services.map((sv) => (
                     <ServiceRow key={sv.name} s={sv} sessionId={id} onChange={() => load(true)} toast={toast} onLogs={(text) => { setInfo(null); setCommandResult({ line: `service ${sv.name} · log`, text }); }} />
                   ))}
@@ -962,15 +965,15 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
               )}
               {schedules.length > 0 && (
                 <section className="sheet-section" id="info-cron">
-                  <div className="sheet-section-title"><Icon name="clock" size={14} /> Schedules · {schedules.length}</div>
+                  <div className="sheet-section-title"><Icon name="clock" size={14} /> {t("session.schedules")} · {schedules.length}</div>
                   {schedules.map((sc) => <ScheduleRow key={sc.id} sc={sc} sessionId={id} onAction={scheduleAction} />)}
                 </section>
               )}
               <section className="sheet-section" id="info-tools">
-              <div className="sheet-section-title"><Icon name="wrench" size={14} /> Tools</div>
+              <div className="sheet-section-title"><Icon name="wrench" size={14} /> {t("session.tools")}</div>
               <ToolPicker
                 off={detail.tools_off ?? []}
-                note="Applies from the agent's next step."
+                note={t("session.tools.note")}
                 onChange={async (off) => {
                   try {
                     await api.post(`/api/sessions/${id}/tools`, { tools_off: off });
@@ -982,19 +985,19 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
               />
               </section>
               <section className="sheet-section" id="info-brief">
-              <div className="sheet-section-title"><Icon name="pen" size={14} /> Brief</div>
-              <label className="field">Standing instructions in this session's system prompt{detail.spawned_by ? `; set by session ${detail.spawned_by}` : ""}</label>
+              <div className="sheet-section-title"><Icon name="pen" size={14} /> {t("session.brief")}</div>
+              <label className="field">{t("session.brief.label")}{detail.spawned_by ? t("session.brief.by", { id: detail.spawned_by }) : ""}</label>
               <textarea
                 className="field"
                 rows={4}
                 defaultValue={detail.brief ?? ""}
-                placeholder="What this agent is for, how the work is done, where things are…"
+                placeholder={t("session.brief.placeholder")}
                 onBlur={async (e) => {
                   const brief = e.target.value.trim();
                   if (brief === (detail.brief ?? "")) return;
                   try {
                     await api.post(`/api/sessions/${id}/brief`, { brief });
-                    toast(brief ? "brief saved (applies from the next run)" : "brief removed");
+                    toast(t(brief ? "session.brief.saved" : "session.brief.removed"));
                     load();
                   } catch (err) {
                     toast(errorText(err));
@@ -1003,15 +1006,15 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
               />
               </section>
               <section className="sheet-section" id="info-spend">
-              <div className="sheet-section-title"><Icon name="chart" size={14} /> Spend cap</div>
-              <label className="field">For this session, USD across all its runs (empty = global limits only)</label>
+              <div className="sheet-section-title"><Icon name="chart" size={14} /> {t("session.cap")}</div>
+              <label className="field">{t("session.cap.label")}</label>
               <div className="composer-row">
                 <input
                   className="field"
                   type="number"
                   step="0.5"
                   min={0}
-                  placeholder="none"
+                  placeholder={t("session.cap.none")}
                   defaultValue={detail.usd_cap ?? ""}
                   onBlur={async (e) => {
                     const raw = e.target.value.trim();
@@ -1020,31 +1023,31 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
                     if (cap === (detail.usd_cap ?? null)) return;
                     try {
                       await api.post(`/api/sessions/${id}/cap`, { usd_cap: cap });
-                      toast(cap === null ? "session cap removed" : `session cap: $${cap}`);
+                      toast(cap === null ? t("session.cap.removed") : t("session.cap.set", { n: cap }));
                       load();
                     } catch (err) {
                       toast(errorText(err));
                     }
                   }}
                 />
-                <span className="sub" style={{ whiteSpace: "nowrap" }}>spent {fmtUsd(detail.usage.usd)}</span>
+                <span className="sub" style={{ whiteSpace: "nowrap" }}>{t("settings.limits.spent", { sum: fmtUsd(detail.usage.usd) })}</span>
               </div>
               </section>
               <section className="sheet-section" id="info-advanced">
-              <div className="sheet-section-title">Advanced</div>
-              <div className="kv"><span>Session id</span><button className="linkbtn mono" onClick={async () => toast((await copyText(id)) ? "id copied" : id)} title="copy">{id}</button></div>
-              <div className="kv"><span>Workspace</span><button className="linkbtn mono truncate" onClick={async () => toast((await copyText(detail.workspace)) ? "path copied" : detail.workspace)} title={detail.workspace}>{detail.workspace_own === false ? detail.workspace_name : detail.workspace}</button></div>
-              {detail.project && <div className="kv"><span>Project</span><span className="truncate" title={detail.project.root}>{detail.project.name} — everything it reads or writes stays in this folder</span></div>}
-              {detail.run_id && <div className="kv"><span>Run id</span><span className="mono">{detail.run_id}</span></div>}
+              <div className="sheet-section-title">{t("session.advanced")}</div>
+              <div className="kv"><span>{t("session.id")}</span><button className="linkbtn mono" onClick={async () => toast((await copyText(id)) ? t("session.id.copied") : id)} title={t("common.copy")}>{id}</button></div>
+              <div className="kv"><span>{t("session.workspace")}</span><button className="linkbtn mono truncate" onClick={async () => toast((await copyText(detail.workspace)) ? t("session.path.copied") : detail.workspace)} title={detail.workspace}>{detail.workspace_own === false ? detail.workspace_name : detail.workspace}</button></div>
+              {detail.project && <div className="kv"><span>{t("session.project")}</span><span className="truncate" title={detail.project.root}>{t("session.project.inside", { name: detail.project.name })}</span></div>}
+              {detail.run_id && <div className="kv"><span>{t("session.runid")}</span><span className="mono">{detail.run_id}</span></div>}
               <div className="btnrow">
-                <button className="btn small" onClick={exportMarkdown}><Icon name="download" size={14} /> Export as Markdown</button>
+                <button className="btn small" onClick={exportMarkdown}><Icon name="download" size={14} /> {t("session.export")}</button>
               </div>
               </section>
               <section className="sheet-section danger">
-              <div className="sheet-section-title">Danger zone</div>
+              <div className="sheet-section-title">{t("session.danger")}</div>
               <div className="btnrow" style={{ marginTop: 0 }}>
-                <button className="btn small danger" onClick={clearHistory} disabled={busy}><Icon name="trash" size={14} /> Clear history</button>
-                <button className="btn small danger" onClick={remove}><Icon name="trash" size={14} /> Delete session</button>
+                <button className="btn small danger" onClick={clearHistory} disabled={busy}><Icon name="trash" size={14} /> {t("session.clear.short")}</button>
+                <button className="btn small danger" onClick={remove}><Icon name="trash" size={14} /> {t("session.delete.short")}</button>
               </div>
               </section>
         </Sheet>
@@ -1054,10 +1057,10 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
         <div className="chat-main">
           <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
             <div className="timeline">
-              {pageable && <div className="sub older-note">{older === "loading" ? "loading earlier messages…" : ""}</div>}
+              {pageable && <div className="sub older-note">{older === "loading" ? t("session.older") : ""}</div>}
               {snapshots?.pruned && (
                 <div className="sub older-note">
-                  older checkpoints were removed by retention{snapshots.pruned_before ? ` (before ${new Date(snapshots.pruned_before).toLocaleDateString()})` : ""} — those turns undo the history, not the files
+                  {snapshots.pruned_before ? t("session.pruned.before", { date: absDate(snapshots.pruned_before) }) : t("session.pruned")}
                 </div>
               )}
               <SessionContext.Provider value={sessionCtx}>
@@ -1079,7 +1082,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
             </div>
           </div>
           {!atBottom && !busy && (
-            <button className="jump-down" onClick={jumpToBottom} aria-label="scroll to the latest message" title="To the latest message">
+            <button className="jump-down" onClick={jumpToBottom} aria-label={t("session.jump.label")} title={t("session.jump")}>
               <Icon name="down" size={18} />
             </button>
           )}
@@ -1087,7 +1090,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
           {busy && <LiveBar status={status} base={tail} live={live} workspace={detail?.workspace} atBottom={atBottom} onJump={jumpToBottom} />}
           <div className="composer">
             {pending.length > 0 && (
-              <div className="attachments" aria-label="attachments">
+              <div className="attachments" aria-label={t("session.attachments")}>
                 {pending.map((f, i) => (
                   <AttachmentCard key={`${f.name}-${f.size}-${f.lastModified}-${i}`} file={f} onOpen={() => setPreview({ file: f })} onRemove={() => setPending((p) => p.filter((_, j) => j !== i))} />
                 ))}
@@ -1105,7 +1108,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
             )}
             <div className="composer-box line">
               <input ref={fileInput} type="file" multiple hidden onChange={(e) => setPending((p) => [...p, ...Array.from(e.target.files ?? [])])} />
-              <button className="roundbtn" title="Attach files" onClick={() => fileInput.current?.click()} aria-label="Attach files">
+              <button className="roundbtn" title={t("session.attach")} onClick={() => fileInput.current?.click()} aria-label={t("session.attach")}>
                 <Icon name="plus" />
               </button>
               <textarea
@@ -1117,7 +1120,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
                   el.style.height = "auto";
                   el.style.height = `${Math.min(el.scrollHeight, Math.max(120, window.innerHeight * 0.4))}px`;
                 }}
-                placeholder={status === "running" ? "Steer the agent…" : status === "waiting" ? "Reply to the agent…" : "Message the agent…"}
+                placeholder={t(status === "running" ? "session.composer.running" : status === "waiting" ? "session.composer.waiting" : "session.composer.idle")}
                 rows={1}
                 onPaste={onPaste}
                 onKeyDown={(e) => {
@@ -1143,12 +1146,12 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
               />
               {asr?.configured && !draft.trim() && <MicButton onRecording={onRecording} busy={transcribing} />}
               {status === "running" && (
-                <button className="roundbtn stop" onClick={stop} aria-label="Stop the run" title="Stop the run">
+                <button className="roundbtn stop" onClick={stop} aria-label={t("session.stop")} title={t("session.stop")}>
                   <Icon name="stop" />
                 </button>
               )}
               {(status !== "running" || draft.trim() || pending.length > 0) && (
-                <button className="roundbtn send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)} aria-label={status === "running" ? "Send as a steer" : "Send"} title={status === "running" ? "Send as a steer (applies before the next step)" : "Send"}>
+                <button className="roundbtn send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)} aria-label={t(status === "running" ? "session.send.steer" : "session.send")} title={t(status === "running" ? "session.send.steer.title" : "session.send")}>
                   <Icon name="up" />
                 </button>
               )}
@@ -1159,8 +1162,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
         {view !== "chat" && detail && (
           <aside className="side-pane">
             <div className="side-head">
-              <span className="side-title"><Icon name={view === "files" ? "folder" : "plug"} size={14} /> {view === "files" ? "Workspace files" : "MCP servers"}</span>
-              <button className="iconbtn small" onClick={() => setView("chat")} aria-label="close" title="Close">
+              <span className="side-title"><Icon name={view === "files" ? "folder" : "plug"} size={14} /> {t(view === "files" ? "session.files" : "session.mcp")}</span>
+              <button className="iconbtn small" onClick={() => setView("chat")} aria-label={t("common.close")} title={t("common.close")}>
                 <Icon name="close" size={16} />
               </button>
             </div>
@@ -1170,12 +1173,12 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
         {detail && asideOpen && (
           <aside className="session-aside wide-only">
             <div className="aside-card">
-              <div className="aside-title">Session</div>
+              <div className="aside-title">{t("nav.agents")}</div>
               <div className="aside-row"><Icon name="model" size={16} /><span className="grow" title={detail.model}>{shortModel(detail.model, 30)}</span></div>
               {detail.context && detail.context.window > 0 && (
-                <div className="aside-row" title={`${detail.context.tokens.toLocaleString()} of ${detail.context.window.toLocaleString()} tokens · ${detail.context.messages} messages`}>
+                <div className="aside-row" title={t("session.aside.ctx.title", { used: fmtInt(detail.context.tokens), window: fmtInt(detail.context.window), n: detail.context.messages })}>
                   <Icon name="compact" size={16} />
-                  <span className="grow">context {Math.round((100 * detail.context.tokens) / detail.context.window)}%</span>
+                  <span className="grow">{t("session.aside.ctx", { n: Math.round((100 * detail.context.tokens) / detail.context.window) })}</span>
                   <i className="ctxbar wide" style={{ ["--fill" as string]: `${Math.min(100, Math.round((100 * detail.context.tokens) / detail.context.window))}%` }} />
                 </div>
               )}
@@ -1185,53 +1188,53 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
                   Revert can put back. */}
               <button className="aside-row link" onClick={() => setView(view === "files" ? "chat" : "files")} title={detail.project ? detail.project.root : detail.workspace}>
                 <Icon name="folder" size={16} />
-                <span className="grow name">{detail.project ? `project: ${detail.project.name}` : detail.workspace_own === false ? `workspace: ${detail.workspace_name}` : "own workspace"}</span>
-                {detail.workspace_sessions && detail.workspace_sessions.length > 0 && <span className="sub" title={detail.workspace_sessions.map((w) => w.title).join(", ")}>+{detail.workspace_sessions.length} session{detail.workspace_sessions.length === 1 ? "" : "s"}</span>}
+                <span className="grow name">{detail.project ? t("session.aside.project", { name: detail.project.name }) : detail.workspace_own === false ? t("session.aside.workspace", { name: detail.workspace_name ?? "" }) : t("session.aside.own")}</span>
+                {detail.workspace_sessions && detail.workspace_sessions.length > 0 && <span className="sub" title={detail.workspace_sessions.map((w) => w.title).join(", ")}>{plural("session.aside.plus", detail.workspace_sessions.length)}</span>}
               </button>
               {detail.project && (
-                <div className="aside-row project-root" title={`everything this agent reads or writes stays inside ${detail.project.root}`}>
+                <div className="aside-row project-root" title={t("session.aside.project.title", { root: detail.project.root })}>
                   <span className="grow mono sub">{detail.project.root}</span>
-                  <span className="badge" title={detail.project.settings.snapshots ? "every turn is snapshotted, so Revert can put the files back" : "Revert undoes the history only: this project has snapshots switched off"}>
-                    {detail.project.settings.snapshots ? "snapshots" : "no snapshots"}
+                  <span className="badge" title={t(detail.project.settings.snapshots ? "session.aside.snapshots.title" : "session.aside.nosnapshots.title")}>
+                    {t(detail.project.settings.snapshots ? "project.snapshots.badge" : "session.aside.nosnapshots")}
                   </span>
                 </div>
               )}
               {detail.workspace_sessions && detail.workspace_sessions.length > 0 && detail.workspace_sessions.slice(0, 4).map((w) => (
-                <button key={w.id} className="aside-row link" onClick={() => onOpen?.(w.id)} title="a session working in the same workspace">
+                <button key={w.id} className="aside-row link" onClick={() => onOpen?.(w.id)} title={t("session.aside.sameworkspace")}>
                   <span className="dot" style={{ background: "var(--muted)" }} /><span className="grow name sub">{w.title}</span>
                 </button>
               ))}
               {detail.subagent_of && (
                 <button className="aside-row link" onClick={() => onOpen?.(detail.subagent_of!)}>
-                  <Icon name="back" size={16} /><span className="grow">leader: {detail.leader_title ?? detail.subagent_of}</span>
+                  <Icon name="back" size={16} /><span className="grow">{t("session.leader.word")}: {detail.leader_title ?? detail.subagent_of}</span>
                 </button>
               )}
             </div>
             {provider && <ProviderUsageCard provider={provider} usage={providerUsage} />}
             {schedules.length > 0 && (
               <div className="aside-card">
-                <div className="aside-title"><Icon name="clock" size={14} /> Cron <span className="sub">{schedules.filter((x) => x.enabled).length} on</span></div>
+                <div className="aside-title"><Icon name="clock" size={14} /> {t("session.cron")} <span className="sub">{t("session.cron.on", { n: schedules.filter((x) => x.enabled).length })}</span></div>
                 {schedules.map((sc) => <ScheduleRow key={sc.id} sc={sc} sessionId={id} onAction={scheduleAction} />)}
               </div>
             )}
             {detail.loop && (
               <div className="aside-card">
-                <div className="aside-title"><Icon name="loop" size={14} /> Loop <span className={`badge loop ${detail.loop.status}`}>{detail.loop.status}</span></div>
+                <div className="aside-title"><Icon name="loop" size={14} /> {t("session.loop")} <span className={`badge loop ${detail.loop.status}`}>{statusWord(detail.loop.status).toLowerCase()}</span></div>
                 <div className="aside-text">{detail.loop.instruction}</div>
-                <div className="sub">{loopLabel(detail.loop).replace(/^loop · /, "")}{detail.loop.next_run_at && detail.loop.status === "active" ? ` · next ${untilShort(detail.loop.next_run_at)}` : ""}</div>
+                <div className="sub">{loopLabel(detail.loop).replace(/^\S+ · /, "")}{detail.loop.next_run_at && detail.loop.status === "active" ? t("agents.loop.next", { t: untilShort(detail.loop.next_run_at) }) : ""}</div>
                 <div className="btnrow" style={{ marginTop: 8 }}>
                   {detail.loop.status === "active" ? (
-                    <button className="btn small" onClick={() => loopAction("pause")}><Icon name="pause" size={14} /> pause</button>
+                    <button className="btn small" onClick={() => loopAction("pause")}><Icon name="pause" size={14} /> {t("common.pause")}</button>
                   ) : (
-                    <button className="btn small primary" onClick={() => loopAction("resume")}><Icon name="play" size={14} /> resume</button>
+                    <button className="btn small primary" onClick={() => loopAction("resume")}><Icon name="play" size={14} /> {t("common.resume")}</button>
                   )}
-                  {detail.loop.status === "active" && <button className="btn small" onClick={() => loopAction("run")}><Icon name="up" size={14} /> run now</button>}
+                  {detail.loop.status === "active" && <button className="btn small" onClick={() => loopAction("run")}><Icon name="up" size={14} /> {t("common.runnow")}</button>}
                 </div>
               </div>
             )}
             {detail.services && detail.services.length > 0 && (
               <div className="aside-card">
-                <div className="aside-title"><Icon name="globe" size={14} /> Services <span className="sub">{detail.services.filter((s) => s.status === "running").length} running</span></div>
+                <div className="aside-title"><Icon name="globe" size={14} /> {t("session.services")} <span className="sub">{t("session.services.running", { n: detail.services.filter((s) => s.status === "running").length })}</span></div>
                 {detail.services.map((s) => (
                   <ServiceRow key={s.name} s={s} sessionId={id} onChange={() => load(true)} toast={toast} onLogs={(text) => setCommandResult({ line: `service ${s.name} · log`, text })} />
                 ))}
@@ -1239,12 +1242,12 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
             )}
             {detail.subagents && detail.subagents.length > 0 && (
               <div className="aside-card">
-                <div className="aside-title"><Icon name="spawn" size={14} /> Subagents <span className="sub">{detail.subagents.filter((s) => s.running).length} working</span></div>
+                <div className="aside-title"><Icon name="spawn" size={14} /> {t("session.subagents.title")} <span className="sub">{t("session.subagents.working", { n: detail.subagents.filter((s) => s.running).length }).replace(/^ · /, "")}</span></div>
                 {detail.subagents.map((s) => (
                   <button key={s.session_id} className={`aside-row link sub-${s.status}`} onClick={() => onOpen?.(s.session_id)} title={`${s.model} · ${s.session_id}`}>
                     {s.running ? <span className="live-dot" /> : <span className={"dot " + s.status} />}
                     <span className="grow name">{s.name || s.session_id}</span>
-                    <span className="sub">{s.running ? "working" : s.status === "failed" ? "failed" : s.kept ? "kept" : "done"}</span>
+                    <span className="sub">{s.running ? statusWord("running").toLowerCase() : s.status === "failed" ? statusWord("failed").toLowerCase() : s.kept ? t("session.sub.kept") : statusWord("done").toLowerCase()}</span>
                   </button>
                 ))}
               </div>
@@ -1274,17 +1277,17 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
         <Overlay><div className="sheet-backdrop" onClick={() => setPicker(null)}>
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
             <div className="grip" />
-            <h3>Model for this session</h3>
+            <h3>{t("session.model.for")}</h3>
             <div className="sheet-body">
               <button className="menu-item" onClick={() => chooseModel({ clear: true })}>
-                Global default <span className="sub">{picker.global}</span>
+                {t("session.model.global")} <span className="sub">{picker.global}</span>
               </button>
               {Object.entries(picker.presets).map(([pid, p]) => (
                 <button key={pid} className="menu-item" onClick={() => chooseModel({ preset: pid })}>
                   {p.label || p.model} <span className="sub">{p.provider}/{p.model}</span>
                 </button>
               ))}
-              <div className="sub" style={{ margin: "10px 0 4px" }}>Or a specific model: provider/model-id</div>
+              <div className="sub" style={{ margin: "10px 0 4px" }}>{t("session.model.custom")}</div>
               <div className="composer-row">
                 <input className="field" placeholder="vllm/Qwen3.6" value={custom} onChange={(e) => setCustom(e.target.value)} />
                 <button
@@ -1296,7 +1299,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
                     chooseModel(model ? { provider: prov, model } : { model: prov });
                   }}
                 >
-                  Use
+                  {t("session.model.use")}
                 </button>
               </div>
             </div>
@@ -1316,7 +1319,7 @@ function LoopPanel({ sessionId, loop, onChange, toast }: { sessionId: string; lo
   async function action(a: string) {
     try {
       await api.post(`/api/sessions/${sessionId}/loop/action`, { action: a });
-      toast(`loop: ${a}`);
+      toast(t("session.loop.action", { action: a }));
       onChange();
     } catch (e) {
       toast(errorText(e));
@@ -1326,7 +1329,7 @@ function LoopPanel({ sessionId, loop, onChange, toast }: { sessionId: string; lo
     if (!text.trim()) return;
     try {
       await api.post(`/api/sessions/${sessionId}/loop`, { instruction: text.trim(), mode, interval_minutes: mode === "interval" ? Math.max(1, Number(minutes) || 10) : null, max_runs: maxRuns.trim() ? Math.max(1, Number(maxRuns) || 1) : null, start_now: true });
-      toast(loop ? "loop updated; an iteration starts now" : "loop started");
+      toast(t(loop ? "session.loop.updated" : "session.loop.started"));
       setEditing(false);
       onChange();
     } catch (e) {
@@ -1336,8 +1339,8 @@ function LoopPanel({ sessionId, loop, onChange, toast }: { sessionId: string; lo
   if (!loop && !editing) {
     return (
       <div className="btnrow" style={{ marginTop: 0 }}>
-        <span className="sub">No loop.</span>
-        <button className="btn small" onClick={() => setEditing(true)}>+ Loop</button>
+        <span className="sub">{t("session.loop.none")}</span>
+        <button className="btn small" onClick={() => setEditing(true)}>{t("session.loop.add")}</button>
       </div>
     );
   }
@@ -1347,32 +1350,36 @@ function LoopPanel({ sessionId, loop, onChange, toast }: { sessionId: string; lo
         <>
           <div className="sub loop-instruction">{loop.instruction}</div>
           <div className="sub">
-            {loop.status === "active" && loop.next_run_at ? `next wake-up ${new Date(loop.next_run_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : loop.status === "active" ? "next wake-up: when the agent asks (LoopNext)" : `${loop.status}${loop.stop_reason || loop.pause_note ? `: ${loop.stop_reason || loop.pause_note}` : ""}`}
-            {loop.last_reason ? ` · last reason: ${loop.last_reason}` : ""}
+            {loop.status === "active" && loop.next_run_at
+              ? t("session.loop.next", { time: clock(loop.next_run_at) })
+              : loop.status === "active"
+                ? t("session.loop.dynamic")
+                : `${statusWord(loop.status)}${loop.stop_reason || loop.pause_note ? `: ${loop.stop_reason || loop.pause_note}` : ""}`}
+            {loop.last_reason ? t("session.loop.lastreason", { reason: loop.last_reason }) : ""}
           </div>
           <div className="btnrow" style={{ marginTop: 6 }}>
-            {loop.status === "active" ? <button className="btn small" onClick={() => action("pause")}>pause</button> : <button className="btn small primary" onClick={() => action("resume")}>resume</button>}
-            {loop.status === "active" && <button className="btn small" onClick={() => action("run")}>run now</button>}
-            <button className="btn small" onClick={() => setEditing(true)}>edit</button>
-            {loop.status !== "stopped" && loop.status !== "done" && <button className="btn small danger" onClick={() => action("stop")}>stop</button>}
-            <button className="btn small danger" onClick={async () => { if (await confirmAsync("Remove the loop from this session?")) action("remove"); }}>remove</button>
+            {loop.status === "active" ? <button className="btn small" onClick={() => action("pause")}>{t("common.pause")}</button> : <button className="btn small primary" onClick={() => action("resume")}>{t("common.resume")}</button>}
+            {loop.status === "active" && <button className="btn small" onClick={() => action("run")}>{t("common.runnow")}</button>}
+            <button className="btn small" onClick={() => setEditing(true)}>{t("session.loop.edit")}</button>
+            {loop.status !== "stopped" && loop.status !== "done" && <button className="btn small danger" onClick={() => action("stop")}>{t("session.loop.stop")}</button>}
+            <button className="btn small danger" onClick={async () => { if (await confirmAsync(t("session.loop.remove.title"))) action("remove"); }}>{t("session.loop.remove")}</button>
           </div>
         </>
       )}
       {editing && (
         <>
-          <textarea className="field" rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder="what each wake-up is for" />
+          <textarea className="field" rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder={t("session.loop.placeholder")} />
           <div className="composer-row">
             <select className="field" value={mode} onChange={(e) => setMode(e.target.value as "interval" | "dynamic")}>
-              <option value="interval">every N min</option>
-              <option value="dynamic">self-paced</option>
+              <option value="interval">{t("newagent.loop.interval")}</option>
+              <option value="dynamic">{t("loop.selfpaced")}</option>
             </select>
-            {mode === "interval" && <input className="field" type="number" min={1} style={{ maxWidth: 110 }} value={minutes} onChange={(e) => setMinutes(e.target.value)} aria-label="minutes" />}
-            <input className="field" type="number" min={1} style={{ maxWidth: 130 }} placeholder="max runs" value={maxRuns} onChange={(e) => setMaxRuns(e.target.value)} aria-label="max runs" />
+            {mode === "interval" && <input className="field" type="number" min={1} style={{ maxWidth: 110 }} value={minutes} onChange={(e) => setMinutes(e.target.value)} aria-label={t("newagent.loop.minutes")} />}
+            <input className="field" type="number" min={1} style={{ maxWidth: 130 }} placeholder={t("newagent.loop.max")} value={maxRuns} onChange={(e) => setMaxRuns(e.target.value)} aria-label={t("newagent.loop.max")} />
           </div>
           <div className="btnrow" style={{ marginTop: 6 }}>
-            <button className="btn small primary" onClick={save} disabled={!text.trim()}>{loop ? "save & run" : "start loop"}</button>
-            <button className="btn small" onClick={() => setEditing(false)}>cancel</button>
+            <button className="btn small primary" onClick={save} disabled={!text.trim()}>{t(loop ? "session.loop.save" : "session.loop.start")}</button>
+            <button className="btn small" onClick={() => setEditing(false)}>{t("common.cancel")}</button>
           </div>
         </>
       )}
@@ -1432,7 +1439,7 @@ function PaneHandle({ side, onDrag }: { side: "left" | "right"; onDrag: (dx: num
       className={`pane-handle wide-only ${side}`}
       role="separator"
       aria-orientation="vertical"
-      aria-label="resize"
+      aria-label={t("session.resize")}
       onPointerDown={(e) => {
         last.current = e.clientX;
         (e.target as HTMLElement).setPointerCapture(e.pointerId);
@@ -1479,13 +1486,13 @@ function ProviderUsageCard({ provider, usage }: { provider: string; usage: Provi
         {sub?.limit_reached && <span className="badge" style={{ color: "var(--bad)" }}>limit</span>}
       </div>
       {!usage && <div className="sub">…</div>}
-      {sub && !sub.logged_in && <div className="sub">not logged in on the host</div>}
+      {sub && !sub.logged_in && <div className="sub">{t("usage.notloggedin")}</div>}
       {sub?.error && <div className="sub" style={{ color: "var(--bad)" }}>{sub.error}</div>}
       {(sub?.windows ?? []).map((w) => (
         <div key={w.name} className="quota">
           <div className="sub quota-line">
             <span className="grow">{w.name}</span>
-            <span>{Math.round(w.used_percent)}%{w.resets_at ? ` · resets in ${resetIn(w.resets_at)}` : ""}</span>
+            <span>{Math.round(w.used_percent)}%{w.resets_at ? t("session.provider.resets", { t: resetIn(w.resets_at) }) : ""}</span>
           </div>
           <div className="quota-bar">
             <i style={{ width: `${Math.min(100, Math.max(0, w.used_percent))}%`, background: w.used_percent >= 100 ? "var(--bad)" : w.used_percent >= 80 ? "var(--warn)" : "var(--ok)" }} />
@@ -1494,9 +1501,9 @@ function ProviderUsageCard({ provider, usage }: { provider: string; usage: Provi
       ))}
       {usage && (
         <div className="sub" style={{ marginTop: sub ? 6 : 0 }}>
-          today: {fmtInt(today.calls)} calls · {fmtTok(today.input_tokens)}↑ {fmtTok(today.output_tokens)}↓
+          {t("session.provider.today", { calls: plural("usage.calls", today.calls ?? 0), in: fmtTok(today.input_tokens), out: fmtTok(today.output_tokens) })}
           {!sub && ` · ${fmtUsd(today.cost_usd)}`}
-          {usage.balance !== undefined && usage.balance !== null && ` · balance ${fmtUsd(usage.balance)}`}
+          {usage.balance !== undefined && usage.balance !== null && t("session.provider.balance", { sum: fmtUsd(usage.balance) })}
         </div>
       )}
     </div>
@@ -1505,24 +1512,24 @@ function ProviderUsageCard({ provider, usage }: { provider: string; usage: Provi
 
 /** One scheduled task of the session: cadence, next run, and the two things one does with it. */
 function ScheduleRow({ sc, sessionId, onAction }: { sc: Schedule; sessionId: string; onAction: (sc: Schedule, action: "run" | "delete") => void }) {
-  const where = sc.kind === "message" ? "reminder" : sc.kind === "lazy" ? "lazy note" : sc.run_in === "self" || sc.target_session === sessionId ? "runs here" : "own session";
+  const where = t(sc.kind === "message" ? "session.sched.reminder" : sc.kind === "lazy" ? "session.sched.lazy" : sc.run_in === "self" || sc.target_session === sessionId ? "session.sched.here" : "session.sched.own");
   return (
     <div className="sched-row" title={sc.prompt}>
       <div className="grow" style={{ minWidth: 0 }}>
         <div className="sched-name">
-          {!sc.enabled && <span title="switched off">⏸ </span>}
+          {!sc.enabled && <span title={t("session.sched.off")}>⏸ </span>}
           {sc.name} <span className="badge">{where}</span>
-          {sc.active_session_id === sessionId && <span className="live-dot" title="running now" />}
+          {sc.active_session_id === sessionId && <span className="live-dot" title={t("sched.running")} />}
         </div>
         <div className="sub sched-when">
-          {sc.cron ? `cron ${sc.cron}` : `once ${sc.run_at ? new Date(sc.run_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" }) : ""}`}
-          {sc.next_run_at && sc.enabled ? ` · next ${new Date(sc.next_run_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}` : ""}
-          {sc.last_run_at ? ` · last ${timeAgo(sc.last_run_at)}` : ""}
-          {sc.failure_count > 0 && <span style={{ color: "var(--bad)" }}> · {sc.failure_count} failed</span>}
+          {sc.cron ? t("session.sched.cron", { cron: sc.cron }) : t("session.sched.once", { when: shortDateTime(sc.run_at) })}
+          {sc.next_run_at && sc.enabled ? t("session.sched.next", { when: shortDateTime(sc.next_run_at) }) : ""}
+          {sc.last_run_at ? t("session.sched.last", { t: timeAgo(sc.last_run_at) }) : ""}
+          {sc.failure_count > 0 && <span style={{ color: "var(--bad)" }}>{t("session.sched.failed", { n: sc.failure_count })}</span>}
         </div>
       </div>
-      <button className="iconbtn small" onClick={() => onAction(sc, "run")} title="Run now" aria-label="run now"><Icon name="play" size={14} /></button>
-      <button className="iconbtn small" onClick={() => onAction(sc, "delete")} title="Delete" aria-label="delete"><Icon name="trash" size={14} /></button>
+      <button className="iconbtn small" onClick={() => onAction(sc, "run")} title={t("common.runnow")} aria-label={t("common.runnow")}><Icon name="play" size={14} /></button>
+      <button className="iconbtn small" onClick={() => onAction(sc, "delete")} title={t("common.delete")} aria-label={t("common.delete")}><Icon name="trash" size={14} /></button>
     </div>
   );
 }
@@ -1534,14 +1541,14 @@ function AttachmentCard({ file, onOpen, onRemove }: { file: File; onOpen: () => 
   useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
   return (
     <div className={`attachment ${isImage ? "image" : ""}`}>
-      <button type="button" className="attachment-open" onClick={onOpen} title={canPreview(file.name) ? "preview" : file.name}>
+      <button type="button" className="attachment-open" onClick={onOpen} title={canPreview(file.name) ? t("preview.open") : file.name}>
         {url ? <img src={url} alt={file.name} /> : <span className="attachment-glyph" aria-hidden>{fileGlyph(file.name)}</span>}
         <span className="attachment-meta">
           <span className="attachment-name">{file.name}</span>
           <span className="sub">{fmtBytes(file.size)}</span>
         </span>
       </button>
-      <button type="button" className="attachment-x" onClick={onRemove} aria-label={`remove ${file.name}`} title="Remove">
+      <button type="button" className="attachment-x" onClick={onRemove} aria-label={t("common.remove")} title={t("common.remove")}>
         <Icon name="close" size={12} />
       </button>
     </div>
@@ -1589,13 +1596,13 @@ function MicButton({ onRecording, busy }: { onRecording: (blob: Blob, seconds: n
   }
   if (rec) {
     return (
-      <button className="chip recording" onClick={stop} title="stop and transcribe" aria-label="stop recording">
-        <span className="rec-dot" /> {seconds}s · stop
+      <button className="chip recording" onClick={stop} title={t("session.mic.stop")} aria-label={t("session.mic.stop.label")}>
+        <span className="rec-dot" /> {t("session.mic.seconds", { n: seconds })}
       </button>
     );
   }
   return (
-    <button className="roundbtn" onClick={start} disabled={!supported || busy} title={!supported ? "no microphone access in this browser" : busy ? "transcribing…" : "record a voice note (transcribed to text)"} aria-label="record a voice note">
+    <button className="roundbtn" onClick={start} disabled={!supported || busy} title={t(!supported ? "session.mic.none" : busy ? "session.mic.busy" : "session.mic.title")} aria-label={t("session.mic")}>
       <Icon name={busy ? "dot" : "mic"} />
     </button>
   );
@@ -1607,12 +1614,12 @@ class Safe extends Component<{ children: ReactNode }, { failed: boolean }> {
     return { failed: true };
   }
   render() {
-    return this.state.failed ? <div className="note">this message could not be rendered</div> : this.props.children;
+    return this.state.failed ? <div className="note">{t("session.norender")}</div> : this.props.children;
   }
 }
 
 function shortModel(name?: string, max = 18): string {
-  if (!name) return "model";
+  if (!name) return t("session.model.none");
   const short = name.split("/").pop()!.replace(/^deepseek-/, "").replace(/\s*\(.*\)$/, "");
   return short.length > max ? `${short.slice(0, max - 1)}…` : short;
 }
@@ -1697,8 +1704,8 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
             actions={
               turn.user.seq && onTurnAction && !live
                 ? ([
-                    { icon: "fork", label: "Fork a session from here", onSelect: () => onTurnAction("fork", turn.user!.seq!) },
-                    ...(canRevert ? [{ icon: "undo", label: "Revert to here…", danger: true, onSelect: () => onTurnAction("revert", turn.user!.seq!) }] : []),
+                    { icon: "fork", label: t("session.fork.action"), onSelect: () => onTurnAction("fork", turn.user!.seq!) },
+                    ...(canRevert ? [{ icon: "undo", label: t("session.revert.action.menu"), danger: true, onSelect: () => onTurnAction("revert", turn.user!.seq!) }] : []),
                   ] as MessageAction[])
                 : []
             }
@@ -1712,15 +1719,15 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
             <i />
             <i />
           </span>
-          {live ? (turn.pendingTools > 0 ? "Working for" : "Thinking for") : "Worked for"} {fmtDuration(elapsed)}
-          {steps > 0 && <span className="steps">· {steps} step{steps === 1 ? "" : "s"}</span>}
+          {t(live ? (turn.pendingTools > 0 ? "session.working.for" : "session.thinking.for") : "session.worked", { t: fmtDuration(elapsed) })}
+          {steps > 0 && <span className="steps">{plural("session.steps", steps)}</span>}
           <span className={`chev ${open ? "down" : ""}`}>›</span>
         </button>
       )}
       {open && (
         <div className="activity">
           <ActivityList items={turn.activity} compact={false} />
-          {live && !turn.answer && turn.pendingTools === 0 && turn.activity.length > 0 && <div className="working">working…</div>}
+          {live && !turn.answer && turn.pendingTools === 0 && turn.activity.length > 0 && <div className="working">{t("session.working")}</div>}
         </div>
       )}
       {turn.answer && <Md className={`answer ${live ? "streaming" : ""}`} text={turn.answer} cacheKey={live ? undefined : `a${turn.key}`} />}
@@ -1759,18 +1766,18 @@ function LiveBar({ status, base, live, workspace, atBottom, onJump }: { status: 
         return `${d.verb}${d.detail ? ` ${d.detail}` : ""}`;
       })()
     : turn.answer
-      ? "Writing the answer"
+      ? t("session.livebar.writing")
       : state.thinking
-        ? "Reasoning"
+        ? t("session.reasoning")
         : status === "waiting"
-          ? "Waiting for your answer"
-          : "Thinking";
+          ? t("session.livebar.waiting")
+          : t("session.livebar.thinking");
   return (
-    <button className={`livebar ${status}`} onClick={onJump} role="status" aria-live="polite" title="To the latest step">
+    <button className={`livebar ${status}`} onClick={onJump} role="status" aria-live="polite" title={t("session.jump.step")}>
       <Dot status={status} />
-      <b>{status === "waiting" ? "Needs you" : "Working"}</b>
+      <b>{statusWord(status === "waiting" ? "waiting" : "running")}</b>
       <span className="num">{fmtDuration(Date.now() - turn.startedAt)}</span>
-      {steps > 0 && <span>· step {steps}</span>}
+      {steps > 0 && <span>{t("session.livebar.step", { n: steps })}</span>}
       {step && <span className="truncate">· {step}</span>}
       {!atBottom && <Icon name="down" size={16} />}
     </button>
@@ -1797,7 +1804,7 @@ function MessageActions({ text, actions = [] }: { text: string; actions?: Messag
   };
   return (
     <div className="msg-actions">
-      <button className="iconbtn small" onClick={copy} aria-label={copied ? "Copied" : "Copy"} title={copied ? "Copied" : "Copy"}>
+      <button className="iconbtn small" onClick={copy} aria-label={t(copied ? "common.copied" : "common.copy")} title={t(copied ? "common.copied" : "common.copy")}>
         <Icon name={copied ? "check" : "copy"} size={15} />
       </button>
       {actions.map((a) => (
@@ -1815,8 +1822,8 @@ function SummaryBlock({ message }: { message: MessageView }) {
   return (
     <div className="summary">
       <button className="summary-head" onClick={() => setOpen((o) => !o)}>
-        <Icon name="compact" /> Context summary
-        {meta ? ` · ${meta.messages} messages compacted (${meta.reason})` : ""}
+        <Icon name="compact" /> {t("session.summary")}
+        {meta ? t("session.summary.meta", { n: meta.messages ?? 0, reason: meta.reason }) : ""}
         <span className="chev">{open ? "⌄" : "›"}</span>
       </button>
       {open && <Md className="summary-body" text={message.text} />}
@@ -1824,79 +1831,86 @@ function SummaryBlock({ message }: { message: MessageView }) {
   );
 }
 
-/** Verb + noun for a tool, Grok-style ("Ran command", "Read file", "Editing 2 files"). */
-function describe(t: ToolItem, workspace?: string): { verb: string; noun: string; detail: string; icon: IconName } {
-  const a = t.args;
+/** The verb of a step, in the reader's language: "Ran command", "Выполнил команду". */
+function verb(name: string, running: boolean): string {
+  return t(`tool.${name}.${running ? "on" : "off"}`);
+}
+
+/** Verb + detail for a tool ("Ran command", "Read file"); the icon and the family it groups under. */
+function describe(item: ToolItem, workspace?: string): { verb: string; family: string; detail: string; icon: IconName } {
+  const a = item.args;
   const str = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : a[k] === undefined ? "" : JSON.stringify(a[k]));
   const base = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
-  const r = t.running;
-  switch (t.name) {
+  const r = item.running;
+  switch (item.name) {
     case "Exec":
-      return { verb: r ? "Running command" : "Ran command", noun: "command", detail: commandPreview(str("command"), workspace), icon: "terminal" };
+      return { verb: verb("Exec", r), family: "Exec", detail: commandPreview(str("command"), workspace), icon: "terminal" };
     case "Read":
-      return { verb: r ? "Reading file" : "Read file", noun: "file", detail: base(str("path")), icon: "file" };
+      return { verb: verb("Read", r), family: "Read", detail: base(str("path")), icon: "file" };
     case "Write":
-      return { verb: r ? "Writing file" : "Wrote file", noun: "file", detail: base(str("path")), icon: "pen" };
+      return { verb: verb("Write", r), family: "Write", detail: base(str("path")), icon: "pen" };
     case "Edit":
-      return { verb: r ? "Editing file" : "Edited file", noun: "file", detail: base(str("path")), icon: "pen" };
+      return { verb: verb("Edit", r), family: "Edit", detail: base(str("path")), icon: "pen" };
     case "Find":
     case "Search":
-      return { verb: r ? "Searching" : "Searched", noun: "search", detail: str("pattern") || str("query"), icon: "search" };
+      return { verb: verb("Find", r), family: "search", detail: str("pattern") || str("query"), icon: "search" };
     case "WebSearch":
-      return { verb: r ? "Searching the web" : "Searched the web", noun: "search", detail: str("query"), icon: "search" };
+      return { verb: verb("WebSearch", r), family: "search", detail: str("query"), icon: "search" };
     case "WebFetch":
-      return { verb: "Browsing", noun: "page", detail: str("url").replace(/^https?:\/\//, "").slice(0, 60), icon: "globe" };
+      return { verb: verb("WebFetch", r), family: "WebFetch", detail: str("url").replace(/^https?:\/\//, "").slice(0, 60), icon: "globe" };
     case "SendFile":
-      return { verb: r ? "Sending file" : "Sent file", noun: "file", detail: base(str("path")), icon: "attach" };
+      return { verb: verb("SendFile", r), family: "SendFile", detail: base(str("path")), icon: "attach" };
     case "ImageView":
-      return { verb: r ? "Viewing image" : "Viewed image", noun: "image", detail: `${base(str("path"))}${str("task") ? " · " + str("task").slice(0, 60) : ""}`, icon: "image" };
+      return { verb: verb("ImageView", r), family: "ImageView", detail: `${base(str("path"))}${str("task") ? " · " + str("task").slice(0, 60) : ""}`, icon: "image" };
     case "AskUser":
-      return { verb: "Asked you", noun: "question", detail: "", icon: "question" };
+      return { verb: t("tool.AskUser"), family: "AskUser", detail: "", icon: "question" };
     case "Skill":
-      return { verb: r ? "Loading skill" : "Loaded skill", noun: "skill", detail: str("skill") || str("name"), icon: "skill" };
+      return { verb: verb("Skill", r), family: "Skill", detail: str("skill") || str("name"), icon: "skill" };
     case "Remember":
     case "Recall":
     case "Forget":
-      return { verb: t.name === "Recall" ? "Recalled" : t.name === "Forget" ? "Forgot" : "Remembered", noun: "memory", detail: str("query") || str("text").slice(0, 60), icon: "bulb" };
+      return { verb: t(`tool.${item.name}`), family: item.name, detail: str("query") || str("text").slice(0, 60), icon: "bulb" };
     case "Verify":
-      return { verb: r ? "Verifying" : t.error ? "Verification failed" : "Verified", noun: "check", detail: str("criterion"), icon: "wrench" };
+      return { verb: r ? t("tool.Verify.on") : item.error ? t("tool.Verify.failed") : t("tool.Verify.off"), family: "Verify", detail: str("criterion"), icon: "wrench" };
     case "SubAgent":
-      return { verb: r ? "Starting subagent" : "Started subagent", noun: "subagent", detail: str("name") || str("task").split("\n")[0].slice(0, 60), icon: "spawn" };
+      return { verb: verb("SubAgent", r), family: "SubAgent", detail: str("name") || str("task").split("\n")[0].slice(0, 60), icon: "spawn" };
     case "SubAgentList":
-      return { verb: "Listed subagents", noun: "list", detail: "", icon: "spawn" };
+      return { verb: t("tool.SubAgentList"), family: "SubAgentList", detail: "", icon: "spawn" };
     case "SpawnAgent":
-      return { verb: r ? "Creating agent" : "Created agent", noun: "agent", detail: str("title"), icon: "spawn" };
+      return { verb: verb("SpawnAgent", r), family: "SpawnAgent", detail: str("title"), icon: "spawn" };
     case "AskPeer":
-      return { verb: r ? "Asking peer" : "Asked peer", noun: "peer", detail: str("name"), icon: "question" };
+      return { verb: verb("AskPeer", r), family: "AskPeer", detail: str("name"), icon: "question" };
     case "StaySilent":
-      return { verb: "Stayed silent", noun: "note", detail: str("note").slice(0, 60), icon: "dot" };
+      return { verb: t("tool.StaySilent"), family: "StaySilent", detail: str("note").slice(0, 60), icon: "dot" };
     case "HistorySearch":
-      return { verb: r ? "Searching history" : "Searched history", noun: "search", detail: str("query"), icon: "search" };
+      return { verb: verb("HistorySearch", r), family: "search", detail: str("query"), icon: "search" };
     case "HistoryExpand":
-      return { verb: "Read earlier turns", noun: "range", detail: `seq ${str("from_seq")}–${str("to_seq")}`, icon: "file" };
+      return { verb: t("tool.HistoryExpand"), family: "HistoryExpand", detail: t("tool.HistoryExpand.range", { from: str("from_seq"), to: str("to_seq") }), icon: "file" };
     default: {
-      if (t.name.startsWith("Board")) {
-        const what = t.name.replace(/^Board/, "").toLowerCase();
-        const verb = what === "add" ? (r ? "adding" : "added") : what === "update" ? (r ? "updating" : "updated") : what === "get" ? "read" : "listed";
-        return { verb: `Board: ${verb}`, noun: "task", detail: str("title") || str("task_id") || str("id"), icon: "skill" };
+      if (item.name.startsWith("Board")) {
+        const what = item.name.replace(/^Board/, "").toLowerCase();
+        const word = what === "add" || what === "update" ? t(`tool.board.${what}.${r ? "on" : "off"}`) : what === "get" ? t("tool.board.get") : t("tool.board.list");
+        return { verb: t("tool.board", { what: word }), family: item.name, detail: str("title") || str("task_id") || str("id"), icon: "skill" };
       }
-      if (t.name.startsWith("Self")) return { verb: t.name.replace(/^Self/, "Self: "), noun: "step", detail: str("branch") || str("title") || str("repo"), icon: "wrench" };
-      if (t.name.startsWith("Schedule")) return { verb: t.name.replace(/^Schedule/, "Schedule: "), noun: "task", detail: str("name") || str("schedule_id"), icon: "clock" };
-      if (t.name.startsWith("Service")) {
-        const what = t.name.replace(/^Service/, "").toLowerCase();
-        const verb = what === "start" ? (r ? "Starting service" : "Started service") : what === "stop" ? (r ? "Stopping service" : "Stopped service") : what === "logs" ? "Read service log" : "Listed services";
-        return { verb, noun: "service", detail: str("name") ? `${str("name")}${str("command") ? " · " + str("command").slice(0, 50) : ""}` : "", icon: "globe" };
+      // The names of the agent's own machinery are the tool ids themselves: they are what the agent
+      // writes in its own reasoning and what the documentation calls them, so they stay as they are.
+      if (item.name.startsWith("Self")) return { verb: item.name.replace(/^Self/, "Self: "), family: item.name, detail: str("branch") || str("title") || str("repo"), icon: "wrench" };
+      if (item.name.startsWith("Schedule")) return { verb: item.name.replace(/^Schedule/, "Schedule: "), family: item.name, detail: str("name") || str("schedule_id"), icon: "clock" };
+      if (item.name.startsWith("Service")) {
+        const what = item.name.replace(/^Service/, "").toLowerCase();
+        const word = what === "start" || what === "stop" ? verb(`Service${what[0].toUpperCase()}${what.slice(1)}`, r) : what === "logs" ? t("tool.ServiceLogs") : t("tool.ServiceList");
+        return { verb: word, family: item.name, detail: str("name") ? `${str("name")}${str("command") ? " · " + str("command").slice(0, 50) : ""}` : "", icon: "globe" };
       }
-      if (t.name.startsWith("Loop")) return { verb: t.name.replace(/^Loop/, "Loop: ").toLowerCase().replace(/^l/, "L"), noun: "loop", detail: str("reason") || str("note") || str("instruction").slice(0, 60), icon: "loop" };
-      if (t.name.startsWith("Mcp")) {
+      if (item.name.startsWith("Loop")) return { verb: item.name.replace(/^Loop/, "Loop: "), family: item.name, detail: str("reason") || str("note") || str("instruction").slice(0, 60), icon: "loop" };
+      if (item.name.startsWith("Mcp")) {
         // Mcp_Postingboard_read_thread → "postingboard · read thread", with the first string argument as the detail.
-        const parts = t.name.replace(/^Mcp_?/, "").split("_");
+        const parts = item.name.replace(/^Mcp_?/, "").split("_");
         const server = (parts.shift() ?? "").toLowerCase();
         const tool = parts.join(" ").replace(/_/g, " ");
         const first = Object.values(a).find((v) => typeof v === "string") as string | undefined;
-        return { verb: `${server} · ${tool || "call"}`, noun: "call", detail: (first ?? "").slice(0, 60), icon: "plug" };
+        return { verb: `${server} · ${tool}`.trim(), family: item.name, detail: (first ?? "").slice(0, 60), icon: "plug" };
       }
-      return { verb: t.name, noun: "call", detail: Object.keys(a).length ? JSON.stringify(a).slice(0, 60) : "", icon: "dot" };
+      return { verb: item.name, family: item.name, detail: Object.keys(a).length ? JSON.stringify(a).slice(0, 60) : "", icon: "dot" };
     }
   }
 }
@@ -1952,9 +1966,7 @@ function ToolGroup({ family, group }: { family: string; group: ToolItem[] }) {
     <div className="group">
       <div className={`act head ${running ? "running" : ""}`} onClick={() => setOpen((o) => !o)}>
         <Icon name={d.icon} />
-        <span className="verb">
-          {groupVerb(family, running)} {group.length} {plural(d.noun)}
-        </span>
+        <span className="verb">{groupVerb(d.family, running, group.length, family)}</span>
         <span className={`chev ${open ? "down" : ""}`}>›</span>
       </div>
       {open && group.map((g) => <ToolRow key={g.id} item={g} nested />)}
@@ -1962,25 +1974,12 @@ function ToolGroup({ family, group }: { family: string; group: ToolItem[] }) {
   );
 }
 
-function plural(noun: string): string {
-  const irregular: Record<string, string> = { search: "searches", memory: "memories", query: "queries", check: "checks" };
-  return irregular[noun] ?? `${noun}s`;
-}
+/** "Read 3 files", "Прочитал 3 файла" — the whole line, because the count sits inside it. */
+const GROUPED = ["Exec", "Read", "Write", "Edit", "search", "WebFetch", "SendFile"];
 
-function groupVerb(name: string, running: boolean): string {
-  const map: Record<string, [string, string]> = {
-    Exec: ["Running", "Ran"],
-    Read: ["Reading", "Read"],
-    Write: ["Writing", "Wrote"],
-    Edit: ["Editing", "Edited"],
-    Find: ["Running", "Ran"],
-    Search: ["Running", "Ran"],
-    WebSearch: ["Running", "Ran"],
-    WebFetch: ["Browsing", "Browsed"],
-    SendFile: ["Sending", "Sent"],
-  };
-  const [a, b] = map[name] ?? ["Calling", "Called"];
-  return running ? a : b;
+function groupVerb(family: string, running: boolean, n: number, name: string): string {
+  if (!GROUPED.includes(family)) return plural(`tool.group.other${running ? "" : ".done"}`, n, { name });
+  return plural(`tool.group.${family}${running ? "" : ".done"}`, n);
 }
 
 function SummaryGroup({ group }: { group: SummaryItem[] }) {
@@ -1989,8 +1988,8 @@ function SummaryGroup({ group }: { group: SummaryItem[] }) {
     <div className="act-wrap">
       <div className="act prose" onClick={() => setOpen((o) => !o)}>
         <Icon name="compact" />
-        <span className="verb">Context compacted</span>
-        <span className="detail">{group.length} older turns folded into summaries</span>
+        <span className="verb">{t("session.compacted.title")}</span>
+        <span className="detail">{t("session.compacted.group", { n: group.length })}</span>
         <span className={`chev ${open ? "down" : ""}`}>›</span>
       </div>
       {open && group.map((s, k) => <SummaryRow key={k} text={s.text} reason={s.reason} />)}
@@ -2004,7 +2003,7 @@ function SummaryRow({ text, reason }: { text: string; reason: string }) {
     <div className="act-wrap">
       <div className="act prose" onClick={() => setOpen((o) => !o)}>
         <Icon name="compact" />
-        <span className="verb">Context compacted</span>
+        <span className="verb">{t("session.compacted.title")}</span>
         <span className="detail">{reason !== "auto" ? `${reason} · ` : ""}{plainPreview(text, 100)}</span>
         <span className={`chev ${open ? "down" : ""}`}>›</span>
       </div>
@@ -2019,7 +2018,7 @@ function ThoughtBlock({ text }: { text: string }) {
     <div className="act-wrap">
       <div className="act prose" onClick={() => setOpen((o) => !o)}>
         <Icon name="bulb" />
-        <span className="verb">Reasoning</span>
+        <span className="verb">{t("session.reasoning")}</span>
         <span className="detail">{plainPreview(text, 100)}</span>
         <span className={`chev ${open ? "down" : ""}`}>›</span>
       </div>
@@ -2082,22 +2081,22 @@ function ReceiptDialog({ sessionId, receipt, onClose }: { sessionId: string; rec
   return (
     <Overlay>
       <div className="sheet-backdrop" onClick={onClose}>
-        <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={`receipt ${receipt}`}>
+        <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={t("session.receipt", { id: receipt })}>
           <div className="grip" />
-          <h3>Receipt {receipt}</h3>
+          <h3>{t("session.receipt", { id: receipt })}</h3>
           <div className="sheet-body">
-            {row === undefined && <div className="empty">Loading…</div>}
-            {row === null && <div className="empty">No receipt {receipt} in this session — the agent may have cited a run it did not make.</div>}
+            {row === undefined && <div className="empty">{t("common.loading")}</div>}
+            {row === null && <div className="empty">{t("session.receipt.none", { id: receipt })}</div>}
             {row && (
               <>
                 <p className="receipt-claim">
-                  <b>{row.passed ? "✅ verified" : "❌ not verified"}</b> — {row.criterion}
+                  <b>{row.passed ? `✅ ${t("session.receipt.ok")}` : `❌ ${t("session.receipt.fail")}`}</b> — {row.criterion}
                 </p>
                 <div className="sub">
-                  exit {row.exit_code} · {(row.duration_ms / 1000).toFixed(1)}s · {timeAgo(row.at)}
-                  {row.tests_run !== null && ` · ${row.tests_run} tests`}
-                  {row.sandboxed ? " · sandboxed" : ""}
-                  {row.dependencies && ` · depends on ${row.dependencies}`}
+                  {t("session.receipt.meta", { code: row.exit_code, secs: (row.duration_ms / 1000).toFixed(1), when: timeAgo(row.at) })}
+                  {row.tests_run !== null && t("session.receipt.tests", { n: row.tests_run })}
+                  {row.sandboxed ? t("session.receipt.sandboxed") : ""}
+                  {row.dependencies && t("session.receipt.depends", { list: row.dependencies })}
                 </div>
                 <div dangerouslySetInnerHTML={{ __html: codeBlock(row.command, "sh") }} />
                 {row.output_head && <pre className="filetext">{row.output_head}</pre>}
@@ -2143,7 +2142,7 @@ function ToolAttachment({ item }: { item: ToolItem }) {
   }
   return (
     <div className="tool-attachment">
-      <button type="button" className="file-chip" onClick={() => preview(src)} title={canPreview(name) ? "preview" : "download"}>
+      <button type="button" className="file-chip" onClick={() => preview(src)} title={t(canPreview(name) ? "preview.open" : "preview.download")}>
         <span aria-hidden>{fileGlyph(name)}</span> {name}
       </button>
     </div>
@@ -2160,13 +2159,20 @@ function CompactionBar({ c }: { c: Compacting }) {
   }, []);
   const parts = c.parts_total > 1 ? Math.round((100 * c.parts_done) / c.parts_total) : 0;
   const pct = c.stage === "writing" ? 97 : c.stage === "merging" ? 88 : c.parts_total > 1 ? Math.round(parts * 0.8) : 35;
-  const what = c.stage === "writing" ? "writing the summary" : c.stage === "merging" ? "merging the parts" : c.parts_total > 1 ? `part ${Math.min(c.parts_done + 1, c.parts_total)} of ${c.parts_total}` : "summarising";
+  const what =
+    c.stage === "writing"
+      ? t("session.compacting.writing")
+      : c.stage === "merging"
+        ? t("session.compacting.merging")
+        : c.parts_total > 1
+          ? t("session.compacting.part", { n: Math.min(c.parts_done + 1, c.parts_total), total: c.parts_total })
+          : t("session.compacting.summarising");
   return (
     <div className="livebar compacting" role="status" aria-live="polite">
       <Dot status="compacting" />
-      <b>Compacting</b>
+      <b>{t("session.compacting.bar")}</b>
       <span className="num">{fmtDuration(Date.now() - new Date(c.started_at).getTime())}</span>
-      <span>· {c.messages} messages · {what}</span>
+      <span>{t("session.compacting.messages", { n: c.messages, what })}</span>
       <div className="bar" aria-hidden><i style={{ ["--v" as string]: pct }} /></div>
     </div>
   );
@@ -2177,23 +2183,23 @@ function SentFiles({ items }: { items: Activity[] }) {
   const sent = items.filter((a): a is ToolItem => a.kind === "tool" && a.name === "SendFile" && !a.running && !a.error && typeof a.args.path === "string");
   if (!sent.length || !id) return null;
   return (
-    <div className="sent-files" aria-label="files sent to you">
-      {sent.map((t) => {
-        const path = String(t.args.path);
+    <div className="sent-files" aria-label={t("session.sentfiles")}>
+      {sent.map((file) => {
+        const path = String(file.args.path);
         const name = path.split("/").filter(Boolean).pop() ?? path;
-        const caption = typeof t.args.caption === "string" ? t.args.caption : "";
+        const caption = typeof file.args.caption === "string" ? file.args.caption : "";
         // The file is served by the call that sent it, so a path outside the workspace opens too.
-        const src: PreviewSource = { base: `${sessionBase(id)}/sent/${encodeURIComponent(t.id)}`, path: name };
+        const src: PreviewSource = { base: `${sessionBase(id)}/sent/${encodeURIComponent(file.id)}`, path: name };
         if (previewKind(name) === "image") {
           return (
-            <figure key={t.id} className="sent-file image">
+            <figure key={file.id} className="sent-file image">
               <AuthImg src={src} alt={name} className="tool-image" onClick={() => preview(src)} />
               {caption && <figcaption className="sub">{caption}</figcaption>}
             </figure>
           );
         }
         return (
-          <button key={t.id} type="button" className="file-chip sent-file" onClick={() => preview(src)} title={caption || (canPreview(name) ? "preview" : "download")}>
+          <button key={file.id} type="button" className="file-chip sent-file" onClick={() => preview(src)} title={caption || t(canPreview(name) ? "preview.open" : "preview.download")}>
             <span aria-hidden>{fileGlyph(name)}</span>
             <span className="truncate">{name}</span>
           </button>
@@ -2212,7 +2218,7 @@ function ToolTiming({ sessionId }: { sessionId: string }) {
   const total = rows.reduce((a, r) => a + r.total_ms, 0);
   return (
     <div className="sub">
-      Tool time {Math.round(total / 1000)}s: {rows.slice(0, 5).map((r) => `${r.name} ${Math.round(r.total_ms / 1000)}s/${r.calls}${r.errors ? ` (${r.errors} failed)` : ""}`).join(" · ")}
+      {t("session.tooltime", { n: Math.round(total / 1000), list: rows.slice(0, 5).map((r) => `${r.name} ${Math.round(r.total_ms / 1000)}s/${r.calls}${r.errors ? ` (${r.errors})` : ""}`).join(" · ") })}
     </div>
   );
 }
@@ -2257,13 +2263,13 @@ function ToolResultText({ item }: { item: ToolItem }) {
     <>
       <pre className={`result ${item.error ? "error" : ""} ${full !== null ? "full" : ""}`}>{text}</pre>
       {approval && (
-        <button type="button" className="btn small" onClick={allowOnce} disabled={granted} title="Let this exact call through once; the agent retries it on its next step">
-          {granted ? `Allowed once (${approval[1]})` : `Allow once (${approval[1]})`}
+        <button type="button" className="btn small" onClick={allowOnce} disabled={granted} title={t("session.allow.title")}>
+          {t(granted ? "session.allowed.once" : "session.allow.once", { key: approval[1] })}
         </button>
       )}
       {clipped && (
         <button type="button" className="btn small" onClick={loadAll} disabled={loading}>
-          {loading ? "Loading…" : `Show all (${item.length!.toLocaleString()} characters)`}
+          {loading ? t("common.loading") : t("session.showall", { n: fmtInt(item.length!) })}
         </button>
       )}
     </>
@@ -2312,13 +2318,13 @@ function QuestionCard({ sessionId, questions, onDone, toast }: { sessionId: stri
             </button>
           ))}
           {(q.allow_custom || !(q.options ?? []).length) && (
-            <input className="field" style={{ marginTop: 6 }} placeholder="your answer" value={answers[qi].custom} onChange={(e) => setAnswers((p) => p.map((a, i) => (i === qi ? { ...a, custom: e.target.value } : a)))} />
+            <input className="field" style={{ marginTop: 6 }} placeholder={t("session.answer.placeholder")} value={answers[qi].custom} onChange={(e) => setAnswers((p) => p.map((a, i) => (i === qi ? { ...a, custom: e.target.value } : a)))} />
           )}
         </div>
       ))}
       <div className="btnrow">
         <button className="btn primary" disabled={!complete} onClick={submit}>
-          Answer
+          {t("session.answer")}
         </button>
       </div>
     </div>
@@ -2354,7 +2360,7 @@ export function Files({ base, uploadUrl, onPreview, toast }: { base: string; upl
       const res = await fetch(uploadUrl, { method: "POST", headers: api.authHeaders(), body: form });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? res.statusText);
       const r = (await res.json()) as { files: string[] };
-      toast?.(`${r.files.length} file${r.files.length === 1 ? "" : "s"} added`);
+      toast?.(plural("session.files.added", r.files.length));
       setGen((g) => g + 1);
     } catch (e) {
       toast?.(errorText(e));
@@ -2363,8 +2369,8 @@ export function Files({ base, uploadUrl, onPreview, toast }: { base: string; upl
       if (upload.current) upload.current.value = "";
     }
   }
-  if (error) return <div className="empty">could not read {path || "the workspace"}: {error}</div>;
-  if (!data) return <div className="empty">Loading…</div>;
+  if (error) return <div className="empty">{t("session.files.error", { what: path || t("session.files.theworkspace"), error })}</div>;
+  if (!data) return <div className="empty">{t("common.loading")}</div>;
   const crumbs = path ? path.split("/") : [];
   const all: any[] = data.kind === "dir" ? data.entries : [];
   const entries = all.filter((e) => showHidden || !e.name.startsWith("."));
@@ -2374,7 +2380,7 @@ export function Files({ base, uploadUrl, onPreview, toast }: { base: string; upl
   return (
     <div className="files">
       <div className="crumbs">
-        <button className="crumb" onClick={() => setPath("")}>workspace</button>
+        <button className="crumb" onClick={() => setPath("")}>{t("session.files.crumb")}</button>
         {crumbs.map((c, i) => (
           <span key={i}>
             <span className="sub"> / </span>
@@ -2383,19 +2389,19 @@ export function Files({ base, uploadUrl, onPreview, toast }: { base: string; upl
         ))}
         {data.kind !== "dir" && (
           <a className="btn small" style={{ marginLeft: "auto" }} href={download} target="_blank" rel="noreferrer">
-            download{data.size ? ` · ${fmtBytes(data.size)}` : ""}
+            {t("preview.download")}{data.size ? ` · ${fmtBytes(data.size)}` : ""}
           </a>
         )}
         {data.kind === "dir" && uploadUrl && (
           <>
             <input ref={upload} type="file" multiple hidden onChange={(e) => sendFiles(e.target.files)} />
-            <button className="btn small" style={{ marginLeft: "auto" }} disabled={uploading} onClick={() => upload.current?.click()} title="Upload files into this folder">
-              <Icon name="up" size={14} /> {uploading ? "uploading…" : "upload"}
+            <button className="btn small" style={{ marginLeft: "auto" }} disabled={uploading} onClick={() => upload.current?.click()} title={t("session.files.upload.title")}>
+              <Icon name="up" size={14} /> {t(uploading ? "session.files.uploading" : "session.files.upload")}
             </button>
           </>
         )}
       </div>
-      {data.kind === "dir" && entries.length === 0 && <div className="empty">empty</div>}
+      {data.kind === "dir" && entries.length === 0 && <div className="empty">{t("session.files.empty")}</div>}
       {data.kind === "dir" &&
         entries.map((e: any) => (
           <button
@@ -2411,21 +2417,21 @@ export function Files({ base, uploadUrl, onPreview, toast }: { base: string; upl
             <span aria-hidden>{fileGlyph(e.name, e.dir)}</span>
             <div className="grow title">{e.name}</div>
             {!e.dir && <span className="sub">{fmtBytes(e.size)}</span>}
-            {e.mtime && <span className="sub">{new Date(e.mtime * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}</span>}
+            {e.mtime && <span className="sub">{shortDateTime(e.mtime * 1000)}</span>}
           </button>
         ))}
       {data.kind === "dir" && hidden > 0 && (
         <button className="btn small" onClick={() => setShowHidden((h) => !h)}>
-          {showHidden ? "hide" : "show"} {hidden} hidden {hidden === 1 ? "entry" : "entries"}
+          {plural(showHidden ? "session.files.hidden.hide" : "session.files.hidden", hidden)}
         </button>
       )}
-      {data.kind === "file" && data.truncated && <div className="sub" style={{ margin: "6px 0" }}>showing the first 512 KB; download for the whole file</div>}
+      {data.kind === "file" && data.truncated && <div className="sub" style={{ margin: "6px 0" }}>{t("session.files.truncated")}</div>}
       {data.kind !== "dir" && canPreview(path) && (
-        <button className="btn small" style={{ marginBottom: 8 }} onClick={() => onPreview({ base, path })}><Icon name="eye" size={14} /> preview</button>
+        <button className="btn small" style={{ marginBottom: 8 }} onClick={() => onPreview({ base, path })}><Icon name="eye" size={14} /> {t("preview.open")}</button>
       )}
       {data.kind === "file" && <pre className="filetext">{data.content}</pre>}
       {data.kind === "binary" && previewKind(path) === "image" && <AuthImg className="preview" src={{ base, path }} alt={path} onClick={() => onPreview({ base, path })} />}
-      {data.kind === "binary" && previewKind(path) !== "image" && <div className="empty">binary file, {fmtBytes(data.size)}</div>}
+      {data.kind === "binary" && previewKind(path) !== "image" && <div className="empty">{t("session.files.binary", { size: fmtBytes(data.size) })}</div>}
     </div>
   );
 }
@@ -2443,7 +2449,7 @@ function McpPanel({ sessionId, toast }: { sessionId: string; toast: (t: string) 
     setBusy(server);
     try {
       setData(await api.put(`/api/sessions/${sessionId}/mcp`, { server, enabled }));
-      toast(`${server}: ${enabled ? "enabled" : "disabled"}`);
+      toast(t("session.mcp.toggled", { name: server, state: t(enabled ? "session.mcp.enabled" : "session.mcp.disabled") }));
     } catch (e) {
       toast(errorText(e));
     } finally {
@@ -2451,10 +2457,10 @@ function McpPanel({ sessionId, toast }: { sessionId: string; toast: (t: string) 
     }
   }
   if (!data) return <div className="empty">…</div>;
-  if (data.servers.length === 0) return <div className="empty">No MCP servers configured. Add them under [mcp.servers.&lt;name&gt;] in config.toml.</div>;
+  if (data.servers.length === 0) return <div className="empty">{t("session.mcp.none")}</div>;
   return (
     <div>
-      <div className="sub" style={{ marginBottom: 8 }}>MCP servers for this session (off by default; the agent can toggle them too)</div>
+      <div className="sub" style={{ marginBottom: 8 }}>{t("session.mcp.sub")}</div>
       {data.servers.map((s) => {
         const on = data.enabled.includes(s.name);
         return (
@@ -2462,11 +2468,11 @@ function McpPanel({ sessionId, toast }: { sessionId: string; toast: (t: string) 
             <div className="row">
               <div className="grow">
                 <div className="title">{s.name}</div>
-                <div className="sub">{s.description || "no description"}{s.error && ` · error: ${s.error}`}</div>
+                <div className="sub">{s.description || t("session.mcp.nodesc")}{s.error && t("session.mcp.error", { error: s.error })}</div>
                 {s.tools.length > 0 && <div className="sub">{s.tools.join(", ")}</div>}
               </div>
               <button className={`btn small ${on ? "primary" : ""}`} disabled={busy === s.name} onClick={() => toggle(s.name, !on)}>
-                {on ? "on" : "off"}
+                {t(on ? "common.on" : "common.off")}
               </button>
             </div>
           </div>

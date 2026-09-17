@@ -9,6 +9,7 @@ import { api } from "./api";
 import { Icon } from "./icons";
 import { renderMarkdown } from "./md";
 import { errorText, fmtBytes } from "./ui";
+import { t } from "./i18n";
 
 /** Where the bytes come from: a file under an API file root (`/api/sessions/<id>` or `/api/workspaces/<name>`), or a File object from the composer.
  * `lines` ("20-40", or a single number) is what an answer cited: the file opens as source with that range marked. */
@@ -72,7 +73,7 @@ function sourceName(src: PreviewSource): string {
 async function sourceBlob(src: PreviewSource): Promise<Blob> {
   if ("file" in src) return src.file;
   const res = await fetch(`${src.base}/download?path=${encodeURIComponent(src.path)}`, { headers: api.authHeaders() });
-  if (!res.ok) throw new Error(res.status === 404 ? "no such file" : `could not load the file (${res.status})`);
+  if (!res.ok) throw new Error(res.status === 404 ? t("preview.nofile") : t("preview.failed", { status: res.status }));
   return res.blob();
 }
 
@@ -150,7 +151,7 @@ export function parseCsv(text: string, max = 2000): string[][] {
 }
 
 function Grid({ rows, note }: { rows: string[][]; note?: string }) {
-  if (!rows.length) return <div className="empty">empty</div>;
+  if (!rows.length) return <div className="empty">{t("preview.empty")}</div>;
   const width = Math.max(...rows.map((r) => r.length));
   return (
     <div className="tablewrap preview-grid">
@@ -202,7 +203,7 @@ function LinedText({ text, range }: { text: string; range: { from: number; to: n
   }, [range.from, range.to]);
   return (
     <div className="filetext lined">
-      {windowed && <div className="sub">lines {start + 1}–{end} of {all.length}</div>}
+      {windowed && <div className="sub">{t("preview.lines.of", { from: start + 1, to: end, total: all.length })}</div>}
       {shown.map((line, i) => {
         const n = start + i + 1;
         const cited = n >= range.from && n <= range.to;
@@ -244,11 +245,11 @@ export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () 
       try {
         if (kind === "markdown" || kind === "text" || kind === "csv" || kind === "html") {
           const text = await blob.slice(0, TEXT_LIMIT).text();
-          const clipped = blob.size > TEXT_LIMIT ? `\n\n[… ${fmtBytes(blob.size - TEXT_LIMIT)} more — download the file for the rest]` : "";
+          const clipped = blob.size > TEXT_LIMIT ? `\n\n${t("preview.more", { size: fmtBytes(blob.size - TEXT_LIMIT) })}` : "";
           if (kind === "markdown") done({ html: renderMarkdown(text + clipped) });
           else if (kind === "csv") {
             const rows = parseCsv(text);
-            done({ rows, error: rows.length >= 2000 ? "showing the first 2000 rows" : undefined });
+            done({ rows, error: rows.length >= 2000 ? t("preview.rows") : undefined });
           } else done({ text: text + clipped });
         } else if (kind === "docx") {
           const mammoth = await import("mammoth");
@@ -283,16 +284,16 @@ export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () 
         <div className="sheet-head">
           <h3 className="preview-name" title={"file" in src ? name : src.path}>
             <span aria-hidden>{fileGlyph(name)}</span> {name}
-            {cited && <span className="sub"> · lines {cited.from === cited.to ? cited.from : `${cited.from}–${cited.to}`}</span>}
+            {cited && <span className="sub">{t("preview.lines", { range: cited.from === cited.to ? cited.from : `${cited.from}–${cited.to}` })}</span>}
             {blob && <span className="sub"> · {fmtBytes(blob.size)}</span>}
           </h3>
           <div className="head-actions">
             {url && (
-              <a className="iconbtn small" href={url} download={downloadName} title="Download" aria-label="download">
+              <a className="iconbtn small" href={url} download={downloadName} title={t("common.download")} aria-label={t("common.download")}>
                 <Icon name="download" size={16} />
               </a>
             )}
-            <button className="iconbtn small" onClick={onClose} aria-label="close" title="Close">
+            <button className="iconbtn small" onClick={onClose} aria-label={t("common.close")} title={t("common.close")}>
               <Icon name="close" size={16} />
             </button>
           </div>
@@ -306,7 +307,7 @@ export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () 
         )}
         <div className="sheet-body preview-body">
           {failure && <div className="empty">{failure}</div>}
-          {loading && <div className="empty">Loading…</div>}
+          {loading && <div className="empty">{t("common.loading")}</div>}
           {!failure && url && kind === "image" && <img className="preview-image" src={url} alt={name} />}
           {!failure && url && kind === "pdf" && <iframe className="preview-frame" src={url} title={name} />}
           {!failure && url && kind === "audio" && <audio className="preview-media" controls src={url} />}
@@ -316,12 +317,12 @@ export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () 
           {!failure && body?.text !== undefined && kind === "html" && <pre className="filetext">{body.text}</pre>}
           {!failure && body?.text !== undefined && kind === "text" && (cited ? <LinedText text={body.text} range={cited} /> : <pre className="filetext">{body.text}</pre>)}
           {!failure && body?.rows && <Grid rows={body.rows} note={body.error} />}
-          {!failure && body?.sheets && <Grid rows={body.sheets[sheet]?.rows ?? []} note={(body.sheets[sheet]?.rows.length ?? 0) >= 2000 ? "showing the first 2000 rows" : undefined} />}
+          {!failure && body?.sheets && <Grid rows={body.sheets[sheet]?.rows ?? []} note={(body.sheets[sheet]?.rows.length ?? 0) >= 2000 ? t("preview.rows") : undefined} />}
           {!failure && url && kind === "other" && (
             <div className="empty">
-              No preview for this type.
+              {t("preview.none")}
               <div style={{ marginTop: 10 }}>
-                <a className="btn small" href={url} download={downloadName}>download {fmtBytes(blob?.size ?? 0)}</a>
+                <a className="btn small" href={url} download={downloadName}>{t("preview.download")} {fmtBytes(blob?.size ?? 0)}</a>
               </div>
             </div>
           )}
