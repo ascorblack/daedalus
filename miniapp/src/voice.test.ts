@@ -86,6 +86,20 @@ describe("the page's state machine", () => {
     expect(voiceReducer(delegating, { type: "done" }).delegating).toBe("");
   });
 
+  it("goes back to listening the moment the operator talks over the answer", () => {
+    const speaking = run([{ type: "mic", on: true }, { type: "asked", text: "read me the digest" }, { type: "say", text: "Three things happened." }]);
+    expect(speaking.phase).toBe("speaking");
+    const barged = voiceReducer(speaking, { type: "barge" });
+    expect(barged.phase).toBe("listening");
+    expect(barged.spoken).toEqual(["Three things happened."]);
+    expect(barged.partial).toBe("");
+  });
+
+  it("leaves a page that is not speaking alone when a barge-in arrives", () => {
+    const thinking = run([{ type: "mic", on: true }, { type: "asked", text: "what is on the board?" }]);
+    expect(voiceReducer(thinking, { type: "barge" })).toBe(thinking);
+  });
+
   it("shows a problem without pretending the page is still working", () => {
     const failed = run([{ type: "mic", on: true }, { type: "asked", text: "x" }, { type: "problem", message: "the concierge stopped" }]);
     expect([failed.phase, failed.problem]).toEqual(["listening", "the concierge stopped"]);

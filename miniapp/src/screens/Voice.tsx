@@ -74,6 +74,20 @@ type VoiceState = {
 /** How long after the last spoken word the microphone stays deaf: a speaker's tail reaches it late. */
 const ECHO_TAIL_MS = 400;
 
+/** How long after the answer starts playing a speech start is taken to be the speaker, not a person.
+ *
+ *  A laptop plays the answer into its own microphone, and the first thing the recogniser hears after
+ *  the audio begins is almost always that. After this the two are told apart by level instead: a
+ *  person talking over a speaker is louder at the microphone than the speaker is. */
+const ECHO_GUARD_MS = 400;
+
+/** The loudness a listener that measures one must reach to count as somebody talking over the answer.
+ *
+ *  Well above the level a laptop speaker comes back at through echo cancellation, and well below
+ *  ordinary speech at arm's length. A recogniser with its own voice activity detector reports no
+ *  level at all, and is believed: telling speech from noise is the thing it is for. */
+const BARGE_LEVEL = 0.06;
+
 export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   const { data: state, refresh } = useQuery<VoiceState>("/api/voice", { staleMs: 10000, pollMs: 60000 });
   const [ui, dispatch] = useReducer(voiceReducer, IDLE_VOICE);
@@ -138,10 +152,12 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   // synthesiser — the listener keeps running and everything it hears is dropped.
   const speakingRef = useRef(false);
   const deafUntil = useRef(0);
+  const speakingSince = useRef(0);
   const earsOpen = useCallback(() => !speakingRef.current && Date.now() >= deafUntil.current, []);
   const onSpeaking = useCallback((on: boolean) => {
     speakingRef.current = on;
-    if (!on) deafUntil.current = Date.now() + ECHO_TAIL_MS;
+    if (on) speakingSince.current = Date.now();
+    else deafUntil.current = Date.now() + ECHO_TAIL_MS;
     dispatch({ type: "speaking", on });
   }, []);
 
@@ -292,16 +308,45 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   }, []);
 
   const bargeIn = useCallback(() => {
+    // Three things stop, and all three have to: the clip that is playing, the request fetching the
+    // rest of the answer (`cancel` aborts it, which is what stops the synthesiser at the far end),
+    // and the run that is producing the sentences.
     speaker.current?.cancel();
+    dispatch({ type: "barge" });
+    // The tail the speaker leaves behind is for its own echo. The operator is talking *now*, and
+    // deafening the page for four hundred milliseconds would drop the start of what they said.
+    deafUntil.current = 0;
     void api.post("/api/voice/interrupt", {}).catch(() => undefined);
   }, []);
+
+  /**
+   * Somebody started talking. Whether that is the operator or the page hearing itself is the whole
+   * question, and it is the one moment barge-in exists for: while the answer is playing.
+   *
+   * The old guard closed the ears entirely while speaking, which is exactly when barging in is the
+   * only thing that matters, so nothing was ever interrupted. What is kept from it is the reason it
+   * was there — the speaker is heard by the microphone — and that is now answered by the two things
+   * that actually tell them apart: the first moments of playback are the speaker, and after that a
+   * person is louder than a speaker is through echo cancellation. A listener that reports no level
+   * has a voice activity detector of its own and is taken at its word.
+   */
+  const onSpeechStart = useCallback(
+    (level?: number) => {
+      if (!speakingRef.current) return;
+      if (Date.now() - speakingSince.current < ECHO_GUARD_MS) return;
+      if (level !== undefined && level < BARGE_LEVEL) return;
+      haptic("light");
+      bargeIn();
+    },
+    [bargeIn],
+  );
 
   const startMic = useCallback(async () => {
     speaker.current?.unlock();
     const handlers = {
       onInterim: (text: string) => earsOpen() && dispatch({ type: "heard", text }),
       onFinal: (text: string) => earsOpen() && void send(text),
-      onSpeechStart: () => earsOpen() && bargeIn(),
+      onSpeechStart,
       onError: (message: string) => dispatch({ type: "problem", message }),
       onLevel,
     };
@@ -331,7 +376,7 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
     }
     dispatch({ type: "mic", on: true });
     haptic("medium");
-  }, [bargeIn, canRecognise, earsOpen, lang, localStt, onLevel, send]);
+  }, [canRecognise, earsOpen, lang, localStt, onLevel, onSpeechStart, send]);
 
   const stopMic = useCallback(() => {
     listener.current?.stop();
