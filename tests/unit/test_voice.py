@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,7 +18,10 @@ from daedalus.extensions.voice import (
     REPORT_CLOSE,
     REPORT_OPEN,
     Voice,
+    delta_text,
+    progress_line,
     report_block,
+    settles_interim,
     speakable,
     split_sentences,
     tts_configured,
@@ -155,6 +160,7 @@ async def test_a_finished_agent_is_reported_at_once_only_while_a_page_is_listeni
     assert session_id == await voice.session_id() and origin == "agent"
     assert text.startswith(REPORT_OPEN) and text.endswith(REPORT_CLOSE)
     assert "Digest" in text and "finished" in text and "the digest is out" in text and "⟦" not in text
+    assert "kind: final" in text
     assert not voice.held
 
     # With a page connected the next one goes straight through, as one turn each.
@@ -168,8 +174,8 @@ async def test_held_reports_are_delivered_as_one_turn(app: Any) -> None:
     voice = Voice(app)
     submitted = _capture(manager)
     await voice.session_id()
-    await voice.report(report_block(title="a", session_id="s-a", state="finished", body="one"))
-    await voice.report(report_block(title="b", session_id="s-b", state="finished", body="two"))
+    await voice.report(report_block(kind="final", title="a", session_id="s-a", state="finished", body="one"))
+    await voice.report(report_block(kind="final", title="b", session_id="s-b", state="finished", body="two"))
     async with voice.listen():
         pass
     assert len(submitted) == 1 and "one" in submitted[0][1] and "two" in submitted[0][1]
@@ -236,7 +242,10 @@ async def test_a_waiting_agent_is_reported_with_the_way_to_answer_it(app: Any) -
         await voice.on_event(child, event)
     text = submitted[-1][1]
     assert "which photos, the seasonal ones?" in text
+    assert "kind: question" in text
     assert "is waiting for the operator" in text and child in text and "Delegate" in text
+    # And the page says so too, without waiting for the concierge to speak.
+    assert (await voice.agents())[0]["waiting"] == "operator"
 
     # And the answer the concierge sends back answers the question rather than queueing behind it.
     calls: list[tuple[str, bool]] = []
@@ -272,6 +281,190 @@ async def test_an_event_of_a_session_the_concierge_never_started_costs_nothing(a
     event = SimpleNamespace(type=EventType.TOOL_CALL_PENDING, payload={"kind": "ask_user", "ask_user_payload": {"questions": [{"question": "?"}]}})
     await voice.on_event("a-session-of-somebody-elses", event)
     assert reads == []  # the live state answered; no store read for a session that is not ours
+
+
+# -- progress ------------------------------------------------------------------------------
+
+
+def _fast(manager: SessionManager, *, window: float = 0.02, gap: float = 0.0, progress: bool = True) -> None:
+    """The same rules with the clock wound in: what the window decides is what is under test, not how long it takes."""
+    manager.config.voice = manager.config.voice.model_copy(update={"progress": progress, "progress_window_seconds": window, "progress_min_gap_seconds": gap})
+
+
+async def _narrate(voice: Voice, session_id: str, run_id: str, text: str, *, stop_reason: str = "tool_use", delta: str = "text_delta") -> None:
+    """One agent message: written, then ended — by a tool call, or by the end of the turn."""
+    await voice.on_event(session_id, SimpleNamespace(type=EventType.CONTENT_BLOCK_DELTA, run_id=run_id, payload={"delta": {"type": delta, "text": text}}))
+    await voice.on_event(session_id, SimpleNamespace(type=EventType.MESSAGE_STOP, run_id=run_id, payload={"stop_reason": stop_reason}))
+
+
+def _progress_reports(submitted: list[tuple[str, str, str]]) -> list[str]:
+    return [text for _, text, _ in submitted if "kind: progress" in text]
+
+
+def test_only_an_agents_own_prose_counts_as_an_interim() -> None:
+    # Prose is relayed; thinking is a draft the model did not commit to; a tool's traffic is not speech.
+    assert delta_text({"delta": {"type": "text_delta", "text": "found it"}}) == "found it"
+    assert delta_text({"delta": {"type": "thinking_delta", "text": "maybe the lexer?"}}) == ""
+    assert delta_text({"delta": {"type": "input_json_delta", "partial_json": '{"path":'}}) == ""
+    assert delta_text({}) == ""
+    # And only a message that ended in a tool call is an interim: any other ending is the final answer,
+    # which is reported by the finished run with its status attached.
+    assert settles_interim({"stop_reason": "tool_use"}) is True
+    assert settles_interim({"stop_reason": "end_turn"}) is False
+    assert settles_interim({}) is False
+    # What is relayed is sayable: no code, no evidence tags, no line breaks, and bounded.
+    assert progress_line("**Found** it in `lex.py`.\n\n<file path=\"lex.py\" lines=\"3-9\"/>") == "Found it in lex.py."
+    assert len(progress_line("word " * 200)) <= 300
+
+
+async def test_an_agents_words_between_tool_calls_reach_the_concierge_as_progress(app: Any) -> None:
+    manager: SessionManager = app.manager
+    voice = Voice(app)
+    _fast(manager)
+    submitted = _capture(manager)
+    child = (await voice.delegate(title="Parser", task="fix the parser"))["session_id"]
+
+    async with voice.listen():
+        await _narrate(voice, child, "run-1", "Found the problem in the lexer. Checking the fix now.")
+        await voice.drain_progress()
+
+    reports = _progress_reports(submitted)
+    assert len(reports) == 1
+    text = reports[0]
+    assert text.startswith(REPORT_OPEN) and text.endswith(REPORT_CLOSE)
+    assert "Parser" in text and child in text and "Found the problem in the lexer" in text
+    assert "is still working" in text and "not a result" in text
+    # The page has it too, with a time of its own, and the agent is not waiting for anybody.
+    row = (await voice.agents())[0]
+    assert row["progress"].startswith("Found the problem") and row["progress_at"] and row["waiting"] == ""
+
+
+async def test_neither_thinking_nor_a_tool_result_nor_a_finished_turn_is_progress(app: Any) -> None:
+    manager: SessionManager = app.manager
+    voice = Voice(app)
+    _fast(manager)
+    submitted = _capture(manager)
+    child = (await voice.delegate(title="Parser", task="fix the parser"))["session_id"]
+
+    async with voice.listen():
+        await _narrate(voice, child, "run-1", "the user probably means the lexer", delta="thinking_delta")
+        await _narrate(voice, child, "run-2", "This is the answer.", stop_reason="end_turn")
+        await voice.on_event(child, SimpleNamespace(type=EventType.TOOL_RESULT, run_id="run-3", payload={"content": "3 files changed, 42 insertions(+)", "is_error": False}))
+        await voice.drain_progress()
+
+    assert _progress_reports(submitted) == []
+    assert (await voice.agents())[0]["progress"] == ""
+
+
+async def test_progress_is_coalesced_in_a_window_and_capped_to_one_per_agent(app: Any) -> None:
+    manager: SessionManager = app.manager
+    voice = Voice(app)
+    _fast(manager, window=0.05, gap=0.3)
+    submitted = _capture(manager)
+    child = (await voice.delegate(title="Parser", task="fix the parser"))["session_id"]
+
+    async with voice.listen():
+        # Two paragraphs inside one window are one turn, and the one that is spoken is the newer.
+        await _narrate(voice, child, "run-1", "Reading the tokenizer.")
+        await _narrate(voice, child, "run-1", "Found the problem in the lexer.")
+        await voice.drain_progress()
+        reports = _progress_reports(submitted)
+        assert len(reports) == 1 and "Found the problem" in reports[0] and "Reading the tokenizer" not in reports[0]
+
+        # And the next one waits out the cap rather than following it straight away.
+        started = time.monotonic()
+        await _narrate(voice, child, "run-2", "The tests pass locally.")
+        await voice.drain_progress()
+        assert len(_progress_reports(submitted)) == 2
+        assert time.monotonic() - started >= 0.3
+
+
+async def test_progress_is_dropped_while_nobody_is_listening(app: Any) -> None:
+    manager: SessionManager = app.manager
+    voice = Voice(app)
+    _fast(manager)
+    submitted = _capture(manager)
+    child = (await voice.delegate(title="Parser", task="fix the parser"))["session_id"]
+    before = len(submitted)
+
+    await _narrate(voice, child, "run-1", "Found the problem in the lexer.")
+    await voice.drain_progress()
+    # Not spoken, and not held either: by the time a page connects this is stale, and the final report
+    # will say more than it does. The panel still shows it when the page opens.
+    assert len(submitted) == before and voice.held == []
+    assert (await voice.agents())[0]["progress"].startswith("Found the problem")
+
+    async with voice.listen():
+        pass
+    assert len(submitted) == before
+
+
+async def test_progress_does_not_interrupt_the_concierges_own_turn(app: Any) -> None:
+    manager: SessionManager = app.manager
+    voice = Voice(app)
+    _fast(manager, window=0.0)
+    submitted = _capture(manager)
+    child = (await voice.delegate(title="Parser", task="fix the parser"))["session_id"]
+    concierge = manager.live_state(await voice.session_id())
+    assert concierge is not None
+    answering = asyncio.get_running_loop().create_future()
+
+    async with voice.listen():
+        # The operator is being answered: an interim that arrives now would steer that very turn.
+        concierge.task = asyncio.create_task(asyncio.wait_for(answering, timeout=5))
+        await _narrate(voice, child, "run-1", "Found the problem in the lexer.")
+        await voice.drain_progress()
+        assert _progress_reports(submitted) == []
+
+        answering.set_result(None)
+        await concierge.task
+        await _narrate(voice, child, "run-2", "The tests pass locally.")
+        await voice.drain_progress()
+        assert len(_progress_reports(submitted)) == 1
+
+
+async def test_progress_can_be_switched_off_without_touching_the_reports(app: Any) -> None:
+    manager: SessionManager = app.manager
+    voice = Voice(app)
+    _fast(manager, progress=False)
+    submitted = _capture(manager)
+    child = (await voice.delegate(title="Parser", task="fix the parser"))["session_id"]
+    await manager.sessions.append_transcript(child, [Message(role=MessageRole.assistant, content_blocks=[TextBlock(text="the parser is fixed")])])
+
+    async with voice.listen():
+        await _narrate(voice, child, "run-1", "Found the problem in the lexer.")
+        await voice.drain_progress()
+        assert _progress_reports(submitted) == []
+        await voice.on_run_finished(child, "run-1", "completed")
+
+    assert "kind: final" in submitted[-1][1] and "the parser is fixed" in submitted[-1][1]
+
+
+async def test_an_agent_the_policy_stopped_is_reported_once_and_is_held_for_a_page(app: Any) -> None:
+    manager: SessionManager = app.manager
+    voice = Voice(app)
+    _fast(manager)
+    submitted = _capture(manager)
+    child = (await voice.delegate(title="Parser", task="fix the parser"))["session_id"]
+    state = await manager.get_state(child)
+    assert state is not None
+    state.metadata["policy_pending"] = {"abcdef123456": {"tool": "Exec", "text": "rm -rf build"}}
+    refusal = SimpleNamespace(type=EventType.TOOL_RESULT, run_id="run-1", payload={"is_error": True, "content": "refused by the policy. Approval key: abcdef123456"})
+
+    # Nobody is listening: unlike progress, a run that is stopped until somebody acts is held.
+    await voice.on_event(child, refusal)
+    assert voice.held and "kind: approval" in voice.held[0]
+
+    async with voice.listen():
+        pass
+    text = submitted[-1][1]
+    assert "kind: approval" in text and "Exec" in text and "rm -rf build" in text and "approves it" in text
+    assert (await voice.agents())[0]["waiting"] == "approval"
+
+    # The agent retries the refused call on its next step; the operator is told about it once.
+    async with voice.listen():
+        await voice.on_event(child, refusal)
+        assert len(submitted) == 2
 
 
 # -- the endpoints' caps -------------------------------------------------------------------

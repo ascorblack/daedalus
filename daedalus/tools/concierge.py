@@ -53,8 +53,9 @@ async def delegate(context: ToolContext, title: str, task: str, session_id: str 
     name="Agents",
     description=(
         "The agents you started, newest first: id, title, status (idle, running, waiting for the "
-        "operator, failed), when each last did something, and the beginning of what it last said. Use it "
-        "when the operator asks what is going on, and to find the id of an agent you want to steer or stop."
+        "operator, failed), when each last did something, what it last said on the way, and the beginning "
+        "of its last answer. Use it when the operator asks what is going on, and to find the id of an "
+        "agent you want to steer or stop."
     ),
 )
 async def agents(context: ToolContext) -> ToolResult:
@@ -64,7 +65,15 @@ async def agents(context: ToolContext) -> ToolResult:
     rows = await hook("agents")
     if not rows:
         return ok(context, "no agents are running; nothing has been delegated yet")
-    lines = [f"- {r['title']} ({r['session_id']}): {r['status']}, last active {r['last_message_at']}" + (f" — {r['answer']}" if r["answer"] else "") for r in rows]
+    lines = []
+    for r in rows:
+        waiting = {"operator": ", waiting for the operator to answer it", "approval": ", stopped until the operator approves a call in its session"}.get(r.get("waiting", ""), "")
+        line = f"- {r['title']} ({r['session_id']}): {r['status']}{waiting}, last active {r['last_message_at']}"
+        if r.get("progress"):
+            line += f" — on the way: {r['progress']}"
+        if r["answer"]:
+            line += f" — last answer: {r['answer']}"
+        lines.append(line)
     return ok(context, "\n".join(lines))
 
 

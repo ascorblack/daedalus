@@ -12,9 +12,9 @@ import { pathFor, sessionPath } from "../router";
 import { PageHeader, go } from "../shell";
 import { useQuery } from "../store";
 import { errorText, haptic } from "../ui";
-import { Listener, Speaker, createRecognition, createRecorder, createSpeaker, recognitionSupported, recorderSupported, sendUtterance, voiceLang } from "../voice";
+import { AgentNews, Listener, Speaker, agentNote, createRecognition, createRecorder, createSpeaker, recognitionSupported, recorderSupported, sendUtterance, voiceLang } from "../voice";
 
-type Agent = { session_id: string; title: string; status: string; last_message_at: string; answer: string };
+type Agent = AgentNews;
 type VoiceState = {
   enabled: boolean;
   session_id: string;
@@ -317,18 +317,21 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
               Agents<span className="sub">{agents.length ? ` · ${agents.length}` : ""}</span>
             </h2>
             {agents.length === 0 && <div className="sub voice-agents-empty">Nothing delegated yet. Ask for something that takes real work and it appears here.</div>}
-            {agents.map((a) => (
-              <button key={a.session_id} className="card row pressable voice-agent" onClick={() => onOpen(a.session_id)}>
-                <div className="grow">
-                  <div className="voice-agent-top">
-                    <b className="truncate">{a.title}</b>
-                    <StatusLabel status={a.status} />
+            {agents.map((a) => {
+              const note = agentNote(a);
+              return (
+                <button key={a.session_id} className="card row pressable voice-agent" onClick={() => onOpen(a.session_id)}>
+                  <div className="grow">
+                    <div className="voice-agent-top">
+                      <b className="truncate">{a.title}</b>
+                      {note.waiting ? <span className="chip accent">{note.waiting}</span> : <StatusLabel status={a.status} />}
+                    </div>
+                    {note.line && <div className={`sub clamp-2${note.live ? " voice-agent-live" : ""}`}>{note.line}</div>}
+                    <div className="sub num">{timeAgo(note.when)}</div>
                   </div>
-                  {a.answer && <div className="sub clamp-2">{a.answer}</div>}
-                  <div className="sub num">{timeAgo(a.last_message_at)}</div>
-                </div>
-              </button>
-            ))}
+                </button>
+              );
+            })}
           </aside>
         </div>
       </div>

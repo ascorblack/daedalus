@@ -1138,6 +1138,9 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .voice-agent { width: 100%; text-align: left; border: 1px solid var(--line); cursor: pointer; }
 .voice-agent-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .voice-agent-top b { min-width: 0; }
+/* What an agent said on the way, as opposed to what it answered: the live line is the one the
+   operator is waiting on, so it reads as the foreground and the finished answer stays muted. */
+.voice-agent-live { color: var(--fg); }
 @media (max-width: 900px) {
   .voice-grid { grid-template-columns: minmax(0, 1fr); }
   /* On a phone the mic has to be under the thumb, so the captions move above it and the control sits
