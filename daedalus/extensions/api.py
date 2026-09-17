@@ -57,6 +57,7 @@ from daedalus.security import redact
 from daedalus.speech import catalog as speech_catalog
 from daedalus.speech import models as speech_models
 from daedalus.speech import service as speech_service
+from daedalus.speech.engine import CACHE as ENGINE_CACHE
 from daedalus.speech.engine import SAMPLE_RATE, SpeechError, clamp_rate
 from daedalus.speech.service import recogniser_available, transcribe_recording
 from daedalus.stores import pairing, passkeys
@@ -1408,6 +1409,21 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             stt["configured"] = True
             stt["reason"] = ""
             stt["model"] = local["label"]
+            # Opening the page is the second free moment to load the weights — the operator is looking
+            # at the microphone and has not tapped it yet. What comes back is where that load is, and
+            # the page keeps the microphone closed until it says ready.
+            load = app.speech.warm()
+            stt["kind"] = "local"
+            stt["state"] = load["state"]
+            stt["loaded_in_ms"] = load["loaded_in_ms"]
+            stt["error"] = load["error"]
+        else:
+            # Nothing is loaded anywhere else: an endpoint and the browser's own recogniser are both
+            # ready the moment they are asked, so the page never waits on them.
+            stt["kind"] = "endpoint" if stt.get("configured") else "browser"
+            stt["state"] = "ready"
+            stt["loaded_in_ms"] = 0
+            stt["error"] = ""
         state["stt"] = stt
         return state
 
@@ -1529,16 +1545,28 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         for sid in stale:
             listening.pop(sid, None)
 
-    @api.get("/api/stt")
-    async def stt_models(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """The picker: every model, what is installed, what is downloading, and what it all costs."""
+    def stt_view() -> dict[str, Any]:
+        """The whole picker, from one place.
+
+        Every endpoint that changes something about local recognition answers with this, complete —
+        the models, the settings, the engine, the decoders and the recommendations. It is written once
+        because it was not: ``select`` used to answer with the models alone, the picker replaced its
+        whole view with what came back, and the next render read ``decoders.opus`` off an object that
+        no longer had it and took the screen down. A partial view is a crash waiting for a render.
+        """
         view = speech_models.view(app.speech.downloads, selected=app.config.stt.local_model)
         view["language"] = app.config.stt.local_language
         view["threads"] = app.config.stt.local_threads
         view["engine_installed"] = speech_service.engine_present()
         view["decoders"] = speech_service.decoders()
         view["recommended"] = {code: model.id for code in ("en", "ru") if (model := speech_catalog.recommended(code))}
+        view["load"] = app.speech.load_state()
         return view
+
+    @api.get("/api/stt")
+    async def stt_models(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The picker: every model, what is installed, what is downloading, and what it all costs."""
+        return stt_view()
 
     engine_install = asyncio.Lock()
     """One install of the speech engine at a time; the second caller waits rather than racing."""
@@ -1591,6 +1619,15 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         logger.warning("the local speech engine was installed on demand")
         return {"installed": True, "message": "the speech engine is installed; the model can be downloaded now"}
 
+    @api.post("/api/stt/engine/warm")
+    async def stt_warm(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Load the chosen model into memory now, so the first utterance does not pay for it.
+
+        Answers at once with where the load is — ``idle``, ``loading``, ``ready`` or ``error`` — and
+        the rest arrives on ``/api/stt/progress`` as it happens. Calling it twice is one load.
+        """
+        return app.speech.warm()
+
     @api.post("/api/stt/models/{model_id}/download")
     async def stt_download(model_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Fetch a model. Returns at once; the bar is fed by /api/stt/progress."""
@@ -1618,7 +1655,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if app.config.stt.local_model == model_id:
             await app.save_config(app.config.model_copy(update={"stt": app.config.stt.model_copy(update={"local_model": ""})}))
         app.speech.forget()
-        return {"deleted": removed, **speech_models.view(app.speech.downloads, selected=app.config.stt.local_model)}
+        return {"deleted": removed, **stt_view()}
 
     @api.post("/api/stt/select")
     async def stt_select(body: SttSelectBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -1634,29 +1671,50 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             patch["local_threads"] = body.threads
         if patch:
             await app.save_config(app.config.model_copy(update={"stt": app.config.stt.model_copy(update=patch)}))
-        view = speech_models.view(app.speech.downloads, selected=app.config.stt.local_model)
-        view["language"] = app.config.stt.local_language
-        view["threads"] = app.config.stt.local_threads
-        return view
+            # Choosing a model is the moment its weights are about to be wanted and the moment nobody
+            # is waiting on them, so the load starts here rather than under the first utterance.
+            app.speech.warm()
+        return stt_view()
 
     @api.get("/api/stt/progress")
     async def stt_progress(request: Request, _: dict[str, Any] = Depends(auth)) -> StreamingResponse:
         """Download progress as it happens, so the bar moves rather than being polled at."""
 
         async def gen():  # type: ignore[no-untyped-def]
-            async with app.speech.downloads.watch() as queue:
+            # Two things move on this stream and they are told apart by ``kind``: a download, which
+            # the picker draws as a bar on one card, and the engine loading a model into memory,
+            # which the voice page draws as the reason its microphone is not open yet. One stream
+            # rather than two because a page that wants either usually wants both, and because a
+            # second SSE connection costs a second proxied, kept-alive socket for four small frames.
+            async with app.speech.downloads.watch() as queue, ENGINE_CACHE.watch() as loads:
                 for current in app.speech.downloads.progress().values():
-                    yield f"data: {json.dumps({'id': current.id, 'state': current.state, 'fraction': current.fraction, 'error': current.error})}\n\n"
-                while True:
-                    if await request.is_disconnected():
-                        return
-                    try:
-                        update = await asyncio.wait_for(queue.get(), timeout=15)
-                    except TimeoutError:
-                        yield ": keepalive\n\n"
-                        continue
-                    body = {"id": update.id, "state": update.state, "fraction": update.fraction, "error": update.error}
-                    yield f"data: {json.dumps(body)}\n\n"
+                    yield f"data: {json.dumps({'kind': 'download', 'id': current.id, 'state': current.state, 'fraction': current.fraction, 'error': current.error})}\n\n"
+                yield f"data: {json.dumps({'kind': 'engine', **app.speech.load_state()})}\n\n"
+                downloading = asyncio.ensure_future(queue.get())
+                loading = asyncio.ensure_future(loads.get())
+                try:
+                    while True:
+                        if await request.is_disconnected():
+                            return
+                        # Both waits stay alive across the loop and only the one that finished is
+                        # started again: cancelling a queue.get() that has already taken an item off
+                        # the queue is how an update disappears.
+                        done, _pending = await asyncio.wait({downloading, loading}, timeout=15, return_when=asyncio.FIRST_COMPLETED)
+                        if not done:
+                            yield ": keepalive\n\n"
+                            continue
+                        if downloading in done:
+                            update = downloading.result()
+                            downloading = asyncio.ensure_future(queue.get())
+                            body = {"kind": "download", "id": update.id, "state": update.state, "fraction": update.fraction, "error": update.error}
+                            yield f"data: {json.dumps(body)}\n\n"
+                        if loading in done:
+                            load = loading.result()
+                            loading = asyncio.ensure_future(loads.get())
+                            yield f"data: {json.dumps({'kind': 'engine', **load})}\n\n"
+                finally:
+                    downloading.cancel()
+                    loading.cancel()
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 

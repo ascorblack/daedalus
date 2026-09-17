@@ -193,7 +193,26 @@ def _local_speech(ctx: DoctorContext) -> Check:
     if not model.streaming and not converter_present():
         return Check("local speech", True, f"{model.label} active; ffmpeg is missing, so only plain WAV can be read", "warn",
                      "install ffmpeg so Telegram voice notes and the site's recordings can be converted")
-    return Check("local speech", True, f"{model.label} active ({'streaming' if model.streaming else 'whole utterances'})", "ok")
+    return Check("local speech", True, f"{model.label} active ({'streaming' if model.streaming else 'whole utterances'}){_load_note()}", "ok")
+
+
+def _load_note() -> str:
+    """What the weights cost to get into memory, where this process has already paid it.
+
+    It is the number that decides whether the voice page feels instant or feels broken — half a
+    gigabyte of Nemotron is seconds, a small Zipformer is under two — and until it was written down
+    the only way to know it was to talk into the microphone and count.
+    """
+    from daedalus.speech.engine import CACHE  # Lazy: the doctor must load without the speech extra
+
+    state = CACHE.state()
+    if state.state == "ready" and state.loaded_in_ms:
+        return f"; loaded in {state.loaded_in_ms / 1000:.1f} s"
+    if state.state == "loading":
+        return "; loading now"
+    if state.state == "error":
+        return f"; the last load failed: {state.error[:120]}"
+    return "; not loaded yet — the voice page loads it when it opens"
 
 
 async def _telegram(ctx: DoctorContext) -> list[Check]:

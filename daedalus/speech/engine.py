@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import array
 import asyncio
+import contextlib
 import logging
 import math
 import struct
 import sys
 import threading
+import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -367,11 +370,37 @@ class Engine:
         return StreamSession(self)
 
 
+@dataclass
+class LoadState:
+    """Where the resident model is in its loading, as the page draws it.
+
+    ``idle`` is nothing chosen or nothing loaded yet, ``loading`` is the half-gigabyte of weights on
+    its way into memory, ``ready`` is a model that will answer the next chunk immediately, and
+    ``error`` is a load that failed with the reason it failed for. The page needs the difference
+    because the first utterance after a selection waits seconds on a cold model and none at all on a
+    warm one, and a microphone that appears to hear nothing for six seconds is indistinguishable from
+    one that is broken.
+    """
+
+    state: str = "idle"
+    model: str = ""
+    loaded_in_ms: int = 0
+    error: str = ""
+
+    def as_json(self) -> dict[str, object]:
+        return {"state": self.state, "model": self.model, "loaded_in_ms": self.loaded_in_ms, "error": self.error}
+
+
 class EngineCache:
     """The one loaded model, kept between utterances and swapped when the operator picks another.
 
     Loading is slow and happens under a lock, so two utterances arriving together load once and both
     wait. Selecting a different model drops the old recogniser; there is never more than one resident.
+
+    Because loading is slow it is also *watchable*: :meth:`warm` starts it without an utterance behind
+    it, and everything the load goes through is published to :meth:`watch`, so the page can say
+    "loading" with something moving rather than leaving the operator talking into a model that is not
+    there yet.
     """
 
     def __init__(self) -> None:
@@ -379,6 +408,9 @@ class EngineCache:
         self._key: tuple[str, int, str] | None = None
         self._lock = asyncio.Lock()
         self._fields = threading.Lock()
+        self._state = LoadState()
+        self._warming: asyncio.Task[Any] | None = None
+        self._watchers: list[asyncio.Queue[dict[str, object]]] = []
 
     async def get(self, model: SpeechModel, directory: Path, *, threads: int, language: str) -> Engine:
         key = (model.id, threads, language)
@@ -389,10 +421,51 @@ class EngineCache:
                 self._engine = None
                 self._key = None
             logger.warning("loading local speech model %s (%d threads)", model.id, threads)
-            engine = await asyncio.to_thread(Engine, model, directory, threads=threads, language=language)
+            self._publish(LoadState(state="loading", model=model.id))
+            began = time.monotonic()
+            try:
+                engine = await asyncio.to_thread(Engine, model, directory, threads=threads, language=language)
+            except Exception as exc:
+                self._publish(LoadState(state="error", model=model.id, error=str(exc)))
+                raise
+            took = int((time.monotonic() - began) * 1000)
             with self._fields:
                 self._engine, self._key = engine, key
+            logger.warning("local speech model %s loaded in %d ms", model.id, took)
+            self._publish(LoadState(state="ready", model=model.id, loaded_in_ms=took))
             return engine
+
+    def warm(self, model: SpeechModel, directory: Path, *, threads: int, language: str) -> LoadState:
+        """Start loading without an utterance waiting on it, and answer with where that got to.
+
+        Called when the operator picks a model and again when the voice page opens, which are the two
+        moments the model is about to be needed and the only two at which a minute of loading costs
+        nobody anything. Returns at once: a second call while the first is still running is the same
+        load, not another one.
+        """
+        if self._engine is not None and self._key is not None and self._key == (model.id, threads, language):
+            return self.state()
+        if self._warming is not None and not self._warming.done():
+            return self.state()
+        if self._state.state == "error" and self._state.model == model.id:
+            # A load that failed fails the same way every time, and the voice page asks on every poll.
+            # The failure stands until something changes the selection, which drops the cache and with
+            # it this state.
+            return self.state()
+        self._publish(LoadState(state="loading", model=model.id))
+
+        async def load() -> None:
+            try:
+                await self.get(model, directory, threads=threads, language=language)
+            except Exception as exc:  # noqa: BLE001 - a warm-up failure is reported, never raised at a caller that did not ask
+                logger.warning("warming the local speech model %s failed: %s", model.id, exc)
+
+        self._warming = asyncio.ensure_future(load())
+        return self.state()
+
+    def state(self) -> LoadState:
+        """Where the resident model is. Cheap enough to answer on every poll of the voice page."""
+        return self._state
 
     def loaded(self) -> str:
         """The id of the resident model, or empty. For the doctor line and the page's recogniser chip."""
@@ -409,6 +482,35 @@ class EngineCache:
         with self._fields:
             self._engine = None
             self._key = None
+        self._publish(LoadState())
+
+    # -- watching a load ----------------------------------------------------------------------
+
+    def _publish(self, state: LoadState) -> None:
+        # Only changes go out. ``warm`` says "loading" when it starts the task and ``get`` says it
+        # again when the load actually begins, which is the same fact twice; a stream of states the
+        # page has to de-duplicate for itself is a stream that will be de-duplicated wrongly.
+        if (state.state, state.model, state.loaded_in_ms, state.error) == (self._state.state, self._state.model, self._state.loaded_in_ms, self._state.error):
+            return
+        self._state = state
+        for queue in list(self._watchers):
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(state.as_json())
+
+    @contextlib.asynccontextmanager
+    async def watch(self) -> AsyncIterator[asyncio.Queue[dict[str, object]]]:
+        """A queue of load states for as long as the caller holds it.
+
+        Bounded and dropping rather than blocking, for the same reason the download watcher is: a
+        page that stopped reading must not be able to hold up a load everything else is waiting on.
+        """
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=16)
+        self._watchers.append(queue)
+        try:
+            yield queue
+        finally:
+            with contextlib.suppress(ValueError):
+                self._watchers.remove(queue)
 
 
 CACHE = EngineCache()
@@ -439,6 +541,7 @@ __all__ = [
     "SAMPLE_RATE",
     "Engine",
     "EngineCache",
+    "LoadState",
     "Partial",
     "SpeechError",
     "StreamSession",

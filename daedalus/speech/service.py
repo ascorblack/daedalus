@@ -119,6 +119,32 @@ class LocalSpeech:
         """Drop the loaded model: the selection changed, or the files were deleted underneath it."""
         CACHE.drop()
 
+    def warm(self) -> dict[str, object]:
+        """Start loading the chosen model now, and answer with where that got to.
+
+        A model is half a gigabyte of weights and takes seconds to become a recogniser, and until this
+        existed that cost was paid by the first thing the operator said: they tapped the microphone,
+        talked, and the words arrived long afterwards or not at all. So the load is started at the two
+        moments it is free — when the model is chosen, and when the voice page opens — and the page is
+        told to wait rather than left to discover it.
+
+        Returns at once. Nothing is warmed where there is no model, or no wheel to read one with;
+        the state says so and the page falls back to whatever else can listen.
+        """
+        model = self.active()
+        if model is None or not engine_present():
+            return CACHE.state().as_json()
+        return CACHE.warm(
+            model,
+            self.downloads.directory(model.id),
+            threads=self.settings.local_threads,
+            language=self.language(),
+        ).as_json()
+
+    def load_state(self) -> dict[str, object]:
+        """Where the resident model is in its loading — ``idle``, ``loading``, ``ready`` or ``error``."""
+        return CACHE.state().as_json()
+
     # -- what the page and the doctor show ----------------------------------------------------
 
     def state(self) -> dict[str, object]:
@@ -141,6 +167,7 @@ class LocalSpeech:
             "streaming": bool(model and model.streaming),
             "language": self.settings.local_language,
             "loaded": CACHE.loaded(),
+            "load": CACHE.state().as_json(),
             "decoders": decoders(),
         }
 

@@ -1122,3 +1122,158 @@ async def test_a_real_streaming_model_hears_its_own_test_recording() -> None:
     if last.text:
         heard.append(last.text)
     assert heard, "streaming produced no utterance where the batch decode produced words"
+
+
+# -- warming the engine, and what the voice page is told ------------------------------------------
+
+
+class FakeVoice:
+    """The voice extension as the API reads it, with nothing of the concierge behind it."""
+
+    async def state(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "session_id": "s1",
+            "model": "Qwen",
+            "tts": {"configured": False},
+            "stt": {"configured": False, "reason": "no endpoint"},
+            "agents": [],
+            "listening": False,
+        }
+
+
+class LoadedEngine:
+    """A model that loads instantly, standing in for half a gigabyte of weights."""
+
+    def __init__(self, model: catalog.SpeechModel, directory: Path, *, threads: int = 2, language: str = "") -> None:
+        self.model = model
+        self.directory = directory
+        self.threads = threads
+        self.language = language
+
+
+@pytest.fixture
+def warm_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A client whose chosen model loads, over a cache that starts and ends empty.
+
+    The engine cache is process-wide, because the model it holds is; a test that leaves one resident
+    is a test that decides what the next one sees.
+    """
+    from daedalus.speech.engine import CACHE
+
+    monkeypatch.setattr("daedalus.speech.engine.Engine", LoadedEngine)
+    CACHE.drop()
+    app = FakeApp(tmp_path)
+    app.extensions["voice"] = FakeVoice()
+    _install_fake_model(app)
+    with TestClient(build_app(app, "tok")) as c:  # type: ignore[arg-type]
+        c.app_state = app  # type: ignore[attr-defined]
+        yield c
+    CACHE.drop()
+
+
+def _until_loaded(client: TestClient, state: str = "ready", tries: int = 200) -> dict[str, Any]:
+    """Poll the picker until the background load has got where it is going."""
+    for _ in range(tries):
+        load = client.get("/api/stt", headers=HEAD).json()["load"]
+        if load["state"] == state:
+            return load
+        time.sleep(0.01)
+    raise AssertionError(f"the load never reached {state}")
+
+
+def test_choosing_a_model_answers_with_the_whole_picker_and_not_half_of_it(warm_client: TestClient) -> None:
+    """The crash this fixes: ``select`` used to answer with the models and nothing else.
+
+    The page replaced its whole view with what came back and the next render read ``decoders.opus``
+    off an object that no longer had ``decoders``, so pressing "Use this one" took the screen down
+    while the server had already saved the choice. Every call that changes something answers with the
+    same complete view now.
+    """
+    whole = set(warm_client.get("/api/stt", headers=HEAD).json())
+    chosen = warm_client.post("/api/stt/select", json={"model": "gigaam-ru"}, headers=HEAD).json()
+    assert set(chosen) == whole
+    assert set(chosen["decoders"]) == {"opus", "any"} and "recommended" in chosen and "engine_installed" in chosen
+    assert chosen["selected"] == "gigaam-ru"
+    deleted = warm_client.delete("/api/stt/models/gigaam-ru", headers=HEAD).json()
+    assert whole <= set(deleted)
+
+
+def test_choosing_a_model_starts_loading_it_before_anything_is_said(warm_client: TestClient) -> None:
+    started = warm_client.post("/api/stt/select", json={"model": "gigaam-ru"}, headers=HEAD).json()
+    assert started["load"]["state"] in ("loading", "ready")
+    load = _until_loaded(warm_client)
+    assert load["model"] == "gigaam-ru" and load["error"] == ""
+    # The time it took is kept, because it is the number that says whether the page will feel instant.
+    assert load["loaded_in_ms"] >= 0
+
+
+def test_the_warm_up_call_answers_at_once_and_twice_is_one_load(warm_client: TestClient) -> None:
+    first = warm_client.post("/api/stt/engine/warm", headers=HEAD).json()
+    second = warm_client.post("/api/stt/engine/warm", headers=HEAD).json()
+    assert first["state"] in ("loading", "ready") and second["state"] in ("loading", "ready")
+    assert _until_loaded(warm_client)["model"] == "gigaam-ru"
+
+
+def test_a_load_that_fails_says_so_and_is_not_tried_again_on_every_poll(warm_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = []
+
+    def refuse(*args: Any, **kwargs: Any) -> LoadedEngine:
+        attempts.append(1)
+        raise SpeechError("the archive is not a model")
+
+    monkeypatch.setattr("daedalus.speech.engine.Engine", refuse)
+    warm_client.post("/api/stt/engine/warm", headers=HEAD)
+    load = _until_loaded(warm_client, "error")
+    assert "not a model" in load["error"]
+    for _ in range(3):
+        warm_client.post("/api/stt/engine/warm", headers=HEAD)
+        warm_client.get("/api/voice", headers=HEAD)
+    assert len(attempts) == 1
+
+
+def test_the_voice_page_is_told_which_recogniser_listens_and_where_its_weights_are(warm_client: TestClient) -> None:
+    stt = warm_client.get("/api/voice", headers=HEAD).json()["stt"]
+    assert stt["kind"] == "local" and stt["local"]["model"] == "gigaam-ru"
+    # Opening the page is the second free moment to load the model, so asking for the page starts it.
+    assert stt["state"] in ("loading", "ready")
+    _until_loaded(warm_client)
+    after = warm_client.get("/api/voice", headers=HEAD).json()["stt"]
+    assert after["state"] == "ready" and after["error"] == ""
+
+
+def test_a_page_with_no_local_model_never_waits_for_one(tmp_path: Path) -> None:
+    app = FakeApp(tmp_path)
+    app.extensions["voice"] = FakeVoice()
+    with TestClient(build_app(app, "tok")) as client:  # type: ignore[arg-type]
+        stt = client.get("/api/voice", headers=HEAD).json()["stt"]
+    # An endpoint and the browser's own recogniser answer the moment they are asked; only a local
+    # model has weights to wait for, and the page must not draw a loading state for something that
+    # never loads.
+    assert stt["kind"] == "browser" and stt["state"] == "ready" and stt["loaded_in_ms"] == 0
+
+
+async def test_the_engine_publishes_every_step_of_a_load_to_a_watcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the page draws its "loading" on, at the fan-out that feeds the progress stream.
+
+    The stream itself is deliberately endless — it stays open until the page closes it — so it is the
+    watcher that is tested rather than the socket: a test that subscribes to an endless response has
+    no way to stop reading one. The frame shapes the stream builds out of these are checked in the
+    app's own tests, where they are read.
+    """
+    from daedalus.speech.engine import CACHE
+
+    monkeypatch.setattr("daedalus.speech.engine.Engine", LoadedEngine)
+    CACHE.drop()
+    app = FakeApp(tmp_path)
+    _install_fake_model(app)
+    seen: list[dict[str, Any]] = []
+    async with CACHE.watch() as queue:
+        app.speech.warm()
+        while len(seen) < 2:
+            seen.append(await asyncio.wait_for(queue.get(), timeout=5))
+    assert [frame["state"] for frame in seen] == ["loading", "ready"]
+    assert seen[1]["model"] == "gigaam-ru" and seen[1]["error"] == ""
+    assert app.speech.load_state()["state"] == "ready"
+    CACHE.drop()
+    assert app.speech.load_state()["state"] == "idle"
