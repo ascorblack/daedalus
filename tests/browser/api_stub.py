@@ -11,9 +11,23 @@ happened to ``perf_session.py`` when the onboarding gate landed in the app and o
 So the gates live here, once. A script answers what it has invented and falls back to this table
 for the rest, and records every ``/api/`` path it did not recognise so the run can fail with the
 list: a gate added to the app cannot be answered by one harness and silently missed by another.
+
+``expect_app`` is here for the same reason one level down: before any of this matters, the address
+a harness was pointed at has to be *this* build and not something else that happens to hold the
+port. It is checked once, in a sentence, rather than discovered as a selector that never appears.
 """
 
 from __future__ import annotations
+
+import sys
+import urllib.error
+import urllib.request
+
+# Outside services_port_range (8100-8119), the range this product hands to an agent's own preview
+# servers: a harness that serves its build into that range competes with the installation running
+# beside it, and loses silently — the browser is pointed at the address either way.
+DEFAULT_PORT = 8163
+DEFAULT_APP = f"http://127.0.0.1:{DEFAULT_PORT}/app"
 
 GATES: dict[str, object] = {
     # Drawn before any screen: no model means the whole app is the "Add a model" flow.
@@ -54,4 +68,23 @@ class Unhandled:
         return 1
 
 
-__all__ = ["GATES", "Unhandled"]
+def expect_app(base: str) -> None:
+    """Refuse to drive a browser at an address that is not the built Mini App.
+
+    ``serve_app.py`` is normally started in the background, and a port it could not bind leaves
+    something else answering there — an agent's own preview server, a stale run. The browser loads
+    that page quite happily, and the failure arrives much later as a selector timeout on ``.screen``
+    that reads like a broken component. One request up front says what actually happened.
+    """
+    try:
+        with urllib.request.urlopen(f"{base}/index.html", timeout=5) as answer:  # noqa: S310
+            body = answer.read(4096).decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"nothing is serving the app at {base} ({exc}); build it and start tests/browser/serve_app.py", file=sys.stderr)
+        raise SystemExit(1) from None
+    if "/app/assets/" not in body:
+        print(f"{base} answers, but not with the built Mini App — something else holds that port", file=sys.stderr)
+        raise SystemExit(1)
+
+
+__all__ = ["DEFAULT_APP", "DEFAULT_PORT", "GATES", "Unhandled", "expect_app"]

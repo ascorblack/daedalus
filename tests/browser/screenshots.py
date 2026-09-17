@@ -6,8 +6,8 @@ operator's own sessions. Build the app, serve it with tests/browser/serve_app.py
 
     cd miniapp && npm run build
     mkdir -p /tmp/app-root/app && cp -r dist/* /tmp/app-root/app/
-    python3 tests/browser/serve_app.py 8101 /tmp/app-root &
-    APP_URL=http://127.0.0.1:8101/app OUT=docs/screenshots python3 tests/browser/screenshots.py
+    python3 tests/browser/serve_app.py 8163 /tmp/app-root &
+    APP_URL=http://127.0.0.1:8163/app OUT=docs/screenshots python3 tests/browser/screenshots.py
 
 One PNG per screen lands in OUT (default: the directory this file is in). The Russian set is the
 same run in the other language:
@@ -31,9 +31,9 @@ from pathlib import Path
 from playwright.sync_api import Page, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import GATES, Unhandled  # noqa: E402
+from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app  # noqa: E402
 
-BASE = os.environ.get("APP_URL", "http://127.0.0.1:8101/app")
+BASE = os.environ.get("APP_URL", DEFAULT_APP)
 # The app is bilingual, and so is this set: LANG_UI=ru opens every page with ?lang=ru and the words
 # the helpers click on come from the same column the app reads. The pictures go wherever OUT says.
 LANG = os.environ.get("LANG_UI", "en")
@@ -839,4 +839,6 @@ def run() -> int:
 
 
 if __name__ == "__main__":
+    # Before anything is driven: is the address the built app, or whatever else holds the port?
+    expect_app(BASE)
     sys.exit(run_voice() if os.environ.get("ONLY") == "voice" else run())

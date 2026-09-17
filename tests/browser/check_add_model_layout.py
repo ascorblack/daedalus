@@ -11,8 +11,8 @@ right, at four widths, and the page's own horizontal scroll.
 
     cd miniapp && npm run build
     mkdir -p /tmp/app-root/app && cp -r dist/* /tmp/app-root/app/
-    python3 tests/browser/serve_app.py 8101 /tmp/app-root &
-    APP_URL=http://127.0.0.1:8101/app OUT=/tmp/shots python3 tests/browser/check_add_model_layout.py
+    python3 tests/browser/serve_app.py 8163 /tmp/app-root &
+    APP_URL=http://127.0.0.1:8163/app OUT=/tmp/shots python3 tests/browser/check_add_model_layout.py
 
 Exit 0 when the flow is centred and nothing spills sideways. One PNG per width lands in OUT.
 """
@@ -25,9 +25,10 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from api_stub import DEFAULT_APP, expect_app  # noqa: E402
 from screenshots import stub  # noqa: E402  the same invented installation the pictures are taken of
 
-BASE = os.environ.get("APP_URL", "http://127.0.0.1:8101/app")
+BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
 OUT = Path(os.environ.get("OUT", "/tmp/add-model-widths"))
 WIDTHS = (400, 1440, 2000, 2560)
@@ -87,4 +88,5 @@ def run() -> int:
 
 
 if __name__ == "__main__":
+    expect_app(BASE)
     sys.exit(run())

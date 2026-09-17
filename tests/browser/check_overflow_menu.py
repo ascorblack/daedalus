@@ -14,8 +14,8 @@ Build the app, serve it with tests/browser/serve_app.py, then run this with APP_
 
     cd miniapp && npm run build
     mkdir -p /tmp/app-root/app && cp -r dist/* /tmp/app-root/app/
-    python3 tests/browser/serve_app.py 8101 /tmp/app-root &
-    APP_URL=http://127.0.0.1:8101/app python3 tests/browser/check_overflow_menu.py
+    python3 tests/browser/serve_app.py 8163 /tmp/app-root &
+    APP_URL=http://127.0.0.1:8163/app python3 tests/browser/check_overflow_menu.py
 
 Exit 0 when every action opens its panel.
 """
@@ -28,7 +28,12 @@ from pathlib import Path
 
 from playwright.sync_api import Page, sync_playwright
 
-BASE = os.environ.get("APP_URL", "http://127.0.0.1:8101/app")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app  # noqa: E402
+
+UNHANDLED = Unhandled()
+
+BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
 
 
@@ -67,7 +72,17 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     elif "unread" in url:
         body = json.dumps({"unread": 0})
     else:
-        body = "[]"
+        # The gates the app draws any screen at all behind — a model, the capabilities — live in one
+        # table so that adding one cannot leave a harness sitting on the onboarding screen until its
+        # selector times out. Anything past them is reported at the end rather than answered blind.
+        rel = url.split("?", 1)[0]
+        rel = rel[rel.index("/api/"):] if "/api/" in rel else ""
+        if rel in GATES:
+            body = json.dumps(GATES[rel])
+        else:
+            if rel:
+                UNHANDLED.record(rel)
+            body = "[]"
     route.fulfill(status=200, content_type="application/json", body=body)
 
 
@@ -142,4 +157,8 @@ def run() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(run())
+    expect_app(BASE)
+    # A gate the app grew and this stub does not know about fails the run by name, rather than by a
+    # selector that never appears somewhere further down.
+    failed = run()
+    sys.exit(failed or UNHANDLED.report())

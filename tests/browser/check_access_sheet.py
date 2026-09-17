@@ -12,8 +12,8 @@ that clicking the sheet does not fall through to the card underneath.
 
     cd miniapp && npm run build
     mkdir -p /tmp/app-root/app && cp -r dist/* /tmp/app-root/app/
-    python3 tests/browser/serve_app.py 8101 /tmp/app-root &
-    APP_URL=http://127.0.0.1:8101/app python3 tests/browser/check_access_sheet.py
+    python3 tests/browser/serve_app.py 8163 /tmp/app-root &
+    APP_URL=http://127.0.0.1:8163/app python3 tests/browser/check_access_sheet.py
 """
 from __future__ import annotations
 
@@ -23,9 +23,10 @@ import sys
 
 from playwright.sync_api import Page, sync_playwright
 
+from api_stub import DEFAULT_APP, expect_app
 from check_overflow_menu import SERVICES, open_menu, press, stub as base_stub
 
-BASE = os.environ.get("APP_URL", "http://127.0.0.1:8101/app")
+BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
 
 puts: list[dict] = []
@@ -87,4 +88,5 @@ def run() -> int:
 
 
 if __name__ == "__main__":
+    expect_app(BASE)
     sys.exit(run())

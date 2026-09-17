@@ -8,8 +8,8 @@ a very large window, type a cheap small one, save, and read what went to the API
 
     cd miniapp && npm run build
     mkdir -p /tmp/app-root/app && cp -r dist/* /tmp/app-root/app/
-    python3 tests/browser/serve_app.py 8101 /tmp/app-root &
-    APP_URL=http://127.0.0.1:8101/app python3 tests/browser/check_add_model.py
+    python3 tests/browser/serve_app.py 8163 /tmp/app-root &
+    APP_URL=http://127.0.0.1:8163/app python3 tests/browser/check_add_model.py
 
 Exit 0 when the picked model's description does not reach the typed model.
 """
@@ -23,9 +23,10 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from api_stub import DEFAULT_APP, expect_app  # noqa: E402
 from screenshots import stub  # noqa: E402  the same invented installation the pictures are taken of
 
-BASE = os.environ.get("APP_URL", "http://127.0.0.1:8101/app")
+BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
 
 PICKED = "Claude Opus 5"  # $5.00/$25.00 in, a 1M window, sees pictures
@@ -83,4 +84,5 @@ def run() -> int:
 
 
 if __name__ == "__main__":
+    expect_app(BASE)
     sys.exit(run())

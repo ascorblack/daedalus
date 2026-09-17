@@ -10,8 +10,8 @@ has a copy button, and that pressing it puts the answer on the clipboard.
 
     cd miniapp && npm run build
     mkdir -p /tmp/app-root/app && cp -r dist/* /tmp/app-root/app/
-    python3 tests/browser/serve_app.py 8101 /tmp/app-root &
-    APP_URL=http://127.0.0.1:8101/app python3 tests/browser/check_message_actions.py
+    python3 tests/browser/serve_app.py 8163 /tmp/app-root &
+    APP_URL=http://127.0.0.1:8163/app python3 tests/browser/check_message_actions.py
 
 Exit 0 when the actions are reachable and copy works.
 """
@@ -24,7 +24,12 @@ from pathlib import Path
 
 from playwright.sync_api import Page, sync_playwright
 
-BASE = os.environ.get("APP_URL", "http://127.0.0.1:8101/app")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app  # noqa: E402
+
+UNHANDLED = Unhandled()
+
+BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
 
 ANSWER = "The answer the operator wants to copy, with a detail worth keeping."
@@ -86,6 +91,10 @@ DETAIL = {
 
 def stub(route) -> None:  # type: ignore[no-untyped-def]
     url = route.request.url
+    if url.split("?", 1)[0].endswith("/stream"):
+        # The session's own event stream. An empty JSON body puts the reader in a retry loop for the
+        # whole run; one hello frame and nothing after it is a session that is simply quiet.
+        return route.fulfill(status=200, content_type="text/event-stream", body="event: hello\ndata: {}\n\n")
     if "auth/me" in url:
         body = json.dumps({"user_id": 1, "via": "token"})
     elif f"/api/sessions/{SESSION}" in url and "/events" not in url and "/stream" not in url:
@@ -95,7 +104,15 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     elif url.rstrip("/").endswith("/api/sessions"):
         body = json.dumps([{"id": SESSION, "title": "A session", "status": "idle", "created_at": "2026-09-13T12:00:00+00:00", "last_message_at": "2026-09-13T12:00:05+00:00", "run_id": None}])
     else:
-        body = "[]"
+        # As in every other harness here: the shared gates first, then a report of what was missed.
+        rel = url.split("?", 1)[0]
+        rel = rel[rel.index("/api/"):] if "/api/" in rel else ""
+        if rel in GATES:
+            body = json.dumps(GATES[rel])
+        else:
+            if rel:
+                UNHANDLED.record(rel)
+            body = "[]"
     route.fulfill(status=200, content_type="application/json", body=body)
 
 
@@ -166,4 +183,8 @@ def run() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(run())
+    expect_app(BASE)
+    # A gate the app grew and this stub does not know about fails the run by name, rather than by a
+    # selector that never appears somewhere further down.
+    failed = run()
+    sys.exit(failed or UNHANDLED.report())
