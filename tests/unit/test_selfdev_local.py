@@ -223,7 +223,9 @@ async def test_the_capabilities_carry_the_restart_banner_and_the_restart_route(t
     app.config = config
     selfdev = SelfDevelopment(app, "local")  # type: ignore[arg-type]
     app.extensions["selfdev"] = selfdev
-    app.manager = SimpleNamespace(capabilities=capabilities.resolve(settings, config), providers=SimpleNamespace(available=lambda: []))
+    # busy_sessions: a restart refuses while anything is running or still writing its last turn
+    # down, so the stand-in manager has to be able to answer that too. Nothing is running here.
+    app.manager = SimpleNamespace(capabilities=capabilities.resolve(settings, config), providers=SimpleNamespace(available=lambda: []), busy_sessions=set)
     api = build_app(app, "tok")  # type: ignore[arg-type]
     headers = {"X-Daedalus-Token": "tok"}
 

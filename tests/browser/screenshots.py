@@ -441,10 +441,16 @@ CAPABILITIES = {"selfdev": {"mode": "server", "configured": "auto", "reasons": [
 CAPABILITIES["components"] = {"mode": "native", "missing": ["browser", "node", "bwrap"], "needed": [], "installing": ""}
 
 
-def _component(cid, state, detail, **over):  # type: ignore[no-untyped-def]
-    """One card on Settings -> Components, as the registry would have measured it."""
+def _component(cid, state, detail_key, detail_args=None, **over):  # type: ignore[no-untyped-def]
+    """One card on Settings -> Components, as the registry would have measured it.
+
+    The sentence comes as a key and its numbers, the way the registry sends it: the Russian set of
+    these pictures is a check that the page is Russian all the way down, and a stub that sent English
+    prose would photograph a page the app does not produce.
+    """
     return {
-        "id": cid, "state": state, "detail": detail, "installable": False, "how": "none", "fix": "",
+        "id": cid, "state": state, "detail": "", "detail_key": detail_key, "detail_args": detail_args or {},
+        "installable": False, "how": "none", "fix": "",
         "download_bytes": 0, "disk_bytes": 0, "requires_restart": False,
         "installed_count": 0, "total_count": 0, "skills": [], "enables": [], "progress": None, **over,
     }
@@ -460,20 +466,20 @@ COMPONENTS = {
     "missing": ["browser", "node", "bwrap"],
     "busy": "browser",
     "components": [
-        _component("speech", "installed", "the speech engine is importable", download_bytes=15_728_640, enables=["stt", "tts", "voicenotes"]),
-        _component("stt-models", "installed", "1 of 12 downloaded", how="models", disk_bytes=178_000_000, installed_count=1, total_count=12, enables=["stt"]),
-        _component("tts-voices", "installed", "2 of 16 downloaded", how="models", disk_bytes=36_577_296, installed_count=2, total_count=16, enables=["tts"]),
-        _component("browser", "installing", "the browser extra and the headless shell are not in this installation",
+        _component("speech", "installed", "comp.detail.speech.ok", download_bytes=15_728_640, enables=["stt", "tts", "voicenotes"]),
+        _component("stt-models", "installed", "comp.detail.models.some", {"n": "1", "total": "12"}, how="models", disk_bytes=178_000_000, installed_count=1, total_count=12, enables=["stt"]),
+        _component("tts-voices", "installed", "comp.detail.models.some", {"n": "2", "total": "16"}, how="models", disk_bytes=36_577_296, installed_count=2, total_count=16, enables=["tts"]),
+        _component("browser", "installing", "comp.detail.browser.missing",
                    installable=True, how="launcher", download_bytes=104_857_600, requires_restart=True,
                    enables=["skills.browser", "screenshots"], skills=["accessibility", "canvas-design", "web-design-reviewer", "webapp-testing"],
-                   progress={"id": "browser", "state": "running", "step": "installing browser", "error": "", "restart_required": True}),
-        _component("node", "missing", "Node is not in this installation's runtime folder",
+                   progress={"id": "browser", "state": "running", "step": "installing browser", "step_key": "", "error": "", "restart_required": True}),
+        _component("node", "missing", "comp.detail.node.missing",
                    installable=True, how="launcher", download_bytes=60_817_408, requires_restart=True,
                    enables=["skills.node", "npx"], skills=["accessibility", "web-artifacts-builder", "webapp-testing"]),
-        _component("git", "installed", "git is at /usr/bin/git", enables=["selfdev", "projects"]),
-        _component("ripgrep", "installed", "rg is at /usr/bin/rg", enables=["search"]),
-        _component("opus", "missing", "opusdec is not on the PATH", fix="install opus-tools with this machine's package manager", enables=["voicenotes"]),
-        _component("bwrap", "unavailable", "bwrap is installed but this kernel forbids unprivileged user namespaces",
+        _component("git", "installed", "comp.detail.binary.ok", {"binary": "git", "path": "/usr/bin/git"}, enables=["selfdev", "projects"]),
+        _component("ripgrep", "installed", "comp.detail.binary.ok", {"binary": "rg", "path": "/usr/bin/rg"}, enables=["search"]),
+        _component("opus", "missing", "comp.detail.binary.nopath", {"binary": "opusdec"}, fix="install opus-tools with this machine's package manager", enables=["voicenotes"]),
+        _component("bwrap", "unavailable", "comp.detail.bwrap.refused",
                    fix="allow unprivileged user namespaces on this machine", enables=["sandbox"]),
     ],
 }
@@ -588,7 +594,7 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         # pages say the browser is doing the listening and offer the download that changes it.
         if getattr(stub, "nospeech", False):
             missing = dict(COMPONENTS["components"][0], state="missing", installable=True, how="extra",
-                           detail="the speech extra is not in this environment")
+                           detail_key="comp.detail.speech.missing")
             return respond(route, {**COMPONENTS, "components": [missing, *COMPONENTS["components"][1:]], "busy": ""})
         return respond(route, COMPONENTS)
     if rel == "/api/components/stream":
