@@ -47,8 +47,12 @@ export function visibleScreens(list: Screen[], selfdev: SelfDevMode): Screen[] {
   return selfdev === "off" ? list.filter((s) => s !== "changes") : list;
 }
 
-/** The word beside a destination's name when it works differently here than the name suggests. */
+/** The word beside a destination's name when it works differently here than the name suggests.
+ *
+ *  A key in the table rather than the word: the rail renders it, and the rail is read in two
+ *  languages.
+ */
 export function screenTag(s: Screen, selfdev: SelfDevMode, beta: Screen[]): string {
-  if (s === "changes" && selfdev === "local") return "local";
-  return beta.includes(s) ? "beta" : "";
+  if (s === "changes" && selfdev === "local") return "nav.tag.local";
+  return beta.includes(s) ? "nav.tag.beta" : "";
 }

@@ -33,7 +33,6 @@ const SAME_IN_BOTH = [
   "settings.search.title",
   "settings.vision.title",
   "settings.web.title",
-  "settings.web.ua",
   "usage.col.usd",
 ];
 

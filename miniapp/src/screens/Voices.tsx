@@ -13,55 +13,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { Icon } from "../icons";
 import { modelSize as size } from "../format";
-import { t } from "../i18n";
+import { plural, t } from "../i18n";
+import { mergeTtsView } from "../ttsview";
+import type { TtsView } from "../ttsview";
 import { errorText, haptic } from "../ui";
-
-export type TtsVoice = {
-  id: string;
-  label: string;
-  kind: string;
-  language: string;
-  gender: string;
-  size_bytes: number;
-  disk_bytes: number;
-  memory_mb: number;
-  sample_rate: number;
-  licence: string;
-  quality: number;
-  speed: number;
-  rtf: number;
-  keeps_up: boolean;
-  note: string;
-  speakers: string[];
-  recommended_for: string[];
-  installed: boolean;
-  installed_bytes: number;
-  selected: boolean;
-  progress?: { state: string; fraction: number; error: string };
-};
-
-export type TtsView = {
-  models: TtsVoice[];
-  languages: string[];
-  selected: string;
-  disk_bytes: number;
-  engine_installed: boolean;
-  recommended: Record<string, string>;
-  state: {
-    voice: string;
-    label: string;
-    speaker: string;
-    speed: number;
-    threads: number;
-    installed: boolean;
-    active: boolean;
-    engine_installed: boolean;
-    state: string;
-    error: string;
-    loaded: string;
-    encoder: boolean;
-  };
-};
 
 const name = (code: string) => t(`lang.of.${code}`);
 
@@ -79,6 +34,9 @@ function Bar({ label, value }: { label: string; value: number }) {
 
 export function TtsVoices({ toast }: { toast: (message: string) => void }) {
   const [view, setView] = useState<TtsView | null>(null);
+  // Every answer is folded into the view the page already has rather than replacing it: three
+  // endpoints answer with this shape and a field missing from any of them is a blank screen.
+  const take = useCallback((answer: Partial<TtsView> | null | undefined) => setView((v) => mergeTtsView(v, answer)), []);
   const [query, setQuery] = useState("");
   const [language, setLanguage] = useState("");
   const [fastOnly, setFastOnly] = useState(false);
@@ -91,11 +49,11 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
 
   const load = useCallback(async () => {
     try {
-      setView(await api.get<TtsView>("/api/tts"));
+      take(await api.get<Partial<TtsView>>("/api/tts"));
     } catch (e) {
       setProblem(errorText(e));
     }
-  }, []);
+  }, [take]);
 
   useEffect(() => {
     void load();
@@ -182,7 +140,7 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
       } else if (what === "cancel") {
         await api.post(`/api/tts/voices/${encodeURIComponent(id)}/cancel`);
       } else if (what === "use") {
-        setView(await api.post<TtsView>("/api/tts/select", { voice: id }));
+        take(await api.post<Partial<TtsView>>("/api/tts/select", { voice: id }));
         haptic("medium");
         toast(id ? t("tts.toast.using") : t("tts.toast.stopped"));
         return;
@@ -198,9 +156,18 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
     }
   }
 
+  /** The speed while the thumb is being dragged, before it is worth writing anything to disk. */
+  const [dragging, setDragging] = useState<number | null>(null);
+
+  async function commitSpeed(speed: number) {
+    setDragging(null);
+    if (Math.abs(speed - view!.state.speed) < 0.001) return;
+    await settings({ speed });
+  }
+
   async function settings(patch: Record<string, unknown>) {
     try {
-      setView(await api.post<TtsView>("/api/tts/select", patch));
+      take(await api.post<Partial<TtsView>>("/api/tts/select", patch));
     } catch (e) {
       setProblem(errorText(e));
     }
@@ -234,7 +201,7 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
       </div>
       <div className="kv">
         <span>{t("tts.ondisk")}</span>
-        <b>{installedCount ? t("tts.ondisk.some", { n: installedCount, size: size(view.disk_bytes) }) : t("tts.ondisk.none")}</b>
+        <b>{installedCount ? plural("tts.ondisk.some", installedCount, { size: size(view.disk_bytes) }) : t("tts.ondisk.none")}</b>
       </div>
       {view.state.error && <div className="sub attn" style={{ marginTop: 6 }}>{view.state.error}</div>}
 
@@ -275,7 +242,7 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
               <div className="stt-facts sub faint">
                 <span>{t("tts.facts.size", { dl: size(m.size_bytes), disk: size(m.disk_bytes), mem: m.memory_mb })}</span>
                 <span>{t("tts.facts.rate", { khz: Math.round(m.sample_rate / 1000), licence: m.licence })}</span>
-                {m.speakers.length > 1 && <span>{t("tts.facts.speakers", { n: m.speakers.length })}</span>}
+                {m.speakers.length > 1 && <span>{plural("tts.facts.speakers", m.speakers.length)}</span>}
               </div>
               <div className="stt-bars">
                 <Bar label={t("tts.quality")} value={m.quality} />
@@ -287,7 +254,7 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
                     <span className="stt-bar-fill accent" style={{ width: `${Math.round((progress?.fraction ?? 0) * 100)}%` }} />
                   </span>
                   <span className="sub faint">
-                    {progress?.state === "downloading" ? `${Math.round((progress?.fraction ?? 0) * 100)}%` : progress?.state}
+                    {progress?.state === "downloading" ? `${Math.round((progress?.fraction ?? 0) * 100)}%` : t(`tts.progress.${progress?.state}`)}
                   </span>
                 </div>
               )}
@@ -338,7 +305,10 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
             </div>
           )}
           <div>
-            <label className="field">{t("tts.speed.label", { speed: view.state.speed.toFixed(2) })}</label>
+            {/* The number under the thumb follows the drag; the configuration file is written when the
+                drag ends. Saving on every change was a POST and a full rewrite of the operator's TOML
+                per pixel — about thirty of each for one pull from 1.0 to 2.0. */}
+            <label className="field">{t("tts.speed.label", { speed: (dragging ?? view.state.speed).toFixed(2) })}</label>
             <input
               className="field"
               type="range"
@@ -346,7 +316,10 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
               max={2}
               step={0.05}
               defaultValue={view.state.speed}
-              onChange={(e) => void settings({ speed: Number(e.target.value) })}
+              onChange={(e) => setDragging(Number(e.target.value))}
+              onPointerUp={(e) => void commitSpeed(Number((e.target as HTMLInputElement).value))}
+              onKeyUp={(e) => void commitSpeed(Number((e.target as HTMLInputElement).value))}
+              onBlur={(e) => void commitSpeed(Number(e.target.value))}
             />
           </div>
           <div>

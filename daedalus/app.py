@@ -55,9 +55,10 @@ class Application:
             # is now the wrong one and holds most of a gigabyte while being it.
             self.speech.forget()
         now = config.voice.tts
-        if (spoke.local_voice, spoke.local_speaker, spoke.local_threads) != (now.local_voice, now.local_speaker, now.local_threads):
-            # A different voice, speaker or thread count is a different synthesiser. Speed is not:
-            # it is an argument to every call rather than something the model is built with.
+        if (spoke.local_voice, spoke.local_threads) != (now.local_voice, now.local_threads):
+            # A different voice or thread count is a different synthesiser. The speaker inside a
+            # multi-voice model is not, and neither is the speed: both are arguments to every call,
+            # so dropping a loaded model for either is a second of silence bought for nothing.
             self.tts.forget()
         config.save(self.settings.config_path)
         if self.manager is not None:

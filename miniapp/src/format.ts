@@ -252,7 +252,7 @@ export function describeCron(cron: string, offsetMinutes = zoneOffsetMinutes()):
   const fixedMinute = /^\d+$/.test(p.minute);
   const fixedHour = /^\d+$/.test(p.hour);
   if (p.dom === "*" && p.month === "*") {
-    if (/^\*\/(\d+)$/.test(p.minute) && p.hour === "*" && p.dow === "*") return t("fmt.cron.everyminutes", { n: /^\*\/(\d+)$/.exec(p.minute)![1] });
+    if (/^\*\/(\d+)$/.test(p.minute) && p.hour === "*" && p.dow === "*") return plural("fmt.cron.everyminutes", Number(/^\*\/(\d+)$/.exec(p.minute)![1]));
     if (fixedMinute && /^\*\/(\d+)$/.test(p.hour) && p.dow === "*") {
       const n = Number(/^\*\/(\d+)$/.exec(p.hour)![1]);
       return n === 1 ? t("fmt.cron.everyhour") : plural("fmt.cron.everyhours", n);

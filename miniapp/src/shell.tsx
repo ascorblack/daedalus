@@ -112,7 +112,7 @@ export function MoreSheet({ screen, counts, selfdev, onClose }: { screen: Screen
             <a key={s} href={pathFor(s)} className={`more-item ${screen === s ? "active" : ""}`} onClick={(e) => { go(e, pathFor(s)); onClose(); }}>
               <Icon name={ICONS[s]} size={22} />
               <span>{screenTitle(s)}</span>
-              {tag && <span className="beta-tag">{tag}</span>}
+              {tag && <span className="beta-tag">{t(tag)}</span>}
               {n > 0 && <span className="tab-badge">{n}</span>}
             </a>
           );
@@ -136,7 +136,7 @@ export function Rail({ screen, counts, selfdev, collapsed, onToggle, onPalette, 
       <a key={s} href={pathFor(s)} className={`rail-item ${screen === s ? "active" : ""}`} aria-current={screen === s ? "page" : undefined} onClick={(e) => go(e, pathFor(s))} title={collapsed ? screenTitle(s) : undefined}>
         <Icon name={ICONS[s]} size={18} />
         <span className="rail-text">{screenTitle(s)}</span>
-        {tag && <span className="rail-text beta-tag">{tag}</span>}
+        {tag && <span className="rail-text beta-tag">{t(tag)}</span>}
         {n > 0 && <span className={`count ${s === "services" ? "ok" : s === "changes" ? "attn" : ""}`}>{n}</span>}
       </a>
     );

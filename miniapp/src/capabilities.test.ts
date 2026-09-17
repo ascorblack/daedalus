@@ -25,11 +25,11 @@ describe("visibleScreens", () => {
 
 describe("screenTag", () => {
   it("marks Changes as local, because a change there stays on this machine", () => {
-    expect(screenTag("changes", "local", BETA)).toBe("local");
+    expect(screenTag("changes", "local", BETA)).toBe("nav.tag.local");
     expect(screenTag("changes", "server", BETA)).toBe("");
   });
   it("still marks what is in beta", () => {
-    expect(screenTag("voice", "server", BETA)).toBe("beta");
+    expect(screenTag("voice", "server", BETA)).toBe("nav.tag.beta");
     expect(screenTag("inbox", "server", BETA)).toBe("");
   });
 });

@@ -629,13 +629,18 @@ function HealthTab({ toast }: { toast: (t: string) => void }) {
   }, []);
   if (!data) return <div className="empty">{t(busy ? "settings.health.checking" : "common.loading")}</div>;
   const mark = (c: Check) => (c.fixed ? "🔧" : c.ok ? "✅" : c.severity === "fail" ? "❌" : "⚠️");
-  const fixable = data.checks.some((c) => !c.ok && c.fixable);
+  // An answer without `checks` is not a screen that should go down with "Cannot read properties of
+  // undefined": the doctor is one endpoint away and an installation that has not got it yet reads
+  // as no checks rather than as a broken page.
+  const checks = data.checks ?? [];
+  const summary = data.summary ?? {};
+  const fixable = checks.some((c) => !c.ok && c.fixable);
   return (
     <>
       <div className="card">
         <div className="row">
           <div className="grow">
-            <b>{t("settings.health.ok", { n: data.summary.ok })}</b> · {t("settings.health.warn", { n: data.summary.warn })} · {t("settings.health.fail", { n: data.summary.fail })}
+            <b>{t("settings.health.ok", { n: summary.ok ?? 0 })}</b> · {t("settings.health.warn", { n: summary.warn ?? 0 })} · {t("settings.health.fail", { n: summary.fail ?? 0 })}
           </div>
           <button className="btn small" disabled={busy} onClick={() => load(false)}>
             {t("settings.health.recheck")}
@@ -648,7 +653,7 @@ function HealthTab({ toast }: { toast: (t: string) => void }) {
         </div>
       </div>
       <div className="card">
-        {data.checks.map((c, i) => (
+        {checks.map((c, i) => (
           <div key={i} className="row" style={{ alignItems: "flex-start", padding: "6px 0", borderTop: i ? "1px solid var(--line)" : undefined }}>
             <span style={{ flex: "none", width: 22 }}>{mark(c)}</span>
             <div className="grow" style={{ minWidth: 0 }}>
