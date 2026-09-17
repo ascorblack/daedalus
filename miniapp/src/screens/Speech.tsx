@@ -9,45 +9,15 @@
 // Only one model is in use at a time; several can be installed, and the one in use is a tap away from
 // any of them.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { Icon } from "../icons";
+import { invalidate } from "../store";
 import { errorText, haptic } from "../ui";
+import type { SpeechModel, SpeechView } from "../sttview";
+import { fetchSttView, mergeSttView, postSttSelect, sttFrame } from "../sttview";
 
-export type SpeechModel = {
-  id: string;
-  label: string;
-  kind: string;
-  streaming: boolean;
-  languages: string[];
-  language_count: number;
-  size_bytes: number;
-  disk_bytes: number;
-  memory_mb: number;
-  licence: string;
-  accuracy: number;
-  speed: number;
-  note: string;
-  recommended_for: string[];
-  installed: boolean;
-  installed_bytes: number;
-  selected: boolean;
-  verified: boolean;
-  detects_language: boolean;
-  progress?: { state: string; fraction: number; error: string };
-};
-
-export type SpeechView = {
-  models: SpeechModel[];
-  languages: string[];
-  selected: string;
-  disk_bytes: number;
-  language: string;
-  threads: number;
-  engine_installed: boolean;
-  decoders: { opus: boolean; any: boolean };
-  recommended: Record<string, string>;
-};
+export type { SpeechModel, SpeechView } from "../sttview";
 
 const NAMES: Record<string, string> = {
   en: "English", ru: "Russian", de: "German", fr: "French", es: "Spanish", it: "Italian", pt: "Portuguese",
@@ -83,6 +53,32 @@ function Languages({ model }: { model: SpeechModel }) {
   return <>{shown.join(", ")}{rest > 0 ? ` +${rest} more` : ""}</>;
 }
 
+/** Where the chosen model is: in memory and quick, on its way there, or refusing to load. */
+function LoadLine({ load }: { load: SpeechView["load"] }) {
+  if (!load || load.state === "idle") return null;
+  if (load.state === "loading") {
+    return (
+      <div className="kv stt-load">
+        <span>In memory</span>
+        <b className="stt-loading">loading now — the first utterance would have waited for this</b>
+      </div>
+    );
+  }
+  if (load.state === "error") {
+    return (
+      <div className="sub attn" style={{ marginTop: 6 }}>
+        That model would not load: {load.error || "the engine refused it"}
+      </div>
+    );
+  }
+  return (
+    <div className="kv">
+      <span>In memory</span>
+      <b>ready{load.loaded_in_ms ? ` · loaded in ${(load.loaded_in_ms / 1000).toFixed(1)} s` : ""}</b>
+    </div>
+  );
+}
+
 export function SpeechModels({ toast }: { toast: (t: string) => void }) {
   const [view, setView] = useState<SpeechView | null>(null);
   const [query, setQuery] = useState("");
@@ -90,15 +86,19 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
   const [streamingOnly, setStreamingOnly] = useState(false);
   const [busy, setBusy] = useState("");
   const [problem, setProblem] = useState("");
-  const live = useRef<Record<string, { state: string; fraction: number; error: string }>>({});
+
+  /** Every answer is folded into what is already on the screen; none of them replaces it. */
+  const take = useCallback((answer: Partial<SpeechView>) => {
+    setView((current) => mergeSttView(current, answer));
+  }, []);
 
   const load = useCallback(async () => {
     try {
-      setView(await api.get<SpeechView>("/api/stt"));
+      take(await fetchSttView());
     } catch (e) {
       setProblem(errorText(e));
     }
-  }, []);
+  }, [take]);
 
   useEffect(() => {
     void load();
@@ -126,8 +126,15 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
             const data = /^data: (.*)$/m.exec(frame)?.[1];
             if (!data) continue;
             try {
-              const update = JSON.parse(data) as { id: string; state: string; fraction: number; error: string };
-              live.current = { ...live.current, [update.id]: update };
+              const frame = sttFrame(JSON.parse(data));
+              if (!frame) continue;
+              if (frame.kind === "engine") {
+                // The same stream carries the engine loading a model into memory, which is a card
+                // here and the reason the voice page's microphone is shut over there.
+                setView((v) => (v ? { ...v, load: frame.load } : v));
+                continue;
+              }
+              const update = frame.progress;
               setView((v) => (v ? { ...v, models: v.models.map((m) => (m.id === update.id ? { ...m, progress: update } : m)) } : v));
               if (["installed", "failed", "cancelled", "deleted"].includes(update.state)) void load();
               if (update.state === "failed" && update.error) setProblem(update.error);
@@ -159,12 +166,16 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
       } else if (what === "cancel") {
         await api.post(`/api/stt/models/${encodeURIComponent(id)}/cancel`);
       } else if (what === "use") {
-        setView(await api.post<SpeechView>("/api/stt/select", { model: id }));
+        take(await postSttSelect({ model: id }));
+        // The voice page and the card above it both say which recogniser listens; the selection has
+        // just changed that, so they are told rather than left until something reloads them.
+        invalidate("/api/voice");
         haptic("medium");
-        toast(id ? "this model is now used for speech" : "back to the endpoint and the browser");
+        toast(id ? "this model is now used for speech — it is loading into memory now" : "back to the endpoint and the browser");
         return;
       } else {
-        await api.delete(`/api/stt/models/${encodeURIComponent(id)}`);
+        take(await api.delete<Partial<SpeechView>>(`/api/stt/models/${encodeURIComponent(id)}`));
+        invalidate("/api/voice");
         toast("removed");
       }
       await load();
@@ -210,7 +221,8 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
         <span>On disk</span>
         <b>{installedCount ? `${installedCount} model${installedCount > 1 ? "s" : ""} · ${size(view.disk_bytes)}` : "nothing yet"}</b>
       </div>
-      {view.selected && !view.decoders.opus && !view.decoders.any && (
+      {view.selected && <LoadLine load={view.load} />}
+      {view.selected && !view.decoders?.opus && !view.decoders?.any && (
         <div className="sub attn" style={{ marginTop: 6 }}>
           No audio decoder is installed here, so only plain WAV can be read — a Telegram voice note cannot. Install
           opus-tools (small) or ffmpeg (large).
@@ -304,7 +316,7 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
         <div className="grid2" style={{ marginTop: 12 }}>
           <div>
             <label className="field">Language</label>
-            <select className="field" value={view.language} onChange={(e) => void api.post<SpeechView>("/api/stt/select", { language: e.target.value }).then(setView).catch((x) => setProblem(errorText(x)))}>
+            <select className="field" value={view.language} onChange={(e) => void postSttSelect({ language: e.target.value }).then(take).catch((x) => setProblem(errorText(x)))}>
               <option value="auto">{autoDetects ? "auto — the model decides" : "auto — English for this model"}</option>
               {view.languages.map((code) => (
                 <option key={code} value={code}>{name(code)}</option>
@@ -319,7 +331,7 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
               min={1}
               max={16}
               defaultValue={view.threads}
-              onBlur={(e) => void api.post<SpeechView>("/api/stt/select", { threads: Number(e.target.value) || 2 }).then(setView).catch((x) => setProblem(errorText(x)))}
+              onBlur={(e) => void postSttSelect({ threads: Number(e.target.value) || 2 }).then(take).catch((x) => setProblem(errorText(x)))}
             />
           </div>
         </div>

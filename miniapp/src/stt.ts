@@ -138,6 +138,13 @@ export function createLocalListener(h: ListenerHandlers): Listener {
 
   const take = (samples: Float32Array) => {
     if (!wanted) return;
+    // The loudness is taken from the samples already in hand rather than from a second tap on the
+    // microphone: this path has the audio, and the orb should react to exactly what is being sent.
+    if (h.onLevel) {
+      let sum = 0;
+      for (const v of samples) sum += v * v;
+      h.onLevel(Math.sqrt(sum / samples.length));
+    }
     pending.push(samples);
     held += samples.length;
     if (held >= (rate * CHUNK_MS) / 1000) inflightDone = drain();

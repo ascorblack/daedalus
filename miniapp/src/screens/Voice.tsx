@@ -1,77 +1,117 @@
 // Voice: the operator talks, a small fast model answers out loud, and the work goes to agents.
 //
-// The page is a conversation, not a transcript reader: one big control to take the mic, the words
-// being said under it, the answer as it is spoken, and beside it the agents the concierge started —
-// each one a tap away from its own session, where the actual work is visible.
+// The page is a conversation, not a transcript reader. One thing is in the middle of it — an orb that
+// breathes when nothing is happening, swells with the operator's own voice while it listens, turns
+// and brightens while the concierge thinks, and ripples in time with the answer while it is spoken.
+// Under it are the words: what was asked, what is being heard, and the reply a sentence at a time.
+// Beside it are the agents the concierge started, each one a tap away from its own session.
+//
+// The motion is not decoration. There is no other signal on this page: the microphone is open or it
+// is not, the model is loaded or it is loading, the answer is being written or being read out, and a
+// person who is talking rather than reading has to know which from the corner of their eye. Where the
+// reader asked for less of it — `prefers-reduced-motion` — the colours and the words still say all
+// four, and the global rule in styles.css takes the animation away.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { api } from "../api";
-import { Dot, StatusLabel, timeAgo } from "../components";
+import { StatusLabel, timeAgo } from "../components";
+import { t, useLang } from "../i18n";
 import { Icon } from "../icons";
 import { pathFor, sessionPath } from "../router";
 import { PageHeader, go, screenTitle } from "../shell";
 import { useQuery } from "../store";
 import { errorText, haptic } from "../ui";
 import { createLocalListener, localListenSupported } from "../stt";
-import { AgentNews, Listener, Speaker, agentNote, createRecognition, createRecorder, createSpeaker, recognitionSupported, recorderSupported, sendUtterance, voiceLang } from "../voice";
+import { sttFrame } from "../sttview";
+import type { AgentNews, Listener, Speaker, VoiceUi } from "../voice";
+import {
+  IDLE_VOICE,
+  agentNote,
+  createMeter,
+  createRecognition,
+  createRecorder,
+  createSpeaker,
+  micReady,
+  orbVisual,
+  recognitionSupported,
+  recorderSupported,
+  sendUtterance,
+  smoothLevel,
+  voiceLang,
+  voiceReducer,
+} from "../voice";
 
 type Agent = AgentNews;
 type VoiceState = {
   enabled: boolean;
   session_id: string;
   model: string;
-  tts: { configured: boolean; reason?: string; voice?: string; model?: string };
-  stt: {
+  tts?: { configured: boolean; reason?: string; voice?: string; model?: string };
+  stt?: {
     configured: boolean;
     reason?: string;
+    /** Which of the three recognisers listens, decided by the server and merely followed here. */
+    kind?: string;
+    /** Where the local model's weights are: `loading`, `ready`, `error` — `ready` for everything else. */
+    state?: string;
+    loaded_in_ms?: number;
+    error?: string;
     /** The model that runs on this machine, where one is installed and selected. */
     local?: { model: string; label: string; installed: boolean; active: boolean; streaming: boolean; loaded: string };
   };
-  agents: Agent[];
+  agents?: Agent[];
   listening: boolean;
 };
-
-type Phase = "idle" | "listening" | "thinking" | "speaking" | "delegating";
-
-const PHASE_WORD: Record<Phase, string> = { idle: "Ready", listening: "Listening", thinking: "Thinking", speaking: "Speaking", delegating: "Setting that up" };
 
 /** How long after the last spoken word the microphone stays deaf: a speaker's tail reaches it late. */
 const ECHO_TAIL_MS = 400;
 
 export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   const { data: state, refresh } = useQuery<VoiceState>("/api/voice", { staleMs: 10000, pollMs: 60000 });
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [delegating, setDelegating] = useState("");
-  const [heard, setHeard] = useState("");
-  const [said, setSaid] = useState("");
-  const [lastAsked, setLastAsked] = useState("");
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [problem, setProblem] = useState("");
+  const [ui, dispatch] = useReducer(voiceReducer, IDLE_VOICE);
   const [typed, setTyped] = useState("");
-  const [micOn, setMicOn] = useState(false);
+  useLang();
   const speaker = useRef<Speaker | null>(null);
   const listener = useRef<Listener | null>(null);
+  const meter = useRef<ReturnType<typeof createMeter> | null>(null);
   const lang = useMemo(() => voiceLang(), []);
-  const serverTts = !!state?.tts.configured;
+  const serverTts = !!state?.tts?.configured;
   // Which recogniser listens, in the order the server decides and the page merely follows: a model
   // that runs on the server's processor first, then this browser's own recognition, then a recorder
   // whose cut utterances the server transcribes. The local model wins over the browser because it is
   // a deliberate choice the operator made and paid disk for; the browser's is whatever it shipped.
-  const localStt = !!state?.stt.local?.active && localListenSupported();
+  const localStt = !!state?.stt?.local?.active && localListenSupported();
   const canRecognise = recognitionSupported();
-  const canRecord = recorderSupported() && !!state?.stt.configured;
+  const canRecord = recorderSupported() && !!state?.stt?.configured;
   const canTalk = localStt || canRecognise || canRecord;
-  const recogniser = localStt ? `${state?.stt.local?.label} on this machine` : canRecognise ? "this browser" : canRecord ? "recorded here, transcribed on the server" : "";
+  const modelName = state?.stt?.local?.label || state?.stt?.local?.model || "";
+  const recogniser = localStt
+    ? t("voice.recogniser.local", { label: modelName })
+    : canRecognise
+      ? t("voice.recogniser.browser")
+      : canRecord
+        ? t("voice.recogniser.server")
+        : "";
 
   useEffect(() => {
-    setAgents(state?.agents ?? []);
+    dispatch({ type: "agents", agents: state?.agents ?? [] });
   }, [state?.agents]);
 
-  // The stream handler is built once, on mount; what it needs of the live state it reads through a ref.
-  const micOnRef = useRef(false);
+  // The engine's own state comes from the same place the recogniser choice does, so a page opened
+  // while the weights are still loading starts in "loading" rather than in "ready" with a microphone
+  // that hears nothing.
   useEffect(() => {
-    micOnRef.current = micOn;
-  }, [micOn]);
+    const stt = state?.stt;
+    if (!stt) return;
+    dispatch({
+      type: "engine",
+      engine: { state: String(stt.state ?? "ready"), model: stt.local?.model ?? "", loadedInMs: Number(stt.loaded_in_ms ?? 0), error: String(stt.error ?? "") },
+    });
+  }, [state?.stt]);
+
+  // The stream handler is built once, on mount; what it needs of the live state it reads through a ref.
+  const uiRef = useRef(ui);
+  uiRef.current = ui;
 
   // The page is heard by its own microphone: a laptop or phone speaker plays the answer straight back
   // into the recogniser, which would barge in on it and then submit the machine's words as the
@@ -83,7 +123,35 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   const onSpeaking = useCallback((on: boolean) => {
     speakingRef.current = on;
     if (!on) deafUntil.current = Date.now() + ECHO_TAIL_MS;
-    setPhase((f) => (on ? "speaking" : f === "speaking" ? (micOnRef.current ? "listening" : "idle") : f));
+    dispatch({ type: "speaking", on });
+  }, []);
+
+  // ── the orb's level ──────────────────────────────────────────────────────────────────────
+  //
+  // Sixty values a second is not React's business: each one would be a render of a page that has a
+  // list on it. The raw level lands in a ref, one animation frame smooths it and writes three custom
+  // properties onto the orb, and the component re-renders only when the phase changes.
+  const orb = useRef<HTMLButtonElement | null>(null);
+  const rawLevel = useRef(0);
+  const onLevel = useCallback((level: number) => {
+    rawLevel.current = level;
+  }, []);
+  useEffect(() => {
+    let frame = 0;
+    let shown = 0;
+    const paint = () => {
+      shown = smoothLevel(shown, rawLevel.current);
+      const visual = orbVisual(uiRef.current.phase, shown);
+      const node = orb.current;
+      if (node) {
+        node.style.setProperty("--orb-scale", visual.scale.toFixed(3));
+        node.style.setProperty("--orb-glow", visual.glow.toFixed(3));
+        node.style.setProperty("--orb-spin", `${visual.spin.toFixed(2)}s`);
+      }
+      frame = requestAnimationFrame(paint);
+    };
+    frame = requestAnimationFrame(paint);
+    return () => cancelAnimationFrame(frame);
   }, []);
 
   // ── the concierge's half of the conversation ────────────────────────────────────────────
@@ -128,16 +196,14 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
       }
     })();
     function handle(event: string, p: Record<string, any>) {
-      if (event === "partial") setSaid(String(p.text ?? ""));
-      else if (event === "say") speaker.current?.say(String(p.text ?? ""));
-      else if (event === "agents") setAgents((p.agents ?? []) as Agent[]);
-      else if (event === "error") setProblem(String(p.message ?? "the concierge stopped"));
-      else if (event === "done") setPhase((f) => (f === "thinking" || f === "delegating" ? "idle" : f));
-      else if (event === "status") {
-        const next = String(p.state ?? "idle");
-        setDelegating(next === "delegating" ? String(p.title ?? "") : "");
-        setPhase((f) => (next === "idle" ? (f === "speaking" ? f : micOnRef.current ? "listening" : "idle") : (next as Phase)));
-      }
+      if (event === "partial") dispatch({ type: "partial", text: String(p.text ?? "") });
+      else if (event === "say") {
+        dispatch({ type: "say", text: String(p.text ?? "") });
+        speaker.current?.say(String(p.text ?? ""));
+      } else if (event === "agents") dispatch({ type: "agents", agents: (p.agents ?? []) as Agent[] });
+      else if (event === "error") dispatch({ type: "problem", message: String(p.message ?? "the concierge stopped") });
+      else if (event === "done") dispatch({ type: "done" });
+      else if (event === "status") dispatch({ type: "status", state: String(p.state ?? "idle"), title: String(p.title ?? "") });
     }
     return () => {
       stop = true;
@@ -145,29 +211,64 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
     };
   }, []);
 
+  // ── the model loading into memory ────────────────────────────────────────────────────────
+  //
+  // Opening this page starts the load (the server does it when it answers /api/voice); this is how
+  // the page hears about it finishing without polling for it.
+  useEffect(() => {
+    if (state?.stt?.kind !== "local") return;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch("/api/stt/progress", { headers: api.authHeaders(), signal: controller.signal });
+        if (!response.body) return;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() ?? "";
+          for (const chunk of frames) {
+            const data = /^data: (.*)$/m.exec(chunk)?.[1];
+            if (!data) continue;
+            try {
+              const frame = sttFrame(JSON.parse(data));
+              if (frame?.kind === "engine") {
+                dispatch({ type: "engine", engine: { state: frame.load.state, model: frame.load.model, loadedInMs: frame.load.loaded_in_ms, error: frame.load.error } });
+              }
+            } catch {
+              /* one malformed frame must not end the stream */
+            }
+          }
+        }
+      } catch {
+        /* the page navigated away, or the stream dropped */
+      }
+    })();
+    return () => controller.abort();
+  }, [state?.stt?.kind]);
+
   // ── speaking ─────────────────────────────────────────────────────────────────────────────
   useEffect(() => {
-    speaker.current = createSpeaker({ server: serverTts, lang, onSpeaking });
+    speaker.current = createSpeaker({ server: serverTts, lang, onSpeaking, onLevel });
     return () => {
       speaker.current?.stop();
       speaker.current = null;
     };
-  }, [serverTts, lang, onSpeaking]);
+  }, [serverTts, lang, onSpeaking, onLevel]);
 
   // ── what the operator says ───────────────────────────────────────────────────────────────
   const send = useCallback(async (text: string) => {
     const body = text.trim();
     if (!body) return;
-    setLastAsked(body);
-    setHeard("");
-    setSaid("");
-    setProblem("");
-    setPhase("thinking");
+    dispatch({ type: "asked", text: body });
     try {
       await api.post("/api/voice/say", { text: body });
     } catch (e) {
-      setProblem(errorText(e));
-      setPhase("idle");
+      dispatch({ type: "problem", message: errorText(e) });
     }
   }, []);
 
@@ -179,61 +280,66 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   const startMic = useCallback(async () => {
     speaker.current?.unlock();
     const handlers = {
-      onInterim: (t: string) => earsOpen() && setHeard(t),
-      onFinal: (t: string) => earsOpen() && void send(t),
+      onInterim: (text: string) => earsOpen() && dispatch({ type: "heard", text }),
+      onFinal: (text: string) => earsOpen() && void send(text),
       onSpeechStart: () => earsOpen() && bargeIn(),
-      onError: (m: string) => setProblem(m),
+      onError: (message: string) => dispatch({ type: "problem", message }),
+      onLevel,
     };
     const l = localStt
       ? createLocalListener(handlers)
       : canRecognise
-      ? createRecognition(lang, handlers)
-      : createRecorder({
-          ...handlers,
-          onUtterance: async (blob) => {
-            if (!earsOpen()) return;
-            setPhase("thinking");
-            try {
-              const text = await sendUtterance(blob);
-              if (text.trim()) {
-                setLastAsked(text.trim());
-                setHeard("");
-                setSaid("");
-              } else setPhase("idle");
-            } catch (e) {
-              setProblem(errorText(e));
-              setPhase("idle");
-            }
-          },
-        });
+        ? createRecognition(lang, handlers)
+        : createRecorder({
+            ...handlers,
+            onUtterance: async (blob) => {
+              if (!earsOpen()) return;
+              try {
+                const text = await sendUtterance(blob);
+                if (text.trim()) dispatch({ type: "asked", text: text.trim() });
+              } catch (e) {
+                dispatch({ type: "problem", message: errorText(e) });
+              }
+            },
+          });
     listener.current = l;
     await l.start();
-    setMicOn(true);
-    setPhase("listening");
+    // The browser's own recognition hands over words and no audio at all, so on that path the level
+    // the orb reacts to comes from a second, read-only tap on the microphone.
+    if (l.kind === "recognition") {
+      meter.current = createMeter(onLevel);
+      void meter.current.start();
+    }
+    dispatch({ type: "mic", on: true });
     haptic("medium");
-  }, [bargeIn, canRecognise, earsOpen, lang, localStt, send]);
+  }, [bargeIn, canRecognise, earsOpen, lang, localStt, onLevel, send]);
 
   const stopMic = useCallback(() => {
     listener.current?.stop();
     listener.current = null;
-    setMicOn(false);
-    setHeard("");
-    setPhase((f) => (f === "listening" ? "idle" : f));
+    meter.current?.stop();
+    meter.current = null;
+    rawLevel.current = 0;
+    dispatch({ type: "mic", on: false });
   }, []);
 
-  useEffect(() => () => listener.current?.stop(), []);
+  useEffect(
+    () => () => {
+      listener.current?.stop();
+      meter.current?.stop();
+    },
+    [],
+  );
 
   async function newConversation() {
     stopMic();
     speaker.current?.cancel();
-    setSaid("");
-    setLastAsked("");
-    setAgents([]);
+    dispatch({ type: "cleared" });
     try {
       await api.post("/api/voice/new", {});
       await refresh();
     } catch (e) {
-      setProblem(errorText(e));
+      dispatch({ type: "problem", message: errorText(e) });
     }
   }
 
@@ -243,62 +349,87 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
         <PageHeader title={<VoiceTitle />} />
         <div className="screen wide">
           <div className="empty">
-            <b>The voice page is switched off</b>
-            <div>Turn it on in the configuration under [voice], then reload.</div>
+            <b>{t("voice.off.title")}</b>
+            <div>{t("voice.off.body")}</div>
           </div>
         </div>
       </>
     );
   }
 
-  const phaseNow: Phase = delegating ? "delegating" : phase;
+  const ready = micReady(ui);
+  const agents = ui.agents;
   return (
     <>
       <PageHeader
         title={<VoiceTitle />}
-        subtitle={state ? `${state.model} · ${serverTts ? "server voice" : "browser voice"}` : "…"}
+        subtitle={state ? `${state.model} · ${serverTts ? t("voice.out.server") : t("voice.out.browser")}` : "…"}
         actions={
           <>
             {state?.session_id && (
               <a className="btn ghost small" href={sessionPath(state.session_id)} onClick={(e) => go(e, sessionPath(state.session_id))}>
-                Transcript
+                {t("voice.transcript")}
               </a>
             )}
             <button className="btn small" onClick={() => void newConversation()}>
-              New conversation
+              {t("voice.new")}
             </button>
           </>
         }
       />
       <div className="screen wide voice">
         <div className="voice-grid">
-          <section className="voice-stage card">
-            <div className="voice-status">
-              <span className={`chip ${phaseNow === "idle" ? "" : "accent"}`}>
-                <Dot status={phaseNow === "idle" ? "idle" : phaseNow === "listening" ? "waiting" : "running"} />
-                {PHASE_WORD[phaseNow]}
-                {delegating && `: ${delegating}`}
-              </span>
-              {!serverTts && <span className="chip">browser voice</span>}
+          <section className={`voice-stage card phase-${ui.phase}`}>
+            <div className="voice-chips">
+              <PhaseChip ui={ui} />
+              <span className="chip quiet">{serverTts ? t("voice.out.server") : t("voice.out.browser")}</span>
             </div>
 
-            <button
-              className={`mic-button ${micOn ? "on" : ""}`}
-              onClick={() => (micOn ? stopMic() : void startMic())}
-              disabled={!canTalk}
-              aria-pressed={micOn}
-              aria-label={micOn ? "Stop listening" : "Start listening"}
-            >
-              <Icon name="mic" size={40} />
-              <span className="mic-ring" aria-hidden />
-            </button>
-            <div className="voice-hint sub">{!canTalk ? "This browser cannot listen; type below instead." : micOn ? "Talk. Tap again to stop." : "Tap to talk."}</div>
+            <div className="voice-orb-wrap">
+              <button
+                ref={orb}
+                className={`voice-orb ${ui.micOn ? "on" : ""}`}
+                onClick={() => (ui.micOn ? stopMic() : void startMic())}
+                disabled={!canTalk || !ready}
+                aria-pressed={ui.micOn}
+                aria-label={ui.micOn ? t("voice.mic.stop") : t("voice.mic.start")}
+              >
+                <span className="orb-halo" aria-hidden />
+                <span className="orb-shell" aria-hidden />
+                <span className="orb-sweep" aria-hidden />
+                <span className="orb-ring" aria-hidden />
+                <span className="orb-ring two" aria-hidden />
+                <span className="orb-glyph" aria-hidden>
+                  <Icon name="mic" size={36} />
+                </span>
+              </button>
+            </div>
 
-            <div className="voice-captions">
-              {lastAsked && <p className="voice-asked">{lastAsked}</p>}
-              {heard && <p className="voice-heard">{heard}</p>}
-              {said ? <p className="voice-said">{said}</p> : <p className="voice-said empty-line sub">{micOn ? "…" : ""}</p>}
-              {problem && <p className="voice-problem">{problem}</p>}
+            <div className="voice-hint sub">
+              {!ready
+                ? t("voice.loading.model", { name: modelName || t("voice.phase.loading") })
+                : ui.engine.state === "error"
+                  ? t("voice.loading.failed", { name: modelName, error: ui.engine.error })
+                  : !canTalk
+                    ? t("voice.tap.none")
+                    : ui.micOn
+                      ? t("voice.tap.stop")
+                      : t("voice.tap")}
+            </div>
+
+            <div className="voice-captions" aria-live="polite">
+              {ui.asked && <p className="voice-asked">{ui.asked}</p>}
+              {ui.heard && <p className="voice-heard">{ui.heard}</p>}
+              <div className="voice-said">
+                {ui.spoken.map((sentence, i) => (
+                  <span className="voice-sentence" key={`${i}-${sentence.slice(0, 12)}`}>
+                    {sentence}{" "}
+                  </span>
+                ))}
+                {!ui.spoken.length && ui.partial && <span className="voice-sentence writing">{ui.partial}</span>}
+                {!ui.spoken.length && !ui.partial && <span className="voice-waiting" aria-hidden />}
+              </div>
+              {ui.problem && <p className="voice-problem">{ui.problem}</p>}
             </div>
 
             <form
@@ -310,23 +441,20 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
                 void send(text);
               }}
             >
-              <input className="field" placeholder="…or type an utterance" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label="Type an utterance" />
-              <button className="btn primary" type="submit" disabled={!typed.trim()}>
+              <input className="field" placeholder={t("voice.compose")} value={typed} onChange={(e) => setTyped(e.target.value)} aria-label={t("voice.compose.label")} />
+              <button className="btn ghost" type="submit" disabled={!typed.trim()} aria-label={t("voice.compose.label")}>
                 <Icon name="send" size={16} />
               </button>
             </form>
-            <div className="sub voice-why">
-              {canTalk
-                ? `Listening: ${recogniser}.`
-                : "This browser has no speech recognition, and nothing here can turn a recording into words — download a speech model in Settings → Voice, or configure a transcription endpoint."}
-            </div>
+            <div className="sub voice-why">{canTalk ? t("voice.listening.with", { what: recogniser }) : t("voice.recogniser.none")}</div>
           </section>
 
           <aside className="voice-agents">
             <h2 className="voice-agents-head">
-              Agents<span className="sub">{agents.length ? ` · ${agents.length}` : ""}</span>
+              {t("voice.agents")}
+              <span className="sub">{agents.length ? ` · ${agents.length}` : ""}</span>
             </h2>
-            {agents.length === 0 && <div className="sub voice-agents-empty">Nothing delegated yet. Ask for something that takes real work and it appears here.</div>}
+            {agents.length === 0 && <div className="sub voice-agents-empty">{t("voice.agents.empty")}</div>}
             {agents.map((a) => {
               const note = agentNote(a);
               return (
@@ -349,10 +477,26 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   );
 }
 
+/** The one word for what the page is doing, and the animation that says it without being read. */
+function PhaseChip({ ui }: { ui: VoiceUi }) {
+  const word = t(`voice.phase.${ui.phase}`);
+  return (
+    <span className={`chip voice-chip ${ui.phase}`}>
+      <span className="voice-chip-mark" aria-hidden>
+        <i />
+        <i />
+        <i />
+      </span>
+      {word}
+      {ui.delegating && `: ${ui.delegating}`}
+    </span>
+  );
+}
+
 function VoiceTitle() {
   return (
     <>
-      {screenTitle("voice")} <span className="chip accent voice-beta">beta</span>
+      {screenTitle("voice")} <span className="chip accent voice-beta">{t("voice.beta")}</span>
     </>
   );
 }
@@ -360,7 +504,8 @@ function VoiceTitle() {
 /** The Settings card: what the page runs on and what it can and cannot do here. */
 export function VoiceSettings() {
   const { data } = useQuery<VoiceState>("/api/voice", { staleMs: 10000 });
-  if (!data) return <div className="sub">Loading…</div>;
+  if (!data) return <div className="sub">{t("common.loading")}</div>;
+  const local = data.stt?.local;
   return (
     <div className="card">
       <div className="section-title" style={{ marginTop: 0 }}>Voice (beta)</div>
@@ -375,20 +520,34 @@ export function VoiceSettings() {
       </div>
       <div className="kv">
         <span>Speech out</span>
-        <b>{data.tts.configured ? `server · ${data.tts.model} · ${data.tts.voice}` : data.tts.reason || "the browser's own synthesiser ([voice.tts] is empty)"}</b>
+        <b>{data.tts?.configured ? `server · ${data.tts.model} · ${data.tts.voice}` : data.tts?.reason || "the browser's own synthesiser ([voice.tts] is empty)"}</b>
       </div>
       <div className="kv">
         <span>Speech in</span>
         <b>
-          {data.stt.local?.active
-            ? `${data.stt.local.label}, running on this machine${data.stt.local.streaming ? " — words appear as they are said" : ""}`
+          {local?.active
+            ? `${local.label}, running on this machine${local.streaming ? " — words appear as they are said" : ""}`
             : recognitionSupported()
               ? "this browser recognises speech itself"
-              : data.stt.configured
+              : data.stt?.configured
                 ? "recorded here, transcribed on the server"
                 : "not available in this browser, and nothing is configured to transcribe a recording"}
         </b>
       </div>
+      {local?.active && (
+        <div className="kv">
+          <span>In memory</span>
+          <b>
+            {data.stt?.state === "loading"
+              ? "loading now"
+              : data.stt?.state === "error"
+                ? data.stt.error || "the last load failed"
+                : data.stt?.loaded_in_ms
+                  ? `ready · loaded in ${(data.stt.loaded_in_ms / 1000).toFixed(1)} s`
+                  : "loads when the voice page opens"}
+          </b>
+        </div>
+      )}
       <div className="btnrow">
         <a className="btn small" href={pathFor("voice")} onClick={(e) => go(e, pathFor("voice"))}>
           Open the voice page

@@ -55,6 +55,8 @@ export type ListenerHandlers = {
   onFinal: (text: string) => void;
   onSpeechStart: () => void;
   onError: (message: string) => void;
+  /** The microphone's loudness, 0 to about 1, as often as the listener has it. Drives the orb. */
+  onLevel?: (level: number) => void;
 };
 
 /** Streaming recognition: words arrive while they are being said, and a final result is one utterance. */
@@ -177,6 +179,7 @@ export function createRecorder(h: ListenerHandlers & { onUtterance: (blob: Blob)
       let sum = 0;
       for (const v of samples) sum += v * v;
       const level = Math.sqrt(sum / samples.length);
+      h.onLevel?.(level);
       const now = Date.now();
       if (level > SILENCE_LEVEL) {
         if (!speaking) h.onSpeechStart();
@@ -226,21 +229,89 @@ export type Speaker = {
 };
 
 /**
+ * How loud the answer is while it is being spoken, for the orb to ripple with.
+ *
+ * Two sources, because there are two speakers. Server audio is a real signal and is measured: the
+ * `<audio>` element is routed through an analyser, once — a media element can only be given to one
+ * `MediaElementAudioSourceNode` ever, and a second attempt throws and takes the audio with it. The
+ * browser's own synthesiser exposes nothing at all: no node, no level, not even a boundary event in
+ * every engine. So that half is a cadence rather than a measurement, and it is written here as one
+ * honestly: a slow wave with a faster one over it, which reads as speech without claiming to be it.
+ */
+function createSpeechLevel(audio: HTMLAudioElement, opts: { server: boolean; onLevel?: (level: number) => void }): { start: () => void; stop: () => void } {
+  let context: AudioContext | null = null;
+  let analyser: AnalyserNode | null = null;
+  let samples = new Float32Array(0);
+  let frame = 0;
+  let began = 0;
+
+  const attach = () => {
+    if (analyser || !opts.server) return;
+    try {
+      const Ctx = window.AudioContext ?? window.webkitAudioContext!;
+      context = new Ctx();
+      analyser = context.createAnalyser();
+      analyser.fftSize = 512;
+      samples = new Float32Array(analyser.fftSize);
+      const source = context.createMediaElementSource(audio);
+      source.connect(analyser);
+      // The element is no longer heard directly once it has a source node, so the graph has to carry
+      // it to the output itself. Without this line the page goes silent and nothing says why.
+      analyser.connect(context.destination);
+    } catch {
+      analyser = null; // No analyser here: the cadence below stands in, and the audio is untouched.
+    }
+  };
+
+  const tick = () => {
+    if (analyser && samples.length) {
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (const v of samples) sum += v * v;
+      opts.onLevel?.(Math.sqrt(sum / samples.length));
+    } else {
+      const t = (performance.now() - began) / 1000;
+      opts.onLevel?.(0.12 + 0.06 * Math.sin(t * 7.3) + 0.05 * Math.sin(t * 2.1));
+    }
+    frame = requestAnimationFrame(tick);
+  };
+
+  return {
+    start: () => {
+      if (frame) return;
+      attach();
+      void context?.resume().catch(() => undefined);
+      began = performance.now();
+      frame = requestAnimationFrame(tick);
+    },
+    stop: () => {
+      cancelAnimationFrame(frame);
+      frame = 0;
+      opts.onLevel?.(0);
+    },
+  };
+}
+
+/**
  * One queue, one player. Sentences arrive from the server faster than they are read out, so each is
  * fetched (or synthesised) as it arrives and played in the order it came; cancelling drops the lot,
  * including the request in flight, whose result is thrown away rather than played after the barge-in.
  */
-export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking: (on: boolean) => void }): Speaker {
+export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking: (on: boolean) => void; onLevel?: (level: number) => void }): Speaker {
   const audio = new Audio();
   audio.preload = "auto";
   let generation = 0;
   let queue: string[] = [];
   let playing = false;
+  const level = createSpeechLevel(audio, opts);
 
   const done = () => {
     playing = false;
     if (queue.length) void next();
-    else opts.onSpeaking(false);
+    else {
+      level.stop();
+      opts.onSpeaking(false);
+    }
   };
 
   const next = async () => {
@@ -249,6 +320,7 @@ export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking:
     if (text === undefined) return done();
     playing = true;
     opts.onSpeaking(true);
+    level.start();
     if (!opts.server) {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = opts.lang;
@@ -298,6 +370,7 @@ export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking:
       }
       audio.pause();
       audio.removeAttribute("src");
+      level.stop();
       opts.onSpeaking(false);
     },
     unlock: () => {
@@ -330,6 +403,7 @@ export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking:
       }
       // Unmount goes through here, so the phase must come back down with it: a remount that starts in
       // "speaking" never leaves it, because nothing is playing to end.
+      level.stop();
       opts.onSpeaking(false);
     },
   };
@@ -377,4 +451,214 @@ export function agentNote(a: AgentNews): AgentNote {
   const waiting = WAITING_WORDS[a.waiting ?? ""] ?? "";
   if (progress) return { line: progress, when: a.progress_at || a.last_message_at, waiting, live: true };
   return { line: (a.answer ?? "").trim(), when: a.last_message_at, waiting, live: false };
+}
+
+// ── what the page is doing, as one value ───────────────────────────────────────────────────
+//
+// The page has six things it can be doing and eleven things that can change which — the operator's
+// microphone, the engine loading, the recogniser's words, the concierge's status, its sentences, the
+// speaker starting and stopping. Held as a dozen separate pieces of component state, the rules
+// between them (a finished answer goes back to listening only if the microphone is still on; a model
+// still loading outranks everything) live in four different callbacks and disagree. So they are one
+// value and one function, which is also the only way any of it can be tested without a browser.
+
+/** What the operator sees the page doing. Every one of these is drawn differently. */
+export type VoicePhase = "idle" | "loading" | "listening" | "thinking" | "delegating" | "speaking";
+
+/** Where the local recogniser's weights are, as `/api/voice` and the progress stream report them. */
+export type EngineState = { state: string; model: string; loadedInMs: number; error: string };
+
+export type VoiceUi = {
+  phase: VoicePhase;
+  micOn: boolean;
+  /** The title of the agent being set up, while one is. */
+  delegating: string;
+  /** The last thing the operator said, as it was understood. */
+  asked: string;
+  /** What the recogniser has heard of the sentence being said now. */
+  heard: string;
+  /** The concierge's answer, a spoken sentence at a time, in the order it was said. */
+  spoken: string[];
+  /** The answer as it is being written, for the part that has not become a sentence yet. */
+  partial: string;
+  problem: string;
+  agents: AgentNews[];
+  engine: EngineState;
+};
+
+export type VoiceEvent =
+  | { type: "mic"; on: boolean }
+  | { type: "heard"; text: string }
+  | { type: "asked"; text: string }
+  | { type: "partial"; text: string }
+  | { type: "say"; text: string }
+  | { type: "status"; state: string; title?: string }
+  | { type: "done" }
+  | { type: "agents"; agents: AgentNews[] }
+  | { type: "speaking"; on: boolean }
+  | { type: "engine"; engine: Partial<EngineState> }
+  | { type: "problem"; message: string }
+  | { type: "cleared" };
+
+export const IDLE_VOICE: VoiceUi = {
+  phase: "idle",
+  micOn: false,
+  delegating: "",
+  asked: "",
+  heard: "",
+  spoken: [],
+  partial: "",
+  problem: "",
+  agents: [],
+  engine: { state: "ready", model: "", loadedInMs: 0, error: "" },
+};
+
+/** Whether the microphone may be opened at all: a model still loading cannot hear anything. */
+export function micReady(state: VoiceUi): boolean {
+  return state.engine.state !== "loading";
+}
+
+/**
+ * What the page falls back to when nothing is happening: still loading, still listening, or idle.
+ *
+ * Every transition that ends — the answer finished, the speaker stopped, the error shown — comes back
+ * through here rather than guessing "idle", which is what used to leave the page saying "Ready" while
+ * the microphone was still open.
+ */
+function resting(state: VoiceUi): VoicePhase {
+  if (state.engine.state === "loading") return "loading";
+  return state.micOn ? "listening" : "idle";
+}
+
+export function voiceReducer(state: VoiceUi, event: VoiceEvent): VoiceUi {
+  switch (event.type) {
+    case "mic": {
+      const next = { ...state, micOn: event.on, heard: event.on ? state.heard : "" };
+      if (event.on) return { ...next, problem: "", phase: resting(next) };
+      // Stopping the microphone does not stop the concierge: an answer being written or spoken keeps
+      // its phase, and only a page that was merely listening goes quiet.
+      return { ...next, phase: state.phase === "listening" || state.phase === "loading" ? resting(next) : state.phase };
+    }
+    case "heard":
+      return { ...state, heard: event.text };
+    case "asked":
+      // A new utterance clears the last answer rather than appending to it: the captions are a
+      // conversation, and the previous reply is on its way off the screen the moment this one starts.
+      return { ...state, asked: event.text, heard: "", spoken: [], partial: "", problem: "", phase: "thinking" };
+    case "partial":
+      return { ...state, partial: event.text };
+    case "say":
+      return event.text.trim() ? { ...state, spoken: [...state.spoken, event.text.trim()] } : state;
+    case "status": {
+      if (event.state === "idle") return { ...state, delegating: "", phase: state.phase === "speaking" ? state.phase : resting(state) };
+      const phase = event.state === "delegating" ? "delegating" : event.state === "thinking" ? "thinking" : state.phase;
+      return { ...state, delegating: event.state === "delegating" ? event.title ?? "" : "", phase };
+    }
+    case "done":
+      return state.phase === "thinking" || state.phase === "delegating" ? { ...state, delegating: "", phase: resting(state) } : { ...state, delegating: "" };
+    case "agents":
+      return { ...state, agents: event.agents };
+    case "speaking":
+      if (event.on) return { ...state, phase: "speaking" };
+      return state.phase === "speaking" ? { ...state, phase: resting(state) } : state;
+    case "engine": {
+      const engine = { ...state.engine, ...event.engine };
+      const next = { ...state, engine };
+      // A model that has finished loading releases the page: whatever it was waiting to be, it is now.
+      if (state.phase === "loading" || engine.state === "loading") return { ...next, phase: resting(next) };
+      return next;
+    }
+    case "problem":
+      return { ...state, problem: event.message, phase: resting(state) };
+    case "cleared":
+      return { ...IDLE_VOICE, micOn: state.micOn, engine: state.engine, phase: resting(state) };
+  }
+}
+
+// ── the orb ────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One microphone level, smoothed the way an ear is: quick to rise, slow to fall.
+ *
+ * A raw RMS read sixty times a second makes the orb flicker on every consonant and collapse in every
+ * gap between two words, which reads as a fault rather than as speech. Rising fast keeps the reaction
+ * immediate; falling slowly keeps a sentence looking like one thing.
+ */
+export function smoothLevel(previous: number, next: number): number {
+  const target = Math.max(0, Math.min(1, next));
+  const rate = target > previous ? 0.55 : 0.12;
+  return previous + (target - previous) * rate;
+}
+
+/** How the orb looks right now: how big, how bright, and how fast its light travels around it. */
+export type OrbVisual = { scale: number; glow: number; spin: number };
+
+/**
+ * The level-to-look mapping, in one pure function so it can be checked without a browser.
+ *
+ * The curve is deliberately not linear. Speech at a normal distance from a laptop microphone sits
+ * around an RMS of 0.05–0.2, so a linear mapping spends nine tenths of its range on volumes nobody
+ * produces and the orb barely moves while someone is talking normally.
+ */
+export function orbVisual(phase: VoicePhase, level: number): OrbVisual {
+  const heard = Math.pow(Math.max(0, Math.min(1, level)) * 3.2, 0.55);
+  const loud = Math.max(0, Math.min(1, heard));
+  switch (phase) {
+    case "listening":
+      return { scale: 1 + loud * 0.24, glow: 0.35 + loud * 0.65, spin: 1 };
+    case "speaking":
+      return { scale: 1 + loud * 0.16, glow: 0.45 + loud * 0.55, spin: 1.6 };
+    case "thinking":
+    case "delegating":
+      return { scale: 1.05, glow: 0.7, spin: 2.4 };
+    case "loading":
+      return { scale: 1.02, glow: 0.5, spin: 2 };
+    default:
+      return { scale: 1, glow: 0.3, spin: 0.7 };
+  }
+}
+
+/**
+ * The microphone's loudness, for a listener that has no audio of its own.
+ *
+ * The local model's listener taps the samples it is already sending, and the recorder already has an
+ * analyser; the browser's own `SpeechRecognition` hands over words and nothing else, so on that path
+ * the page opens its own read-only tap on the same microphone. The permission has already been
+ * granted by then, so nothing is asked of the operator twice.
+ */
+export function createMeter(onLevel: (level: number) => void): { start: () => Promise<void>; stop: () => void } {
+  let stream: MediaStream | null = null;
+  let context: AudioContext | null = null;
+  let frame = 0;
+  return {
+    start: async () => {
+      if (stream) return;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      } catch {
+        return; // The listener itself reports a refused microphone; a meter that cannot run is silent.
+      }
+      const Ctx = window.AudioContext ?? window.webkitAudioContext!;
+      context = new Ctx();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 1024;
+      context.createMediaStreamSource(stream).connect(analyser);
+      const samples = new Float32Array(analyser.fftSize);
+      const tick = () => {
+        analyser.getFloatTimeDomainData(samples);
+        let sum = 0;
+        for (const v of samples) sum += v * v;
+        onLevel(Math.sqrt(sum / samples.length));
+        frame = requestAnimationFrame(tick);
+      };
+      frame = requestAnimationFrame(tick);
+    },
+    stop: () => {
+      cancelAnimationFrame(frame);
+      stream?.getTracks().forEach((t) => t.stop());
+      stream = null;
+      void context?.close();
+      context = null;
+    },
+  };
 }

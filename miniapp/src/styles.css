@@ -1107,57 +1107,157 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .sent-file.file-chip { max-width: 100%; min-height: 40px; }
 .sent-file .truncate { max-width: 260px; }
 
-/* ── voice: the mic, what was said, and the agents it started ──────────────────────────── */
+/* ── voice: the orb, what was said, and the agents it started ────────────────────────────── */
+/* This page is looked at sideways by someone who is talking, so everything it has to say it says in
+   motion and colour before it says it in words: the orb breathes when nothing is happening, swells
+   with the operator's own voice, turns while the concierge thinks and ripples while it speaks. Three
+   custom properties carry the live part — --orb-scale, --orb-glow and --orb-spin, written sixty times
+   a second by one animation frame in Voice.tsx — and everything else here is the shape around them.
+   The :root rule for prefers-reduced-motion takes every animation below away; the colours, the words
+   and the scale still distinguish all six states, which is why none of them is drawn by motion alone. */
 .beta-tag { margin-left: 6px; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .rail-item .beta-tag { margin-left: 0; }
 .voice-beta { padding: 2px 8px; font-size: 11px; vertical-align: middle; }
-/* Wide by design: the conversation takes the room it needs and the agents stand beside it, not under it. */
-.voice-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); gap: 14px; align-items: start; }
-.voice-stage { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 32px 18px 20px; min-height: min(70vh, 600px); }
-.voice-status { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
-.mic-button {
-  position: relative; width: 132px; height: 132px; border-radius: 50%; border: 1px solid var(--line-strong);
-  background: var(--surface-2); color: var(--fg); cursor: pointer; display: grid; place-items: center;
-  transition: background .15s, transform .08s ease, color .15s;
+/* Wide by design: the conversation takes the room it needs and the agents stand beside it, not under
+   it. The right column grows with the glass rather than pinning the page to a column in the middle. */
+.voice-grid { display: grid; grid-template-columns: minmax(0, 1fr) clamp(300px, 26vw, 460px); gap: 16px; align-items: start; }
+.voice-stage {
+  position: relative; overflow: hidden; display: flex; flex-direction: column; align-items: center;
+  gap: 16px; padding: 40px 20px 22px; min-height: min(72vh, 660px);
+  --orb-color: var(--accent);
+  --orb-scale: 1; --orb-glow: .3; --orb-spin: 8s;
 }
-.mic-button:hover:not(:disabled) { background: var(--surface-3); }
-.mic-button:active:not(:disabled) { transform: scale(0.97); }
-.mic-button:disabled { opacity: .4; cursor: default; }
-.mic-button.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
-.mic-ring { position: absolute; inset: -6px; border-radius: 50%; border: 2px solid transparent; }
-.mic-button.on .mic-ring { border-color: color-mix(in srgb, var(--accent) 55%, transparent); animation: mic-pulse 1.8s ease-out infinite; }
-@keyframes mic-pulse { 0% { transform: scale(1); opacity: .9; } 100% { transform: scale(1.22); opacity: 0; } }
-.voice-hint { text-align: center; }
-.voice-captions { width: min(100%, 720px); display: grid; gap: 8px; text-align: center; padding: 8px 0; }
+/* The light behind the whole card, tinted by whatever the page is doing. Lightening to elevate, not
+   a darker slab: the stage is the raised surface here and the halo is what raises it. */
+.voice-stage::before {
+  content: ""; position: absolute; left: 50%; top: 14%; width: min(120%, 780px); aspect-ratio: 1; translate: -50% 0;
+  background: radial-gradient(circle, color-mix(in srgb, var(--orb-color) 16%, transparent) 0%, transparent 62%);
+  opacity: calc(.35 + var(--orb-glow) * .5); transition: opacity .4s ease, background .6s ease; pointer-events: none;
+}
+.voice-stage.phase-idle { --orb-color: var(--fg-3); }
+.voice-stage.phase-loading { --orb-color: var(--warn); }
+.voice-stage.phase-listening { --orb-color: var(--accent); }
+.voice-stage.phase-thinking,
+.voice-stage.phase-delegating { --orb-color: var(--info); }
+.voice-stage.phase-speaking { --orb-color: var(--ok); }
+.voice-stage > * { position: relative; }
+
+.voice-chips { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.chip.quiet { color: var(--fg-3); }
+/* The state chip animates between states rather than swapping: three bars that stand still when idle,
+   rise and fall with a listening page, travel while it thinks, and pulse together while it speaks. */
+.voice-chip { color: var(--orb-color, var(--fg-2)); border-color: color-mix(in srgb, var(--orb-color) 35%, transparent); background: color-mix(in srgb, var(--orb-color) 12%, var(--surface-2)); transition: color .3s ease, background .3s ease, border-color .3s ease; }
+.voice-chip-mark { display: inline-flex; align-items: flex-end; gap: 2px; height: 11px; margin-right: 2px; }
+.voice-chip-mark i { display: block; width: 2px; height: 4px; border-radius: 1px; background: currentColor; transition: height .3s ease; }
+.voice-chip.listening .voice-chip-mark i { animation: chip-bars 1s ease-in-out infinite; }
+.voice-chip.listening .voice-chip-mark i:nth-child(2) { animation-delay: .12s; }
+.voice-chip.listening .voice-chip-mark i:nth-child(3) { animation-delay: .24s; }
+.voice-chip.speaking .voice-chip-mark i { animation: chip-bars .62s ease-in-out infinite; }
+.voice-chip.speaking .voice-chip-mark i:nth-child(2) { animation-delay: .1s; }
+.voice-chip.speaking .voice-chip-mark i:nth-child(3) { animation-delay: .2s; }
+.voice-chip.thinking .voice-chip-mark i,
+.voice-chip.delegating .voice-chip-mark i,
+.voice-chip.loading .voice-chip-mark i { height: 4px; animation: chip-travel 1.4s ease-in-out infinite; }
+.voice-chip.thinking .voice-chip-mark i:nth-child(2),
+.voice-chip.delegating .voice-chip-mark i:nth-child(2),
+.voice-chip.loading .voice-chip-mark i:nth-child(2) { animation-delay: .18s; }
+.voice-chip.thinking .voice-chip-mark i:nth-child(3),
+.voice-chip.delegating .voice-chip-mark i:nth-child(3),
+.voice-chip.loading .voice-chip-mark i:nth-child(3) { animation-delay: .36s; }
+@keyframes chip-bars { 0%, 100% { height: 3px; } 50% { height: 11px; } }
+@keyframes chip-travel { 0%, 100% { opacity: .25; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
+
+.voice-orb-wrap { display: grid; place-items: center; padding: 8px 0 4px; }
+.voice-orb {
+  position: relative; width: clamp(148px, 17vw, 232px); aspect-ratio: 1; border: 0; padding: 0; border-radius: 50%;
+  background: none; color: var(--fg); cursor: pointer; display: grid; place-items: center; isolation: isolate;
+  transform: scale(var(--orb-scale)); transition: transform .09s linear, opacity .3s ease;
+}
+.voice-orb:disabled { cursor: default; opacity: .55; }
+.voice-orb:active:not(:disabled) { transform: scale(calc(var(--orb-scale) * .97)); }
+/* Four layers, outside in: the light it throws, the body of the sphere, a sweep of brighter colour
+   travelling around it, and the rings it sends out while it is listening or speaking. */
+.orb-halo {
+  position: absolute; inset: -22%; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, color-mix(in srgb, var(--orb-color) 55%, transparent) 0%, transparent 65%);
+  opacity: calc(.15 + var(--orb-glow) * .55); filter: blur(14px); transition: opacity .12s linear;
+}
+.orb-shell {
+  position: absolute; inset: 0; border-radius: 50%;
+  background:
+    radial-gradient(circle at 34% 28%, color-mix(in srgb, var(--orb-color) 42%, var(--surface-3)) 0%, var(--surface-2) 58%, var(--surface-1) 100%);
+  box-shadow: inset 0 1px 0 var(--line-strong), 0 18px 44px rgba(0, 0, 0, .45);
+  border: 1px solid color-mix(in srgb, var(--orb-color) 28%, var(--line-strong));
+  animation: orb-breathe 5.5s ease-in-out infinite;
+}
+.orb-sweep {
+  position: absolute; inset: 6%; border-radius: 50%; pointer-events: none;
+  background: conic-gradient(from 0deg, transparent 0deg, color-mix(in srgb, var(--orb-color) 65%, transparent) 70deg, transparent 150deg, color-mix(in srgb, var(--orb-color) 28%, transparent) 250deg, transparent 330deg);
+  opacity: calc(.18 + var(--orb-glow) * .5); mix-blend-mode: screen;
+  animation: orb-turn var(--orb-spin, 8s) linear infinite;
+}
+.orb-ring {
+  position: absolute; inset: 0; border-radius: 50%; pointer-events: none;
+  border: 1.5px solid color-mix(in srgb, var(--orb-color) 55%, transparent); opacity: 0;
+}
+.voice-orb.on .orb-ring { animation: orb-ripple 2.4s cubic-bezier(.25, .7, .35, 1) infinite; }
+.voice-orb.on .orb-ring.two { animation-delay: 1.2s; }
+.phase-speaking .orb-ring { animation: orb-ripple 1.5s cubic-bezier(.25, .7, .35, 1) infinite; }
+.phase-speaking .orb-ring.two { animation-delay: .75s; }
+.orb-glyph { display: grid; place-items: center; color: color-mix(in srgb, var(--orb-color) 70%, var(--fg)); transition: color .3s ease; }
+.voice-orb.on .orb-glyph { color: var(--fg); }
+@keyframes orb-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.035); } }
+@keyframes orb-turn { to { rotate: 360deg; } }
+@keyframes orb-ripple { 0% { transform: scale(1); opacity: .55; } 100% { transform: scale(1.5); opacity: 0; } }
+
+.voice-hint { text-align: center; max-width: 46ch; min-height: 1.4em; }
+.voice-captions { width: min(100%, 780px); display: grid; gap: 10px; text-align: center; padding: 6px 0; }
+/* Three voices, three treatments: what the operator asked (settled, quiet), what is being heard right
+   now (light and italic, because it is still provisional), and the answer (large, and arriving). */
 .voice-asked { margin: 0; color: var(--fg-2); font-size: 14px; }
-.voice-heard { margin: 0; color: var(--fg-3); font-style: italic; }
-.voice-said { margin: 0; font-size: 19px; line-height: 1.45; overflow-wrap: anywhere; }
-.voice-said.empty-line { min-height: 1.45em; }
+.voice-heard { margin: 0; color: var(--fg-3); font-style: italic; font-size: 15px; animation: caption-in .25s ease-out both; }
+.voice-said { margin: 0; font-size: clamp(18px, 1.35vw, 23px); line-height: 1.5; overflow-wrap: anywhere; min-height: 1.5em; }
+.voice-sentence { display: inline; animation: sentence-in .45s cubic-bezier(.2, .7, .3, 1) both; }
+.voice-sentence.writing { color: var(--fg-2); }
+/* Nothing said yet, and the concierge has not started: three dots that are a wait, not a sentence. */
+.voice-waiting { display: inline-block; width: 42px; height: 6px; border-radius: 3px; background: currentColor; opacity: .16; animation: waiting-breathe 2.4s ease-in-out infinite; }
 .voice-problem { margin: 0; color: var(--bad); font-size: 13.5px; }
-.voice-compose { width: min(100%, 720px); display: flex; gap: 8px; margin-top: auto; }
-.voice-compose .field { flex: 1; }
+@keyframes caption-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sentence-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes waiting-breathe { 0%, 100% { opacity: .1; width: 34px; } 50% { opacity: .28; width: 52px; } }
+
+/* Typing is the fallback, not the feature: it keeps its place and gives up its weight. */
+.voice-compose { width: min(100%, 560px); display: flex; gap: 8px; margin-top: auto; opacity: .62; transition: opacity .2s ease; }
+.voice-compose:hover, .voice-compose:focus-within { opacity: 1; }
+.voice-compose .field { flex: 1; background: transparent; }
 .voice-why { width: min(100%, 720px); text-align: center; }
-.voice-agents { display: grid; gap: 8px; align-content: start; }
+
+.voice-agents { display: grid; gap: 8px; align-content: start; animation: panel-slide .34s cubic-bezier(.2, .7, .3, 1) both; }
 .voice-agents-head { margin: 4px 2px 2px; font-size: 14px; font-weight: 600; }
 .voice-agents-empty { padding: 8px 2px; }
-.voice-agent { width: 100%; text-align: left; border: 1px solid var(--line); cursor: pointer; }
+.voice-agent { width: 100%; text-align: left; border: 1px solid var(--line); cursor: pointer; transition: background .15s ease, border-color .15s ease; }
+.voice-agent:hover { background: var(--surface-2); border-color: var(--line-strong); }
 .voice-agent-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .voice-agent-top b { min-width: 0; }
 /* What an agent said on the way, as opposed to what it answered: the live line is the one the
    operator is waiting on, so it reads as the foreground and the finished answer stays muted. */
 .voice-agent-live { color: var(--fg); }
+@keyframes panel-slide { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
+
 @media (max-width: 900px) {
   .voice-grid { grid-template-columns: minmax(0, 1fr); }
-  /* On a phone the mic has to be under the thumb, so the captions move above it and the control sits
-     at the bottom of the card, just over the composer and the tab bar. */
-  .voice-stage { min-height: 54vh; padding: 16px 12px; justify-content: flex-end; }
-  .voice-status { order: -3; }
+  /* On a phone the orb has to be under the thumb, so the captions move above it and the control sits
+     at the bottom of the card, just over the composer and the tab bar. The panel stacks below rather
+     than sliding in from a side that is not there. */
+  .voice-stage { min-height: 56vh; padding: 16px 12px 14px; justify-content: flex-end; gap: 12px; }
+  .voice-chips { order: -3; }
   .voice-captions { order: -2; margin-bottom: auto; }
-  .mic-button { width: 116px; height: 116px; }
+  .voice-orb { width: clamp(132px, 42vw, 180px); }
   .voice-hint { font-size: 12.5px; }
-  .voice-compose { margin-top: 12px; }
-  .voice-said { font-size: 17px; }
+  .voice-compose { margin-top: 12px; opacity: 1; }
+  .voice-agents { animation-name: panel-rise; }
 }
+@keyframes panel-rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
 
 /* ── add a model: the first-run flow and the same three steps from Settings ───────────────── */
 /* The flow is its own page when a fresh install opens it, wide enough that the endpoints and the
@@ -1278,6 +1378,10 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .stt-progress { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
 .stt-progress .stt-bar-track { height: 6px; }
 .stt-progress .sub { flex: none; min-width: 64px; text-align: right; }
+/* The chosen model's weights on their way into memory: a line that says the wait is happening now
+   rather than under the first thing the operator says. */
+.stt-load b.stt-loading { color: var(--warn); }
+.stt-load b.stt-loading::after { content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 7px; border-radius: 50%; background: currentColor; vertical-align: middle; animation: pulse 1.4s ease-in-out infinite; }
 
 @media (max-width: 480px) {
   .stt-list { grid-template-columns: 1fr; }
