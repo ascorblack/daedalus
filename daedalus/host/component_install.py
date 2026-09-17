@@ -36,12 +36,27 @@ logger = logging.getLogger(__name__)
 SYNC_TIMEOUT = 900.0
 """How long a ``uv sync`` may take before it is killed. Wheels over a slow link, not a resolution."""
 
-LAUNCHER_TIMEOUT = 1800.0
-"""The headless browser is a few hundred megabytes and the launcher unpacks it; this is the outer
-bound on waiting for it, not an expectation."""
+LAUNCHER_BASE_TIMEOUT = 300.0
+"""What the wait for the launcher allows before the download itself is counted: finding the machine's
+link, unpacking, and a launcher that is slow to pick the work up."""
+
+LAUNCHER_SECONDS_PER_MB = 6.0
+"""Added to the base for every megabyte the component declares — about 170 kB/s, which is a bad link
+rather than a normal one. A bound scaled to the work is a bound that can say something when it is
+reached; one round number for a fifteen-megabyte extra and a hundred-megabyte browser cannot."""
 
 LAUNCHER_POLL = 2.0
 """How often the launcher's status is asked while it works. Its own page polls at about this rate."""
+
+LAUNCHER_IDLE_POLLS = 15
+"""How many polls a launcher too old to hand out job ids may go without picking the work up before
+the app stops waiting. It does one action at a time, so a launcher busy with something else would
+otherwise be waited out for the whole bound."""
+
+DISK_HEADROOM = 3
+"""What a download needs free, as a multiple of its own size: the archive, what it unpacks into, and
+room for the installation to go on working. A full disk surfaces as whatever raw text the tool
+underneath last wrote, which is not a thing an operator can act on."""
 
 QUEUE_SIZE = 64
 
@@ -141,11 +156,34 @@ class Installer:
         if not status.installable:
             raise NotInstallable(status.detail or f"{status.id} cannot be installed from here", status.fix)
         component = components.CATALOGUE[status.id]
+        self._require_disk(component)
         self._running_id = status.id
         frame = self._publish(status.id, "queued", step="starting", restart=component.requires_restart)
         runner = self._sync_extra if status.how == "extra" else self._ask_launcher
         self._task = asyncio.ensure_future(self._run(runner, status.id, component.requires_restart))
         return frame
+
+    def _require_disk(self, component: components.Component) -> None:
+        """Refuse a download this machine has no room for, before it starts rather than in the middle.
+
+        The multiple is what an unpack costs: the archive and the tree it becomes are both on the
+        disk at once, and an installation with nothing left over stops working in ways that have
+        nothing to do with the component. Asked of the state directory, because that is where the
+        installation's own folder is and therefore what fills up.
+        """
+        if not component.download_bytes:
+            return
+        try:
+            free = shutil.disk_usage(self.settings.state_dir).free
+        except OSError:
+            return  # not knowing is not a reason to refuse; the install says so itself if it runs out
+        needed = component.download_bytes * DISK_HEADROOM
+        if free < needed:
+            mb = 1024 * 1024
+            raise NotInstallable(
+                f"{component.id} needs about {needed // mb} MB free while it is unpacked, and this installation has {free // mb} MB",
+                "free some space and try again",
+            )
 
     async def _run(self, runner, component_id: str, restart: bool) -> None:  # type: ignore[no-untyped-def]
         try:
@@ -155,6 +193,10 @@ class Installer:
             raise
         except NotInstallable as exc:
             self._publish(component_id, "failed", error=exc.reason)
+        except TimeoutError:
+            # A bare TimeoutError carries no message at all, and the frame under it used to read
+            # "TimeoutError: " — the class name and a colon — for a component that might be there.
+            self._publish(component_id, "failed", error=f"installing {component_id} took longer than this installation waits, and the app stopped watching")
         except Exception as exc:  # noqa: BLE001 - the frame is the report; nothing above this reads it
             logger.warning("installing %s failed: %s: %s", component_id, type(exc).__name__, exc)
             self._publish(component_id, "failed", error=f"{type(exc).__name__}: {exc}")
@@ -213,6 +255,11 @@ class Installer:
         ``--inexact`` is what keeps it from being destructive: without it uv removes everything the
         lock does not mention, which in a running installation is whatever other extra was installed
         earlier. ``--frozen`` keeps it from relocking, which would be a change to a tracked file.
+
+        What it does not keep it from is upgrading: a dependency the lock has moved is replaced on
+        disk under a live interpreter, and this process keeps whatever it has already imported until
+        it is restarted. That is why ``requires_restart`` being false for the speech engine is a
+        statement about the new import and not about the environment as a whole.
         """
         uv = shutil.which("uv")
         if uv is None:
@@ -268,36 +315,66 @@ class Installer:
                 f"daedalus-desktop --extra {component_id}",
             )
         self._publish(component_id, "running", step="the launcher was asked")
-        await launcher_bridge.act(launcher, f"extra/{component_id}")
-        await self._wait_for_launcher(component_id, launcher)
+        try:
+            job = await launcher_bridge.act(launcher, f"extra/{component_id}")
+        except launcher_bridge.LauncherBusy as exc:
+            raise NotInstallable(f"the launcher could not take this on: {exc}", f"daedalus-desktop --extra {component_id}") from None
+        await self._wait_for_launcher(component_id, launcher, job)
 
-    async def _wait_for_launcher(self, component_id: str, launcher: launcher_bridge.Launcher) -> None:
-        """Watch the launcher until the action it was given is over, then read what became of it.
+    async def _wait_for_launcher(self, component_id: str, launcher: launcher_bridge.Launcher, job: str) -> None:
+        """Watch the action the launcher was given until it is over, then report what became of it.
 
-        The launcher answers 202 and works behind it, reporting one action at a time as ``busy`` and
-        the last error as ``failure``. So the wait is: see it pick the work up, see it put it down,
-        and then ask whether it went wrong. A launcher that never picks it up — because it was already
-        doing something else — is the same as one that finished, and the status afterwards is what
-        says which.
+        The launcher answers 202 with the id of the job it claimed for the action, and that id is the
+        whole of this wait: asked about it, the launcher says running, done, or failed and why. What
+        it replaced was a watch on the single ``busy`` field, which cannot tell "not picked up yet"
+        from "finished a moment ago" — they are the same empty string. An action that ended between
+        two polls and one the launcher never took at all therefore looked identical, and both left
+        the app waiting out its whole bound and then reporting a failure for a component that may
+        well have been installed all along.
+
+        The bound is the download rather than a round number, because a bound that is about the work
+        is one that can say something when it is reached.
         """
+        bound = LAUNCHER_BASE_TIMEOUT + components.CATALOGUE[component_id].download_bytes / (1024 * 1024) * LAUNCHER_SECONDS_PER_MB
         started = False
-        async with asyncio.timeout(LAUNCHER_TIMEOUT):
-            while True:
-                busy, failure = await launcher_bridge.busy(launcher)
-                if busy:
-                    started = True
-                    self._publish(component_id, "running", step=busy)
-                elif started:
-                    if failure:
-                        raise NotInstallable(f"the launcher could not install {component_id}: {failure}")
-                    return
-                else:
-                    # Not started yet, or done before the first poll. Either way the component itself
-                    # is the answer, and it is measured rather than inferred.
-                    self._publish(component_id, "running", step="the launcher was asked")
-                    if failure:
-                        raise NotInstallable(f"the launcher could not install {component_id}: {failure}")
-                await asyncio.sleep(LAUNCHER_POLL)
+        idle = 0
+        try:
+            async with asyncio.timeout(bound):
+                while True:
+                    if job:
+                        answer = await launcher_bridge.job(launcher, job)
+                        if not answer:
+                            raise NotInstallable(f"the launcher no longer knows the job it took for {component_id}; it was restarted while it worked")
+                        if answer["state"] == "failed":
+                            raise NotInstallable(f"the launcher could not install {component_id}: {answer['error'] or 'it did not say why'}")
+                        if answer["state"] == "done":
+                            return
+                        busy, _failure = await launcher_bridge.busy(launcher)
+                        self._publish(component_id, "running", step=busy or "the launcher was asked")
+                    else:
+                        # An older launcher hands out no job ids, so the only thing it says about
+                        # itself is whether it is busy. Watch that — and give up on a launcher that
+                        # never picks the work up, rather than waiting out the bound on one that is
+                        # doing something else entirely.
+                        busy, failure = await launcher_bridge.busy(launcher)
+                        if failure:
+                            raise NotInstallable(f"the launcher could not install {component_id}: {failure}")
+                        if busy:
+                            started = True
+                            self._publish(component_id, "running", step=busy)
+                        elif started:
+                            return
+                        else:
+                            idle += 1
+                            if idle > LAUNCHER_IDLE_POLLS:
+                                raise NotInstallable(f"the launcher never started installing {component_id}; it does one thing at a time and may be busy with something else")
+                            self._publish(component_id, "running", step="the launcher was asked")
+                    await asyncio.sleep(LAUNCHER_POLL)
+        except TimeoutError:
+            raise NotInstallable(
+                f"the launcher was still installing {component_id} after {int(bound)} s and the app stopped watching; "
+                "the launcher's own window says where it got to",
+            ) from None
 
     # -- the restart the launcher offers ------------------------------------------------
 

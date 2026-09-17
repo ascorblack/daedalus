@@ -18,6 +18,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -198,6 +199,13 @@ class FakeLauncher:
         self.refusals: list[str] = []
         self.known: set[str] | None = None
         """The actions this launcher has, or None for one that has every action asked of it."""
+        self.jobs = True
+        """Whether this launcher hands out a job id per action, as the shipped one does. False is a
+        launcher older than jobs, which the app still has to be able to wait on."""
+        self.job_states: dict[str, dict[str, str]] = {}
+        self.last_job = ""
+        self.conflict = ""
+        """Non-empty: this launcher is already doing something else and refuses what it is asked."""
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -209,17 +217,23 @@ class FakeLauncher:
                 self.send_response(403)
                 self.end_headers()
 
-            def do_GET(self) -> None:  # noqa: N802
-                if self.path != "/api/status":
-                    self.send_response(404)
-                    self.end_headers()
-                    return
-                body = json.dumps({"busy": outer.busy, "failure": outer.failure}).encode()
-                self.send_response(200)
+            def _json(self, code: int, payload: dict[str, Any]) -> None:
+                body = json.dumps(payload).encode()
+                self.send_response(code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path.startswith("/api/jobs/"):
+                    job = outer.job_states.get(self.path.removeprefix("/api/jobs/"))
+                    return self._json(200, job) if job else self._json(404, {"error": "no such job"})
+                if self.path != "/api/status":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self._json(200, {"busy": outer.busy, "failure": outer.failure})
 
             def do_POST(self) -> None:  # noqa: N802
                 self.rfile.read(int(self.headers.get("Content-Length") or 0))
@@ -237,9 +251,22 @@ class FakeLauncher:
                     self.send_response(404)
                     self.end_headers()
                     return
+                if outer.conflict:
+                    body = outer.conflict.encode()
+                    self.send_response(409)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 outer.actions.append(action)
-                self.send_response(202)
-                self.end_headers()
+                if not outer.jobs:
+                    self.send_response(202)
+                    self.end_headers()
+                    return
+                outer.last_job = f"j{len(outer.job_states) + 1}"
+                outer.job_states[outer.last_job] = {"id": outer.last_job, "action": action, "state": "running", "error": ""}
+                self._json(202, {"started": True, "job": outer.last_job})
 
         self.server = HTTPServer(("127.0.0.1", 0), Handler)
         self.port = self.server.server_address[1]
@@ -253,6 +280,16 @@ class FakeLauncher:
             json.dumps({"port": self.port, "token": self.token, "pid": pid if pid is not None else os.getpid()}),
             encoding="utf-8",
         )
+
+    def finish(self, *, error: str = "") -> None:
+        """The launcher puts the work down: the job it took ends, and it stops reading as busy."""
+        self.busy = ""
+        if error:
+            self.failure = error
+        job = self.job_states.get(self.last_job)
+        if job is not None:
+            job["state"] = "failed" if error else "done"
+            job["error"] = error
 
     def close(self) -> None:
         self.server.shutdown()
@@ -299,8 +336,11 @@ async def test_the_launcher_accepts_a_tokened_request_from_the_app_under_its_own
     launcher.write_file(settings.state_dir)
     found = launcher_bridge.read(settings.state_dir)
     assert found is not None
-    await launcher_bridge.act(found, "extra/node")
+    job = await launcher_bridge.act(found, "extra/node")
     assert launcher.actions == ["extra/node"] and launcher.refusals == []
+    # The id is the whole of the wait that follows: without it the app can only watch a field that
+    # reads the same before the work starts and after it ends.
+    assert job and (await launcher_bridge.job(found, job))["state"] == "running"
 
 
 async def test_a_request_without_the_token_is_refused_and_says_so(tmp_path: Path, launcher: FakeLauncher) -> None:
@@ -355,7 +395,7 @@ async def test_one_install_at_a_time_and_the_second_is_told_what_is_running(
     with pytest.raises(Busy) as raised:
         installer.start(speech)
     assert raised.value.component_id == components.BROWSER
-    launcher.busy = ""
+    launcher.finish()
     await installer.wait(components.BROWSER)
     # And the lane is free again the moment the first one is over, rather than at the next request.
     assert installer.running_id() == ""
@@ -391,7 +431,7 @@ async def test_progress_reaches_a_watcher_and_a_finished_launcher_install_asks_f
     async with installer.watch() as queue:
         installer.start(node)
         await asyncio.sleep(0.1)
-        launcher.busy = ""  # the launcher put the work down
+        launcher.finish()  # the launcher put the work down
         await installer.wait(components.NODE)
         frames = []
         while not queue.empty():
@@ -412,10 +452,89 @@ async def test_what_the_launcher_failed_at_becomes_the_reason_the_install_failed
     browser = components.Status(components.BROWSER, "missing", "not here", installable=True, how="launcher")
     installer.start(browser)
     await asyncio.sleep(0.1)
-    launcher.busy, launcher.failure = "", "the download did not verify"
+    launcher.finish(error="the download did not verify")
     await installer.wait(components.BROWSER)
     frame = installer.progress_of(components.BROWSER) or {}
     assert frame["state"] == "failed" and "did not verify" in str(frame["error"])
+
+
+async def test_an_install_the_launcher_finished_between_two_polls_is_not_a_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launcher: FakeLauncher
+) -> None:
+    """The launcher is never seen busy at all, and the install still ends as an install.
+
+    Node already cached, a re-install that is a no-op: the work is over before the first poll. On the
+    single ``busy`` field that is indistinguishable from a launcher which has not picked the work up
+    yet, so the app used to wait out its whole bound and then report a failure for a component that
+    was in fact installed. The job says which of the two it is.
+    """
+    monkeypatch.setattr("daedalus.host.component_install.LAUNCHER_POLL", 0.01)
+    settings = settings_for(tmp_path, native=True)
+    launcher.write_file(settings.state_dir)
+    installer = Installer(settings)
+    node = components.Status(components.NODE, "missing", "not here", installable=True, how="launcher")
+    installer.start(node)
+    await asyncio.sleep(0.05)
+    launcher.finish()  # done, and busy was never set
+    await installer.wait(components.NODE)
+    frame = installer.progress_of(components.NODE) or {}
+    assert frame["state"] == "installed", f"a finished install was read as something else: {frame}"
+
+
+async def test_a_launcher_that_never_takes_the_work_is_not_waited_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launcher: FakeLauncher
+) -> None:
+    """A launcher too old for jobs, busy with something the app did not ask for.
+
+    It answers 202 and then never turns busy, because the action was refused inside its goroutine.
+    Nothing here can measure the component either — node and the browser are found through the
+    environment the process was started with — so the only honest answer is to stop waiting and say
+    what probably happened, rather than hold the one install lane for the whole bound.
+    """
+    monkeypatch.setattr("daedalus.host.component_install.LAUNCHER_POLL", 0.01)
+    monkeypatch.setattr("daedalus.host.component_install.LAUNCHER_IDLE_POLLS", 3)
+    settings = settings_for(tmp_path, native=True)
+    launcher.jobs = False
+    launcher.write_file(settings.state_dir)
+    installer = Installer(settings)
+    node = components.Status(components.NODE, "missing", "not here", installable=True, how="launcher")
+    installer.start(node)
+    await installer.wait(components.NODE)
+    frame = installer.progress_of(components.NODE) or {}
+    assert frame["state"] == "failed"
+    assert "never started" in str(frame["error"]), frame["error"]
+    # And the class name of an exception is never what the operator is shown.
+    assert "TimeoutError" not in str(frame["error"])
+
+
+async def test_a_launcher_already_doing_something_else_refuses_rather_than_being_waited_on(
+    tmp_path: Path, launcher: FakeLauncher
+) -> None:
+    launcher.conflict = "update is already running"
+    settings = settings_for(tmp_path, native=True)
+    launcher.write_file(settings.state_dir)
+    installer = Installer(settings)
+    browser = components.Status(components.BROWSER, "missing", "not here", installable=True, how="launcher")
+    installer.start(browser)
+    await installer.wait(components.BROWSER)
+    frame = installer.progress_of(components.BROWSER) or {}
+    assert frame["state"] == "failed" and "update is already running" in str(frame["error"])
+
+
+def test_a_download_with_nowhere_to_land_is_refused_before_it_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launcher: FakeLauncher
+) -> None:
+    """A full disk used to surface as whatever raw text the tool underneath last wrote."""
+    settings = settings_for(tmp_path, native=True)
+    launcher.write_file(settings.state_dir)
+    monkeypatch.setattr(
+        "daedalus.host.component_install.shutil.disk_usage",
+        lambda path: SimpleNamespace(total=2 * 1024 * 1024, used=1024 * 1024, free=1024 * 1024),
+    )
+    browser = components.Status(components.BROWSER, "missing", "not here", installable=True, how="launcher")
+    with pytest.raises(NotInstallable) as raised:
+        Installer(settings).start(browser)
+    assert "MB free" in raised.value.reason and "1 MB" in raised.value.reason
 
 
 async def test_a_headless_start_with_no_launcher_says_what_to_run_instead(tmp_path: Path) -> None:

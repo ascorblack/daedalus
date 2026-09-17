@@ -81,6 +81,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/lang", s.handleLang)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/action/", s.handleAction)
+	mux.HandleFunc("/api/jobs/", s.handleJob)
 	mux.HandleFunc("/focus", s.handleFocus)
 	mux.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(mustSub()))))
 	s.http = &http.Server{Handler: s.sameOrigin(mux), ReadHeaderTimeout: 10 * time.Second}
@@ -420,6 +421,9 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	action := strings.TrimPrefix(r.URL.Path, "/api/action/")
 	// The action outlives the request: the browser's context ends when the answer is written.
 	ctx := context.Background()
+	// The id of the claim, for the actions that make one before answering. Empty for the rest: the
+	// page beside them reads the status, and the status is enough for a button it is looking at.
+	job := ""
 	switch action {
 	case "start":
 		go func() { _ = s.app.Start(ctx) }()
@@ -437,27 +441,64 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		// The app asks for these over the loopback bridge with this same token, which is why the
 		// list is here and not only on the page: a component installed from Settings and one
 		// installed from the launcher's window have to be the same thing happening.
+		//
+		// The launcher is claimed here rather than inside the goroutine, and the id of the claim
+		// goes back in the answer. Both halves matter to the app: a launcher already busy with
+		// something else has to be a refusal the app can show, and an action the app cannot see
+		// from outside has to be one it can ask about by name afterwards.
 		name := strings.TrimPrefix(action, "extra/")
-		go func() {
-			if err := s.app.InstallExtra(ctx, name); err != nil {
-				s.app.log("%s could not be installed: %v", name, err)
-			}
-		}()
+		id, err := s.app.StartExtra(name)
+		if err != nil {
+			refuseAction(w, err)
+			return
+		}
+		job = id
+		go func() { _ = s.app.RunExtra(ctx, id, name) }()
 	case "restart":
 		// Node and the browser are found through the environment the supervisor was started with,
 		// so a process cannot pick them up by itself: something above it has to start it again.
 		// That is this. The app offers the button; the launcher is what can honour it.
-		go func() {
-			if err := s.app.Restart(ctx); err != nil {
-				s.app.log("the agent could not be restarted: %v", err)
-			}
-		}()
+		id, err := s.app.StartRestart()
+		if err != nil {
+			refuseAction(w, err)
+			return
+		}
+		job = id
+		go func() { _ = s.app.RunRestart(ctx, id) }()
 	default:
 		http.Error(w, "no such action", http.StatusNotFound)
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write([]byte(`{"started":true}`))
+	_ = json.NewEncoder(w).Encode(map[string]any{"started": true, "job": job})
+}
+
+// handleJob answers what became of one action. A read, like the status beside it: it says whether
+// an action is running, done or failed and carries the failure's own sentence, and nothing in it
+// is a secret. It is the whole of what the app's bridge waits on — without it "the launcher is not
+// busy" is the same answer before the work starts and after it ends, and the app that asked cannot
+// tell those apart.
+func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
+	job, ok := s.app.JobStatus(id)
+	w.Header().Set("Content-Type", "application/json")
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no such job"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(job)
+}
+
+// refuseAction says why an action was not started, in the two ways it can fail before it begins: a
+// launcher already taking another one, which the caller retries after, and an action this shape of
+// installation does not have, which it never will.
+func refuseAction(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrNotNative) {
+		http.Error(w, err.Error(), http.StatusNotImplemented)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusConflict)
 }
 
 // mustSub exposes only the stylesheet and the script, not the templates next to them.

@@ -24,9 +24,14 @@ a client does not — aims at ``127.0.0.1:<port>``, and carries the token. So it
 rules being loosened: what a hostile page still cannot do is read a 0600 file to learn the token,
 and it could not set the custom header cross-site even if it had one.
 
-The agent is not given this path either: ``Settings.sealed_paths`` names it, so a tool that reaches
-for the file is refused before it is opened. The agent asks the app for an install like the operator
-does; it does not get the launcher's keys.
+**What keeps the agent away from this file, and what does not.** ``Settings.sealed_paths`` names it,
+so the file tools refuse it and a shell command that spells the path out is refused with them. That
+is hygiene, not containment, and it is worth saying plainly: the sealed set is matched against the
+words of a command, so a path the command builds for itself — from ``Path.home()``, from ``$HOME``,
+inside a Python one-liner — is not matched, and the loopback port the launcher listens on is not
+restricted by the egress rules either. What the file is really protected by is its mode: 0600 and
+owned by the account this process runs as. The agent asks the app for an install the way the
+operator does, and the app is what holds the launcher's keys.
 """
 
 from __future__ import annotations
@@ -71,6 +76,14 @@ class Launcher:
 
 class LauncherUnavailable(RuntimeError):
     """No launcher is holding this installation, so nothing here can be asked of one."""
+
+
+class LauncherBusy(RuntimeError):
+    """The launcher is already doing something else, so this action was never started.
+
+    Told apart from every other refusal because it is the one worth trying again: the launcher does
+    one thing at a time, and what it is doing now will end.
+    """
 
 
 def instance_path(state_dir: Path) -> Path:
@@ -118,11 +131,12 @@ def _alive(pid: int) -> bool:
     return True
 
 
-async def act(launcher: Launcher, action: str) -> None:
-    """Start one of the launcher's actions. Returns once it has been accepted, not once it is done.
+async def act(launcher: Launcher, action: str) -> str:
+    """Start one of the launcher's actions; returns the id of the job it claimed for it.
 
-    The launcher answers 202 and does the work behind it, which is why :func:`busy` exists: the caller
-    watches the status until the action it asked for is no longer running.
+    The launcher answers 202 and does the work behind it, which is why :func:`job` exists: the caller
+    asks about that id until the launcher says the action is done or says why it is not. An empty id
+    comes back from a launcher older than jobs, and the caller falls back to watching :func:`busy`.
     """
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         try:
@@ -135,8 +149,40 @@ async def act(launcher: Launcher, action: str) -> None:
         raise LauncherUnavailable("the launcher refused the request; it may have been restarted since this process started")
     if response.status_code == 404:
         raise LauncherUnavailable(f"this launcher has no {action!r} action; it is older than this build of the app")
+    if response.status_code == 409:
+        raise LauncherBusy(_sentence(response) or "the launcher is already doing something else")
     if response.status_code >= 400:
-        raise LauncherUnavailable(f"the launcher answered {response.status_code} to {action!r}")
+        raise LauncherUnavailable(f"the launcher answered {response.status_code} to {action!r}: {_sentence(response)}".rstrip(": "))
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    return str(body.get("job") or "") if isinstance(body, dict) else ""
+
+
+def _sentence(response: httpx.Response) -> str:
+    """The launcher's own words for a refusal, trimmed. Its error bodies are one line of plain text."""
+    return response.text.strip().splitlines()[0][:200] if response.text.strip() else ""
+
+
+async def job(launcher: Launcher, job_id: str) -> dict[str, str]:
+    """What became of one action: ``state`` is ``running``, ``done`` or ``failed``, with ``error``.
+
+    An empty mapping means the launcher does not know this id — it was restarted, or the id is older
+    than the handful it keeps. A read, so it carries no token, and it names nothing but the action.
+    """
+    async with httpx.AsyncClient(timeout=STATUS_TIMEOUT) as client:
+        try:
+            response = await client.get(f"{launcher.base}/api/jobs/{job_id}")
+        except httpx.HTTPError as exc:
+            raise LauncherUnavailable(f"the launcher on port {launcher.port} stopped answering: {type(exc).__name__}") from None
+    if response.status_code == 404:
+        return {}
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    return {"state": str(body.get("state") or ""), "error": str(body.get("error") or "")} if isinstance(body, dict) else {}
 
 
 async def status(launcher: Launcher) -> dict[str, object]:
@@ -160,4 +206,4 @@ async def busy(launcher: Launcher) -> tuple[str, str]:
     return str(body.get("busy") or ""), str(body.get("failure") or "")
 
 
-__all__ = ["HEADER", "Launcher", "LauncherUnavailable", "act", "busy", "instance_path", "read", "status"]
+__all__ = ["HEADER", "Launcher", "LauncherBusy", "LauncherUnavailable", "act", "busy", "instance_path", "job", "read", "status"]

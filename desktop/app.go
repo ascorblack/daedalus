@@ -26,6 +26,14 @@ type App struct {
 	busy    string
 	failure string
 
+	// What each action became, by the id the caller was given. "Not busy" is not an outcome —
+	// a launcher that never picked the work up and one that finished it look identical from
+	// outside — so every action leaves a record of how it ended, and the app's bridge polls that
+	// instead of watching a status field for a transition it may miss between two polls.
+	jobs     map[string]*Job
+	jobOrder []string
+	jobSeq   int
+
 	// Where a start has got to, and — while something with a known size is being downloaded — how
 	// far through it is. Both are for the progress page: the log says what is happening, these say
 	// how much of it is left.
@@ -49,8 +57,26 @@ type App struct {
 // file: the real logs come from docker.
 const logLimit = 200
 
+// ErrNotNative is the answer to an action only a native installation has. Not a failure and not a
+// collision with another action: this installation is the other shape, and nothing it does here
+// would help. The page and the app both need that apart from "the launcher is busy".
+var ErrNotNative = errors.New("the runtime extras and the agent's own restart belong to native mode; in Docker mode the browser comes with the :browser image and compose restarts the containers")
+
+// Job is one action of the launcher's, from the moment it is claimed to the moment it is over.
+type Job struct {
+	ID     string `json:"id"`
+	Action string `json:"action"`
+	// State is running, done or failed. Never empty: a job exists only once it has been claimed.
+	State string `json:"state"`
+	Error string `json:"error"`
+}
+
+// jobLimit is how many finished actions are remembered. The caller polls its own job seconds after
+// it asked for it; this is generous for that and bounded for a launcher left open for weeks.
+const jobLimit = 32
+
 func NewApp(p Paths) *App {
-	app := &App{paths: p, mode: StoredMode(p)}
+	app := &App{paths: p, mode: StoredMode(p), jobs: map[string]*Job{}}
 	app.native = NewNative(p, app.log)
 	app.native.OnProgress(app.enter, app.downloaded)
 	return app
@@ -110,18 +136,26 @@ func (a *App) log(format string, args ...any) {
 
 // begin claims the launcher for one action. Two starts at once — one from the terminal, one from an
 // impatient click — would race over the same compose project.
-func (a *App) begin(action string) error {
+func (a *App) begin(action string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.busy != "" {
-		return fmt.Errorf("%s is already running", a.busy)
+		return "", fmt.Errorf("%s is already running", a.busy)
 	}
 	a.busy = action
 	a.failure = ""
-	return nil
+	a.jobSeq++
+	id := fmt.Sprintf("j%d", a.jobSeq)
+	a.jobs[id] = &Job{ID: id, Action: action, State: "running"}
+	a.jobOrder = append(a.jobOrder, id)
+	for len(a.jobOrder) > jobLimit {
+		delete(a.jobs, a.jobOrder[0])
+		a.jobOrder = a.jobOrder[1:]
+	}
+	return id, nil
 }
 
-func (a *App) end(err error) {
+func (a *App) end(id string, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.busy = ""
@@ -129,6 +163,24 @@ func (a *App) end(err error) {
 	if err != nil {
 		a.failure = err.Error()
 	}
+	if job := a.jobs[id]; job != nil {
+		job.State = "done"
+		if err != nil {
+			job.State, job.Error = "failed", err.Error()
+		}
+	}
+}
+
+// JobStatus is how an action ended, for a caller that is not looking at the page. The second value
+// is false for an id this launcher never minted or has since forgotten.
+func (a *App) JobStatus(id string) (Job, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	job, ok := a.jobs[id]
+	if !ok {
+		return Job{}, false
+	}
+	return *job, true
 }
 
 // Telegram reports whether the Telegram containers belong in this installation.
@@ -139,11 +191,12 @@ func (a *App) Telegram() bool {
 // Start brings the stack up: the checkouts, the override, the images, the containers, and then the
 // wait for the app to answer. It is safe to call on a running stack — compose reconciles.
 func (a *App) Start(ctx context.Context) error {
-	if err := a.begin("start"); err != nil {
+	id, err := a.begin("start")
+	if err != nil {
 		return err
 	}
-	err := a.start(ctx)
-	a.end(err)
+	err = a.start(ctx)
+	a.end(id, err)
 	return err
 }
 
@@ -210,11 +263,12 @@ func (a *App) startNative(ctx context.Context) error {
 // stay down until the launcher is asked to start them again. A Stop followed by a Start applies
 // whatever the checkout holds without preflighting it — Apply is the one that checks first.
 func (a *App) Stop(ctx context.Context) error {
-	if err := a.begin("stop"); err != nil {
+	id, err := a.begin("stop")
+	if err != nil {
 		return err
 	}
-	err := a.stop(ctx)
-	a.end(err)
+	err = a.stop(ctx)
+	a.end(id, err)
 	return err
 }
 
@@ -244,11 +298,12 @@ func (a *App) stop(ctx context.Context) error {
 // nothing having looked at it. That path is still here, as the fallback for a stack whose
 // supervisor cannot be reached, and it says what it is giving up.
 func (a *App) Apply(ctx context.Context) error {
-	if err := a.begin("apply"); err != nil {
+	id, err := a.begin("apply")
+	if err != nil {
 		return err
 	}
-	err := a.apply(ctx)
-	a.end(err)
+	err = a.apply(ctx)
+	a.end(id, err)
 	return err
 }
 
@@ -305,15 +360,41 @@ func (a *App) StopOnQuit() {
 // InstallExtra fetches one of the optional halves of the portable runtime. Only native mode has
 // them: a Docker installation gets node and the browser from the image tag it runs.
 func (a *App) InstallExtra(ctx context.Context, name string) error {
-	if !a.Native() {
-		return errors.New("the runtime extras belong to native mode; in Docker mode the browser comes with the :browser image")
-	}
-	if err := a.begin("installing " + name); err != nil {
+	id, err := a.StartExtra(name)
+	if err != nil {
 		return err
 	}
+	return a.RunExtra(ctx, id, name)
+}
+
+// RunExtra does the work a StartExtra claim was made for and records how it ended. Split from the
+// claim so the page's handler can answer before the download starts and still report its outcome.
+func (a *App) RunExtra(ctx context.Context, id, name string) error {
 	err := a.native.InstallExtra(ctx, name)
-	a.end(err)
+	if err != nil {
+		a.log("%s could not be installed: %v", name, err)
+	}
+	a.end(id, err)
 	return err
+}
+
+// StartExtra claims the launcher for one extra and returns the job id to poll it by, without
+// running it. The claim is what the answer to the app's bridge is made of: a launcher already busy
+// with something else has to say so in the answer, because from outside a launcher that never
+// picked the work up and one that has already finished it look exactly the same.
+func (a *App) StartExtra(name string) (string, error) {
+	if !a.Native() {
+		return "", ErrNotNative
+	}
+	return a.begin("installing " + name)
+}
+
+// StartRestart claims the launcher for a restart, on the same terms.
+func (a *App) StartRestart() (string, error) {
+	if !a.Native() {
+		return "", ErrNotNative
+	}
+	return a.begin("restart")
 }
 
 // Restart stops the agent and starts it again, so that what has been added to the installation
@@ -322,26 +403,33 @@ func (a *App) InstallExtra(ctx context.Context, name string) error {
 // launcher started it: a process cannot give itself either. Native only — a container is restarted
 // by compose, and in Docker mode neither piece is installable from here in the first place.
 func (a *App) Restart(ctx context.Context) error {
-	if !a.Native() {
-		return errors.New("a container is restarted by compose; this is the native installation's own restart")
-	}
-	if err := a.begin("restart"); err != nil {
+	id, err := a.StartRestart()
+	if err != nil {
 		return err
 	}
+	return a.RunRestart(ctx, id)
+}
+
+// RunRestart does the work a StartRestart claim was made for, on the same terms as RunExtra.
+func (a *App) RunRestart(ctx context.Context, id string) error {
 	a.native.Stop(ctx)
 	err := a.native.Start(ctx)
-	a.end(err)
+	if err != nil {
+		a.log("the agent could not be restarted: %v", err)
+	}
+	a.end(id, err)
 	return err
 }
 
 // Update moves both checkouts to what is published, refreshes the images and restarts. The agent's
 // own merged pull requests arrive this way.
 func (a *App) Update(ctx context.Context) error {
-	if err := a.begin("update"); err != nil {
+	id, err := a.begin("update")
+	if err != nil {
 		return err
 	}
-	err := a.update(ctx)
-	a.end(err)
+	err = a.update(ctx)
+	a.end(id, err)
 	return err
 }
 
@@ -373,11 +461,12 @@ func (a *App) update(ctx context.Context) error {
 // Uninstall removes the containers and networks. The volumes — the database, the workspaces, the
 // agent's memory — go with them unless the operator asked to keep the data.
 func (a *App) Uninstall(ctx context.Context, keepData bool) error {
-	if err := a.begin("uninstall"); err != nil {
+	id, err := a.begin("uninstall")
+	if err != nil {
 		return err
 	}
-	err := a.uninstall(ctx, keepData)
-	a.end(err)
+	err = a.uninstall(ctx, keepData)
+	a.end(id, err)
 	return err
 }
 

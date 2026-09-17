@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -315,10 +316,16 @@ func TestTheAppsOwnRequestIsAcceptedAndTheNewActionsExist(t *testing.T) {
 	defer server.Stop(context.Background())
 
 	// Exactly what daedalus/host/launcher_bridge.py sends: the token, and nothing a browser adds.
+	// The mode of this temporary installation is unset, so each of them is refused for being the
+	// wrong shape rather than run — which is the point: a route that does not exist answers 404,
+	// and these answer for themselves. Starting them for real would fetch a hundred megabytes.
 	for _, action := range []string{"extra/node", "extra/browser", "extra/speech", "restart"} {
-		if got := post(t, server.URL()+"api/action/"+action, map[string]string{csrfHeader: server.csrf}, nil); got != http.StatusAccepted {
-			t.Fatalf("%s from the app answered %d, want %d", action, got, http.StatusAccepted)
+		if got := post(t, server.URL()+"api/action/"+action, map[string]string{csrfHeader: server.csrf}, nil); got != http.StatusNotImplemented {
+			t.Fatalf("%s from the app answered %d, want %d", action, got, http.StatusNotImplemented)
 		}
+	}
+	if got := post(t, server.URL()+"api/action/nonsense", map[string]string{csrfHeader: server.csrf}, nil); got != http.StatusNotFound {
+		t.Fatalf("an action that does not exist answered %d, want %d", got, http.StatusNotFound)
 	}
 	// And the same actions are refused without the token, since the bridge is the token and nothing
 	// else: the loopback port is reachable by every process and every page on this machine.
@@ -343,4 +350,69 @@ func TestTheHandoverFileIsPrivateToItsOwner(t *testing.T) {
 	if mode := info.Mode().Perm(); mode != 0o600 {
 		t.Fatalf("the launcher's handover file is %o, want 600: it carries the token for start, stop and the extras", mode)
 	}
+}
+
+// What the app's bridge waits on. Without a job to poll, the only thing the launcher says about an
+// extra is whether it is busy — and "not busy" is the same answer before the work is picked up and
+// after it is done, so an app that missed the transition between two polls waits for the timeout
+// and then reports a failure for a component that may well be installed.
+func TestAnActionAnswersWithAJobAndTheJobCarriesTheOutcome(t *testing.T) {
+	paths := setupTempInstall(t)
+	if err := WriteSetup(paths, Setup{}, ModeNative); err != nil {
+		t.Fatal(err)
+	}
+	if err := StoreMode(paths, ModeNative); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(paths)
+	// Claimed by hand: the launcher is doing something the app did not ask for, which is one of the
+	// two ways the wait used to spin for its whole timeout without anything ever turning busy.
+	id, err := app.begin("installing browser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(app, 0)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer server.Stop(context.Background())
+
+	if got := post(t, server.URL()+"api/action/extra/node", map[string]string{csrfHeader: server.csrf}, nil); got != http.StatusConflict {
+		t.Fatalf("an action asked of a busy launcher answered %d, want %d", got, http.StatusConflict)
+	}
+	if job := readJob(t, server.URL()+"api/jobs/"+id); job.State != "running" {
+		t.Fatalf("the claimed job reads %q, want running", job.State)
+	}
+	app.end(id, errors.New("the download was refused"))
+	job := readJob(t, server.URL()+"api/jobs/"+id)
+	if job.State != "failed" || job.Error != "the download was refused" {
+		t.Fatalf("the finished job reads %q/%q, want failed and the message", job.State, job.Error)
+	}
+	// An id this launcher never minted is a 404 and not an empty job, so a stale id cannot read as
+	// an action that is still going.
+	resp, err := http.Get(server.URL() + "api/jobs/nothing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("an unknown job answered %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+func readJob(t *testing.T, url string) Job {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the job answered %d, want 200", resp.StatusCode)
+	}
+	var job Job
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		t.Fatal(err)
+	}
+	return job
 }
