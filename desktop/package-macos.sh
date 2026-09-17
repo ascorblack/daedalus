@@ -58,6 +58,13 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 # to answer about their own hardware.
 lipo -create -output "$executable" "$amd64_binary" "$arm64_binary"
 chmod +x "$executable"
+
+# The Mini App travels in the bundle's Resources, where the launcher looks for it. Without it a
+# native installation on a Mac with no Node would have to fetch a toolchain to build 1.7 MB of
+# static files on its first run; with it there is nothing to build at all.
+if [ -n "${MINIAPP_DIST:-}" ] && [ -d "$MINIAPP_DIST" ]; then
+  cp -R "$MINIAPP_DIST" "$app/Contents/Resources/miniapp-dist"
+fi
 lipo -info "$executable"
 
 cat > "$app/Contents/Info.plist" <<PLIST

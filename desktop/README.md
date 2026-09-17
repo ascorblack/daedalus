@@ -1,19 +1,29 @@
 # Daedalus on your own machine
 
 `daedalus-desktop` is one small program — `Daedalus.app` on macOS — that turns a folder into a
-running Daedalus. It clones the two
-repositories, asks the handful of questions the stack needs on a page of its own, writes the
-same environment files a server install uses, and runs `docker compose` against the repository's own
-`deploy/compose.yaml`. Nothing is installed on the host: **Docker is the only requirement**, and the
-launcher never installs it for you.
+running Daedalus. It fetches the two repositories, asks the handful of questions the installation
+needs on a page of its own, writes the environment files, and then runs the agent one of two ways.
+
+**The first run asks which**, and the choice is written next to the data and never asked again
+(`--mode docker` / `--mode native`, or `DAEDALUS_MODE`, answers it from a script):
+
+| | What it needs | What you get |
+|---|---|---|
+| **Docker** | Docker Desktop (macOS, Windows) or Docker Engine with the compose plugin | The agent in a container with its own filesystem and its own network. A command that goes wrong stops at the container's edge. ~480 MB of images on top of Docker itself. |
+| **Native** | nothing | The agent as a process on your machine, out of a private folder of pinned binaries the launcher downloads and checksums: ~115 MB to fetch on Linux, ~1 s from launch to the app. **No container boundary** — `Exec` runs as you. |
+
+Neither is the "real" one. Docker buys a wall; native buys weight and speed, and
+[Native mode](#native-mode) says exactly what the wall was doing and what still stands without it.
+Nothing is ever installed system-wide either way, and Docker is never installed for you.
 
 On macOS and Windows it opens a window: the system's own web view, which shows the launcher's page
 while the stack comes up and the app itself once it answers. On Linux it opens a browser window with
 nothing around it — no tabs, no address bar — and falls back to the default browser. [The window](#the-window)
 says why the three are not the same.
 
-It is about 8 MB without the window and 10–12 MB with it, twice that as the universal macOS build,
-and carries no runtime with it. Everything that runs is in containers.
+It is about 8 MB without the window and 10–12 MB with it, twice that as the universal macOS build.
+In Docker mode everything that runs is in containers; in native mode the launcher downloads what it
+needs into `data/runtime/` and runs it from there.
 
 ## Get it
 
@@ -52,29 +62,39 @@ live in. The executable is not signed, so SmartScreen warns once: *More info →
 
 ## What happens on the first run
 
-1. Docker is checked — including the places the installers put it, since a program started from
-   Finder inherits a PATH that has none of them in it. Without Docker the launcher says what to
-   install, on its own page as well as in the terminal, and waits there: Docker Desktop on macOS and
-   Windows, Docker Engine with the compose plugin on Linux.
-2. The two repositories are fetched into the folder as GitHub tarballs and committed there, with
-   `git` running inside the agent's own image: git is not expected on the host either, and no image
-   is downloaded that the stack does not already need. Each checkout is a real local history with
+1. A page opens and asks **Docker or native**, with what each costs written next to it. A machine
+   with a running Docker is offered Docker; a machine without one is offered native, because the
+   alternative there is installing a whole application first. In Docker mode the client is then
+   looked for in the places the installers put it — a program started from Finder inherits a PATH
+   with none of them in it — and without it the launcher says what to install and waits there. In
+   native mode nothing is checked, because nothing is expected.
+2. The two repositories are fetched into the folder as GitHub tarballs and committed there — with
+   `git` running inside the agent's own image in Docker mode, and with the runtime's own git in
+   native mode. Each checkout is a real local history with
    no remote — an update is the next commit on top of it.
 3. A page opens at `http://127.0.0.1:8770` — in the launcher's own window where there is one — and
    asks for a model provider key, optionally the Telegram values, and a daily spending cap. Telegram
    is optional — without it you use the app in that window.
-4. The image is pulled (or built, if there is no published image for your platform), the stack comes
-   up, and the same window moves to the app. There is one image and two containers from it: the
+4. **Docker:** the image is pulled (or built, if there is no published image for your platform),
+   the stack comes up, and the same window moves to the app. One image, two containers from it: the
    agent, and the key proxy that holds the provider keys.
+   **Native:** the runtime is downloaded and checked, the environment is built from the checkout's
+   own lock file, and the launcher starts the supervisor and the key proxy as its own child
+   processes. Same two programs, same key file, no container between them and the machine.
 5. **The app asks for a model, and that is the last step.** A key is an address; which model runs on
    it — and what it costs — is yours to pick, so the installation ships with none. The app opens on
    *Add a model*: choose the endpoint, choose a model from the list it serves (its context window,
    its modalities and its prices are shown), save. Nothing runs before that, and everything does
    after it. Later ones are added the same way from Settings → Models.
 
-Closing the launcher — the window, or Ctrl+C in the terminal — does not stop anything: the
-containers are `restart: unless-stopped` and come back with the machine. The launcher's page is only
-a remote control.
+**In Docker mode, closing the launcher does not stop anything**: the containers are
+`restart: unless-stopped` and come back with the machine, and the launcher's page is only a remote
+control. **In native mode it does stop the agent**, and that is deliberate rather than a setting: a
+container is visible in `docker ps` and has a restart policy of its own, while a supervisor started
+by the launcher is an ordinary process with nothing above it and no window to say it is there, and
+an agent you cannot see is one you cannot stop. A run in flight is not lost — the supervisor gives
+the bot 25 seconds to drain, the run is snapshotted, and it picks up where it left off on the next
+start.
 
 Starting the launcher a second time against the same folder does not start a second one. It brings
 the first to the front, hands it the link it was opened with if it was opened with one, and exits.
@@ -99,6 +119,28 @@ Daedalus/
     launcher.json           the running launcher's port and token (0600) — how a second launch finds it
     scheme.txt              which executable daedalus:// links are registered to
     browser-profile/        only when the app is shown in a browser window rather than the launcher's own
+```
+
+In **native mode** the same folder also holds everything a container would have held. There are no
+Docker volumes: the database, the sessions and the workspaces are files here, so backing the
+installation up is copying one directory and removing it is deleting one directory.
+
+```
+  data/
+    mode                    docker or native, written once and read on every start
+    runtime/
+      uv/uv                 the installer for everything below it
+      python/               the CPython uv manages, for this installation only
+      venv/                 the environment the agent runs in, built from the checkout's lock file
+      bin/rg                what Search uses
+      git/                  MinGit — Windows only; elsewhere git is the machine's own
+      node/                 an extra, fetched on demand
+      browsers/             an extra, fetched on demand
+      cache/                uv's wheel cache; safe to delete, and the next sync refills it
+      logs/                 the supervisor's and the key proxy's output, rolled by the launcher
+      installed/            which version and which hash each tool was unpacked from
+    state/                  the database, the sessions, the pairing links, the known-good history
+    workspaces/             one per session
 ```
 
 `data/` is next to the `.app` when the launcher runs from a bundle, and next to the working
@@ -244,9 +286,109 @@ Set `mode = "off"` in the configuration and the subsystem is not there at all: n
 `/api/proposals`, and nothing in the prompt about changing its own code. `daedalus doctor` names the
 mode it resolved and what a mode you chose yourself is missing.
 
+## Native mode
+
+The same agent, the same supervisor, the same code — with the operating system where the container
+was. What that changes, in both directions.
+
+### What is downloaded, and where
+
+Everything goes into `data/runtime/` and nowhere else. No package manager is run, no PATH is
+changed, nothing is installed system-wide. Every version is pinned in `desktop/runtime.go` next to
+the SHA-256 the publisher published, and **a download whose hash does not match is not used**: it is
+refused by name and the start fails saying so.
+
+| | Version | Download | On disk | Where it comes from |
+|---|---|---|---|---|
+| `uv` | 0.12.15 | 19.4 MB (Linux x86-64) | 50 MB | astral-sh/uv release, `sha256.sum` |
+| CPython | 3.12 | ~32 MB | 103 MB | python-build-standalone, fetched **by uv**, which checks its own downloads — which is why there is no second hash for it here |
+| `rg` | 15.2.0 | 2.3 MB | 5 MB | BurntSushi/ripgrep release, its own `.sha256` |
+| `git` | — | — | — | the machine's own, everywhere but Windows |
+| MinGit | 2.55.0.5 | 39 MB | ~120 MB | git-for-windows release; **Windows only** |
+| the environment | from `uv.lock` | the rest of the 103 MB | 85 MB | PyPI, through uv, against the lock |
+
+**Measured, Linux x86-64, from an empty folder to the app answering: 103 MB over the wire, 26
+seconds.** On disk that is 245 MB of `data/runtime/` (73 MB of it uv's wheel cache, deletable at any
+time) and 390 MB for the whole installation including both checkouts. A warm start — everything
+already downloaded — is **4.3 seconds** from launching the binary to `/app/` answering 200. macOS is
+smaller (CPython is about half the size there) and Windows larger by MinGit.
+
+Optional, fetched only when something asks for them — `daedalus-desktop install node` /
+`daedalus-desktop install browser`, or the buttons on the launcher's page:
+
+| | Download | What needs it |
+|---|---|---|
+| Node 24.21.0 | 58 MB (Linux x86-64) | four skills that shell out to `npx`, and rebuilding the Mini App |
+| headless Chromium | ~100 MB | the browser skills and `ImageView`'s screenshots |
+
+Against Docker mode that is roughly four times lighter to download, and it does not need Docker
+Desktop — a ~600 MB application with a multi-gigabyte VM disk behind it — at all.
+
+### The isolation, honestly
+
+Everything in the agent still applies, because it was never the container doing it: the policy
+engine with its ASK and DENY rules, the approval gates, the protected paths, the egress allowlist,
+the per-run and per-day spending caps the supervisor enforces from its own environment, and the
+public-text gate. `daedalus doctor` prints the same sentence.
+
+What is gone is the wall behind them:
+
+- **`Exec` runs as you.** A command the agent runs has your files and your credentials, and the only
+  things between it and them are the rules above. On Linux bubblewrap still confines it when
+  `tools.exec.sandbox = workspace`, and that is worth switching on; on macOS and Windows there is no
+  bubblewrap, and the doctor says so rather than reporting it as missing software.
+- **Key isolation is weaker, but not gone.** The key proxy is still a separate process, still the
+  only one that holds a provider key, still bound to `127.0.0.1` and nothing else, and the key file
+  is still `0600` outside every folder the agent works in — the agent process never holds a key. But
+  a shell the agent starts runs as the same user and could read that file. The residual risk is
+  real; the mitigation is the policy rule that denies reading it.
+- **The ports are the machine's.** `SERVICES_PUBLIC_HOST` is `127.0.0.1` and a service a session
+  starts binds there, so nothing is published to the network — but it is the same loopback interface
+  every other program of yours can reach.
+
+If any of that matters more than 500 MB and a second of start-up, use Docker mode. That is the
+whole of the trade, and the setup page says it in those terms.
+
+### The supervisor, and the launcher above it
+
+`launcher/supervisor.py` is unchanged and does the same job in both modes: it starts the bot,
+restarts it when it dies, preflights a change on a detached copy of itself before letting it run,
+and rolls a revision back that cannot boot three times in ten minutes. In Docker mode it is PID 1 of
+the container; here it is a child of the launcher, and the launcher does what compose did — rotates
+its log, starts it again when it exits, and stops it on quit.
+
+**Apply is therefore two hops, not one.** The launcher asks the supervisor for a restart over its
+socket; the supervisor preflights the commit and re-execs the bot only if that passes. Stopping and
+starting the process from the launcher would put the change live with nothing having looked at it,
+which is why Apply does not do that.
+
+Three small differences inside the supervisor, all of them about the platform rather than the mode:
+the command socket is a file in the state directory where there are unix sockets and a loopback port
+on Windows where there are not; the zombie reaper reads `/proc` and is therefore Linux-only; and the
+owner-restoring `chown` exists because a container runs as root over a host mount, which is not the
+case when it is your own process writing your own files.
+
+### Windows
+
+Implemented and cross-compiled, with the path and argument logic under tests of its own, but **not
+run on a real Windows machine** — see [what is not yet proven](#what-is-not-yet-proven).
+MinGit is unpacked into `data/runtime/git` with no installer and no PATH change. It ships `sh.exe`
+(a dash), **not** bash: `Exec` runs `sh -c` there, so a command written with bash arrays or `[[ ]]`
+will not run. The supervisor listens on `127.0.0.1:8769` instead of a socket file — which is a port
+any process on the machine can reach, where the socket file has an owner; it is the platform's
+limitation, not a choice, and it is stated here rather than hidden.
+
+### What is not yet proven
+
+- Everything Windows: the MinGit unpack, `sh -c`, the loopback supervisor, `taskkill` stopping the
+  tree. Compiled, unit-tested for the path and argument logic, never run on Windows.
+- macOS: the `xcode-select` probe and the folder dialog. Compiled, unit-tested, never run on a Mac.
+- The folder picker's dialogs (`osascript`, `FolderBrowserDialog`, `zenity`/`kdialog`) — each needs
+  its own desktop.
+
 ## Disk
 
-One image, and the key proxy is a second container from it:
+In Docker mode, one image, and the key proxy is a second container from it:
 
 | Image | Size on disk | Why |
 |---|---|---|
