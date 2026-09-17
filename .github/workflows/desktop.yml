@@ -12,9 +12,17 @@
 # That is also why both Linux architectures still come off one runner.
 name: desktop
 
+# `test` and `window` run on every change to the launcher, not only on a tag: `window` is the only
+# place the macOS and Windows halves are compiled at all, and a first compile that happens during a
+# release is a compile that has nowhere to go but the release. The two jobs that publish are held
+# back to the tag by the `if` on each of them.
 on:
   push:
     tags: ["desktop-v*"]
+    branches: [main]
+    paths: ["desktop/**", ".github/workflows/desktop.yml"]
+  pull_request:
+    paths: ["desktop/**", ".github/workflows/desktop.yml"]
   workflow_dispatch:
 
 permissions:
@@ -60,6 +68,7 @@ jobs:
 
   binaries:
     needs: [test, window]
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
     strategy:
       fail-fast: false
       matrix:
@@ -130,6 +139,7 @@ jobs:
   # cover every archive, including its own.
   package:
     needs: binaries
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
