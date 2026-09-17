@@ -64,14 +64,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Apple Silicon and Intel are built on the machines they run on and joined into one
-          # universal executable by the packaging job.
+          # Both Mac slices come off the Apple Silicon runner and are joined into one universal
+          # executable by the packaging job. The Intel slice is a cross-compile on the same machine:
+          # Apple's toolchain builds x86_64 from arm64 with one flag, and the Intel runners spend
+          # hours in a queue when they exist at all.
           - runner: macos-latest
             goos: darwin
             goarch: arm64
-          - runner: macos-13
+          - runner: macos-latest
             goos: darwin
             goarch: amd64
+            arch_flags: "-arch x86_64"
           # The Windows runner has the compiler cgo needs; WebView2 is the user's to have, and the
           # launcher asks the registry for it before it tries to open a window.
           - runner: windows-latest
@@ -106,6 +109,8 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ matrix.cgo || '1' }}
           TAGS: ${{ matrix.tags }}
+          CGO_CFLAGS: ${{ matrix.arch_flags }}
+          CGO_LDFLAGS: ${{ matrix.arch_flags }}
         run: |
           mkdir -p dist/bin
           out="dist/bin/daedalus-desktop-$GOOS-$GOARCH"
