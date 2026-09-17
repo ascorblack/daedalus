@@ -568,6 +568,12 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     if rel == "/api/stt":
         return respond(route, STT)
     if rel == "/api/components":
+        # The state the owner reported: a portable build with no speech runtime, where the voice
+        # pages say the browser is doing the listening and offer the download that changes it.
+        if getattr(stub, "nospeech", False):
+            missing = dict(COMPONENTS["components"][0], state="missing", installable=True, how="extra",
+                           detail="the speech extra is not in this environment")
+            return respond(route, {**COMPONENTS, "components": [missing, *COMPONENTS["components"][1:]], "busy": ""})
         return respond(route, COMPONENTS)
     if rel == "/api/components/stream":
         # Nothing moves while a picture is taken; the card carries its own frame in the view above.
@@ -866,6 +872,11 @@ def run() -> int:
         # The settings index, because the language switch is its first row.
         shot(page, "settings", "settings")
         shot(page, "components", "settings/components", wait=".comp-grid .comp-card", settle=500)
+        # And the same install where the owner met its absence: under the two lines on the voice card
+        # that say the browser is doing the listening and the speaking.
+        stub.nospeech = True  # type: ignore[attr-defined]
+        shot(page, "voice-needs-speech", "settings/voice", wait=".voice-needs .btn", settle=600)
+        stub.nospeech = False  # type: ignore[attr-defined]
         stub.fresh = True  # type: ignore[attr-defined]
         shot(page, "add-model", "agents", wait=".addmodel", before=pick_a_model, settle=600)
         stub.fresh = False  # type: ignore[attr-defined]

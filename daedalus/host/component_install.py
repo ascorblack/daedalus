@@ -113,7 +113,12 @@ class Installer:
             with contextlib.suppress(ValueError):
                 self._watchers.remove(queue)
 
-    def _publish(self, component_id: str, state: str, *, step: str = "", error: str = "", restart: bool = False) -> dict[str, object]:
+    def _publish(self, component_id: str, state: str, *, step: str = "", error: str = "", restart: bool | None = None) -> dict[str, object]:
+        # The restart a component needs is a property of the component, not of the moment: every frame
+        # carries it, so a page that joins the stream half-way through knows what the end will ask for.
+        if restart is None:
+            known = components.CATALOGUE.get(component_id)
+            restart = bool(known and known.requires_restart)
         frame: dict[str, object] = {"id": component_id, "state": state, "step": step, "error": error, "restart_required": restart}
         self._progress[component_id] = frame
         for queue in list(self._watchers):

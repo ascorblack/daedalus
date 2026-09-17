@@ -335,6 +335,9 @@ class Registry:
         return Status(
             component_id, state, detail,
             installable=False, how="models",
+            # Not a button here and not a command either: one model at a time is a choice, made in
+            # front of the catalogue that says what each one speaks and what it costs.
+            fix="choose one in Settings → Voice",
             disk_bytes=_dir_bytes(root), installed_count=len(installed), total_count=len(catalogue),
         )
 

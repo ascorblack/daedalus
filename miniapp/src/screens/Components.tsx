@@ -141,8 +141,9 @@ function Card({
         </div>
       )}
       {/* The server's own sentence about what it found. English, like every other runtime fact this
-          app repeats, and kept small: the card above it is the answer, this is the evidence. */}
-      {entry.detail && <div className="sub faint comp-detail">{entry.detail}</div>}
+          app repeats, and kept small: the card above it is the answer, this is the evidence. The two
+          model cards are the exception — their sentence is the count, and the count is already above. */}
+      {entry.detail && entry.total_count === 0 && <div className="sub faint comp-detail">{entry.detail}</div>}
     </div>
   );
 }
