@@ -18,10 +18,12 @@ whole of that knowledge, and it is deliberately small.
 
 from __future__ import annotations
 
+import array
 import asyncio
-import audioop
 import logging
+import math
 import struct
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -167,8 +169,18 @@ def to_float(pcm16: bytes) -> list[float]:
 
 
 def rms(pcm16: bytes) -> int:
-    """Loudness of a chunk in sample units, for the silence test. Zero for an empty chunk."""
-    return audioop.rms(pcm16, 2) if pcm16 else 0
+    """Loudness of a chunk in sample units, for the silence test. Zero for an empty chunk.
+
+    Written out rather than taken from ``audioop``, which Python 3.13 removed: this feature would
+    otherwise be the one thing holding the interpreter back.
+    """
+    if len(pcm16) < 2:
+        return 0
+    samples = array.array("h")
+    samples.frombytes(pcm16[: len(pcm16) - len(pcm16) % 2])
+    if sys.byteorder == "big":
+        samples.byteswap()
+    return int(math.sqrt(sum(value * value for value in samples) / len(samples)))
 
 
 @dataclass
@@ -193,14 +205,20 @@ class StreamSession:
         self._streaming = engine.model.streaming
         self._stream = engine.recognizer.create_stream() if self._streaming else None
         self._buffer = bytearray()
+        self._rate = SAMPLE_RATE
         self._quiet = 0.0
         self._spoken = 0.0
         self._said = ""
 
     async def feed(self, pcm16: bytes, sample_rate: int = SAMPLE_RATE) -> Partial:
-        """Push one chunk in and get back what can be said about the talking so far."""
-        audio = _resample(pcm16, sample_rate)
-        return await asyncio.to_thread(self._feed, audio)
+        """Push one chunk in and get back what can be said about the talking so far.
+
+        The rate is carried rather than converted: sherpa resamples on the way in, and resampling
+        twice is only a worse copy of the audio. It is fixed for the life of a session, because a
+        stream that changed rate mid-sentence would have to be re-opened anyway.
+        """
+        self._rate = sample_rate
+        return await asyncio.to_thread(self._feed, pcm16)
 
     async def finish(self) -> Partial:
         """No more audio is coming: flush whatever is held and answer with the last words."""
@@ -216,7 +234,7 @@ class StreamSession:
 
     def _feed_streaming(self, audio: bytes) -> Partial:
         recognizer, stream = self._engine.recognizer, self._stream
-        stream.accept_waveform(SAMPLE_RATE, to_float(audio))
+        stream.accept_waveform(self._rate, to_float(audio))
         while recognizer.is_ready(stream):
             recognizer.decode_stream(stream)
         text = str(recognizer.get_result(stream)).strip()
@@ -226,7 +244,7 @@ class StreamSession:
         return Partial(text=text)
 
     def _feed_batch(self, audio: bytes) -> Partial:
-        seconds = len(audio) / 2 / SAMPLE_RATE
+        seconds = len(audio) / 2 / self._rate
         loud = rms(audio) > SILENCE_RMS
         if loud:
             self._quiet = 0.0
@@ -235,7 +253,7 @@ class StreamSession:
             self._quiet += seconds
         if loud or self._spoken:
             self._buffer += audio
-        held = len(self._buffer) / 2 / SAMPLE_RATE
+        held = len(self._buffer) / 2 / self._rate
         if self._spoken >= MIN_UTTERANCE_SECONDS and (self._quiet >= BATCH_SILENCE_SECONDS or held >= BATCH_MAX_SECONDS):
             return Partial(text=self._decode_buffer(), final=True)
         # There is nothing honest to show between utterances: a batch model has no words until it has
@@ -245,7 +263,7 @@ class StreamSession:
     def _decode_buffer(self) -> str:
         audio, self._buffer = bytes(self._buffer), bytearray()
         self._quiet = self._spoken = 0.0
-        self._said = self._engine.decode(audio)
+        self._said = self._engine.decode(audio, self._rate)
         return self._said
 
     def _finish(self) -> Partial:
@@ -280,13 +298,13 @@ class Engine:
         self.lock = threading.Lock()
         self.recognizer = _build(model, directory, threads, language)
 
-    def decode(self, pcm16: bytes) -> str:
-        """One finished piece of audio, already at 16 kHz, as words. Blocking; callers hold the lock."""
+    def decode(self, pcm16: bytes, sample_rate: int = SAMPLE_RATE) -> str:
+        """One finished piece of audio as words. Blocking; callers hold the lock."""
         if len(pcm16) < 2:
             return ""
         if self.model.streaming:
             stream = self.recognizer.create_stream()
-            stream.accept_waveform(SAMPLE_RATE, to_float(pcm16))
+            stream.accept_waveform(sample_rate, to_float(pcm16))
             while self.recognizer.is_ready(stream):
                 self.recognizer.decode_stream(stream)
             stream.input_finished()
@@ -294,31 +312,22 @@ class Engine:
                 self.recognizer.decode_stream(stream)
             return str(self.recognizer.get_result(stream)).strip()
         stream = self.recognizer.create_stream()
-        stream.accept_waveform(SAMPLE_RATE, to_float(pcm16))
+        stream.accept_waveform(sample_rate, to_float(pcm16))
         self.recognizer.decode_stream(stream)
         return str(stream.result.text).strip()
 
     async def transcribe(self, pcm16: bytes, sample_rate: int = SAMPLE_RATE, language: str = "") -> str:
         """A whole recording as words. ``language`` is accepted for symmetry and is set at load time."""
-        audio = _resample(pcm16, sample_rate)
 
         def run() -> str:
             with self.lock:
-                return self.decode(audio)
+                return self.decode(pcm16, sample_rate)
 
         return await asyncio.to_thread(run)
 
     def session(self) -> StreamSession:
         """A stream to feed while the operator talks."""
         return StreamSession(self)
-
-
-def _resample(pcm16: bytes, sample_rate: int) -> bytes:
-    """Whatever came in, at 16 kHz. A no-op for audio that already is."""
-    if sample_rate == SAMPLE_RATE or not pcm16:
-        return pcm16
-    converted, _ = audioop.ratecv(pcm16, 2, 1, sample_rate, SAMPLE_RATE, None)
-    return converted
 
 
 class EngineCache:

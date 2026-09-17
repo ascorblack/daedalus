@@ -1487,7 +1487,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         view["language"] = app.config.stt.local_language
         view["threads"] = app.config.stt.local_threads
         view["engine_installed"] = _speech_engine_present()
-        view["converter"] = speech_service.converter_present()
+        view["decoders"] = speech_service.decoders()
         view["recommended"] = {code: model.id for code in ("en", "ru") if (model := speech_catalog.recommended(code))}
         return view
 

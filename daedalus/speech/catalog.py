@@ -100,8 +100,12 @@ EUROPEAN_25 = (
 )
 """What NVIDIA's multilingual Parakeet and Nemotron models are trained on."""
 
-NEMOTRON_28 = EUROPEAN_25 + ("tr", "ar", "hi", "ja", "ko", "vi", "zh", "nb")
-"""Nemotron 3.5 adds these to the European set; 28 is what its card claims, counted its way."""
+NEMOTRON_28 = (
+    "en", "es", "fr", "it", "pt", "nl", "de", "tr", "ru", "ar", "hi", "ja", "ko", "vi",
+    "uk", "pl", "sv", "cs", "nb", "da", "bg", "fi", "hr", "sk", "zh", "hu", "ro", "et",
+)
+"""The twenty-eight Nemotron 3.5 is trained on — a wider net than the European set, reaching Arabic,
+Hindi and the CJK languages, and the reason it is the multilingual default here."""
 
 WHISPER_MAJOR = (
     "en", "ru", "de", "es", "fr", "it", "pt", "nl", "pl", "uk", "tr", "ar",

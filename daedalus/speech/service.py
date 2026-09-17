@@ -15,7 +15,6 @@ is not installed rather than failing somewhere deeper as an empty transcript.
 from __future__ import annotations
 
 import asyncio
-import audioop
 import contextlib
 import io
 import logging
@@ -185,14 +184,16 @@ async def _run(program: str, *args: str, feed: bytes | None = None) -> bytes:
 
 
 def _wav_body(blob: bytes) -> tuple[bytes, int]:
-    """The samples inside a WAV in memory, and their rate."""
+    """The samples inside a WAV in memory, and their rate.
+
+    Mono only, which is what every decoder here is asked for: opusdec is given ``--force-wav`` on a
+    voice note, which is mono to begin with, and ffmpeg is given ``-ac 1``. A stereo WAV arriving
+    would mean one of them was invoked wrongly, and the honest answer to that is the error below.
+    """
     with contextlib.suppress(OSError, wave.Error, EOFError):
         with wave.open(io.BytesIO(blob), "rb") as handle:
-            if handle.getsampwidth() == 2:
-                frames = handle.readframes(handle.getnframes())
-                if handle.getnchannels() > 1:
-                    frames = audioop.tomono(frames, 2, 0.5, 0.5) if handle.getnchannels() == 2 else frames
-                return frames, handle.getframerate()
+            if handle.getsampwidth() == 2 and handle.getnchannels() == 1:
+                return handle.readframes(handle.getnframes()), handle.getframerate()
     raise SpeechError("the decoder did not produce readable audio")
 
 
