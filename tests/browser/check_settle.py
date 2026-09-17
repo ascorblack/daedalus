@@ -30,7 +30,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import GATES, Unhandled  # noqa: E402
+from api_stub import DEFAULT_PORT, GATES, Unhandled  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "miniapp" / "dist"
@@ -195,7 +195,7 @@ def run(gap: float, chromium: str, base: str, port: int) -> int:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--gap", type=float, default=5.0, help="seconds the host keeps saying 'running' after the last token")
-    ap.add_argument("--port", type=int, default=8164)
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT, help="this harness serves the build itself; the port has to be free")
     ap.add_argument("--chromium", default="/usr/local/bin/chromium")
     args = ap.parse_args()
     import os
