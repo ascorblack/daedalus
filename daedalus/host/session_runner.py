@@ -218,6 +218,11 @@ class SessionManager:
         self.shutting_down = False
         self.recovering = True
         """True from construction until boot recovery has decided the fate of every run the previous process left behind."""
+        self.stale_runs: list[str] = []
+        """Runs the previous process was driving that this one could not pick up — no snapshot to resume
+        from, so the row is closed as cancelled. Empty on a clean stop; a line in the operator's inbox
+        when it is not, because a run that simply vanishes is the thing they would otherwise go looking
+        for in the logs."""
         self.index_rebuild: dict[str, int] | None = None
         """How far the search index still has to be rebuilt, while it is being rebuilt. A search that
         answers "nothing" from an index that has not reached those rows yet reads as "that was never
@@ -232,9 +237,13 @@ class SessionManager:
         """Open the stores; ``recovering`` (default: whether a previous process left runs behind) gates new runs until resume_unfinished()."""
         await self.memory.load()
         await self.workspace_units.load()
+        # The policy is built inside a tool call and cannot wait on a query; this is where the project
+        # roots it compares against are read.
+        await self.projects.list()
         # New runs wait until resume_unfinished() has continued what the previous process left behind;
         # a process that finds nothing to resume (tests, a first start) opens the gate at once.
         self.recovering = recovering if recovering is not None else bool(await self.events.unfinished_snapshots())
+        self.stale_runs = []
         # A tool this installation cannot honour is not registered at all: an unusable name in the
         # list is an invitation the model accepts and a failure it cannot understand.
         disabled = self.capabilities.selfdev.disabled_tools
@@ -1178,14 +1187,7 @@ class SessionManager:
         services = SessionServices(
             session_id=state.session.id,
             workspace_dir=state.workspace,
-            protected_paths=(
-                self.governance_path,
-                Path("/opt/launcher"),
-                self.settings.secrets_dir,
-                self.settings.state_dir,
-                self.settings.config_path,
-                self.settings.db_path,
-            ),
+            protected_paths=self.protected_paths(),
             tool_timeout_seconds=self.config.limits.tool_timeout_seconds,
             max_tool_output_chars=self.config.tools.exec.max_output_chars,
             send_file=_bind(hooks.get("send_file"), state.session.id),
@@ -2039,10 +2041,33 @@ class SessionManager:
         cfg = self.config.policy
         rules = [Rule(id=r.id or f"config.{i}", tool=r.tool or "*", action=r.action, note=r.note, pattern=r.pattern, source="config") for i, r in enumerate(cfg.rules, 1)]
         return Policy(
-            protected_paths=(self.governance_path, Path("/opt/launcher"), self.settings.secrets_dir, self.settings.config_path, self.settings.db_path),
+            protected_paths=self.protected_paths(),
             egress_allow=cfg.egress_allow, rules=rules, workspace_roots=(self.settings.workspaces_dir,),
             operator_checkouts=(self.settings.bot_repo_dir, self.settings.core_repo_dir),
             selfdev_mode=self.capabilities.selfdev.mode,
+            native=self.settings.native,
+            # The home folder is the operator's, and only a native installation is inside it.
+            home_dir=Path.home() if self.settings.native else "",
+            project_roots=self.projects.roots,
+            sealed_paths=self.settings.sealed_paths,
+        )
+
+    def protected_paths(self) -> tuple[Path, ...]:
+        """What no session may write: the governance file, the launcher, the state directory and its
+        contents, and — natively — the runtime the process is executing out of.
+
+        Both the policy and every session's :class:`SessionServices` are built from this one list, so
+        a path added here is added to the tool that resolves it and to the rule that judges it at once.
+        """
+        return (
+            self.governance_path,
+            Path("/opt/launcher"),
+            self.settings.secrets_dir,
+            self.settings.state_dir,
+            self.settings.config_path,
+            self.settings.db_path,
+            *((self.settings.runtime_dir,) if self.settings.runtime_dir is not None else ()),
+            *((self.settings.launcher_path,) if self.settings.launcher_path is not None else ()),
         )
 
     def policy_gate(self, session_id: str, run_id: str) -> Any:
@@ -2249,11 +2274,13 @@ class SessionManager:
         """A run row still 'running' that nobody drives is a leftover of the previous process: closed as cancelled."""
         active = set(resumed) | self.running_run_ids()
         rows = await self.db.fetchall("SELECT id FROM runs WHERE status = ?", (RunStatus.running.value,))
+        self.stale_runs = []
         for row in rows:
             if row["id"] in active:
                 continue
             await self.runs.update_status(row["id"], TENANT, RunStatus.cancelled)
             await self.events.delete_snapshot(row["id"])
+            self.stale_runs.append(row["id"])
             logger.warning("run %s was left running by the previous process and could not be resumed; closed as cancelled", row["id"])
 
     async def _resume_one(self, entry: dict[str, Any], resumed: list[str]) -> None:

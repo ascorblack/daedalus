@@ -114,10 +114,23 @@ class ProjectStore:
 
     def __init__(self, db: Database) -> None:
         self._db = db
+        self._roots: tuple[Path, ...] = ()
+
+    @property
+    def roots(self) -> tuple[Path, ...]:
+        """The folders that are projects, as the last read of the table saw them.
+
+        The tool policy is built while a call is being judged, which is not a place to wait on a
+        query. Every write below refreshes this, and the manager reads the table on the way up, so
+        the list is current whenever a project has ever existed in this process.
+        """
+        return self._roots
 
     async def list(self) -> list[Project]:
         rows = await self._db.fetchall("SELECT * FROM projects ORDER BY name COLLATE NOCASE")
-        return [_row(r) for r in rows]
+        projects = [_row(r) for r in rows]
+        self._roots = tuple(p.root for p in projects)
+        return projects
 
     async def get(self, project_id: str) -> Project | None:
         row = await self._db.fetchone("SELECT * FROM projects WHERE id = ?", (project_id,))
@@ -134,6 +147,7 @@ class ProjectStore:
             "INSERT INTO projects(id, name, root, created_at, settings) VALUES (?, ?, ?, ?, ?)",
             (project.id, project.name, str(project.root), project.created_at.isoformat(), json.dumps(project.settings.dump())),
         )
+        await self.list()
         return project
 
     async def update(self, project_id: str, *, name: str | None = None, root: str | None = None, settings: ProjectSettings | None = None) -> Project:
@@ -151,12 +165,14 @@ class ProjectStore:
             "UPDATE projects SET name = ?, root = ?, settings = ? WHERE id = ?",
             (label, str(path), json.dumps(merged.dump()), project_id),
         )
+        await self.list()
         return Project(id=project.id, name=label, root=path, created_at=project.created_at, settings=merged)
 
     async def delete(self, project_id: str) -> None:
         """Forget the project. Nothing on disk is touched: the folder is the operator's, not ours."""
         await self._db.execute("UPDATE sessions SET project_id = NULL WHERE project_id = ?", (project_id,))
         await self._db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        await self.list()
 
     async def _refuse_overlap(self, path: Path, *, ignore: str = "") -> None:
         """Two projects may not nest, because containment would then mean two different things at once.

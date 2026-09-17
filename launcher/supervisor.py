@@ -22,9 +22,12 @@ Commands arrive as JSON lines on a unix socket. Standard library only.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import hmac
 import json
 import os
+import secrets
 import shlex
 import shutil
 import signal
@@ -41,6 +44,9 @@ CORE_REPO = Path(os.environ.get("DAEDALUS_CORE_REPO", "/srv/protocore-exp"))
 STATE = Path(os.environ.get("DAEDALUS_STATE", "/srv/state"))
 WORKSPACES = Path(os.environ.get("DAEDALUS_WORKSPACES", "/srv/workspaces"))
 SOCKET = Path(os.environ.get("DAEDALUS_SUPERVISOR_SOCKET", "/run/daedalus/supervisor.sock"))
+SUPERVISOR_TOKEN = STATE / "supervisor.token"
+"""The secret a loopback channel is opened with. Written here because here is where the socket would
+have been: one directory, one owner, one thing to delete when the installation goes."""
 SUPERVISOR_TCP = os.environ.get("DAEDALUS_SUPERVISOR_TCP", "").strip()
 """``host:port`` to listen on instead of the socket, where the platform has no unix sockets (Windows).
 One or the other: the bot is told whichever this supervisor really opened, so the two cannot disagree."""
@@ -301,6 +307,27 @@ def published_mode() -> str:
         return ""
     mode = str((data.get("selfdev") or {}).get("mode") or "") if isinstance(data, dict) else ""
     return mode if mode in ("off", "local", "server") else ""
+
+
+def loopback_token() -> str:
+    """The shared secret that has to accompany a command sent over the loopback port.
+
+    A unix socket is a file: the operating system decides who may write to it, which is the whole
+    reason it is preferred. A port on 127.0.0.1 has no owner — every process of every user on the
+    machine can connect to it, and ``restart``, ``rollback`` and ``panic`` are not commands to leave
+    open to all of them. So the port asks for a secret kept the way the socket was: a file in the
+    state directory that only its owner can read. The same secret across restarts, so a bot that is
+    already running goes on being able to ask.
+    """
+    with contextlib.suppress(OSError):
+        if existing := SUPERVISOR_TOKEN.read_text("utf-8").strip():
+            return existing
+    token = secrets.token_urlsafe(32)
+    SUPERVISOR_TOKEN.parent.mkdir(parents=True, exist_ok=True)
+    SUPERVISOR_TOKEN.write_text(token, encoding="utf-8")
+    with contextlib.suppress(OSError):
+        os.chmod(SUPERVISOR_TOKEN, 0o600)
+    return token
 
 
 def resolve_mode(configured: str, *, repo: Path, token: str, published: str = "") -> str:
@@ -588,6 +615,9 @@ class Supervisor:
         self.backoff = 2.0
         self.lock = asyncio.Lock()
         self.last_result = "startup"
+        self.token = ""
+        """The secret the loopback channel asks for, empty where the channel is a socket and the
+        filesystem answers the same question."""
         self.health_task: asyncio.Task[None] | None = None
         self.rebuild_task: asyncio.Task[None] | None = None
         self.queued_rebuild: str | None = None
@@ -1018,6 +1048,8 @@ class Supervisor:
         try:
             raw = await asyncio.wait_for(reader.readline(), timeout=30)
             request = json.loads(raw.decode("utf-8") or "{}")
+            if self.token and not hmac.compare_digest(str(request.get("token") or ""), self.token):
+                raise PermissionError("this supervisor listens on a loopback port, which anything on the machine can reach; a command has to carry the secret from the state directory")
             op = request.get("op")
             if op == "status":
                 result: Any = self.status()
@@ -1043,11 +1075,13 @@ class Supervisor:
 
         The socket is the better channel and is used wherever it exists: it is a file, so the
         operating system's own permissions decide who may ask for a restart. A loopback port has no
-        owner, so it is bound to 127.0.0.1 and to nothing else — every process of every user on the
-        machine can reach it, and that is stated in the README rather than hidden here.
+        owner at all, so what the file's permissions would have said is said by a secret kept in a
+        file with those permissions: the port is bound to 127.0.0.1, and a command that does not
+        carry the secret from the state directory is refused.
         """
         if SUPERVISOR_TCP or not POSIX:
             host, _, port = (SUPERVISOR_TCP or "127.0.0.1:8769").rpartition(":")
+            self.token = loopback_token()
             server = await asyncio.start_server(self.handle, host or "127.0.0.1", int(port))
             log(f"listening on {host or '127.0.0.1'}:{port}")
         else:

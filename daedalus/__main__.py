@@ -157,7 +157,7 @@ async def cmd_self(args: argparse.Namespace) -> int:
 
     settings = _settings(args)
     try:
-        result = await supervisor_client.call(settings.supervisor_address, "restart", reason=args.reason)
+        result = await supervisor_client.call(settings.supervisor_address, "restart", token_path=settings.supervisor_token_path, reason=args.reason)
     except supervisor_client.SupervisorUnavailable as exc:
         print(f"no supervisor to ask ({exc}); this installation applies a change by starting over", file=sys.stderr)
         return 2

@@ -13,6 +13,7 @@
     <h1>Daedalus</h1>
     <p class="sub">Running from <code>{{.Status.Data}}</code> in <strong>{{.Status.ModeDetail}}</strong>.</p>
     <p class="sub">{{if .Native}}Closing this {{if .Windowed}}window{{else}}launcher{{end}} stops the agent: it is a process under the launcher, not a container, and an agent nobody can see is one nobody can stop. A run in flight is saved and picks up where it left off on the next start.{{else}}{{if .Windowed}}Closing this window leaves the stack running — it keeps running in the background and comes back with the machine.{{else}}Closing this launcher leaves the stack running.{{end}}{{end}}</p>
+    {{if .Native}}<p class="sub">No container boundary: Exec runs as you. The policy asks before a command or a file touches anything outside the project, refuses the installation&rsquo;s own files outright, and the approval gates, the network allowlist and the spend caps all still apply.</p>{{end}}
   </header>
 
   <p class="banner warn" id="alert" hidden></p>

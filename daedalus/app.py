@@ -67,6 +67,16 @@ class Application:
         resumed = await self.manager.resume_unfinished()
         if resumed:
             await self.notify(f"Resumed {len(resumed)} run(s) after restart.", markdown=False, kind="startup")
+        if stale := self.manager.stale_runs:
+            # Natively the agent is a process under the launcher, so closing the window is a stop.
+            # A run that was working when it happened is worth a line: the operator's question the
+            # next morning is "what happened to it", and the answer belongs where they will look.
+            why = (
+                " Closing the app stops the agent with it — leave the window open while a run is working."
+                if self.settings.native
+                else ""
+            )
+            await self.notify(f"{len(stale)} run(s) were interrupted by the last stop and could not be resumed.{why}", markdown=False, kind="startup", severity="notice")
         if self.front is not None:
             resent = await self.front.redeliver_pending()
             if resent:

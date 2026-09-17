@@ -5,6 +5,10 @@ is the right shape for a channel that can restart the installation: nothing that
 file can ask. Windows has no unix sockets, so there the supervisor listens on the loopback interface
 instead and the address is ``tcp://127.0.0.1:<port>``. Everything above this module passes
 ``Settings.supervisor_address`` and never has to know which it got.
+
+A port, unlike a file, has no owner: anything running on the machine can connect to it. So a command
+sent that way carries a secret the supervisor wrote into the state directory with the permissions the
+socket would have had, and a command sent to a socket carries nothing — the file is the answer there.
 """
 
 from __future__ import annotations
@@ -54,11 +58,25 @@ async def _open(address: str) -> tuple[asyncio.StreamReader, asyncio.StreamWrite
     return await asyncio.open_connection(host, port)
 
 
-async def call(address: str | Path, op: str, *, timeout: float = 120.0, **params: Any) -> Any:
+def loopback_token(token_path: str | Path | None) -> str:
+    """The secret for a loopback channel, read per call so that a supervisor which minted a new one
+    does not need the bot restarted as well. Missing or unreadable is an empty string: the supervisor
+    says what is wrong with a command that carries none, and says it better than a traceback here."""
+    if token_path is None:
+        return ""
+    try:
+        return Path(token_path).read_text("utf-8").strip()
+    except OSError:
+        return ""
+
+
+async def call(address: str | Path, op: str, *, token_path: str | Path | None = None, timeout: float = 120.0, **params: Any) -> Any:
     try:
         reader, writer = await _open(str(address))
     except OSError as exc:
         raise SupervisorUnavailable(str(exc)) from exc
+    if tcp_endpoint(str(address)) is not None and (token := loopback_token(token_path)):
+        params["token"] = token
     writer.write((json.dumps({"op": op, **params}) + "\n").encode("utf-8"))
     await writer.drain()
     try:
@@ -73,4 +91,4 @@ async def call(address: str | Path, op: str, *, timeout: float = 120.0, **params
     return response.get("result")
 
 
-__all__ = ["SupervisorUnavailable", "call", "present", "tcp_endpoint"]
+__all__ = ["SupervisorUnavailable", "call", "loopback_token", "present", "tcp_endpoint"]

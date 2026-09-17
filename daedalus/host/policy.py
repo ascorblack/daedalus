@@ -66,6 +66,19 @@ WAIT_REASON = (
     "finished job arrive as messages that wake you the moment they are ready. If there is nothing to do "
     "meanwhile, end the turn; to read a running job, use JobOutput; a service's log, ServiceLogs."
 )
+INSTALLATION_REASON = (
+    "the installation's own files — the provider keys, the state database, the restart channel's secret, "
+    "the launcher and the runtime this process runs out of — are not the agent's to read or to write"
+)
+"""Why a path under the installation is refused. Read as well as write, and that is the point: the file
+mode says 0600 and the agent is the same user, so the mode is not what keeps it."""
+HOME_REASON = (
+    "it is in the operator's home folder, outside every project and outside the installation; there is no "
+    "container here, so a path the operator has not opened is one they are asked about"
+)
+PATH_ARGUMENTS = frozenset({"path", "paths", "file", "files", "filename", "dir", "directory", "cwd", "root", "source", "src", "destination", "dest", "target", "output"})
+"""The names the file tools give a path. Reading every string of every argument instead would take a
+file's contents for a list of paths the moment one of them began with a slash."""
 WRITERS = {"cp", "mv", "install", "rsync", "ln"}
 """Commands whose last non-flag argument is their destination."""
 GIT_OPTIONS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
@@ -328,6 +341,56 @@ def _sleep_seconds(args: list[str]) -> float:
     return total
 
 
+def expand_home(path: str, home: str) -> str:
+    """A path as the filesystem will see it, with ``~`` and ``$HOME`` resolved against this machine's home.
+
+    The rules elsewhere compare ``~`` as written, because what they ask is whether the command aims at
+    the home folder as a whole. These rules ask which directory a path lands in, and ``~/Documents`` and
+    ``/home/ada/Documents`` land in the same one.
+    """
+    if not home:
+        return _norm(path)
+    if path == "~" or path.startswith("~/"):
+        return _norm(home + path[1:])
+    for form in ("$HOME", "${HOME}"):
+        if path == form or path.startswith(form + "/"):
+            return _norm(home + path[len(form) :])
+    return _norm(path)
+
+
+def path_operands(words: list[str]) -> list[str]:
+    """Every operand of one simple command that names a file on the machine.
+
+    Its plain arguments, the operands of its redirections, and the destinations only the command's own
+    flags reveal (``cp -t``, ``curl -o``, ``tar -C``, ``dd of=``) — the same reading ``_written_paths``
+    already does, widened from where a command writes to what it touches at all. Only operands written
+    as absolute paths or against the home folder count: a relative one is resolved against the session's
+    workspace, and a word that is not a path must not be read as one.
+    """
+    head = words[0].lstrip("\\").rsplit("/", 1)[-1]
+    seen = [words[0], *(w for w in _without_redirects(words)[1:] if not w.startswith("-")), *_redirect_targets(words), *_written_paths(head, words)]
+    return [w for w in dict.fromkeys(seen) if w.startswith(("/", "~", "$HOME", "${HOME}"))]
+
+
+def argument_paths(arguments: Any) -> list[str]:
+    """The paths a tool that is not a shell names, by the argument names the tools use for them."""
+    out: list[str] = []
+
+    def walk(node: Any, named: bool) -> None:
+        if isinstance(node, str):
+            if named:
+                out.append(node)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, named)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, named or key in PATH_ARGUMENTS)
+
+    walk(arguments, False)
+    return out
+
+
 def _under(path: str, roots: Iterable[str]) -> bool:
     p = path.rstrip("/") or "/"
     return any(p == r.rstrip("/") or p.startswith(r.rstrip("/") + "/") for r in roots)
@@ -336,13 +399,46 @@ def _under(path: str, roots: Iterable[str]) -> bool:
 class Policy:
     """The rule set: built-ins plus the operator's, evaluated per call."""
 
-    def __init__(self, *, protected_paths: Iterable[Path] = (), egress_allow: Iterable[str] = (), rules: Iterable[Rule] = (), workspace_roots: Iterable[Path] = (), operator_checkouts: Iterable[Path] = (), selfdev_mode: str = "server") -> None:
+    def __init__(self, *, protected_paths: Iterable[Path] = (), egress_allow: Iterable[str] = (), rules: Iterable[Rule] = (), workspace_roots: Iterable[Path] = (), operator_checkouts: Iterable[Path] = (), selfdev_mode: str = "server", native: bool = False, home_dir: Path | str = "", project_roots: Iterable[Path] = (), sealed_paths: Iterable[Path] = ()) -> None:
         self.protected = [str(p) for p in protected_paths]
         self.egress_allow = [e for e in egress_allow if e.strip()]
         self.rules = list(rules)
         self.workspace_roots = [str(p) for p in workspace_roots]
         self.operator_checkouts = [str(p) for p in operator_checkouts] or list(CONTAINER_CHECKOUTS)
         self.selfdev_mode = selfdev_mode
+        self.native = native
+        self.home = str(home_dir) if home_dir else ""
+        self.project_roots = [str(p) for p in project_roots]
+        self.sealed = [str(p) for p in sealed_paths]
+
+    # -- the machine's own paths ------------------------------------------------------
+
+    def _host_paths(self, paths: Iterable[str]) -> Decision | None:
+        """The two rules a machine needs and a container does not, over the paths a call names.
+
+        In Docker mode this answers nothing at all, and that is deliberate rather than an omission:
+        the provider keys are in another container, the state directory is a volume the protected-path
+        rules already refuse to write, and the operator's home is not mounted. Rules against them
+        there would be sentences about directories that are not in the container.
+
+        Natively the agent is a process of the operator's own user. Everything the container used to
+        make impossible is now merely impolite, so the installation's own files are refused outright
+        and the rest of the operator's home is a question rather than a silence.
+        """
+        if not self.native:
+            return None
+        open_roots = self.workspace_roots + self.operator_checkouts + self.project_roots + self.protected
+        asked: Decision | None = None
+        for raw in paths:
+            path = expand_home(str(raw), self.home)
+            if not path.startswith("/"):
+                continue
+            target = path.rstrip("*").rstrip("/") or "/"
+            if _under(target, self.sealed):
+                return Decision(DENY, f"{raw}: {INSTALLATION_REASON}", "host.installation")
+            if asked is None and self.home and _under(target, [self.home]) and not _under(target, open_roots):
+                asked = Decision(ASK, f"{raw}: {HOME_REASON}", "host.home")
+        return asked
 
     # -- built-in judgement -----------------------------------------------------------
 
@@ -358,6 +454,8 @@ class Policy:
             if _SEVERITY[action] > _SEVERITY[worst.action]:
                 worst = Decision(action, reason, rule, hosts=hosts)
 
+        if (host := self._host_paths([cwd] if cwd else [])) is not None:
+            escalate(host.action, host.reason, host.rule)
         if re.search(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}", command):
             escalate(DENY, "a fork bomb", "shell.forkbomb")
         if foreground:
@@ -402,6 +500,8 @@ class Policy:
                     escalate(DENY, f"writing to a protected path ({target})", "shell.protected_write")
                 elif normed in DANGEROUS_TARGETS or normed.rstrip("/*") in _DANGEROUS_BASES[1:]:
                     escalate(DENY, f"writing into a system directory ({target})", "shell.system_write")
+            if (host := self._host_paths(path_operands(words))) is not None:
+                escalate(host.action, host.reason, host.rule)
             if head == "git":
                 sub, at = _git_subcommand(words)
                 if sub == "push":
@@ -450,7 +550,7 @@ class Policy:
         elif tool == "WebFetch":
             decision = self._web(text)
         else:
-            decision = Decision(ALLOW)
+            decision = self._host_paths(argument_paths(arguments)) or Decision(ALLOW)
         decision = self._config_rules(tool, text, decision)
         if decision.action == ASK:
             decision.key = approval_key(tool, arguments)
@@ -475,9 +575,16 @@ class Policy:
             ("git.operator_push", "Exec", DENY, "git push from the operator's checkouts"),
             ("egress.allowlist", "Exec, WebFetch", ASK, "a host outside the egress allowlist (when one is configured)"),
         ]
+        if self.native:
+            # Only where they can fire. A list that names them in Docker mode would describe a boundary
+            # the installation does not have, which is the opposite of what this endpoint is for.
+            builtins += [
+                ("host.installation", "*", DENY, "reading or writing the provider keys, the state database, the restart secret, the launcher or its runtime"),
+                ("host.home", "*", ASK, "a path in the operator's home folder, outside every project and outside the installation"),
+            ]
         rows = [{"id": i, "tool": t, "action": a, "note": n, "source": "builtin"} for i, t, a, n in builtins]
         rows += [{"id": r.id, "tool": r.tool, "action": r.action, "note": r.note, "pattern": r.pattern, "source": r.source} for r in self.rules]
         return rows
 
 
-__all__ = ["ALLOW", "ASK", "DENY", "SHELL_TOOLS", "Decision", "Policy", "Rule", "approval_key", "canonical", "host_allowed", "hosts_in", "shell_segments"]
+__all__ = ["ALLOW", "ASK", "DENY", "SHELL_TOOLS", "Decision", "Policy", "Rule", "approval_key", "argument_paths", "canonical", "expand_home", "host_allowed", "hosts_in", "path_operands", "shell_segments"]

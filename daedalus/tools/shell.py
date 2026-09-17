@@ -66,13 +66,14 @@ def windows_shell() -> str:
 def native_sandbox_note() -> str:
     """What the operator is told about isolation on a machine with no container around the agent.
 
-    Said once, plainly, in the doctor and in the README: what is gone and what is not. The policy
-    engine, the approval gates, the protected paths, the network allowlist and the spend caps are in
-    the agent and all still apply. The wall behind them is what a container was.
+    Said once, plainly, in the doctor, on the launcher's status page and in the README: what is gone
+    and what is not. The policy engine, the approval gates, the protected paths, the network allowlist
+    and the spend caps are in the agent and all still apply. The wall behind them is what a container
+    was, and what stands where it stood is a question the operator answers.
     """
     if sys.platform.startswith("linux"):
-        return "native mode: no container boundary — Exec runs as you. bubblewrap still confines it when tools.exec.sandbox = workspace."
-    return "native mode: no container boundary and no bubblewrap on this platform — Exec runs as you, with the policy rules and the approval gates as the only limits."
+        return "native mode: no container boundary; the policy asks before leaving the project, and bubblewrap confines Exec while tools.exec.sandbox = workspace (the default here)."
+    return "native mode: no container boundary and no bubblewrap on this platform; the policy asks before leaving the project, and the approval gates are what stands behind it."
 
 
 def bwrap_status() -> str:

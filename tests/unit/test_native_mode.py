@@ -220,17 +220,69 @@ async def test_the_supervisor_listens_on_a_port_where_there_are_no_unix_sockets(
                 await asyncio.sleep(0.02)
         else:
             pytest.fail("the supervisor never opened its port")
+        # A port has no owner: this connection could be any process of any user on the machine, and
+        # without the secret it is told so rather than being served a restart.
         writer.write(json.dumps({"op": "status"}).encode() + b"\n")
+        await writer.drain()
+        refused = json.loads(await asyncio.wait_for(reader.readline(), timeout=10))
+        writer.close()
+        assert refused["ok"] is False
+        assert "secret" in refused["error"]
+
+        token_path = tmp_path / "state" / "supervisor.token"
+        token = token_path.read_text("utf-8").strip()
+        assert token and token_path.stat().st_mode & 0o077 == 0
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(json.dumps({"op": "status", "token": token}).encode() + b"\n")
         await writer.drain()
         answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=10))
         writer.close()
         assert answer["ok"] is True
         assert "selfdev_mode" in answer["result"]
-        # And the client above reaches it through exactly the address Settings hands out.
-        result = await supervisor_client.call(f"tcp://127.0.0.1:{port}", "status", timeout=10)
+        # And the client above reaches it through exactly the address Settings hands out, reading the
+        # same file to open the same channel.
+        result = await supervisor_client.call(f"tcp://127.0.0.1:{port}", "status", token_path=token_path, timeout=10)
         assert "child_running" in result
     finally:
         server.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_socket_channel_asks_for_no_secret(tmp_path: Path) -> None:
+    """The secret answers what a port cannot: who is connecting. A socket file already answers it with
+    its own permissions, so a command sent there carries nothing extra and nothing is written down."""
+    sent: dict[str, object] = {}
+
+    class _Writer:
+        def write(self, raw: bytes) -> None:
+            sent.update(json.loads(raw))
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class _Reader:
+        async def readline(self) -> bytes:
+            return json.dumps({"ok": True, "result": "done"}).encode()
+
+    token = tmp_path / "supervisor.token"
+    token.write_text("a-secret", encoding="utf-8")
+    socket = tmp_path / "supervisor.sock"
+    socket.touch()
+
+    async def fake_open(address: str) -> tuple[object, object]:
+        assert address == str(socket)
+        return _Reader(), _Writer()
+
+    original = supervisor_client._open
+    supervisor_client._open = fake_open  # type: ignore[assignment]
+    try:
+        assert await supervisor_client.call(socket, "restart", token_path=token, reason="because") == "done"
+    finally:
+        supervisor_client._open = original  # type: ignore[assignment]
+    assert sent == {"op": "restart", "reason": "because"}
 
 
 def test_zombies_are_a_linux_idea(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

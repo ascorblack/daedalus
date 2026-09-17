@@ -12,6 +12,8 @@ Two layers, deliberately separate:
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
@@ -31,6 +33,28 @@ def native_mode() -> bool:
     the paths and the defaults are, and those are decided before a configuration file is read.
     """
     return os.environ.get("DAEDALUS_NATIVE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def native_sandbox_default() -> str:
+    """Whether Exec is confined by default on this installation.
+
+    Natively on Linux, where bubblewrap is installed, it is. Outside Docker bubblewrap needs no added
+    capability and no relaxed seccomp profile, and there is no container around the agent to be the
+    boundary in its place, so the one wall that is available is up by default.
+
+    The check is for the binary and not for a working namespace, because this runs whenever a default
+    configuration is built and a namespace probe is a subprocess. A machine that has ``bwrap`` and
+    forbids unprivileged namespaces gets the sandbox's own fail-closed message, which names the
+    setting to turn off; a machine without it gets the policy rules, which is what macOS, Windows and
+    a container get too.
+    """
+    return "workspace" if native_mode() and sys.platform.startswith("linux") and shutil.which("bwrap") else "off"
+
+
+def env_path(name: str) -> Path | None:
+    """A path the launcher put in the environment, or ``None`` where it did not."""
+    raw = os.environ.get(name, "").strip()
+    return Path(raw) if raw else None
 
 
 def keyproxy_base() -> str:
@@ -129,6 +153,18 @@ class Settings(BaseSettings):
     supervisor_tcp: str = ""
     """``host:port`` the supervisor listens on where unix sockets are not available (Windows); empty
     everywhere else, and then the socket above is what is used. One or the other, never both."""
+    runtime_dir: Path | None = Field(default_factory=lambda: env_path("DAEDALUS_RUNTIME"))
+    """The portable runtime a native installation runs out of: the interpreter executing this process,
+    the environment it imports from, and the binaries the tools call. ``None`` in a container, where
+    the image carries all three and no directory of the installation's own has to be named."""
+    secrets_override: Path | None = Field(default_factory=lambda: env_path("DAEDALUS_SECRETS"))
+    """Where the launcher keeps the provider keys, when that is not the default place under the state
+    directory. Natively they sit beside the checkouts instead, so that no project root and no mount
+    can reach them; the launcher says where, because the launcher is what wrote the file."""
+    launcher_path: Path | None = Field(default_factory=lambda: env_path("DAEDALUS_LAUNCHER"))
+    """The launcher's own executable, natively. It starts this process, restarts it and can replace
+    it, which is the whole reason the agent is not allowed to touch it."""
+
     rebuild_trigger_dir: Path = Path("/run/daedalus-rebuild")
     """Shared with the rebuilder sidecar — the only container that can reach Docker. It is a rebuild
     channel only while something is on the other end of it, which the sidecar says by keeping a
@@ -186,7 +222,32 @@ class Settings(BaseSettings):
 
     @property
     def secrets_dir(self) -> Path:
-        return self.state_dir / "secrets"
+        return self.secrets_override or self.state_dir / "secrets"
+
+    @property
+    def supervisor_token_path(self) -> Path:
+        """The shared secret the restart channel is opened with, where that channel is a loopback port
+        rather than a socket file. A file with an owner is what a port does not have."""
+        return self.state_dir / "supervisor.token"
+
+    @property
+    def sealed_paths(self) -> tuple[Path, ...]:
+        """What the agent may neither read nor write: the parts of the installation that are the
+        installation rather than its work.
+
+        The provider keys, the state database and the journals beside it, the secret that opens the
+        restart channel, the launcher's own executable and the runtime the process is executing out
+        of. In a container none of this needs saying — the keys are in another container, the state
+        is a volume the policy already refuses to write, and there is no launcher binary to protect.
+        On the operator's machine the agent runs as the operator, and a file mode protects nothing
+        from a process that owns it.
+        """
+        paths = [self.secrets_dir, self.db_path, Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm"), self.supervisor_token_path]
+        if self.runtime_dir is not None:
+            paths.append(self.runtime_dir)
+        if self.launcher_path is not None:
+            paths.append(self.launcher_path)
+        return tuple(paths)
 
     @property
     def skills_dir(self) -> Path:
@@ -369,10 +430,12 @@ class ExecToolsConfig(BaseModel):
     """Exec / Read / Find output handling (the timeout itself is ``limits.tool_timeout_seconds``)."""
 
     max_output_chars: int = Field(default=60_000, ge=2_000, le=1_000_000)
-    sandbox: Literal["off", "workspace"] = "off"
+    sandbox: Literal["off", "workspace"] = Field(default_factory=native_sandbox_default)
     """``workspace``: run Exec inside bubblewrap with the whole filesystem read-only except the session
     workspace and a private /tmp, in its own PID namespace. Needs ``bwrap`` in the image; falls back to
-    an unsandboxed run with a warning when it is missing."""
+    an unsandboxed run with a warning when it is missing. It defaults to ``workspace`` on a native
+    Linux installation, where nothing else stands between Exec and the operator's machine, and to
+    ``off`` where a container does."""
     sandbox_extra_writable: list[str] = Field(default_factory=list)
     """Extra paths the sandbox may write (e.g. the bot repository worktrees for self-development)."""
 

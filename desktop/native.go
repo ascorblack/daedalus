@@ -485,6 +485,13 @@ func supervisorEnv(p Paths, base []string, settings map[string]string) []string 
 	add("DAEDALUS_CORE_REPO", p.Core)
 	add("DAEDALUS_STATE", p.State)
 	add("DAEDALUS_WORKSPACES", p.Workspaces)
+	// The provider keys are beside the checkouts rather than under the state directory, and the
+	// launcher is the only thing that knows it: the agent needs the path to refuse a tool that reaches
+	// for it, which it cannot do for a file it has never been told about.
+	add("DAEDALUS_SECRETS", p.Secrets)
+	if exe, err := os.Executable(); err == nil {
+		add("DAEDALUS_LAUNCHER", exe)
+	}
 	add("DAEDALUS_SSH_SOURCE", p.SSH)
 	// The Mini App as a release archive carries it, beside the launcher. It is not the checkout's
 	// own miniapp/dist: that is the thing this would be a fallback for, and pointing one at the

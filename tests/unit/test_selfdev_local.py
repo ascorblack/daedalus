@@ -259,7 +259,7 @@ def test_the_launcher_applies_a_change_through_the_supervisors_preflight(tmp_pat
     monkeypatch.setattr(supervisor_client, "call", fake_call)
     argv = ["--state-dir", str(tmp_path / "state"), "--workspaces-dir", str(tmp_path / "ws"), "self", "restart", "--reason", "the launcher's Apply"]
     assert cli.main(argv) == 0
-    assert asked == [("restart", {"reason": "the launcher's Apply"})]
+    assert asked == [("restart", {"token_path": tmp_path / "state" / "supervisor.token", "reason": "the launcher's Apply"})]
     assert "checking the change and restarting" in capsys.readouterr().out
 
     # No supervisor to ask: it says so and fails, so the launcher knows to say what it is falling back to.
