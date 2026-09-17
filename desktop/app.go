@@ -26,6 +26,13 @@ type App struct {
 	busy    string
 	failure string
 
+	// Where a start has got to, and — while something with a known size is being downloaded — how
+	// far through it is. Both are for the progress page: the log says what is happening, these say
+	// how much of it is left.
+	stage     Stage
+	stageDone int64
+	stageSize int64
+
 	// startedAt is when the stack was last brought up, and paired records that a link which signs
 	// the operator in has already been handed to a browser since. Both exist so that the launcher
 	// offers a pairing link once, while it is fresh, and the app's own address afterwards.
@@ -45,7 +52,25 @@ const logLimit = 200
 func NewApp(p Paths) *App {
 	app := &App{paths: p, mode: StoredMode(p)}
 	app.native = NewNative(p, app.log)
+	app.native.OnProgress(app.enter, app.downloaded)
 	return app
+}
+
+// enter records which piece of a start the launcher has reached. Any progress already counted
+// belongs to the piece that is over, so it goes with it.
+func (a *App) enter(stage Stage) {
+	a.mu.Lock()
+	a.stage, a.stageDone, a.stageSize = stage, 0, 0
+	a.mu.Unlock()
+}
+
+// downloaded records how much of a download of a known size is done. Only the runtime has one: an
+// image pull reports its own progress to a terminal nobody is reading, and an honest bar that does
+// not know is better than a made-up one that does.
+func (a *App) downloaded(done, total int64) {
+	a.mu.Lock()
+	a.stageDone, a.stageSize = done, total
+	a.mu.Unlock()
 }
 
 // SetMode is how the command line and the setup page tell the launcher which shape to run in. It is
@@ -96,6 +121,7 @@ func (a *App) end(err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.busy = ""
+	a.stage, a.stageDone, a.stageSize = StageIdle, 0, 0
 	if err != nil {
 		a.failure = err.Error()
 	}
@@ -124,6 +150,7 @@ func (a *App) start(ctx context.Context) error {
 	if err := CheckDocker(ctx); err != nil {
 		return err
 	}
+	a.enter(StageCheckouts)
 	if err := EnsureRepos(ctx, a.paths, dockerGit(a.paths), a.log); err != nil {
 		return err
 	}
@@ -140,6 +167,7 @@ func (a *App) start(ctx context.Context) error {
 	a.mu.Lock()
 	a.startedAt, a.paired = time.Now(), false
 	a.mu.Unlock()
+	a.enter(StageImages)
 	a.log("pulling images")
 	if _, err := compose(ctx, a.paths, telegram, "pull"); err != nil {
 		// No published image for this platform, or no network. Building takes several minutes the
@@ -151,6 +179,7 @@ func (a *App) start(ctx context.Context) error {
 	} else if err := composeStream(ctx, a.paths, telegram, "up", "-d"); err != nil {
 		return err
 	}
+	a.enter(StageStart)
 	a.log("waiting for the app to answer")
 	if err := WaitReady(ctx, APIPort(a.paths), readyTimeout); err != nil {
 		return err
@@ -458,6 +487,14 @@ type Status struct {
 	Failure    string   `json:"failure"`
 	Log        []string `json:"log"`
 
+	// What a start is doing and how far through the piece with a known size it is. The progress
+	// page draws its list from Steps and ticks it off with Stage; Done and Size turn an
+	// indeterminate bar into a determinate one, and are zero when nothing knows a size.
+	Stage string   `json:"stage"`
+	Steps []string `json:"steps"`
+	Done  int64    `json:"done"`
+	Size  int64    `json:"size"`
+
 	// Change is the agent's own code: a commit waiting for a restart, or what became of the last
 	// one. Empty unless the stack is running, because the container is what holds the answer.
 	Change ChangeNotice `json:"change"`
@@ -476,7 +513,11 @@ func (a *App) Status(ctx context.Context) Status {
 		Busy:       a.busy,
 		Failure:    a.failure,
 		Log:        append([]string(nil), a.lines...),
+		Stage:      string(a.stage),
+		Done:       a.stageDone,
+		Size:       a.stageSize,
 	}
+	status.Steps = Stages(a.mode)
 	a.mu.Unlock()
 	if a.Native() {
 		status.Ports = NativePorts(a.paths)
