@@ -2,7 +2,7 @@ import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon, IconName } from "../icons";
 import { pathFor } from "../router";
-import { PageHeader, go, useMedia } from "../shell";
+import { PageHeader, go, screenTitle, useMedia } from "../shell";
 import { api, telegram, HeartbeatStatus, Preset, ProviderConf, SearchBackendInfo, SearchCheck, Settings } from "../api";
 import { confirmAsync, errorText, numInput } from "../ui";
 import * as passkeys from "../passkeys";
@@ -780,7 +780,7 @@ function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void })
 export function HealthScreen({ toast }: { toast: (t: string) => void }) {
   return (
     <>
-      <PageHeader title="Health" />
+      <PageHeader title={screenTitle("health")} />
       <div className="screen narrow">
         <HealthTab toast={toast} />
         {!telegram()?.initData && (
@@ -1221,7 +1221,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
   if (wide) {
     return (
       <>
-        <PageHeader title="Settings" />
+        <PageHeader title={screenTitle("settings")} />
         <div className="screen wide settings-split">
           <aside className="settings-nav">{index}</aside>
           <div className="settings-body">{shown && body(shown)}</div>
@@ -1233,7 +1233,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
   if (!current) {
     return (
       <>
-        <PageHeader title="Settings" />
+        <PageHeader title={screenTitle("settings")} />
         <div className="screen narrow">{index}</div>
         {addSheet}
       </>

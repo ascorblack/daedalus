@@ -25,11 +25,13 @@ export function screenTitle(s: Screen): string {
 }
 
 const PRIMARY: Screen[] = ["agents", "inbox", "board"];
-const GROUPS: { label: string; items: Screen[] }[] = [
-  { label: "Work", items: ["agents", "voice", "inbox", "board"] },
-  { label: "Autonomy", items: ["changes", "schedules", "services"] },
-  { label: "Knowledge", items: ["memory"] },
-  { label: "Observe", items: ["usage", "health"] },
+// A group is named by a key, not by a word: the heading sits directly above destinations that are
+// translated, and one English word there is what makes a rail read as broken rather than partial.
+const GROUPS: { key: string; items: Screen[] }[] = [
+  { key: "work", items: ["agents", "voice", "inbox", "board"] },
+  { key: "autonomy", items: ["changes", "schedules", "services"] },
+  { key: "knowledge", items: ["memory"] },
+  { key: "observe", items: ["usage", "health"] },
 ];
 /** Screens that carry a beta tag beside their name: new, usable, not yet finished. */
 const BETA: Screen[] = ["voice"];
@@ -54,7 +56,7 @@ export function PageHeader({ title, subtitle, actions, back, children }: { title
     <header className="pagehead">
       <div className="pagehead-row">
         {back && (
-          <a className="iconbtn" href={back} onClick={(e) => go(e, back)} aria-label="Back" title="Back">
+          <a className="iconbtn" href={back} onClick={(e) => go(e, back)} aria-label={t("shell.back")} title={t("shell.back")}>
             <Icon name="back" />
           </a>
         )}
@@ -90,7 +92,7 @@ export function TabBar({ screen, counts, selfdev, onMore, moreOpen }: { screen: 
       <button className={inMore || moreOpen ? "active" : ""} onClick={onMore} aria-haspopup="dialog" aria-expanded={moreOpen}>
         <span className="glyph">
           <Icon name={inMore ? ICONS[screen] : "more"} size={22} />
-          {moreCount > 0 && <span className="tab-badge dot" aria-label={`${moreCount} waiting`} />}
+          {moreCount > 0 && <span className="tab-badge dot" aria-label={t("shell.waiting", { n: moreCount })} />}
         </span>
         {inMore ? screenTitle(screen) : t("nav.more")}
       </button>
@@ -100,7 +102,7 @@ export function TabBar({ screen, counts, selfdev, onMore, moreOpen }: { screen: 
 
 export function MoreSheet({ screen, counts, selfdev, onClose }: { screen: Screen; counts: Counts; selfdev: SelfDevMode; onClose: () => void }) {
   return (
-    <Sheet onClose={onClose} size="narrow" className="more-sheet" title="More">
+    <Sheet onClose={onClose} size="narrow" className="more-sheet" title={t("nav.more")}>
       <div className="more-grid">
         {visibleScreens(MORE, selfdev).map((s) => {
           const n = countFor(s, counts);
@@ -139,24 +141,24 @@ export function Rail({ screen, counts, selfdev, collapsed, onToggle, onPalette, 
         <span className="rail-text">Daedalus</span>
       </a>
       <ProjectChip projects={projects} current={project} onOpen={onProjects} collapsed={collapsed} />
-      <button className="rail-item search" onClick={onPalette} title="Search and go (Ctrl/⌘ K)">
+      <button className="rail-item search" onClick={onPalette} title={t("shell.search.title")}>
         <Icon name="search" size={18} />
-        <span className="rail-text">Search…</span>
+        <span className="rail-text">{t("shell.search")}</span>
         <kbd className="rail-text">⌘K</kbd>
       </button>
       {GROUPS.map((g) => visibleScreens(g.items, selfdev)).map((items, i) =>
         items.length === 0 ? null : (
-          <div key={GROUPS[i].label} className="rail-group">
-            <div className="rail-label">{GROUPS[i].label}</div>
+          <div key={GROUPS[i].key} className="rail-group">
+            <div className="rail-label">{t(`nav.group.${GROUPS[i].key}`)}</div>
             {items.map(item)}
           </div>
         ),
       )}
       <div className="rail-group bottom">
         {item("settings")}
-        <button className="rail-item collapse" onClick={onToggle} title={collapsed ? "Expand the rail" : "Collapse the rail"} aria-label={collapsed ? "Expand the rail" : "Collapse the rail"} aria-expanded={!collapsed}>
+        <button className="rail-item collapse" onClick={onToggle} title={t(collapsed ? "shell.expand.title" : "shell.collapse.title")} aria-label={t(collapsed ? "shell.expand.title" : "shell.collapse.title")} aria-expanded={!collapsed}>
           <Icon name={collapsed ? "columns" : "back"} size={18} />
-          <span className="rail-text">Collapse</span>
+          <span className="rail-text">{t("shell.collapse")}</span>
         </button>
       </div>
     </nav>
@@ -179,11 +181,11 @@ export function Palette({ items, onClose }: { items: PaletteItem[]; onClose: () 
     it.run();
   };
   return (
-    <Sheet ariaLabel="Search and go" onClose={onClose} size="narrow" className="palette-sheet">
+    <Sheet ariaLabel={t("shell.search.label")} onClose={onClose} size="narrow" className="palette-sheet">
       <input
         className="field"
         autoFocus
-        placeholder="Go to, open, create…"
+        placeholder={t("shell.search.placeholder")}
         value={q}
         onChange={(e) => setQ(e.target.value)}
         onKeyDown={(e) => {
@@ -195,7 +197,7 @@ export function Palette({ items, onClose }: { items: PaletteItem[]; onClose: () 
             e.preventDefault();
           } else if (e.key === "Enter" && shown[cursor]) run(shown[cursor]);
         }}
-        aria-label="Search and go"
+        aria-label={t("shell.search.label")}
       />
       <div className="palette-list" role="listbox">
         {shown.map((it, i) => (
@@ -205,7 +207,7 @@ export function Palette({ items, onClose }: { items: PaletteItem[]; onClose: () 
             {it.hint && <span className="sub truncate">{it.hint}</span>}
           </button>
         ))}
-        {shown.length === 0 && <div className="sub" style={{ padding: "10px 12px" }}>Nothing matches.</div>}
+        {shown.length === 0 && <div className="sub" style={{ padding: "10px 12px" }}>{t("shell.search.nomatch")}</div>}
       </div>
     </Sheet>
   );

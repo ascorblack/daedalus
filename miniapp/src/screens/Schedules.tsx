@@ -5,7 +5,7 @@ import { OverflowMenu, Sheet } from "../dialogs";
 import { absTime, cronFor, describeCron, describeSchedule, relTime, untilShort } from "../format";
 import { Icon } from "../icons";
 import { navigate, pathFor } from "../router";
-import { PageHeader } from "../shell";
+import { PageHeader, screenTitle } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { confirmAsync, errorText } from "../ui";
 import { useSessionTitles } from "./Sessions";
@@ -108,7 +108,7 @@ export function SchedulesScreen({ toast, onOpen, selected }: { toast: (t: string
   return (
     <>
       <PageHeader
-        title="Schedules"
+        title={screenTitle("schedules")}
         subtitle={items ? `${groups.upcoming.length} upcoming${groups.paused.length ? ` · ${groups.paused.length} paused` : ""}` : undefined}
         actions={<button className="iconbtn primary" onClick={() => setCreating(true)} title="New schedule" aria-label="New schedule"><Icon name="plus" /></button>}
       />

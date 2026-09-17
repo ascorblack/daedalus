@@ -5,7 +5,7 @@ import { OverflowMenu, Sheet } from "../dialogs";
 import { absTime, relTime } from "../format";
 import { Icon } from "../icons";
 import { navigate, pathFor } from "../router";
-import { PageHeader } from "../shell";
+import { PageHeader, screenTitle } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { confirmAsync, errorText } from "../ui";
 import { useSessionTitles } from "./Sessions";
@@ -114,7 +114,7 @@ export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) =>
   return (
     <>
       <PageHeader
-        title="Board"
+        title={screenTitle("board")}
         subtitle={tasks ? `${openCount} open${finished.length && showDone ? ` · ${finished.length} finished` : ""}` : undefined}
         actions={<button className="iconbtn primary" onClick={() => setCreating(true)} title="New task" aria-label="New task"><Icon name="plus" /></button>}
       >

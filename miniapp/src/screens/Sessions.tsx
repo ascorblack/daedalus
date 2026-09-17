@@ -6,7 +6,7 @@ import { relTime, shortModel, untilShort } from "../format";
 import { Icon } from "../icons";
 import { FilePreview, PreviewSource, workspaceBase } from "../preview";
 import { useProjects } from "../projects";
-import { PageHeader } from "../shell";
+import { PageHeader, screenTitle } from "../shell";
 import { useQuery } from "../store";
 import { confirmAsync, errorText, fmtBytes } from "../ui";
 import { Files } from "./Session";
@@ -98,7 +98,7 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
   return (
     <>
       <PageHeader
-        title={inProject ? inProject.name : "Agents"}
+        title={inProject ? inProject.name : screenTitle("agents")}
         subtitle={sessions ? `${top.length} agent${top.length === 1 ? "" : "s"}${activeCount ? ` · ${activeCount} active` : ""}${inProject ? ` · ${inProject.root}` : ""}` : undefined}
         actions={
           <>

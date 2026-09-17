@@ -3,7 +3,7 @@ import { ServiceView } from "../api";
 import { ServiceRow, Skeleton } from "../components";
 import { Sheet } from "../dialogs";
 import { relTime } from "../format";
-import { PageHeader } from "../shell";
+import { PageHeader, screenTitle } from "../shell";
 import { invalidate, useQuery } from "../store";
 
 type Row = ServiceView & { session_id: string; session_title: string };
@@ -25,7 +25,7 @@ export function ServicesScreen({ onOpen, toast }: { onOpen: (id: string) => void
   for (const r of shown) groups.set(r.session_id, [...(groups.get(r.session_id) ?? []), r]);
   return (
     <>
-      <PageHeader title="Services" subtitle={rows ? `${running.length} running${stopped.length ? ` · ${stopped.length} stopped` : ""}` : undefined}>
+      <PageHeader title={screenTitle("services")} subtitle={rows ? `${running.length} running${stopped.length ? ` · ${stopped.length} stopped` : ""}` : undefined}>
         {stopped.length > 0 && (
           <div className="chips">
             <button className="chip select" aria-pressed={!showStopped} onClick={() => setShowStopped(false)}>Running · {running.length}</button>

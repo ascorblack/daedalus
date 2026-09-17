@@ -4,7 +4,7 @@ import { Pill, Skeleton } from "../components";
 import { Sheet } from "../dialogs";
 import { absTime, relTime } from "../format";
 import { navigate, pathFor } from "../router";
-import { PageHeader } from "../shell";
+import { PageHeader, screenTitle } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { errorText } from "../ui";
 
@@ -22,7 +22,7 @@ export function ProposalsScreen({ toast, selected }: { toast: (t: string) => voi
   };
   return (
     <>
-      <PageHeader title="Changes" subtitle={items ? (pending.length ? `${pending.length} waiting for you` : `${items.length} proposal${items.length === 1 ? "" : "s"}`) : undefined}>
+      <PageHeader title={screenTitle("changes")} subtitle={items ? (pending.length ? `${pending.length} waiting for you` : `${items.length} proposal${items.length === 1 ? "" : "s"}`) : undefined}>
         <div className="chips">
           <button className="chip select" aria-pressed={filter === "all"} onClick={() => setFilter("all")}>All</button>
           <button className="chip select" aria-pressed={filter === "pending"} onClick={() => setFilter("pending")}>Pending{pending.length ? ` · ${pending.length}` : ""}</button>
