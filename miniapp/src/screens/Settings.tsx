@@ -8,6 +8,7 @@ import { confirmAsync, errorText, numInput } from "../ui";
 import * as passkeys from "../passkeys";
 import { timeAgo } from "../components";
 import { SpeechModels } from "./Speech";
+import { TtsVoices } from "./Voices";
 import { VoiceSettings } from "./Voice";
 import { AddModel } from "./AddModel";
 import { Sheet } from "../dialogs";
@@ -1100,6 +1101,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
           <>
             <VoiceSettings />
             <SpeechModels toast={toast} />
+            <TtsVoices toast={toast} />
           </>
         );
       case "chat":

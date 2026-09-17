@@ -190,6 +190,7 @@ class LocalTts:
             "language": voice.language if voice else "",
             "speaker": self.speaker(),
             "speed": self.speed(),
+            "threads": self.settings.local_threads,
             "installed": installed,
             "active": installed and engine,
             "engine_installed": engine,
