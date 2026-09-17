@@ -254,10 +254,95 @@ export type Speaker = {
   say: (text: string) => void;
   /** Barge-in: drop what is queued and stop what is playing. */
   cancel: () => void;
-  /** iOS Safari plays nothing that a tap did not start: call this from the first tap. */
+  /** A browser that plays nothing a tap did not start: call this from a tap. */
   unlock: () => void;
   stop: () => void;
 };
+
+/**
+ * How the page knows a sentence is being said, when nothing tells it.
+ *
+ * The browser's own synthesiser is a queue with no clock on it. `speak()` returns nothing and may
+ * decide, for reasons the page cannot see, to say nothing at all: the voices have not finished
+ * loading, the tab is in the background, the engine wants a tap it has not had, or the queue is
+ * holding an utterance from before that will never end. There is no error in any of those cases —
+ * `onend` simply never arrives, and a queue that waits for it waits for good. This is what happened
+ * here: an answer was heard, the one after it was not, and the page sat in "speaking" with the
+ * microphone deafened until it was reloaded.
+ *
+ * So nothing on this page waits on a synthesiser's word any more. Every utterance is given a budget
+ * made of these, and an utterance that outlives its budget is abandoned, the sentence is shown as
+ * written rather than spoken, and the queue moves on. Late is not better than never here — a sentence
+ * read out thirty seconds after the question is worse than one the operator simply reads.
+ */
+/** An unhurried reading pace, deliberately slower than any engine's, so a budget never cuts speech off. */
+export const SPEECH_CHARS_PER_SECOND = 11;
+/** How long `speak()` has to produce a sound before the page decides nothing is coming. */
+export const SPEECH_START_MS = 1800;
+/** Slack over the estimate, for an engine that pauses for breath or reads a number out in full. */
+export const SPEECH_MARGIN_MS = 5000;
+/** How long the first sentence waits for `getVoices()` to fill; past it, the engine's default voice reads. */
+export const VOICES_WAIT_MS = 1500;
+/** Chromium stops a synthesiser it thinks has run too long; a periodic `resume()` is the cure. */
+export const RESUME_PULSE_MS = 10000;
+/** How long a clip may play without its position moving before it counts as stalled rather than slow. */
+export const CLIP_STALL_MS = 6000;
+
+/** How long one utterance is allowed to take, from the moment it is handed over to the last word. */
+export function speechBudgetMs(text: string): number {
+  return SPEECH_START_MS + (text.length / SPEECH_CHARS_PER_SECOND) * 1000 + SPEECH_MARGIN_MS;
+}
+
+/** The little of `window.speechSynthesis` this page uses, so a test can supply one that misbehaves. */
+export type Synthesiser = {
+  getVoices: () => SpeechSynthesisVoice[];
+  speak: (utterance: SpeechSynthesisUtterance) => void;
+  cancel: () => void;
+  resume: () => void;
+  speaking?: boolean;
+  pending?: boolean;
+  paused?: boolean;
+  addEventListener?: (name: string, fn: () => void) => void;
+  removeEventListener?: (name: string, fn: () => void) => void;
+  onvoiceschanged?: (() => void) | null;
+};
+
+/**
+ * The voices, once there are any, or nothing after the wait.
+ *
+ * `getVoices()` is empty on the first call in every Chromium and in a fresh WKWebView: the list is
+ * filled asynchronously and announced with `voiceschanged`. A page that reads it once at the first
+ * sentence picks no voice for the whole conversation, and on the engines that treat a null voice as
+ * "not ready" says nothing at all. Waiting is cheap and happens once; waiting forever is not an
+ * option, because an engine with no voices to report never fires the event either.
+ */
+export function whenVoicesReady(synth: Synthesiser, waitMs: number): Promise<SpeechSynthesisVoice[]> {
+  const have = synth.getVoices();
+  if (have.length) return Promise.resolve(have);
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      synth.removeEventListener?.("voiceschanged", changed);
+      if (synth.onvoiceschanged === changed) synth.onvoiceschanged = null;
+      resolve(synth.getVoices());
+    };
+    const changed = () => {
+      if (synth.getVoices().length) done();
+    };
+    const timer = setTimeout(done, waitMs);
+    if (synth.addEventListener) synth.addEventListener("voiceschanged", changed);
+    else synth.onvoiceschanged = changed;
+  });
+}
+
+/** The voice to read a language in: the first one that speaks it, or none and the engine's default. */
+export function voiceFor(voices: SpeechSynthesisVoice[], lang: string): SpeechSynthesisVoice | undefined {
+  const want = lang.slice(0, 2).toLowerCase();
+  return voices.find((v) => v.lang.toLowerCase().startsWith(want));
+}
 
 /**
  * How loud the answer is while it is being spoken, for the orb to ripple with.
@@ -347,7 +432,16 @@ function joined(head: Uint8Array<ArrayBuffer>, tail: Uint8Array): Uint8Array<Arr
  * Cancelling drops the lot: the queue, the clips already fetched, the clip playing, and the request in
  * flight — which is aborted rather than read to the end, so the server stops synthesising too.
  */
-export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking: (on: boolean) => void; onLevel?: (level: number) => void }): Speaker {
+export function createSpeaker(opts: {
+  server: boolean;
+  lang: string;
+  onSpeaking: (on: boolean) => void;
+  onLevel?: (level: number) => void;
+  /** A sentence the speaker gave up on. The page shows it as written rather than pretending it was said. */
+  onUnspoken?: (text: string) => void;
+  /** Whether the browser is refusing to make a sound until it is tapped. The page offers the tap. */
+  onBlocked?: (blocked: boolean) => void;
+}): Speaker {
   const audio = new Audio();
   audio.preload = "auto";
   let generation = 0;
@@ -357,44 +451,155 @@ export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking:
   /** Ends whatever `play` is waiting on, so cancelling never leaves the pump hanging on a clip. */
   let release: (() => void) | null = null;
   const level = createSpeechLevel(audio, opts);
+  const synth = (): Synthesiser | null => {
+    try {
+      return (window.speechSynthesis as unknown as Synthesiser) ?? null;
+    } catch {
+      return null;
+    }
+  };
 
-  /** Play one clip and resolve when it has finished, failed, or been cancelled. Always revokes. */
+  /**
+   * Play one clip and resolve when it has finished, failed, been cancelled — or stalled.
+   *
+   * The stall is the point. A media element that never fires `ended` is the same bug as a
+   * synthesiser that never fires `onend`, and it happens for the same kinds of reason: a decode that
+   * went wrong, a tab the browser stopped giving time to, a `play()` the page was not allowed to
+   * make. Progress is what is watched rather than the clock alone — a clip that is playing keeps
+   * moving `currentTime`, and one that has stopped moving for `CLIP_STALL_MS` is not playing however
+   * long it claims to be.
+   */
   const play = (url: string, mine: number) =>
     new Promise<void>((resolve) => {
       if (mine !== generation) {
         URL.revokeObjectURL(url);
         return resolve();
       }
-      const finish = () => {
+      let done = false;
+      let moved = Date.now();
+      let guard = 0;
+      const finish = (spoken: boolean) => {
+        if (done) return;
+        done = true;
+        clearInterval(guard);
         release = null;
         audio.onended = null;
         audio.onerror = null;
+        audio.onplaying = null;
+        audio.ontimeupdate = null;
         URL.revokeObjectURL(url);
+        if (!spoken) audio.pause();
         resolve();
       };
-      release = finish;
-      audio.onended = finish;
-      audio.onerror = finish;
+      release = () => finish(true);
+      audio.onended = () => finish(true);
+      audio.onerror = () => finish(false);
+      audio.onplaying = () => {
+        moved = Date.now();
+        opts.onBlocked?.(false);
+      };
+      audio.ontimeupdate = () => {
+        moved = Date.now();
+      };
+      guard = setInterval(() => {
+        if (Date.now() - moved < CLIP_STALL_MS) return;
+        finish(false);
+      }, CLIP_STALL_MS / 2) as unknown as number;
       audio.src = url;
-      void audio.play().catch(finish);
+      void audio.play().catch(() => {
+        // Refused rather than broken: a browser that wants a tap first says so here and nowhere else.
+        opts.onBlocked?.(true);
+        finish(false);
+      });
     });
 
-  /** The browser's own synthesiser, which takes the text and gives nothing back but an end event. */
-  const speakHere = (text: string, mine: number) =>
-    new Promise<void>((resolve) => {
+  /**
+   * The browser's own synthesiser, which takes the text and promises nothing.
+   *
+   * Everything here is a defence against one of its ways of going quiet. The voices are waited for
+   * once, because an utterance handed over before they load is the one that is never spoken. A queue
+   * left paused or holding an abandoned utterance is cleared before anything is put into it, because
+   * otherwise it swallows every sentence after it. `resume()` is pulsed while it speaks, because
+   * Chromium stops a synthesiser it decides has gone on too long and reports nothing. And the whole
+   * utterance is under a budget: if no sound starts, or the end never comes, it is abandoned and the
+   * sentence is marked as one the operator will have to read.
+   */
+  const speakHere = async (text: string, mine: number) => {
+    const engine = synth();
+    if (!engine) {
+      opts.onUnspoken?.(text);
+      return;
+    }
+    const voices = await whenVoicesReady(engine, VOICES_WAIT_MS);
+    if (mine !== generation) return;
+    try {
+      if (engine.paused) engine.resume();
+      if (engine.speaking || engine.pending) engine.cancel();
+    } catch {
+      /* an engine that will not be asked about itself is still worth speaking to */
+    }
+    await new Promise<void>((resolve) => {
       const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = opts.lang;
-      const match = window.speechSynthesis.getVoices().find((v) => v.lang.toLowerCase().startsWith(opts.lang.slice(0, 2).toLowerCase()));
-      if (match) utterance.voice = match;
-      const finish = () => {
+      let started = false;
+      let done = false;
+      let guard = 0;
+      let pulse = 0;
+      const finish = (spoken: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(guard);
+        clearInterval(pulse);
         release = null;
+        if (!spoken) {
+          try {
+            engine.cancel(); // the utterance is abandoned, and a queue still holding it is the next bug
+          } catch {
+            /* nothing to cancel */
+          }
+          opts.onUnspoken?.(text);
+        }
         resolve();
       };
-      release = finish;
-      utterance.onend = finish;
-      utterance.onerror = finish;
-      window.speechSynthesis.speak(utterance);
+      release = () => finish(true);
+      utterance.onstart = () => {
+        started = true;
+        opts.onBlocked?.(false);
+        clearTimeout(guard);
+        guard = setTimeout(() => finish(false), speechBudgetMs(text)) as unknown as number;
+      };
+      utterance.onend = () => finish(true);
+      utterance.onerror = () => {
+        if (!started) opts.onBlocked?.(true);
+        finish(started);
+      };
+      // Before a word is heard the only budget that applies is "did anything start at all", and a
+      // browser waiting for a tap fails exactly that one.
+      guard = setTimeout(() => {
+        if (!started) opts.onBlocked?.(true);
+        finish(false);
+      }, SPEECH_START_MS) as unknown as number;
+      pulse = setInterval(() => {
+        try {
+          engine.resume();
+        } catch {
+          /* an engine with no resume needs none */
+        }
+      }, RESUME_PULSE_MS) as unknown as number;
+      // Everything that touches the engine is in here, because every part of it throws somewhere:
+      // assigning a voice the engine does not recognise, and `speak` itself on an engine that has
+      // decided it cannot synthesise. A throw at this point used to take the whole queue with it —
+      // the promise never settled, or settled by rejecting into a pump that then abandoned the rest
+      // of the answer without a word. It is one more way for a sentence to go unspoken, no more.
+      try {
+        utterance.lang = opts.lang;
+        const match = voiceFor(voices, opts.lang);
+        if (match) utterance.voice = match;
+        engine.speak(utterance);
+      } catch {
+        finish(false);
+      }
     });
+  };
 
   /** One piece of text from the server: either a sequence of sentences, or one whole file. */
   const speakThere = async (text: string, mine: number) => {
@@ -497,7 +702,7 @@ export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking:
     inflight?.abort();
     inflight = null;
     try {
-      window.speechSynthesis.cancel();
+      synth()?.cancel();
     } catch {
       /* no synthesiser */
     }
@@ -535,8 +740,21 @@ export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking:
         .catch(() => {
           audio.muted = false;
         });
+      // And the synthesiser is a second engine with a gesture rule of its own, which reading the
+      // voice list does not satisfy. What does is speaking inside the tap — so a silent utterance
+      // goes through here, and the queue is cleared first in case one from before the tap is still
+      // sitting in it, unspoken and blocking everything behind it.
       try {
-        window.speechSynthesis.getVoices();
+        const engine = synth();
+        if (!engine) return;
+        engine.cancel();
+        engine.resume();
+        void whenVoicesReady(engine, VOICES_WAIT_MS);
+        const primer = new SpeechSynthesisUtterance(" ");
+        primer.volume = 0;
+        primer.lang = opts.lang;
+        engine.speak(primer);
+        opts.onBlocked?.(false);
       } catch {
         /* no synthesiser */
       }
@@ -671,6 +889,10 @@ export type VoiceUi = {
   spoken: string[];
   /** The answer as it is being written, for the part that has not become a sentence yet. */
   partial: string;
+  /** The sentences of this answer the speaker gave up on, so the page can mark them as read, not heard. */
+  unspoken: string[];
+  /** Whether the browser is refusing to make a sound until it is tapped. */
+  blocked: boolean;
   problem: string;
   agents: AgentNews[];
   engine: EngineState;
@@ -686,6 +908,8 @@ export type VoiceEvent =
   | { type: "done" }
   | { type: "agents"; agents: AgentNews[] }
   | { type: "speaking"; on: boolean }
+  | { type: "unspoken"; text: string }
+  | { type: "blocked"; on: boolean }
   | { type: "barge" }
   | { type: "engine"; engine: Partial<EngineState> }
   | { type: "problem"; message: string }
@@ -699,6 +923,8 @@ export const IDLE_VOICE: VoiceUi = {
   heard: "",
   spoken: [],
   partial: "",
+  unspoken: [],
+  blocked: false,
   problem: "",
   agents: [],
   engine: { state: "ready", model: "", loadedInMs: 0, error: "" },
@@ -735,7 +961,7 @@ export function voiceReducer(state: VoiceUi, event: VoiceEvent): VoiceUi {
     case "asked":
       // A new utterance clears the last answer rather than appending to it: the captions are a
       // conversation, and the previous reply is on its way off the screen the moment this one starts.
-      return { ...state, asked: event.text, heard: "", spoken: [], partial: "", problem: "", phase: "thinking" };
+      return { ...state, asked: event.text, heard: "", spoken: [], partial: "", unspoken: [], problem: "", phase: "thinking" };
     case "partial":
       return { ...state, partial: event.text };
     case "say": {
@@ -759,6 +985,23 @@ export function voiceReducer(state: VoiceUi, event: VoiceEvent): VoiceUi {
     case "speaking":
       if (event.on) return { ...state, phase: "speaking" };
       return state.phase === "speaking" ? { ...state, phase: resting(state) } : state;
+    case "unspoken": {
+      // A sentence the speaker abandoned. It stays on the screen where it was — it is part of the
+      // answer — and it is marked, because "you were told this out loud" and "this is on the screen
+      // and nobody said it" are different things to the person who is not looking at the screen.
+      const line = event.text.trim();
+      if (!line || state.unspoken.includes(line)) return state;
+      const unspoken = [...state.unspoken, line];
+      // And where not one sentence of this answer was read out, the page is not speaking, whatever
+      // the speaker's queue believes. "Speaking" with nothing audible is the state the operator
+      // reported: the chip said the answer was being read out, and the page was silent.
+      const silent = state.phase === "speaking" && state.spoken.every((said) => unspoken.includes(said));
+      return { ...state, unspoken, phase: silent ? resting(state) : state.phase };
+    }
+    case "blocked":
+      // Losing the block is not news worth a render when there was none: the speaker says so at the
+      // start of every sentence it manages to say.
+      return state.blocked === event.on ? state : { ...state, blocked: event.on };
     case "barge":
       // The operator talked over the answer. What was being read out is abandoned where it stopped —
       // the sentences already said stay on the screen, because they were said — and the page goes
@@ -774,7 +1017,7 @@ export function voiceReducer(state: VoiceUi, event: VoiceEvent): VoiceUi {
     case "problem":
       return { ...state, problem: event.message, phase: resting(state) };
     case "cleared":
-      return { ...IDLE_VOICE, micOn: state.micOn, engine: state.engine, phase: resting(state) };
+      return { ...IDLE_VOICE, micOn: state.micOn, engine: state.engine, blocked: state.blocked, phase: resting(state) };
   }
 }
 

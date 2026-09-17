@@ -77,6 +77,88 @@ def check_streamed(browser, check) -> None:  # type: ignore[no-untyped-def]
     context.close()
 
 
+# A synthesiser that behaves, and says when it was spoken to. The browser's own is not used here:
+# what is being measured is the page's own path from a frame on the wire to a word handed over, and a
+# real engine would add its own start-up to it and answer differently on every machine.
+FAKE_SYNTH = """
+window.__spoke = [];
+window.__streamAt = 0;
+window.__shownAt = 0;
+const fetched = window.fetch;
+window.fetch = function (input, init) {
+  const url = String(typeof input === "string" ? input : input.url || "");
+  return fetched.apply(this, arguments).then((response) => {
+    // The canned stream is a finite body, so the page reconnects; the first one is the one timed.
+    if (url.includes("/api/voice/stream") && !window.__streamAt) window.__streamAt = performance.now();
+    return response;
+  });
+};
+Object.defineProperty(window, "speechSynthesis", { configurable: true, value: {
+    // A loaded list with nothing for this language in it: the engine's default reads the sentence,
+  // which is the ordinary case and the one whose timing is worth measuring.
+  getVoices: () => [{ lang: "xx-XX", name: "Nobody" }],
+  speak: (u) => {
+    if (!u.text.trim()) return;
+    window.__spoke.push({ text: u.text, at: performance.now() });
+    setTimeout(() => { u.onstart && u.onstart(); setTimeout(() => u.onend && u.onend(), 5); }, 1);
+  },
+  cancel: () => undefined,
+  resume: () => undefined,
+  speaking: false,
+  pending: false,
+  paused: false,
+  addEventListener: () => undefined,
+  removeEventListener: () => undefined,
+} });
+document.addEventListener("readystatechange", function watch() {
+  if (!document.documentElement) return;
+  document.removeEventListener("readystatechange", watch);
+  new MutationObserver(() => {
+    if (!window.__shownAt && document.querySelector(".voice-said .voice-sentence")) window.__shownAt = performance.now();
+  }).observe(document.documentElement, { childList: true, subtree: true });
+});
+"""
+
+SPOKEN_NOW = shots.sse(("say", {"text": "All eleven invoices went out this morning."}))
+
+
+def check_prompt(browser, check) -> None:  # type: ignore[no-untyped-def]
+    """A sentence off the wire is on the screen and in the synthesiser, both within a breath.
+
+    The complaint this answers is that the first answers of a conversation were spoken late or not at
+    all. The server writes a sentence the moment it has one; what is timed here is everything after
+    that — the stream reader, the reducer, the render, and the speaker's own queue — because that is
+    where the delay was.
+    """
+
+    def stub(route) -> None:  # type: ignore[no-untyped-def]
+        rel = route.request.url.split("?", 1)[0]
+        rel = rel[rel.index("/api/") :]
+        if rel == "/api/voice":
+            # The browser's own synthesiser, which is what the operator is on: no endpoint, no
+            # downloaded voice, and therefore the path with no audio element in it at all.
+            body = json.loads(json.dumps(shots.VOICE))
+            body["tts"] = {"configured": False, "reason": "", "kind": "browser", "state": "ready"}
+            return shots.respond(route, body)
+        return shots.stub(route)
+
+    context = browser.new_context(viewport={"width": 1440, "height": 900}, color_scheme="dark", permissions=["microphone"])
+    context.add_init_script(FAKE_SYNTH)
+    page = context.new_page()
+    page.route("**/api/**", stub)
+    shots.stub.voice_frames = SPOKEN_NOW  # type: ignore[attr-defined]
+    page.goto(f"{BASE}/voice?token=t&scheme=dark&lang=en")
+    page.wait_for_function("window.__spoke.length > 0", timeout=15000)
+    timings = page.evaluate("({ stream: window.__streamAt, shown: window.__shownAt, spoke: window.__spoke })")
+    shown = timings["shown"] - timings["stream"]
+    spoke = timings["spoke"][0]["at"] - timings["stream"]
+    check(timings["spoke"][0]["text"].startswith("All eleven invoices"), "the sentence the server wrote is the sentence handed to the synthesiser")
+    check(shown < 200, f"the sentence is on the screen within 200ms of the stream ({shown:.0f}ms)")
+    check(spoke < 300, f"the sentence is handed to the synthesiser within 300ms of the stream ({spoke:.0f}ms)")
+    shots.stub.voice_frames = ""  # type: ignore[attr-defined]
+    context.close()
+
+
 def main() -> int:
     seen: list[str] = []
     talking = {"on": False}
@@ -105,6 +187,7 @@ def main() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch(executable_path=shots.CHROMIUM, args=shots.FAKE_MEDIA)
         check_streamed(browser, check)
+        check_prompt(browser, check)
         context = browser.new_context(viewport={"width": 1440, "height": 900}, color_scheme="dark", permissions=["microphone"])
         page = context.new_page()
         page.route("**/api/**", stub)

@@ -261,7 +261,7 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
       if (event === "partial") dispatch({ type: "partial", text: String(p.text ?? "") });
       else if (event === "say") {
         dispatch({ type: "say", text: String(p.text ?? "") });
-        speaker.current?.say(String(p.text ?? ""));
+        speak(String(p.text ?? ""));
       } else if (event === "agents") dispatch({ type: "agents", agents: (p.agents ?? []) as Agent[] });
       else if (event === "error") dispatch({ type: "problem", message: String(p.message ?? "the concierge stopped") });
       else if (event === "done") dispatch({ type: "done" });
@@ -314,13 +314,29 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
   }, [state?.stt?.kind]);
 
   // ── speaking ─────────────────────────────────────────────────────────────────────────────
+  //
+  // The speaker is rebuilt when the page learns which of the three speaks, and that reading arrives
+  // after the stream is already open: a sentence that lands in the gap used to be handed to a null
+  // and dropped without a trace, which is one of the ways the first answer of a conversation was
+  // never heard. It waits here instead, and is spoken by whichever speaker is built next.
+  const waiting = useRef<string[]>([]);
+  const speak = useCallback((text: string) => {
+    if (!text.trim()) return;
+    if (speaker.current) speaker.current.say(text);
+    else waiting.current.push(text);
+  }, []);
+  const onUnspoken = useCallback((text: string) => dispatch({ type: "unspoken", text }), []);
+  const onBlocked = useCallback((on: boolean) => dispatch({ type: "blocked", on }), []);
   useEffect(() => {
-    speaker.current = createSpeaker({ server: serverTts, lang, onSpeaking, onLevel });
+    speaker.current = createSpeaker({ server: serverTts, lang, onSpeaking, onLevel, onUnspoken, onBlocked });
+    const held = waiting.current;
+    waiting.current = [];
+    for (const text of held) speaker.current.say(text);
     return () => {
       speaker.current?.stop();
       speaker.current = null;
     };
-  }, [serverTts, lang, onSpeaking, onLevel]);
+  }, [serverTts, lang, onSpeaking, onLevel, onUnspoken, onBlocked]);
 
   // ── what the operator says ───────────────────────────────────────────────────────────────
   const send = useCallback(async (text: string) => {
@@ -349,7 +365,13 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
   /** Somebody started talking. `shouldBargeIn` decides whose voice that is; this acts on the answer. */
   const onSpeechStart = useCallback(
     (level?: number) => {
-      if (!shouldBargeIn({ speaking: speakingRef.current, playingForMs: Date.now() - speakingSince.current, level })) return;
+      // The browser's own recognition reports that somebody started talking and never says how
+      // loudly, and a listener with no measurement at all is believed — that is its own voice
+      // activity detector talking. But on that path the page *does* measure, through the meter it
+      // opened for the orb, and not using that reading meant the page's own speaker barging in on
+      // itself four hundred milliseconds into every answer.
+      const heard = level ?? (meter.current ? rawLevel.current : undefined);
+      if (!shouldBargeIn({ speaking: speakingRef.current, playingForMs: Date.now() - speakingSince.current, level: heard })) return;
       haptic("light");
       bargeIn();
     },
@@ -509,8 +531,9 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
               {ui.heard && <p className="voice-heard">{ui.heard}</p>}
               <div className="voice-said">
                 {ui.spoken.map((sentence, i) => (
-                  <span className="voice-sentence" key={`${i}-${sentence.slice(0, 12)}`}>
-                    {sentence}{" "}
+                  <span className={`voice-sentence${ui.unspoken.includes(sentence) ? " unspoken" : ""}`} key={`${i}-${sentence.slice(0, 12)}`}>
+                    {sentence}
+                    {ui.unspoken.includes(sentence) && <i className="voice-unspoken">{t("voice.unspoken")}</i>}{" "}
                   </span>
                 ))}
                 {!ui.spoken.length && ui.partial && <span className="voice-sentence writing">{ui.partial}</span>}
@@ -518,6 +541,25 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
               </div>
               {ui.problem && <p className="voice-problem">{ui.problem}</p>}
             </div>
+
+            {/* There is no asking a browser whether it will make a sound; it is found out by handing
+                it a sentence and hearing nothing start. When that happens the page says so and offers
+                the one thing that fixes it, which is a tap — the same tap the microphone needs. */}
+            {ui.blocked && (
+              <div className="voice-blocked">
+                <span>{t("voice.sound.blocked")}</span>
+                <button
+                  className="btn small"
+                  onClick={() => {
+                    speaker.current?.unlock();
+                    dispatch({ type: "blocked", on: false });
+                    haptic("light");
+                  }}
+                >
+                  {t("voice.sound.enable")}
+                </button>
+              </div>
+            )}
 
             <form
               className="voice-compose"
