@@ -3,7 +3,7 @@ import type { ReactElement, ReactNode } from "react";
 import { api, AsrStatus, LoopView, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
 import { Dot, ServiceRow, Status, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, statusWord, timeAgo } from "../components";
 import { OverflowMenu, Sheet, confirmDialog, Overlay } from "../dialogs";
-import { absDate, clock, commandPreview, plainPreview, shortDateTime, untilShort } from "../format";
+import { absDate, clock, commandPreview, duration, plainPreview, shortDateTime, untilShort } from "../format";
 import { EVIDENCE_EVENT, EvidenceRequest, codeBlock, renderCached, renderMarkdown } from "../md";
 import { confirmAsync, enterSends, errorText, fmtBytes, fmtTok, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
@@ -900,7 +900,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       {info && detail && (
         <Sheet title={t("session.info")} onClose={() => setInfo(null)} className="session-info">
               <section className="sheet-section" id="info-session">
-              <div className="sheet-section-title">{t("nav.agents")}</div>
+              <div className="sheet-section-title">{t("session.card")}</div>
               <label className="field">{t("session.title")}</label>
               <input className="field" defaultValue={detail.title} onBlur={(e) => rename(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
               <label className="field">{t("session.model")}</label>
@@ -1173,7 +1173,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
         {detail && asideOpen && (
           <aside className="session-aside wide-only">
             <div className="aside-card">
-              <div className="aside-title">{t("nav.agents")}</div>
+              <div className="aside-title">{t("session.card")}</div>
               <div className="aside-row"><Icon name="model" size={16} /><span className="grow" title={detail.model}>{shortModel(detail.model, 30)}</span></div>
               {detail.context && detail.context.window > 0 && (
                 <div className="aside-row" title={t("session.aside.ctx.title", { used: fmtInt(detail.context.tokens), window: fmtInt(detail.context.window), n: detail.context.messages })}>
@@ -1471,7 +1471,8 @@ function resetIn(at: number | string | null | undefined): string {
   const d = typeof at === "number" ? new Date(at * 1000) : new Date(at);
   if (Number.isNaN(d.getTime())) return "";
   const mins = Math.max(0, Math.round((d.getTime() - Date.now()) / 60000));
-  return mins < 60 ? `${mins}m` : mins < 48 * 60 ? `${Math.round(mins / 60)}h` : `${Math.round(mins / 1440)}d`;
+  if (mins < 60) return t("fmt.min", { n: mins });
+  return mins < 48 * 60 ? t("fmt.hour", { n: Math.round(mins / 60) }) : t("fmt.day", { n: Math.round(mins / 1440) });
 }
 
 /** What the session's provider has left: a subscription's windows, or the day's metered spend and balance. */
@@ -1658,14 +1659,6 @@ function useDisclosed(key: string, initial: boolean): [boolean, (next: boolean |
   return [open, write];
 }
 
-function fmtDuration(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m${s % 60 ? ` ${s % 60}s` : ""}`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
-}
-
 function stepCount(items: Activity[]): number {
   return items.filter((a) => a.kind === "tool").length;
 }
@@ -1719,7 +1712,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
             <i />
             <i />
           </span>
-          {t(live ? (turn.pendingTools > 0 ? "session.working.for" : "session.thinking.for") : "session.worked", { t: fmtDuration(elapsed) })}
+          {t(live ? (turn.pendingTools > 0 ? "session.working.for" : "session.thinking.for") : "session.worked", { t: duration(elapsed) })}
           {steps > 0 && <span className="steps">{plural("session.steps", steps)}</span>}
           <span className={`chev ${open ? "down" : ""}`}>›</span>
         </button>
@@ -1776,7 +1769,7 @@ function LiveBar({ status, base, live, workspace, atBottom, onJump }: { status: 
     <button className={`livebar ${status}`} onClick={onJump} role="status" aria-live="polite" title={t("session.jump.step")}>
       <Dot status={status} />
       <b>{statusWord(status === "waiting" ? "waiting" : "running")}</b>
-      <span className="num">{fmtDuration(Date.now() - turn.startedAt)}</span>
+      <span className="num">{duration(Date.now() - turn.startedAt)}</span>
       {steps > 0 && <span>{t("session.livebar.step", { n: steps })}</span>}
       {step && <span className="truncate">· {step}</span>}
       {!atBottom && <Icon name="down" size={16} />}
@@ -2171,7 +2164,7 @@ function CompactionBar({ c }: { c: Compacting }) {
     <div className="livebar compacting" role="status" aria-live="polite">
       <Dot status="compacting" />
       <b>{t("session.compacting.bar")}</b>
-      <span className="num">{fmtDuration(Date.now() - new Date(c.started_at).getTime())}</span>
+      <span className="num">{duration(Date.now() - new Date(c.started_at).getTime())}</span>
       <span>{t("session.compacting.messages", { n: c.messages, what })}</span>
       <div className="bar" aria-hidden><i style={{ ["--v" as string]: pct }} /></div>
     </div>

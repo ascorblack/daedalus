@@ -1037,6 +1037,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   // ── the conversation ───────────────────────────────────────────────────────────────────
   "session.drop": { en: "Drop files to attach", ru: "Отпустите файлы, чтобы приложить" },
   "session.closepane": { en: "Close this pane", ru: "Закрыть панель" },
+  "session.card": { en: "Session", ru: "Сессия" },
   "session.info": { en: "Session info", ru: "О сессии" },
   "session.model.for": { en: "Model for this session", ru: "Модель этой сессии" },
   "session.ctx": { en: "ctx {n}%", ru: "контекст {n}%" },
