@@ -67,6 +67,11 @@ class SessionServices:
         elsewhere are all the same refusal. Every file tool, the file browser, the preview, the
         download and SendFile reach the filesystem through here, which is the reason the refusal
         lives at this one point rather than in each of them.
+
+        What comes back inside a project is the real path, not the one that was asked for: the check
+        judges the real path and the caller then opens what it was handed, so returning the candidate
+        left a window in which a name inside the root could be turned into a link out of it between
+        the two. Handing back what was judged closes it.
         """
         if not path or path == ".":
             return self.workspace_dir
@@ -79,7 +84,7 @@ class SessionServices:
             raise PathOutsideProject(
                 f"{candidate} is outside this project. This session works in {self.project_root} and everything it reads or writes stays there."
             )
-        return candidate
+        return Path(os.path.realpath(candidate))
 
     def contains(self, path: Path) -> bool:
         """Whether ``path`` is inside the project root, or inside a path the host opened for this session.
