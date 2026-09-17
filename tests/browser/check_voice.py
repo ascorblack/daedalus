@@ -1,4 +1,4 @@
-"""Barge-in: the operator talks while the answer is being read out, and the answer stops.
+"""The voice page's two halves that only a browser can show: a streamed answer, and barge-in.
 
 What decides whose voice it is lives in `shouldBargeIn` and is covered by the unit tests. What cannot
 be checked without a browser is that the callback is wired to a listener at all, that the listener is
@@ -9,7 +9,7 @@ the middle of it.
 
     cd miniapp && npm run build
     python3 tests/browser/serve_app.py 8163 /tmp/app-root &
-    APP_URL=http://127.0.0.1:8163/app python3 tests/browser/check_voice_bargein.py
+    APP_URL=http://127.0.0.1:8163/app python3 tests/browser/check_voice.py
 
 Exit status is the number of checks that failed.
 """
@@ -35,6 +35,48 @@ SPEAKING = shots.sse(
     ("say", {"text": "Two came back with the wrong VAT line, and I have put both on the board."}),
     ("say", {"text": "Shall I have someone redo them now?"}),
 )
+
+
+def sequence(*clips: bytes) -> bytes:
+    """A local voice's answer on the wire: four bytes of length, then one playable clip, per sentence."""
+    return b"".join(len(clip).to_bytes(4, "big") + clip for clip in clips)
+
+
+PLAYED = """
+window.__played = [];
+const play = HTMLMediaElement.prototype.play;
+HTMLMediaElement.prototype.play = function () { if (this.src) window.__played.push(this.src); return play.apply(this); };
+"""
+
+
+def check_streamed(browser, check) -> None:  # type: ignore[no-untyped-def]
+    """Three sentences arrive as three clips, and the page plays all three in order."""
+    clips = sequence(shots.wav(0.4), shots.wav(0.4), shots.wav(0.4))
+
+    def stub(route) -> None:  # type: ignore[no-untyped-def]
+        rel = route.request.url.split("?", 1)[0]
+        rel = rel[rel.index("/api/") :]
+        if rel == "/api/voice/tts":
+            return route.fulfill(
+                status=200,
+                body=clips,
+                headers={"content-type": "application/x-speech-sequence", "x-speech-media-type": "audio/wav"},
+            )
+        return shots.stub(route)
+
+    context = browser.new_context(viewport={"width": 1440, "height": 900}, color_scheme="dark", permissions=["microphone"])
+    context.add_init_script(PLAYED)
+    page = context.new_page()
+    page.route("**/api/**", stub)
+    shots.stub.voice_frames = SPEAKING  # type: ignore[attr-defined]
+    page.goto(f"{BASE}/voice?token=t&scheme=dark&lang=en")
+    page.wait_for_selector(".voice-stage.phase-speaking", timeout=15000)
+    page.wait_for_timeout(2500)
+    played = page.evaluate("window.__played")
+    check(len(played) >= 3, f"the three sentences of one answer are played as three clips (played {len(played)})")
+    check(len(set(played)) == len(played), "each clip is its own object URL rather than one played over")
+    shots.stub.voice_frames = ""  # type: ignore[attr-defined]
+    context.close()
 
 
 def main() -> int:
@@ -64,6 +106,7 @@ def main() -> int:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(executable_path=shots.CHROMIUM, args=shots.FAKE_MEDIA)
+        check_streamed(browser, check)
         context = browser.new_context(viewport={"width": 1440, "height": 900}, color_scheme="dark", permissions=["microphone"])
         page = context.new_page()
         page.route("**/api/**", stub)
