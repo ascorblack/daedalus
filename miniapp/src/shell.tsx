@@ -8,6 +8,7 @@ import { Project } from "./api";
 import { ProjectChip } from "./projects";
 import { Screen, navigate, pathFor } from "./router";
 import { SelfDevMode, screenTag, visibleScreens } from "./capabilities";
+import { t } from "./i18n";
 
 export type Counts = { inbox?: number; changes?: number; services?: number; agents?: number };
 
@@ -15,11 +16,12 @@ function tagFor(s: Screen, selfdev: SelfDevMode): string {
   return screenTag(s, selfdev, BETA);
 }
 
-const TITLES: Record<Screen, string> = { agents: "Agents", voice: "Voice", inbox: "Inbox", board: "Board", changes: "Changes", schedules: "Schedules", services: "Services", memory: "Memory", usage: "Usage", health: "Health", settings: "Settings" };
 const ICONS: Record<Screen, IconName> = { agents: "bots", voice: "mic", inbox: "inbox", board: "board", changes: "changes", schedules: "clock", services: "globe", memory: "bulb", usage: "chart", health: "check", settings: "settings" };
 
+/** A destination's name, in the reader's language. The components below re-render with it because
+ *  the shell's own `useLang` does; nothing here holds a translated string of its own. */
 export function screenTitle(s: Screen): string {
-  return TITLES[s];
+  return t(`nav.${s}`);
 }
 
 const PRIMARY: Screen[] = ["agents", "inbox", "board"];
@@ -81,7 +83,7 @@ export function TabBar({ screen, counts, selfdev, onMore, moreOpen }: { screen: 
               <Icon name={ICONS[s]} size={22} />
               {n > 0 && <span className="tab-badge">{n > 99 ? "99+" : n}</span>}
             </span>
-            {TITLES[s]}
+            {screenTitle(s)}
           </a>
         );
       })}
@@ -90,7 +92,7 @@ export function TabBar({ screen, counts, selfdev, onMore, moreOpen }: { screen: 
           <Icon name={inMore ? ICONS[screen] : "more"} size={22} />
           {moreCount > 0 && <span className="tab-badge dot" aria-label={`${moreCount} waiting`} />}
         </span>
-        {inMore ? TITLES[screen] : "More"}
+        {inMore ? screenTitle(screen) : t("nav.more")}
       </button>
     </nav>
   );
@@ -106,7 +108,7 @@ export function MoreSheet({ screen, counts, selfdev, onClose }: { screen: Screen
           return (
             <a key={s} href={pathFor(s)} className={`more-item ${screen === s ? "active" : ""}`} onClick={(e) => { go(e, pathFor(s)); onClose(); }}>
               <Icon name={ICONS[s]} size={22} />
-              <span>{TITLES[s]}</span>
+              <span>{screenTitle(s)}</span>
               {tag && <span className="beta-tag">{tag}</span>}
               {n > 0 && <span className="tab-badge">{n}</span>}
             </a>
@@ -122,9 +124,9 @@ export function Rail({ screen, counts, selfdev, collapsed, onToggle, onPalette, 
     const n = countFor(s, counts);
     const tag = tagFor(s, selfdev);
     return (
-      <a key={s} href={pathFor(s)} className={`rail-item ${screen === s ? "active" : ""}`} aria-current={screen === s ? "page" : undefined} onClick={(e) => go(e, pathFor(s))} title={collapsed ? TITLES[s] : undefined}>
+      <a key={s} href={pathFor(s)} className={`rail-item ${screen === s ? "active" : ""}`} aria-current={screen === s ? "page" : undefined} onClick={(e) => go(e, pathFor(s))} title={collapsed ? screenTitle(s) : undefined}>
         <Icon name={ICONS[s]} size={18} />
-        <span className="rail-text">{TITLES[s]}</span>
+        <span className="rail-text">{screenTitle(s)}</span>
         {tag && <span className="rail-text beta-tag">{tag}</span>}
         {n > 0 && <span className={`count ${s === "services" ? "ok" : s === "changes" ? "attn" : ""}`}>{n}</span>}
       </a>
