@@ -35,5 +35,5 @@ services:
 // belongs to the launcher's version, not to the operator's folder.
 func WriteOverride(p Paths) error {
 	body := fmt.Sprintf(overrideYAML, agentImage(), agentImage())
-	return os.WriteFile(p.Override, []byte(body), 0o644)
+	return os.WriteFile(p.Override, []byte(withProjectMounts(p, body)), 0o644) // projects: the folders the operator added (desktop/projects.go)
 }

@@ -156,6 +156,7 @@ func (a *App) start(ctx context.Context) error {
 		return err
 	}
 	a.log("the app is up at %s", AppURL(APIPort(a.paths)))
+	a.mountProjects(ctx) // projects: folders the container cannot see yet (desktop/projects.go)
 	return nil
 }
 
