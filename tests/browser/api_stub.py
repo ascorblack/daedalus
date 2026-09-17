@@ -33,7 +33,14 @@ GATES: dict[str, object] = {
     # Drawn before any screen: no model means the whole app is the "Add a model" flow.
     "/api/onboarding": {"has_model": True, "presets": 1, "default_preset": "p", "providers": [], "needs": [], "message": ""},
     # Decides which screens the navigation has at all.
-    "/api/capabilities": {"selfdev": {"mode": "off", "configured": "off", "reasons": [], "missing": [], "tools": []}},
+    "/api/capabilities": {
+        "selfdev": {"mode": "off", "configured": "off", "reasons": [], "missing": [], "tools": []},
+        # The shell marks the Components entry from this; a stub without it marks nothing, which is
+        # the right answer for a harness that has invented no missing component.
+        "components": {"mode": "docker", "missing": [], "needed": [], "installing": ""},
+    },
+    # Settings asks what the installation is missing before it draws its index.
+    "/api/components": {"mode": "docker", "launcher": False, "components": [], "disk_bytes": 0, "missing": [], "busy": ""},
     "/api/auth/me": {"user": "operator"},
     "/api/auth/config": {"passkeys": 1},
     "/api/status": {"ok": True},

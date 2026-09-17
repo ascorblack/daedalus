@@ -422,6 +422,45 @@ CATALOGUE = [
 # The installation in the pictures develops itself on a server: it has both checkouts, a token and a
 # rebuilder, so Changes is in the nav and carries no qualifying tag.
 CAPABILITIES = {"selfdev": {"mode": "server", "configured": "auto", "reasons": ["checkouts: both writable", "token: configured", "remotes: both have an origin", "rebuild: the rebuilder service"], "missing": [], "tools": ["SelfPropose", "SelfRebuild", "SelfRollback", "SelfWorkspace"]}, "restart_required": None, "last_change": None}
+CAPABILITIES["components"] = {"mode": "native", "missing": ["browser", "node", "bwrap"], "needed": [], "installing": ""}
+
+
+def _component(cid, state, detail, **over):  # type: ignore[no-untyped-def]
+    """One card on Settings -> Components, as the registry would have measured it."""
+    return {
+        "id": cid, "state": state, "detail": detail, "installable": False, "how": "none", "fix": "",
+        "download_bytes": 0, "disk_bytes": 0, "requires_restart": False,
+        "installed_count": 0, "total_count": 0, "skills": [], "enables": [], "progress": None, **over,
+    }
+
+
+# A portable installation part-way through being fitted out: the speech runtime and its models are in,
+# the browser is going in while the picture is taken, and Node is waiting to be asked for. That is the
+# state the page exists for, so it is the state it is photographed in.
+COMPONENTS = {
+    "mode": "native",
+    "launcher": True,
+    "disk_bytes": 214_577_296,
+    "missing": ["browser", "node", "bwrap"],
+    "busy": "browser",
+    "components": [
+        _component("speech", "installed", "the speech engine is importable", download_bytes=15_728_640, enables=["stt", "tts", "voicenotes"]),
+        _component("stt-models", "installed", "1 of 12 downloaded", how="models", disk_bytes=178_000_000, installed_count=1, total_count=12, enables=["stt"]),
+        _component("tts-voices", "installed", "2 of 16 downloaded", how="models", disk_bytes=36_577_296, installed_count=2, total_count=16, enables=["tts"]),
+        _component("browser", "installing", "the browser extra and the headless shell are not in this installation",
+                   installable=True, how="launcher", download_bytes=104_857_600, requires_restart=True,
+                   enables=["skills.browser", "screenshots"], skills=["accessibility", "canvas-design", "web-design-reviewer", "webapp-testing"],
+                   progress={"id": "browser", "state": "running", "step": "installing browser", "error": "", "restart_required": True}),
+        _component("node", "missing", "Node is not in this installation's runtime folder",
+                   installable=True, how="launcher", download_bytes=60_817_408, requires_restart=True,
+                   enables=["skills.node", "npx"], skills=["accessibility", "web-artifacts-builder", "webapp-testing"]),
+        _component("git", "installed", "git is at /usr/bin/git", enables=["selfdev", "projects"]),
+        _component("ripgrep", "installed", "rg is at /usr/bin/rg", enables=["search"]),
+        _component("opus", "missing", "opusdec is not on the PATH", fix="install opus-tools with this machine's package manager", enables=["voicenotes"]),
+        _component("bwrap", "unavailable", "bwrap is installed but this kernel forbids unprivileged user namespaces",
+                   fix="allow unprivileged user namespaces on this machine", enables=["sandbox"]),
+    ],
+}
 
 
 # ---- the stub API -------------------------------------------------------------------------
@@ -528,6 +567,11 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, TTS)
     if rel == "/api/stt":
         return respond(route, STT)
+    if rel == "/api/components":
+        return respond(route, COMPONENTS)
+    if rel == "/api/components/stream":
+        # Nothing moves while a picture is taken; the card carries its own frame in the view above.
+        return route.fulfill(status=200, content_type="text/event-stream", body=": keepalive\n\n")
     if rel.endswith("/progress"):
         # The two pickers subscribe to a download stream as they mount. Nothing is downloading in a
         # picture, so this is an empty stream rather than an unhandled route the reporter complains
@@ -821,6 +865,7 @@ def run() -> int:
         shot(page, "memory", "memory")
         # The settings index, because the language switch is its first row.
         shot(page, "settings", "settings")
+        shot(page, "components", "settings/components", wait=".comp-grid .comp-card", settle=500)
         stub.fresh = True  # type: ignore[attr-defined]
         shot(page, "add-model", "agents", wait=".addmodel", before=pick_a_model, settle=600)
         stub.fresh = False  # type: ignore[attr-defined]
