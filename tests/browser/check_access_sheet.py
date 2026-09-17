@@ -21,10 +21,10 @@ import json
 import os
 import sys
 
-from playwright.sync_api import Page, sync_playwright
-
 from api_stub import DEFAULT_APP, expect_app
-from check_overflow_menu import SERVICES, open_menu, press, stub as base_stub
+from check_overflow_menu import SERVICES, open_menu, press
+from check_overflow_menu import stub as base_stub
+from playwright.sync_api import Page, sync_playwright
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
