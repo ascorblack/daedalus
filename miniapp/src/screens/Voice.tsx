@@ -12,6 +12,7 @@ import { pathFor, sessionPath } from "../router";
 import { PageHeader, go } from "../shell";
 import { useQuery } from "../store";
 import { errorText, haptic } from "../ui";
+import { createLocalListener, localListenSupported } from "../stt";
 import { Listener, Speaker, createRecognition, createRecorder, createSpeaker, recognitionSupported, recorderSupported, sendUtterance, voiceLang } from "../voice";
 
 type Agent = { session_id: string; title: string; status: string; last_message_at: string; answer: string };
@@ -20,7 +21,12 @@ type VoiceState = {
   session_id: string;
   model: string;
   tts: { configured: boolean; reason?: string; voice?: string; model?: string };
-  stt: { configured: boolean; reason?: string };
+  stt: {
+    configured: boolean;
+    reason?: string;
+    /** The model that runs on this machine, where one is installed and selected. */
+    local?: { model: string; label: string; installed: boolean; active: boolean; streaming: boolean; loaded: string };
+  };
   agents: Agent[];
   listening: boolean;
 };
@@ -47,9 +53,15 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   const listener = useRef<Listener | null>(null);
   const lang = useMemo(() => voiceLang(), []);
   const serverTts = !!state?.tts.configured;
+  // Which recogniser listens, in the order the server decides and the page merely follows: a model
+  // that runs on the server's processor first, then this browser's own recognition, then a recorder
+  // whose cut utterances the server transcribes. The local model wins over the browser because it is
+  // a deliberate choice the operator made and paid disk for; the browser's is whatever it shipped.
+  const localStt = !!state?.stt.local?.active && localListenSupported();
   const canRecognise = recognitionSupported();
   const canRecord = recorderSupported() && !!state?.stt.configured;
-  const canTalk = canRecognise || canRecord;
+  const canTalk = localStt || canRecognise || canRecord;
+  const recogniser = localStt ? `${state?.stt.local?.label} on this machine` : canRecognise ? "this browser" : canRecord ? "recorded here, transcribed on the server" : "";
 
   useEffect(() => {
     setAgents(state?.agents ?? []);
@@ -172,7 +184,9 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
       onSpeechStart: () => earsOpen() && bargeIn(),
       onError: (m: string) => setProblem(m),
     };
-    const l = canRecognise
+    const l = localStt
+      ? createLocalListener(handlers)
+      : canRecognise
       ? createRecognition(lang, handlers)
       : createRecorder({
           ...handlers,
@@ -197,7 +211,7 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
     setMicOn(true);
     setPhase("listening");
     haptic("medium");
-  }, [bargeIn, canRecognise, earsOpen, lang, send]);
+  }, [bargeIn, canRecognise, earsOpen, lang, localStt, send]);
 
   const stopMic = useCallback(() => {
     listener.current?.stop();
@@ -301,15 +315,11 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
                 <Icon name="send" size={16} />
               </button>
             </form>
-            {!canTalk && (
-              <div className="sub voice-why">
-                {recognitionSupported()
-                  ? ""
-                  : state?.stt.configured
-                    ? "This browser has no speech recognition, so recordings are transcribed on the server."
-                    : "This browser has no speech recognition and no transcription endpoint is configured (Settings → Tools → Voice notes)."}
-              </div>
-            )}
+            <div className="sub voice-why">
+              {canTalk
+                ? `Listening: ${recogniser}.`
+                : "This browser has no speech recognition, and nothing here can turn a recording into words — download a speech model in Settings → Voice, or configure a transcription endpoint."}
+            </div>
           </section>
 
           <aside className="voice-agents">
@@ -366,7 +376,15 @@ export function VoiceSettings() {
       </div>
       <div className="kv">
         <span>Speech in</span>
-        <b>{recognitionSupported() ? "this browser recognises speech itself" : data.stt.configured ? "recorded here, transcribed on the server" : "not available in this browser, and no transcription endpoint is configured"}</b>
+        <b>
+          {data.stt.local?.active
+            ? `${data.stt.local.label}, running on this machine${data.stt.local.streaming ? " — words appear as they are said" : ""}`
+            : recognitionSupported()
+              ? "this browser recognises speech itself"
+              : data.stt.configured
+                ? "recorded here, transcribed on the server"
+                : "not available in this browser, and nothing is configured to transcribe a recording"}
+        </b>
       </div>
       <div className="btnrow">
         <a className="btn small" href={pathFor("voice")} onClick={(e) => go(e, pathFor("voice"))}>

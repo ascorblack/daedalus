@@ -1208,3 +1208,34 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .project-pick .sub { font-size: 12.5px; }
 .menu-item.on { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .readonly-path { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-1); color: var(--fg-2); font-size: 13px; word-break: break-all; }
+
+/* ── speech models: the picker for a recogniser that runs on this machine ────────────────── */
+/* Cards on a lighter step than the card they sit in, as everything raised here is: the list is
+   inside a panel, so it lifts rather than sinks, and the hairline is what separates two cards that
+   are nearly the same shade. The grid fills the width it is given — one column at 400 px, as many
+   as fit on a wide screen — because a list of twelve read one at a time is a list nobody finishes. */
+
+.stt-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0 4px; }
+.stt-filters .field { flex: 1 1 180px; min-width: 140px; }
+.stt-filters .chip.select.on { background: var(--fg); color: var(--bg); border-color: transparent; }
+
+.stt-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-top: 10px; }
+.stt-card { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.stt-card.using { background: var(--surface-3); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.stt-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.stt-head b { font-size: 15px; margin-right: 2px; }
+.stt-facts { display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; }
+.stt-bars { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 2px; }
+.stt-bar { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.stt-bar > .sub { flex: none; width: 56px; }
+.stt-bar-track { flex: 1; height: 5px; border-radius: 999px; background: var(--line-strong); overflow: hidden; }
+.stt-bar-fill { display: block; height: 100%; border-radius: 999px; background: var(--fg-2); }
+.stt-bar-fill.accent { background: var(--accent); }
+.stt-progress { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.stt-progress .stt-bar-track { height: 6px; }
+.stt-progress .sub { flex: none; min-width: 64px; text-align: right; }
+
+@media (max-width: 480px) {
+  .stt-list { grid-template-columns: 1fr; }
+  .stt-bars { grid-template-columns: 1fr; }
+}

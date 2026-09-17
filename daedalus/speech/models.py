@@ -330,7 +330,10 @@ def verify(archive: Path, model: SpeechModel) -> None:
 
 def _check_loadable(directory: Path, model: SpeechModel) -> None:
     """The unpacked directory holds what its kind needs. Imported late: this must work without the extra."""
-    from daedalus.speech.engine import SpeechError, resolve  # Lazy: downloading must work before the engine's wheel is installed
+    from daedalus.speech.engine import (  # Lazy: downloading must work before the engine's wheel is installed
+        SpeechError,
+        resolve,
+    )
 
     try:
         resolve(directory, model.kind)
@@ -340,7 +343,11 @@ def _check_loadable(directory: Path, model: SpeechModel) -> None:
 
 def view(downloads: Downloads, *, selected: str = "") -> dict[str, Any]:
     """The whole picker in one object: the catalog, what is installed, what is arriving, what it costs."""
-    from daedalus.speech.catalog import MODELS, as_json, languages  # Lazy: only this view joins the catalog to the manager
+    from daedalus.speech.catalog import (  # Lazy: only this view joins the catalog to the manager
+        MODELS,
+        as_json,
+        languages,
+    )
 
     records = downloads.manifest()
     running = downloads.progress()

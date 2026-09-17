@@ -2,6 +2,13 @@
 #
 # Three stages. The environment is assembled where a compiler and a Node are allowed to live, and
 # only the results — the virtualenv and the built Mini App — are copied into the image that ships.
+# The `speech` extra rides in the default image rather than being an opt-in like `browser`: the two
+# wheels together are about fifteen megabytes against Playwright's several hundred, and an installation
+# that never downloads a model never loads them. opus-tools comes in with it, from apt-packages.txt,
+# because a Telegram voice note is Ogg Opus and a model reads samples: opusdec is one and a quarter
+# megabytes and decodes exactly that. ffmpeg would decode everything else too and is deliberately not
+# here — it drags four hundred and fifty megabytes of video codecs in behind it, to convert a voice clip.
+#
 # Two targets come out of it: `runtime` (the default, and what `:latest` is) and `browser`, which
 # adds Playwright and a headless Chromium shell for the browser skills. They share every layer up
 # to the last one, so having both costs the difference, not twice the image.
@@ -51,7 +58,7 @@ COPY pyproject.toml uv.lock ./
 # and runs no uv at all; a checkout that later declares different dependencies no longer matches it, and
 # the supervisor syncs before it starts the bot.
 RUN uv venv /srv/venv \
-    && uv export --frozen --no-emit-project --no-emit-package protocore --format requirements-txt -o /build/requirements.txt \
+    && uv export --frozen --extra speech --no-emit-project --no-emit-package protocore --format requirements-txt -o /build/requirements.txt \
     && uv export --frozen --extra browser --no-emit-project --no-emit-package protocore --format requirements-txt -o /build/requirements-browser.txt \
     && uv pip install --python /srv/venv/bin/python --no-cache --requirements /build/requirements.txt \
     && python3 -c "import hashlib, pathlib; d = hashlib.sha256(); [d.update(pathlib.Path(n).read_bytes()) for n in ('uv.lock', 'pyproject.toml')]; pathlib.Path('/srv/venv/.daedalus-dependencies').write_text(d.hexdigest())"

@@ -15,7 +15,9 @@ is not installed rather than failing somewhere deeper as an empty transcript.
 from __future__ import annotations
 
 import asyncio
+import audioop
 import contextlib
+import io
 import logging
 import shutil
 import wave
@@ -28,9 +30,15 @@ from daedalus.speech.models import Downloads
 
 logger = logging.getLogger(__name__)
 
+OPUS_DECODER = "opusdec"
+"""What turns a Telegram voice note into samples. One and a quarter megabytes from opus-tools, which
+is the whole reason it is preferred over ffmpeg here: ffmpeg brings four hundred and fifty megabytes
+of video codecs into the image to decode a mono voice clip."""
+
 CONVERTER = "ffmpeg"
-"""What turns a voice note into samples. Present in the runtime image; on a native install it comes
-from the machine, and the doctor says so when it does not."""
+"""The general case, for a recording in something other than WAV or Ogg Opus. Not in the runtime
+image — see above — so this is what a native installation that happens to have it gets, and the
+message below is what an installation without it gets."""
 
 CONVERT_TIMEOUT = 120.0
 """A conversion that has not finished by now is not going to; the file is longer than anything spoken."""
@@ -126,44 +134,97 @@ class LocalSpeech:
             "streaming": bool(model and model.streaming),
             "language": self.settings.local_language,
             "loaded": CACHE.loaded(),
-            "converter": converter_present(),
+            "decoders": decoders(),
         }
 
 
 def converter_present() -> bool:
-    """Whether the thing that turns a voice note into samples is on this machine."""
+    """Whether a general converter is here. The Opus decoder is asked for separately; see :func:`decoders`."""
     return shutil.which(CONVERTER) is not None
+
+
+def decoders() -> dict[str, bool]:
+    """Which decoders this machine has, for the doctor line and the settings page."""
+    return {"opus": shutil.which(OPUS_DECODER) is not None, "any": converter_present()}
+
+
+def can_decode_recordings() -> bool:
+    """Whether a voice note or a browser recording can be turned into samples at all."""
+    found = decoders()
+    return found["opus"] or found["any"]
+
+
+def is_ogg(path: Path) -> bool:
+    """Whether the file is an Ogg stream, by its magic bytes rather than by its name.
+
+    Telegram sends a voice note as ``.oga``, the site sometimes as ``.ogg``, and an ``audio`` message
+    can arrive with no useful extension at all, so the first four bytes are the only reliable answer.
+    """
+    with contextlib.suppress(OSError):
+        with path.open("rb") as handle:
+            return handle.read(4) == b"OggS"
+    return False
+
+
+async def _run(program: str, *args: str, feed: bytes | None = None) -> bytes:
+    """One decoder, with its output collected. Raises :class:`SpeechError` with what it complained about."""
+    process = await asyncio.create_subprocess_exec(
+        program, *args,
+        stdin=asyncio.subprocess.PIPE if feed is not None else None,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(process.communicate(feed), timeout=CONVERT_TIMEOUT)
+    except TimeoutError:
+        process.kill()
+        raise SpeechError("decoding the recording took too long") from None
+    if process.returncode:
+        raise SpeechError(f"the recording could not be decoded: {err.decode(errors='replace').strip()[:200]}")
+    return out
+
+
+def _wav_body(blob: bytes) -> tuple[bytes, int]:
+    """The samples inside a WAV in memory, and their rate."""
+    with contextlib.suppress(OSError, wave.Error, EOFError):
+        with wave.open(io.BytesIO(blob), "rb") as handle:
+            if handle.getsampwidth() == 2:
+                frames = handle.readframes(handle.getnframes())
+                if handle.getnchannels() > 1:
+                    frames = audioop.tomono(frames, 2, 0.5, 0.5) if handle.getnchannels() == 2 else frames
+                return frames, handle.getframerate()
+    raise SpeechError("the decoder did not produce readable audio")
 
 
 async def decode_file(path: Path) -> tuple[bytes, int]:
     """A recording as 16-bit mono samples, and their rate.
 
-    A plain WAV is read here; anything else — Opus, WebM, m4a — goes through the converter, which is
-    the only external program this feature needs. The engine resamples, so the converter is asked for
-    the model's rate directly and the two never disagree.
+    Three routes, cheapest first. A plain WAV is read here with nothing shelled out to. An Ogg Opus
+    stream — which is what a Telegram voice note always is, and what most browsers record — goes
+    through opusdec, a megabyte of decoder that does exactly this one job. Anything else needs a
+    general converter, and the runtime image deliberately does not carry one: ffmpeg would add four
+    hundred and fifty megabytes of video codecs to decode a voice clip, so an installation that wants
+    it installs it, and one that does not gets a message saying so rather than a mysterious silence.
     """
     with contextlib.suppress(OSError, wave.Error, EOFError):
         with wave.open(str(path), "rb") as handle:
             if handle.getsampwidth() == 2 and handle.getnchannels() == 1:
                 return handle.readframes(handle.getnframes()), handle.getframerate()
-    if not converter_present():
-        raise SpeechError(
-            f"this recording is not a plain WAV and {CONVERTER} is not installed, so it cannot be converted; "
-            f"install {CONVERTER} or use a transcription endpoint instead"
+    if is_ogg(path) and shutil.which(OPUS_DECODER):
+        # opusdec writes a WAV to stdout; it resamples itself, so the rate asked for is the rate that
+        # comes back and the engine has nothing left to do.
+        blob = await _run(OPUS_DECODER, "--quiet", "--force-wav", "--rate", str(SAMPLE_RATE), str(path), "-")
+        return _wav_body(blob)
+    if converter_present():
+        out = await _run(
+            CONVERTER, "-nostdin", "-loglevel", "error", "-i", str(path),
+            "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-",
         )
-    process = await asyncio.create_subprocess_exec(
-        CONVERTER, "-nostdin", "-loglevel", "error", "-i", str(path),
-        "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        return out, SAMPLE_RATE
+    raise SpeechError(
+        "this recording is not a plain WAV and nothing here can decode it: install opus-tools for "
+        "voice notes, or ffmpeg for everything else, or use a transcription endpoint instead"
     )
-    try:
-        out, err = await asyncio.wait_for(process.communicate(), timeout=CONVERT_TIMEOUT)
-    except TimeoutError:
-        process.kill()
-        raise SpeechError("converting the recording took too long") from None
-    if process.returncode:
-        raise SpeechError(f"the recording could not be converted: {err.decode(errors='replace').strip()[:200]}")
-    return out, SAMPLE_RATE
 
 
 async def transcribe_recording(speech: LocalSpeech, config: RuntimeConfig, manager: object, path: Path) -> str:
@@ -177,7 +238,11 @@ async def transcribe_recording(speech: LocalSpeech, config: RuntimeConfig, manag
     Raises ``TranscriptionError`` either way, so every call site keeps the one exception it already
     catches.
     """
-    from daedalus.transport.telegram.voice import TranscriptionError, effective_asr, transcribe  # Lazy: the transport imports this module
+    from daedalus.transport.telegram.voice import (  # Lazy: the transport imports this module
+        TranscriptionError,
+        effective_asr,
+        transcribe,
+    )
 
     if speech.available():
         try:
@@ -199,6 +264,9 @@ def recogniser_available(speech: LocalSpeech, config: RuntimeConfig) -> bool:
 
 __all__ = [
     "CONVERTER",
+    "OPUS_DECODER",
+    "can_decode_recordings",
+    "decoders",
     "LocalSpeech",
     "converter_present",
     "decode_file",

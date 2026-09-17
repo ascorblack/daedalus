@@ -1499,6 +1499,34 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             return False
         return True
 
+    @api.post("/api/stt/engine")
+    async def stt_install_engine(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Install the engine that runs a downloaded model.
+
+        In a container it is already there — the image carries it — and this answers so. Natively it
+        is an optional extra the installation has not paid for yet, and the first download is when it
+        starts being worth paying for, so the wheels are fetched into the installation's own
+        environment. ``--inexact`` is what keeps that from removing whatever else was installed into
+        it (the browser extra, typically).
+        """
+        if _speech_engine_present():
+            return {"installed": True, "message": "the speech engine is already installed"}
+        if not settings.native:
+            raise HTTPException(409, "the runtime image carries the speech engine; this one was built without it")
+        uv = shutil.which("uv")
+        if uv is None:
+            raise HTTPException(503, "uv is not on the PATH, so the speech engine cannot be installed from here")
+        process = await asyncio.create_subprocess_exec(
+            uv, "sync", "--frozen", "--inexact", "--extra", "speech",
+            cwd=str(settings.bot_repo_dir),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _unused = await process.communicate()
+        if process.returncode:
+            raise HTTPException(502, f"the speech engine could not be installed: {out.decode(errors='replace').strip()[-400:]}")
+        logger.warning("the local speech engine was installed on demand")
+        return {"installed": True, "message": "the speech engine is installed; the model can be downloaded now"}
+
     @api.post("/api/stt/models/{model_id}/download")
     async def stt_download(model_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Fetch a model. Returns at once; the bar is fed by /api/stt/progress."""
