@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useMemo, useState } from "react";
 import { api, Project, SessionSummary, Settings, Workspace } from "../api";
-import { Avatar, Dot, STATUS_WORD, Skeleton, Status, ToolPicker, fmtInterval } from "../components";
+import { Avatar, Dot, Skeleton, Status, ToolPicker, fmtInterval, statusWord } from "../components";
 import { Sheet } from "../dialogs";
 import { relTime, shortModel, untilShort } from "../format";
 import { Icon } from "../icons";
@@ -9,6 +9,7 @@ import { useProjects } from "../projects";
 import { PageHeader, screenTitle } from "../shell";
 import { useQuery } from "../store";
 import { confirmAsync, errorText, fmtBytes } from "../ui";
+import { plural, t } from "../i18n";
 import { Files } from "./Session";
 
 type Filter = "all" | "working" | "loops";
@@ -59,12 +60,11 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
     return "idle";
   };
   const kept = top.filter((s) => (filter === "all" ? true : filter === "working" ? kind(s) === "waiting" || kind(s) === "working" : kind(s) === "loop"));
-  const byStatus: { key: string; label: string; items: SessionSummary[] }[] = [
-    { key: "waiting", label: "Needs you", items: kept.filter((s) => kind(s) === "waiting") },
-    { key: "working", label: "Working", items: kept.filter((s) => kind(s) === "working") },
-    { key: "loop", label: "Loops", items: kept.filter((s) => kind(s) === "loop") },
-    { key: "idle", label: "Idle", items: kept.filter((s) => kind(s) === "idle") },
-  ];
+  const byStatus: { key: string; label: string; items: SessionSummary[] }[] = (["waiting", "working", "loop", "idle"] as const).map((k) => ({
+    key: k,
+    label: t(`agents.group.${k}`),
+    items: kept.filter((s) => kind(s) === k),
+  }));
   // By workspace the shared directories come first (a project with its agents in it); everything that
   // works in a directory of its own goes into one group at the end, because one agent is not a project.
   // A directory is shared when more than one top-level agent works in it — the one it was made for
@@ -79,7 +79,7 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
   }
   const byWorkspace = [...buckets.entries()]
     .sort((a, b) => (a[0] === OWN ? 1 : b[0] === OWN ? -1 : a[0].localeCompare(b[0])))
-    .map(([key, items]) => ({ key, label: key === OWN ? "Own directory" : titleOf.get(key) ?? key, items }));
+    .map(([key, items]) => ({ key, label: key === OWN ? t("agents.group.own") : titleOf.get(key) ?? key, items }));
   // By project the named ones come first and everything without a project goes into one group at the
   // end — an agent in a directory of its own is not a project, and there is nothing to call its group.
   const projectName = new Map(projects.map((p) => [p.id, p.name]));
@@ -90,7 +90,7 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
   }
   const byProject = [...byProjectBuckets.entries()]
     .sort((a, b) => (a[0] === NO_PROJECT ? 1 : b[0] === NO_PROJECT ? -1 : (projectName.get(a[0]) ?? "").localeCompare(projectName.get(b[0]) ?? "")))
-    .map(([key, items]) => ({ key, label: key === NO_PROJECT ? "No project" : projectName.get(key) ?? key, items }));
+    .map(([key, items]) => ({ key, label: key === NO_PROJECT ? t("agents.group.noproject") : projectName.get(key) ?? key, items }));
   const groups = groupBy === "project" ? byProject : groupBy === "workspace" ? byWorkspace : byStatus;
   const activeCount = top.filter((s) => kind(s) === "waiting" || kind(s) === "working").length;
   const shown = groups.reduce((n, g) => n + g.items.length, 0);
@@ -99,45 +99,45 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
     <>
       <PageHeader
         title={inProject ? inProject.name : screenTitle("agents")}
-        subtitle={sessions ? `${top.length} agent${top.length === 1 ? "" : "s"}${activeCount ? ` · ${activeCount} active` : ""}${inProject ? ` · ${inProject.root}` : ""}` : undefined}
+        subtitle={sessions ? `${plural("agents.count", top.length)}${activeCount ? ` · ${t("agents.active", { n: activeCount })}` : ""}${inProject ? ` · ${inProject.root}` : ""}` : undefined}
         actions={
           <>
             {/* Not a folder glyph: Workspaces sits beside it with one, and two identical icons next to each other name nothing. */}
-            {!compact && onProjects && <button className="iconbtn" onClick={onProjects} title="Projects" aria-label="Projects"><Icon name="skill" /></button>}
-            <button className={`iconbtn ${searching ? "on" : ""}`} onClick={() => { setSearching((v) => !v); if (searching) setQuery(""); }} title="Search" aria-label="Search" aria-pressed={searching}><Icon name="search" /></button>
-            {!compact && <button className="iconbtn" onClick={() => setShowWorkspaces(true)} title="Workspaces" aria-label="Workspaces"><Icon name="folder" /></button>}
-            <button className="iconbtn primary" onClick={() => setCreating(true)} title="New agent" aria-label="New agent"><Icon name="plus" /></button>
+            {!compact && onProjects && <button className="iconbtn" onClick={onProjects} title={t("shell.projects")} aria-label={t("shell.projects")}><Icon name="skill" /></button>}
+            <button className={`iconbtn ${searching ? "on" : ""}`} onClick={() => { setSearching((v) => !v); if (searching) setQuery(""); }} title={t("common.search")} aria-label={t("common.search")} aria-pressed={searching}><Icon name="search" /></button>
+            {!compact && <button className="iconbtn" onClick={() => setShowWorkspaces(true)} title={t("agents.workspaces")} aria-label={t("agents.workspaces")}><Icon name="folder" /></button>}
+            <button className="iconbtn primary" onClick={() => setCreating(true)} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" /></button>
           </>
         }
       >
-        {searching && <input className="field search" autoFocus placeholder="Search agents…" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") { setQuery(""); setSearching(false); } }} aria-label="Search agents" />}
+        {searching && <input className="field search" autoFocus placeholder={t("agents.search")} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") { setQuery(""); setSearching(false); } }} aria-label={t("agents.search.label")} />}
         {!compact && <div className="chips">
           {(["all", "working", "loops"] as Filter[]).map((f) => (
             <button key={f} className="chip select" aria-pressed={filter === f} onClick={() => setFilter(f)}>
-              {f === "all" ? `All · ${top.length}` : f === "working" ? `Active · ${activeCount}` : `Loops · ${top.filter((s) => kind(s) === "loop").length}`}
+              {f === "all" ? t("agents.filter.all", { n: top.length }) : f === "working" ? t("agents.filter.working", { n: activeCount }) : t("agents.filter.loops", { n: top.filter((s) => kind(s) === "loop").length })}
             </button>
           ))}
           {!project && projects.length > 0 && (
-            <button className="chip select" aria-pressed={groupBy === "project"} onClick={() => setGrouping(groupBy === "project" ? "status" : "project")} title="Group the list by the project each agent works in">
-              <Icon name="folder" size={13} /> By project
+            <button className="chip select" aria-pressed={groupBy === "project"} onClick={() => setGrouping(groupBy === "project" ? "status" : "project")} title={t("agents.group.project.title")}>
+              <Icon name="folder" size={13} /> {t("agents.group.project")}
             </button>
           )}
-          <button className="chip select" aria-pressed={groupBy === "workspace"} onClick={() => setGrouping(groupBy === "workspace" ? "status" : "workspace")} title="Group the list by the workspace each agent works in">
-            <Icon name="folder" size={13} /> By workspace
+          <button className="chip select" aria-pressed={groupBy === "workspace"} onClick={() => setGrouping(groupBy === "workspace" ? "status" : "workspace")} title={t("agents.group.workspace.title")}>
+            <Icon name="folder" size={13} /> {t("agents.group.workspace")}
           </button>
         </div>}
       </PageHeader>
       <div className="screen narrow">
         {loading && !error && <Skeleton rows={5} />}
-        {error && !sessions && <div className="empty"><b>Could not load agents</b><div>{error}</div></div>}
+        {error && !sessions && <div className="empty"><b>{t("agents.error")}</b><div>{error}</div></div>}
         {sessions && all.length === 0 && (
           <div className="empty">
-            <b>{inProject ? `No agents in ${inProject.name} yet` : "No agents yet"}</b>
-            <div>{inProject ? `An agent started here works in ${inProject.root}.` : "Create one here, or write to the bot in Telegram."}</div>
-            <button className="btn primary" onClick={() => setCreating(true)}>Create agent</button>
+            <b>{inProject ? t("agents.empty.project", { name: inProject.name }) : t("agents.empty")}</b>
+            <div>{inProject ? t("agents.empty.project.sub", { root: inProject.root }) : t("agents.empty.sub")}</div>
+            <button className="btn primary" onClick={() => setCreating(true)}>{t("agents.empty.create")}</button>
           </div>
         )}
-        {sessions && all.length > 0 && shown === 0 && <div className="empty">Nothing matches.</div>}
+        {sessions && all.length > 0 && shown === 0 && <div className="empty">{t("common.nothing")}</div>}
         {groups.map((g) =>
           g.items.length === 0 ? null : (
             <section key={g.key} className="erow-group">
@@ -158,7 +158,7 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
       </div>
       {creating && <NewAgentSheet onClose={() => setCreating(false)} onCreated={onOpen} toast={toast} project={project} />}
       {showWorkspaces && (
-        <Sheet title="Workspaces" onClose={() => setShowWorkspaces(false)}>
+        <Sheet title={t("agents.workspaces")} onClose={() => setShowWorkspaces(false)}>
           <WorkspacesPanel onOpen={(id) => { setShowWorkspaces(false); onOpen(id); }} toast={toast} />
         </Sheet>
       )}
@@ -170,10 +170,11 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
 function loopLine(s: SessionSummary): string {
   const loop = s.metadata?.loop;
   if (!loop) return "";
-  const cadence = loop.mode === "interval" ? `every ${fmtInterval(loop.interval_seconds)}` : "self-paced";
-  const runs = `run #${loop.run_count}${loop.max_runs ? `/${loop.max_runs}` : ""}`;
-  if (loop.status === "active") return `Loop ${cadence} · ${runs}${loop.next_run_at ? ` · next ${untilShort(loop.next_run_at)}` : ""}`;
-  return `Loop ${loop.status}${loop.pause_note || loop.stop_reason ? `: ${(loop.pause_note || loop.stop_reason || "").slice(0, 80)}` : ""} · ${runs}`;
+  const cadence = loop.mode === "interval" ? t("loop.every", { t: fmtInterval(loop.interval_seconds) }) : t("loop.selfpaced");
+  const runs = `${t("agents.loop.runs", { n: loop.run_count })}${loop.max_runs ? `/${loop.max_runs}` : ""}`;
+  if (loop.status === "active") return `${t("agents.loop.line", { cadence, runs })}${loop.next_run_at ? t("agents.loop.next", { t: untilShort(loop.next_run_at) }) : ""}`;
+  const why = loop.pause_note || loop.stop_reason || "";
+  return `${t("agents.loop.stopped", { status: statusWord(loop.status).toLowerCase() })}${why ? `: ${why.slice(0, 80)}` : ""} · ${runs}`;
 }
 
 function Row({ s, kids, onOpen, current, fork }: { s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number } }) {
@@ -194,26 +195,26 @@ function Row({ s, kids, onOpen, current, fork }: { s: SessionSummary; kids: Sess
         </div>
         <div className={`erow-meta ${spoken ? status : ""}`}>
           {spoken && <Dot status={status} />}
-          {spoken && <span className="word">{STATUS_WORD[status]}</span>}
+          {spoken && <span className="word">{statusWord(status)}</span>}
           {spoken && s.model && <span className="sep">·</span>}
           {s.model && <span title={s.model}>{shortModel(s.model, 28)}</span>}
           {orphan && <span className="sep">·</span>}
-          {orphan && <span>subagent, leader gone</span>}
+          {orphan && <span>{t("agents.orphan")}</span>}
         </div>
-        {fork && <div className="erow-meta"><Icon name="fork" size={12} /> <span title={`forked from ${fork.of} at message ${fork.seq}`}>forked at message {fork.seq}</span></div>}
+        {fork && <div className="erow-meta"><Icon name="fork" size={12} /> <span title={t("agents.fork.of", { name: fork.of, n: fork.seq })}>{t("agents.fork.at", { n: fork.seq })}</span></div>}
         {loop && <div className={`erow-meta ${s.metadata?.loop?.status === "paused" ? "waiting" : ""}`}>{loop}</div>}
         {kids.length > 0 && (
           <div className="erow-children" onClick={(e) => e.stopPropagation()}>
             {visibleKids.map((c) => (
-              <button key={c.id} className="subrow" onClick={() => onOpen(c.id)} title={`open ${c.metadata?.subagent_name ?? c.title}`}>
+              <button key={c.id} className="subrow" onClick={() => onOpen(c.id)} title={t("agents.sub.open", { name: c.metadata?.subagent_name ?? c.title })}>
                 <Dot status={c.status === "idle" ? "done" : c.status} />
                 <span className="truncate">{c.metadata?.subagent_name || c.title.replace(/^\[sub\]\s*/, "")}</span>
-                <span className="sub">{c.status === "running" ? "working" : c.status === "waiting" ? "needs you" : c.status === "failed" ? "failed" : "done"}</span>
+                <span className="sub">{statusWord(c.status === "running" ? "running" : c.status === "waiting" ? "waiting" : c.status === "failed" ? "failed" : "done").toLowerCase()}</span>
               </button>
             ))}
             {kids.length > 3 && (
               <button className="subrow more" onClick={() => setShowKids((v) => !v)}>
-                {showKids ? "Fewer" : `${kids.length - 3} more subagent${kids.length - 3 === 1 ? "" : "s"}`}
+                {showKids ? t("agents.sub.fewer") : plural("agents.sub.more", kids.length - 3)}
               </button>
             )}
           </div>
@@ -267,35 +268,38 @@ function NewAgentSheet({ onClose, onCreated, toast, project: initial = "" }: { o
       setBusy(false);
     }
   }
-  const wsLabel = (w: Workspace) => `${w.own_session ? `${w.sessions.find((s) => s.id === w.name)?.title ?? w.name} (session workspace)` : w.name}${w.sessions.length ? ` · ${w.sessions.length} session${w.sessions.length === 1 ? "" : "s"}` : " · unused"} · ${w.files} files`;
+  const wsLabel = (w: Workspace) =>
+    `${w.own_session ? t("newagent.ws.session", { name: w.sessions.find((s) => s.id === w.name)?.title ?? w.name }) : w.name}` +
+    `${w.sessions.length ? plural("newagent.ws.sessions", w.sessions.length) : t("newagent.ws.unused")}` +
+    t("newagent.ws.files", { n: w.files });
   return (
-    <Sheet title="New agent" onClose={onClose}>
-      <label className="field">Name</label>
-      <input className="field" autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What this agent is about" onKeyDown={(e) => e.key === "Enter" && create()} />
-      <label className="field">First task (optional)</label>
-      <textarea className="field" rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="It starts on this right away" />
-      <label className="field">Model</label>
+    <Sheet title={t("newagent.title")} onClose={onClose}>
+      <label className="field">{t("common.name")}</label>
+      <input className="field" autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("newagent.name.placeholder")} onKeyDown={(e) => e.key === "Enter" && create()} />
+      <label className="field">{t("newagent.first")}</label>
+      <textarea className="field" rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={t("newagent.first.placeholder")} />
+      <label className="field">{t("newagent.model")}</label>
       <select className="field" value={preset} onChange={(e) => setPreset(e.target.value)}>
-        <option value="">Default{defaultPreset ? ` · ${presetLabel(defaultPreset)}` : ""}</option>
+        <option value="">{t("newagent.model.default")}{defaultPreset ? ` · ${presetLabel(defaultPreset)}` : ""}</option>
         {Object.keys(presets).map((id) => (
           <option key={id} value={id}>{presetLabel(id)}</option>
         ))}
       </select>
-      <label className="field">Where it works</label>
+      <label className="field">{t("newagent.where")}</label>
       <select className="field" value={project} onChange={(e) => setProject(e.target.value)}>
-        <option value="">No project — a directory of its own</option>
+        <option value="">{t("newagent.where.none")}</option>
         {(projects.data ?? []).map((p) => (
           <option key={p.id} value={p.id} disabled={!p.reachable}>
-            {p.name} · {p.root}{p.reachable ? "" : " (not mounted)"}
+            {p.name} · {p.root}{p.reachable ? "" : t("newagent.where.unmounted")}
           </option>
         ))}
       </select>
-      {chosen && <div className="sub">Everything this agent reads, writes and runs stays inside {chosen.root}.</div>}
+      {chosen && <div className="sub">{t("newagent.where.inside", { root: chosen.root })}</div>}
       {!project && (
         <>
-          <label className="field">Workspace</label>
+          <label className="field">{t("newagent.workspace")}</label>
           <select className="field" value={workspace} onChange={(e) => setWorkspace(e.target.value)}>
-            <option value="">A directory of its own</option>
+            <option value="">{t("newagent.workspace.own")}</option>
             {(workspaces.data ?? []).map((w) => (
               <option key={w.name} value={w.name}>{wsLabel(w)}</option>
             ))}
@@ -303,38 +307,38 @@ function NewAgentSheet({ onClose, onCreated, toast, project: initial = "" }: { o
         </>
       )}
       <button type="button" className="disclosure" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced}>
-        <span className={`chev ${advanced ? "down" : ""}`}>›</span> Advanced{loopOn ? " · loop" : ""}{toolsOff.length ? ` · ${toolsOff.length} tools off` : ""}
+        <span className={`chev ${advanced ? "down" : ""}`}>›</span> {t("newagent.advanced")}{loopOn ? t("newagent.advanced.loop") : ""}{toolsOff.length ? t("newagent.advanced.tools", { n: toolsOff.length }) : ""}
       </button>
       {advanced && (
         <div className="disclosure-body">
-          <div className="sub">Several sessions can work in one directory: each keeps its own history, model and brief, and sees the same files.</div>
+          <div className="sub">{t("newagent.shared")}</div>
           <label className="toggle-row">
             <input type="checkbox" checked={loopOn} onChange={(e) => setLoopOn(e.target.checked)} />
-            <span>Loop agent</span>
-            <span className="sub">woken up for one standing task, on an interval or when it says so</span>
+            <span>{t("newagent.loop")}</span>
+            <span className="sub">{t("newagent.loop.hint")}</span>
           </label>
           {loopOn && (
             <div className="loop-form">
-              <label className="field">Loop instruction (what each wake-up is for)</label>
-              <textarea className="field" rows={3} value={loopText} onChange={(e) => setLoopText(e.target.value)} placeholder="Check the forum for replies to my threads; answer what needs answering; report only what matters." />
+              <label className="field">{t("newagent.loop.label")}</label>
+              <textarea className="field" rows={3} value={loopText} onChange={(e) => setLoopText(e.target.value)} placeholder={t("newagent.loop.placeholder")} />
               <div className="composer-row">
                 <select className="field" value={loopMode} onChange={(e) => setLoopMode(e.target.value as "interval" | "dynamic")}>
-                  <option value="interval">every N min</option>
-                  <option value="dynamic">self-paced</option>
+                  <option value="interval">{t("newagent.loop.interval")}</option>
+                  <option value="dynamic">{t("loop.selfpaced")}</option>
                 </select>
-                {loopMode === "interval" && <input className="field" type="number" min={1} style={{ maxWidth: 110 }} value={loopMinutes} onChange={(e) => setLoopMinutes(e.target.value)} aria-label="minutes" />}
-                <input className="field" type="number" min={1} style={{ maxWidth: 130 }} placeholder="max runs" value={loopMax} onChange={(e) => setLoopMax(e.target.value)} aria-label="max runs" />
+                {loopMode === "interval" && <input className="field" type="number" min={1} style={{ maxWidth: 110 }} value={loopMinutes} onChange={(e) => setLoopMinutes(e.target.value)} aria-label={t("newagent.loop.minutes")} />}
+                <input className="field" type="number" min={1} style={{ maxWidth: 130 }} placeholder={t("newagent.loop.max")} value={loopMax} onChange={(e) => setLoopMax(e.target.value)} aria-label={t("newagent.loop.max")} />
               </div>
-              <div className="sub">The first iteration runs right after creation. The agent stops the loop itself when its purpose is achieved, pauses it when it needs you, and stays quiet when there is nothing to report.</div>
+              <div className="sub">{t("newagent.loop.note")}</div>
             </div>
           )}
-          <ToolPicker off={toolsOff} onChange={setToolsOff} note="Untick what this agent must not have (self-development, spawning agents, the shell…). Everything is on by default." />
+          <ToolPicker off={toolsOff} onChange={setToolsOff} note={t("newagent.tools.note")} />
         </div>
       )}
       <div className="sheet-foot">
-        <button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn ghost" onClick={onClose}>{t("common.cancel")}</button>
         <button className="btn primary" onClick={create} disabled={busy || !title.trim() || (loopOn && !loopText.trim())}>
-          Create
+          {t("common.create")}
         </button>
       </div>
     </Sheet>
@@ -352,7 +356,7 @@ function WorkspacesPanel({ onOpen, toast }: { onOpen: (id: string) => void; toas
     if (!n) return;
     try {
       await api.post("/api/workspaces", { name: n });
-      toast(`workspace ${n} created`);
+      toast(t("ws.created", { name: n }));
       setName("");
       refresh();
     } catch (e) {
@@ -360,10 +364,10 @@ function WorkspacesPanel({ onOpen, toast }: { onOpen: (id: string) => void; toas
     }
   }
   async function remove(w: Workspace) {
-    if (!(await confirmAsync(`Delete the workspace "${w.name}"?`, { body: `Its ${w.files} file${w.files === 1 ? "" : "s"} are removed. No session works in it.`, action: "Delete" }))) return;
+    if (!(await confirmAsync(t("ws.delete.title", { name: w.name }), { body: plural("ws.delete.body", w.files), action: t("common.delete") }))) return;
     try {
       await api.delete(`/api/workspaces/${encodeURIComponent(w.name)}`);
-      toast("workspace deleted");
+      toast(t("ws.deleted"));
       refresh();
     } catch (e) {
       toast(errorText(e));
@@ -373,35 +377,35 @@ function WorkspacesPanel({ onOpen, toast }: { onOpen: (id: string) => void; toas
   return (
     <div className="workspaces">
       <div className="composer-row" style={{ marginTop: 0, marginBottom: 8 }}>
-        <input className="field" placeholder="new workspace name (letters, digits, - _ .)" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && create()} />
-        <button className="btn primary" disabled={!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name.trim())} onClick={create}>Create</button>
+        <input className="field" placeholder={t("ws.new.placeholder")} value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && create()} />
+        <button className="btn primary" disabled={!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name.trim())} onClick={create}>{t("common.create")}</button>
       </div>
-      {!workspaces && <div className="sub">Loading…</div>}
-      {workspaces?.length === 0 && <div className="sub">No workspaces yet.</div>}
+      {!workspaces && <div className="sub">{t("common.loading")}</div>}
+      {workspaces?.length === 0 && <div className="sub">{t("ws.empty")}</div>}
       {workspaces?.map((w) => (
         <div key={w.name} className="ws-row">
           <span aria-hidden>📁</span>
           <div className="grow" style={{ minWidth: 0 }}>
             <div className="ws-name">
               {w.name}
-              {w.kind === "session" && <span className="badge" title="created with a session; it stays while anyone works in it">session</span>}
-              {w.kind === "schedule" && <span className="badge" title={`the scheduled task ${w.schedule} runs here`}>schedule: {w.schedule}</span>}
-              {w.kind === "heartbeat" && <span className="badge">heartbeat</span>}
-              {w.kind === "named" && w.sessions.length === 0 && <span className="badge">unused</span>}
+              {w.kind === "session" && <span className="badge" title={t("ws.badge.session.title")}>{t("ws.badge.session")}</span>}
+              {w.kind === "schedule" && <span className="badge" title={t("ws.badge.schedule.title", { name: w.schedule ?? "" })}>{t("ws.badge.schedule", { name: w.schedule ?? "" })}</span>}
+              {w.kind === "heartbeat" && <span className="badge">{t("ws.badge.heartbeat")}</span>}
+              {w.kind === "named" && w.sessions.length === 0 && <span className="badge">{t("ws.badge.unused")}</span>}
             </div>
             <div className="sub ws-meta">
-              {w.files} file{w.files === 1 ? "" : "s"} · {fmtBytes(w.size)} · {relTime(w.mtime)}
+              {plural("ws.files", w.files)} · {fmtBytes(w.size)} · {relTime(w.mtime)}
               {w.sessions.map((s) => (
-                <button key={s.id} className="linkbtn sub" onClick={() => onOpen(s.id)} title="open the session"> · {s.title}</button>
+                <button key={s.id} className="linkbtn sub" onClick={() => onOpen(s.id)} title={t("ws.open.session")}> · {s.title}</button>
               ))}
             </div>
           </div>
-          <button className="iconbtn small" onClick={() => setBrowsing(w)} title="Browse and upload files" aria-label="Browse files"><Icon name="folder" size={15} /></button>
-          {w.sessions.length === 0 && w.kind === "named" && <button className="iconbtn small" onClick={() => remove(w)} title="Delete" aria-label="Delete"><Icon name="trash" size={15} /></button>}
+          <button className="iconbtn small" onClick={() => setBrowsing(w)} title={t("ws.browse")} aria-label={t("ws.browse.label")}><Icon name="folder" size={15} /></button>
+          {w.sessions.length === 0 && w.kind === "named" && <button className="iconbtn small" onClick={() => remove(w)} title={t("common.delete")} aria-label={t("common.delete")}><Icon name="trash" size={15} /></button>}
         </div>
       ))}
       {browsing && (
-        <Sheet title={<><span aria-hidden>📁</span> {browsing.name}</>} ariaLabel={`workspace ${browsing.name}`} onClose={onClose}>
+        <Sheet title={<><span aria-hidden>📁</span> {browsing.name}</>} ariaLabel={t("ws.sheet", { name: browsing.name })} onClose={onClose}>
           <Files base={workspaceBase(browsing.name)} uploadUrl={`${workspaceBase(browsing.name)}/upload`} onPreview={setPreview} toast={toast} />
         </Sheet>
       )}

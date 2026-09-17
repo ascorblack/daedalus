@@ -7,6 +7,7 @@ import { navigate, pathFor } from "../router";
 import { PageHeader, screenTitle } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { errorText } from "../ui";
+import { plural, t } from "../i18n";
 
 type Filter = "all" | "pending";
 
@@ -22,19 +23,19 @@ export function ProposalsScreen({ toast, selected }: { toast: (t: string) => voi
   };
   return (
     <>
-      <PageHeader title={screenTitle("changes")} subtitle={items ? (pending.length ? `${pending.length} waiting for you` : `${items.length} proposal${items.length === 1 ? "" : "s"}`) : undefined}>
+      <PageHeader title={screenTitle("changes")} subtitle={items ? (pending.length ? plural("changes.waiting", pending.length) : plural("changes.count", items.length)) : undefined}>
         <div className="chips">
-          <button className="chip select" aria-pressed={filter === "all"} onClick={() => setFilter("all")}>All</button>
-          <button className="chip select" aria-pressed={filter === "pending"} onClick={() => setFilter("pending")}>Pending{pending.length ? ` · ${pending.length}` : ""}</button>
+          <button className="chip select" aria-pressed={filter === "all"} onClick={() => setFilter("all")}>{t("common.all")}</button>
+          <button className="chip select" aria-pressed={filter === "pending"} onClick={() => setFilter("pending")}>{t("changes.filter.pending")}{pending.length ? ` · ${pending.length}` : ""}</button>
         </div>
       </PageHeader>
       <div className="screen narrow">
         {loading && !error && <Skeleton rows={4} />}
-        {error && !items && <div className="empty"><b>Could not load the proposals</b><div>{error}</div><button className="btn" onClick={refresh}>Retry</button></div>}
+        {error && !items && <div className="empty"><b>{t("changes.error")}</b><div>{error}</div><button className="btn" onClick={refresh}>{t("common.retry")}</button></div>}
         {items && shown.length === 0 && (
           <div className="empty">
-            <b>{filter === "pending" ? "Nothing waiting" : "No change proposals yet"}</b>
-            {filter === "all" && <div>The agent opens one when it changes its own code.</div>}
+            <b>{t(filter === "pending" ? "changes.empty.pending" : "changes.empty")}</b>
+            {filter === "all" && <div>{t("changes.empty.sub")}</div>}
           </div>
         )}
         {shown.map((p) => (
@@ -62,7 +63,7 @@ function ProposalRow({ p, onOpen }: { p: Proposal; onOpen: () => void }) {
           <span title={absTime(p.created_at)}>{relTime(p.created_at)}</span>
         </div>
         {p.summary && <div className="sub clamp-3 proposal-summary">{p.summary}</div>}
-        {p.reason && <div className="sub" style={{ marginTop: 4 }}><b>Reason:</b> {p.reason}</div>}
+        {p.reason && <div className="sub" style={{ marginTop: 4 }}><b>{t("changes.reason")}</b> {p.reason}</div>}
       </div>
     </div>
   );
@@ -77,7 +78,7 @@ function ProposalSheet({ p, toast, onDone, onClose }: { p: Proposal; toast: (t: 
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (tab !== "diff" || diff !== null) return;
-    api.get<{ diff: string }>(`/api/proposals/${p.id}/diff`).then((r) => setDiff(r.diff)).catch((e) => setDiff(`could not load the diff: ${errorText(e)}`));
+    api.get<{ diff: string }>(`/api/proposals/${p.id}/diff`).then((r) => setDiff(r.diff)).catch((e) => setDiff(t("changes.diff.error", { error: errorText(e) })));
   }, [tab, diff, p.id]);
   async function decide(decision: "approve" | "reject") {
     setBusy(true);
@@ -105,29 +106,29 @@ function ProposalSheet({ p, toast, onDone, onClose }: { p: Proposal; toast: (t: 
         <span>{absTime(p.created_at)}</span>
       </div>
       <div className="segmented" role="tablist">
-        <button role="tab" aria-selected={tab === "summary"} className={tab === "summary" ? "on" : ""} onClick={() => setTab("summary")}>Summary</button>
-        <button role="tab" aria-selected={tab === "diff"} className={tab === "diff" ? "on" : ""} onClick={() => setTab("diff")}>Diff</button>
+        <button role="tab" aria-selected={tab === "summary"} className={tab === "summary" ? "on" : ""} onClick={() => setTab("summary")}>{t("changes.tab.summary")}</button>
+        <button role="tab" aria-selected={tab === "diff"} className={tab === "diff" ? "on" : ""} onClick={() => setTab("diff")}>{t("changes.tab.diff")}</button>
       </div>
       {tab === "summary" && (
         <>
-          <div className="proposal-text">{p.summary || "No summary."}</div>
-          {p.reason && <div className="sub" style={{ marginTop: 8 }}><b>Reason:</b> {p.reason}</div>}
+          <div className="proposal-text">{p.summary || t("changes.nosummary")}</div>
+          {p.reason && <div className="sub" style={{ marginTop: 8 }}><b>{t("changes.reason")}</b> {p.reason}</div>}
         </>
       )}
-      {tab === "diff" && (diff === null ? <div className="empty">Loading the diff…</div> : <Diff text={diff} />)}
+      {tab === "diff" && (diff === null ? <div className="empty">{t("changes.diff.loading")}</div> : <Diff text={diff} />)}
       {p.status === "pending" && !rejecting && (
         <div className="sheet-foot">
-          <button className="btn" disabled={busy} onClick={() => setRejecting(true)}>Reject…</button>
-          <button className="btn primary" disabled={busy} onClick={() => decide("approve")}>Approve</button>
+          <button className="btn" disabled={busy} onClick={() => setRejecting(true)}>{t("inbox.reject")}</button>
+          <button className="btn primary" disabled={busy} onClick={() => decide("approve")}>{t("inbox.approve")}</button>
         </div>
       )}
       {rejecting && (
         <div className="sheet-foot column">
-          <label className="field">Reason (sent to the agent)</label>
-          <textarea className="field" rows={3} autoFocus value={reason} onChange={(e) => setReason(e.target.value)} placeholder="What is wrong, or what to do instead" />
+          <label className="field">{t("inbox.reason")}</label>
+          <textarea className="field" rows={3} autoFocus value={reason} onChange={(e) => setReason(e.target.value)} placeholder={t("inbox.reason.placeholder")} />
           <div className="btnrow" style={{ justifyContent: "flex-end" }}>
-            <button className="btn ghost" onClick={() => setRejecting(false)}>Cancel</button>
-            <button className="btn danger solid" disabled={busy} onClick={() => decide("reject")}>Reject</button>
+            <button className="btn ghost" onClick={() => setRejecting(false)}>{t("common.cancel")}</button>
+            <button className="btn danger solid" disabled={busy} onClick={() => decide("reject")}>{t("inbox.reject.do")}</button>
           </div>
         </div>
       )}

@@ -8,6 +8,7 @@ import { navigate, pathFor } from "../router";
 import { PageHeader, screenTitle } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { confirmAsync, errorText } from "../ui";
+import { t } from "../i18n";
 import { useSessionTitles } from "./Sessions";
 
 type Group = "upcoming" | "paused" | "done";
@@ -20,11 +21,11 @@ function groupOf(s: Schedule): Group {
 
 function lastOutcome(s: Schedule): { status: string; word: string } | null {
   if (!s.last_run_at) return null;
-  if (s.failure_count > 0) return { status: "failed", word: `${s.failure_count} failed` };
-  return { status: "done", word: "ran" };
+  if (s.failure_count > 0) return { status: "failed", word: t("sched.failed", { n: s.failure_count }) };
+  return { status: "done", word: t("sched.ran") };
 }
 
-const KIND_WORD: Record<Schedule["kind"], string> = { agent: "Agent task", message: "Reminder", lazy: "Lazy note" };
+const kindWord = (kind: Schedule["kind"]) => t(`sched.kind.${kind}`);
 
 export function SchedulesScreen({ toast, onOpen, selected }: { toast: (t: string) => void; onOpen: (id: string) => void; selected?: string | null }) {
   const { data: items, error, loading, refresh } = useQuery<Schedule[]>("/api/schedules", { pollMs: 30000, staleMs: 5000 });
@@ -46,7 +47,7 @@ export function SchedulesScreen({ toast, onOpen, selected }: { toast: (t: string
   const open = selected ? (items ?? []).find((s) => s.id === selected) ?? null : null;
 
   async function remove(s: Schedule) {
-    if (!(await confirmAsync(`Delete "${s.name}"?`, { body: s.cron ? "It will not run again. Sessions it started are not affected." : "The one-off is removed.", action: "Delete schedule" }))) return;
+    if (!(await confirmAsync(t("sched.delete.title", { name: s.name }), { body: t(s.cron ? "sched.delete.body.cron" : "sched.delete.body.once"), action: t("sched.delete.action") }))) return;
     try {
       await api.delete(`/api/schedules/${s.id}`);
       if (selected === s.id) navigate(pathFor("schedules"), { replace: true });
@@ -58,7 +59,7 @@ export function SchedulesScreen({ toast, onOpen, selected }: { toast: (t: string
   async function runNow(s: Schedule) {
     try {
       const r = await api.post<{ session_id: string }>(`/api/schedules/${s.id}/run`);
-      toast("started");
+      toast(t("sched.started"));
       reload();
       if (r.session_id) onOpen(r.session_id);
     } catch (e) {
@@ -68,7 +69,7 @@ export function SchedulesScreen({ toast, onOpen, selected }: { toast: (t: string
   async function setEnabled(s: Schedule, enabled: boolean) {
     try {
       await api.patch(`/api/schedules/${s.id}`, { enabled });
-      toast(enabled ? "resumed" : "paused");
+      toast(t(enabled ? "sched.resumed" : "sched.pausedtoast"));
       reload();
     } catch (e) {
       toast(errorText(e));
@@ -89,16 +90,16 @@ export function SchedulesScreen({ toast, onOpen, selected }: { toast: (t: string
           <div className="erow-meta">
             <span>{describeSchedule(s)}</span>
             {!s.enabled && s.cron && <span className="sep">·</span>}
-            {!s.enabled && s.cron && <span className="word">paused</span>}
+            {!s.enabled && s.cron && <span className="word">{t("sched.paused.word")}</span>}
           </div>
           <div className="erow-meta">
-            <span>{KIND_WORD[s.kind] ?? s.kind}</span>
+            <span>{kindWord(s.kind)}</span>
             {s.run_in === "self" && target && <span className="sep">·</span>}
-            {s.run_in === "self" && target && <span>in {target}</span>}
+            {s.run_in === "self" && target && <span>{t("sched.in", { name: target })}</span>}
             {s.last_run_at && <span className="sep">·</span>}
-            {s.last_run_at && <span title={absTime(s.last_run_at)}>last {relTime(s.last_run_at)}</span>}
+            {s.last_run_at && <span title={absTime(s.last_run_at)}>{t("sched.last", { t: relTime(s.last_run_at) })}</span>}
             {s.active_session_id && <span className="sep">·</span>}
-            {s.active_session_id && <span className="word running">running now</span>}
+            {s.active_session_id && <span className="word running">{t("sched.running")}</span>}
           </div>
         </div>
       </div>
@@ -109,24 +110,24 @@ export function SchedulesScreen({ toast, onOpen, selected }: { toast: (t: string
     <>
       <PageHeader
         title={screenTitle("schedules")}
-        subtitle={items ? `${groups.upcoming.length} upcoming${groups.paused.length ? ` · ${groups.paused.length} paused` : ""}` : undefined}
-        actions={<button className="iconbtn primary" onClick={() => setCreating(true)} title="New schedule" aria-label="New schedule"><Icon name="plus" /></button>}
+        subtitle={items ? `${t("sched.upcoming", { n: groups.upcoming.length })}${groups.paused.length ? t("sched.paused.count", { n: groups.paused.length }) : ""}` : undefined}
+        actions={<button className="iconbtn primary" onClick={() => setCreating(true)} title={t("sched.new")} aria-label={t("sched.new")}><Icon name="plus" /></button>}
       />
       <div className="screen narrow">
         {loading && !error && <Skeleton rows={4} />}
-        {error && !items && <div className="empty"><b>Could not load the schedules</b><div>{error}</div><button className="btn" onClick={refresh}>Retry</button></div>}
+        {error && !items && <div className="empty"><b>{t("sched.error")}</b><div>{error}</div><button className="btn" onClick={refresh}>{t("common.retry")}</button></div>}
         {items && items.length === 0 && (
           <div className="empty">
-            <b>No schedules yet</b>
-            <div>A task the agent runs at a set time, or a reminder for you.</div>
-            <button className="btn primary" onClick={() => setCreating(true)}>New schedule</button>
+            <b>{t("sched.empty")}</b>
+            <div>{t("sched.empty.sub")}</div>
+            <button className="btn primary" onClick={() => setCreating(true)}>{t("sched.new")}</button>
           </div>
         )}
         {(["upcoming", "paused", "done"] as Group[]).map((g) =>
           groups[g].length === 0 ? null : (
             <section key={g}>
               <div className="section-title">
-                {g === "upcoming" ? "Upcoming" : g === "paused" ? "Paused" : "Done"} <span className="n">{groups[g].length}</span>
+                {t(`sched.group.${g}`)} <span className="n">{groups[g].length}</span>
               </div>
               {groups[g].map(row)}
             </section>
@@ -142,35 +143,35 @@ export function SchedulesScreen({ toast, onOpen, selected }: { toast: (t: string
           head={
             <OverflowMenu
               small
-              label="Schedule actions"
+              label={t("sched.actions")}
               items={[
-                { label: "Edit", icon: "pen", onSelect: () => setEditing(open) },
-                open.enabled ? { label: "Pause", icon: "pause", onSelect: () => setEnabled(open, false) } : { label: "Resume", icon: "play", onSelect: () => setEnabled(open, true), disabled: !open.cron && !!open.last_run_at },
+                { label: t("common.edit"), icon: "pen", onSelect: () => setEditing(open) },
+                open.enabled ? { label: t("common.pause"), icon: "pause", onSelect: () => setEnabled(open, false) } : { label: t("common.resume"), icon: "play", onSelect: () => setEnabled(open, true), disabled: !open.cron && !!open.last_run_at },
                 "-",
-                { label: "Delete…", icon: "trash", danger: true, onSelect: () => remove(open) },
+                { label: t("board.delete.menu"), icon: "trash", danger: true, onSelect: () => remove(open) },
               ]}
             />
           }
         >
-          <div className="kv"><span>When</span><b>{describeSchedule(open)}</b></div>
-          {open.cron && <div className="kv"><span>Cron (UTC)</span><b className="mono">{open.cron}</b></div>}
-          <div className="kv"><span>Next run</span><b>{open.enabled && open.next_run_at ? `${absTime(open.next_run_at)} · ${untilShort(open.next_run_at)}` : open.enabled ? "—" : "paused"}</b></div>
-          {open.last_run_at && <div className="kv"><span>Last run</span><b>{absTime(open.last_run_at)}{open.failure_count ? ` · ${open.failure_count} failed` : ""}</b></div>}
-          <div className="kv"><span>Kind</span><b>{KIND_WORD[open.kind] ?? open.kind}{open.run_in === "self" ? ` · in ${(open.target_session && titles[open.target_session]) || "its session"}` : open.kind === "agent" ? " · own session each run" : ""}</b></div>
-          {open.last_error && <div className="kv"><span>Last error</span><b style={{ color: "var(--bad)" }}>{open.last_error}</b></div>}
+          <div className="kv"><span>{t("sched.when")}</span><b>{describeSchedule(open)}</b></div>
+          {open.cron && <div className="kv"><span>{t("sched.cron")}</span><b className="mono">{open.cron}</b></div>}
+          <div className="kv"><span>{t("sched.next")}</span><b>{open.enabled && open.next_run_at ? `${absTime(open.next_run_at)} · ${untilShort(open.next_run_at)}` : open.enabled ? "—" : t("sched.paused.word")}</b></div>
+          {open.last_run_at && <div className="kv"><span>{t("sched.lastrun")}</span><b>{absTime(open.last_run_at)}{open.failure_count ? ` · ${t("sched.failed", { n: open.failure_count })}` : ""}</b></div>}
+          <div className="kv"><span>{t("sched.kind")}</span><b>{kindWord(open.kind)}{open.run_in === "self" ? t("sched.kind.in", { name: (open.target_session && titles[open.target_session]) || t("sched.kind.itssession") }) : open.kind === "agent" ? t("sched.kind.own") : ""}</b></div>
+          {open.last_error && <div className="kv"><span>{t("sched.lasterror")}</span><b style={{ color: "var(--bad)" }}>{open.last_error}</b></div>}
           <section className="sheet-section">
-            <div className="sheet-section-title">{open.kind === "agent" ? "Instruction" : "Text"}</div>
+            <div className="sheet-section-title">{t(open.kind === "agent" ? "sched.instruction" : "sched.text")}</div>
             <div className="proposal-text">{open.prompt}</div>
           </section>
           {open.last_summary && (
             <section className="sheet-section">
-              <div className="sheet-section-title">Last result</div>
+              <div className="sheet-section-title">{t("sched.lastresult")}</div>
               <div className="proposal-text">{open.last_summary}</div>
             </section>
           )}
           <div className="sheet-foot">
-            {open.active_session_id && <button className="btn" onClick={() => onOpen(open.active_session_id!)}>Open the running session</button>}
-            <button className="btn primary" onClick={() => runNow(open)}><Icon name="play" size={14} /> Run now</button>
+            {open.active_session_id && <button className="btn" onClick={() => onOpen(open.active_session_id!)}>{t("sched.openrunning")}</button>}
+            <button className="btn primary" onClick={() => runNow(open)}><Icon name="play" size={14} /> {t("common.runnow")}</button>
           </div>
         </Sheet>
       )}
@@ -179,7 +180,8 @@ export function SchedulesScreen({ toast, onOpen, selected }: { toast: (t: string
 }
 
 type When = "once" | "daily" | "weekdays" | "weekly" | "hours" | "cron";
-const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+/** Monday first, the way a week is picked here; the cron field counts from Sunday. */
+const DAYS = [1, 2, 3, 4, 5, 6, 0];
 
 /** When, in the reader's own clock: a moment, a daily or weekly time, or every few hours; cron stays for the rest. */
 function ScheduleForm({ existing, onClose, onSaved, toast }: { existing?: Schedule; onClose: () => void; onSaved: () => void; toast: (t: string) => void }) {
@@ -205,7 +207,7 @@ function ScheduleForm({ existing, onClose, onSaved, toast }: { existing?: Schedu
     if (when === "hours") return { run_at: null, cron: cronFor("hours", h, m, [], Number(every) || 1) };
     return { run_at: null, cron: cronFor(when, h, m) };
   })();
-  const preview = built.cron ? describeCron(built.cron) : built.run_at ? `Once · ${absTime(built.run_at)}` : "";
+  const preview = built.cron ? describeCron(built.cron) : built.run_at ? t("fmt.once", { when: absTime(built.run_at) }) : "";
   const valid = name.trim() && prompt.trim() && (built.cron || built.run_at) && (when !== "weekly" || days.length > 0);
 
   async function save() {
@@ -213,7 +215,7 @@ function ScheduleForm({ existing, onClose, onSaved, toast }: { existing?: Schedu
     try {
       if (existing) await api.patch(`/api/schedules/${existing.id}`, { name: name.trim(), prompt: prompt.trim(), cron: built.cron, run_at: built.run_at });
       else await api.post("/api/schedules", { name: name.trim(), prompt: prompt.trim(), cron: built.cron, run_at: built.run_at, kind });
-      toast(existing ? "schedule updated" : "schedule created");
+      toast(t(existing ? "sched.saved" : "sched.created"));
       onSaved();
     } catch (e) {
       toast(errorText(e));
@@ -222,61 +224,61 @@ function ScheduleForm({ existing, onClose, onSaved, toast }: { existing?: Schedu
     }
   }
   return (
-    <Sheet title={existing ? "Edit schedule" : "New schedule"} onClose={onClose}>
-      <label className="field">Name</label>
+    <Sheet title={t(existing ? "sched.edit" : "sched.new")} onClose={onClose}>
+      <label className="field">{t("common.name")}</label>
       <input className="field" autoFocus value={name} onChange={(e) => setName(e.target.value)} />
       {!existing && (
         <>
-          <label className="field">Type</label>
+          <label className="field">{t("sched.type")}</label>
           <div className="segmented inline" role="radiogroup">
-            <button role="radio" aria-checked={kind === "agent"} className={kind === "agent" ? "on" : ""} onClick={() => setKind("agent")}>Agent task</button>
-            <button role="radio" aria-checked={kind === "message"} className={kind === "message" ? "on" : ""} onClick={() => setKind("message")}>Reminder</button>
+            <button role="radio" aria-checked={kind === "agent"} className={kind === "agent" ? "on" : ""} onClick={() => setKind("agent")}>{t("sched.kind.agent")}</button>
+            <button role="radio" aria-checked={kind === "message"} className={kind === "message" ? "on" : ""} onClick={() => setKind("message")}>{t("sched.kind.message")}</button>
           </div>
-          <div className="sub" style={{ marginTop: 4 }}>{kind === "agent" ? "Runs the instruction as a task in a session of its own." : "Delivers the text to you; no model call."}</div>
+          <div className="sub" style={{ marginTop: 4 }}>{t(kind === "agent" ? "sched.type.agent.hint" : "sched.type.message.hint")}</div>
         </>
       )}
-      <label className="field">{kind === "agent" ? "Instruction" : "Reminder text"}</label>
+      <label className="field">{t(kind === "agent" ? "sched.instruction" : "sched.remindertext")}</label>
       <textarea className="field" rows={4} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
-      <label className="field">When</label>
+      <label className="field">{t("sched.when")}</label>
       <div className="chips">
         {(["once", "daily", "weekdays", "weekly", "hours", "cron"] as When[]).map((w) => (
           <button key={w} className="chip select" aria-pressed={when === w} onClick={() => setWhen(w)}>
-            {w === "once" ? "Once" : w === "daily" ? "Every day" : w === "weekdays" ? "Weekdays" : w === "weekly" ? "Weekly" : w === "hours" ? "Every N hours" : "Cron"}
+            {t(`sched.when.${w}`)}
           </button>
         ))}
       </div>
       {when === "once" && (
         <div className="grid2">
-          <div><label className="field">Date</label><input className="field" type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
-          <div><label className="field">Time</label><input className="field" type="time" value={time} onChange={(e) => setTime(e.target.value)} /></div>
+          <div><label className="field">{t("sched.date")}</label><input className="field" type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+          <div><label className="field">{t("sched.time")}</label><input className="field" type="time" value={time} onChange={(e) => setTime(e.target.value)} /></div>
         </div>
       )}
       {(when === "daily" || when === "weekdays" || when === "weekly" || when === "hours") && (
         <div className="grid2">
-          <div><label className="field">{when === "hours" ? "Starting at minute" : "Time"}</label><input className="field" type="time" value={time} onChange={(e) => setTime(e.target.value)} /></div>
-          {when === "hours" && <div><label className="field">Every (hours)</label><input className="field" type="number" min={1} max={24} value={every} onChange={(e) => setEvery(e.target.value)} /></div>}
+          <div><label className="field">{t(when === "hours" ? "sched.minute" : "sched.time")}</label><input className="field" type="time" value={time} onChange={(e) => setTime(e.target.value)} /></div>
+          {when === "hours" && <div><label className="field">{t("sched.everyhours")}</label><input className="field" type="number" min={1} max={24} value={every} onChange={(e) => setEvery(e.target.value)} /></div>}
         </div>
       )}
       {when === "weekly" && (
         <>
-          <label className="field">Days</label>
+          <label className="field">{t("sched.days")}</label>
           <div className="chips">
             {DAYS.map((d, i) => (
-              <button key={d} className="chip select" aria-pressed={days.includes(i)} onClick={() => setDays((cur) => (cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i].sort()))}>{d}</button>
+              <button key={d} className="chip select" aria-pressed={days.includes(i)} onClick={() => setDays((cur) => (cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i].sort()))}>{t(`fmt.dow.${d}`)}</button>
             ))}
           </div>
         </>
       )}
       {when === "cron" && (
         <>
-          <label className="field">Cron expression (UTC, 5 fields)</label>
+          <label className="field">{t("sched.cron.label")}</label>
           <input className="field mono" placeholder="0 4 * * 1-5" value={cron} onChange={(e) => setCron(e.target.value)} />
         </>
       )}
-      <div className="sub preview-line">{preview ? `Runs: ${preview}` : "Pick a valid moment."}{built.cron && when !== "cron" ? <span className="faint"> · cron {built.cron}</span> : null}</div>
+      <div className="sub preview-line">{preview ? t("sched.preview", { when: preview }) : t("sched.preview.none")}{built.cron && when !== "cron" ? <span className="faint"> · cron {built.cron}</span> : null}</div>
       <div className="sheet-foot">
-        <button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn primary" disabled={busy || !valid} onClick={save}>{existing ? "Save" : "Create"}</button>
+        <button className="btn ghost" onClick={onClose}>{t("common.cancel")}</button>
+        <button className="btn primary" disabled={busy || !valid} onClick={save}>{t(existing ? "common.save" : "common.create")}</button>
       </div>
     </Sheet>
   );

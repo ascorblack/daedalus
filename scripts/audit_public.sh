@@ -28,8 +28,9 @@ set -euo pipefail
 PATTERNS='sk-[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]+|ghp_[A-Za-z0-9]{20,}|[0-9]{6,}:[A-Za-z0-9_-]{30,}|192\.168\.[0-9.]+|10\.10\.[0-9.]+|Co-authored-by|Generated with|[Cc]laude-[Ss]ession|session_01|claude\.ai/code|Signed-off-by'
 
 # Where this repository legitimately keeps bytes git cannot diff. Anchored at the start of the path,
-# so a binary that merely ends in one of these names does not slip through on the suffix.
-BINARY_ALLOWED='^docs/(brand|diagrams|screenshots)/[^/]+\.(png|jpg|jpeg|webp|gif|svg)$|^miniapp/public/.+\.(png|jpg|ico|webp|svg)$|^skills/.+\.(png|jpg|jpeg|webp|gif|ttf|otf|woff2?|pdf|tar\.gz|zip)$'
+# so a binary that merely ends in one of these names does not slip through on the suffix. The
+# screenshots may sit one level down, in a folder named by a language code: the same set in Russian.
+BINARY_ALLOWED='^docs/(brand|diagrams|screenshots(/[a-z]{2})?)/[^/]+\.(png|jpg|jpeg|webp|gif|svg)$|^miniapp/public/.+\.(png|jpg|ico|webp|svg)$|^skills/.+\.(png|jpg|jpeg|webp|gif|ttf|otf|woff2?|pdf|tar\.gz|zip)$'
 
 # Usernames that appear in documentation and tests on purpose, as examples. Everything else is a real
 # account name and has no business being committed.

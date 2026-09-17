@@ -7,10 +7,13 @@ import { api, telegram, HeartbeatStatus, Preset, ProviderConf, SearchBackendInfo
 import { confirmAsync, errorText, numInput } from "../ui";
 import * as passkeys from "../passkeys";
 import { timeAgo } from "../components";
+import { shortDateTime } from "../format";
 import { SpeechModels } from "./Speech";
 import { VoiceSettings } from "./Voice";
 import { AddModel } from "./AddModel";
 import { Sheet } from "../dialogs";
+import { t } from "../i18n";
+import { LangPicker } from "../components";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "openai_compat"];
 
@@ -23,17 +26,15 @@ function RulesEditor({ rules, fallback, onSave }: { rules: string; fallback: str
   }, [rules, fallback]);
   return (
     <div className="card">
-      <div className="section-title" style={{ marginTop: 0 }}>
-        Working rules (system prompt)
-      </div>
-      <div className="sub">Shared by every session, after the persona and before the governance text. {rules ? "Custom text is in use." : "The built-in default is in use."}</div>
+      <div className="section-title" style={{ marginTop: 0 }}>{t("settings.rules.title")}</div>
+      <div className="sub">{t("settings.rules.sub")} {t(rules ? "settings.rules.custom" : "settings.rules.default")}</div>
       <textarea className="field" rows={14} value={text} onChange={(e) => (setText(e.target.value), setDirty(true))} style={{ fontFamily: "var(--mono)", fontSize: 12.5, marginTop: 8 }} />
       <div className="btnrow">
         <button className="btn primary" disabled={!dirty} onClick={() => (onSave(text.trim() === fallback.trim() ? "" : text), setDirty(false))}>
-          Save
+          {t("common.save")}
         </button>
         <button className="btn" onClick={() => (setText(fallback), setDirty(true))}>
-          Reset to default
+          {t("settings.rules.reset")}
         </button>
       </div>
     </div>
@@ -71,11 +72,11 @@ function ModelsMenu({ load, current, onPick }: { load: () => Promise<string[] | 
       </button>
       {open && (
         <div className="models-menu">
-          <input className="field" autoFocus placeholder="filter" value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <input className="field" autoFocus placeholder={t("settings.models.menu")} value={filter} onChange={(e) => setFilter(e.target.value)} />
           <div className="models-menu-list">
-            {busy && <div className="sub" style={{ padding: 8 }}>loading…</div>}
-            {!busy && models === null && <div className="sub" style={{ padding: 8 }}>could not reach the endpoint</div>}
-            {!busy && models !== null && shown.length === 0 && <div className="sub" style={{ padding: 8 }}>no models</div>}
+            {busy && <div className="sub" style={{ padding: 8 }}>{t("settings.models.menu.loading")}</div>}
+            {!busy && models === null && <div className="sub" style={{ padding: 8 }}>{t("settings.models.menu.unreachable")}</div>}
+            {!busy && models !== null && shown.length === 0 && <div className="sub" style={{ padding: 8 }}>{t("settings.models.menu.none")}</div>}
             {shown.map((m) => (
               <button key={m} className={`models-menu-item ${m === current ? "on" : ""}`} onClick={() => (setOpen(false), onPick(m))}>
                 {m}
@@ -123,25 +124,25 @@ function PresetRow({ id, p, isDefault, inChain, providers, onDefault, onChain, o
           <span className="mmeta">{p.provider} · {p.model}</span>
         </button>
         <div className="mtags">
-          {isDefault && <span className="chip accent">default</span>}
-          {!isDefault && inChain && <span className="pill">fallback</span>}
-          <span className="pill">{p.thinking ? `think ${p.reasoning_effort}` : "no thinking"}</span>
-          {p.images && <span className="pill">images</span>}
+          {isDefault && <span className="chip accent">{t("settings.preset.default")}</span>}
+          {!isDefault && inChain && <span className="pill">{t("settings.preset.fallback")}</span>}
+          <span className="pill">{p.thinking ? t("settings.preset.think", { effort: t(`add.effort.${p.reasoning_effort}`) }) : t("settings.preset.nothink")}</span>
+          {p.images && <span className="pill">{t("settings.preset.images")}</span>}
           <span className="pill">{Math.round(p.context_window / 1000)}k</span>
         </div>
         <div className="mactions">
-          <button className={`iconbtn small ${open ? "on" : ""}`} onClick={() => setOpen((o) => !o)} title={open ? "Close" : "Edit"} aria-label={open ? "Close" : "Edit"}><span className={`chev ${open ? "down" : ""}`}>›</span></button>
+          <button className={`iconbtn small ${open ? "on" : ""}`} onClick={() => setOpen((o) => !o)} title={t(open ? "common.close" : "common.edit")} aria-label={t(open ? "common.close" : "common.edit")}><span className={`chev ${open ? "down" : ""}`}>›</span></button>
         </div>
       </div>
       {open && (
         <div className="mpanel">
           <div className="mfields">
             <label className="mfield">
-              <span>Label</span>
+              <span>{t("settings.preset.label")}</span>
               <input className="field" value={label} placeholder={`${p.provider}/${p.model}`} onChange={(e) => setLabel(e.target.value)} onBlur={() => label.trim() !== p.label && onPatch({ label: label.trim() })} />
             </label>
             <label className="mfield">
-              <span>Client</span>
+              <span>{t("settings.preset.client")}</span>
               <select className="field" value={p.provider} onChange={(e) => onPatch({ provider: e.target.value })}>
                 {providers.map((x) => (
                   <option key={x}>{x}</option>
@@ -150,37 +151,37 @@ function PresetRow({ id, p, isDefault, inChain, providers, onDefault, onChain, o
               </select>
             </label>
             <label className="mfield wide">
-              <span>Model id</span>
+              <span>{t("settings.preset.model")}</span>
               <div className="row" style={{ gap: 8 }}>
-                <input className="field" style={{ flex: 1, minWidth: 0 }} value={model} placeholder="model id" onChange={(e) => setModel(e.target.value)} onBlur={() => model.trim() && model.trim() !== p.model && onPatch({ model: model.trim() })} />
+                <input className="field" style={{ flex: 1, minWidth: 0 }} value={model} placeholder={t("settings.preset.model.placeholder")} onChange={(e) => setModel(e.target.value)} onBlur={() => model.trim() && model.trim() !== p.model && onPatch({ model: model.trim() })} />
                 <ModelsMenu load={() => onLookup(p.provider)} current={p.model} onPick={(m) => onPatch({ model: m })} />
               </div>
             </label>
             <label className="mfield">
-              <span>Context window (tokens)</span>
+              <span>{t("settings.preset.window")}</span>
               <input className="field" type="number" min={8000} step={1000} defaultValue={p.context_window} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null && v !== p.context_window) onPatch({ context_window: v }); }} />
             </label>
             <label className="mfield">
-              <span>Max output per reply (thinking included)</span>
+              <span>{t("settings.preset.output")}</span>
               <input className="field" type="number" min={1024} step={1000} defaultValue={p.max_output_tokens} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null && v !== p.max_output_tokens) onPatch({ max_output_tokens: v }); }} />
             </label>
           </div>
           <div className="btnrow">
-            <Toggle on={p.thinking} onClick={() => onPatch({ thinking: !p.thinking })}>thinking {p.thinking ? "on" : "off"}</Toggle>
-            <div className="segmented inline" role="group" aria-label="reasoning effort">
+            <Toggle on={p.thinking} onClick={() => onPatch({ thinking: !p.thinking })}>{t("settings.preset.thinking", { state: t(p.thinking ? "common.on" : "common.off") })}</Toggle>
+            <div className="segmented inline" role="group" aria-label={t("settings.preset.effort")}>
               {["low", "medium", "high"].map((e) => (
-                <button key={e} className={p.reasoning_effort === e ? "on" : ""} disabled={!p.thinking} onClick={() => onPatch({ reasoning_effort: e })}>{e}</button>
+                <button key={e} className={p.reasoning_effort === e ? "on" : ""} disabled={!p.thinking} onClick={() => onPatch({ reasoning_effort: e })}>{t(`add.effort.${e}`)}</button>
               ))}
             </div>
-            <Toggle on={p.images} onClick={() => onPatch({ images: !p.images })} title="the model accepts pictures">images {p.images ? "on" : "off"}</Toggle>
-            {!isDefault && <Toggle on={inChain} onClick={onChain} title="tried after the default when it fails">{inChain ? "fallback ✓" : "use as fallback"}</Toggle>}
+            <Toggle on={p.images} onClick={() => onPatch({ images: !p.images })} title={t("settings.preset.images.title")}>{t("settings.preset.imagestoggle", { state: t(p.images ? "common.on" : "common.off") })}</Toggle>
+            {!isDefault && <Toggle on={inChain} onClick={onChain} title={t("settings.preset.fallback.title")}>{t(inChain ? "settings.preset.isfallback" : "settings.preset.usefallback")}</Toggle>}
             <span className="sub mono mid">{id}</span>
           </div>
           <div className="btnrow mrow-foot">
-            {isDefault ? <span className="sub">Opens new sessions.</span> : <button className="btn small primary" onClick={onDefault}>Make default</button>}
+            {isDefault ? <span className="sub">{t("settings.preset.opens")}</span> : <button className="btn small primary" onClick={onDefault}>{t("settings.preset.makedefault")}</button>}
             <span className="grow" />
-            <button className="btn small danger" disabled={isDefault} title={isDefault ? "pick another default first" : "remove this model"} onClick={async () => { if (await confirmAsync(`Delete "${title}"?`, { body: "Sessions that chose it fall back to the default; the client stays.", action: "Delete model" })) onDelete(); }}>
-              <Icon name="trash" size={14} /> Delete
+            <button className="btn small danger" disabled={isDefault} title={t(isDefault ? "settings.preset.cannotdelete" : "settings.preset.remove.title")} onClick={async () => { if (await confirmAsync(t("settings.preset.delete.title", { title }), { body: t("settings.preset.delete.body"), action: t("settings.preset.delete.action") })) onDelete(); }}>
+              <Icon name="trash" size={14} /> {t("common.delete")}
             </button>
           </div>
         </div>
@@ -208,21 +209,21 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
       <div className="mline noradio">
         <button className="mmain" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
           <span className="mtitle mono">{id}</span>
-          <span className="mmeta">{p.kind} · {p.base_url || "no address"}</span>
+          <span className="mmeta">{p.kind} · {p.base_url || t("settings.provider.noaddress")}</span>
         </button>
         <div className="mtags">
-          <span className={`pill ${available ? "idle" : "waiting"}`}>{available ? "ready" : "needs URL or key"}</span>
-          {p.api_key_set && <span className="pill">key stored</span>}
+          <span className={`pill ${available ? "idle" : "waiting"}`}>{t(available ? "settings.provider.ready" : "settings.provider.needs")}</span>
+          {p.api_key_set && <span className="pill">{t("settings.provider.keystored")}</span>}
         </div>
         <div className="mactions">
-          <button className={`iconbtn small ${open ? "on" : ""}`} onClick={() => setOpen((o) => !o)} title={open ? "Close" : "Edit"} aria-label={open ? "Close" : "Edit"}><span className={`chev ${open ? "down" : ""}`}>›</span></button>
+          <button className={`iconbtn small ${open ? "on" : ""}`} onClick={() => setOpen((o) => !o)} title={t(open ? "common.close" : "common.edit")} aria-label={t(open ? "common.close" : "common.edit")}><span className={`chev ${open ? "down" : ""}`}>›</span></button>
         </div>
       </div>
       {open && (
         <div className="mpanel">
           <div className="mfields">
             <label className="mfield">
-              <span>Kind</span>
+              <span>{t("settings.provider.kind")}</span>
               <select className="field" value={p.kind} onChange={(e) => onPatch(id, { kind: e.target.value })}>
                 {kinds.map((k) => (
                   <option key={k}>{k}</option>
@@ -230,7 +231,7 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
               </select>
             </label>
             <label className="mfield wide">
-              <span>base_url (the API root, usually …/v1)</span>
+              <span>{t("settings.provider.baseurl")}</span>
               <input
                 className="field"
                 value={baseUrl}
@@ -240,14 +241,14 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
               />
             </label>
             <label className="mfield wide">
-              <span>api_key {p.api_key_set ? "(stored)" : "(optional; a key proxy or a self-hosted endpoint needs none)"}</span>
+              <span>{t(p.api_key_set ? "settings.provider.apikey.stored" : "settings.provider.apikey")}</span>
               <div className="row" style={{ gap: 8 }}>
                 <input
                   className="field"
                   style={{ flex: 1, minWidth: 0 }}
                   type="password"
                   autoComplete="new-password"
-                  placeholder={p.api_key_set ? "•••• stored — type to replace" : "no key needed"}
+                  placeholder={t(p.api_key_set ? "settings.provider.apikey.placeholder" : "settings.provider.apikey.none")}
                   value={keyDraft}
                   onChange={(e) => setKeyDraft(e.target.value)}
                   onBlur={() => {
@@ -259,8 +260,8 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
                   }}
                 />
                 {p.api_key_set && (
-                  <button className="btn small danger" title="remove stored key" onClick={() => onPatch(id, { api_key: "" })}>
-                    forget key
+                  <button className="btn small danger" title={t("settings.provider.forget.title")} onClick={() => onPatch(id, { api_key: "" })}>
+                    {t("settings.provider.forget")}
                   </button>
                 )}
               </div>
@@ -268,8 +269,8 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
           </div>
           <div className="btnrow mrow-foot">
             <span className="grow" />
-            <button className="btn small danger" onClick={async () => { if (await confirmAsync(`Remove the client "${id}"?`, { body: "Models that use it stop working until they are moved to another client.", action: "Remove client" })) onRemove(id); }}>
-              <Icon name="trash" size={14} /> Remove
+            <button className="btn small danger" onClick={async () => { if (await confirmAsync(t("settings.provider.remove.title", { id }), { body: t("settings.provider.remove.body"), action: t("settings.provider.remove.action") })) onRemove(id); }}>
+              <Icon name="trash" size={14} /> {t("common.remove")}
             </button>
           </div>
         </div>
@@ -287,11 +288,11 @@ function AddProviderRow({ kinds, onAdd, toast }: { kinds: string[]; onAdd: (id: 
     const pid = id.trim();
     const base = baseUrl.trim();
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(pid)) {
-      toast("id: letters, digits, - and _ only");
+      toast(t("settings.provider.id.bad"));
       return;
     }
     if (!base.startsWith("http")) {
-      toast("base_url must start with http:// or https://");
+      toast(t("settings.provider.url.bad"));
       return;
     }
     onAdd(pid, base, kind);
@@ -302,18 +303,18 @@ function AddProviderRow({ kinds, onAdd, toast }: { kinds: string[]; onAdd: (id: 
   if (!open)
     return (
       <button className="btn small" style={{ marginTop: 10 }} onClick={() => setOpen(true)}>
-        ＋ add client
+        ＋ {t("settings.provider.add")}
       </button>
     );
   return (
     <div className="mpanel add">
       <div className="mfields">
         <label className="mfield">
-          <span>Client id</span>
+          <span>{t("settings.provider.id")}</span>
           <input className="field" value={id} placeholder="local-vllm" onChange={(e) => setId(e.target.value)} />
         </label>
         <label className="mfield">
-          <span>Kind</span>
+          <span>{t("settings.provider.kind")}</span>
           <select className="field" value={kind} onChange={(e) => setKind(e.target.value)}>
             {kinds.map((k) => (
               <option key={k}>{k}</option>
@@ -326,8 +327,8 @@ function AddProviderRow({ kinds, onAdd, toast }: { kinds: string[]; onAdd: (id: 
         </label>
       </div>
       <div className="btnrow">
-        <button className="btn small primary" onClick={add}>add</button>
-        <button className="btn small" onClick={() => setOpen(false)}>cancel</button>
+        <button className="btn small primary" onClick={add}>{t("common.add")}</button>
+        <button className="btn small" onClick={() => setOpen(false)}>{t("common.cancel")}</button>
       </div>
     </div>
   );
@@ -345,22 +346,22 @@ function TotalCaps({ s, save }: { s: Settings; save: (patch: any) => Promise<voi
   const caps = s.limits.usd_total_per_provider ?? {};
   return (
     <>
-      <label className="field">Total spend cap, all sessions and providers (USD, 0 = none)</label>
+      <label className="field">{t("settings.limits.total")}</label>
       <div className="composer-row">
         <input className="field" type="number" step="1" min={0} defaultValue={s.limits.usd_total} onBlur={(e) => { const v = numInput(e.target.value, 0); if (v !== null && v !== s.limits.usd_total) save({ limits: { usd_total: v } }); }} />
-        <span className="sub" style={{ whiteSpace: "nowrap" }}>spent {spend ? `$${spend.total.spent_usd.toFixed(2)}` : "…"}</span>
+        <span className="sub" style={{ whiteSpace: "nowrap" }}>{t("settings.limits.spent", { sum: spend ? `$${spend.total.spent_usd.toFixed(2)}` : "…" })}</span>
       </div>
-      <label className="field">Per-provider total caps (USD, 0 = none)</label>
+      <label className="field">{t("settings.limits.perprovider")}</label>
       {providers.map((pid) => (
         <div key={pid} className="composer-row" style={{ marginBottom: 6 }}>
           <span style={{ minWidth: 90 }}>{pid}</span>
           <input className="field" type="number" step="1" min={0} defaultValue={caps[pid] ?? 0} onBlur={(e) => { const v = numInput(e.target.value, 0); if (v !== null && v !== (caps[pid] ?? 0)) save({ limits: { usd_total_per_provider: { [pid]: v } } }); }} />
-          <span className="sub" style={{ whiteSpace: "nowrap" }}>spent {spend?.per_provider[pid] ? `$${spend.per_provider[pid].spent_usd.toFixed(2)}` : "$0.00"}</span>
+          <span className="sub" style={{ whiteSpace: "nowrap" }}>{t("settings.limits.spent", { sum: spend?.per_provider[pid] ? `$${spend.per_provider[pid].spent_usd.toFixed(2)}` : "$0.00" })}</span>
         </div>
       ))}
       <div className="row" style={{ alignItems: "center", gap: 10 }}>
-        <span className="sub">counting since {s.limits.total_since ? new Date(s.limits.total_since).toLocaleString() : "the beginning"}</span>
-        <button className="btn small" onClick={async () => { await api.post("/api/limits/reset-total"); load(); }}>reset counters</button>
+        <span className="sub">{t("settings.limits.since", { when: s.limits.total_since ? shortDateTime(s.limits.total_since) : t("settings.limits.since.start") })}</span>
+        <button className="btn small" onClick={async () => { await api.post("/api/limits/reset-total"); load(); }}>{t("settings.limits.reset")}</button>
       </div>
     </>
   );
@@ -395,7 +396,7 @@ function SearchBlock({ s, save }: { s: Settings; save: (patch: any) => Promise<v
   const saveSearch = (patch: any) => save({ tools: { web: { search: patch } } });
   const info = (id: string) => backends.find((b) => b.id === id);
   const usable = (b: SearchBackendInfo) => !b.needs_key || b.available !== false;
-  const optionLabel = (b: SearchBackendInfo) => `${b.label}${b.needs_key ? (b.available === false ? " — no key in the key proxy" : b.available == null ? " — key proxy not reachable" : "") : ""}`;
+  const optionLabel = (b: SearchBackendInfo) => `${b.label}${b.needs_key ? (b.available === false ? t("settings.search.nokey") : b.available == null ? t("settings.search.noproxy") : "") : ""}`;
   const runCheck = async (backend: string) => {
     setChecking(true);
     setCheckError("");
@@ -411,16 +412,16 @@ function SearchBlock({ s, save }: { s: Settings; save: (patch: any) => Promise<v
   const fallbackIds = search.fallback ?? [];
   return (
     <div className="card">
-      <div className="section-title" style={{ marginTop: 0 }}>WebSearch</div>
-      <div className="sub">One tool, switchable backends: the free self-hosted SearXNG by default, DuckDuckGo as the no-install fallback, paid APIs through the key proxy once their key is in keyproxy.env. The tool's contract does not change with the backend.</div>
-      <label className="field">Backend</label>
+      <div className="section-title" style={{ marginTop: 0 }}>{t("settings.search.title")}</div>
+      <div className="sub">{t("settings.search.sub")}</div>
+      <label className="field">{t("settings.search.backend")}</label>
       <select className="field" value={search.backend} onChange={(e) => saveSearch({ backend: e.target.value })}>
         {backends.map((b) => (
           <option key={b.id} value={b.id} disabled={!usable(b)}>{optionLabel(b)}</option>
         ))}
         {!backends.some((b) => b.id === search.backend) && <option value={search.backend}>{search.backend}</option>}
       </select>
-      <label className="field">Fallbacks (tried in order when the backend fails or returns nothing)</label>
+      <label className="field">{t("settings.search.fallbacks")}</label>
       <div className="btnrow">
         {backends.filter((b) => b.id !== search.backend).map((b) => {
           const on = fallbackIds.includes(b.id);
@@ -438,17 +439,17 @@ function SearchBlock({ s, save }: { s: Settings; save: (patch: any) => Promise<v
         })}
       </div>
       <div className="grid2">
-        <NumField label="Results per search" value={search.results} min={1} onSave={(v) => saveSearch({ results: v })} />
-        <NumField label="Search timeout (s)" value={search.timeout_seconds} min={1} onSave={(v) => saveSearch({ timeout_seconds: v })} />
+        <NumField label={t("settings.search.results")} value={search.results} min={1} onSave={(v) => saveSearch({ results: v })} />
+        <NumField label={t("settings.search.timeout")} value={search.timeout_seconds} min={1} onSave={(v) => saveSearch({ timeout_seconds: v })} />
       </div>
       {search.backend === "searxng" || fallbackIds.includes("searxng") ? (
         <>
           <div className="section-title">SearXNG</div>
-          <TextField label="URL" value={search.searxng.url} onSave={(v) => saveSearch({ searxng: { url: v } })} />
-          <TextField label="Engines (comma-separated; empty = the instance's defaults)" value={search.searxng.engines} placeholder="google,duckduckgo,bing" onSave={(v) => saveSearch({ searxng: { engines: v } })} />
+          <TextField label={t("settings.search.url")} value={search.searxng.url} onSave={(v) => saveSearch({ searxng: { url: v } })} />
+          <TextField label={t("settings.search.engines")} value={search.searxng.engines} placeholder="google,duckduckgo,bing" onSave={(v) => saveSearch({ searxng: { engines: v } })} />
           <div className="grid2">
-            <TextField label="Categories" value={search.searxng.categories} placeholder="general" onSave={(v) => saveSearch({ searxng: { categories: v } })} />
-            <NumField label="Safe search (0–2)" value={search.searxng.safesearch} min={0} onSave={(v) => saveSearch({ searxng: { safesearch: Math.min(2, v) } })} />
+            <TextField label={t("settings.search.categories")} value={search.searxng.categories} placeholder="general" onSave={(v) => saveSearch({ searxng: { categories: v } })} />
+            <NumField label={t("settings.search.safe")} value={search.searxng.safesearch} min={0} onSave={(v) => saveSearch({ searxng: { safesearch: Math.min(2, v) } })} />
           </div>
         </>
       ) : null}
@@ -456,8 +457,8 @@ function SearchBlock({ s, save }: { s: Settings; save: (patch: any) => Promise<v
         <>
           <div className="section-title">DuckDuckGo</div>
           <div className="grid2">
-            <TextField label="HTML endpoint" value={search.duckduckgo.url} onSave={(v) => saveSearch({ duckduckgo: { url: v } })} />
-            <TextField label="Region" value={search.duckduckgo.region} placeholder="wt-wt, ru-ru, us-en" onSave={(v) => saveSearch({ duckduckgo: { region: v } })} />
+            <TextField label={t("settings.search.html")} value={search.duckduckgo.url} onSave={(v) => saveSearch({ duckduckgo: { url: v } })} />
+            <TextField label={t("settings.search.region")} value={search.duckduckgo.region} placeholder="wt-wt, ru-ru, us-en" onSave={(v) => saveSearch({ duckduckgo: { region: v } })} />
           </div>
         </>
       ) : null}
@@ -465,21 +466,21 @@ function SearchBlock({ s, save }: { s: Settings; save: (patch: any) => Promise<v
         <>
           <div className="section-title">Serper (Google)</div>
           <div className="grid2">
-            <TextField label="Country (gl, empty = Google's default)" value={search.serper.gl} placeholder="ru, us" onSave={(v) => saveSearch({ serper: { gl: v } })} />
-            <TextField label="Language (hl, empty = per query)" value={search.serper.hl} placeholder="ru, en" onSave={(v) => saveSearch({ serper: { hl: v } })} />
+            <TextField label={t("settings.search.country")} value={search.serper.gl} placeholder="ru, us" onSave={(v) => saveSearch({ serper: { gl: v } })} />
+            <TextField label={t("settings.search.language")} value={search.serper.hl} placeholder="ru, en" onSave={(v) => saveSearch({ serper: { hl: v } })} />
           </div>
         </>
       ) : null}
       {search.backend === "keenable" || fallbackIds.includes("keenable") ? (
         <>
           <div className="section-title">Keenable</div>
-          <NumField label="Snippet length (chars)" value={search.keenable.snippet_max_length} min={180} step={60} onSave={(v) => saveSearch({ keenable: { snippet_max_length: v } })} />
+          <NumField label={t("settings.search.snippet")} value={search.keenable.snippet_max_length} min={180} step={60} onSave={(v) => saveSearch({ keenable: { snippet_max_length: v } })} />
         </>
       ) : null}
       {search.backend === "tavily" || fallbackIds.includes("tavily") ? (
         <>
           <div className="section-title">Tavily</div>
-          <label className="field">Search depth</label>
+          <label className="field">{t("settings.search.depth")}</label>
           <select className="field" value={search.tavily.depth} onChange={(e) => saveSearch({ tavily: { depth: e.target.value } })}>
             {["basic", "advanced", "fast", "ultra-fast"].map((d) => <option key={d} value={d}>{d}</option>)}
           </select>
@@ -488,22 +489,22 @@ function SearchBlock({ s, save }: { s: Settings; save: (patch: any) => Promise<v
       {search.backend === "exa" || fallbackIds.includes("exa") ? (
         <>
           <div className="section-title">Exa</div>
-          <label className="field">Search type</label>
+          <label className="field">{t("settings.search.type")}</label>
           <select className="field" value={search.exa.type} onChange={(e) => saveSearch({ exa: { type: e.target.value } })}>
             {["auto", "instant", "fast", "deep"].map((d) => <option key={d} value={d}>{d}</option>)}
           </select>
         </>
       ) : null}
       <div className="btnrow" style={{ marginTop: 12 }}>
-        <button className="btn small primary" disabled={checking} onClick={() => runCheck("")}>{checking ? "checking…" : "Check the configured chain"}</button>
-        <button className="btn small" disabled={checking || !info(search.backend)} onClick={() => runCheck(search.backend)}>Check {search.backend} alone</button>
+        <button className="btn small primary" disabled={checking} onClick={() => runCheck("")}>{t(checking ? "settings.search.checking" : "settings.search.check")}</button>
+        <button className="btn small" disabled={checking || !info(search.backend)} onClick={() => runCheck(search.backend)}>{t("settings.search.checkone", { name: search.backend })}</button>
       </div>
       {checkError && <div className="sub" style={{ color: "var(--bad)" }}>{checkError}</div>}
       {check && (
         <div className="sub" style={{ marginTop: 8 }}>
           {check.attempts.map((a) => (
             <div key={a.backend}>
-              {a.backend}: {a.error ? `error — ${a.error}` : `${a.hits} results`} ({a.ms} ms)
+              {a.error ? t("settings.search.attempt.error", { name: a.backend, error: a.error, ms: a.ms }) : t("settings.search.attempt.ok", { name: a.backend, n: a.hits, ms: a.ms })}
             </div>
           ))}
           {check.hits.slice(0, 3).map((h) => (
@@ -524,82 +525,82 @@ function ToolsTab({ s, save }: { s: Settings; save: (patch: any) => Promise<void
   return (
     <>
       <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>Voice notes (speech-to-text)</div>
-        <div className="sub">Any OpenAI-compatible /audio/transcriptions endpoint: one of the configured providers (OpenRouter, a vLLM with a Whisper model — its key stays in the key proxy) or a URL of its own. Nothing configured = voice notes are attached as files only and the site has no microphone. The agent receives the words marked as a transcript, never the audio; in Telegram the transcript is shown with ✓ Send / ✗ Discard first.</div>
-        <label className="field">Provider</label>
+        <div className="section-title" style={{ marginTop: 0 }}>{t("settings.asr.title")}</div>
+        <div className="sub">{t("settings.asr.sub")}</div>
+        <label className="field">{t("settings.asr.provider")}</label>
         <select className="field" value={asr.provider || ""} onChange={(e) => save({ asr: { ...asr, api_key: "", provider: e.target.value } })}>
-          <option value="">custom endpoint (URL + key below)</option>
+          <option value="">{t("settings.asr.custom")}</option>
           {Object.keys(s.providers).map((pid) => (
             <option key={pid} value={pid}>{pid}{s.providers[pid].base_url ? ` · ${s.providers[pid].base_url.replace(/^https?:\/\//, "")}` : ""}</option>
           ))}
         </select>
         {!asr.provider && (
           <>
-            <label className="field">Endpoint base URL</label>
+            <label className="field">{t("settings.asr.url")}</label>
             <input className="field" defaultValue={asr.url} placeholder="https://api.openai.com/v1" onBlur={(e) => save({ asr: { ...asr, api_key: "", url: e.target.value.trim() } })} />
-            <label className="field">API key {asr.api_key_set ? "(set — leave empty to keep)" : ""}</label>
+            <label className="field">{t(asr.api_key_set ? "settings.asr.key.set" : "settings.asr.key")}</label>
             <input className="field" type="password" defaultValue="" placeholder={asr.api_key_set ? "••••••" : ""} onBlur={(e) => e.target.value && save({ asr: { ...asr, api_key: e.target.value } })} />
           </>
         )}
         <div className="grid2">
           <div>
-            <label className="field">Model</label>
+            <label className="field">{t("settings.asr.model")}</label>
             <input className="field" defaultValue={asr.model} placeholder={asr.provider === "openrouter" ? "openai/whisper-1" : "whisper-1"} onBlur={(e) => save({ asr: { ...asr, api_key: "", model: e.target.value.trim() } })} />
           </div>
           <div>
-            <label className="field">Language hint (empty = auto)</label>
+            <label className="field">{t("settings.asr.language")}</label>
             <input className="field" defaultValue={asr.language} onBlur={(e) => save({ asr: { ...asr, api_key: "", language: e.target.value.trim() } })} />
           </div>
         </div>
         <div className="btnrow">
           <button className={`btn small ${asr.autosend ? "primary" : ""}`} onClick={() => save({ asr: { ...asr, api_key: "", autosend: !asr.autosend } })}>
-            send without confirmation {asr.autosend ? "on" : "off"}
+            {t("settings.asr.autosend", { state: t(asr.autosend ? "common.on" : "common.off") })}
           </button>
         </div>
       </div>
       <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>ImageView</div>
-        <div className="sub">The agent's eyes: a separate image-capable model answers questions about pictures so the main context never carries pixels. Pick any model marked “images on” in General → Models.</div>
+        <div className="section-title" style={{ marginTop: 0 }}>{t("settings.vision.title")}</div>
+        <div className="sub">{t("settings.vision.sub")}</div>
         <div className="grid2">
           <div>
-            <label className="field">Model</label>
+            <label className="field">{t("settings.asr.model")}</label>
             <select className="field" value={s.vision.preset} onChange={(e) => save({ vision: { preset: e.target.value } })}>
               {Object.entries(s.presets ?? {}).filter(([, p]) => p.images).map(([id, p]) => (
                 <option key={id} value={id}>{p.label || `${p.provider}/${p.model}`}</option>
               ))}
-              {!(s.presets ?? {})[s.vision.preset]?.images && <option value={s.vision.preset}>{s.vision.preset || "(none image-capable)"}</option>}
+              {!(s.presets ?? {})[s.vision.preset]?.images && <option value={s.vision.preset}>{s.vision.preset || t("settings.vision.none")}</option>}
             </select>
           </div>
-          <NumField label="Max output tokens" value={s.vision.max_output_tokens} min={100} step={100} onSave={(v) => save({ vision: { max_output_tokens: v } })} />
+          <NumField label={t("settings.vision.output")} value={s.vision.max_output_tokens} min={100} step={100} onSave={(v) => save({ vision: { max_output_tokens: v } })} />
         </div>
       </div>
 
       <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>WebFetch</div>
+        <div className="section-title" style={{ marginTop: 0 }}>{t("settings.web.title")}</div>
         <div className="grid2">
-          <NumField label="Fetch timeout (s)" value={web.fetch_timeout_seconds} min={1} onSave={(v) => save({ tools: { web: { fetch_timeout_seconds: v } } })} />
-          <NumField label="Fetch max chars" value={web.fetch_max_chars} min={1000} step={1000} onSave={(v) => save({ tools: { web: { fetch_max_chars: v } } })} />
+          <NumField label={t("settings.web.timeout")} value={web.fetch_timeout_seconds} min={1} onSave={(v) => save({ tools: { web: { fetch_timeout_seconds: v } } })} />
+          <NumField label={t("settings.web.maxchars")} value={web.fetch_max_chars} min={1000} step={1000} onSave={(v) => save({ tools: { web: { fetch_max_chars: v } } })} />
         </div>
-        <TextField label="Proxy (http/https/socks5 URL, empty = direct)" value={web.proxy} placeholder="socks5://127.0.0.1:1080" hint="Used by WebFetch and by the directly scraped search backend (DuckDuckGo); SearXNG and the key proxy are reached directly." onSave={(v) => save({ tools: { web: { proxy: v } } })} />
-        <TextField label="User agent" value={web.user_agent} onSave={(v) => save({ tools: { web: { user_agent: v } } })} />
+        <TextField label={t("settings.web.proxy")} value={web.proxy} placeholder="socks5://127.0.0.1:1080" hint={t("settings.web.proxy.hint")} onSave={(v) => save({ tools: { web: { proxy: v } } })} />
+        <TextField label={t("settings.web.ua")} value={web.user_agent} onSave={(v) => save({ tools: { web: { user_agent: v } } })} />
       </div>
 
       <SearchBlock s={s} save={save} />
 
       <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>Exec, Read, Find</div>
+        <div className="section-title" style={{ marginTop: 0 }}>{t("settings.exec.title")}</div>
         <div className="grid2">
-          <NumField label="Tool timeout (s)" value={s.limits.tool_timeout_seconds} min={10} step={30} onSave={(v) => save({ limits: { tool_timeout_seconds: v } })} hint="Exec default; the agent can ask for more per call." />
-          <NumField label="Max output chars per call" value={s.tools.exec.max_output_chars} min={2000} step={5000} onSave={(v) => save({ tools: { exec: { max_output_chars: v } } })} hint="Longer output is clipped head+tail; the agent is told to use files." />
+          <NumField label={t("settings.exec.timeout")} value={s.limits.tool_timeout_seconds} min={10} step={30} onSave={(v) => save({ limits: { tool_timeout_seconds: v } })} hint={t("settings.exec.timeout.hint")} />
+          <NumField label={t("settings.exec.maxchars")} value={s.tools.exec.max_output_chars} min={2000} step={5000} onSave={(v) => save({ tools: { exec: { max_output_chars: v } } })} hint={t("settings.exec.maxchars.hint")} />
         </div>
       </div>
 
       
       <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>MCP servers</div>
-        <div className="sub">Configured under [mcp.servers.&lt;name&gt;] in config.toml; every session starts with them off and toggles them from its ⋯ menu.</div>
-        <div className="sub" style={{ marginTop: 6 }}>{Object.keys((s as any).mcp?.servers ?? {}).join(", ") || "none configured"}</div>
-        <div className="sub" style={{ marginTop: 6 }}>Changes here apply to the next tool call; no restart needed.</div>
+        <div className="section-title" style={{ marginTop: 0 }}>{t("settings.mcp.title")}</div>
+        <div className="sub">{t("settings.mcp.sub")}</div>
+        <div className="sub" style={{ marginTop: 6 }}>{Object.keys((s as any).mcp?.servers ?? {}).join(", ") || t("settings.mcp.none")}</div>
+        <div className="sub" style={{ marginTop: 6 }}>{t("settings.mcp.apply")}</div>
       </div>
     </>
   );
@@ -614,7 +615,7 @@ function HealthTab({ toast }: { toast: (t: string) => void }) {
     setBusy(true);
     try {
       setData(fix ? await api.post("/api/doctor/fix") : await api.get("/api/doctor"));
-      if (fix) toast("fixes applied");
+      if (fix) toast(t("settings.health.fixed"));
     } catch (e) {
       toast((e as Error).message);
     } finally {
@@ -625,7 +626,7 @@ function HealthTab({ toast }: { toast: (t: string) => void }) {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  if (!data) return <div className="empty">{busy ? "Checking…" : "Loading…"}</div>;
+  if (!data) return <div className="empty">{t(busy ? "settings.health.checking" : "common.loading")}</div>;
   const mark = (c: Check) => (c.fixed ? "🔧" : c.ok ? "✅" : c.severity === "fail" ? "❌" : "⚠️");
   const fixable = data.checks.some((c) => !c.ok && c.fixable);
   return (
@@ -633,14 +634,14 @@ function HealthTab({ toast }: { toast: (t: string) => void }) {
       <div className="card">
         <div className="row">
           <div className="grow">
-            <b>{data.summary.ok} ok</b> · {data.summary.warn} warnings · {data.summary.fail} failures
+            <b>{t("settings.health.ok", { n: data.summary.ok })}</b> · {t("settings.health.warn", { n: data.summary.warn })} · {t("settings.health.fail", { n: data.summary.fail })}
           </div>
           <button className="btn small" disabled={busy} onClick={() => load(false)}>
-            re-check
+            {t("settings.health.recheck")}
           </button>
           {fixable && (
             <button className="btn small primary" disabled={busy} onClick={() => load(true)}>
-              apply safe fixes
+              {t("settings.health.fix")}
             </button>
           )}
         </div>
@@ -679,7 +680,7 @@ function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void })
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  if (!hb) return <div className="empty">Loading…</div>;
+  if (!hb) return <div className="empty">{t("common.loading")}</div>;
 
   async function put(patch: Record<string, unknown>) {
     try {
@@ -690,7 +691,7 @@ function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void })
         dirtyRef.current = false;
         setText(r.text);
       }
-      toast("saved");
+      toast(t("common.saved"));
     } catch (e) {
       toast((e as Error).message);
     }
@@ -699,7 +700,7 @@ function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void })
   async function runNow() {
     try {
       const r = await api.post<{ session_id: string }>("/api/heartbeat/run");
-      toast(`heartbeat started in ${r.session_id}`);
+      toast(t("settings.heartbeat.started", { id: r.session_id }));
       load();
     } catch (e) {
       toast((e as Error).message);
@@ -710,35 +711,30 @@ function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void })
   return (
     <>
       <div className="card">
-        <div className="section-title" style={{ marginTop: 0 }}>
-          Heartbeat
-        </div>
-        <div className="sub">
-          A periodic unattended check. The file below is its prompt; empty = nothing runs. The agent reports only what needs you and stays silent
-          otherwise (the inbox records every check).
-        </div>
+        <div className="section-title" style={{ marginTop: 0 }}>{t("settings.heartbeat.title")}</div>
+        <div className="sub">{t("settings.heartbeat.sub")}</div>
         <div className="btnrow">
           <button className={`btn small ${hb.enabled ? "primary" : ""}`} onClick={() => put({ enabled: !hb.enabled })}>
-            {hb.enabled ? "on" : "off"}
+            {t(hb.enabled ? "common.on" : "common.off")}
           </button>
           <button className="btn small" onClick={runNow} disabled={!text.trim() || hb.running}>
-            run now
+            {t("common.runnow")}
           </button>
           <span className="sub" style={{ alignSelf: "center" }}>
-            {hb.armed ? "armed" : hb.enabled ? "on, but the file is empty" : "off"} · today {hb.runs_today}/{hb.max_runs_per_day} · last{" "}
-            {hb.last_run ? timeAgo(hb.last_run) : "never"}
-            {hb.running ? " · running" : ""}
+            {hb.armed ? t("settings.heartbeat.armed") : hb.enabled ? t("settings.heartbeat.emptyfile") : t("common.off")} · {t("settings.heartbeat.today", { done: hb.runs_today, max: hb.max_runs_per_day })} ·{" "}
+            {t("settings.heartbeat.last", { t: hb.last_run ? timeAgo(hb.last_run) : t("common.never") })}
+            {hb.running ? t("settings.heartbeat.running") : ""}
           </span>
         </div>
-        <label className="field">Every N minutes</label>
+        <label className="field">{t("settings.heartbeat.interval")}</label>
         <input className="field" type="number" defaultValue={hb.interval_minutes} onBlur={(e) => { const v = numInput(e.target.value, 1); if (v !== null) put({ interval_minutes: v }); }} />
-        <label className="field">Active hours (UTC, HH:MM-HH:MM)</label>
+        <label className="field">{t("settings.heartbeat.hours")}</label>
         <input className="field" defaultValue={hb.active_hours} onBlur={(e) => put({ active_hours: e.target.value })} />
-        <label className="field">Max runs per day</label>
+        <label className="field">{t("settings.heartbeat.max")}</label>
         <input className="field" type="number" defaultValue={hb.max_runs_per_day} onBlur={(e) => { const v = numInput(e.target.value, 0); if (v !== null) put({ max_runs_per_day: v }); }} />
-        <label className="field">Model preset (empty = default)</label>
+        <label className="field">{t("settings.heartbeat.preset")}</label>
         <select className="field" value={hb.preset} onChange={(e) => put({ preset: e.target.value })}>
-          <option value="">default</option>
+          <option value="">{t("settings.heartbeat.default")}</option>
           {presets.map((p) => (
             <option key={p} value={p}>
               {p}
@@ -763,13 +759,13 @@ function HeartbeatTab({ s, toast }: { s: Settings; toast: (t: string) => void })
         />
         <div className="btnrow">
           <button className="btn primary" disabled={!dirty} onClick={() => put({ text })}>
-            Save
+            {t("common.save")}
           </button>
           <button className="btn small" onClick={() => { setText(hb.template ?? ""); setDirty(true); }}>
-            insert template
+            {t("settings.heartbeat.template")}
           </button>
           <button className="btn small" onClick={() => { setText(""); setDirty(true); }}>
-            clear (switches off)
+            {t("settings.heartbeat.clear")}
           </button>
         </div>
       </div>
@@ -797,7 +793,7 @@ export function HealthScreen({ toast }: { toast: (t: string) => void }) {
                 }
               }}
             >
-              Log out of this browser
+              {t("settings.logout")}
             </button>
           </div>
         )}
@@ -822,9 +818,9 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
   async function add() {
     setBusy(true);
     try {
-      setKeys(await passkeys.enrol(name.trim() || "This device"));
+      setKeys(await passkeys.enrol(name.trim() || t("settings.security.thisdevice")));
       setName("");
-      toast("passkey added");
+      toast(t("settings.security.addedtoast"));
     } catch (e) {
       toast(errorText(e));
     } finally {
@@ -833,7 +829,7 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
   }
 
   async function remove(key: passkeys.PasskeyView) {
-    if (!(await confirmAsync(`Remove "${key.name}"?`, { body: "The key can no longer sign a browser in. Browsers that are signed in already stay signed in until you sign out everywhere below.", action: "Remove" }))) return;
+    if (!(await confirmAsync(t("settings.security.remove.title", { name: key.name }), { body: t("settings.security.remove.body"), action: t("common.remove") }))) return;
     try {
       setKeys((await passkeys.forget(key.id)).passkeys);
     } catch (e) {
@@ -843,29 +839,26 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
 
   return (
     <div className="card">
-      <div className="section-title" style={{ marginTop: 0 }}>Passkeys</div>
-      <div className="sub">
-        The key stays in this device (or its password manager) and never leaves it. One is enough to sign in on the login screen, so the pairing link stays a
-        one-off.
-      </div>
+      <div className="section-title" style={{ marginTop: 0 }}>{t("settings.security.title")}</div>
+      <div className="sub">{t("settings.security.sub")}</div>
       <div className="btnrow" style={{ marginTop: 8 }}>
         <button
           className="btn small"
           onClick={async () => {
-            if (!(await confirmAsync("Sign out everywhere?", { body: "Every browser and installed app that is signed in has to sign in again; this one is re-issued its session.", action: "Sign out everywhere" }))) return;
+            if (!(await confirmAsync(t("settings.security.signoutall.title"), { body: t("settings.security.signoutall.body"), action: t("settings.security.signoutall") }))) return;
             try {
               await passkeys.signOutEverywhere();
-              toast("every other session is signed out");
+              toast(t("settings.security.signedout"));
             } catch (e) {
               toast(errorText(e));
             }
           }}
         >
-          Sign out everywhere
+          {t("settings.security.signoutall")}
         </button>
       </div>
-      {keys === null && <div className="empty">Loading…</div>}
-      {keys !== null && keys.length === 0 && <div className="sub" style={{ marginTop: 8 }}>No passkey yet — add one and this browser stops needing a link.</div>}
+      {keys === null && <div className="empty">{t("common.loading")}</div>}
+      {keys !== null && keys.length === 0 && <div className="sub" style={{ marginTop: 8 }}>{t("settings.security.none")}</div>}
       {keys !== null && keys.length > 0 && (
         <div className="mlist">
           {keys.map((k) => (
@@ -874,46 +867,46 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
                 <div className="mmain">
                   <span className="mtitle">{k.name}</span>
                   <span className="mmeta">
-                    added {timeAgo(k.created_at)} · {k.last_used_at ? `last used ${timeAgo(k.last_used_at)}` : "never used"}
+                    {t("settings.security.added", { t: timeAgo(k.created_at) })} · {k.last_used_at ? t("settings.security.lastused", { t: timeAgo(k.last_used_at) }) : t("settings.security.neverused")}
                   </span>
                 </div>
                 <div className="mactions">
-                  <button className="btn small" onClick={() => void remove(k)}>Remove</button>
+                  <button className="btn small" onClick={() => void remove(k)}>{t("common.remove")}</button>
                 </div>
               </div>
             </div>
           ))}
         </div>
       )}
-      <label className="field">Name for the new passkey</label>
-      <input className="field" placeholder="This device" value={name} onChange={(e) => setName(e.target.value)} />
+      <label className="field">{t("settings.security.name")}</label>
+      <input className="field" placeholder={t("settings.security.thisdevice")} value={name} onChange={(e) => setName(e.target.value)} />
       <div className="btnrow">
         <button className="btn primary small" disabled={busy || !can} onClick={() => void add()}>
-          {busy ? "Waiting for the device…" : "Add a passkey"}
+          {t(busy ? "settings.security.waiting" : "settings.security.add")}
         </button>
       </div>
       {!can && (
-        <div className="sub">
-          This browser will not make a passkey on this address. A passkey needs https, or the app opened at <code>http://localhost</code> — an address bar
-          showing an IP is not a name a key can belong to.
-        </div>
+        <div className="sub">{t("settings.security.cannot")}</div>
       )}
     </div>
   );
 }
 
 type Section = "models" | "rules" | "limits" | "tools" | "voice" | "chat" | "security" | "heartbeat" | "about";
-const SECTIONS: { id: Section; label: string; hint: string; icon: IconName }[] = [
-  { id: "models", label: "Models & providers", hint: "which model opens a session, the fallbacks, the clients", icon: "model" },
-  { id: "rules", label: "Working rules", hint: "the standing instructions and how self-changes are approved", icon: "pen" },
-  { id: "limits", label: "Limits & budget", hint: "spend caps, iterations, context compaction, balance alerts", icon: "chart" },
-  { id: "tools", label: "Tools & search", hint: "web search backends, fetch, exec, speech, vision", icon: "wrench" },
-  { id: "voice", label: "Voice (beta)", hint: "the concierge model, the speech models that run here, the endpoints", icon: "mic" },
-  { id: "chat", label: "Chat & scheduler", hint: "Telegram behaviour and scheduled runs", icon: "inbox" },
-  { id: "security", label: "Security", hint: "the passkeys that sign this browser in", icon: "key" },
-  { id: "heartbeat", label: "Heartbeat", hint: "the periodic check-in run", icon: "loop" },
-  { id: "about", label: "About", hint: "versions, providers, this browser", icon: "settings" },
+/** The sections, in the order they are listed; the words come from the table, not from here. */
+const SECTIONS: { id: Section; icon: IconName }[] = [
+  { id: "models", icon: "model" },
+  { id: "rules", icon: "pen" },
+  { id: "limits", icon: "chart" },
+  { id: "tools", icon: "wrench" },
+  { id: "voice", icon: "mic" },
+  { id: "chat", icon: "inbox" },
+  { id: "security", icon: "key" },
+  { id: "heartbeat", icon: "loop" },
+  { id: "about", icon: "settings" },
 ];
+
+const sectionLabel = (id: Section) => t(`settings.sec.${id}`);
 
 export function SettingsScreen({ toast, section }: { toast: (t: string) => void; section?: string | null }) {
   const [s, setS] = useState<Settings | null>(null);
@@ -931,7 +924,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
     try {
       const next = await api.put<Settings>("/api/settings", patch);
       setS({ ...next, providers_available: next.providers_available ?? s?.providers_available ?? [] });
-      toast("saved");
+      toast(t("common.saved"));
     } catch (e) {
       toast((e as Error).message);
     }
@@ -974,7 +967,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
     try {
       const next = await api.delete<Settings>(`/api/providers/${encodeURIComponent(id)}`);
       setS({ ...next, providers_available: next.providers_available ?? (s?.providers_available ?? []) });
-      toast("provider removed");
+      toast(t("settings.provider.removed"));
     } catch (e) {
       toast((e as Error).message);
     }
@@ -982,12 +975,22 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
 
   const index = (
     <div className="settings-index">
+      {/* The language is the first thing here and it is answered here: a reader who cannot read the
+          rest of the page should not have to open a section to change the language of the page. */}
+      <div className="settings-link settings-lang">
+        <Icon name="globe" size={18} />
+        <span className="settings-link-text">
+          <b>{t("settings.sec.language")}</b>
+          <span className="sub">{t("lang.hint")}</span>
+        </span>
+        <LangPicker />
+      </div>
       {SECTIONS.map((sec) => (
         <a key={sec.id} href={pathFor("settings", sec.id)} className={`settings-link ${shown === sec.id ? "active" : ""}`} aria-current={shown === sec.id ? "page" : undefined} onClick={(e) => go(e, pathFor("settings", sec.id))}>
           <Icon name={sec.icon} size={18} />
           <span className="settings-link-text">
-            <b>{sec.label}</b>
-            <span className="sub">{sec.hint}</span>
+            <b>{sectionLabel(sec.id)}</b>
+            <span className="sub">{t(`settings.sec.${sec.id}.hint`)}</span>
           </span>
           <span className="chev">›</span>
         </a>
@@ -996,7 +999,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
   );
 
   const body = (sec: Section) => {
-    if (!s) return <div className="empty">Loading…</div>;
+    if (!s) return <div className="empty">{t("common.loading")}</div>;
     const kinds = s.provider_kinds ?? DEFAULT_KINDS;
     const providerIds = Object.keys(s.providers ?? {});
     switch (sec) {
@@ -1004,8 +1007,8 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
         return (
           <>
             <div className="card">
-              <div className="section-title" style={{ marginTop: 0 }}>Models</div>
-              <div className="sub">A model is a client plus a model id. The default one opens new sessions; any session can switch from the chip in its header. Open a row to edit it.</div>
+              <div className="section-title" style={{ marginTop: 0 }}>{t("settings.models.title")}</div>
+              <div className="sub">{t("settings.models.sub")}</div>
               <div className="mlist">
                 {Object.entries(s.presets ?? {}).map(([id, p]) => (
                   <PresetRow
@@ -1025,21 +1028,21 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
               </div>
               {Object.keys(s.presets ?? {}).length === 0 && (
                 <div className="empty">
-                  <b>No models yet</b>
-                  <div className="sub">A client is an address; a model is the thing that answers. Nothing runs until one is added.</div>
+                  <b>{t("settings.models.empty")}</b>
+                  <div className="sub">{t("settings.models.empty.sub")}</div>
                 </div>
               )}
               <div className="btnrow">
                 <button className="btn primary" onClick={() => setAdding(true)}>
-                  <Icon name="plus" size={14} /> Add a model
+                  <Icon name="plus" size={14} /> {t("settings.models.add")}
                 </button>
-                <span className="sub faint" style={{ alignSelf: "center" }}>the endpoint's own list, with its context window, modalities and prices</span>
+                <span className="sub faint" style={{ alignSelf: "center" }}>{t("settings.models.add.hint")}</span>
               </div>
-              <div className="sub" style={{ marginTop: 10 }}>Fallback order: {(s.model.chain ?? []).length ? s.model.chain.join(" → ") : "none"} (tried after the default when it fails).</div>
+              <div className="sub" style={{ marginTop: 10 }}>{t("settings.models.chain", { chain: (s.model.chain ?? []).length ? s.model.chain.join(" → ") : t("settings.models.chain.none") })}</div>
             </div>
             <div className="card">
-              <div className="section-title" style={{ marginTop: 0 }}>Providers (clients)</div>
-              <div className="sub">OpenAI-compatible endpoints the models run on. Keys stay in the key proxy where one is configured; a self-hosted vLLM needs none.</div>
+              <div className="section-title" style={{ marginTop: 0 }}>{t("settings.providers.title")}</div>
+              <div className="sub">{t("settings.providers.sub")}</div>
               <div className="mlist">
                 {providerIds.map((id) => (
                   <ProviderBlock key={id} id={id} p={s.providers[id]} kinds={kinds} available={(s.providers_available ?? []).includes(id)} onPatch={patchProvider} onRemove={(pid) => void removeProvider(pid)} />
@@ -1054,16 +1057,16 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
           <>
             <RulesEditor rules={s.prompt.rules} fallback={s.prompt.default_rules ?? ""} onSave={(rules) => save({ prompt: { rules } })} />
             <div className="card">
-              <div className="section-title" style={{ marginTop: 0 }}>Self-change</div>
-              <div className="sub">How a pull request the agent opens on its own code is handled.</div>
+              <div className="section-title" style={{ marginTop: 0 }}>{t("settings.selfchange")}</div>
+              <div className="sub">{t("settings.selfchange.sub")}</div>
               <div className="btnrow" style={{ marginTop: 8 }}>
                 {["manual", "auto"].map((m) => (
                   <button key={m} className={`btn small ${s.self_change.approval === m ? "primary" : ""}`} onClick={() => save({ self_change: { ...s.self_change, approval: m } })}>
-                    {m} approval
+                    {t(`settings.selfchange.${m}`)}
                   </button>
                 ))}
                 <button className={`btn small ${s.self_change.auto_rebuild ? "primary" : ""}`} onClick={() => save({ self_change: { ...s.self_change, auto_rebuild: !s.self_change.auto_rebuild } })}>
-                  auto rebuild {s.self_change.auto_rebuild ? "on" : "off"}
+                  {t("settings.selfchange.rebuild", { state: t(s.self_change.auto_rebuild ? "common.on" : "common.off") })}
                 </button>
               </div>
             </div>
@@ -1072,24 +1075,24 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
       case "limits":
         return (
           <div className="card">
-            <div className="section-title" style={{ marginTop: 0 }}>Limits & alerts</div>
-            <div className="sub">daily cap: ${(s as any).usd_per_day} — set in the environment, enforced by the supervisor</div>
-            <label className="field">Max iterations per run</label>
+            <div className="section-title" style={{ marginTop: 0 }}>{t("settings.limits.title")}</div>
+            <div className="sub">{t("settings.limits.daily", { n: (s as any).usd_per_day })}</div>
+            <label className="field">{t("settings.limits.iterations")}</label>
             <input className="field" type="number" defaultValue={s.limits.max_iterations} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ limits: { ...s.limits, max_iterations: v } }); }} />
-            <label className="field">Spend cap per run (USD, 0 = none; calls without a known price do not count)</label>
+            <label className="field">{t("settings.limits.perrun")}</label>
             <input className="field" type="number" step="0.5" defaultValue={s.limits.usd_per_run} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ limits: { ...s.limits, usd_per_run: v } }); }} />
             <TotalCaps s={s} save={save} />
-            <div className="section-title">Context compaction</div>
-            <div className="sub">When a finished run's prompt filled this share of the model window, the history is replaced by one structured summary (fixed headings, your messages quoted verbatim) before the next run. 0 = manual /compact only.</div>
+            <div className="section-title">{t("settings.compaction")}</div>
+            <div className="sub">{t("settings.compaction.sub")}</div>
             <div className="grid2">
-              <NumField label="Compact above (share of window)" value={s.compaction?.auto_ratio ?? 0.5} min={0} step={0.05} onSave={(v) => save({ compaction: { ...s.compaction, auto_ratio: v } })} />
-              <NumField label="Keep recent messages" value={s.compaction?.keep_recent_messages ?? 6} min={0} onSave={(v) => save({ compaction: { ...s.compaction, keep_recent_messages: v } })} />
-              <NumField label="Summary budget (words)" value={s.compaction?.max_words ?? 1200} min={200} step={100} onSave={(v) => save({ compaction: { ...s.compaction, max_words: v } })} />
-              <NumField label="Core mid-run trigger (share)" value={s.compaction?.core_trigger_ratio ?? 0.85} min={0.1} step={0.05} onSave={(v) => save({ compaction: { ...s.compaction, core_trigger_ratio: v } })} hint="the core's own incremental compaction inside a long run" />
+              <NumField label={t("settings.compaction.ratio")} value={s.compaction?.auto_ratio ?? 0.5} min={0} step={0.05} onSave={(v) => save({ compaction: { ...s.compaction, auto_ratio: v } })} />
+              <NumField label={t("settings.compaction.keep")} value={s.compaction?.keep_recent_messages ?? 6} min={0} onSave={(v) => save({ compaction: { ...s.compaction, keep_recent_messages: v } })} />
+              <NumField label={t("settings.compaction.words")} value={s.compaction?.max_words ?? 1200} min={200} step={100} onSave={(v) => save({ compaction: { ...s.compaction, max_words: v } })} />
+              <NumField label={t("settings.compaction.core")} value={s.compaction?.core_trigger_ratio ?? 0.85} min={0.1} step={0.05} onSave={(v) => save({ compaction: { ...s.compaction, core_trigger_ratio: v } })} hint={t("settings.compaction.core.hint")} />
             </div>
-            <label className="field">Balance alert thresholds (USD, comma-separated)</label>
+            <label className="field">{t("settings.balance.thresholds")}</label>
             <input className="field" defaultValue={s.balance.thresholds_usd.join(", ")} onBlur={(e) => save({ balance: { ...s.balance, thresholds_usd: e.target.value.split(",").map(Number).filter((n) => !Number.isNaN(n)) } })} />
-            <label className="field">Balance poll interval (seconds)</label>
+            <label className="field">{t("settings.balance.poll")}</label>
             <input className="field" type="number" defaultValue={s.balance.poll_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ balance: { ...s.balance, poll_seconds: v } }); }} />
           </div>
         );
@@ -1105,21 +1108,21 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
       case "chat":
         return (
           <div className="card">
-            <div className="section-title" style={{ marginTop: 0 }}>Chat & scheduler</div>
-            <label className="field">Where sessions live</label>
+            <div className="section-title" style={{ marginTop: 0 }}>{t("settings.chat.title")}</div>
+            <label className="field">{t("settings.chat.where")}</label>
             <div className="btnrow" style={{ marginTop: 0 }}>
-              {([["private", "one private chat"], ["topics", "a topic per session"]] as const).map(([m, label]) => (
+              {(["private", "topics"] as const).map((m) => (
                 <button key={m} className={`btn small ${(s.telegram.mode ?? (s.telegram.forum_chat_id ? "topics" : "private")) === m ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, mode: m } })}>
-                  {label}
+                  {t(`settings.chat.${m}`)}
                 </button>
               ))}
             </div>
             <div className="sub">
               {(s.telegram.mode ?? (s.telegram.forum_chat_id ? "topics" : "private")) === "private"
-                ? "The private chat is a window onto one session at a time: /sessions lists them, /use switches. Every other session still speaks there, under its own name."
-                : `Each session gets its own forum topic${s.telegram.forum_chat_id ? "" : " — send /bind in a supergroup with topics first"}.`}
+                ? t("settings.chat.private.sub")
+                : t(s.telegram.forum_chat_id ? "settings.chat.topics.sub" : "settings.chat.topics.bind")}
             </div>
-            <label className="field">Telegram verbosity</label>
+            <label className="field">{t("settings.chat.verbosity")}</label>
             <div className="btnrow" style={{ marginTop: 0 }}>
               {[0, 1, 2].map((v) => (
                 <button key={v} className={`btn small ${s.telegram.verbosity === v ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, verbosity: v } })}>
@@ -1129,28 +1132,28 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
             </div>
             <div className="btnrow">
               <button className={`btn small ${s.telegram.reactions ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, reactions: !s.telegram.reactions } })}>
-                reactions {s.telegram.reactions ? "on" : "off"}
+                {t("settings.chat.reactions", { state: t(s.telegram.reactions ? "common.on" : "common.off") })}
               </button>
               <button className={`btn small ${s.telegram.topic_status_emoji ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, topic_status_emoji: !s.telegram.topic_status_emoji } })}>
-                topic status emoji {s.telegram.topic_status_emoji ? "on" : "off"}
+                {t("settings.chat.topicemoji", { state: t(s.telegram.topic_status_emoji ? "common.on" : "common.off") })}
               </button>
               <button className={`btn small ${s.telegram.forward_unknown_commands ? "primary" : ""}`} onClick={() => save({ telegram: { ...s.telegram, forward_unknown_commands: !s.telegram.forward_unknown_commands } })}>
-                unknown /commands → agent {s.telegram.forward_unknown_commands ? "on" : "off"}
+                {t("settings.chat.forward", { state: t(s.telegram.forward_unknown_commands ? "common.on" : "common.off") })}
               </button>
             </div>
-            <label className="field">Ignore messages older than (seconds, 0 = never)</label>
+            <label className="field">{t("settings.chat.stale")}</label>
             <input className="field" type="number" defaultValue={s.telegram.stale_after_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, stale_after_seconds: v } }); }} />
-            <label className="field">Largest accepted file (MB)</label>
+            <label className="field">{t("settings.chat.maxfile")}</label>
             <input className="field" type="number" defaultValue={s.telegram.max_inbound_file_mb} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, max_inbound_file_mb: v } }); }} />
-            <label className="field">Wait for a caption after a bare photo (seconds)</label>
+            <label className="field">{t("settings.chat.caption")}</label>
             <input className="field" type="number" defaultValue={s.telegram.photo_caption_wait_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, photo_caption_wait_seconds: v } }); }} />
-            <label className="field">Mark a tool call as slow after (seconds)</label>
+            <label className="field">{t("settings.chat.slowtool")}</label>
             <input className="field" type="number" defaultValue={s.telegram.slow_tool_seconds} onBlur={(e) => { const v = numInput(e.target.value); if (v !== null) save({ telegram: { ...s.telegram, slow_tool_seconds: v } }); }} />
-            <label className="field">Scheduled runs</label>
+            <label className="field">{t("settings.chat.scheduled")}</label>
             <div className="btnrow" style={{ marginTop: 0 }}>
               {["per_task", "per_run"].map((m) => (
                 <button key={m} className={`btn small ${s.scheduler.topic_mode === m ? "primary" : ""}`} onClick={() => save({ scheduler: { ...s.scheduler, topic_mode: m } })}>
-                  one topic {m === "per_task" ? "per task" : "per run"}
+                  {t(m === "per_task" ? "settings.chat.pertask" : "settings.chat.perrun")}
                 </button>
               ))}
             </div>
@@ -1163,31 +1166,31 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
       case "about":
         return (
           <div className="card">
-            <div className="section-title" style={{ marginTop: 0 }}>Runtime</div>
+            <div className="section-title" style={{ marginTop: 0 }}>{t("settings.about.runtime")}</div>
             {status ? (
               <>
-                <div className="kv"><span>Providers</span><b>{status.providers?.join(", ")}</b></div>
+                <div className="kv"><span>{t("settings.about.providers")}</span><b>{status.providers?.join(", ")}</b></div>
                 {status.supervisor ? (
                   <>
-                    <div className="kv"><span>Bot</span><b className="mono">{String(status.supervisor.bot).slice(0, 10)}</b></div>
-                    <div className="kv"><span>Core</span><b className="mono">{String(status.supervisor.core).slice(0, 10)}</b></div>
-                    <div className="kv"><span>Process</span><b>{status.supervisor.child_running ? "running" : "stopped"}</b></div>
+                    <div className="kv"><span>{t("settings.about.bot")}</span><b className="mono">{String(status.supervisor.bot).slice(0, 10)}</b></div>
+                    <div className="kv"><span>{t("settings.about.core")}</span><b className="mono">{String(status.supervisor.core).slice(0, 10)}</b></div>
+                    <div className="kv"><span>{t("settings.about.process")}</span><b>{t(status.supervisor.child_running ? "settings.about.running" : "settings.about.stopped")}</b></div>
                   </>
                 ) : (
-                  <div className="sub">supervisor: not connected (development mode)</div>
+                  <div className="sub">{t("settings.about.nosupervisor")}</div>
                 )}
-                {status.budget_exceeded && <div className="sub" style={{ color: "var(--bad)" }}>budget exceeded: {status.budget_exceeded}</div>}
+                {status.budget_exceeded && <div className="sub" style={{ color: "var(--bad)" }}>{t("settings.about.budget", { what: String(status.budget_exceeded) })}</div>}
               </>
             ) : (
-              <div className="sub">status unavailable</div>
+              <div className="sub">{t("settings.about.nostatus")}</div>
             )}
             {!telegram()?.initData && (
               <>
-                <div className="section-title">This browser</div>
+                <div className="section-title">{t("settings.about.browser")}</div>
                 <div className="btnrow" style={{ marginTop: 0 }}>
-                  <button className="btn small" onClick={() => { try { localStorage.setItem("daedalus.scheme", "dark"); } catch { /* private */ } window.location.reload(); }}>Dark</button>
-                  <button className="btn small" onClick={() => { try { localStorage.setItem("daedalus.scheme", "light"); } catch { /* private */ } window.location.reload(); }}>Light</button>
-                  <button className="btn small" onClick={() => { try { localStorage.removeItem("daedalus.scheme"); } catch { /* private */ } window.location.reload(); }}>Follow the system</button>
+                  <button className="btn small" onClick={() => { try { localStorage.setItem("daedalus.scheme", "dark"); } catch { /* private */ } window.location.reload(); }}>{t("settings.about.dark")}</button>
+                  <button className="btn small" onClick={() => { try { localStorage.setItem("daedalus.scheme", "light"); } catch { /* private */ } window.location.reload(); }}>{t("settings.about.light")}</button>
+                  <button className="btn small" onClick={() => { try { localStorage.removeItem("daedalus.scheme"); } catch { /* private */ } window.location.reload(); }}>{t("settings.about.system")}</button>
                 </div>
                 <div className="btnrow">
                   <button
@@ -1201,7 +1204,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
                       }
                     }}
                   >
-                    Log out of this browser
+                    {t("settings.logout")}
                   </button>
                 </div>
               </>
@@ -1212,14 +1215,14 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
   };
 
   const addSheet = adding && (
-    <Sheet title="Add a model" size="wide" onClose={() => setAdding(false)}>
+    <Sheet title={t("settings.models.add")} size="wide" onClose={() => setAdding(false)}>
       <AddModel
         toast={toast}
         onCancel={() => setAdding(false)}
         onSaved={(id, next) => {
           setS({ ...next, providers_available: next.providers_available ?? (s?.providers_available ?? []) });
           setAdding(false);
-          toast(`added ${id}`);
+          toast(t("settings.added", { id }));
         }}
       />
     </Sheet>
@@ -1247,7 +1250,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
   }
   return (
     <>
-      <PageHeader title={SECTIONS.find((x) => x.id === current)!.label} back={pathFor("settings")} />
+      <PageHeader title={sectionLabel(current)} back={pathFor("settings")} />
       <div className="screen narrow">{body(current)}</div>
       {addSheet}
     </>

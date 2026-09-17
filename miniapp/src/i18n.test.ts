@@ -1,11 +1,11 @@
 // A half-translated screen is worse than an untranslated one: the reader cannot tell whether the
 // English sentence in the middle of a Russian page is a gap or a term of art. So the dictionary is
-// checked as a table — every key present in both languages, and neither column left as a copy of
-// the other where a translation was meant.
+// checked as a table — every key present in both languages, neither column left as a copy of the
+// other where a translation was meant, and every key the code asks for actually in it.
 
 /// <reference types="vite/client" />
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DICT, LANGS, setLang, t } from "./i18n";
+import { DICT, LANGS, plural, setLang, t } from "./i18n";
 
 // Every source file under src/, as text. Read through the bundler rather than from disk: the app
 // has no Node types, and importing the modules themselves would run code that wants a browser.
@@ -18,6 +18,28 @@ function screens(): string[] {
   return [...found[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
 }
 
+// Words that are the same in both languages: names, brands and the ids of tools and config fields.
+// Everything else being identical means a row was copied and never translated.
+const SAME_IN_BOTH = [
+  "fmt.cron.utc",
+  "lang.name.en",
+  "lang.name.ru",
+  "login.title",
+  "sched.cron",
+  "sched.when.cron",
+  "session.mcp.toggled",
+  "session.sched.cron",
+  "settings.exec.title",
+  "settings.search.title",
+  "settings.vision.title",
+  "settings.web.title",
+  "settings.web.ua",
+  "usage.col.usd",
+];
+
+/** A row whose forms are separated by `|` is a plural: English has two, Russian three. */
+const isPlural = (key: string) => DICT[key].en.includes("|");
+
 describe("the dictionary", () => {
   it("has every key in every language", () => {
     const missing: string[] = [];
@@ -29,19 +51,36 @@ describe("the dictionary", () => {
     expect(missing).toEqual([]);
   });
 
+  it("gives a plural row two English forms and three Russian ones", () => {
+    const wrong: string[] = [];
+    for (const key of Object.keys(DICT)) {
+      if (!isPlural(key)) continue;
+      if (DICT[key].en.split("|").length !== 2) wrong.push(`${key}.en`);
+      if (DICT[key].ru.split("|").length !== 3) wrong.push(`${key}.ru`);
+    }
+    expect(wrong).toEqual([]);
+  });
+
   it("translates rather than repeating, outside the handful of words that are the same in both", () => {
     const same = Object.entries(DICT)
       .filter(([, entry]) => entry.en === entry.ru)
       .map(([key]) => key);
-    // Names and brands stay as they are; everything else being identical means a row was copied.
-    expect(same.sort()).toEqual(["lang.name.en", "lang.name.ru", "login.title"]);
+    expect(same.sort()).toEqual(SAME_IN_BOTH);
   });
 
   it("keeps the same holes in both languages", () => {
-    const holes = (text: string) => [...text.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
+    const holes = (text: string) => [...new Set([...text.matchAll(/\{(\w+)\}/g)].map((m) => m[1]))].sort();
     for (const [key, entry] of Object.entries(DICT)) {
       expect(holes(entry.ru), key).toEqual(holes(entry.en));
     }
+  });
+
+  // The product's tone: calm. It survives a translation only if it is checked in the translation.
+  it("keeps the Russian free of exclamation marks", () => {
+    const shouting = Object.entries(DICT)
+      .filter(([, entry]) => entry.ru.includes("!"))
+      .map(([key]) => key);
+    expect(shouting).toEqual([]);
   });
 });
 
@@ -50,23 +89,60 @@ describe("the keys the code asks for", () => {
     const missing = new Set<string>();
     for (const [path, text] of Object.entries(SOURCES)) {
       if (path.endsWith(".test.ts")) continue;
-      for (const [, key] of text.matchAll(/\bt\("([^"]+)"/g)) {
+      // `t`, the aliases a screen imports it under where the name is taken, and `plural`.
+      for (const [, key] of text.matchAll(/\b(?:t|t2|plural)\("([^"]+)"/g)) {
         if (!(key in DICT)) missing.add(`${key} (${path})`);
       }
     }
     expect([...missing]).toEqual([]);
   });
 
-  // The two keys built from a variable. A screen added to the rail without a name, or an effort
-  // level without a word, shows its own key on the page.
+  it("uses plural() for every row that has plural forms, and only for those", () => {
+    const asPlural = new Set<string>();
+    const asPlain = new Set<string>();
+    for (const [path, text] of Object.entries(SOURCES)) {
+      if (path.endsWith(".test.ts")) continue;
+      for (const [, key] of text.matchAll(/\bplural\("([^"]+)"/g)) asPlural.add(key);
+      for (const [, key] of text.matchAll(/\b(?:t|t2)\("([^"]+)"/g)) asPlain.add(key);
+    }
+    expect([...asPlural].filter((k) => k in DICT && !isPlural(k))).toEqual([]);
+    expect([...asPlain].filter((k) => k in DICT && isPlural(k))).toEqual([]);
+  });
+
+  // The keys built from a value rather than written out. A screen added to the rail without a name,
+  // a state the app has no word for, or a tool nobody named shows its own key on the page.
   it("includes every key built from a name", () => {
-    const missing = [
-      ...screens().map((s) => `nav.${s}`),
-      ...["work", "autonomy", "knowledge", "observe"].map((g) => `nav.group.${g}`),
-      ...["low", "medium", "high"].map((e) => `add.effort.${e}`),
-      ...LANGS.map((l) => `lang.name.${l}`),
-    ].filter((key) => !(key in DICT));
-    expect(missing).toEqual([]);
+    const families: [string, string[]][] = [
+      ["nav.", screens()],
+      ["nav.group.", ["work", "autonomy", "knowledge", "observe"]],
+      ["add.effort.", ["low", "medium", "high"]],
+      ["lang.name.", [...LANGS]],
+      ["status.", ["idle", "running", "waiting", "compacting", "failed", "done", "paused", "stopped", "pending", "merged", "approved", "rejected", "closed", "dead"]],
+      ["fmt.dow.", ["0", "1", "2", "3", "4", "5", "6"]],
+      ["fmt.dur.", ["s", "m", "h", "d"]],
+      ["agents.group.", ["waiting", "working", "loop", "idle", "own", "noproject", "project", "workspace"]],
+      ["board.col.", ["todo", "doing", "review", "blocked", "done", "dropped"]],
+      ["sched.kind.", ["agent", "message", "lazy"]],
+      ["sched.group.", ["upcoming", "paused", "done"]],
+      ["sched.when.", ["once", "daily", "weekdays", "weekly", "hours", "cron"]],
+      ["memory.kind.", ["fact", "decision", "preference", "reflection", "skill", "note"]],
+      ["usage.purpose.", ["stream", "structured", "text"]],
+      ["svc.access.", ["local", "key", "public"]],
+      ["svc.copied.", ["address", "link", "key"]],
+      ["settings.chat.", ["private", "topics"]],
+      ["settings.selfchange.", ["manual", "auto"]],
+      ["settings.sec.", ["models", "rules", "limits", "tools", "voice", "chat", "security", "heartbeat", "about"]],
+      ["tool.group.", ["Exec", "Read", "Write", "Edit", "search", "WebFetch", "SendFile", "other"]],
+      ["tool.board.", ["get", "list"]],
+    ];
+    const missing = families.flatMap(([prefix, names]) => names.map((n) => prefix + n)).filter((key) => !(key in DICT));
+    // The section hints sit beside the section names, and a hint nobody wrote is a blank line.
+    const hints = ["models", "rules", "limits", "tools", "voice", "chat", "security", "heartbeat", "about"].map((s) => `settings.sec.${s}.hint`).filter((k) => !(k in DICT));
+    // Every tool the timeline names has a verb while it runs and one after it.
+    const verbs = ["Exec", "Read", "Write", "Edit", "Find", "WebSearch", "WebFetch", "SendFile", "ImageView", "Skill", "Verify", "SubAgent", "SpawnAgent", "AskPeer", "HistorySearch", "ServiceStart", "ServiceStop"]
+      .flatMap((name) => [`tool.${name}.on`, `tool.${name}.off`])
+      .filter((k) => !(k in DICT));
+    expect([...missing, ...hints, ...verbs]).toEqual([]);
   });
 });
 
@@ -118,12 +194,37 @@ describe("which language a visit is in", () => {
 });
 
 describe("t", () => {
-  it("fills the holes and falls back to the key it does not know", () => {
+  it("fills the holes, and shows a key it does not know rather than hiding it", () => {
     setLang("en");
     expect(t("add.pill.context", { n: "128k" })).toBe("128k context");
     setLang("ru");
     expect(t("add.pill.context", { n: "128k" })).toBe("контекст 128k");
-    expect(t("nothing.like.this")).toBe("nothing.like.this");
+    expect(t("nothing.like.this")).toBe("[nothing.like.this]");
     setLang("en");
+  });
+});
+
+describe("plural", () => {
+  it("counts in English by whether it is one", () => {
+    setLang("en");
+    expect(plural("agents.count", 1)).toBe("1 agent");
+    expect(plural("agents.count", 2)).toBe("2 agents");
+    expect(plural("agents.count", 0)).toBe("0 agents");
+  });
+
+  it("counts in Russian by the last digit, with the teens apart", () => {
+    setLang("ru");
+    expect(plural("agents.count", 1)).toBe("1 агент");
+    expect(plural("agents.count", 2)).toBe("2 агента");
+    expect(plural("agents.count", 5)).toBe("5 агентов");
+    expect(plural("agents.count", 11)).toBe("11 агентов");
+    expect(plural("agents.count", 21)).toBe("21 агент");
+    expect(plural("agents.count", 22)).toBe("22 агента");
+    expect(plural("agents.count", 112)).toBe("112 агентов");
+    setLang("en");
+  });
+
+  it("shows a key it does not know", () => {
+    expect(plural("nothing.like.this", 3)).toBe("[nothing.like.this]");
   });
 });

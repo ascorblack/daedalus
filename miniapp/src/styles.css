@@ -120,6 +120,9 @@ a { color: var(--accent); text-decoration: none; }
 .more-item .ic { color: var(--fg-2); }
 .more-item.active { outline: 1px solid var(--line-strong); }
 .more-item .tab-badge { top: 8px; right: 8px; }
+/* The language, under the destinations: the sheet is the menu on a phone. */
+.more-lang { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 13px; font-weight: 600; }
+.settings-lang { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .rail { display: none; }
 
 /* ── primitives ─────────────────────────────────────────────────────────────────────────── */

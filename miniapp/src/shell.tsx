@@ -9,6 +9,7 @@ import { ProjectChip } from "./projects";
 import { Screen, navigate, pathFor } from "./router";
 import { SelfDevMode, screenTag, visibleScreens } from "./capabilities";
 import { t } from "./i18n";
+import { LangPicker } from "./components";
 
 export type Counts = { inbox?: number; changes?: number; services?: number; agents?: number };
 
@@ -76,7 +77,7 @@ export function TabBar({ screen, counts, selfdev, onMore, moreOpen }: { screen: 
   const inMore = more.includes(screen);
   const moreCount = more.reduce((n, s) => n + countFor(s, counts), 0);
   return (
-    <nav className="tabbar" aria-label="Primary">
+    <nav className="tabbar" aria-label={t("shell.nav.primary")}>
       {PRIMARY.map((s) => {
         const n = countFor(s, counts);
         return (
@@ -117,6 +118,12 @@ export function MoreSheet({ screen, counts, selfdev, onClose }: { screen: Screen
           );
         })}
       </div>
+      {/* The language is changed from here as well as from Settings: on a phone this sheet is the
+          menu, and a reader who cannot read the rail cannot find a settings section either. */}
+      <div className="more-lang">
+        <span>{t("lang.menu")}</span>
+        <LangPicker />
+      </div>
     </Sheet>
   );
 }
@@ -135,7 +142,7 @@ export function Rail({ screen, counts, selfdev, collapsed, onToggle, onPalette, 
     );
   };
   return (
-    <nav className={`rail ${collapsed ? "collapsed" : ""}`} aria-label="Primary">
+    <nav className={`rail ${collapsed ? "collapsed" : ""}`} aria-label={t("shell.nav.primary")}>
       <a className="brand" href={pathFor("agents")} onClick={(e) => go(e, pathFor("agents"))} title="Daedalus">
         <img src="/app/icons/icon-192.png" alt="" width={26} height={26} />
         <span className="rail-text">Daedalus</span>

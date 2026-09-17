@@ -1,120 +1,130 @@
-// How numbers, times and schedules read in the app: the reader's locale and time zone, never
-// seconds, never an ISO timestamp. Every screen formats through here.
+// How numbers, times and schedules read in the app: the reader's language, locale and time zone,
+// never seconds, never an ISO timestamp. Every screen formats through here, so a language changed
+// in Settings changes every date and every count on the page with it.
+
+import { locale, num, plural, t } from "./i18n";
 
 /** "now", "35m", "3h", "2d" — the short form for a row's trailing time. */
 export function relTime(iso: string | number | Date | null | undefined, now = Date.now()): string {
-  const t = toMs(iso);
-  if (t === null) return "";
-  const delta = Math.round((now - t) / 1000);
+  const at = toMs(iso);
+  if (at === null) return "";
+  const delta = Math.round((now - at) / 1000);
   const abs = Math.abs(delta);
-  const sign = delta < 0 ? "in " : "";
-  if (abs < 60) return delta < 0 ? "in <1m" : "now";
-  if (abs < 3600) return `${sign}${Math.floor(abs / 60)}m`;
-  if (abs < 86400) return `${sign}${Math.floor(abs / 3600)}h`;
-  if (abs < 30 * 86400) return `${sign}${Math.floor(abs / 86400)}d`;
-  return absDate(t);
+  const ahead = (s: string) => (delta < 0 ? t("fmt.in", { t: s }) : s);
+  if (abs < 60) return delta < 0 ? t("fmt.soon") : t("fmt.now");
+  if (abs < 3600) return ahead(t("fmt.min", { n: Math.floor(abs / 60) }));
+  if (abs < 86400) return ahead(t("fmt.hour", { n: Math.floor(abs / 3600) }));
+  if (abs < 30 * 86400) return ahead(t("fmt.day", { n: Math.floor(abs / 86400) }));
+  return absDate(at);
 }
 
-/** "just now", "35 min ago", "3 h ago", "2 d ago", or "in 2 h" for a future moment. */
+/** "just now", "35 minutes ago", "3 hours ago", "2 days ago", or "in 2 hours" for a future moment. */
 export function relTimeLong(iso: string | number | Date | null | undefined, now = Date.now()): string {
-  const t = toMs(iso);
-  if (t === null) return "";
-  const delta = Math.round((now - t) / 1000);
+  const at = toMs(iso);
+  if (at === null) return "";
+  const delta = Math.round((now - at) / 1000);
   const abs = Math.abs(delta);
-  const wrap = (s: string) => (delta < 0 ? `in ${s}` : `${s} ago`);
-  if (abs < 60) return delta < 0 ? "in a moment" : "just now";
-  if (abs < 3600) return wrap(`${Math.floor(abs / 60)} min`);
-  if (abs < 86400) return wrap(`${Math.floor(abs / 3600)} h`);
-  if (abs < 30 * 86400) return wrap(`${Math.floor(abs / 86400)} d`);
-  return absDate(t);
+  const wrap = (s: string) => t(delta < 0 ? "fmt.in" : "fmt.ago", { t: s });
+  if (abs < 60) return delta < 0 ? t("fmt.moment") : t("fmt.justnow");
+  if (abs < 3600) return wrap(plural("fmt.minutes", Math.floor(abs / 60)));
+  if (abs < 86400) return wrap(plural("fmt.hours", Math.floor(abs / 3600)));
+  if (abs < 30 * 86400) return wrap(plural("fmt.days", Math.floor(abs / 86400)));
+  return absDate(at);
 }
 
-/** "in 12m", "in 2h", "in 3d" — how long until a reset or a wake-up; "" when it is past. */
+/** "in 12m", "in 2h", "in 3d" — how long until a reset or a wake-up; "now" when it is past. */
 export function untilShort(iso: string | number | Date | null | undefined, now = Date.now()): string {
-  const t = toMs(iso);
-  if (t === null) return "";
-  const mins = Math.round((t - now) / 60000);
-  if (mins <= 0) return "now";
-  if (mins < 60) return `in ${mins}m`;
-  if (mins < 48 * 60) return `in ${Math.round(mins / 60)}h`;
-  return `in ${Math.round(mins / 1440)}d`;
+  const at = toMs(iso);
+  if (at === null) return "";
+  const mins = Math.round((at - now) / 60000);
+  if (mins <= 0) return t("fmt.now");
+  if (mins < 60) return t("fmt.in", { t: t("fmt.min", { n: mins }) });
+  if (mins < 48 * 60) return t("fmt.in", { t: t("fmt.hour", { n: Math.round(mins / 60) }) });
+  return t("fmt.in", { t: t("fmt.day", { n: Math.round(mins / 1440) }) });
 }
 
 /** "11 Sep, 15:20" in the reader's locale and zone; the year only when it is not this one. */
 export function absTime(iso: string | number | Date | null | undefined): string {
-  const t = toMs(iso);
-  if (t === null) return "";
-  const d = new Date(t);
+  const at = toMs(iso);
+  if (at === null) return "";
+  const d = new Date(at);
   const sameYear = d.getFullYear() === new Date().getFullYear();
-  return d.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", ...(sameYear ? {} : { year: "numeric" }) });
+  return d.toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", ...(sameYear ? {} : { year: "numeric" }) });
 }
 
 /** "11 Sep" or "11 Sep 2025". */
 export function absDate(iso: string | number | Date | null | undefined): string {
-  const t = toMs(iso);
-  if (t === null) return "";
-  const d = new Date(t);
+  const at = toMs(iso);
+  if (at === null) return "";
+  const d = new Date(at);
   const sameYear = d.getFullYear() === new Date().getFullYear();
-  return d.toLocaleDateString(undefined, { day: "numeric", month: "short", ...(sameYear ? {} : { year: "numeric" }) });
+  return d.toLocaleDateString(locale(), { day: "numeric", month: "short", ...(sameYear ? {} : { year: "numeric" }) });
 }
 
 /** "15:20" in the reader's zone. */
 export function clock(iso: string | number | Date | null | undefined): string {
-  const t = toMs(iso);
-  if (t === null) return "";
-  return new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const at = toMs(iso);
+  if (at === null) return "";
+  return new Date(at).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" });
+}
+
+/** A date and a time together, short: "11/09, 15:20". */
+export function shortDateTime(iso: string | number | Date | null | undefined): string {
+  const at = toMs(iso);
+  if (at === null) return "";
+  return new Date(at).toLocaleString(locale(), { dateStyle: "short", timeStyle: "short" });
 }
 
 /** "today", "yesterday", or the date. */
 export function dayLabel(iso: string | number | Date | null | undefined): string {
-  const t = toMs(iso);
-  if (t === null) return "";
-  const d = new Date(t);
+  const at = toMs(iso);
+  if (at === null) return "";
+  const d = new Date(at);
   const today = new Date();
   const yday = new Date(today.getTime() - 86400000);
   const same = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-  if (same(d, today)) return "today";
-  if (same(d, yday)) return "yesterday";
-  return absDate(t);
+  if (same(d, today)) return t("fmt.today");
+  if (same(d, yday)) return t("fmt.yesterday");
+  return absDate(at);
 }
 
 /** "4s", "2m 14s", "1h 44m", "2d 3h" — a duration in milliseconds as people read it. */
 export function duration(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s}s`;
+  if (s < 60) return t("fmt.dur.s", { n: s });
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m${s % 60 ? ` ${s % 60}s` : ""}`;
+  if (m < 60) return t("fmt.dur.m", { n: m }) + (s % 60 ? ` ${t("fmt.dur.s", { n: s % 60 })}` : "");
   const h = Math.floor(m / 60);
-  if (h < 48) return `${h}h${m % 60 ? ` ${m % 60}m` : ""}`;
+  if (h < 48) return t("fmt.dur.h", { n: h }) + (m % 60 ? ` ${t("fmt.dur.m", { n: m % 60 })}` : "");
   const d = Math.floor(h / 24);
-  return `${d}d${h % 24 ? ` ${h % 24}h` : ""}`;
+  return t("fmt.dur.d", { n: d }) + (h % 24 ? ` ${t("fmt.dur.h", { n: h % 24 })}` : "");
 }
 
 /** Compact token counts: 71.1M, 28k, 950. */
 export function tokens(n: number | null | undefined): string {
   const v = n ?? 0;
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 10_000) return `${Math.round(v / 1000)}k`;
-  return v.toLocaleString();
+  if (v >= 1_000_000) return t("fmt.tok.m", { n: (v / 1_000_000).toFixed(1) });
+  if (v >= 10_000) return t("fmt.tok.k", { n: Math.round(v / 1000) });
+  return num(v);
 }
 
 /** "$3.90", "< $0.01", "$0", "free" for a missing price. */
 export function usd(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "free";
+  if (value === null || value === undefined) return t("fmt.free");
   if (value === 0) return "$0";
   if (value < 0.01) return "< $0.01";
   return `$${value.toFixed(2)}`;
 }
 
 export function int(value: number | null | undefined): string {
-  return (value ?? 0).toLocaleString();
+  return num(value ?? 0);
 }
 
 /** Bytes as people read them: 950 B, 12 KB, 1.4 MB. */
 export function bytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n < 1024) return t("fmt.bytes.b", { n });
+  if (n < 1024 * 1024) return t("fmt.bytes.kb", { n: Math.round(n / 1024) });
+  return t("fmt.bytes.mb", { n: (n / (1024 * 1024)).toFixed(1) });
 }
 
 /** Keeps both ends of a long path or id: "/srv/works…/round8_probe.py". */
@@ -138,7 +148,7 @@ export function planName(id: string | null | undefined): string {
 
 /** The model name as the header shows it: "deepseek/deepseek-v4-flash" → "deepseek-v4-flash", cut at `max`. */
 export function shortModel(name: string | null | undefined, max = 24): string {
-  if (!name) return "model";
+  if (!name) return t("session.model.none");
   const short = name.split("/").pop()!.replace(/\s*\(.*\)$/, "");
   return short.length > max ? `${short.slice(0, max - 1)}…` : short;
 }
@@ -176,7 +186,8 @@ export function plainPreview(md: string, max = 120): string {
 
 // ── schedules ────────────────────────────────────────────────────────────────────────────
 
-const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+/** Sunday first, the way a cron field counts. */
+const dow = (d: number) => t(`fmt.dow.${d}`);
 
 export type CronParts = { minute: string; hour: string; dom: string; month: string; dow: string };
 
@@ -211,12 +222,13 @@ function dowList(spec: string): number[] | null {
   return [...out].sort();
 }
 
-function dowLabel(days: number[]): string {
+/** The days a cron line names: a word where there is one, the list of days otherwise. */
+function dowLabel(days: number[]): { text: string; everyDay: boolean } {
   const key = days.join(",");
-  if (key === "1,2,3,4,5") return "weekdays";
-  if (key === "0,6") return "weekends";
-  if (key === "0,1,2,3,4,5,6") return "every day";
-  return days.map((d) => DOW[d]).join(", ");
+  if (key === "1,2,3,4,5") return { text: t("fmt.cron.weekdays"), everyDay: false };
+  if (key === "0,6") return { text: t("fmt.cron.weekends"), everyDay: false };
+  if (key === "0,1,2,3,4,5,6") return { text: "", everyDay: true };
+  return { text: days.map(dow).join(", "), everyDay: false };
 }
 
 /**
@@ -230,12 +242,12 @@ export function describeCron(cron: string, offsetMinutes = zoneOffsetMinutes()):
   const fixedMinute = /^\d+$/.test(p.minute);
   const fixedHour = /^\d+$/.test(p.hour);
   if (p.dom === "*" && p.month === "*") {
-    if (/^\*\/(\d+)$/.test(p.minute) && p.hour === "*" && p.dow === "*") return `Every ${/^\*\/(\d+)$/.exec(p.minute)![1]} min`;
+    if (/^\*\/(\d+)$/.test(p.minute) && p.hour === "*" && p.dow === "*") return t("fmt.cron.everyminutes", { n: /^\*\/(\d+)$/.exec(p.minute)![1] });
     if (fixedMinute && /^\*\/(\d+)$/.test(p.hour) && p.dow === "*") {
-      const n = /^\*\/(\d+)$/.exec(p.hour)![1];
-      return n === "1" ? "Every hour" : `Every ${n} hours`;
+      const n = Number(/^\*\/(\d+)$/.exec(p.hour)![1]);
+      return n === 1 ? t("fmt.cron.everyhour") : plural("fmt.cron.everyhours", n);
     }
-    if (fixedMinute && p.hour === "*" && p.dow === "*") return "Every hour";
+    if (fixedMinute && p.hour === "*" && p.dow === "*") return t("fmt.cron.everyhour");
     if (fixedMinute && fixedHour) {
       // Shift the UTC clock into the reader's zone; a shift across midnight moves the days too.
       let total = Number(p.hour) * 60 + Number(p.minute) + offsetMinutes;
@@ -249,22 +261,22 @@ export function describeCron(cron: string, offsetMinutes = zoneOffsetMinutes()):
         dayShift += 1;
       }
       const clockText = fmtClock(Math.floor(total / 60), total % 60);
-      if (p.dow === "*") return `Every day at ${clockText}`;
+      if (p.dow === "*") return t("fmt.cron.daily", { time: clockText });
       const days = dowList(p.dow);
       if (days) {
         const shifted = days.map((d) => (((d + dayShift) % 7) + 7) % 7).sort();
         const label = dowLabel(shifted);
-        return label === "every day" ? `Every day at ${clockText}` : `${label[0].toUpperCase()}${label.slice(1)} at ${clockText}`;
+        return label.everyDay ? t("fmt.cron.daily", { time: clockText }) : t("fmt.cron.on", { days: label.text, time: clockText });
       }
     }
   }
-  return `${cron} (UTC)`;
+  return t("fmt.cron.utc", { cron });
 }
 
 /** One line for a schedule row: the cadence, or the moment of a one-off. */
 export function describeSchedule(s: { cron: string | null; run_at: string | null }): string {
   if (s.cron) return describeCron(s.cron);
-  if (s.run_at) return `Once · ${absTime(s.run_at)}`;
+  if (s.run_at) return t("fmt.once", { when: absTime(s.run_at) });
   return "";
 }
 

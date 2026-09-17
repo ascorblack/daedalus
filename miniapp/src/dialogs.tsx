@@ -5,6 +5,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Icon, IconName } from "./icons";
+import { t } from "./i18n";
 
 // ── sheet ────────────────────────────────────────────────────────────────────────────────
 
@@ -51,7 +52,7 @@ export function Sheet({ title, ariaLabel, onClose, children, size, className, he
         <div className="sheet-head">
           {title && <h3>{title}</h3>}
           {head}
-          <button className="iconbtn small" onClick={onClose} aria-label="Close" title="Close"><Icon name="close" size={16} /></button>
+          <button className="iconbtn small" onClick={onClose} aria-label={t("common.close")} title={t("common.close")}><Icon name="close" size={16} /></button>
         </div>
         <div className="sheet-body">{children}</div>
       </div>
@@ -138,9 +139,9 @@ function ConfirmDialog({ pending, onDone }: { pending: Pending; onDone: (ok: boo
         <h3 id="confirm-title">{pending.title}</h3>
         {pending.body && <div className="dialog-body">{pending.body}</div>}
         <div className="dialog-actions">
-          <button className="btn ghost" onClick={() => onDone(false)}>{pending.cancel ?? "Cancel"}</button>
+          <button className="btn ghost" onClick={() => onDone(false)}>{pending.cancel ?? t("common.cancel")}</button>
           <button className={`btn ${pending.danger ? "danger solid" : "primary"}`} onClick={() => onDone(true)}>
-            {pending.action ?? "OK"}
+            {pending.action ?? t("common.ok")}
           </button>
         </div>
       </div>
@@ -153,7 +154,8 @@ function ConfirmDialog({ pending, onDone }: { pending: Pending; onDone: (ok: boo
 
 export type MenuItem = { label: string; icon?: IconName; danger?: boolean; disabled?: boolean; onSelect: () => void } | "-";
 
-export function OverflowMenu({ items, label = "More", icon = "more", small, className }: { items: MenuItem[]; label?: string; icon?: IconName; small?: boolean; className?: string }) {
+export function OverflowMenu({ items, label, icon = "more", small, className }: { items: MenuItem[]; label?: string; icon?: IconName; small?: boolean; className?: string }) {
+  const name = label ?? t("dlg.menu");
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
@@ -196,7 +198,7 @@ export function OverflowMenu({ items, label = "More", icon = "more", small, clas
   }, [open]);
   return (
     <>
-      <button ref={trigger} className={`iconbtn ${small ? "small" : ""} ${open ? "on" : ""} ${className ?? ""}`} aria-label={label} title={label} aria-haspopup="menu" aria-expanded={open} onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}>
+      <button ref={trigger} className={`iconbtn ${small ? "small" : ""} ${open ? "on" : ""} ${className ?? ""}`} aria-label={name} title={name} aria-haspopup="menu" aria-expanded={open} onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}>
         <Icon name={icon} size={small ? 16 : 18} />
       </button>
       {open && pos && createPortal(
@@ -252,7 +254,7 @@ export function ToastHost() {
       <span>{state.text}</span>
       {state.undo && (
         <button className="btn small ghost" onClick={() => { state.undo?.(); setState(null); }}>
-          Undo
+          {t("common.undo")}
         </button>
       )}
     </div>

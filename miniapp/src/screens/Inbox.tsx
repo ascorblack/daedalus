@@ -8,6 +8,7 @@ import { navigate, pathFor } from "../router";
 import { PageHeader, screenTitle } from "../shell";
 import { hold, invalidate, prime, release, useQuery } from "../store";
 import { errorText } from "../ui";
+import { plural, t } from "../i18n";
 
 type Entry = {
   id: number;
@@ -113,7 +114,7 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
     patch((l) => l.filter((e) => !ids.includes(e.id)), -g.unread);
     setOpen(null);
     deleteWithUndo(
-      ids.length === 1 ? "Entry deleted" : `${ids.length} entries deleted`,
+      plural("inbox.deleted", ids.length),
       async () => {
         try {
           for (const id of ids) await api.delete(`/api/inbox/${id}`);
@@ -136,29 +137,29 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
     <>
       <PageHeader
         title={screenTitle("inbox")}
-        subtitle={unread > 0 ? `${unread} unread` : undefined}
-        actions={<button className="iconbtn" onClick={markAll} disabled={unread === 0} title="Mark all read" aria-label="Mark all read"><Icon name="check" /></button>}
+        subtitle={unread > 0 ? plural("inbox.unread", unread) : undefined}
+        actions={<button className="iconbtn" onClick={markAll} disabled={unread === 0} title={t("inbox.markall")} aria-label={t("inbox.markall")}><Icon name="check" /></button>}
       >
         <div className="chips">
-          <button className="chip select" aria-pressed={filter === "all"} onClick={() => setFilter("all")}>All</button>
-          <button className="chip select" aria-pressed={filter === "unread"} onClick={() => setFilter("unread")}>Unread{unread > 0 ? ` · ${unread}` : ""}</button>
-          <button className="chip select" aria-pressed={filter === "problems"} onClick={() => setFilter("problems")}>Problems</button>
+          <button className="chip select" aria-pressed={filter === "all"} onClick={() => setFilter("all")}>{t("common.all")}</button>
+          <button className="chip select" aria-pressed={filter === "unread"} onClick={() => setFilter("unread")}>{t("inbox.filter.unread")}{unread > 0 ? ` · ${unread}` : ""}</button>
+          <button className="chip select" aria-pressed={filter === "problems"} onClick={() => setFilter("problems")}>{t("inbox.filter.problems")}</button>
         </div>
       </PageHeader>
       <div className="screen narrow">
         {pending.length > 0 && filter !== "problems" && (
           <section>
-            <div className="section-title">Waiting for you <span className="n">{pending.length}</span></div>
+            <div className="section-title">{t("inbox.waiting")} <span className="n">{pending.length}</span></div>
             {pending.map((p) => (
               <ProposalCard key={p.id} p={p} toast={toast} onDone={() => { proposals.refresh(); invalidate("/api/proposals"); }} />
             ))}
           </section>
         )}
         {loading && !error && <Skeleton rows={6} />}
-        {error && !data && <div className="empty"><b>Could not load the inbox</b><div>{error}</div><button className="btn" onClick={refresh}>Retry</button></div>}
+        {error && !data && <div className="empty"><b>{t("inbox.error")}</b><div>{error}</div><button className="btn" onClick={refresh}>{t("common.retry")}</button></div>}
         {data && groups.length === 0 && pending.length === 0 && (
           <div className="empty">
-            <b>{filter === "unread" ? "Nothing unread" : filter === "problems" ? "No problems" : "Nothing happened while you were away"}</b>
+            <b>{t(filter === "unread" ? "inbox.empty.unread" : filter === "problems" ? "inbox.empty.problems" : "inbox.empty")}</b>
           </div>
         )}
         {groups.map((g) => {
@@ -207,17 +208,17 @@ function InboxRow({ g, open, onToggle, onOpen, onRemove, onUnread }: { g: Group;
             <div className="btnrow">
               {g.session_id && (
                 <button className="btn small" onClick={() => onOpen(g.session_id!)}>
-                  <Icon name="bots" size={14} /> Open session
+                  <Icon name="bots" size={14} /> {t("inbox.open.session")}
                 </button>
               )}
               <span className="grow" />
               <OverflowMenu
                 small
-                label="Entry actions"
+                label={t("inbox.actions")}
                 items={[
-                  { label: "Mark unread", icon: "inbox", onSelect: onUnread },
+                  { label: t("inbox.markunread"), icon: "inbox", onSelect: onUnread },
                   "-",
-                  { label: many ? `Delete ${g.entries.length} entries` : "Delete", icon: "trash", danger: true, onSelect: onRemove },
+                  { label: many ? t("inbox.delete.many", { n: g.entries.length }) : t("common.delete"), icon: "trash", danger: true, onSelect: onRemove },
                 ]}
               />
             </div>
@@ -261,19 +262,19 @@ export function ProposalCard({ p, toast, onDone }: { p: Proposal; toast: (t: str
         </div>
         {p.summary && <div className="sub clamp-3" style={{ marginTop: 4 }}>{p.summary}</div>}
         <div className="btnrow">
-          <button className="btn small primary" disabled={busy} onClick={() => decide("approve")}>Approve</button>
-          <button className="btn small" disabled={busy} onClick={() => setRejecting(true)}>Reject…</button>
-          <button className="btn small ghost" onClick={() => navigate(pathFor("changes", p.id))}>Diff</button>
+          <button className="btn small primary" disabled={busy} onClick={() => decide("approve")}>{t("inbox.approve")}</button>
+          <button className="btn small" disabled={busy} onClick={() => setRejecting(true)}>{t("inbox.reject")}</button>
+          <button className="btn small ghost" onClick={() => navigate(pathFor("changes", p.id))}>{t("inbox.diff")}</button>
         </div>
       </div>
       {rejecting && (
-        <Sheet title="Reject this change" onClose={() => setRejecting(false)} size="narrow">
+        <Sheet title={t("inbox.reject.title")} onClose={() => setRejecting(false)} size="narrow">
           <div className="sub">{p.title}</div>
-          <label className="field">Reason (sent to the agent)</label>
-          <textarea className="field" rows={3} autoFocus value={reason} onChange={(e) => setReason(e.target.value)} placeholder="What is wrong, or what to do instead" />
+          <label className="field">{t("inbox.reason")}</label>
+          <textarea className="field" rows={3} autoFocus value={reason} onChange={(e) => setReason(e.target.value)} placeholder={t("inbox.reason.placeholder")} />
           <div className="sheet-foot">
-            <button className="btn ghost" onClick={() => setRejecting(false)}>Cancel</button>
-            <button className="btn danger solid" disabled={busy} onClick={() => decide("reject")}>Reject</button>
+            <button className="btn ghost" onClick={() => setRejecting(false)}>{t("common.cancel")}</button>
+            <button className="btn danger solid" disabled={busy} onClick={() => decide("reject")}>{t("inbox.reject.do")}</button>
           </div>
         </Sheet>
       )}
