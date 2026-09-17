@@ -86,6 +86,10 @@ func openWindow(p Paths, title, url string) (*Window, error) {
 	if view == nil {
 		return nil, fmt.Errorf("this machine has no web view the launcher can use")
 	}
+	// The menu bar, which is where macOS keeps the keyboard shortcuts: without it ⌘C, ⌘V and ⌘A do
+	// nothing in the window. It is installed once the web view has made the application object and
+	// before anything is shown. Elsewhere this is a no-op — see menu_other.go.
+	installMenu(title)
 	w := &Window{view: view, paths: p, geom: ReadGeometry(p)}
 	view.SetTitle(title)
 	view.SetSize(w.geom.Width, w.geom.Height, webview.HintNone)
