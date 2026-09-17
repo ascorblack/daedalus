@@ -131,12 +131,19 @@ function drawProgress(status) {
   el("working").hidden = failed;
   el("trouble").hidden = !failed;
   if (failed) {
-    el("what").textContent = status.docker_missing ? T("docker.missing") : status.failure;
-    el("trouble-log").textContent = (status.log || []).join("\n");
+    // What the launcher can name, it names — in the language of the page. What it cannot stays as
+    // the program said it, which is a visible gap rather than a silent one. Either way the original
+    // text is under "What happened", above the log.
+    const said = status.docker_missing ? T("docker.missing") : status.failure_key ? T(status.failure_key) : status.failure;
+    el("what").textContent = said;
+    el("trouble-log").textContent = [status.failure, ...(status.log || [])].filter(Boolean).join("\n");
     return;
   }
   el("idle").hidden = Boolean(status.busy) || ready;
-  el("live").textContent = ready ? T("progress.done") : (status.log || []).slice(-1)[0] || T("progress.working");
+  // Two lines: what is happening, in the operator's language, and under it the launcher's own
+  // commentary, which is machine output and looks like it.
+  el("live").textContent = ready ? T("progress.done") : status.stage ? T("live." + status.stage) : T("progress.working");
+  el("livelog").textContent = ready ? "" : (status.log || []).slice(-1)[0] || "";
   if (ready) setTimeout(() => (location.href = "/status"), 900);
 }
 
