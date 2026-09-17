@@ -4,6 +4,22 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-17
 
+- **The optional pieces are listed, and installed from the app.** Settings → Components is every
+  part an installation can do without — the speech runtime, downloaded recognition models and
+  voices, the headless browser, Node, git, ripgrep, opus-tools, bubblewrap — with what each one
+  unlocks, which skills are waiting for it, and how much it would cost to fetch. Each row is
+  measured rather than assumed, so a portable build says what it is actually missing. What this
+  process can install it installs, with a progress bar and one at a time; what the launcher owns it
+  asks the launcher for; and what no download can fix says so instead of offering a button that can
+  only fail. Where a component only takes effect after a restart, the page says so and offers one.
+  The voice pages carry the same install button directly under the lines that explain that the
+  browser is doing the listening and the speaking.
+- **A finished answer stops looking unfinished.** A run now announces that it is over before it
+  tidies up after itself, and the app ends the turn on the model's own full stop rather than on the
+  next poll. The cursor used to go on blinking under a completed answer for anything up to twenty
+  seconds; it is gone within a frame of the last token, and the run chip within a frame of the
+  host saying the run is done. The history, the workspace snapshot and everything a finished run
+  hands on are unchanged — they simply no longer happen in front of you.
 - **The voice concierge's model is chosen in the app.** Settings → Voice → Model is a list of the
   configured presets rather than a line of text you could only read: each one shows its label, its
   endpoint and its model id, the ones that think or that may write at length are marked as slow, and

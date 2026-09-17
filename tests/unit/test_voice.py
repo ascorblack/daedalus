@@ -653,6 +653,21 @@ async def test_the_page_lists_what_there_is_to_pick_and_which_one_is_in_use(pick
     assert by_id[DEFAULT_PRESET]["fast"] is False and by_id[DEFAULT_PRESET]["thinking"] is True
 
 
+async def test_one_reading_answers_everything_the_page_asks_of_it(picking: Any) -> None:
+    """The model, the recogniser and the speaker come back together or the page draws half of itself.
+
+    Three separate pieces of work shape this one response — the model picker, the recogniser, the
+    speaker — and each is tested where it lives. What is tested here is that they are all still in
+    the same answer: a builder that loses one of them fails nothing else in this file.
+    """
+    body = (await picking.get("/api/voice", headers=HEADERS)).json()
+    assert {"preset", "using", "model", "presets", "stt", "tts"} <= set(body)
+    assert body["presets"] and body["using"]
+    # Both halves say how the page should listen and how it should speak, whatever they say.
+    assert body["stt"]["kind"] in ("local", "endpoint", "browser")
+    assert body["tts"]["kind"] in ("local", "endpoint", "browser")
+
+
 async def test_an_unknown_preset_is_refused_and_an_empty_one_means_the_default(picking: Any) -> None:
     refused = await picking.put("/api/voice/model", json={"preset": "nothing.at-all"}, headers=HEADERS)
     assert refused.status_code == 400
