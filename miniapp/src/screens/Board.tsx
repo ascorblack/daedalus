@@ -8,6 +8,9 @@ import { navigate, pathFor } from "../router";
 import { PageHeader, screenTitle } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { confirmAsync, errorText } from "../ui";
+// `t` is also the name every task on this screen goes by, so the translator is imported twice: the
+// plain name where there is no task in scope, and `t2` inside the functions that take one.
+import { plural, t, t as t2 } from "../i18n";
 import { useSessionTitles } from "./Sessions";
 
 type Status = "todo" | "doing" | "review" | "done" | "blocked" | "dropped";
@@ -26,14 +29,9 @@ type Task = {
   updated_at: string;
 };
 
-const COLUMNS: { id: Status; label: string }[] = [
-  { id: "todo", label: "To do" },
-  { id: "doing", label: "Doing" },
-  { id: "review", label: "Review" },
-  { id: "blocked", label: "Blocked" },
-];
+const COLUMNS: Status[] = ["todo", "doing", "review", "blocked"];
 const FINISHED: Status[] = ["done", "dropped"];
-const STATUS_LABEL: Record<Status, string> = { todo: "To do", doing: "Doing", review: "Review", done: "Done", blocked: "Blocked", dropped: "Dropped" };
+const columnLabel = (s: Status) => t(`board.col.${s}`);
 const NEXT: Record<Status, Status[]> = { todo: ["doing", "blocked", "dropped"], doing: ["review", "done", "blocked", "todo"], review: ["done", "doing"], blocked: ["todo", "doing"], done: ["todo"], dropped: ["todo"] };
 
 export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) => void; onOpen: (id: string) => void; selected?: string | null }) {
@@ -69,7 +67,7 @@ export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) =>
     }
   }
   async function remove(t: Task) {
-    if (!(await confirmAsync(`Delete "${t.title}"?`, { body: "The task leaves the board. Sessions that worked on it are not affected.", action: "Delete task" }))) return;
+    if (!(await confirmAsync(t2("board.delete.title", { title: t.title }), { body: t2("board.delete.body"), action: t2("board.delete.action") }))) return;
     try {
       await api.delete(`/api/board/${t.id}`);
       if (selected === t.id) navigate(pathFor("board"), { replace: true });
@@ -115,32 +113,32 @@ export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) =>
     <>
       <PageHeader
         title={screenTitle("board")}
-        subtitle={tasks ? `${openCount} open${finished.length && showDone ? ` · ${finished.length} finished` : ""}` : undefined}
-        actions={<button className="iconbtn primary" onClick={() => setCreating(true)} title="New task" aria-label="New task"><Icon name="plus" /></button>}
+        subtitle={tasks ? `${plural("board.open.count", openCount)}${finished.length && showDone ? t("board.finished.count", { n: finished.length }) : ""}` : undefined}
+        actions={<button className="iconbtn primary" onClick={() => setCreating(true)} title={t("board.new")} aria-label={t("board.new")}><Icon name="plus" /></button>}
       >
         <div className="chips">
-          <button className="chip select" aria-pressed={!showDone} onClick={() => setShowDone(false)}>Open</button>
-          <button className="chip select" aria-pressed={showDone} onClick={() => setShowDone(true)}>With finished</button>
+          <button className="chip select" aria-pressed={!showDone} onClick={() => setShowDone(false)}>{t("board.filter.open")}</button>
+          <button className="chip select" aria-pressed={showDone} onClick={() => setShowDone(true)}>{t("board.filter.done")}</button>
         </div>
       </PageHeader>
       <div className="screen wide board">
         {loading && !error && <Skeleton rows={4} />}
-        {error && !tasks && <div className="empty"><b>Could not load the board</b><div>{error}</div><button className="btn" onClick={refresh}>Retry</button></div>}
+        {error && !tasks && <div className="empty"><b>{t("board.error")}</b><div>{error}</div><button className="btn" onClick={refresh}>{t("common.retry")}</button></div>}
         {tasks && tasks.length === 0 && (
           <div className="empty">
-            <b>No tasks yet</b>
-            <div>The agent keeps this board itself; a task you add here is picked up on its next run.</div>
-            <button className="btn primary" onClick={() => setCreating(true)}>Add task</button>
+            <b>{t("board.empty")}</b>
+            <div>{t("board.empty.sub")}</div>
+            <button className="btn primary" onClick={() => setCreating(true)}>{t("board.add")}</button>
           </div>
         )}
         {tasks && tasks.length > 0 && (
           <div className={`kanban ${showDone ? "five" : ""}`}>
             {COLUMNS.map((col) => {
-              const items = column(col.id);
+              const items = column(col);
               return (
-                <section key={col.id} className={`kanban-col ${over === col.id ? "over" : ""} ${items.length === 0 ? "is-empty" : ""}`} {...dropProps(col.id)}>
+                <section key={col} className={`kanban-col ${over === col ? "over" : ""} ${items.length === 0 ? "is-empty" : ""}`} {...dropProps(col)}>
                   <div className="section-title">
-                    {col.label} <span className="n">{items.length}</span>
+                    {columnLabel(col)} <span className="n">{items.length}</span>
                   </div>
                   {items.map(card)}
                   {items.length === 0 && <div className="kanban-empty">—</div>}
@@ -150,7 +148,7 @@ export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) =>
             {showDone && (
               <section className={`kanban-col ${over === "done" ? "over" : ""}`} {...dropProps("done")}>
                 <div className="section-title">
-                  Finished <span className="n">{finished.length}</span>
+                  {t("board.finished")} <span className="n">{finished.length}</span>
                 </div>
                 {finished.map(card)}
               </section>
@@ -181,12 +179,12 @@ function TaskRow({ t, owner, onOpen, onDragStart, onDragEnd, dragging }: { t: Ta
             <span className="num sub">{done}/{t.checklist.length}</span>
           </div>
         )}
-        {next && <div className="erow-meta"><span className="faint">next:</span><span>{next.text}</span></div>}
+        {next && <div className="erow-meta"><span className="faint">{t2("board.next")}</span><span>{next.text}</span></div>}
         <div className="erow-meta">
           {t.priority <= 2 && <span className={`chip ${t.priority === 1 ? "bad" : "attn"}`}>P{t.priority}</span>}
           {owner && <span>{owner}</span>}
           {t.depends_on.length > 0 && owner && <span className="sep">·</span>}
-          {t.depends_on.length > 0 && <span>after {t.depends_on.length} task{t.depends_on.length === 1 ? "" : "s"}</span>}
+          {t.depends_on.length > 0 && <span>{plural("board.after", t.depends_on.length)}</span>}
         </div>
       </div>
     </div>
@@ -202,36 +200,36 @@ function TaskSheet({ t, owner, board, onClose, onMove, onCheck, onRemove, onOpen
       head={
         <OverflowMenu
           small
-          label="Task actions"
+          label={t2("board.actions")}
           items={[
-            ...(t.session_id ? [{ label: owner ? `Open ${owner}` : "Open session", icon: "bots" as const, onSelect: () => onOpenSession(t.session_id!) }] : []),
-            { label: "Copy task id", icon: "copy", onSelect: async () => toast((await copyText(t.id)) ? "task id copied" : t.id) },
+            ...(t.session_id ? [{ label: owner ? t2("board.open.owner", { name: owner }) : t2("board.open.session"), icon: "bots" as const, onSelect: () => onOpenSession(t.session_id!) }] : []),
+            { label: t2("board.copyid"), icon: "copy", onSelect: async () => toast((await copyText(t.id)) ? t2("board.copied") : t.id) },
             "-",
-            { label: "Delete task…", icon: "trash", danger: true, onSelect: () => onRemove(t) },
+            { label: t2("board.delete.menu"), icon: "trash", danger: true, onSelect: () => onRemove(t) },
           ]}
         />
       }
     >
       <div className="erow-meta" style={{ marginBottom: 10 }}>
-        <span className="chip">{STATUS_LABEL[t.status]}</span>
+        <span className="chip">{columnLabel(t.status)}</span>
         <span className={`chip ${t.priority === 1 ? "bad" : t.priority === 2 ? "attn" : ""}`}>P{t.priority}</span>
         {owner && <span className="sep">·</span>}
         {owner && <button className="linkbtn" onClick={() => onOpenSession(t.session_id!)}>{owner}</button>}
         <span className="sep">·</span>
-        <span title={absTime(t.updated_at)}>updated {relTime(t.updated_at)}</span>
+        <span title={absTime(t.updated_at)}>{t2("board.updated", { t: relTime(t.updated_at) })}</span>
       </div>
       <div className="sub" style={{ marginBottom: 10 }}>
-        {t.origin_session_id ? <>Board of <button className="linkbtn" onClick={() => onOpenSession(t.origin_session_id!)}>{board ?? "a removed agent"}</button></> : "Posted to every agent's board"}
+        {t.origin_session_id ? <>{t2("board.of")} <button className="linkbtn" onClick={() => onOpenSession(t.origin_session_id!)}>{board ?? t2("board.of.gone")}</button></> : t2("board.everyone")}
       </div>
       {t.acceptance && (
         <section className="sheet-section">
-          <div className="sheet-section-title">Acceptance</div>
+          <div className="sheet-section-title">{t2("board.acceptance")}</div>
           <div className="proposal-text">{t.acceptance}</div>
         </section>
       )}
       {t.checklist.length > 0 && (
         <section className="sheet-section">
-          <div className="sheet-section-title">Checklist <span className="sub">{done}/{t.checklist.length}</span></div>
+          <div className="sheet-section-title">{t2("board.checklist")} <span className="sub">{done}/{t.checklist.length}</span></div>
           {t.checklist.map((c, i) => (
             <label key={i} className="toggle-row check-row">
               <input type="checkbox" checked={c.done} onChange={() => onCheck(t, i)} />
@@ -242,22 +240,22 @@ function TaskSheet({ t, owner, board, onClose, onMove, onCheck, onRemove, onOpen
       )}
       {t.depends_on.length > 0 && (
         <section className="sheet-section">
-          <div className="sheet-section-title">Depends on</div>
+          <div className="sheet-section-title">{t2("board.depends")}</div>
           <div className="sub mono">{t.depends_on.join(", ")}</div>
         </section>
       )}
       {t.notes && (
         <section className="sheet-section">
-          <div className="sheet-section-title">Notes</div>
+          <div className="sheet-section-title">{t2("board.notes")}</div>
           <pre className="inbox-text">{t.notes}</pre>
         </section>
       )}
       <section className="sheet-section">
-        <div className="sheet-section-title">Move to</div>
+        <div className="sheet-section-title">{t2("board.moveto")}</div>
         <div className="btnrow" style={{ marginTop: 0 }}>
           {NEXT[t.status].map((s) => (
             <button key={s} className={`btn small ${s === "done" ? "primary" : ""}`} onClick={() => onMove(t, s)}>
-              {STATUS_LABEL[s]}
+              {columnLabel(s)}
             </button>
           ))}
         </div>
@@ -289,29 +287,29 @@ function NewTaskSheet({ onClose, onCreated, toast }: { onClose: () => void; onCr
     }
   }
   return (
-    <Sheet title="New task" onClose={onClose}>
-      <label className="field">Title</label>
+    <Sheet title={t("board.new")} onClose={onClose}>
+      <label className="field">{t("board.title")}</label>
       <input className="field" autoFocus value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
-      <label className="field">Acceptance (how anyone can tell it is done)</label>
+      <label className="field">{t("board.acceptance.label")}</label>
       <textarea className="field" rows={2} value={form.acceptance} onChange={(e) => setForm({ ...form, acceptance: e.target.value })} />
-      <label className="field">Checklist (one item per line)</label>
+      <label className="field">{t("board.checklist.label")}</label>
       <textarea className="field" rows={3} value={form.checklist} onChange={(e) => setForm({ ...form, checklist: e.target.value })} />
-      <label className="field">Priority</label>
+      <label className="field">{t("board.priority")}</label>
       <div className="segmented inline" role="radiogroup">
         {[1, 2, 3, 4, 5].map((p) => (
           <button key={p} role="radio" aria-checked={form.priority === p} className={form.priority === p ? "on" : ""} onClick={() => setForm({ ...form, priority: p })}>P{p}</button>
         ))}
       </div>
-      <div className="sub" style={{ marginTop: 4 }}>P1 is the most urgent.</div>
-      <label className="field">Board</label>
+      <div className="sub" style={{ marginTop: 4 }}>{t("board.priority.hint")}</div>
+      <label className="field">{t("board.board")}</label>
       <select className="field" value={form.session_id} onChange={(e) => setForm({ ...form, session_id: e.target.value })}>
-        <option value="">Every agent (whoever takes it)</option>
+        <option value="">{t("board.board.any")}</option>
         {agents.map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
       </select>
-      <div className="sub" style={{ marginTop: 4 }}>An agent sees its own tasks and the ones posted to every agent.</div>
+      <div className="sub" style={{ marginTop: 4 }}>{t("board.board.hint")}</div>
       <div className="sheet-foot">
-        <button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn primary" disabled={busy || !form.title.trim()} onClick={create}>Create</button>
+        <button className="btn ghost" onClick={onClose}>{t("common.cancel")}</button>
+        <button className="btn primary" disabled={busy || !form.title.trim()} onClick={create}>{t("common.create")}</button>
       </div>
     </Sheet>
   );
