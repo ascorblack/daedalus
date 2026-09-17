@@ -1,6 +1,6 @@
 import { Component, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { api, AsrStatus, LoopView, ProviderUsage, Schedule, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
+import { api, AsrStatus, LoopView, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
 import { Dot, STATUS_WORD, ServiceRow, Status, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, timeAgo } from "../components";
 import { OverflowMenu, Sheet, confirmDialog, Overlay } from "../dialogs";
 import { commandPreview, plainPreview, untilShort } from "../format";
@@ -79,6 +79,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   const [asideOpen, setAsideOpen] = useState(() => pane === undefined && readLayout("aside") !== "0");
   useEffect(() => { if (pane === undefined) writeLayout("aside", asideOpen ? "1" : "0"); }, [asideOpen, pane]);
   const [asr, setAsr] = useState<AsrStatus | null>(null);
+  const [snapshots, setSnapshots] = useState<SessionCheckpoints | null>(null);
   const [asideWidth, setAsideWidth] = usePaneWidth("aside", 272, 200, 520);
   const [paneWidth, setPaneWidth] = usePaneWidth("pane", 420, 280, 900);
 
@@ -102,6 +103,17 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     }
   }
 
+  // Which turns can still put the files back. Read once with the session and again after a revert
+  // (which takes a snapshot of its own); a session that never snapshots answers with an empty list,
+  // and then nothing about the undo changes.
+  const readSnapshots = useCallback(async () => {
+    try {
+      setSnapshots(await api.get<SessionCheckpoints>(`/api/sessions/${id}/checkpoints`));
+    } catch {
+      setSnapshots(null);
+    }
+  }, [id]);
+
   const turnAction = useCallback(
     async (kind: "revert" | "fork", seq: number) => {
       try {
@@ -116,6 +128,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
           const r = await api.post<{ dropped: number; workspace_restored: boolean; untouched: string[] }>(`/api/sessions/${id}/revert`, { seq });
           const ws = r.workspace_restored ? (r.untouched.length ? `, workspace restored (${r.untouched.length} nested repo(s) untouched)` : ", workspace restored") : ", files not restored (no snapshot)";
           toast(`reverted: ${r.dropped} message(s) removed${ws}`);
+          void readSnapshots();
         } else {
           const r = await api.post<{ id: string; title: string; messages: number }>(`/api/sessions/${id}/fork`, { seq });
           toast(`forked into "${r.title}" (${r.messages} messages) — open it from the Agents tab`);
@@ -126,7 +139,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [id, toast, detail?.project?.settings.snapshots],
+    [id, toast, readSnapshots, detail?.project?.settings.snapshots],
   );
 
   const [offline, setOffline] = useState(false);
@@ -256,7 +269,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     api.get<Record<string, unknown>>("/api/modes").then((m) => setModes(Object.keys(m))).catch(() => setModes([]));
     api.get<SlashCommand[]>("/api/commands").then(setCommands).catch(() => setCommands([]));
     api.get<AsrStatus>("/api/asr").then(setAsr).catch(() => setAsr(null));
-  }, [load]);
+    readSnapshots();
+  }, [load, readSnapshots]);
 
   // A recording from the microphone becomes text in the composer (or goes straight out with autosend).
   const [transcribing, setTranscribing] = useState(false);
@@ -768,7 +782,17 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     return () => window.clearTimeout(t);
   }, [info]);
 
-  const sessionCtx = useMemo(() => ({ id, workspace: detail?.workspace ?? "", preview: setPreview }), [id, detail?.workspace]);
+  const sessionCtx = useMemo(
+    () => ({
+      id,
+      workspace: detail?.workspace ?? "",
+      preview: setPreview,
+      // An empty list is a session that never snapshots (a project with them off, a workspace over
+      // the size cap): there is nothing retention took away and the undo behaves as it always did.
+      revertable: snapshots && snapshots.total > 0 ? new Set(snapshots.checkpoints.filter((c) => c.kind === "before" && c.seq != null).map((c) => c.seq as number)) : null,
+    }),
+    [id, detail?.workspace, snapshots],
+  );
 
   // What the answer cited, clicked: a file opens at the lines it named, a Verify receipt opens as a
   // receipt, and any other run id is a background job — its log is a file in the workspace.
@@ -1031,6 +1055,11 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
           <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
             <div className="timeline">
               {pageable && <div className="sub older-note">{older === "loading" ? "loading earlier messages…" : ""}</div>}
+              {snapshots?.pruned && (
+                <div className="sub older-note">
+                  older checkpoints were removed by retention{snapshots.pruned_before ? ` (before ${new Date(snapshots.pruned_before).toLocaleDateString()})` : ""} — those turns undo the history, not the files
+                </div>
+              )}
               <SessionContext.Provider value={sessionCtx}>
                 <Windowed
                   keys={turnKeys}
@@ -1635,7 +1664,7 @@ function stepCount(items: Activity[]): number {
 }
 
 const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork", seq: number) => void }) {
-  const { id: sessionId } = useContext(SessionContext);
+  const { id: sessionId, revertable } = useContext(SessionContext);
   const [open, setOpen] = useDisclosed(`${sessionId}:turn:${turn.key}`, live);
   const wasLive = useRef(live);
   useEffect(() => {
@@ -1648,6 +1677,10 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
   const hasWork = turn.activity.length > 0 || live;
   const elapsed = (live ? Date.now() : turn.endedAt) - turn.startedAt;
   const steps = stepCount(turn.activity);
+  // Retention drops the oldest snapshots once a store passes its bounds. Where this turn's snapshot
+  // has gone, the undo is not offered: it would cut the history and leave the files as they are,
+  // which is not what "revert to here" reads as. A session that never snapshots keeps the offer.
+  const canRevert = revertable === null || (turn.user?.seq != null && revertable.has(turn.user.seq));
   return (
     <div className="turn">
       {turn.user && turn.user.origin && turn.user.origin !== "operator" && (
@@ -1663,10 +1696,10 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
             text={turn.user.text}
             actions={
               turn.user.seq && onTurnAction && !live
-                ? [
+                ? ([
                     { icon: "fork", label: "Fork a session from here", onSelect: () => onTurnAction("fork", turn.user!.seq!) },
-                    { icon: "undo", label: "Revert to here…", danger: true, onSelect: () => onTurnAction("revert", turn.user!.seq!) },
-                  ]
+                    ...(canRevert ? [{ icon: "undo", label: "Revert to here…", danger: true, onSelect: () => onTurnAction("revert", turn.user!.seq!) }] : []),
+                  ] as MessageAction[])
                 : []
             }
           />
@@ -2077,7 +2110,12 @@ function ReceiptDialog({ sessionId, receipt, onClose }: { sessionId: string; rec
   );
 }
 
-const SessionContext = createContext<{ id: string; workspace: string; preview: (src: PreviewSource) => void }>({ id: "", workspace: "", preview: () => undefined });
+const SessionContext = createContext<{ id: string; workspace: string; preview: (src: PreviewSource) => void; revertable: Set<number> | null }>({
+  id: "",
+  workspace: "",
+  preview: () => undefined,
+  revertable: null,
+});
 
 /** A tool's path as the workspace knows it: absolute paths inside the workspace become relative, others stay unreachable. */
 function workspaceRelative(path: string, workspace: string): string | null {

@@ -486,6 +486,16 @@ MIGRATIONS: list[str] = [
     ALTER TABLE sessions ADD COLUMN project_id TEXT;
     CREATE INDEX sessions_by_project ON sessions(project_id);
     """,
+    # what retention took away, per session, so the app can say so instead of offering an undo
+    # that would restore nothing
+    """
+    CREATE TABLE checkpoint_retention (
+        session_id TEXT PRIMARY KEY,
+        removed_before TEXT NOT NULL,
+        removed INTEGER NOT NULL,
+        at TEXT NOT NULL
+    );
+    """,
 ]
 
 

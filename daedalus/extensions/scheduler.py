@@ -305,10 +305,13 @@ class Scheduler:
         await self._maintain_database(now)
 
     async def _maintain_database(self, now: datetime) -> None:
-        """The database's own housekeeping, on the tick that already runs: sweep old events, reclaim pages.
+        """The database's own housekeeping, on the tick that already runs: sweep old events, reclaim
+        pages, and bring the workspace snapshot stores back inside their bounds.
 
         Per-run trimming bounds a run and nothing bounded the table; and with auto_vacuum
-        incremental, freed pages are handed back only when something asks for them.
+        incremental, freed pages are handed back only when something asks for them. The checkpoint
+        stores are on the same tick and for the same reason: they are written before every turn and
+        nothing but deleting the session ever took one away.
         """
         ops = self.app.config.ops
         due = self._maintained_at is None or now - self._maintained_at >= timedelta(minutes=ops.db_maintenance_minutes)
@@ -320,6 +323,9 @@ class Scheduler:
             pages = await self.app.db.reclaim()
             if dropped or pages:
                 logger.warning("database maintenance: %d event rows dropped, %d pages reclaimed", dropped, pages)
+            report = await self.app.manager.prune_checkpoints()
+            if report.dropped or report.freed:
+                logger.warning("checkpoint retention: %s", report.line())
         except Exception:  # noqa: BLE001 — housekeeping must never take the tick down
             logger.exception("database maintenance failed")
 

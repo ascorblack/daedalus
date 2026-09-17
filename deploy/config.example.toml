@@ -173,6 +173,18 @@ stale_hours = 6            # a 'doing' task whose session went quiet this long i
 # provider_retry_base_seconds = 30.0   # the first wait; it doubles each time up to provider_retry_max_seconds
 # provider_retry_max_seconds = 600.0
 
+# Workspace snapshots: one is taken before every operator turn and after every run, into a hidden
+# git repository in the workspace, and "revert to this turn" puts the files back from it.
+# checkpoint_max_gb bounds one workspace (a bigger one is not snapshotted at all, and revert there
+# undoes the history only); the three below bound the stores together, oldest dropped first when
+# either bound is passed. A session always keeps its newest checkpoint_keep_last whatever they say.
+# The maintenance tick applies them every ops.db_maintenance_minutes;
+# `python -m daedalus db checkpoints-prune` applies them now and prints what it freed.
+# checkpoint_max_gb = 2.0
+# checkpoint_keep_days = 30
+# checkpoint_total_max_gb = 2.0         # 0 = no size bound
+# checkpoint_keep_last = 50
+
 [scheduler]
 topic_mode = "per_task"
 catch_up_missed = true

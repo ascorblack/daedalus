@@ -241,6 +241,22 @@ export type SessionDetail = {
   usage: { c?: number; i?: number; o?: number; ch?: number; usd?: number | null };
 };
 
+/**
+ * The workspace snapshots a session can still be put back to. Retention drops the oldest once the
+ * store passes its bounds, so the undo is offered for the turns that still have one and the screen
+ * says, once, that the older ones were removed rather than reverting to nothing.
+ */
+export type SessionCheckpoints = {
+  checkpoints: { seq: number | null; run_id: string | null; kind: string; sha: string; at: string }[];
+  total: number;
+  pruned: boolean;
+  pruned_before: string | null;
+  removed: number;
+  note: string;
+  keep_days: number;
+  keep_last: number;
+};
+
 export type MemoryRecord = { id: string; scope: string; scope_key: string; kind: string; text: string; salience: number; version: number; created_at: string | null; last_accessed_at: string | null };
 export type MemoryBucket = { scope: string; scope_key: string; title: string | null; count: number };
 export type MemoryListing = { records: MemoryRecord[]; buckets: MemoryBucket[]; sessions: Record<string, string> };

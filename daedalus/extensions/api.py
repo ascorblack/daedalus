@@ -1441,6 +1441,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         return {"id": session_id, "title": body.title.strip()[:128]}
 
+    @api.get("/api/sessions/{session_id}/checkpoints")
+    async def session_checkpoints(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The workspace snapshots this session still has, and whether retention cut the list."""
+        if await manager.get_state(session_id) is None:
+            raise HTTPException(404, "no such session")
+        return await manager.list_checkpoints(session_id)
+
     @api.post("/api/sessions/{session_id}/revert")
     async def revert_session(session_id: str, body: RevertBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:
