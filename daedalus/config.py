@@ -762,12 +762,25 @@ class SttConfig(BaseModel):
 
 
 class TtsConfig(BaseModel):
-    """Text-to-speech for the voice page: any OpenAI-compatible ``/audio/speech`` endpoint.
+    """How the voice page speaks, in the order it tries: a voice that runs here, then an endpoint.
 
-    Empty means the browser speaks the answer itself with its own synthesiser, which every
-    modern browser has; a server endpoint is worth configuring for a voice that sounds human
-    (a hosted one, or a local Kokoro/Piper server on the private network).
+    ``local_voice`` names an entry from :mod:`daedalus.speech.tts_catalog` — a Piper, Kokoro or
+    KittenTTS voice downloaded into the state directory — and is the whole switch: set it and the
+    answer is synthesised on this machine's processor, clear it and nothing changes anywhere else.
+    Past that, an OpenAI-compatible ``/audio/speech`` endpoint if one is configured, and past that the
+    browser's own synthesiser, which every modern browser has and none of them do well.
     """
+
+    local_voice: str = ""
+    """A catalog id (``ru-dmitri``, ``en-amy``, …). Empty = no local synthesis."""
+    local_speaker: str = ""
+    """Which voice inside a multi-speaker archive (``af_sarah``, ``expr-voice-4-f``). Empty = the first.
+    Ignored by the single-voice models, which is most of them."""
+    local_speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    """How fast it talks. 1.0 is the voice as trained; the bounds are what stays intelligible."""
+    local_threads: int = Field(default=2, ge=1, le=16)
+    """Synthesis threads. Two is enough for every voice in the catalog that keeps up with speech at
+    all, and the two that do not are not rescued by more."""
 
     provider: str = ""
     """A configured provider id whose base URL and key are used, exactly as ``[asr]`` does; empty = ``url``/``api_key``."""

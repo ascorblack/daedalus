@@ -507,8 +507,12 @@ host, not by the prompt, and no mode can widen it.
 enabled = true
 preset = "openrouter.qwen-qwen3.7-flash"   # a preset from [presets]; pick a fast, no-thinking model
 
-[voice.tts]                  # reading the answer out loud; empty = the browser's own synthesiser
-provider = ""                # a provider id from [providers] — its base URL and key are used
+[voice.tts]                  # reading the answer out loud, in the order it is tried
+local_voice = ""             # a voice downloaded onto this machine: "ru-dmitri", "en-amy", ...
+local_speaker = ""           # which voice inside a multi-voice model ("af_sarah", "expr-voice-4-f")
+local_speed = 1.0            # 0.5 - 2.0
+local_threads = 2
+provider = ""                # else an endpoint: a provider id from [providers], its URL and key
 url = ""                     # or an endpoint of its own, e.g. a local speech server
 api_key = ""
 model = "gpt-4o-mini-tts"
@@ -522,12 +526,29 @@ page records instead, cuts an utterance when you have been quiet for about a sec
 be transcribed by the `[asr]` endpoint (the same one that transcribes voice notes in the chat). With
 neither, the page still works from the keyboard and says why the microphone is missing.
 
-**Speaking back.** With `[voice.tts]` empty the browser reads the answer with its own voice: nothing
-to install, and it sounds like it. Any OpenAI-compatible `/audio/speech` endpoint gives you a better
-one — a self-hosted server such as Kokoro-FastAPI or Piper on the private network, or a hosted model
-like `gpt-4o-mini-tts`. Set `provider` to reuse a configured provider's URL and key, or `url` and
-`api_key` for an endpoint of its own. The answer is spoken a sentence at a time as it is written, so
-speech starts before the model has finished the paragraph, and talking over it stops it.
+**Speaking back.** Three ways, tried in that order, and the first is the one to use.
+
+**A voice that runs here.** **Settings → Voice → Voice (speech synthesis)** is a catalog of sixteen
+voices — Piper in ten languages including three Russian ones, plus Kokoro and KittenTTS for English —
+between thirteen and a hundred megabytes each. Pick one, press **Play sample** to hear it say a
+sentence in its own language, and press **Use this one**. From then on every answer is synthesised on
+this machine's processor: no endpoint, no key, nothing metered, and it works with the network down.
+Most of them render four to five times faster than a person talks, so the audio is ready before the
+sentence before it has finished playing; the two that do not — Kokoro and Piper's "high" quality — say
+so on their own cards. Numbers, dates and Latin words inside a Russian sentence are read properly:
+each archive carries its own copy of espeak-ng's data, so nothing has to be installed for it.
+
+**An endpoint**, if you would rather: any OpenAI-compatible `/audio/speech` — a self-hosted
+Kokoro-FastAPI or Piper server, or a hosted model like `gpt-4o-mini-tts`. Set `provider` to reuse a
+configured provider's URL and key, or `url` and `api_key` for an endpoint of its own. A local voice
+that fails is *not* quietly replaced by this one: you chose it, and a failure hidden behind a metered
+fallback is a failure nobody fixes.
+
+**The browser**, with neither configured: every modern browser has a synthesiser, nothing has to be
+installed, and it sounds like it.
+
+Whichever speaks, the answer is spoken a sentence at a time as it is written, so speech starts before
+the model has finished the paragraph, and talking over it stops it.
 
 **Limits.** It is beta and it shows. Recognition quality is the browser's, and it mishears names and
 identifiers; barge-in cuts the audio but the concierge's turn keeps its own run until it settles; a

@@ -27,6 +27,7 @@ from daedalus.extensions.voice import (
     tts_configured,
 )
 from daedalus.host.session_runner import SessionManager
+from daedalus.speech.tts_service import LocalTts
 from daedalus.stores.database import Database
 from tests.support.models import model_config
 
@@ -557,6 +558,8 @@ async def client(settings: Settings, db: Database) -> Any:
         front=None,
         guard=None,
         extensions={"voice": SimpleNamespace(say=lambda text: said.append(text))},
+        # /api/voice/tts asks this before it asks the endpoint: a voice downloaded here speaks first.
+        tts=LocalTts(settings.state_dir, model_config()),
     )
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(application, "tok")), base_url="http://test") as c:  # type: ignore[arg-type]
         c.said = said  # type: ignore[attr-defined]

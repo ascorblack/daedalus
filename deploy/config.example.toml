@@ -217,6 +217,13 @@ progress_max_per_minute = 3      # interims relayed in a minute across all the a
 # Reading the answer out loud. Empty url and provider = the browser's own synthesiser.
 # Any OpenAI-compatible /audio/speech endpoint works: a hosted one, or a local server.
 [voice.tts]
+# How the answer is spoken, in the order it is tried: a voice downloaded onto this machine, then the
+# endpoint below, then the browser's own synthesiser. Pick a voice in Settings -> Voice rather than
+# by hand — the id has to be one the catalog knows and the files have to be downloaded first.
+local_voice = ""         # a catalog id: "ru-dmitri", "en-amy", "en-kokoro", ... Empty = nothing local
+local_speaker = ""       # a named speaker inside a multi-voice model ("af_sarah", "expr-voice-4-f")
+local_speed = 1.0        # 0.5 - 2.0; 1.0 is the voice as it was trained
+local_threads = 2
 provider = ""            # a provider id from [providers]; its base URL and key are used
 url = ""                 # or an endpoint of its own, e.g. "http://speech:8880/v1"
 api_key = ""

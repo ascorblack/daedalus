@@ -522,6 +522,15 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     if rel == "/api/voice":
         over = getattr(stub, "voice_over", None)
         return respond(route, {**VOICE, "stt": {**VOICE["stt"], **over}} if over else VOICE)
+    if rel == "/api/tts":
+        return respond(route, TTS)
+    if rel == "/api/stt":
+        return respond(route, STT)
+    if rel.endswith("/progress"):
+        # The two pickers subscribe to a download stream as they mount. Nothing is downloading in a
+        # picture, so this is an empty stream rather than an unhandled route the reporter complains
+        # about; an empty body would leave the reader in its retry loop for the whole shot.
+        return route.fulfill(status=200, content_type="text/event-stream", body=": keepalive\n\n")
     if rel == "/api/asr":
         return respond(route, {"configured": False, "reason": "", "provider": "", "model": "", "max_seconds": 120, "autosend": False})
     if rel == "/api/heartbeat":
@@ -538,6 +547,62 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     # come to describe different apps.
     UNHANDLED.record(rel)
     return respond(route, [])
+
+
+def _tts_voice(vid, label, language, gender, size, disk, quality, speed, rtf, note, installed=False, selected=False, speakers=(), recommended=()):  # type: ignore[no-untyped-def]
+    return {
+        "id": vid, "label": label, "kind": "vits", "language": language, "gender": gender,
+        "size_bytes": size, "disk_bytes": disk, "memory_mb": 120, "sample_rate": 22050,
+        "licence": "CC0 (public domain)", "quality": quality, "speed": speed, "rtf": rtf,
+        "keeps_up": rtf < 1.0, "note": note, "speakers": list(speakers),
+        "recommended_for": list(recommended), "installed": installed, "installed_bytes": disk if installed else 0,
+        "selected": selected,
+    }
+
+
+TTS = {
+    "models": [
+        _tts_voice("ru-dmitri", "Dmitri (Russian)", "ru", "male", 21_129_441, 36_577_368, 74, 53, 0.219,
+                   "A clear male Russian, four times faster than speech.", installed=True, selected=True, recommended=("ru",)),
+        _tts_voice("ru-irina", "Irina (Russian)", "ru", "female", 21_149_417, 36_577_296, 73, 39, 0.337,
+                   "The female Russian voice. Warm and unhurried.", installed=True),
+        _tts_voice("en-amy", "Amy (American English)", "en", "female", 21_028_122, 36_679_476, 72, 57, 0.195,
+                   "Twenty megabytes, five times faster than speech.", recommended=("en",)),
+        dict(_tts_voice("en-kokoro", "Kokoro (English, 11 voices)", "en", "mixed", 103_248_205, 157_947_103, 92, 13, 1.203,
+                        "The best-sounding English here, and slower than real time.",
+                        speakers=("af", "af_bella", "am_adam", "bf_emma", "bm_george")),
+             kind="kokoro", sample_rate=24000, licence="Apache-2.0", memory_mb=320),
+        _tts_voice("de-thorsten", "Thorsten (German)", "de", "male", 20_949_833, 36_577_367, 76, 60, 0.183,
+                   "The German voice most German projects use.", recommended=("de",)),
+        _tts_voice("fr-siwis", "Siwis (French)", "fr", "female", 20_914_888, 36_577_449, 73, 59, 0.189,
+                   "A steady French, quick enough that nothing waits for it.", recommended=("fr",)),
+    ],
+    "languages": ["de", "en", "fr", "ru"],
+    "selected": "ru-dmitri",
+    "disk_bytes": 73_154_664,
+    "root": "/srv/state/models/tts",
+    "engine_installed": True,
+    "recommended": {"de": "de-thorsten", "en": "en-amy", "fr": "fr-siwis", "ru": "ru-dmitri"},
+    "state": {
+        "voice": "ru-dmitri", "label": "Dmitri (Russian)", "language": "ru", "speaker": "", "speed": 1.0,
+        "threads": 2, "installed": True, "active": True, "engine_installed": True, "state": "ready",
+        "error": "", "loaded": "ru-dmitri", "encoder": True,
+    },
+}
+
+STT = {
+    "models": [{
+        "id": "gigaam-ru", "label": "GigaAM v3 Russian", "kind": "nemo_transducer", "streaming": False,
+        "languages": ["ru"], "language_count": 1, "size_bytes": 170_197_019, "disk_bytes": 178_000_000,
+        "memory_mb": 380, "licence": "MIT", "accuracy": 91, "speed": 94,
+        "note": "The best Russian here, and it writes the punctuation itself.", "url": "",
+        "recommended_for": ["ru"], "verified": True, "detects_language": True,
+        "installed": True, "installed_bytes": 178_000_000, "selected": True,
+    }],
+    "languages": ["en", "ru"], "selected": "gigaam-ru", "disk_bytes": 178_000_000,
+    "root": "/srv/state/models/stt", "language": "auto", "threads": 2, "engine_installed": True,
+    "decoders": {"opus": True, "any": False}, "recommended": {"ru": "gigaam-ru"},
+}
 
 
 UNHANDLED = Unhandled()
@@ -609,6 +674,16 @@ def open_more(page: Page) -> None:
     """The More sheet on a phone: every other destination, and the language switch under them."""
     page.locator(".tabbar button").last.click()
     page.wait_for_selector(".more-grid", timeout=5000)
+
+
+def scroll_to_voices(page: Page) -> None:
+    """The settings body scrolls inside itself, so a full-page shot would still show only the top of it.
+
+    The synthesis picker is the last card in the Voice section; bringing it into view is what makes
+    the picture about the voices rather than about the recogniser above them.
+    """
+    page.locator(".stt-list").last.scroll_into_view_if_needed()
+    page.wait_for_timeout(400)
 
 
 def open_workspaces(page: Page) -> None:
@@ -729,6 +804,7 @@ def run() -> int:
         desk.add_init_script("try { localStorage.setItem('agents.groupBy', 'project'); } catch (e) {}")
         shot(page, "projects", "agents", before=open_projects)
         shot(page, "voice", "voice")
+        shot(page, "voice-settings", "settings/voice", wait=".stt-list .stt-card", before=scroll_to_voices, settle=700)
         shot(page, "board", "board")
         shot(page, "inbox", "inbox")
         shot(page, "cron", "schedules")

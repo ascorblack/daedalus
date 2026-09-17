@@ -157,6 +157,7 @@ async def _config(ctx: DoctorContext) -> list[Check]:
     node = await asyncio.to_thread(toolchain_status, "node")
     out.append(Check("node", node == "ok", "available" if node == "ok" else node, "ok" if node == "ok" else "info", node_fix))
     out.append(await asyncio.to_thread(_local_speech, ctx))
+    out.append(await asyncio.to_thread(_local_voice, ctx))
     out.append(Check("per-run spend cap", cfg.limits.usd_per_run > 0, f"${cfg.limits.usd_per_run:.2f} per run, ${st.usd_per_day:.2f} per day" if cfg.limits.usd_per_run > 0 else f"no per-run cap (daily cap ${st.usd_per_day:.2f})", "ok" if cfg.limits.usd_per_run > 0 else "warn", "set limits.usd_per_run in Settings"))
     return out
 
@@ -213,6 +214,44 @@ def _load_note() -> str:
     if state.state == "error":
         return f"; the last load failed: {state.error[:120]}"
     return "; not loaded yet — the voice page loads it when it opens"
+
+
+def _local_voice(ctx: DoctorContext) -> Check:
+    """Whether the answer is spoken here, and whether everything that takes is actually present.
+
+    The same three things as recognition — a voice chosen, that voice downloaded, the engine's wheel
+    installed — and the same rule about saying which one is missing. The difference is that there is
+    always a fallback: the browser has a synthesiser of its own, so nothing here is ever a hard
+    failure, only a worse voice than the one that was asked for.
+    """
+    from daedalus.speech import tts_catalog  # Lazy: the doctor must load on an install that never chose a voice
+    from daedalus.speech.models import Downloads  # Lazy: same
+
+    chosen = ctx.config.voice.tts.local_voice
+    if not chosen:
+        endpoint = bool(ctx.config.voice.tts.provider or ctx.config.voice.tts.url)
+        return Check("local voice", True,
+                     "none: a speech endpoint speaks" if endpoint else "none: the browser's own synthesiser speaks",
+                     "ok", "pick a voice in Settings → Voice → Voice (speech synthesis) to speak on this machine")
+    try:
+        voice = tts_catalog.get(chosen)
+    except KeyError:
+        return Check("local voice", False, f"{chosen} is configured but is not in the catalog", "fail",
+                     "pick a voice again in Settings → Voice → Voice (speech synthesis)")
+    if not Downloads(ctx.settings.state_dir / "models" / "tts", lookup=tts_catalog.get).is_installed(voice.id):
+        return Check("local voice", False, f"{voice.label} is selected but was never downloaded", "fail",
+                     "download it in Settings → Voice → Voice (speech synthesis)")
+    try:
+        import sherpa_onnx  # noqa: F401  # Lazy: the engine is an optional extra and this asks whether it is here
+    except ImportError:
+        fix = ("the launcher installs it on demand: `daedalus-desktop install speech`"
+               if ctx.settings.native else "install the speech extra in the runtime: `uv sync --extra speech`")
+        return Check("local voice", False, f"{voice.label} is downloaded but the speech engine is not installed", "fail", fix)
+    if not voice.keeps_up:
+        return Check("local voice", True,
+                     f"{voice.label} active; it renders slower than speech ({voice.rtf:.2f}x), so answers begin a beat late",
+                     "warn", "pick a faster voice in Settings → Voice if the delay is noticeable")
+    return Check("local voice", True, f"{voice.label} active ({voice.language}, {voice.sample_rate // 1000} kHz)", "ok")
 
 
 async def _telegram(ctx: DoctorContext) -> list[Check]:

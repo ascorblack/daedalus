@@ -18,6 +18,7 @@ from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.boot_guard import BootGuard
 from daedalus.host.session_runner import SessionManager, SessionState
 from daedalus.speech.service import LocalSpeech
+from daedalus.speech.tts_service import LocalTts
 from daedalus.stores.database import Database
 from daedalus.transport.telegram.front import TelegramFront
 
@@ -38,16 +39,26 @@ class Application:
         # The local speech models: a directory listing and a configuration read, no engine and no
         # model until something actually asks for words.
         self.speech = LocalSpeech(settings.state_dir, self.config)
+        # And the voices it speaks with, on the same terms: a directory listing and a configuration
+        # read, no engine and no voice until something actually asks to be heard.
+        self.tts = LocalTts(settings.state_dir, self.config)
         self.guard = BootGuard(settings.state_dir, window_minutes=self.config.ops.boot_loop_window_minutes, threshold=self.config.ops.boot_loop_threshold)
 
     async def save_config(self, config: RuntimeConfig) -> None:
         was = self.config.stt
+        spoke = self.config.voice.tts
         self.config = config
         self.speech.config = config
+        self.tts.config = config
         if (was.local_model, was.local_language, was.local_threads) != (config.stt.local_model, config.stt.local_language, config.stt.local_threads):
             # A different model, language or thread count is a different recogniser; the loaded one
             # is now the wrong one and holds most of a gigabyte while being it.
             self.speech.forget()
+        now = config.voice.tts
+        if (spoke.local_voice, spoke.local_speaker, spoke.local_threads) != (now.local_voice, now.local_speaker, now.local_threads):
+            # A different voice, speaker or thread count is a different synthesiser. Speed is not:
+            # it is an argument to every call rather than something the model is built with.
+            self.tts.forget()
         config.save(self.settings.config_path)
         if self.manager is not None:
             self.manager.reload_config(config)

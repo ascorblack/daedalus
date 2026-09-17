@@ -1408,3 +1408,15 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
   .stt-list { grid-template-columns: 1fr; }
   .stt-bars { grid-template-columns: 1fr; }
 }
+
+/* The synthesis picker shares every class above — the two lists are the same list of cards with a
+   different thing on them — and adds one control the recogniser has no use for: a speed slider. A
+   range input inherits the text field's frame, which reads as an input box drawn around a track, so
+   it gives the frame back and keeps only the height and the accent. */
+input.field[type="range"] {
+  padding: 0;
+  height: 28px;
+  background: transparent;
+  border: 0;
+  accent-color: var(--accent);
+}
