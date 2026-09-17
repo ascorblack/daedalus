@@ -1126,9 +1126,7 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 /* The page takes the height it is given as well as the width: on a 1300 px tall window the stage
    used to stop two thirds of the way down and leave the rest of the glass empty under it. */
 .screen.voice { width: min(100%, 2160px); }
-/* The stage fills the window on a laptop and stops growing past a point: on a 2560-wide screen the
-   card was a metre tall with a small orb floating in the top half of it and nothing under it. */
-.voice-grid { display: grid; grid-template-columns: minmax(0, 1fr) clamp(300px, 24vw, 480px); gap: 16px; align-items: stretch; min-height: min(calc(100dvh - 132px), 780px); }
+.voice-grid { display: grid; grid-template-columns: minmax(0, 1fr) clamp(300px, 24vw, 480px); gap: 16px; align-items: stretch; min-height: calc(100dvh - 132px); }
 .voice-stage {
   position: relative; overflow: hidden; display: flex; flex-direction: column; align-items: center;
   gap: 16px; padding: clamp(28px, 5vh, 64px) 20px 22px; min-height: min(72vh, 660px);
@@ -1181,8 +1179,10 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 @keyframes chip-travel { 0%, 100% { opacity: .25; transform: scaleY(.364) translateY(0); } 50% { opacity: 1; transform: scaleY(.364) translateY(-3px); } }
 
 .voice-orb-wrap { display: grid; place-items: center; padding: 8px 0 4px; }
+/* The orb is the page. On a wide screen it was capped at 232 px in a card most of a metre tall,
+   which read as a small button lost in a lot of glass. */
 .voice-orb {
-  position: relative; width: clamp(148px, 17vw, 340px); aspect-ratio: 1; border: 0; padding: 0; border-radius: 50%;
+  position: relative; width: clamp(148px, 22vw, 360px); aspect-ratio: 1; border: 0; padding: 0; border-radius: 50%;
   background: none; color: var(--fg); cursor: pointer; display: grid; place-items: center; isolation: isolate;
   transform: scale(var(--orb-scale)); transition: transform .09s linear, opacity .3s ease;
 }

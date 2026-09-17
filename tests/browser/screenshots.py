@@ -337,7 +337,9 @@ VOICE = {
     "enabled": True,
     "session_id": S2,
     "model": "Qwen 3.7 Flash",
-    "tts": {"configured": True, "reason": "", "voice": "alloy", "model": "kokoro"},
+    # A voice downloaded onto this machine, which is what the chip on the page is there to say: the
+    # stub used to leave `kind` out, so every picture of the page called it "server voice" instead.
+    "tts": {"configured": True, "reason": "", "kind": "local", "voice": "Dmitri", "model": "vits-piper-ru_RU-dmitri", "state": "ready"},
     # A model that runs on this machine, in memory and ready: the case the page is designed around.
     "stt": {
         "configured": True,
@@ -716,6 +718,12 @@ VOICE_STATES: dict[str, dict] = {
     "thinking": {
         "over": {},
         "frames": sse(("status", {"state": "thinking"}), ("partial", {"text": "Looking at the board and the two invoices that came back"})),
+        "mic": True,
+        "ask": True,
+    },
+    "delegating": {
+        "over": {},
+        "frames": sse(("status", {"state": "delegating", "title": "Invoice run"}), ("partial", {"text": "Handing the eleven invoices to an agent of its own"})),
         "mic": True,
         "ask": True,
     },

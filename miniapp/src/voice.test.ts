@@ -34,7 +34,7 @@ describe("agentNote", () => {
   });
 });
 
-const { IDLE_VOICE, micReady, orbVisual, smoothLevel, voiceReducer } = await import("./voice");
+const { BARGE_LEVEL, ECHO_GUARD_MS, IDLE_VOICE, micReady, orbVisual, shouldBargeIn, smoothLevel, voiceReducer } = await import("./voice");
 type VoiceUi = typeof IDLE_VOICE;
 type VoiceEvent = Parameters<typeof voiceReducer>[1];
 
@@ -103,6 +103,26 @@ describe("the page's state machine", () => {
   it("shows a problem without pretending the page is still working", () => {
     const failed = run([{ type: "mic", on: true }, { type: "asked", text: "x" }, { type: "problem", message: "the concierge stopped" }]);
     expect([failed.phase, failed.problem]).toEqual(["listening", "the concierge stopped"]);
+  });
+});
+
+describe("telling the operator from the page's own speaker", () => {
+  it("does nothing when nothing is being read out", () => {
+    expect(shouldBargeIn({ speaking: false, playingForMs: 5000, level: 0.9 })).toBe(false);
+  });
+
+  it("takes the first moments after playback begins for the speaker itself", () => {
+    expect(shouldBargeIn({ speaking: true, playingForMs: ECHO_GUARD_MS - 1 })).toBe(false);
+    expect(shouldBargeIn({ speaking: true, playingForMs: ECHO_GUARD_MS })).toBe(true);
+  });
+
+  it("believes a listener that reports no level, because that is its voice activity detector", () => {
+    expect(shouldBargeIn({ speaking: true, playingForMs: 1200 })).toBe(true);
+  });
+
+  it("ignores a level too low to be somebody talking over a speaker", () => {
+    expect(shouldBargeIn({ speaking: true, playingForMs: 1200, level: BARGE_LEVEL - 0.01 })).toBe(false);
+    expect(shouldBargeIn({ speaking: true, playingForMs: 1200, level: BARGE_LEVEL })).toBe(true);
   });
 });
 

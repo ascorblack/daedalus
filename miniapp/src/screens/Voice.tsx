@@ -36,6 +36,7 @@ import {
   recognitionSupported,
   recorderSupported,
   sendUtterance,
+  shouldBargeIn,
   smoothLevel,
   voiceLang,
   voiceReducer,
@@ -74,19 +75,6 @@ type VoiceState = {
 /** How long after the last spoken word the microphone stays deaf: a speaker's tail reaches it late. */
 const ECHO_TAIL_MS = 400;
 
-/** How long after the answer starts playing a speech start is taken to be the speaker, not a person.
- *
- *  A laptop plays the answer into its own microphone, and the first thing the recogniser hears after
- *  the audio begins is almost always that. After this the two are told apart by level instead: a
- *  person talking over a speaker is louder at the microphone than the speaker is. */
-const ECHO_GUARD_MS = 400;
-
-/** The loudness a listener that measures one must reach to count as somebody talking over the answer.
- *
- *  Well above the level a laptop speaker comes back at through echo cancellation, and well below
- *  ordinary speech at arm's length. A recogniser with its own voice activity detector reports no
- *  level at all, and is believed: telling speech from noise is the thing it is for. */
-const BARGE_LEVEL = 0.06;
 
 export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   const { data: state, refresh } = useQuery<VoiceState>("/api/voice", { staleMs: 10000, pollMs: 60000 });
@@ -351,22 +339,10 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
     void api.post("/api/voice/interrupt", {}).catch(() => undefined);
   }, []);
 
-  /**
-   * Somebody started talking. Whether that is the operator or the page hearing itself is the whole
-   * question, and it is the one moment barge-in exists for: while the answer is playing.
-   *
-   * The old guard closed the ears entirely while speaking, which is exactly when barging in is the
-   * only thing that matters, so nothing was ever interrupted. What is kept from it is the reason it
-   * was there — the speaker is heard by the microphone — and that is now answered by the two things
-   * that actually tell them apart: the first moments of playback are the speaker, and after that a
-   * person is louder than a speaker is through echo cancellation. A listener that reports no level
-   * has a voice activity detector of its own and is taken at its word.
-   */
+  /** Somebody started talking. `shouldBargeIn` decides whose voice that is; this acts on the answer. */
   const onSpeechStart = useCallback(
     (level?: number) => {
-      if (!speakingRef.current) return;
-      if (Date.now() - speakingSince.current < ECHO_GUARD_MS) return;
-      if (level !== undefined && level < BARGE_LEVEL) return;
+      if (!shouldBargeIn({ speaking: speakingRef.current, playingForMs: Date.now() - speakingSince.current, level })) return;
       haptic("light");
       bargeIn();
     },

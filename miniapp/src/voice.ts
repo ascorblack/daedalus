@@ -221,6 +221,34 @@ export function createRecorder(h: ListenerHandlers & { onUtterance: (blob: Blob)
   };
 }
 
+/** How long after the answer starts playing a speech start is taken to be the speaker, not a person.
+ *
+ *  A laptop plays the answer into its own microphone, and the first thing a recogniser hears after
+ *  the audio begins is almost always that. */
+export const ECHO_GUARD_MS = 400;
+
+/** The loudness a listener that measures one must reach to count as somebody talking over the answer.
+ *
+ *  Well above what a laptop speaker comes back at through echo cancellation, and well below ordinary
+ *  speech at arm's length. */
+export const BARGE_LEVEL = 0.06;
+
+/**
+ * Whether speech starting right now is the operator talking over the answer, or the answer itself.
+ *
+ * The page used to answer this by closing its ears entirely while speaking, which is the one moment
+ * barging in matters, so nothing was ever interrupted. What is kept from that is the reason it was
+ * there — the speaker is heard by the microphone — and it is answered by the two things that actually
+ * tell the two apart: the first moments after playback begins are the speaker, and after that a
+ * person is louder at the microphone than a speaker is through echo cancellation. A listener that
+ * measured no level has a voice activity detector of its own and is taken at its word.
+ */
+export function shouldBargeIn(state: { speaking: boolean; playingForMs: number; level?: number }): boolean {
+  if (!state.speaking) return false;
+  if (state.playingForMs < ECHO_GUARD_MS) return false;
+  return state.level === undefined || state.level >= BARGE_LEVEL;
+}
+
 export type Speaker = {
   /** One sentence, spoken after everything already queued. */
   say: (text: string) => void;
