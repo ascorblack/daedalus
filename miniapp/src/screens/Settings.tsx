@@ -11,10 +11,13 @@ import { shortDateTime } from "../format";
 import { SpeechModels } from "./Speech";
 import { TtsVoices } from "./Voices";
 import { VoiceSettings } from "./Voice";
+import { ComponentsTab } from "./Components";
 import { AddModel } from "./AddModel";
 import { Sheet } from "../dialogs";
 import { t } from "../i18n";
 import { LangPicker } from "../components";
+import { useQuery } from "../store";
+import { Capabilities, componentsNeedAttention } from "../capabilities";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "openai_compat"];
 
@@ -898,7 +901,7 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
   );
 }
 
-type Section = "models" | "rules" | "limits" | "tools" | "voice" | "chat" | "security" | "heartbeat" | "about";
+type Section = "models" | "rules" | "limits" | "tools" | "voice" | "components" | "chat" | "security" | "heartbeat" | "about";
 /** The sections, in the order they are listed; the words come from the table, not from here. */
 const SECTIONS: { id: Section; icon: IconName }[] = [
   { id: "models", icon: "model" },
@@ -906,6 +909,7 @@ const SECTIONS: { id: Section; icon: IconName }[] = [
   { id: "limits", icon: "chart" },
   { id: "tools", icon: "wrench" },
   { id: "voice", icon: "mic" },
+  { id: "components", icon: "plug" },
   { id: "chat", icon: "inbox" },
   { id: "security", icon: "key" },
   { id: "heartbeat", icon: "loop" },
@@ -915,6 +919,7 @@ const SECTIONS: { id: Section; icon: IconName }[] = [
 const sectionLabel = (id: Section) => t(`settings.sec.${id}`);
 
 export function SettingsScreen({ toast, section }: { toast: (t: string) => void; section?: string | null }) {
+  const caps = useQuery<Capabilities>("/api/capabilities", { staleMs: 20000 });
   const [s, setS] = useState<Settings | null>(null);
   const [adding, setAdding] = useState(false);
   const [status, setStatus] = useState<any>(null);
@@ -995,7 +1000,12 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
         <a key={sec.id} href={pathFor("settings", sec.id)} className={`settings-link ${shown === sec.id ? "active" : ""}`} aria-current={shown === sec.id ? "page" : undefined} onClick={(e) => go(e, pathFor("settings", sec.id))}>
           <Icon name={sec.icon} size={18} />
           <span className="settings-link-text">
-            <b>{sectionLabel(sec.id)}</b>
+            <b>
+              {sectionLabel(sec.id)}
+              {/* A mark, not a count: the one thing worth interrupting a reader for is a feature they
+                  have already configured whose runtime is not installed. */}
+              {sec.id === "components" && componentsNeedAttention(caps.data) && <span className="tab-badge dot settings-mark" aria-label={t("comp.state.missing")} />}
+            </b>
             <span className="sub">{t(`settings.sec.${sec.id}.hint`)}</span>
           </span>
           <span className="chev">›</span>
@@ -1107,11 +1117,13 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
       case "voice":
         return (
           <>
-            <VoiceSettings />
+            <VoiceSettings toast={toast} />
             <SpeechModels toast={toast} />
             <TtsVoices toast={toast} />
           </>
         );
+      case "components":
+        return <ComponentsTab toast={toast} />;
       case "chat":
         return (
           <div className="card">

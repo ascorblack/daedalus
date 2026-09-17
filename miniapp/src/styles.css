@@ -1429,3 +1429,44 @@ input.field[type="range"] {
   border: 0;
   accent-color: var(--accent);
 }
+
+/* Settings -> Components. The optional pieces of an installation, one card each.
+   Dark elevation: the page's card is --card, a component sits on --surface-2 above it, and the one
+   that is already installed sits on --surface-3 — lighter to come forward, never a darker slab, with
+   a hairline for the seam. The grid is the same auto-fill the two speech pickers use, so the three
+   sections of Settings that are lists of things read as one thing. */
+.comp-mode { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+.comp-mode > .sub { flex: 1 1 220px; margin: 0; }
+.comp-disk { font-size: 12.5px; white-space: nowrap; }
+.comp-restart { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--surface-3); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); }
+.comp-restart > b { font-size: 14px; }
+.comp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; margin-top: 12px; }
+.comp-card { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.comp-card-on { background: var(--surface-3); }
+.comp-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.comp-head b { font-size: 15px; flex: 1 1 auto; }
+.comp-what { margin: 0; }
+.comp-chip { flex: none; padding: 3px 9px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line-strong); color: var(--fg-2); background: var(--card); }
+.comp-chip.comp-installed { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.comp-chip.comp-missing { color: var(--fg-2); }
+.comp-chip.comp-installing { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.comp-chip.comp-unavailable { color: var(--fg-3); }
+.comp-enables { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.comp-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.comp-tag { padding: 2px 8px; border-radius: 999px; background: var(--card); border: 1px solid var(--line); font-size: 12px; color: var(--fg-2); }
+.comp-line { margin-top: 2px; }
+.comp-running { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.comp-bar { flex: 1; height: 6px; border-radius: 999px; background: var(--line-strong); overflow: hidden; }
+.comp-bar-fill { display: block; height: 100%; width: 40%; border-radius: 999px; background: var(--accent); animation: comp-slide 1.5s ease-in-out infinite; }
+@keyframes comp-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
+.comp-step { flex: 1 1 140px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comp-actions { margin-top: 4px; }
+.comp-byhand { margin-top: 4px; }
+.comp-fix { display: block; margin-top: 3px; padding: 6px 8px; border-radius: 8px; background: var(--card); border: 1px solid var(--line); font-size: 12px; overflow-x: auto; white-space: pre; }
+.comp-detail { margin-top: 2px; font-size: 12px; }
+.voice-needs { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line); }
+
+@media (max-width: 480px) {
+  .comp-grid { grid-template-columns: 1fr; }
+}
+.settings-link-text .settings-mark { position: static; display: inline-block; margin-left: 7px; vertical-align: middle; }

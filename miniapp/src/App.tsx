@@ -375,7 +375,7 @@ export function App() {
     content = (
       <ErrorBoundary key={route.screen}>
         {route.screen === "agents" && <SessionsScreen onOpen={open} toast={showToast} project={project} projects={projectList} onProjects={wide ? undefined : () => setSwitching(true)} />}
-        {route.screen === "voice" && <VoiceScreen onOpen={open} />}
+        {route.screen === "voice" && <VoiceScreen onOpen={open} toast={showToast} />}
         {route.screen === "inbox" && <InboxScreen onOpen={open} toast={showToast} />}
         {route.screen === "board" && <BoardScreen onOpen={open} toast={showToast} selected={route.detail} />}
         {route.screen === "changes" &&

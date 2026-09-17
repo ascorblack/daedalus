@@ -12,10 +12,22 @@ export type PendingChange = { repo: string; commit: string; summary: string; nee
 /** What became of the change before it. `status` is the supervisor's word, not ours. */
 export type ChangeResult = PendingChange & { status: string; detail?: string; resolved_at?: string };
 
+/** The short form of the components registry, carried here so the shell needs no second poll. */
+export type ComponentsSummary = {
+  mode: string;
+  /** Every optional piece this installation does not have. */
+  missing: string[];
+  /** The sharp end: the pieces something *already configured* needs and does not have. A local voice
+   *  chosen with no runtime to speak it is the case this exists for — the page looked configured. */
+  needed: string[];
+  installing: string;
+};
+
 export type Capabilities = {
   selfdev: { mode: SelfDevMode; configured: string; reasons: string[]; missing: string[]; tools: string[] };
   restart_required?: PendingChange | null;
   last_change?: ChangeResult | null;
+  components?: ComponentsSummary | null;
 };
 
 export type Notice = { kind: "pending" | "done" | "failed"; title: string; body: string; commit: string; action: boolean };
@@ -40,6 +52,16 @@ export function changeNotice(caps: Capabilities | undefined, dismissed: string):
   }
   const title = t(last.status === "rolled_back" ? "change.reversed.title" : "change.failed.title");
   return { kind: "failed", title, body: last.detail || last.summary, commit: last.commit, action: false };
+}
+
+/** Whether the Components entry should carry a mark: something configured is missing its runtime.
+ *
+ * Only ``needed``, never ``missing``. A portable installation is missing most of the list by design
+ * and a permanent mark beside a settings entry says nothing; a mark that appears the day a chosen
+ * voice has nothing to speak it is worth looking at.
+ */
+export function componentsNeedAttention(caps: Capabilities | undefined): boolean {
+  return (caps?.components?.needed?.length ?? 0) > 0;
 }
 
 /** The destinations this installation really has. */

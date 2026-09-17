@@ -21,6 +21,10 @@ function screens(): string[] {
 // Words that are the same in both languages: names, brands and the ids of tools and config fields.
 // Everything else being identical means a row was copied and never translated.
 const SAME_IN_BOTH = [
+  // Three of the components are proper names of programs and are spelled the same in Russian.
+  "comp.name.git",
+  "comp.name.node",
+  "comp.name.ripgrep",
   "fmt.cron.utc",
   "lang.name.en",
   "lang.name.ru",
@@ -91,6 +95,9 @@ const SPOKEN = [
   "th", "tr", "uk", "vi", "yue", "zh",
 ];
 
+// The component ids, as daedalus/host/components.py orders them.
+const COMPONENTS = ["speech", "stt-models", "tts-voices", "browser", "node", "git", "ripgrep", "opus", "bwrap"];
+
 describe("the keys the code asks for", () => {
   it("are all in the table", () => {
     const missing = new Set<string>();
@@ -138,7 +145,7 @@ describe("the keys the code asks for", () => {
       ["svc.copied.", ["address", "link", "key"]],
       ["settings.chat.", ["private", "topics"]],
       ["settings.selfchange.", ["manual", "auto"]],
-      ["settings.sec.", ["models", "rules", "limits", "tools", "voice", "chat", "security", "heartbeat", "about"]],
+      ["settings.sec.", ["models", "rules", "limits", "tools", "voice", "components", "chat", "security", "heartbeat", "about"]],
       ["tool.group.", ["Exec", "Read", "Write", "Edit", "search", "WebFetch", "SendFile", "other"]],
       ["tool.board.", ["get", "list"]],
       // Both speech pickers build a language name from a catalog's own code, and the recognition
@@ -146,10 +153,18 @@ describe("the keys the code asks for", () => {
       // here is a bare `[lang.of.xx]` in a filter someone is choosing from.
       ["lang.of.", SPOKEN],
       ["stt.progress.", ["downloading", "verifying", "unpacking", "queued", "failed"]],
+      // Every component the registry can name, in both halves of its card, plus the four states and
+      // every capability key a card lists. A component added to daedalus/host/components.py with no
+      // row here is a bare `[comp.name.x]` on the page that exists to explain it.
+      ["comp.name.", COMPONENTS],
+      ["comp.what.", COMPONENTS],
+      ["comp.state.", ["installed", "missing", "installing", "unavailable"]],
+      ["comp.enables.", ["stt", "tts", "voicenotes", "skills.browser", "screenshots", "skills.node", "npx", "selfdev", "projects", "search", "sandbox"]],
+      ["comp.mode.", ["native", "docker"]],
     ];
     const missing = families.flatMap(([prefix, names]) => names.map((n) => prefix + n)).filter((key) => !(key in DICT));
     // The section hints sit beside the section names, and a hint nobody wrote is a blank line.
-    const hints = ["models", "rules", "limits", "tools", "voice", "chat", "security", "heartbeat", "about"].map((s) => `settings.sec.${s}.hint`).filter((k) => !(k in DICT));
+    const hints = ["models", "rules", "limits", "tools", "voice", "components", "chat", "security", "heartbeat", "about"].map((s) => `settings.sec.${s}.hint`).filter((k) => !(k in DICT));
     // Every tool the timeline names has a verb while it runs and one after it.
     const verbs = ["Exec", "Read", "Write", "Edit", "Find", "WebSearch", "WebFetch", "SendFile", "ImageView", "Skill", "Verify", "SubAgent", "SpawnAgent", "AskPeer", "HistorySearch", "ServiceStart", "ServiceStop"]
       .flatMap((name) => [`tool.${name}.on`, `tool.${name}.off`])
