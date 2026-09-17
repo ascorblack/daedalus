@@ -2136,6 +2136,7 @@ class SessionManager:
             # The home folder is the operator's, and only a native installation is inside it.
             home_dir=Path.home() if self.settings.native else "",
             project_roots=self.projects.roots,
+            worktrees_root=self.settings.worktrees_dir,
             sealed_paths=self.settings.sealed_paths,
             # Where a relative path is resolved from, so that `../../daedalus-secrets/keyproxy.env`
             # is read as the file it names rather than as a word with no slash at the front.
@@ -2143,22 +2144,19 @@ class SessionManager:
         )
 
     def protected_paths(self) -> tuple[Path, ...]:
-        """What no session may write: the governance file, the launcher, the state directory and its
-        contents, and — natively — the runtime the process is executing out of.
+        """What no session may read or write: the installation itself.
 
-        Both the policy and every session's :class:`SessionServices` are built from this one list, so
-        a path added here is added to the tool that resolves it and to the rule that judges it at once.
+        It is the sealed set — the secrets, the whole state directory, the runtime, the launcher and
+        the environment file the launcher owns — plus the two paths that are the installation's
+        without being part of it: the governance file the operator writes the rules in, and the
+        launcher's directory in the image.
+
+        The sealed set is not copied here, it is asked for, because the two layers that judge a path
+        must not be able to disagree about it: the shell rules ask ``Settings.sealed_paths`` and the
+        file tools, the browser and ``SessionServices.is_protected`` ask this list. Enumerating them
+        twice is how the environment file came to be refused to a command and handed to ``Read``.
         """
-        return (
-            self.governance_path,
-            Path("/opt/launcher"),
-            self.settings.secrets_dir,
-            self.settings.state_dir,
-            self.settings.config_path,
-            self.settings.db_path,
-            *((self.settings.runtime_dir,) if self.settings.runtime_dir is not None else ()),
-            *((self.settings.launcher_path,) if self.settings.launcher_path is not None else ()),
-        )
+        return (self.governance_path, Path("/opt/launcher"), *self.settings.sealed_paths)
 
     def policy_gate(self, session_id: str, run_id: str) -> Any:
         """The policy bound to one session: grants are the session's, the egress log names the run."""

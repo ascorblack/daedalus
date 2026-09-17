@@ -566,7 +566,7 @@ def _under(path: str, roots: Iterable[str]) -> bool:
 class Policy:
     """The rule set: built-ins plus the operator's, evaluated per call."""
 
-    def __init__(self, *, protected_paths: Iterable[Path] = (), egress_allow: Iterable[str] = (), rules: Iterable[Rule] = (), workspace_roots: Iterable[Path] = (), operator_checkouts: Iterable[Path] = (), selfdev_mode: str = "server", native: bool = False, home_dir: Path | str = "", project_roots: Iterable[Path] = (), sealed_paths: Iterable[Path] = (), base_dir: Path | str = "") -> None:
+    def __init__(self, *, protected_paths: Iterable[Path] = (), egress_allow: Iterable[str] = (), rules: Iterable[Rule] = (), workspace_roots: Iterable[Path] = (), operator_checkouts: Iterable[Path] = (), selfdev_mode: str = "server", native: bool = False, home_dir: Path | str = "", project_roots: Iterable[Path] = (), worktrees_root: Path | str = "", sealed_paths: Iterable[Path] = (), base_dir: Path | str = "") -> None:
         self.protected = [str(p) for p in protected_paths]
         self.egress_allow = [e for e in egress_allow if e.strip()]
         self.rules = list(rules)
@@ -576,6 +576,10 @@ class Policy:
         self.native = native
         self.home = str(home_dir) if home_dir else ""
         self.project_roots = [str(p) for p in project_roots]
+        self.worktrees_root = str(worktrees_root) if worktrees_root else ""
+        """Where self-development cuts its worktrees. An open root like the workspaces: the changes the
+        agent makes to its own code are written there, and a home-folder question asked of every file
+        of them would be a question about the agent's work rather than about the operator's."""
         self.sealed = [str(p) for p in sealed_paths]
         self.base_dir = str(base_dir) if base_dir else ""
         """Where a relative path is resolved from when the call does not say: the session's own
@@ -597,14 +601,15 @@ class Policy:
 
         Every path is read as the filesystem will read it: relative to ``base`` (the directory the
         command runs in, or the session's workspace) and through the symlinks it is made of. The
-        open roots are the ones the operator opened — the workspaces, the projects, the checkouts.
+        open roots are the ones the operator opened — the workspaces, the projects, the checkouts,
+        and the worktrees self-development writes the agent's own changes in.
         The protected paths are deliberately not among them: they are a superset of the sealed set,
         so listing them here exempted the whole state directory, the operator's own pairing link
         included, from the question the rest of their home gets.
         """
         if not self.native:
             return None
-        open_roots = self.workspace_roots + self.operator_checkouts + self.project_roots
+        open_roots = self.workspace_roots + self.operator_checkouts + self.project_roots + ([self.worktrees_root] if self.worktrees_root else [])
         where = base or self.base_dir or (self.workspace_roots[0] if self.workspace_roots else "")
         asked: Decision | None = None
         for raw in paths:

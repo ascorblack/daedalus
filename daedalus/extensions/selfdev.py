@@ -484,8 +484,10 @@ class SelfDevelopment:
         self.mode = mode
         s = app.settings
         self.repos = {
-            "bot": RepoSpec("bot", s.bot_repo_dir, s.state_dir / "worktrees" / "bot"),
-            "core": RepoSpec("core", s.core_repo_dir, s.state_dir / "worktrees" / "core"),
+            # Beside the state directory rather than in it: the state directory is sealed against the
+            # agent, and a worktree is the one place the agent must be able to write (see Settings.worktrees_dir).
+            "bot": RepoSpec("bot", s.bot_repo_dir, s.worktrees_dir / "bot"),
+            "core": RepoSpec("core", s.core_repo_dir, s.worktrees_dir / "core"),
         }
         self.selfdev_dir = s.state_dir / "selfdev"
         self._reason_waits: dict[tuple[int, int], str] = {}  # (chat_id, thread_id) -> proposal id

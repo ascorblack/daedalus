@@ -240,6 +240,20 @@ class Settings(BaseSettings):
         return self.secrets_override or self.state_dir / "secrets"
 
     @property
+    def worktrees_dir(self) -> Path:
+        """Where self-development cuts its worktrees: beside the state directory, never inside it.
+
+        A worktree is the agent's work — it edits, tests and commits there, and the session that
+        opened it writes to it under the sandbox. The state directory is the installation, sealed
+        whole so that the database, the journal, ``config.toml`` and the sign-in link cannot be read
+        or written by the agent at all. Putting the work inside the sealed tree makes the two
+        statements contradict each other, and the seal is the one that wins: every read, write and
+        command in the worktree is refused. So the worktrees sit next to the state directory rather
+        than in it, which is also where the workspaces and the checkouts already are.
+        """
+        return self.state_dir.parent / "worktrees"
+
+    @property
     def supervisor_token_path(self) -> Path:
         """The shared secret the restart channel is opened with, where that channel is a loopback port
         rather than a socket file. A file with an owner is what a port does not have."""
