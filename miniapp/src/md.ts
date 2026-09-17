@@ -3,6 +3,8 @@
 // <details>/<summary> passthrough, and the evidence tags an answer cites (<file …/>, <run …/>) as
 // clickable chips. Everything else is HTML-escaped first, so model output cannot inject markup.
 
+import { t } from "./i18n";
+
 function escape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -27,7 +29,7 @@ function evidenceChip(kind: string, raw: string): string | null {
     return `<button type="button" class="evidence file" data-evidence="file" data-path="${escape(a.path)}"${a.lines ? ` data-lines="${escape(a.lines)}"` : ""} title="${escape(where)}"><span aria-hidden>📄</span><span class="chip-text">${escape(a.path)}</span>${lines}</button>`;
   }
   if (!a.id) return null;
-  return `<button type="button" class="evidence run" data-evidence="run" data-run="${escape(a.id)}" title="${escape(`run ${a.id}`)}"><span aria-hidden>🧾</span><span class="chip-text">${escape(a.label || a.id)}</span></button>`;
+  return `<button type="button" class="evidence run" data-evidence="run" data-run="${escape(a.id)}" title="${escape(t("md.run", { id: a.id }))}"><span aria-hidden>🧾</span><span class="chip-text">${escape(a.label || a.id)}</span></button>`;
 }
 
 // The stash marks a slot in the text with a character the reader's own markdown cannot

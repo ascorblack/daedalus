@@ -20,9 +20,9 @@ const ELSEWHERE = ["./screens/Voice.tsx", "./screens/Speech.tsx", "./voice.ts", 
 
 // Strings left in English on purpose, with the reason. Everything else has to come from the table.
 const ALLOWED: Record<string, string[]> = {
-  // Developer-facing text: the boundary between the app and the API, never shown as prose to a reader.
+  // The boundary between the app and the API: request paths and error text for a developer, never
+  // prose on a page.
   "./api.ts": ["*"],
-  "./md.ts": ["*"],
   // Placeholders that are examples of what to type, not words: an address, a path, a cron line.
   "./projects.tsx": ["/home/you/projects/bakery"],
   "./screens/Settings.tsx": [

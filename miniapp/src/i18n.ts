@@ -1274,6 +1274,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "session.mcp.toggled": { en: "{name}: {state}", ru: "{name}: {state}" },
   "session.mcp.enabled": { en: "enabled", ru: "включён" },
   "session.mcp.disabled": { en: "disabled", ru: "выключен" },
+  "md.run": { en: "run {id}", ru: "запуск {id}" },
   "preview.download": { en: "download", ru: "скачать" },
   "preview.lines": { en: " · lines {range}", ru: " · строки {range}" },
   "preview.lines.of": { en: "lines {from}–{to} of {total}", ru: "строки {from}–{to} из {total}" },
