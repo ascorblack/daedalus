@@ -316,6 +316,24 @@ func (a *App) InstallExtra(ctx context.Context, name string) error {
 	return err
 }
 
+// Restart stops the agent and starts it again, so that what has been added to the installation
+// since it started is in force. Node lands in the runtime folder and the headless browser in its
+// own, and both are reached through the PATH and the environment the supervisor was given when the
+// launcher started it: a process cannot give itself either. Native only — a container is restarted
+// by compose, and in Docker mode neither piece is installable from here in the first place.
+func (a *App) Restart(ctx context.Context) error {
+	if !a.Native() {
+		return errors.New("a container is restarted by compose; this is the native installation's own restart")
+	}
+	if err := a.begin("restart"); err != nil {
+		return err
+	}
+	a.native.Stop(ctx)
+	err := a.native.Start(ctx)
+	a.end(err)
+	return err
+}
+
 // Update moves both checkouts to what is published, refreshes the images and restarts. The agent's
 // own merged pull requests arrive this way.
 func (a *App) Update(ctx context.Context) error {

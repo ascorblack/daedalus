@@ -56,7 +56,11 @@ commands:
   uninstall   remove the containers, networks and volumes
   install X   native mode only: fetch a runtime extra — "node" for the skills that
               shell out to npx and for rebuilding the app, "browser" for the headless
-              Chromium the browser skills drive. Neither is part of a first run.
+              Chromium the browser skills drive, "speech" for the engine that runs a
+              speech model on this machine. None of the three is part of a first run,
+              and Settings → Components in the app installs them without a terminal.
+  restart     native mode only: stop the agent and start it again, so a component
+              installed since it started is in force.
 
 A daedalus:// link may be given instead of a command — daedalus://open/<session-id> opens that
 conversation. A launcher that is already running is brought to the front and handed the link; a
@@ -182,9 +186,11 @@ func run(argv []string) error {
 		return nil
 	case "install":
 		if opts.extra == "" {
-			return errors.New("install takes the name of a runtime extra: node or browser")
+			return errors.New("install takes the name of a runtime extra: node, browser or speech")
 		}
 		return app.InstallExtra(ctx, opts.extra)
+	case "restart":
+		return app.Restart(ctx)
 	case "uninstall":
 		return app.Uninstall(ctx, opts.keepData)
 	default:

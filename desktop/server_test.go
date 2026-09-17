@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -294,4 +295,52 @@ func postBody(t *testing.T, address string, headers map[string]string, body stri
 	defer resp.Body.Close()
 	_, _ = io.ReadAll(resp.Body)
 	return resp.StatusCode
+}
+
+// The three actions the app reaches over the loopback bridge, and the one rule that lets it.
+//
+// The app is not a browser: it sets no Sec-Fetch-Site and no Origin, aims at 127.0.0.1 and carries
+// the token it read out of the 0600 handover file. That combination has to be accepted, because it
+// is the whole of the bridge — and the same endpoint has to go on refusing a page that has the
+// token but came from somewhere else, which is what the test above pins.
+func TestTheAppsOwnRequestIsAcceptedAndTheNewActionsExist(t *testing.T) {
+	paths := setupTempInstall(t)
+	if err := WriteSetup(paths, Setup{}, ModeNative); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(NewApp(paths), 0)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer server.Stop(context.Background())
+
+	// Exactly what daedalus/host/launcher_bridge.py sends: the token, and nothing a browser adds.
+	for _, action := range []string{"extra/node", "extra/browser", "extra/speech", "restart"} {
+		if got := post(t, server.URL()+"api/action/"+action, map[string]string{csrfHeader: server.csrf}, nil); got != http.StatusAccepted {
+			t.Fatalf("%s from the app answered %d, want %d", action, got, http.StatusAccepted)
+		}
+	}
+	// And the same actions are refused without the token, since the bridge is the token and nothing
+	// else: the loopback port is reachable by every process and every page on this machine.
+	for _, action := range []string{"extra/speech", "restart"} {
+		if got := post(t, server.URL()+"api/action/"+action, nil, nil); got != http.StatusForbidden {
+			t.Fatalf("%s without the token answered %d, want %d", action, got, http.StatusForbidden)
+		}
+	}
+}
+
+// The handover file is how the app learns the port and the token. It is the key to every action
+// above, so it is written readable by its owner and nobody else.
+func TestTheHandoverFileIsPrivateToItsOwner(t *testing.T) {
+	paths := setupTempInstall(t)
+	if err := WriteInstance(paths, 8770, "a-secret"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(instanceFile(paths))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("the launcher's handover file is %o, want 600: it carries the token for start, stop and the extras", mode)
+	}
 }

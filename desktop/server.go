@@ -431,13 +431,25 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		go func() { _ = s.app.Apply(ctx) }()
 	case "open":
 		go func() { _, _ = s.app.Open(ctx) }()
-	case "extra/node", "extra/browser":
-		// The optional halves of the runtime, fetched when something needs them rather than on
+	case "extra/node", "extra/browser", "extra/speech":
+		// The optional pieces of the runtime, fetched when something needs them rather than on
 		// every install. Native only: in Docker mode the browser comes with the :browser image.
+		// The app asks for these over the loopback bridge with this same token, which is why the
+		// list is here and not only on the page: a component installed from Settings and one
+		// installed from the launcher's window have to be the same thing happening.
 		name := strings.TrimPrefix(action, "extra/")
 		go func() {
 			if err := s.app.InstallExtra(ctx, name); err != nil {
 				s.app.log("%s could not be installed: %v", name, err)
+			}
+		}()
+	case "restart":
+		// Node and the browser are found through the environment the supervisor was started with,
+		// so a process cannot pick them up by itself: something above it has to start it again.
+		// That is this. The app offers the button; the launcher is what can honour it.
+		go func() {
+			if err := s.app.Restart(ctx); err != nil {
+				s.app.log("the agent could not be restarted: %v", err)
 			}
 		}()
 	default:
