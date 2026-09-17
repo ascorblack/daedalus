@@ -171,22 +171,54 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   const onLevel = useCallback((level: number) => {
     rawLevel.current = level;
   }, []);
+  //
+  // The loop runs only while there is somebody to see it. A reader who asked for less motion gets the
+  // properties written once and the loop never started — the stylesheet pins how the orb looks for
+  // them, but the sixty writes a second behind that were still happening and cost more than the
+  // drawing did. A hidden tab is the same case: the page is still mounted, still connected, still
+  // being spoken to, and nothing about that needs an animation frame.
   useEffect(() => {
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)");
     let frame = 0;
     let shown = 0;
-    const paint = () => {
-      shown = smoothLevel(shown, rawLevel.current);
+    let last = "";
+    const write = () => {
       const visual = orbVisual(uiRef.current.phase, shown);
       const node = orb.current;
-      if (node) {
-        node.style.setProperty("--orb-scale", visual.scale.toFixed(3));
-        node.style.setProperty("--orb-glow", visual.glow.toFixed(3));
-        node.style.setProperty("--orb-spin", `${visual.spin.toFixed(2)}s`);
+      // Three identical writes are three style invalidations for nothing, and an idle page makes the
+      // same three sixty times a second.
+      const now = `${visual.scale.toFixed(3)} ${visual.glow.toFixed(3)} ${visual.spin.toFixed(2)}`;
+      if (!node || now === last) return;
+      last = now;
+      node.style.setProperty("--orb-scale", visual.scale.toFixed(3));
+      node.style.setProperty("--orb-glow", visual.glow.toFixed(3));
+      node.style.setProperty("--orb-spin", `${visual.spin.toFixed(2)}s`);
+    };
+    const paint = () => {
+      shown = smoothLevel(shown, rawLevel.current);
+      write();
+      frame = requestAnimationFrame(paint);
+    };
+    const settle = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+      if (still.matches || document.hidden) {
+        // Written once so the custom properties have values at all: the stylesheet reads them even
+        // where it overrides what they do.
+        shown = 0;
+        write();
+        return;
       }
       frame = requestAnimationFrame(paint);
     };
-    frame = requestAnimationFrame(paint);
-    return () => cancelAnimationFrame(frame);
+    settle();
+    document.addEventListener("visibilitychange", settle);
+    still.addEventListener("change", settle);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      document.removeEventListener("visibilitychange", settle);
+      still.removeEventListener("change", settle);
+    };
   }, []);
 
   // ── the concierge's half of the conversation ────────────────────────────────────────────
