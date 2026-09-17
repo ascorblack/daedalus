@@ -27,6 +27,7 @@ from daedalus.providers.pricing import pricing_table
 from daedalus.providers.registry import _is_vendor_host
 from daedalus.security.redact import redact as redact_text
 from daedalus.tools.shell import bwrap_status, native_sandbox_note
+from protocore.runtime import token_counting
 
 PROBE_TIMEOUT = 6.0
 """Default per-probe timeout; the configured value (``ops.doctor_probe_timeout_seconds``) wins."""
@@ -61,7 +62,7 @@ class DoctorContext:
 
 async def run_checks(ctx: DoctorContext) -> list[Check]:
     checks: list[Check] = []
-    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _runtime, _providers, _github_org):
+    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _token_counter, _runtime, _providers, _github_org):
         try:
             checks.extend(await probe(ctx))
         except Exception as exc:  # noqa: BLE001 — one broken probe must not hide the others
@@ -405,6 +406,25 @@ async def _native(ctx: DoctorContext) -> list[Check]:
     git = shutil.which("git")
     out.append(Check("portable runtime", bool(git), f"git {git}" if git else "git is not on PATH; the checkouts and self-development need it", "ok" if git else "fail", "install git, or start the launcher again — it puts the runtime's own on PATH"))
     return out
+
+
+async def _token_counter(ctx: DoctorContext) -> list[Check]:
+    """Whether the core estimates tokens with its compiled extension or the pure-Python fallback.
+
+    The fallback (``estimate_tokens_python``) runs at a few MB/s and is re-run on every tool
+    surface each round; the compiled one is roughly thirty times faster on the same input. This
+    just reports which one is wired up — see the core's ``protocore.runtime.token_counting``
+    module for the estimator itself.
+    """
+    active = token_counting.NATIVE_ACTIVE
+    return [
+        Check(
+            "token counter",
+            True,
+            "native extension active" if active else "pure-Python fallback (no native extension installed for this platform)",
+            "ok" if active else "info",
+        ),
+    ]
 
 
 async def _runtime(ctx: DoctorContext) -> list[Check]:

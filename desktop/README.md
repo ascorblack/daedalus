@@ -494,6 +494,9 @@ In **Docker mode**, one image, and the key proxy is a second container from it:
 Budget **about half a gigabyte for the image**, plus the volumes: the database and the agent's
 memory are megabytes, but the per-session workspaces grow with what the agent downloads and builds.
 `uninstall` without `--keep-data` removes the volumes; images are removed with `docker image prune -a`.
+Token estimation runs on the core's pure-Python estimator in this image — its optional compiled
+extension has no published wheel yet, so there is nothing to install; `daedalus doctor` reports
+which one is active under "token counter".
 
 What is not in it, and what it costs to add:
 
