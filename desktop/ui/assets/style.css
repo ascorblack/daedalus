@@ -349,6 +349,9 @@ button[disabled] { opacity: 0.45; cursor: default; transform: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.001ms !important;
+    /* The stagger is a delay, not a duration: without this the page still appears in six steps,
+       each element held at opacity 0 by the animation's `both` fill until its turn comes. */
+    animation-delay: 0s !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }

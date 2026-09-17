@@ -186,6 +186,45 @@ def serve(binary: Path, data: Path, port: int) -> subprocess.Popen:
     raise SystemExit("the launcher did not start")
 
 
+# ---- what the language switch must not lose ------------------------------------------------------
+
+
+def check_language_switch(browser, port: int, data: Path) -> None:
+    """Switching languages on /setup keeps every answer, the mode radios included.
+
+    The switch re-fetches the page in the other language and carries the typed values across, and
+    the fresh page brings the machine's *suggested* mode back with it. A restore that skipped the
+    radios therefore threw away the one answer on the page that decides how the agent runs — while
+    the operator was reading the words and not the tiles.
+    """
+    (data / "lang").write_text("en\n")
+    context = browser.new_context(viewport={"width": 1440, "height": 900})
+    page = context.new_page()
+    try:
+        page.goto(f"http://127.0.0.1:{port}/setup", wait_until="load")
+        suggested = page.eval_on_selector("input[name=mode]:checked", "el => el.value")
+        other = "docker" if suggested == "native" else "native"
+        # The radio itself is under the tile's artwork, which is what an operator clicks too.
+        page.click(f"label.mode:has(input[name=mode][value={other}])")
+        page.fill("input[name=deepseek]", "typed-not-a-key")
+        page.check("#clear-deepseek", force=True)
+        page.click(".langs button[data-lang=ru]")
+        page.wait_for_function("() => document.body.dataset.lang === 'ru'")
+        page.wait_for_timeout(200)
+        after = page.eval_on_selector("input[name=mode]:checked", "el => el.value")
+        key = page.eval_on_selector("input[name=deepseek]", "el => el.value")
+        clear = page.eval_on_selector("#clear-deepseek", "el => el.checked")
+        if after != other:
+            raise SystemExit(f"the language switch lost the mode: chose {other}, kept {after}")
+        if key != "typed-not-a-key":
+            raise SystemExit("the language switch lost what was typed into a key field")
+        if not clear:
+            raise SystemExit("the language switch lost a checkbox")
+        print(f"language switch keeps the answers (mode={after})")
+    finally:
+        context.close()
+
+
 # ---- the pictures --------------------------------------------------------------------------------
 
 
@@ -215,6 +254,7 @@ def main() -> int:
                         page.screenshot(path=str(target), full_page=True)
                         print(target)
                     context.close()
+            check_language_switch(browser, port, data)
             browser.close()
     finally:
         launcher.terminate()

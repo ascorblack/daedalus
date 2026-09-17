@@ -35,15 +35,23 @@ async function act(action) {
 // the typed values are carried across instead — they never leave the page to do it.
 async function switchLang(lang) {
   if (lang === document.body.dataset.lang) return;
-  await fetch("/api/lang", {
+  // The language is written beside the data before the page is swapped. If that write failed the
+  // re-fetched page comes back in the old language, and a page that says it is Russian while
+  // showing English is worse than one that did not switch at all.
+  const saved = await fetch("/api/lang", {
     method: "POST",
     headers: { "X-Daedalus-Desktop": token, "Content-Type": "application/json" },
     body: JSON.stringify({ lang }),
   });
-  const name = (field) => field.name + ":" + (field.type === "checkbox" ? field.value : "");
+  if (!saved.ok) return;
+  // A field is remembered by its name and, where one name covers several controls, by the value
+  // that tells them apart: both mode radios are `name="mode"` and only their value says which one
+  // the operator chose. What is carried across is the checked state, not the value attribute —
+  // the fresh page brings back the machine's suggestion, and that is exactly what must not win.
+  const name = (field) => field.name + ":" + (field.type === "checkbox" || field.type === "radio" ? field.value : "");
   const typed = new Map();
   for (const field of document.querySelectorAll("input[name]")) {
-    typed.set(name(field), field.type === "checkbox" ? field.checked : field.value);
+    typed.set(name(field), field.type === "checkbox" || field.type === "radio" ? field.checked : field.value);
   }
   // What was open and which provider was showing are part of where the operator was, too.
   const opened = [...document.querySelectorAll("details")].map((one) => one.open);
@@ -61,8 +69,8 @@ async function switchLang(lang) {
   for (const field of document.querySelectorAll("input[name]")) {
     const key = name(field);
     if (!typed.has(key)) continue;
-    if (field.type === "checkbox") field.checked = typed.get(key);
-    else if (field.type !== "radio") field.value = typed.get(key);
+    if (field.type === "checkbox" || field.type === "radio") field.checked = typed.get(key);
+    else field.value = typed.get(key);
   }
   document.querySelectorAll("details").forEach((one, i) => (one.open = opened[i] ?? false));
   if (page === "setup") setupPanels(provider);
@@ -158,7 +166,8 @@ function drawStatus(status) {
   const message = status.docker_missing ? T("docker.missing") : status.failure;
   el("alert").textContent = message || "";
   el("alert").hidden = !message;
-  el("log").textContent = status.log.length ? status.log.join("\n") : T("status.log.empty");
+  const log = status.log || [];
+  el("log").textContent = log.length ? log.join("\n") : T("status.log.empty");
 }
 
 // The supervisor's word for what happened, in the operator's.
