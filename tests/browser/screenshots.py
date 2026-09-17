@@ -328,11 +328,16 @@ VOICE = {
 
 # An installation that has already been set up, and one that has not: "Add a model" is the first
 # thing a fresh install shows, so it gets a picture of its own.
+# One key, two command-line logins, and the rest with nothing behind them: the mixture a machine
+# really has, and the one the cards have to tell apart.
 PROVIDERS = [
-    {"id": "openrouter", "kind": "openrouter", "base_url": "http://keyproxy:3200/openrouter", "via_proxy": True, "key_held": True, "ready": True},
-    {"id": "opencode", "kind": "opencode", "base_url": "http://keyproxy:3200/opencode", "via_proxy": True, "key_held": True, "ready": True},
-    {"id": "deepseek", "kind": "deepseek", "base_url": "http://keyproxy:3200/deepseek", "via_proxy": True, "key_held": False, "ready": False},
-    {"id": "vllm", "kind": "vllm", "base_url": "", "via_proxy": False, "key_held": None, "ready": False},
+    {"id": "openrouter", "kind": "openrouter", "base_url": "http://keyproxy:3200/openrouter", "via_proxy": True, "key_held": True, "key_kind": "api_key", "ready": True},
+    {"id": "codex", "kind": "openai_compat", "base_url": "http://keyproxy:3200/codex/v1", "via_proxy": True, "key_held": True, "key_kind": "cli_login", "ready": True},
+    {"id": "grok", "kind": "openai_compat", "base_url": "http://keyproxy:3200/grok/v1", "via_proxy": True, "key_held": True, "key_kind": "cli_login", "ready": True},
+    {"id": "opencode", "kind": "opencode", "base_url": "http://keyproxy:3200/opencode", "via_proxy": True, "key_held": False, "key_kind": "api_key", "ready": False},
+    {"id": "deepseek", "kind": "deepseek", "base_url": "http://keyproxy:3200/deepseek", "via_proxy": True, "key_held": False, "key_kind": "api_key", "ready": False},
+    {"id": "claude", "kind": "openai_compat", "base_url": "http://keyproxy:3200/claude/v1", "via_proxy": True, "key_held": False, "key_kind": "cli_login", "ready": False},
+    {"id": "vllm", "kind": "vllm", "base_url": "", "via_proxy": False, "key_held": False, "key_kind": "endpoint", "ready": False},
 ]
 ONBOARDING = {"has_model": True, "presets": 4, "default_preset": "deepseek-flash", "providers": PROVIDERS, "needs": [], "message": ""}
 FRESH = {"has_model": False, "presets": 0, "default_preset": "", "providers": PROVIDERS, "needs": ["model"], "message": "No model is configured yet. Add one in the app: Settings \u2192 Models \u2192 Add a model."}
@@ -385,7 +390,11 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     if rel.endswith("/stream"):
         return respond(route, "event: hello\ndata: {}\n\n", content_type="text/event-stream")
     if rel == "/api/auth/me":
+        if getattr(stub, "signedout", False):
+            return respond(route, {"detail": "not signed in"}, status=401)
         return respond(route, {"user_id": 1, "via": "token"})
+    if rel == "/api/auth/config":
+        return respond(route, {"telegram": None, "passkeys": 1, "pairing": True})
     if rel == "/api/sessions":
         return respond(route, SESSIONS)
     if rel == "/api/services":
@@ -557,6 +566,9 @@ def run() -> int:
         stub.fresh = True  # type: ignore[attr-defined]
         shot(page, "add-model", "agents", wait=".addmodel", before=pick_a_model, settle=600)
         stub.fresh = False  # type: ignore[attr-defined]
+        stub.signedout = True  # type: ignore[attr-defined]
+        shot(page, "login", "agents", wait=".login", settle=500)
+        stub.signedout = False  # type: ignore[attr-defined]
         desk.close()
 
         phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)

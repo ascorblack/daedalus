@@ -4,8 +4,23 @@ import { api, LoopView, ServiceView, ShareMode, ToolInfo } from "./api";
 import { Icon } from "./icons";
 import { OverflowMenu, Sheet } from "./dialogs";
 import { confirmAsync, errorText } from "./ui";
+import { LANGS, t, useLang } from "./i18n";
 
 export type Status = "idle" | "running" | "waiting" | "failed" | "done" | "compacting";
+
+/** Two words, one chosen: the language the screens a person meets before signing in are written in. */
+export function LangPicker() {
+  const [lang, pick] = useLang();
+  return (
+    <div className="segmented inline lang" role="group" aria-label={t("lang.pick")}>
+      {LANGS.map((l) => (
+        <button key={l} className={lang === l ? "on" : ""} aria-pressed={lang === l} onClick={() => pick(l)}>
+          {l.toUpperCase()}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export function Avatar({ status, seed }: { status: Status; seed: string }) {
   // Deterministic accessory per session so each "bot" stays recognisable.

@@ -3,6 +3,8 @@ import { api } from "../api";
 import * as passkeys from "../passkeys";
 import { Icon } from "../icons";
 import { errorText } from "../ui";
+import { t, useLang } from "../i18n";
+import { LangPicker } from "../components";
 
 declare global {
   interface Window {
@@ -21,10 +23,11 @@ export type AuthConfig = {
 
 /** The site outside Telegram: a passkey, Telegram's Login Widget, or the link the server printed. */
 export function LoginScreen({ onDone }: { onDone: () => void }) {
+  useLang();
   const slot = useRef<HTMLDivElement>(null);
   const [conf, setConf] = useState<AuthConfig | null>(null);
   const [error, setError] = useState<string | null>(() =>
-    new URLSearchParams(window.location.search).get("pairing") === "spent" ? "That pairing link was already used or has expired. Ask for a fresh one (daedalus auth pair) or sign in another way." : null,
+    new URLSearchParams(window.location.search).get("pairing") === "spent" ? t("login.pairing.spent") : null,
   );
   const [busy, setBusy] = useState(false);
 
@@ -91,42 +94,41 @@ export function LoginScreen({ onDone }: { onDone: () => void }) {
   return (
     <div className="gate">
       <div className="login" role="main" aria-labelledby="login-title">
+        <LangPicker />
         <img className="login-logo" src="/app/icons/icon-192.png" alt="" width={72} height={72} />
-        <h1 id="login-title">Daedalus</h1>
-        <p className="sub">Your agent, in this browser. Sign in as its owner; the session stays for a month.</p>
-        {conf === null && !error && <div className="sub">Loading…</div>}
+        <h1 id="login-title">{t("login.title")}</h1>
+        <p className="sub">{t("login.sub")}</p>
+        {conf === null && !error && <div className="sub">{t("common.loading")}</div>}
         {conf !== null && (
           <div className="login-methods">
             {hasPasskeys && (
               <button className="btn primary big" disabled={busy} onClick={() => void withPasskey()}>
-                <Icon name="key" size={16} /> Sign in with a passkey
+                <Icon name="key" size={16} /> {t("login.passkey")}
               </button>
             )}
             {bot && (
               <>
-                {hasPasskeys && <div className="login-or">or</div>}
+                {hasPasskeys && <div className="login-or">{t("login.or")}</div>}
                 <div ref={slot} className="login-widget" />
               </>
             )}
-            {methods > 0 && <div className="login-or">or</div>}
+            {methods > 0 && <div className="login-or">{t("login.or")}</div>}
             <form className="login-pair" onSubmit={withPairing}>
-              <label className="field" htmlFor="pairing">Pairing link or code</label>
+              <label className="field" htmlFor="pairing">{t("login.pairing.label")}</label>
               <div className="share-field">
                 <input id="pairing" className="field mono" value={pairing} onChange={(e) => setPairing(e.target.value)} placeholder="https://…/api/auth/pair?code=… or the code" autoComplete="off" spellCheck={false} />
-                <button className="btn" type="submit" disabled={!pairing.trim() || busy}>Continue</button>
+                <button className="btn" type="submit" disabled={!pairing.trim() || busy}>{t("common.continue")}</button>
               </div>
-              <p className="sub small">
-                The server prints one at every start (<code>pairing link: …</code> in its log, <code>pairing-url</code> in the state directory); the desktop app opens it by itself; <code>daedalus auth pair</code> makes a fresh one. It works once, for 30 minutes.
-              </p>
+              <p className="sub small">{t("login.pairing.hint")}</p>
             </form>
             {canPasskey && !hasPasskeys && (
-              <p className="sub small">No passkey yet: after you sign in, add one in Settings → Security, and the next time Face ID, Touch ID or a security key is enough.</p>
+              <p className="sub small">{t("login.nopasskey")}</p>
             )}
           </div>
         )}
-        {busy && <div className="sub">Signing in…</div>}
+        {busy && <div className="sub">{t("login.busy")}</div>}
         {error && <div className="login-error">{error}</div>}
-        <p className="sub small login-foot">Install the site as an app from your browser's menu ("Install Daedalus" / "Add to Home Screen") to open it like any other app.</p>
+        <p className="sub small login-foot">{t("login.install")}</p>
       </div>
     </div>
   );

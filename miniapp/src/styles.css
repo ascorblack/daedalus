@@ -578,7 +578,11 @@ input.field, select.field, textarea.field {
 
 /* login */
 .gate { min-height: 100vh; min-height: 100dvh; display: flex; align-items: center; justify-content: center; padding: 24px 16px; background: var(--bg); }
+/* A flow is taller than a sign-in box: it starts at the top and the page scrolls, rather than being
+   centred around a middle that leaves the first step above the fold. */
+.gate.tall { align-items: flex-start; height: 100dvh; height: var(--vh, 100dvh); overflow-y: auto; padding: clamp(20px, 4vh, 48px) clamp(14px, 3vw, 40px) 40px; }
 .login { width: 100%; max-width: 460px; display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 32px 28px 24px; text-align: center; background: var(--surface-1); border: 1px solid var(--line); border-radius: 20px; }
+.login .lang { align-self: flex-end; margin: -12px -8px 0 0; }
 .login-logo { border-radius: 18px; }
 .login h1 { margin: 0; font-size: 26px; letter-spacing: -0.02em; }
 .login .sub.small { font-size: 12.5px; line-height: 1.45; }
@@ -851,6 +855,7 @@ body.resizing iframe { pointer-events: none; }
 .mpanel.add { margin-top: 10px; border: 1px dashed var(--line); border-radius: 12px; padding: 10px 12px; }
 .mfields { display: grid; grid-template-columns: 1fr; gap: 8px 12px; }
 .mfield { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.mfield.end { justify-content: flex-end; }
 .mfield > span { color: var(--muted); font-size: 12px; }
 .mfield .field { margin: 0; width: 100%; }
 .segmented.inline { display: inline-flex; margin: 0; }
@@ -1152,16 +1157,36 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 }
 
 /* ── add a model: the first-run flow and the same three steps from Settings ───────────────── */
+/* The flow is its own page when a fresh install opens it, wide enough that the endpoints and the
+   models are read across rather than scrolled through, and capped so a 2560 px window does not
+   stretch one sentence across a metre of glass. */
+.onboard { width: min(100%, 1680px); margin-inline: auto; }
+.onboard-head { display: flex; align-items: center; gap: 14px; padding: 0 2px 18px; }
+.onboard-head h1 { margin: 0; font-size: clamp(22px, 2.2vw, 28px); letter-spacing: -0.02em; }
+.onboard-head .sub { margin-top: 3px; }
+.onboard-logo { border-radius: 11px; flex: none; }
+.onboard-head .lang { flex: none; align-self: flex-start; }
+
 .addmodel { padding-bottom: 8px; }
-.addmodel .step { padding: 14px 16px 16px; }
-.addmodel .step.muted { opacity: .55; }
+/* Depth by lightening, in one small step at a time: the page, the step card above it, the pickable
+   things above that. A step that is not the one being worked on keeps every colour it had — dimming
+   the whole card made its own heading unreadable, which is not the same as being out of the way. */
+.addmodel .step { padding: 14px 16px 16px; background: var(--surface-1); border-color: var(--line); }
+.addmodel .step.on { border-color: var(--line-strong); box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset; }
+.addmodel .step.waiting .step-head .sub { color: var(--fg-3); }
 .step-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
 .step-n {
   flex: none; width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
   background: var(--surface-3); color: var(--fg-2); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums;
 }
+.step.on .step-n { background: var(--surface-3); color: var(--fg); }
+.step-n.done { background: color-mix(in srgb, var(--accent) 22%, var(--surface-3)); color: var(--accent); }
 .step-head b { font-size: 15.5px; }
 .step-head .sub { margin-top: 2px; }
+/* A step arrives rather than appearing: short enough not to be a wait, long enough to be followed.
+   The reduced-motion rule at the top of this file switches every one of these off. */
+.reveal { animation: reveal 200ms cubic-bezier(0.22, 0.8, 0.3, 1) both; }
+@keyframes reveal { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .pickgrid, .modelgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
 .modelgrid { padding: 2px; margin-top: 10px; }
 .pick {
@@ -1171,26 +1196,42 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 }
 .pick:hover { background: var(--surface-3); }
 .pick.dashed { border-style: dashed; }
+/* An endpoint with no credential: still readable, still saying which one it is, not a choice. */
+.pick.blocked { cursor: default; background: var(--surface-1); border-style: dashed; }
+.pick.blocked:hover { background: var(--surface-1); }
+.pick.blocked b, .pick.blocked .sub { color: var(--fg-3); }
 .pick.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface-2)); }
 .pick-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .pick-top b { flex: 1; min-width: 0; font-size: 14.5px; }
 .pick-top .pill { flex: none; }
 .pick .sub { font-size: 12.5px; }
 .pick .mtags { padding: 4px 0 0; }
-.modelbar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+/* The filter and the typed id are one row of two fields with their labels on the same line, so the
+   two boxes start and end together instead of sitting at two different heights. */
+.modelbar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px 12px; align-items: end; }
 .modelbar .field { margin: 0; }
+/* The primary action is part of the card system rather than floating over it: the same surface, the
+   same hairline, the same radius, pinned to the bottom of the flow. */
 .addmodel-foot {
-  position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 10px 2px calc(10px + env(safe-area-inset-bottom));
-  background: linear-gradient(to top, var(--bg) 70%, transparent);
+  position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 4px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: var(--radius);
+  box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.28);
 }
 .addmodel-foot .sub { min-width: 0; flex: 1 1 140px; }
+.empty.calm { padding: 26px 16px; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); margin-top: 10px; }
 @media (min-width: 720px) {
   .modelbar { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
   /* On a wide screen the list scrolls inside its step, so step 3 stays in view; on a phone a
      scroll region inside a scrolling page is a trap, and the page simply grows. */
   .modelgrid { max-height: 460px; overflow-y: auto; }
   .addmodel .step { padding: 16px 20px 18px; }
+}
+/* Room for a fourth and fifth card rather than a wider one: on a desktop window the endpoints and
+   the models are meant to be read across in a glance. */
+@media (min-width: 1280px) {
+  .addmodel .pickgrid, .addmodel .modelgrid { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+  .addmodel .modelgrid { max-height: 560px; }
 }
 
 /* ── projects: the folder an agent works in ─────────────────────────────────────────────── */

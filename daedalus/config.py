@@ -73,6 +73,29 @@ def keyproxy_base() -> str:
     return os.environ.get("KEYPROXY_BASE_URL", "").strip().rstrip("/") or CONTAINER_KEYPROXY_BASE
 
 
+def is_keyproxy_url(url: str) -> bool:
+    """Whether a base URL goes through this installation's key proxy.
+
+    A container reaches the proxy by service name, so the word is in the URL; a native installation
+    reaches it on a loopback port, where nothing in the address says what it is. Testing for the
+    word alone made every native install look as if it held its own keys — and report every endpoint
+    as ready, because the proxy was never asked.
+    """
+    if not url:
+        return False
+    base = keyproxy_base()
+    return url.startswith(base + "/") or url == base or "keyproxy" in url
+
+
+def keyproxy_upstream(url: str) -> str:
+    """The upstream name a key-proxy base URL addresses (``…:3200/deepseek`` → ``deepseek``), or ""."""
+    if not is_keyproxy_url(url):
+        return ""
+    base = keyproxy_base() if url.startswith(keyproxy_base()) else url.split("/", 3)[0] + "//" + url.split("/", 3)[2]
+    tail = url[len(base):].strip("/")
+    return tail.split("/", 1)[0] if tail else ""
+
+
 def _runtime_paths() -> list[str]:
     """The directories this installation is made of, as the environment has them.
 

@@ -30,7 +30,15 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
-from daedalus.config import NO_MODEL_MESSAGE, PROVIDER_KINDS, HeartbeatConfig, ModelPresetConfig, ProviderConfig
+from daedalus.config import (
+    NO_MODEL_MESSAGE,
+    PROVIDER_KINDS,
+    HeartbeatConfig,
+    ModelPresetConfig,
+    ProviderConfig,
+    is_keyproxy_url,
+    keyproxy_upstream,
+)
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
@@ -65,6 +73,20 @@ logger = logging.getLogger(__name__)
 
 INIT_DATA_MAX_AGE = 24 * 3600
 KEYPROXY_CACHE_SECONDS = 5.0
+
+
+def no_credential(kind: str, name: str) -> str:
+    """Why an endpoint could not be listed, in the terms of what is actually missing.
+
+    Written as a function rather than a table keyed by credential kind: a constant whose keys are
+    ``api_key`` and the like is a dictionary of secret-named keys, and the redactor the agent reads
+    its own source through masks the values under those.
+    """
+    if kind == "cli_login":
+        return f"{name} is not signed in on this machine, so it cannot be asked what it serves. Sign in with its command-line tool and try again."
+    if kind == "endpoint":
+        return f"{name} did not answer, and it holds no credential to retry with."
+    return f"{name} has no key in the key proxy, so it cannot be asked what it serves. Add one and restart, or add the endpoint and its own key below."
 """How long the key proxy's answer about its upstreams is reused. It is read once per app load and a
 proxy that does not answer costs the whole timeout; a few seconds is well inside a first screen."""
 
@@ -490,6 +512,18 @@ def model_entry(raw: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
+def _said(response: httpx.Response) -> str:
+    """The endpoint's own error sentence, in parentheses, or nothing when it did not write one."""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    error = body.get("error") if isinstance(body, dict) else None
+    message = error.get("message") if isinstance(error, dict) else error
+    text = str(message or "").strip()
+    return f" ({text[:160]})" if text else ""
+
+
 async def lookup_openai_models(
     base_url: str,
     api_key: str | None = None,
@@ -530,7 +564,9 @@ async def lookup_openai_models(
                 errors.append(f"{url}: {exc.__class__.__name__}")
                 continue
             if response.status_code != 200:
-                errors.append(f"{url}: HTTP {response.status_code}")
+                # The status alone made a missing key read as a vendor whose /models path had moved;
+                # whatever the endpoint said about it is the sentence that names the real fix.
+                errors.append(f"{url}: HTTP {response.status_code}{_said(response)}")
                 continue
             try:
                 data = response.json()
@@ -2514,7 +2550,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     def _keyproxy_origin() -> str:
         for provider in app.config.providers.values():
-            if "keyproxy" in provider.base_url:
+            if is_keyproxy_url(provider.base_url):
                 parts = provider.base_url.split("/", 3)
                 return parts[0] + "//" + parts[2]
         return ""
@@ -2529,9 +2565,16 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             upstreams_cache["client"] = client
         return client
 
-    async def keyproxy_upstreams() -> list[str] | None:
-        """Upstream names the key proxy holds a key for; None when it cannot be asked.
+    async def keyproxy_keys() -> dict[str, dict[str, Any]] | None:
+        """Per upstream, whether the key proxy really holds a credential and of what kind; None when it cannot be asked.
 
+        The proxy is the only process that knows: the bot's own configuration says which address an
+        endpoint is reached at, never whether anything behind it can authenticate. Asking the
+        configuration instead is how an installation with one key came to report six ready
+        endpoints, five of which answered 404 to the first request made of them.
+
+        ``/keys`` answers the bot alone, on the bot's own API token — which the proxy reads out of
+        the same database — so nothing else on the loopback interface can enumerate the credentials.
         Cached for a few seconds and asked through one client: this is on the path of the first
         screen, and a key proxy that hangs made every app load wait out the timeout again.
         """
@@ -2541,13 +2584,50 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if upstreams_cache["at"] and time.monotonic() - float(upstreams_cache["at"]) < KEYPROXY_CACHE_SECONDS:
             return upstreams_cache["value"]  # type: ignore[return-value]
         try:
-            response = await keyproxy_client().get(origin + "/healthz")
-            names = response.json().get("upstreams") if response.status_code == 200 else None
+            response = await keyproxy_client().get(origin + "/keys", headers={"x-daedalus-token": api_token})
+            listed = response.json().get("upstreams") if response.status_code == 200 else None
         except (httpx.HTTPError, ValueError):
             return None
-        value = [str(n) for n in names] if isinstance(names, list) else None
+        value = None
+        if isinstance(listed, dict):
+            value = {str(name): {"configured": bool(row.get("configured")), "kind": str(row.get("kind") or "api_key")} for name, row in listed.items() if isinstance(row, dict)}
         upstreams_cache.update(at=time.monotonic(), value=value)
         return value
+
+    async def keyproxy_upstreams() -> list[str] | None:
+        """The upstream names the proxy holds a credential for; None when it cannot be asked."""
+        keys = await keyproxy_keys()
+        return None if keys is None else sorted(name for name, row in keys.items() if row["configured"])
+
+    def _provider_view(pid: str, pc: ProviderConfig, usable: set[str], keys: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
+        """One endpoint as the app shows it: its address, and whether a credential for it really exists.
+
+        ``key_held`` is ``None`` only when nothing could answer the question — an endpoint reached
+        through the key proxy while the proxy is unreachable. Everything else is a fact: the proxy
+        said so, or the endpoint is reached directly and the configuration is the whole truth about
+        it. ``key_kind`` says what a missing credential would be, which decides what the app tells
+        the operator to do about it.
+        """
+        via_proxy = is_keyproxy_url(pc.base_url)
+        if via_proxy:
+            row = (keys or {}).get(keyproxy_upstream(pc.base_url))
+            key_held = None if keys is None else bool(row and row["configured"])
+            key_kind = str(row["kind"]) if row else "api_key"
+        else:
+            # Reached directly: the registry builds an adapter only for an endpoint that can
+            # authenticate, so being in `usable` is the answer, and an endpoint that needs no key
+            # (a self-hosted one) is ready without holding anything.
+            key_held = pid in usable
+            key_kind = "api_key" if (pc.api_key or pc.kind in ("deepseek", "openrouter", "opencode")) else "endpoint"
+        return {
+            "id": pid,
+            "kind": pc.kind,
+            "base_url": pc.base_url,
+            "via_proxy": via_proxy,
+            "key_held": key_held,
+            "key_kind": key_kind,
+            "ready": pid in usable and key_held is not False,
+        }
 
     @api.get("/api/onboarding")
     async def onboarding(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2557,21 +2637,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         choice of model — so the app opens Add a model instead of a chat that cannot answer.
         """
         usable = set(manager.providers.available())
-        held = await keyproxy_upstreams()
-        providers: list[dict[str, Any]] = []
-        for pid, pc in app.config.providers.items():
-            via_proxy = "keyproxy" in pc.base_url
-            key_held = None if not via_proxy or held is None else pid in held
-            providers.append(
-                {
-                    "id": pid,
-                    "kind": pc.kind,
-                    "base_url": pc.base_url,
-                    "via_proxy": via_proxy,
-                    "key_held": key_held,
-                    "ready": pid in usable and key_held is not False,
-                }
-            )
+        keys = await keyproxy_keys()
+        providers = [_provider_view(pid, pc, usable, keys) for pid, pc in app.config.providers.items()]
         needs = [n for n, missing in (("provider_key", not any(p["ready"] for p in providers)), ("model", not app.config.has_model)) if missing]
         default = app.config.default_preset()
         return {
@@ -2703,6 +2770,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             }.get(provider_config.kind, "") or None
         if not base_url:
             raise HTTPException(400, "base_url is required (or a provider with one configured)")
+        if body.provider and is_keyproxy_url(base_url):
+            # Asking an endpoint for its models before asking whether anything can authenticate to
+            # it produces three HTTP errors and a wall of URLs, and none of them says "no key".
+            keys = await keyproxy_keys()
+            row = (keys or {}).get(keyproxy_upstream(base_url))
+            if keys is not None and not (row and row["configured"]):
+                raise HTTPException(400, no_credential(str(row["kind"]) if row else "api_key", body.provider))
         try:
             return await lookup_openai_models(base_url, api_key)
         except ValueError as exc:
