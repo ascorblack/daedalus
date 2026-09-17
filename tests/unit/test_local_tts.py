@@ -31,7 +31,9 @@ from daedalus.speech import tts_catalog as catalog
 from daedalus.speech.models import DownloadError, Downloads, Installed, view
 from daedalus.speech.service import LocalSpeech
 from daedalus.speech.tts_engine import (
+    CACHE,
     MAX_TEXT_CHARS,
+    TtsCache,
     TtsEngine,
     TtsError,
     resolve,
@@ -40,7 +42,14 @@ from daedalus.speech.tts_engine import (
     to_pcm16,
     wav,
 )
-from daedalus.speech.tts_service import LocalTts, check_voice, encode
+from daedalus.speech.tts_service import (
+    LENGTH_BYTES,
+    MEDIA_TYPE_HEADER,
+    SEQUENCE_TYPE,
+    LocalTts,
+    check_voice,
+    encode,
+)
 
 # -- the catalog ------------------------------------------------------------------------------
 
@@ -443,6 +452,34 @@ async def test_an_encoder_that_fails_still_produces_audio(monkeypatch: pytest.Mo
     assert media == "audio/wav" and clip.startswith(b"RIFF")
 
 
+async def test_an_encoder_that_hangs_is_killed_rather_than_left_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`wait_for` cancels the wait, not the child: without the kill one is left per request, forever."""
+    killed: list[bool] = []
+
+    class Hung:
+        returncode = None
+
+        async def communicate(self, data: bytes) -> tuple[bytes, bytes]:
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable")  # pragma: no cover
+
+        def kill(self) -> None:
+            killed.append(True)
+
+        async def wait(self) -> int:
+            return -9
+
+    async def spawn(*args: Any, **kwargs: Any) -> Hung:
+        return Hung()
+
+    monkeypatch.setattr("daedalus.speech.tts_service.encoder_present", lambda: True)
+    monkeypatch.setattr("daedalus.speech.tts_service.ENCODE_TIMEOUT", 0.05)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    clip, media = await encode(to_pcm16([0.0] * 32), 22_050)
+    assert killed == [True], "the encoder was left running with its pipes open"
+    assert media == "audio/wav" and clip.startswith(b"RIFF")
+
+
 # -- the engine, against a backend that is not sherpa ----------------------------------------------
 
 
@@ -567,6 +604,30 @@ def test_a_kokoro_voice_is_handed_its_style_vectors(tmp_path: Path, monkeypatch:
     files = {"model.int8.onnx": b"M", "tokens.txt": b"t", "voices.bin": b"V", **ESPEAK}
     TtsEngine(catalog.get("en-kokoro"), lay_out(tmp_path, files))
     assert FakeTts.made[-1].model.kokoro.voices.endswith("voices.bin")
+
+
+async def test_a_voice_dropped_while_it_was_loading_does_not_become_resident(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator deleted it, or chose another, in the second and a bit the load takes."""
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", FakeSherpa)
+    lay_out(tmp_path, {"ru_RU-test-medium.onnx": b"M", "tokens.txt": b"t", **ESPEAK})
+    cache = TtsCache()
+    started = threading.Event()
+
+    class Slow(TtsEngine):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            started.set()
+            time.sleep(0.2)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("daedalus.speech.tts_engine.TtsEngine", Slow)
+    loading = asyncio.create_task(cache.get(catalog.get("ru-irina"), tmp_path, threads=2))
+    await asyncio.to_thread(started.wait, 2)
+    cache.drop()
+    engine = await loading
+    assert engine is not None, "the caller that asked for the voice was left with nothing"
+    assert cache.loaded() == "", "the drop was overwritten by the load it arrived in the middle of"
 
 
 # -- the application's view of it -----------------------------------------------------------------
@@ -717,11 +778,25 @@ def with_voice_page(app: FakeApp, spoken_here: list[str]) -> None:
 
             return chunks(), "audio/mpeg"
 
+        async def interrupt(self) -> bool:
+            return True
+
         async def state(self) -> dict[str, Any]:
             return {"enabled": True, "session_id": "", "model": "", "tts": {"configured": True, "reason": ""},
                     "stt": {"configured": False}, "agents": [], "listening": False}
 
     app.extensions["voice"] = Extension()
+
+
+def clips_of(body: bytes) -> list[bytes]:
+    """The per-sentence clips out of a `SEQUENCE_TYPE` body, as the page reads them."""
+    out, at = [], 0
+    while at < len(body):
+        size = int.from_bytes(body[at:at + LENGTH_BYTES], "big")
+        at += LENGTH_BYTES
+        out.append(body[at:at + size])
+        at += size
+    return out
 
 
 def test_with_nothing_configured_the_browser_is_told_to_speak(client: TestClient) -> None:
@@ -750,9 +825,95 @@ def test_a_downloaded_voice_speaks_ahead_of_the_endpoint(client: TestClient, mon
     monkeypatch.setitem(sys.modules, "sherpa_onnx", FakeSherpa)
     monkeypatch.setattr("daedalus.speech.tts_service.encoder_present", lambda: False)
     app.tts.forget()
-    answer = client.post("/api/voice/tts", json={"text": "a sentence"}, headers=HEAD)
-    assert answer.status_code == 200 and answer.content.startswith(b"RIFF")
+    answer = client.post("/api/voice/tts", json={"text": "One sentence here. Another one there."}, headers=HEAD)
+    assert answer.status_code == 200 and answer.headers["content-type"].startswith(SEQUENCE_TYPE)
+    assert answer.headers[MEDIA_TYPE_HEADER] == "audio/wav"
+    clips = clips_of(answer.content)
+    assert len(clips) == 2, "the two sentences did not arrive as two clips"
+    assert all(clip.startswith(b"RIFF") for clip in clips)
     assert sent == [], "the metered endpoint was called while a voice was downloaded here"
+
+
+def ready_to_speak(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """An application with a voice on the disk, the fake engine behind it, and nothing synthesised yet."""
+    app = client.app_state  # type: ignore[attr-defined]
+    with_voice_page(app, [])
+    pretend_installed(app)
+    client.post("/api/tts/select", json={"voice": "ru-dmitri"}, headers=HEAD)
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", FakeSherpa)
+    monkeypatch.setattr("daedalus.speech.tts_service.encoder_present", lambda: False)
+    app.tts.forget()
+    FakeTts.calls.clear()
+    return app
+
+
+async def test_a_sentence_is_handed_over_the_moment_it_is_made_rather_than_at_the_end(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the page is waiting for: clip one exists while sentence three has not been started."""
+    app = ready_to_speak(client, monkeypatch)
+    seen: list[int] = []
+    async for clip, media_type in app.tts.clips("First sentence here. Second sentence there. Third one now."):
+        seen.append(len(FakeTts.calls))
+        assert clip.startswith(b"RIFF") and media_type == "audio/wav"
+    assert seen == [1, 2, 3], f"a clip only arrived after everything had been synthesised: {seen}"
+
+
+async def test_a_listener_that_goes_away_stops_the_synthesiser_at_the_next_sentence(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the generator is what a disconnected client does to it, and it must be enough."""
+    app = ready_to_speak(client, monkeypatch)
+    text = " ".join(f"Sentence number {n} here." for n in range(1, 21))
+    clips = app.tts.clips(text)
+    await anext(clips)
+    await clips.aclose()
+    assert len(FakeTts.calls) == 1, "sentences were synthesised for a listener that had gone"
+
+
+async def test_an_interrupt_stops_an_answer_that_is_being_read_aloud(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = ready_to_speak(client, monkeypatch)
+    text = " ".join(f"Sentence number {n} here." for n in range(1, 21))
+    got = 0
+    async for _clip, _type in app.tts.clips(text):
+        got += 1
+        if got == 2:
+            app.tts.interrupt()
+    assert got == 2, f"the barge-in did not stop the reading at the next sentence: {got} clips"
+    assert len(FakeTts.calls) == 2
+
+
+async def test_an_interrupt_does_not_stop_the_answer_that_comes_after_it(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mark moves once; the next thing asked for is a new answer and is not born cancelled."""
+    app = ready_to_speak(client, monkeypatch)
+    app.tts.interrupt()
+    got = [clip async for clip, _ in app.tts.clips("One sentence here. Another one there.")]
+    assert len(got) == 2
+
+
+async def test_hearing_another_voice_puts_the_chosen_one_back(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sampling takes the one resident slot; the next answer must not pay to reload what was chosen."""
+    app = ready_to_speak(client, monkeypatch)
+    pretend_installed(app, "ru-irina")
+    assert client.post("/api/tts/voices/ru-irina/sample", headers=HEAD).status_code == 200
+    for _ in range(50):
+        if CACHE.loaded() == "ru-dmitri":
+            break
+        await asyncio.sleep(0.02)
+    assert CACHE.loaded() == "ru-dmitri", "the chosen voice was left evicted by a sample of another"
+
+
+def test_the_barge_in_endpoint_stops_the_run_and_the_reading(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = ready_to_speak(client, monkeypatch)
+    before = app.tts._speaking
+    assert client.post("/api/voice/interrupt", json={}, headers=HEAD).json() == {"stopped": True}
+    assert app.tts._speaking != before, "the endpoint stopped the run but left the synthesiser reading"
 
 
 def test_a_local_voice_that_fails_is_not_replaced_by_a_metered_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -767,9 +928,35 @@ def test_a_local_voice_that_fails_is_not_replaced_by_a_metered_endpoint(client: 
     async def refuse(text: str) -> tuple[bytes, str]:
         raise TtsError("the model would not load")
 
+    async def refuse_clips(text: str) -> Any:
+        raise TtsError("the model would not load")
+        yield b""  # pragma: no cover - the raise above is the whole of it
+
     monkeypatch.setattr(app.tts, "audio", refuse)
+    monkeypatch.setattr(app.tts, "clips", refuse_clips)
     answer = client.post("/api/voice/tts", json={"text": "a sentence"}, headers=HEAD)
     assert answer.status_code == 503 and "would not load" in answer.json()["detail"]
+    assert sent == []
+
+
+def test_a_voice_that_breaks_in_a_way_nobody_expected_still_says_why(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not every failure out of a native wheel is a TtsError; none of them may be a bare 500."""
+    app = client.app_state  # type: ignore[attr-defined]
+    sent: list[str] = []
+    with_voice_page(app, sent)
+    app.config.voice.tts.url = "http://speech.invalid/v1"
+    pretend_installed(app)
+    client.post("/api/tts/select", json={"voice": "ru-dmitri"}, headers=HEAD)
+
+    async def explode(text: str) -> Any:
+        raise RuntimeError("the wheel is built for another processor")
+        yield b""  # pragma: no cover - the raise above is the whole of it
+
+    monkeypatch.setattr(app.tts, "clips", explode)
+    answer = client.post("/api/voice/tts", json={"text": "a sentence"}, headers=HEAD)
+    assert answer.status_code == 503 and "another processor" in answer.json()["detail"]
     assert sent == []
 
 
@@ -847,3 +1034,60 @@ def test_a_real_voice_speaks_and_keeps_up_with_a_person_talking() -> None:
         assert first < elapsed, f"{voice.id}: nothing was handed over before the whole answer was made"
         if voice.keeps_up:
             assert elapsed / seconds < 1.0, f"{voice.id} is marked as keeping up and does not here"
+
+
+LONG_RUSSIAN = (
+    "Сегодня утром пришли три письма, и все три просят одного и того же — подтвердить счёт. "
+    "Я отложил их в отдельную папку, чтобы вы посмотрели, когда будет минута. "
+    "Ещё один агент закончил разбор логов за неделю и ждёт вашего слова, прежде чем что-то удалять. "
+    "Остальное может подождать до завтра, ничего срочного там нет. "
+    "Счета я свёл в одну таблицу, чтобы их было видно рядом, а не по одному письму за раз, "
+    "и подписал каждую строку парой слов сразу."
+)
+"""Four hundred and forty-three characters of ordinary Russian: about what one answer runs to."""
+
+
+@pytest.mark.skipif(not REAL, reason="set DAEDALUS_TTS_MODELS to a directory of unpacked voices to measure one")
+def test_a_real_voice_starts_talking_long_before_it_has_finished_reading(tmp_path: Path) -> None:
+    """The number the whole streaming path exists for: how long a person waits before hearing a word.
+
+    A paragraph of Russian, through the service the endpoint uses, with the first clip timed. The
+    ceiling is generous because this runs on whatever the machine is; what it is guarding against is
+    the old behaviour, where nothing at all came back until the last sentence was rendered.
+    """
+    root = Path(REAL)
+    by_archive = {v.archive.removesuffix(".tar.bz2"): v for v in catalog.VOICES}
+    found = [p for p in sorted(root.iterdir()) if p.is_dir() and p.name in by_archive]
+    if not found:
+        pytest.skip(f"no unpacked catalog voice in {root}")
+    directory = found[0]
+    voice = by_archive[directory.name]
+
+    state = tmp_path / "state"
+    into = state / "models" / "tts" / voice.id
+    into.parent.mkdir(parents=True, exist_ok=True)
+    into.symlink_to(directory)
+    config = RuntimeConfig()
+    config.voice.tts.local_voice = voice.id
+    config.voice.tts.local_threads = 2
+    tts = LocalTts(state, config)
+    tts.downloads._write_manifest({voice.id: Installed(id=voice.id, archive=voice.archive, sha256=voice.sha256, disk_bytes=1)})
+    assert tts.available()
+
+    async def run() -> tuple[float, float, int]:
+        # Loaded first, as choosing a voice on the page loads it: what is being measured is the wait
+        # before an answer, not the wait before the first answer of the process's life.
+        await tts.warm()
+        started = time.perf_counter()
+        first, count = 0.0, 0
+        async for _clip, _type in tts.clips(LONG_RUSSIAN):
+            first = first or time.perf_counter() - started
+            count += 1
+        return first, time.perf_counter() - started, count
+
+    first, elapsed, count = asyncio.run(run())
+    print(f"\n{voice.id}: {len(LONG_RUSSIAN)} characters, first clip {first * 1000:.0f} ms, "
+          f"{count} clips, {elapsed:.2f} s in all")
+    assert count > 1, "a paragraph came back as one clip; nothing was being streamed"
+    assert first < elapsed / 3, "the first clip took as long as the whole answer"
+    assert first < 0.9, f"the first words took {first:.2f} s; the page is silent for that long"

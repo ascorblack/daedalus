@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import time
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -62,6 +63,8 @@ from daedalus.speech.engine import CACHE as ENGINE_CACHE
 from daedalus.speech.engine import SAMPLE_RATE, SpeechError, clamp_rate
 from daedalus.speech.service import recogniser_available, transcribe_recording
 from daedalus.speech.tts_engine import MAX_SPEED, MIN_SPEED, TtsError
+from daedalus.speech.tts_service import MEDIA_TYPE_HEADER, SEQUENCE_TYPE
+from daedalus.speech.tts_service import frame as speech_frame
 from daedalus.stores import pairing, passkeys
 from daedalus.stores.projects import ProjectError, ProjectSettings, normalise_root
 from daedalus.tools import websearch
@@ -1517,7 +1520,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.post("/api/voice/interrupt")
     async def voice_interrupt(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """Barge-in: the operator talked over the answer, so the answer stops."""
+        """Barge-in: the operator talked over the answer, so the answer stops.
+
+        Both halves of it. The run stops producing sentences, and anything already being read aloud
+        stops at the end of the sentence it is in — otherwise the operator is talked over by a
+        synthesiser working through a paragraph that has already been abandoned.
+        """
+        app.tts.interrupt()
         return {"stopped": await voice().interrupt()}
 
     @api.post("/api/voice/new")
@@ -1526,11 +1535,16 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return {"session_id": await voice().new_session()}
 
     @api.post("/api/voice/tts")
-    async def voice_tts(body: VoiceSpeakBody, _: dict[str, Any] = Depends(auth)) -> Response:
-        """One sentence read aloud: a downloaded voice, then the configured endpoint, then 404.
+    async def voice_tts(request: Request, body: VoiceSpeakBody, _: dict[str, Any] = Depends(auth)) -> Response:
+        """One answer read aloud: a downloaded voice, then the configured endpoint, then 404.
 
         The 404 is the page's signal to use the browser's own synthesiser, so it is an answer rather
         than a failure and stays a 404 whatever the reason nothing here speaks.
+
+        A local voice answers as a sequence of per-sentence clips rather than as one file, so the
+        page starts playing the first sentence while the rest is still being made. The first one is
+        synthesised before the response begins: a voice that cannot speak has to be able to say 503,
+        and after the first byte of a body there is no status code left to send.
         """
         extension = voice()
         if len(body.text) > VOICE_TTS_MAX_CHARS:
@@ -1542,11 +1556,34 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         # replaced by the endpoint — an endpoint is metered and may not be configured at all, and a
         # failure hidden behind a fallback is a failure nobody fixes.
         if app.tts.available():
+            clips = app.tts.clips(body.text.strip())
             try:
-                clip, media_type = await app.tts.audio(body.text.strip())
-            except TtsError as exc:
+                first, media_type = await anext(clips)
+            except StopAsyncIteration as exc:
+                await clips.aclose()
+                raise HTTPException(503, "the local voice could not speak this: there was nothing to say") from exc
+            except Exception as exc:
+                # Anything at all, not only TtsError: a wheel that is the wrong build for this
+                # machine raises out of the engine itself, and a 500 with no words in it is the one
+                # outcome this endpoint promised never to have.
+                await clips.aclose()
                 raise HTTPException(503, f"the local voice could not speak this: {exc}") from exc
-            return Response(clip, media_type=media_type)
+
+            async def spoken() -> AsyncIterator[bytes]:
+                try:
+                    yield speech_frame(first)
+                    async for clip, _ in clips:
+                        if await request.is_disconnected():
+                            return
+                        yield speech_frame(clip)
+                except TtsError as exc:
+                    # Halfway through is too late for a status code; the page has the sentences it
+                    # already has, and the reason belongs in the log.
+                    logger.warning("the local voice stopped mid-answer: %s", exc)
+                finally:
+                    await clips.aclose()
+
+            return StreamingResponse(spoken(), media_type=SEQUENCE_TYPE, headers={MEDIA_TYPE_HEADER: media_type})
         if not tts_configured(app.config.voice.tts):
             raise HTTPException(404, "nothing here speaks; the browser says this one itself")
         try:

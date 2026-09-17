@@ -6,10 +6,13 @@ told. Everything that decides *whether* to speak here decides it in :meth:`Local
 precedence — a downloaded voice, then the configured endpoint, then the browser's own synthesiser — is
 written once and is the same wherever speech comes out.
 
-The audio leaves as a complete clip rather than a stream. The page fetches it into a blob before it
-plays anything, so streaming the response would buy nothing there; what does buy something is that
-the clip is built a sentence at a time (:meth:`TtsEngine.stream`), which keeps the memory to one
-sentence and lets a cancelled request stop at the next boundary instead of at the end.
+The audio leaves as a sequence of clips rather than as one file: :meth:`LocalTts.clips` drives
+:meth:`TtsEngine.stream`, so each sentence is encoded and sent the moment it is synthesised and the
+page can start playing the first one while the rest is still being made. On a voice that runs four
+times faster than speech that is the difference between a pause of half a second and a pause of six.
+It is also where cancellation lives: the generator stops at a sentence boundary when the client
+disconnects or when the operator talks over the answer, so nothing keeps the synthesiser busy for a
+request nobody is listening to any more.
 
 Ogg Opus where ``opusenc`` is present — it is, in the runtime image, for the recognition side's sake —
 and WAV otherwise. A sentence is about two hundred kilobytes as WAV and twenty as Opus, which matters
@@ -19,8 +22,10 @@ on a phone and not at all on a desktop, so the encoder is used when it is there 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import shutil
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 from daedalus.config import RuntimeConfig, TtsConfig
@@ -44,6 +49,26 @@ tenth of the WAV and still above what anyone can hear the difference of on a pho
 
 WAV_TYPE = "audio/wav"
 OPUS_TYPE = "audio/ogg"
+
+SEQUENCE_TYPE = "application/x-speech-sequence"
+"""The media type of a spoken answer arriving a sentence at a time.
+
+The body is a run of frames: four bytes of length, big-endian, then that many bytes of one complete
+little audio file. Each frame is a sentence and is playable on its own, which is the point — the page
+turns each one into a clip and plays it while the next is still being synthesised, and no player has
+to be able to resume a half-received file. The media type of the frames themselves is in the
+``X-Speech-Media-Type`` header, because it is one answer's worth of the same thing.
+"""
+
+MEDIA_TYPE_HEADER = "X-Speech-Media-Type"
+
+LENGTH_BYTES = 4
+"""The size of a frame's length prefix. Four bytes is far more than a sentence of Opus ever needs."""
+
+
+def frame(clip: bytes) -> bytes:
+    """One clip as it travels inside a :data:`SEQUENCE_TYPE` body."""
+    return len(clip).to_bytes(LENGTH_BYTES, "big") + clip
 
 
 def check_voice(directory: Path, voice: TtsVoice) -> None:
@@ -69,6 +94,10 @@ class LocalTts:
     def __init__(self, state_dir: Path, config: RuntimeConfig) -> None:
         self.downloads = Downloads(state_dir / "models" / "tts", lookup=catalog.get, resolver=check_voice)
         self.config = config
+        self._speaking = 0
+        """Bumped by :meth:`interrupt`. Everything being synthesised stops at its next sentence."""
+        self._rewarm: asyncio.Task[None] | None = None
+        """The reload after a sample took the resident slot; held so it is not garbage collected."""
         self._state = "idle"
         """``idle``, ``loading``, ``ready`` or ``error`` — what the page's chip says. Held here rather
         than derived, because "the voice is loading" is a fact about this second and the cache can only
@@ -141,11 +170,48 @@ class LocalTts:
         return await engine.speak(text, speaker=self.speaker(), speed=self.speed())
 
     async def audio(self, text: str) -> tuple[bytes, str]:
-        """The same, as a file a browser plays, and its media type."""
+        """The same, as one whole file a browser plays, and its media type.
+
+        For the short things that are asked for all at once — a sample, a test. The answer the
+        operator is waiting to hear goes through :meth:`clips` instead.
+        """
         pcm, rate = await self.speak(text)
         if not pcm:
             raise TtsError("there was nothing to say")
         return await encode(pcm, rate)
+
+    def interrupt(self) -> None:
+        """Stop reading aloud: the operator talked over the answer, or asked for another one.
+
+        Synchronous and cheap, because the barge-in endpoint should not have to wait for anything.
+        What it does is move the mark every running :meth:`clips` compares itself against; each stops
+        at the end of the sentence it is in the middle of, which is as fine a grain as a synthesiser
+        that renders whole sentences can offer.
+        """
+        self._speaking += 1
+
+    def _still_wanted(self) -> Callable[[], bool]:
+        """A question a synthesis loop can ask between sentences: has anything cancelled me?"""
+        mine = self._speaking
+        return lambda: self._speaking != mine
+
+    async def clips(self, text: str) -> AsyncIterator[tuple[bytes, str]]:
+        """The text read aloud, one playable clip per sentence, each as soon as it exists.
+
+        The caller gets the first clip after one sentence's work rather than after the whole text's,
+        and stopping is a matter of not asking for the next one: closing this generator — which is
+        what a client going away does — ends the synthesis at that boundary and releases the engine.
+        """
+        engine = await self.engine()
+        rate = engine.sample_rate
+        spoke = False
+        async for pcm in engine.stream(text, speaker=self.speaker(), speed=self.speed(), cancelled=self._still_wanted()):
+            if not pcm:
+                continue
+            spoke = True
+            yield await encode(pcm, rate)
+        if not spoke:
+            raise TtsError("there was nothing to say")
 
     async def sample(self, voice_id: str) -> tuple[bytes, str]:
         """One short phrase in a voice's own language, so it can be heard before it is chosen.
@@ -162,7 +228,24 @@ class LocalTts:
         pcm, rate = await engine.speak(voice.sample(), speaker=speaker, speed=self.speed())
         if not pcm:
             raise TtsError(f"{voice.label} produced no audio for its own sample")
-        return await encode(pcm, rate)
+        clip = await encode(pcm, rate)
+        self._rewarm_chosen(after=voice.id)
+        return clip
+
+    def _rewarm_chosen(self, *, after: str) -> None:
+        """Put the voice that speaks back in memory, after another one was auditioned in its place.
+
+        Sampling loads the voice being sampled, and there is only ever one resident: without this the
+        operator's next answer pays a second or two to reload the voice they had already chosen, in
+        the middle of a sentence they are waiting for. Done in the background, so the sample they
+        asked for is not held up by it, and only when the two are actually different.
+        """
+        chosen = self.active()
+        if chosen is None or chosen.id == after:
+            return
+        if self._rewarm is not None and not self._rewarm.done():
+            return
+        self._rewarm = asyncio.create_task(self.warm())
 
     def forget(self) -> None:
         """Drop the loaded voice: the choice changed, or the files were deleted underneath it."""
@@ -232,22 +315,34 @@ async def encode(pcm16: bytes, rate: int) -> tuple[bytes, str]:
             "--raw-chan", "1", "--bitrate", OPUS_BITRATE, "-", "-",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await asyncio.wait_for(process.communicate(pcm16), timeout=ENCODE_TIMEOUT)
+        try:
+            out, err = await asyncio.wait_for(process.communicate(pcm16), timeout=ENCODE_TIMEOUT)
+        except TimeoutError:
+            # `wait_for` cancels the wait, not the child: without this the encoder is left running
+            # with its pipes open, one per request, and nothing ever reaps it.
+            process.kill()
+            with contextlib.suppress(ProcessLookupError, OSError):
+                await process.wait()
+            logger.warning("opusenc did not finish within %.0fs; sending WAV instead", ENCODE_TIMEOUT)
+            return wav(pcm16, rate), WAV_TYPE
         if process.returncode or not out:
             logger.warning("opusenc refused the audio (%s); sending WAV instead", err.decode(errors="replace").strip()[:200])
             return wav(pcm16, rate), WAV_TYPE
         return out, OPUS_TYPE
-    except (TimeoutError, OSError) as exc:
+    except OSError as exc:
         logger.warning("opusenc could not be run (%s); sending WAV instead", exc)
         return wav(pcm16, rate), WAV_TYPE
 
 
 __all__ = [
     "ENCODER",
+    "MEDIA_TYPE_HEADER",
     "OPUS_TYPE",
+    "SEQUENCE_TYPE",
     "WAV_TYPE",
     "LocalTts",
     "check_voice",
     "encode",
     "encoder_present",
+    "frame",
 ]

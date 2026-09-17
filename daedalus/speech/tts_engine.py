@@ -31,7 +31,7 @@ import logging
 import re
 import struct
 import threading
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -61,6 +61,17 @@ is a separate model call, a separate audio clip and an audible gap, for three ch
 MAX_SENTENCE_CHARS = 400
 """A "sentence" longer than this is split on the nearest comma or space. Something without full stops
 — a list, a pasted line — would otherwise be one long synthesis and defeat the whole streaming path."""
+
+OPENING_CHARS = 60
+"""How much of the first chunk is worth waiting for before any sound comes out.
+
+Everything after the first chunk is made while the one before it is being played, so its length costs
+the listener nothing; the first one is the whole of the silence between asking and hearing. On a voice
+that renders at a quarter of real time an opening of sixty characters is about half a second, and a
+sentence of ninety is about a second — which is the difference between an answer that begins and a
+page that appears to have missed the question. The cut is only ever taken at a clause break that is
+already in the text: a fragment ending nowhere in particular is read as if it ended, and that is worse
+than the wait."""
 
 RULE_FSTS = ("phone.fst", "date.fst", "number.fst")
 """The text-normalisation rules a lexicon-phonemised voice ships, in the order sherpa wants them: how a
@@ -225,11 +236,30 @@ def _cut_long(part: str) -> list[str]:
     return out
 
 
+def _open_sooner(first: str) -> list[str]:
+    """The opening chunk, cut at a clause break if that makes the first sound arrive sooner.
+
+    One cut, at the last comma, semicolon or dash that leaves a fragment worth speaking and still
+    inside :data:`OPENING_CHARS`. Where the sentence has no such break — and many short ones do not —
+    it is left whole rather than broken somewhere a reader would hear as a mistake.
+    """
+    if len(first) <= OPENING_CHARS:
+        return [first]
+    window = first[:OPENING_CHARS]
+    cut = max(window.rfind(", "), window.rfind("; "), window.rfind(" — "), window.rfind(": "))
+    if cut < MIN_SENTENCE_CHARS:
+        return [first]
+    head, tail = first[:cut + 1].strip(), first[cut + 1:].strip()
+    return [head, tail] if tail else [first]
+
+
 def sentences(text: str) -> list[str]:
     """The text as the chunks it will be spoken in, in order.
 
     A short fragment is carried into the next chunk rather than spoken alone: every chunk is a model
     call and a clip boundary, and "Yes." as its own clip is an audible stutter for three characters.
+    The first chunk is the exception and is made *shorter* where the text allows it, because it is the
+    only one the listener waits through in silence.
     """
     parts: list[str] = []
     for raw in SENTENCE_END.split(text):
@@ -242,7 +272,7 @@ def sentences(text: str) -> list[str]:
             out[-1] = f"{out[-1]} {piece}"
         else:
             out.append(piece)
-    return out
+    return _open_sooner(out[0]) + out[1:] if out else out
 
 
 # -- audio ------------------------------------------------------------------------------------
@@ -322,13 +352,17 @@ class TtsEngine:
         audio = self.tts.generate(body, sid=self.speaker_id(speaker), speed=rate)
         return to_pcm16(audio.samples)
 
-    def pieces(self, text: str, *, speaker: str | int = "", speed: float = 1.0) -> Iterator[bytes]:
+    def pieces(self, body: str, *, speaker: str | int = "", speed: float = 1.0) -> Iterator[bytes]:
         """The text as samples, a sentence at a time, in order. Blocking; holds the lock per sentence.
+
+        ``body`` is text :func:`spoken` has already been through — the caller has it in hand and
+        applying it twice is work for nothing and a trap the moment a rule in there stops being
+        idempotent.
 
         The lock is taken and released per sentence rather than held across the whole text, so a long
         answer being read aloud does not block the sample the operator just asked to hear.
         """
-        for piece in sentences(spoken(text)):
+        for piece in sentences(body):
             with self.lock:
                 chunk = self.render(piece, speaker=speaker, speed=speed)
             if chunk:
@@ -345,21 +379,38 @@ class TtsEngine:
 
         return await asyncio.to_thread(run), self.sample_rate
 
-    async def stream(self, text: str, *, speaker: str | int = "", speed: float = 1.0):  # type: ignore[no-untyped-def]
+    async def stream(
+        self,
+        text: str,
+        *,
+        speaker: str | int = "",
+        speed: float = 1.0,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> AsyncIterator[bytes]:
         """The same audio, yielded a sentence at a time as each is finished.
 
         Each sentence is synthesised on a worker thread and handed over before the next is begun, so
         the caller has the first words after one sentence's work rather than after the whole text's.
+
+        ``cancelled`` is asked at every sentence boundary, and the generator being closed — which is
+        what a client disconnecting does to it — stops it at the same place. Either way the work that
+        is abandoned is one sentence's, and the lock is never held across the gap: a request nobody is
+        listening to any more cannot keep the next one waiting.
         """
         body = spoken(text)
         if len(body) > MAX_TEXT_CHARS:
             raise TtsError(f"this is {len(body)} characters to read aloud; {MAX_TEXT_CHARS} is the most at once")
         for piece in sentences(body):
+            if cancelled is not None and cancelled():
+                return
+
             def run(part: str = piece) -> bytes:
                 with self.lock:
                     return self.render(part, speaker=speaker, speed=speed)
 
             chunk = await asyncio.to_thread(run)
+            if cancelled is not None and cancelled():
+                return
             if chunk:
                 yield chunk
 
@@ -376,6 +427,8 @@ class TtsCache:
         self._key: tuple[str, int] | None = None
         self._lock = asyncio.Lock()
         self._fields = threading.Lock()
+        self._generation = 0
+        """Bumped by every :meth:`drop`. A load that finishes after one publishes nothing."""
 
     async def get(self, voice: TtsVoice, directory: Path, *, threads: int) -> TtsEngine:
         key = (voice.id, threads)
@@ -385,9 +438,17 @@ class TtsCache:
                     return self._engine
                 self._engine = None
                 self._key = None
+                mine = self._generation
             logger.warning("loading local voice %s (%d threads)", voice.id, threads)
             engine = await asyncio.to_thread(TtsEngine, voice, directory, threads=threads)
             with self._fields:
+                if self._generation != mine:
+                    # The voice was deleted or swapped while this was loading. The caller still gets
+                    # what it asked for — the request is already in flight and a half-spoken answer
+                    # helps nobody — but nothing resident is left behind pointing at a voice the
+                    # operator has since said they do not want.
+                    logger.warning("local voice %s finished loading after it was dropped; not keeping it", voice.id)
+                    return engine
                 self._engine, self._key = engine, key
             return engine
 
@@ -400,11 +461,13 @@ class TtsCache:
         """Let go of the voice — the operator deleted it or chose another.
 
         Synchronous, because it is called from ``save_config`` and from the delete endpoint, neither of
-        which should have to be async for this. The fields are guarded by a threading lock as well as
-        the async one, so a drop arriving during a load waits rather than clearing the reference the
-        loader is about to write.
+        which should have to be async for this. A drop cannot wait for a load it arrives in the middle
+        of — the whole point of it is to be answerable now — so it marks the generation instead, and a
+        loader that comes back into a newer generation hands its engine to its own caller and leaves
+        the cache empty rather than writing over the drop.
         """
         with self._fields:
+            self._generation += 1
             self._engine = None
             self._key = None
 
@@ -416,6 +479,7 @@ __all__ = [
     "MAX_SPEED",
     "MAX_TEXT_CHARS",
     "MIN_SPEED",
+    "OPENING_CHARS",
     "Files",
     "TtsCache",
     "TtsEngine",

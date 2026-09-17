@@ -53,7 +53,9 @@ export type Listener = {
 export type ListenerHandlers = {
   onInterim: (text: string) => void;
   onFinal: (text: string) => void;
-  onSpeechStart: () => void;
+  /** Speech has begun. The level is passed where the listener measures one; a recogniser's own
+   *  voice activity detector reports nothing but the fact, and passes nothing. */
+  onSpeechStart: (level?: number) => void;
   onError: (message: string) => void;
   /** The microphone's loudness, 0 to about 1, as often as the listener has it. Drives the orb. */
   onLevel?: (level: number) => void;
@@ -182,7 +184,7 @@ export function createRecorder(h: ListenerHandlers & { onUtterance: (blob: Blob)
       h.onLevel?.(level);
       const now = Date.now();
       if (level > SILENCE_LEVEL) {
-        if (!speaking) h.onSpeechStart();
+        if (!speaking) h.onSpeechStart(level);
         speaking = true;
         quietSince = 0;
         h.onInterim("…");
@@ -292,64 +294,196 @@ function createSpeechLevel(audio: HTMLAudioElement, opts: { server: boolean; onL
   };
 }
 
+/** What a local voice answers with: a run of length-prefixed clips, one per sentence. */
+const SEQUENCE_TYPE = "application/x-speech-sequence";
+const LENGTH_BYTES = 4;
+
+/** Join two byte runs. Called once per network read, on buffers the size of a sentence of Opus. */
+function joined(head: Uint8Array<ArrayBuffer>, tail: Uint8Array): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(head.length + tail.length);
+  out.set(head, 0);
+  out.set(tail, head.length);
+  return out;
+}
+
 /**
- * One queue, one player. Sentences arrive from the server faster than they are read out, so each is
- * fetched (or synthesised) as it arrives and played in the order it came; cancelling drops the lot,
- * including the request in flight, whose result is thrown away rather than played after the barge-in.
+ * One queue, one player, and an answer that starts before it has been made.
+ *
+ * A local voice answers `/api/voice/tts` with its sentences as they are synthesised rather than with
+ * one finished file, so the clip for the first sentence is turned into audio and played while the
+ * third is still being rendered on the server. That is the difference between hearing an answer begin
+ * half a second after asking and waiting out the whole paragraph in silence. An endpoint answers with
+ * one file as it always did, and that path is unchanged.
+ *
+ * Cancelling drops the lot: the queue, the clips already fetched, the clip playing, and the request in
+ * flight — which is aborted rather than read to the end, so the server stops synthesising too.
  */
 export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking: (on: boolean) => void; onLevel?: (level: number) => void }): Speaker {
   const audio = new Audio();
   audio.preload = "auto";
   let generation = 0;
   let queue: string[] = [];
-  let playing = false;
+  let pumping = false;
+  let inflight: AbortController | null = null;
+  /** Ends whatever `play` is waiting on, so cancelling never leaves the pump hanging on a clip. */
+  let release: (() => void) | null = null;
   const level = createSpeechLevel(audio, opts);
 
-  const done = () => {
-    playing = false;
-    if (queue.length) void next();
-    else {
-      level.stop();
-      opts.onSpeaking(false);
-    }
-  };
+  /** Play one clip and resolve when it has finished, failed, or been cancelled. Always revokes. */
+  const play = (url: string, mine: number) =>
+    new Promise<void>((resolve) => {
+      if (mine !== generation) {
+        URL.revokeObjectURL(url);
+        return resolve();
+      }
+      const finish = () => {
+        release = null;
+        audio.onended = null;
+        audio.onerror = null;
+        URL.revokeObjectURL(url);
+        resolve();
+      };
+      release = finish;
+      audio.onended = finish;
+      audio.onerror = finish;
+      audio.src = url;
+      void audio.play().catch(finish);
+    });
 
-  const next = async () => {
-    const mine = generation;
-    const text = queue.shift();
-    if (text === undefined) return done();
-    playing = true;
-    opts.onSpeaking(true);
-    level.start();
-    if (!opts.server) {
+  /** The browser's own synthesiser, which takes the text and gives nothing back but an end event. */
+  const speakHere = (text: string, mine: number) =>
+    new Promise<void>((resolve) => {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = opts.lang;
       const match = window.speechSynthesis.getVoices().find((v) => v.lang.toLowerCase().startsWith(opts.lang.slice(0, 2).toLowerCase()));
       if (match) utterance.voice = match;
-      utterance.onend = () => mine === generation && done();
-      utterance.onerror = () => mine === generation && done();
+      const finish = () => {
+        release = null;
+        resolve();
+      };
+      release = finish;
+      utterance.onend = finish;
+      utterance.onerror = finish;
       window.speechSynthesis.speak(utterance);
-      return;
-    }
+    });
+
+  /** One piece of text from the server: either a sequence of sentences, or one whole file. */
+  const speakThere = async (text: string, mine: number) => {
+    const controller = new AbortController();
+    inflight = controller;
+    let response: Response;
     try {
-      const response = await fetch("/api/voice/tts", { method: "POST", headers: { "Content-Type": "application/json", ...api.authHeaders() }, body: JSON.stringify({ text }) });
-      if (mine !== generation) return;
-      if (!response.ok) throw new Error(String(response.status));
-      const url = URL.createObjectURL(await response.blob());
-      if (mine !== generation) return URL.revokeObjectURL(url);
-      audio.src = url;
-      audio.onended = () => {
-        URL.revokeObjectURL(url);
-        if (mine === generation) done();
-      };
-      audio.onerror = () => {
-        URL.revokeObjectURL(url);
-        if (mine === generation) done();
-      };
-      await audio.play();
+      response = await fetch("/api/voice/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...api.authHeaders() },
+        body: JSON.stringify({ text }),
+        signal: controller.signal,
+      });
     } catch {
-      if (mine === generation) done();
+      return; // Aborted by a barge-in, or the connection went; either way there is nothing to play.
     }
+    if (mine !== generation || !response.ok || !response.body) return;
+    if (!(response.headers.get("content-type") ?? "").startsWith(SEQUENCE_TYPE)) {
+      const url = URL.createObjectURL(await response.blob());
+      return play(url, mine);
+    }
+    const type = response.headers.get("x-speech-media-type") || "audio/ogg";
+    const reader = response.body.getReader();
+    // The reader runs ahead of the player: a sentence is fetched while the one before it is being
+    // heard, which is the whole reason the server sends them separately.
+    const ready: string[] = [];
+    let reading = true;
+    let wake: (() => void) | null = null;
+    const nudge = () => {
+      const w = wake;
+      wake = null;
+      w?.();
+    };
+    void (async () => {
+      let buffer = new Uint8Array(new ArrayBuffer(0));
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done || mine !== generation) break;
+          buffer = joined(buffer, value);
+          for (;;) {
+            if (buffer.length < LENGTH_BYTES) break;
+            const size = new DataView(buffer.buffer, buffer.byteOffset, LENGTH_BYTES).getUint32(0);
+            if (buffer.length < LENGTH_BYTES + size) break;
+            ready.push(URL.createObjectURL(new Blob([buffer.slice(LENGTH_BYTES, LENGTH_BYTES + size)], { type })));
+            buffer = buffer.slice(LENGTH_BYTES + size);
+            nudge();
+          }
+        }
+      } catch {
+        /* the fetch was aborted, or the stream dropped: what arrived is still playable */
+      } finally {
+        reading = false;
+        nudge();
+      }
+    })();
+    for (;;) {
+      if (mine !== generation) break;
+      const url = ready.shift();
+      if (url === undefined) {
+        if (!reading) break;
+        await new Promise<void>((r) => {
+          wake = r;
+        });
+        continue;
+      }
+      await play(url, mine);
+    }
+    controller.abort();
+    for (const url of ready) URL.revokeObjectURL(url);
+    ready.length = 0;
+  };
+
+  /** Work through the queue one piece of text at a time, and report speaking only around real audio. */
+  const pump = async () => {
+    if (pumping) return;
+    pumping = true;
+    const mine = generation;
+    opts.onSpeaking(true);
+    level.start();
+    try {
+      while (queue.length && mine === generation) {
+        const text = queue.shift()!;
+        if (opts.server) await speakThere(text, mine);
+        else await speakHere(text, mine);
+      }
+    } finally {
+      pumping = false;
+      if (mine === generation) {
+        level.stop();
+        opts.onSpeaking(false);
+      }
+    }
+  };
+
+  /** Everything cancelling has to undo, in one place: `cancel` and `stop` differ only in what they say. */
+  const halt = () => {
+    generation += 1;
+    queue = [];
+    inflight?.abort();
+    inflight = null;
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      /* no synthesiser */
+    }
+    audio.pause();
+    const url = audio.currentSrc || audio.src;
+    audio.removeAttribute("src");
+    audio.onended = null;
+    audio.onerror = null;
+    // The element is not reliable about firing anything after a pause, and the handler that would
+    // have revoked this URL is the one just taken off it, so it is revoked here by hand.
+    if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+    release?.();
+    release = null;
+    level.stop();
+    opts.onSpeaking(false);
   };
 
   return {
@@ -357,22 +491,9 @@ export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking:
       const body = text.trim();
       if (!body) return;
       queue.push(body);
-      if (!playing) void next();
+      void pump();
     },
-    cancel: () => {
-      generation += 1;
-      queue = [];
-      playing = false;
-      try {
-        window.speechSynthesis.cancel();
-      } catch {
-        /* no synthesiser */
-      }
-      audio.pause();
-      audio.removeAttribute("src");
-      level.stop();
-      opts.onSpeaking(false);
-    },
+    cancel: halt,
     unlock: () => {
       // A muted play() inside the tap is what buys the element the right to play later, on iOS.
       audio.muted = true;
@@ -391,21 +512,9 @@ export function createSpeaker(opts: { server: boolean; lang: string; onSpeaking:
         /* no synthesiser */
       }
     },
-    stop: () => {
-      generation += 1;
-      queue = [];
-      playing = false;
-      audio.pause();
-      try {
-        window.speechSynthesis.cancel();
-      } catch {
-        /* no synthesiser */
-      }
-      // Unmount goes through here, so the phase must come back down with it: a remount that starts in
-      // "speaking" never leaves it, because nothing is playing to end.
-      level.stop();
-      opts.onSpeaking(false);
-    },
+    // Unmount goes through here, so the phase must come back down with it: a remount that starts in
+    // "speaking" never leaves it, because nothing is playing to end.
+    stop: halt,
   };
 }
 
@@ -496,6 +605,7 @@ export type VoiceEvent =
   | { type: "done" }
   | { type: "agents"; agents: AgentNews[] }
   | { type: "speaking"; on: boolean }
+  | { type: "barge" }
   | { type: "engine"; engine: Partial<EngineState> }
   | { type: "problem"; message: string }
   | { type: "cleared" };
@@ -568,6 +678,11 @@ export function voiceReducer(state: VoiceUi, event: VoiceEvent): VoiceUi {
     case "speaking":
       if (event.on) return { ...state, phase: "speaking" };
       return state.phase === "speaking" ? { ...state, phase: resting(state) } : state;
+    case "barge":
+      // The operator talked over the answer. What was being read out is abandoned where it stopped —
+      // the sentences already said stay on the screen, because they were said — and the page goes
+      // back to listening in the same breath rather than waiting for the speaker to report itself.
+      return state.phase === "speaking" ? { ...state, partial: "", phase: resting(state) } : state;
     case "engine": {
       const engine = { ...state.engine, ...event.engine };
       const next = { ...state, engine };
