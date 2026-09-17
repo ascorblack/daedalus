@@ -16,8 +16,10 @@ async function refresh() {
     el("alert").hidden = false;
     return;
   }
-  el("docker").textContent = status.docker ? status.docker : "not available";
+  // In native mode there is no Docker to report and the same tile says what the agent runs on.
+  el("docker").textContent = status.mode === "native" ? "this machine" : status.docker || "not available";
   el("containers").textContent = status.running + " running";
+  if (el("ports")) el("ports").textContent = status.ports || "none yet";
   el("telegram").textContent = status.telegram ? "on" : "off — browser only";
   el("appurl").textContent = status.app_url;
   el("appurl").href = status.app_url;

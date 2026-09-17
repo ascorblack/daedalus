@@ -217,6 +217,19 @@ func safeJoin(dir, name string) (string, error) {
 	return filepath.Join(dir, filepath.FromSlash(clean[1:])), nil
 }
 
+// gitRunner runs git against one checkout under the data folder. There are two of them: Docker mode
+// runs git inside the agent's own image, so a host with no git still gets a checkout with a history;
+// native mode runs the git in the portable runtime. Everything that makes a checkout is written
+// against this one signature, so neither path has a copy of the other's steps.
+type gitRunner func(ctx context.Context, name string, args ...string) (string, error)
+
+// dockerGit is the Docker-mode runner.
+func dockerGit(p Paths) gitRunner {
+	return func(ctx context.Context, name string, args ...string) (string, error) {
+		return runDocker(ctx, gitArgs(p, append([]string{"-C", "/work/" + name}, args...)...)...)
+	}
+}
+
 // gitArgs runs git inside the agent's own container image: git is not assumed to be installed on
 // the host, and that image is there by definition — it is the one the stack runs.
 func gitArgs(p Paths, args ...string) []string {
@@ -235,30 +248,29 @@ func gitArgs(p Paths, args ...string) []string {
 // is what local self-development works against — the agent commits, and a bad commit is undone by
 // going back to the one before it — and an update is the next commit on top, so the history stays
 // linear and nothing the agent did is thrown away by a fetch.
-func commitAll(ctx context.Context, p Paths, name, message string) error {
-	if _, err := runDocker(ctx, gitArgs(p, "-C", "/work/"+name, "add", "-A")...); err != nil {
+func commitAll(ctx context.Context, git gitRunner, name, message string) error {
+	if _, err := git(ctx, name, "add", "-A"); err != nil {
 		return err
 	}
-	pending, err := runDocker(ctx, gitArgs(p, "-C", "/work/"+name, "status", "--porcelain")...)
+	pending, err := git(ctx, name, "status", "--porcelain")
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(pending) == "" {
 		return nil
 	}
-	_, err = runDocker(ctx, gitArgs(p,
-		"-C", "/work/"+name,
+	_, err = git(ctx, name,
 		"-c", "user.name=daedalus-desktop",
 		"-c", "user.email=daedalus-desktop@localhost",
-		"commit", "-q", "-m", message)...)
+		"commit", "-q", "-m", message)
 	return err
 }
 
 // removeTracked deletes everything the last commit holds, so files dropped upstream do not survive
 // an update. Untracked and ignored files — the .env, a virtualenv, whatever a session left — are
 // not touched, which is the difference between this and emptying the folder.
-func removeTracked(ctx context.Context, p Paths, dir, name string) error {
-	listing, err := runDocker(ctx, gitArgs(p, "-C", "/work/"+name, "ls-files", "-z")...)
+func removeTracked(ctx context.Context, git gitRunner, dir, name string) error {
+	listing, err := git(ctx, name, "ls-files", "-z")
 	if err != nil {
 		return err
 	}
@@ -306,7 +318,7 @@ func repos(p Paths) []repo {
 
 // EnsureRepos makes what is missing. An existing checkout is left as it is — it may hold the
 // agent's own work in progress — and is only moved by Update.
-func EnsureRepos(ctx context.Context, p Paths, log func(string, ...any)) error {
+func EnsureRepos(ctx context.Context, p Paths, git gitRunner, log func(string, ...any)) error {
 	if err := p.EnsureDirs(); err != nil {
 		return err
 	}
@@ -325,10 +337,10 @@ func EnsureRepos(ctx context.Context, p Paths, log func(string, ...any)) error {
 		if err := unpackTarball(archive, r.dir); err != nil {
 			return err
 		}
-		if _, err := runDocker(ctx, gitArgs(p, "-C", "/work/"+r.name, "init", "-q", "-b", branch)...); err != nil {
+		if _, err := git(ctx, r.name, "init", "-q", "-b", branch); err != nil {
 			return err
 		}
-		if err := commitAll(ctx, p, r.name, "the published "+branch); err != nil {
+		if err := commitAll(ctx, git, r.name, "the published "+branch); err != nil {
 			return err
 		}
 	}
@@ -337,7 +349,7 @@ func EnsureRepos(ctx context.Context, p Paths, log func(string, ...any)) error {
 
 // UpdateRepos moves both checkouts to what is published, as a commit on top of what they hold. The
 // agent's own merged work arrives this way, and so does everything else in the published tree.
-func UpdateRepos(ctx context.Context, p Paths, log func(string, ...any)) error {
+func UpdateRepos(ctx context.Context, p Paths, git gitRunner, log func(string, ...any)) error {
 	for _, r := range repos(p) {
 		if !exists(r.dir) {
 			continue
@@ -347,13 +359,13 @@ func UpdateRepos(ctx context.Context, p Paths, log func(string, ...any)) error {
 		if err != nil {
 			return err
 		}
-		if err := removeTracked(ctx, p, r.dir, r.name); err != nil {
+		if err := removeTracked(ctx, git, r.dir, r.name); err != nil {
 			return err
 		}
 		if err := unpackTarball(archive, r.dir); err != nil {
 			return err
 		}
-		if err := commitAll(ctx, p, r.name, "the published "+branch); err != nil {
+		if err := commitAll(ctx, git, r.name, "the published "+branch); err != nil {
 			return err
 		}
 	}

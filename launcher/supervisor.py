@@ -25,6 +25,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -40,6 +41,12 @@ CORE_REPO = Path(os.environ.get("DAEDALUS_CORE_REPO", "/srv/protocore-exp"))
 STATE = Path(os.environ.get("DAEDALUS_STATE", "/srv/state"))
 WORKSPACES = Path(os.environ.get("DAEDALUS_WORKSPACES", "/srv/workspaces"))
 SOCKET = Path(os.environ.get("DAEDALUS_SUPERVISOR_SOCKET", "/run/daedalus/supervisor.sock"))
+SUPERVISOR_TCP = os.environ.get("DAEDALUS_SUPERVISOR_TCP", "").strip()
+"""``host:port`` to listen on instead of the socket, where the platform has no unix sockets (Windows).
+One or the other: the bot is told whichever this supervisor really opened, so the two cannot disagree."""
+POSIX = os.name != "nt"
+"""Whether the platform has process groups, signals and uids. Windows has none of the three, and each
+of them is used below for something that has a different answer there rather than no answer."""
 BOT_CMD = os.environ.get("DAEDALUS_BOT_CMD", "uv run --frozen python -m daedalus serve")
 BAKED_APP = Path(os.environ.get("DAEDALUS_BAKED_APP", "/opt/miniapp-dist"))
 """The Mini App bundle built into the image. The runtime image carries no Node, so a checkout that
@@ -141,6 +148,7 @@ def bot_env() -> dict[str, str]:
             "STATE_DIR": str(STATE),
             "WORKSPACES_DIR": str(WORKSPACES),
             "SUPERVISOR_SOCKET": str(SOCKET),
+            "SUPERVISOR_TCP": SUPERVISOR_TCP,
         }
     )
     return env
@@ -196,7 +204,12 @@ def git(repo: Path, *args: str) -> tuple[int, str]:
 
 def restore_owner(repo: Path) -> None:
     """Keep the checkout owned by whoever owns its root: the supervisor runs as root on a
-    host-mounted repository, and files it rewrites must stay editable from the host."""
+    host-mounted repository, and files it rewrites must stay editable from the host.
+
+    Natively there is nothing to restore — the supervisor is the operator's own process and writes
+    the operator's own files — and on Windows there are no uids to restore them to."""
+    if not POSIX:
+        return
     try:
         st = repo.stat()
     except OSError:
@@ -487,9 +500,29 @@ def build_app_if_missing(repo: Path) -> None:
         restore_owner(repo)
 
 
+def end_tree(pid: int, *, hard: bool) -> None:
+    """Signal the bot and everything it started.
+
+    On a POSIX system that is the process group, which the bot was started in one of. Windows has no
+    process groups to signal, so the tree is walked by ``taskkill`` — the nearest thing the platform
+    has, and the only one that reaches a tool the bot started.
+    """
+    if POSIX:
+        os.killpg(pid, signal.SIGKILL if hard else signal.SIGTERM)
+        return
+    args = ["taskkill", "/T", "/PID", str(pid)]
+    if hard:
+        args.insert(1, "/F")
+    run(args, timeout=60)
+
+
 def reap_zombies(keep: set[int]) -> int:
     """Collect children the bot left behind (sandbox wrappers reparented to PID 1) — by pid, never with a
     wait on any child, so the bot process asyncio itself waits on is not taken from under it."""
+    if not Path("/proc").is_dir():
+        # A zombie is a Linux idea reached through /proc. macOS and Windows reap a child when it is
+        # waited on, which asyncio already does, and there is nothing here for this to collect.
+        return 0
     reaped = 0
     for entry in os.listdir("/proc"):
         if not entry.isdigit() or int(entry) in keep:
@@ -591,9 +624,17 @@ class Supervisor:
 
     async def start_child(self) -> None:
         install_ssh()
-        self.child = await asyncio.create_subprocess_exec(
-            "bash", "-lc", BOT_CMD, cwd=str(BOT_REPO), env=bot_env(), start_new_session=True
-        )
+        if POSIX:
+            self.child = await asyncio.create_subprocess_exec(
+                "bash", "-lc", BOT_CMD, cwd=str(BOT_REPO), env=bot_env(), start_new_session=True
+            )
+        else:
+            # Windows has no login shell to hand a command line to, and MinGit's sh is not one
+            # either: the command is split here and the program is started directly, in a process
+            # group of its own so that stopping it stops what it started.
+            self.child = await asyncio.create_subprocess_exec(
+                *shlex.split(BOT_CMD, posix=False), cwd=str(BOT_REPO), env=bot_env(), creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+            )
         self.running_revision, self.running_core = head(BOT_REPO), head(CORE_REPO)
         log(f"bot started pid={self.child.pid} bot={self.running_revision[:10]} core={self.running_core[:10]}")
 
@@ -602,7 +643,7 @@ class Supervisor:
         if child is None or child.returncode is not None:
             return
         try:
-            os.killpg(child.pid, signal.SIGTERM)
+            end_tree(child.pid, hard=False)
         except ProcessLookupError:
             return
         try:
@@ -610,7 +651,7 @@ class Supervisor:
         except TimeoutError:
             log("bot did not exit in time; killing")
             try:
-                os.killpg(child.pid, signal.SIGKILL)
+                end_tree(child.pid, hard=True)
             except ProcessLookupError:
                 pass
             await child.wait()
@@ -951,7 +992,8 @@ class Supervisor:
                 os.killpg(child.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        run(["pkill", "-9", "-f", "python[0-9.]* -m daedalus"], timeout=10)
+        if POSIX:
+            run(["pkill", "-9", "-f", "python[0-9.]* -m daedalus"], timeout=10)
         log("PANIC: process tree killed")
         return "killed everything; the bot restarts in a few seconds"
 
@@ -997,10 +1039,22 @@ class Supervisor:
             writer.close()
 
     async def serve_socket(self) -> None:
-        SOCKET.parent.mkdir(parents=True, exist_ok=True)
-        SOCKET.unlink(missing_ok=True)
-        server = await asyncio.start_unix_server(self.handle, path=str(SOCKET))
-        os.chmod(SOCKET, 0o660)
+        """Listen for commands: on a unix socket, or on the loopback interface where there are none.
+
+        The socket is the better channel and is used wherever it exists: it is a file, so the
+        operating system's own permissions decide who may ask for a restart. A loopback port has no
+        owner, so it is bound to 127.0.0.1 and to nothing else — every process of every user on the
+        machine can reach it, and that is stated in the README rather than hidden here.
+        """
+        if SUPERVISOR_TCP or not POSIX:
+            host, _, port = (SUPERVISOR_TCP or "127.0.0.1:8769").rpartition(":")
+            server = await asyncio.start_server(self.handle, host or "127.0.0.1", int(port))
+            log(f"listening on {host or '127.0.0.1'}:{port}")
+        else:
+            SOCKET.parent.mkdir(parents=True, exist_ok=True)
+            SOCKET.unlink(missing_ok=True)
+            server = await asyncio.start_unix_server(self.handle, path=str(SOCKET))
+            os.chmod(SOCKET, 0o660)
         async with server:
             await server.serve_forever()
 
@@ -1053,7 +1107,12 @@ async def main() -> int:
         asyncio.ensure_future(supervisor.stop_child())
 
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, _terminate)
+        try:
+            loop.add_signal_handler(sig, _terminate)
+        except NotImplementedError:
+            # Windows proactor loops carry no signal handlers; the launcher ends this process by
+            # ending its tree, which is what a stop there means anyway.
+            signal.signal(sig, lambda *_: _terminate())
     GOOD_DIR.mkdir(parents=True, exist_ok=True)
     if not load_history():
         record_good()

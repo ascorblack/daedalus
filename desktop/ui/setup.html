@@ -18,6 +18,19 @@
   <form method="post" action="/setup" class="card">
     <input type="hidden" name="csrf" value="{{.CSRF}}" />
     <section class="block">
+      <h2>How it runs on this machine</h2>
+      <p class="hint">Both run the same agent. The difference is what is around it, and it is worth a moment: it is the one answer here that is awkward to change later.</p>
+      <div class="modes">
+        <label class="mode"><input type="radio" name="mode" value="docker" {{if eq .Suggested "docker"}}checked{{end}} />
+          <span class="mode-name">Docker</span>
+          <span class="hint">The agent runs in a container with its own filesystem and its own network, so a command that goes wrong stops at the container&rsquo;s edge. It needs Docker Desktop &mdash; an application with a virtual machine behind it &mdash; and about half a gigabyte of images on top.</span></label>
+        <label class="mode"><input type="radio" name="mode" value="native" {{if eq .Suggested "native"}}checked{{end}} />
+          <span class="mode-name">Native</span>
+          <span class="hint">The agent runs as a process on this machine, out of a private folder of downloaded binaries: roughly 115&nbsp;MB to fetch, no Docker, and it starts in about a second. There is no container boundary &mdash; the agent&rsquo;s shell commands run as you. The approval gates, the path rules, the network allowlist and the spending caps all still apply; the wall behind them does not.</span></label>
+      </div>
+    </section>
+
+    <section class="block">
       <h2>A model to think with</h2>
       <p class="hint">One key is enough. Keys are written to <code>daedalus-secrets/keyproxy.env</code>, outside every folder the agent can read, and reach the provider through the key proxy — the agent process never holds one.</p>
       <div class="grid">
@@ -57,7 +70,7 @@
 
     <footer class="actions">
       <button type="submit" class="primary">Save and start</button>
-      <span class="hint">The first start downloads the images. They are several gigabytes: the agent's container carries a headless browser.</span>
+      <span class="hint">The first start downloads what the mode above needs &mdash; the images for Docker, the portable runtime for native &mdash; and then opens the app.</span>
     </footer>
   </form>
 </main>

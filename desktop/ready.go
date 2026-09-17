@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +33,16 @@ func AppURL(port string) string { return "http://127.0.0.1:" + port + "/app/" }
 // index page counts. The last status seen goes into the error: an API that answers 404 means the
 // container is up but the app was not built, which is a different problem from nothing listening.
 func WaitReady(ctx context.Context, port string, timeout time.Duration) error {
+	return waitReady(ctx, port, timeout, 2*time.Second)
+}
+
+// WaitReadyNative polls quickly: there is no image to pull and no virtual machine to wake, the whole
+// wait is the bot's own boot, and two seconds of poll interval is a third of it.
+func WaitReadyNative(ctx context.Context, port string, timeout time.Duration) error {
+	return waitReady(ctx, port, timeout, 200*time.Millisecond)
+}
+
+func waitReady(ctx context.Context, port string, timeout, interval time.Duration) error {
 	url := "http://127.0.0.1:" + port + "/app"
 	client := &http.Client{Timeout: 5 * time.Second}
 	deadline := time.Now().Add(timeout)
@@ -51,7 +63,7 @@ func WaitReady(ctx context.Context, port string, timeout time.Duration) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(interval):
 		}
 	}
 	return fmt.Errorf("the app at %s did not come up within %s (%s)", url, timeout, last)
@@ -68,6 +80,22 @@ func PairingURL(ctx context.Context, p Paths, telegram bool, after time.Time) st
 		return ""
 	}
 	return pairingFromFile(out, after)
+}
+
+// NativePairingURL reads the link the server left in the state directory, which in native mode is a
+// file the launcher can simply open. The same freshness rule as the container's: a link written
+// before this launcher brought the installation up has most likely been spent, and sending the
+// operator to a spent link is worse than sending them to the login screen.
+func NativePairingURL(p Paths, after time.Time) string {
+	path := filepath.Join(p.State, "pairing-url")
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	if !after.IsZero() && info.ModTime().Before(after.Truncate(time.Second)) {
+		return ""
+	}
+	return parsePairingURL(readFile(path))
 }
 
 // MintPairing asks the container for a fresh link. This is the only other way the launcher comes by

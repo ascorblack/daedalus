@@ -200,6 +200,24 @@ Every tool can be switched off per session from the app, and a **mode** (`quick`
 
 ## Run it
 
+Three ways, and the first two are the same program:
+
+| | What it needs | What it is |
+|---|---|---|
+| **Desktop, native** | nothing but the launcher | The agent runs as a process on your machine, out of a private folder the launcher fills with a pinned `uv`, a managed CPython, `rg` and the app's environment — about 115 MB to fetch, no Docker, ready in a second. There is no container boundary: `Exec` runs as you. |
+| **Desktop, Docker** | Docker Desktop or Docker Engine | The agent runs in a container with its own filesystem and its own network, from one published image. About 480 MB of images on top of Docker itself. |
+| **Server** | Docker with Compose, a checkout | What the rest of this section describes: the compose file, the checkouts, self-development against GitHub. |
+
+The first two are [`daedalus-desktop`](desktop/README.md): one binary, one folder, and a page of its
+own that asks which of the two you want and says plainly what each costs. `--mode native` or
+`--mode docker` answers it from a script instead.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ascorblack/daedalus/main/desktop/install.sh | sh
+```
+
+The rest of this section is the server install.
+
 Requirements: Docker with Compose, and at least one model API key **or** a ChatGPT / Claude Code / SuperGrok login on the host. **Telegram is optional**: with a bot token you get the chat as a front; without one the app in the browser is the whole interface.
 
 ```bash

@@ -1,0 +1,476 @@
+package main
+
+// The portable runtime is what a native installation has instead of an image: a folder under the
+// data directory holding the few binaries the agent cannot work without, each downloaded from its
+// publisher, checked against a hash written down here, and unpacked where nothing else on the
+// machine can see it. Nothing is installed system-wide, no package manager is run, and no PATH is
+// changed — uninstalling is deleting the folder.
+//
+// Every version below is pinned and every hash was read from the publisher's own checksum file at
+// the time it was written down. A download whose hash does not match is not used: it is deleted and
+// the start fails saying so, because a binary that is not the one that was pinned is not a binary
+// this installation runs.
+
+import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+// download is one archive the runtime is made of.
+type download struct {
+	name    string
+	version string
+	url     string
+	sha256  string
+	size    int64
+	// kind is "tar.gz" or "zip" — the two formats the standard library can open. Node publishes a
+	// smaller .tar.xz and it is deliberately not used: xz would be the module's second dependency,
+	// paid on every platform to save twenty megabytes on one optional extra.
+	kind string
+	// strip is how many leading path segments of every entry belong to the archive rather than to
+	// the tree inside it. Publishers wrap their trees in a folder named after the release.
+	strip int
+	// only, when it is not empty, is the whole of what is taken out of the archive: the runtime
+	// wants a binary, not a copy of the project's documentation and shell completions.
+	only []string
+	// exec names the entries that must come out executable. A tar carries its modes and a zip on
+	// Windows does not need them, but a zip unpacked on a POSIX machine does.
+	exec []string
+}
+
+// uvVersion and the tables below are the pinned runtime. Raising a version means replacing the
+// hashes with the ones the new release publishes, in the same commit: a version without its hash
+// is a download nobody checked.
+const (
+	uvVersion      = "0.12.15"
+	ripgrepVersion = "15.2.0"
+	nodeVersion    = "24.21.0"
+	minGitVersion  = "2.55.0.5"
+	// The tag the MinGit archives hang off; it spells the same release differently from the file names.
+	minGitTag     = "v2.55.0.windows.5"
+	pythonVersion = "3.12"
+)
+
+// uvDownloads: https://github.com/astral-sh/uv/releases/download/<version>/sha256.sum
+var uvDownloads = map[string]download{
+	"linux/amd64": {
+		name: "uv", version: uvVersion, kind: "tar.gz", strip: 1, only: []string{"uv"}, exec: []string{"uv"},
+		url:    "https://github.com/astral-sh/uv/releases/download/" + uvVersion + "/uv-x86_64-unknown-linux-gnu.tar.gz",
+		sha256: "f97935763c04be3e692460a7aaeaaab8fc3b78fcf8b389da820b38ae7423a638", size: 19443011,
+	},
+	"linux/arm64": {
+		name: "uv", version: uvVersion, kind: "tar.gz", strip: 1, only: []string{"uv"}, exec: []string{"uv"},
+		url:    "https://github.com/astral-sh/uv/releases/download/" + uvVersion + "/uv-aarch64-unknown-linux-gnu.tar.gz",
+		sha256: "0e9a3499b0587d449c9ff684c0160da607826e4af1cee220bc87f378702d3e08", size: 18654404,
+	},
+	"darwin/arm64": {
+		name: "uv", version: uvVersion, kind: "tar.gz", strip: 1, only: []string{"uv"}, exec: []string{"uv"},
+		url:    "https://github.com/astral-sh/uv/releases/download/" + uvVersion + "/uv-aarch64-apple-darwin.tar.gz",
+		sha256: "dc304b9ed1b24174572290fba60ac3f6fe63c73a671f0439e62a91375841964d", size: 16678128,
+	},
+	"darwin/amd64": {
+		name: "uv", version: uvVersion, kind: "tar.gz", strip: 1, only: []string{"uv"}, exec: []string{"uv"},
+		url:    "https://github.com/astral-sh/uv/releases/download/" + uvVersion + "/uv-x86_64-apple-darwin.tar.gz",
+		sha256: "e9ca61775532368fe518ab03e7a354c7ecab8ccb3c7d941c775fcc4a362b801b", size: 20292831,
+	},
+	"windows/amd64": {
+		name: "uv", version: uvVersion, kind: "zip", only: []string{"uv.exe"},
+		url:    "https://github.com/astral-sh/uv/releases/download/" + uvVersion + "/uv-x86_64-pc-windows-msvc.zip",
+		sha256: "477bd99a84e34891f2bd4c9152ddeb74e971accccbc59c0f0301f11f08a32d46", size: 17578593,
+	},
+	"windows/arm64": {
+		name: "uv", version: uvVersion, kind: "zip", only: []string{"uv.exe"},
+		url:    "https://github.com/astral-sh/uv/releases/download/" + uvVersion + "/uv-aarch64-pc-windows-msvc.zip",
+		sha256: "a37c8e96cb1260488c8510b64c848533a3a82a2fdf9e905de7c2700ceebf6437", size: 18880214,
+	},
+}
+
+// ripgrepDownloads: each release asset's own .sha256 file. The Linux builds are the musl ones: they
+// are static, so the one binary runs on every distribution the launcher may land on.
+var ripgrepDownloads = map[string]download{
+	"linux/amd64": {
+		name: "rg", version: ripgrepVersion, kind: "tar.gz", strip: 1, only: []string{"rg"}, exec: []string{"rg"},
+		url:    "https://github.com/BurntSushi/ripgrep/releases/download/" + ripgrepVersion + "/ripgrep-" + ripgrepVersion + "-x86_64-unknown-linux-musl.tar.gz",
+		sha256: "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c", size: 2265718,
+	},
+	"linux/arm64": {
+		name: "rg", version: ripgrepVersion, kind: "tar.gz", strip: 1, only: []string{"rg"}, exec: []string{"rg"},
+		url:    "https://github.com/BurntSushi/ripgrep/releases/download/" + ripgrepVersion + "/ripgrep-" + ripgrepVersion + "-aarch64-unknown-linux-musl.tar.gz",
+		sha256: "800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915", size: 1982561,
+	},
+	"darwin/arm64": {
+		name: "rg", version: ripgrepVersion, kind: "tar.gz", strip: 1, only: []string{"rg"}, exec: []string{"rg"},
+		url:    "https://github.com/BurntSushi/ripgrep/releases/download/" + ripgrepVersion + "/ripgrep-" + ripgrepVersion + "-aarch64-apple-darwin.tar.gz",
+		sha256: "3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4", size: 1764284,
+	},
+	"darwin/amd64": {
+		name: "rg", version: ripgrepVersion, kind: "tar.gz", strip: 1, only: []string{"rg"}, exec: []string{"rg"},
+		url:    "https://github.com/BurntSushi/ripgrep/releases/download/" + ripgrepVersion + "/ripgrep-" + ripgrepVersion + "-x86_64-apple-darwin.tar.gz",
+		sha256: "af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1", size: 1878284,
+	},
+	"windows/amd64": {
+		name: "rg", version: ripgrepVersion, kind: "zip", strip: 1, only: []string{"rg.exe"},
+		url:    "https://github.com/BurntSushi/ripgrep/releases/download/" + ripgrepVersion + "/ripgrep-" + ripgrepVersion + "-x86_64-pc-windows-msvc.zip",
+		sha256: "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5", size: 1789611,
+	},
+	"windows/arm64": {
+		name: "rg", version: ripgrepVersion, kind: "zip", strip: 1, only: []string{"rg.exe"},
+		url:    "https://github.com/BurntSushi/ripgrep/releases/download/" + ripgrepVersion + "/ripgrep-" + ripgrepVersion + "-aarch64-pc-windows-msvc.zip",
+		sha256: "e4abca10c3a64ebea742667dd7009449d49403db5460dd6873e389fa2945360f", size: 1640124,
+	},
+}
+
+// gitDownloads is Windows only, and it is MinGit — Git for Windows without the installer, the
+// documentation or the GUI. Everywhere else git is a program the machine already has: macOS ships
+// it with the Command Line Tools and every Linux desktop has it or is one package away, and a
+// second copy of it downloaded from a third party is a copy nobody maintains.
+//
+// Hashes: the release notes of https://github.com/git-for-windows/git/releases/tag/v<...>.
+var gitDownloads = map[string]download{
+	"windows/amd64": {
+		name: "git", version: minGitVersion, kind: "zip",
+		url:    "https://github.com/git-for-windows/git/releases/download/" + minGitTag + "/MinGit-" + minGitVersion + "-64-bit.zip",
+		sha256: "56d7b226b7693196cfc71fef26568f536c4a021ab6c37ff2db4287bed908e96e", size: 38989688,
+	},
+	"windows/arm64": {
+		name: "git", version: minGitVersion, kind: "zip",
+		url:    "https://github.com/git-for-windows/git/releases/download/" + minGitTag + "/MinGit-" + minGitVersion + "-arm64.zip",
+		sha256: "05843f9d6e60306c3ab886799e2c67200caab921571f10512df3493049179ddb", size: 37650057,
+	},
+}
+
+// nodeDownloads is an extra, not part of a first run: four skills shell out to npx and the Mini App
+// can be rebuilt with it, and an installation that does neither never pays for it.
+// Hashes: https://nodejs.org/dist/v<version>/SHASUMS256.txt.
+var nodeDownloads = map[string]download{
+	"linux/amd64": {
+		name: "node", version: nodeVersion, kind: "tar.gz", strip: 1,
+		url:    "https://nodejs.org/dist/v" + nodeVersion + "/node-v" + nodeVersion + "-linux-x64.tar.gz",
+		sha256: "6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff", size: 58088022,
+	},
+	"linux/arm64": {
+		name: "node", version: nodeVersion, kind: "tar.gz", strip: 1,
+		url:    "https://nodejs.org/dist/v" + nodeVersion + "/node-v" + nodeVersion + "-linux-arm64.tar.gz",
+		sha256: "724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5", size: 55000000,
+	},
+	"darwin/arm64": {
+		name: "node", version: nodeVersion, kind: "tar.gz", strip: 1,
+		url:    "https://nodejs.org/dist/v" + nodeVersion + "/node-v" + nodeVersion + "-darwin-arm64.tar.gz",
+		sha256: "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057", size: 52909993,
+	},
+	"darwin/amd64": {
+		name: "node", version: nodeVersion, kind: "tar.gz", strip: 1,
+		url:    "https://nodejs.org/dist/v" + nodeVersion + "/node-v" + nodeVersion + "-darwin-x64.tar.gz",
+		sha256: "1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097", size: 55000000,
+	},
+	"windows/amd64": {
+		name: "node", version: nodeVersion, kind: "zip", strip: 1,
+		url:    "https://nodejs.org/dist/v" + nodeVersion + "/node-v" + nodeVersion + "-win-x64.zip",
+		sha256: "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541", size: 37618919,
+	},
+	"windows/arm64": {
+		name: "node", version: nodeVersion, kind: "zip", strip: 1,
+		url:    "https://nodejs.org/dist/v" + nodeVersion + "/node-v" + nodeVersion + "-win-arm64.zip",
+		sha256: "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921", size: 36000000,
+	},
+}
+
+// platformKey is how the tables above are indexed.
+func platformKey(goos, goarch string) string { return goos + "/" + goarch }
+
+// pick reads a table for this machine. A platform that is not in a table is not a failure of the
+// download: it is a platform the runtime has no pinned build for, and the caller says so in the
+// terms of the thing that is missing.
+func pick(table map[string]download, goos, goarch string) (download, error) {
+	d, ok := table[platformKey(goos, goarch)]
+	if !ok {
+		return download{}, fmt.Errorf("no pinned build for %s", platformKey(goos, goarch))
+	}
+	return d, nil
+}
+
+// downloadLimit is the wall between a redirect to something enormous and a full disk. The largest
+// pinned archive is MinGit at 39 MB.
+const downloadLimit = 512 << 20
+
+// fetchVerified downloads an archive and returns it only when its hash is the pinned one. The whole
+// archive is held in memory and checked before a single byte of it is written anywhere: a runtime
+// half-written from a download that turned out to be something else is worse than no runtime.
+func fetchVerified(ctx context.Context, d download) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, d.url, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: HTTP %d", d.url, response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, downloadLimit))
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(body)
+	if got := hex.EncodeToString(sum[:]); got != d.sha256 {
+		return nil, fmt.Errorf("%s is not what was pinned: sha256 %s, expected %s", d.url, got, d.sha256)
+	}
+	return body, nil
+}
+
+// stripName drops the leading segments that belong to the archive and returns the name the entry
+// has inside the tree. An entry with fewer segments than the archive wraps is the wrapper itself.
+func stripName(name string, strip int) string {
+	name = strings.TrimPrefix(path.Clean("/"+strings.TrimPrefix(name, "./")), "/")
+	for i := 0; i < strip; i++ {
+		_, rest, ok := strings.Cut(name, "/")
+		if !ok {
+			return ""
+		}
+		name = rest
+	}
+	return name
+}
+
+// wanted reports whether an entry is one of the ones to keep.
+func (d download) wanted(name string) bool {
+	if name == "" {
+		return false
+	}
+	if len(d.only) == 0 {
+		return true
+	}
+	for _, kept := range d.only {
+		if name == kept {
+			return true
+		}
+	}
+	return false
+}
+
+// executable reports whether an entry has to come out with the execute bit on however the archive
+// recorded it.
+func (d download) executable(name string) bool {
+	for _, e := range d.exec {
+		if name == e {
+			return true
+		}
+	}
+	return false
+}
+
+// unpackInto writes the wanted entries of an archive under dir. Entry names are cleaned and every
+// directory on the way is made one segment at a time without following a symbolic link — the same
+// care the repository tarballs are unpacked with, for the same reason.
+func unpackInto(d download, body []byte, dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	switch d.kind {
+	case "tar.gz":
+		return unpackTarInto(d, body, dir)
+	case "zip":
+		return unpackZipInto(d, body, dir)
+	default:
+		return fmt.Errorf("unknown archive kind %q", d.kind)
+	}
+}
+
+func unpackTarInto(d download, body []byte, dir string) error {
+	zipped, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer zipped.Close()
+	reader := tar.NewReader(zipped)
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		name := stripName(header.Name, d.strip)
+		if !d.wanted(name) || header.Typeflag != tar.TypeReg {
+			// Directories are made by the files that land in them and everything else a release
+			// archive carries — links, the documentation tree — is not part of the runtime.
+			continue
+		}
+		mode := os.FileMode(header.Mode).Perm()
+		if d.executable(name) {
+			mode |= 0o755
+		}
+		if err := writeEntry(dir, name, mode, reader); err != nil {
+			return err
+		}
+	}
+}
+
+func unpackZipInto(d download, body []byte, dir string) error {
+	archive, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return err
+	}
+	for _, entry := range archive.File {
+		name := stripName(entry.Name, d.strip)
+		if !d.wanted(name) || entry.FileInfo().IsDir() {
+			continue
+		}
+		mode := entry.Mode().Perm()
+		if mode == 0 {
+			mode = 0o644
+		}
+		if d.executable(name) || strings.HasSuffix(name, ".exe") {
+			mode |= 0o755
+		}
+		file, err := entry.Open()
+		if err != nil {
+			return err
+		}
+		err = writeEntry(dir, name, mode, file)
+		file.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeEntry puts one file in its place under dir.
+func writeEntry(dir, name string, mode os.FileMode, body io.Reader) error {
+	target, err := safeJoin(dir, name)
+	if err != nil {
+		return err
+	}
+	if err := ensureParents(dir, filepath.Dir(target)); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(target); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(target); err != nil {
+			return err
+		}
+	}
+	file, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(file, io.LimitReader(body, downloadLimit)); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	// A file that already existed keeps its old mode through O_CREATE, so the mode is set rather
+	// than asked for: a binary unpacked before a version bump must not stay unexecutable.
+	return os.Chmod(target, mode)
+}
+
+// installed reports whether this exact version of a tool is already unpacked, by the stamp written
+// beside the runtime after a successful install. The stamp carries the hash as well as the version:
+// a pinned build whose hash was corrected is a different build.
+func (p Paths) installed(d download) bool {
+	body, err := os.ReadFile(p.stamp(d.name))
+	return err == nil && strings.TrimSpace(string(body)) == d.version+" "+d.sha256
+}
+
+func (p Paths) stamp(name string) string { return filepath.Join(p.RuntimeStamps, name) }
+
+func (p Paths) writeStamp(d download) error {
+	if err := os.MkdirAll(p.RuntimeStamps, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p.stamp(d.name), []byte(d.version+" "+d.sha256+"\n"), 0o644)
+}
+
+// installTool downloads, checks and unpacks one archive, and does nothing at all when the pinned
+// version is already there. It returns how many bytes were downloaded, which is what the first-run
+// figure in the README is measured with.
+func installTool(ctx context.Context, p Paths, d download, dir string, log func(string, ...any)) (int64, error) {
+	if p.installed(d) {
+		return 0, nil
+	}
+	log("downloading %s %s (%.1f MB)", d.name, d.version, float64(d.size)/1e6)
+	body, err := fetchVerified(ctx, d)
+	if err != nil {
+		return 0, err
+	}
+	if err := unpackInto(d, body, dir); err != nil {
+		return 0, err
+	}
+	if err := p.writeStamp(d); err != nil {
+		return 0, err
+	}
+	return int64(len(body)), nil
+}
+
+// systemGit is the git already on this machine, or an empty string. macOS keeps it inside the
+// Command Line Tools, so `xcode-select -p` answering is what says it is really there: /usr/bin/git
+// exists on a Mac with no tools installed and prompts for them when it is run.
+func systemGit(goos string, lookPath func(string) (string, error), run func(string, ...string) error) string {
+	found, err := lookPath("git")
+	if err != nil {
+		return ""
+	}
+	if goos == "darwin" {
+		if err := run("xcode-select", "-p"); err != nil {
+			return ""
+		}
+	}
+	return found
+}
+
+// gitMissing is what an operator sees when native mode has no git to work with. git is how the
+// checkouts are made and how the agent's own changes are recorded, so this is a refusal, not a
+// warning, and it names the one command that fixes it rather than running a package manager itself.
+func gitMissing(goos string) error {
+	switch goos {
+	case "darwin":
+		return errors.New("native mode needs git, which on macOS comes with the Command Line Tools: run `xcode-select --install`, then start Daedalus again")
+	default:
+		return errors.New("native mode needs git: install it with your package manager (`sudo apt install git`, `sudo dnf install git`, `sudo pacman -S git`), then start Daedalus again")
+	}
+}
+
+// commandRuns is systemGit's probe: a command that exits 0.
+func commandRuns(name string, args ...string) error {
+	return exec.Command(name, args...).Run()
+}
+
+// EnsureGit resolves the git this installation uses: MinGit under the runtime folder on Windows,
+// the machine's own everywhere else.
+func EnsureGit(ctx context.Context, p Paths, log func(string, ...any)) (string, int64, error) {
+	if runtime.GOOS != "windows" {
+		if found := systemGit(runtime.GOOS, exec.LookPath, commandRuns); found != "" {
+			return found, 0, nil
+		}
+		return "", 0, gitMissing(runtime.GOOS)
+	}
+	d, err := pick(gitDownloads, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return "", 0, fmt.Errorf("git: %w", err)
+	}
+	bytes, err := installTool(ctx, p, d, p.RuntimeGit, log)
+	if err != nil {
+		return "", 0, err
+	}
+	return filepath.Join(p.RuntimeGit, "cmd", "git.exe"), bytes, nil
+}

@@ -775,7 +775,7 @@ class SelfDevelopment:
     async def restart_to_apply(self, reason: str) -> str:
         """Ask the supervisor to check the change in the checkout and restart onto it."""
         try:
-            return str(await supervisor_client.call(self.app.settings.supervisor_socket, "restart", reason=reason))
+            return str(await supervisor_client.call(self.app.settings.supervisor_address, "restart", reason=reason))
         except supervisor_client.SupervisorUnavailable as exc:
             return f"nothing here can restart the app ({exc}); close it and open it again to apply the change"
 
@@ -935,25 +935,25 @@ class SelfDevelopment:
 
     async def rebuild(self, reason: str) -> str:
         try:
-            return str(await supervisor_client.call(self.app.settings.supervisor_socket, "rebuild", reason=reason))
+            return str(await supervisor_client.call(self.app.settings.supervisor_address, "rebuild", reason=reason))
         except supervisor_client.SupervisorUnavailable as exc:
             return f"supervisor unavailable ({exc}); pull main and restart by hand"
 
     async def rollback(self, steps_back: int, reason: str = "") -> str:
         try:
-            return str(await supervisor_client.call(self.app.settings.supervisor_socket, "rollback", steps_back=steps_back))
+            return str(await supervisor_client.call(self.app.settings.supervisor_address, "rollback", steps_back=steps_back))
         except supervisor_client.SupervisorUnavailable as exc:
             return f"supervisor unavailable ({exc})"
 
     async def panic(self) -> str:
         try:
-            return str(await supervisor_client.call(self.app.settings.supervisor_socket, "panic"))
+            return str(await supervisor_client.call(self.app.settings.supervisor_address, "panic"))
         except supervisor_client.SupervisorUnavailable as exc:
             return f"supervisor unavailable ({exc})"
 
     async def supervisor_status(self) -> dict[str, Any] | None:
         try:
-            return dict(await supervisor_client.call(self.app.settings.supervisor_socket, "status"))
+            return dict(await supervisor_client.call(self.app.settings.supervisor_address, "status"))
         except (supervisor_client.SupervisorUnavailable, RuntimeError):
             return None
 

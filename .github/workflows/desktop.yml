@@ -135,6 +135,19 @@ jobs:
           merge-multiple: true
           path: desktop/dist/bin
 
+      # The app itself, built once and put in every archive. A native installation has no image to
+      # bake it into and may have no node to build it with, so without this the launcher would fetch
+      # a Node toolchain on a first run just to produce 1.7 MB of static files.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build the Mini App
+        run: |
+          cd miniapp
+          npm ci --no-audit --no-fund
+          npm run build
+          du -sh dist
+
       - name: Pack Linux and Windows
         working-directory: desktop
         run: |
@@ -142,14 +155,15 @@ jobs:
           # The tarball keeps the executable's mode, which is the whole point of shipping one: the
           # file comes out of it runnable, with nothing to chmod first. An artifact does not keep
           # that mode, so it is set again here.
+          cp -R ../miniapp/dist stage/miniapp-dist
           for arch in amd64 arm64; do
             cp "dist/bin/daedalus-desktop-linux-$arch" stage/daedalus-desktop
             chmod +x stage/daedalus-desktop
-            tar -czf "dist/archives/daedalus-desktop-linux-$arch.tar.gz" -C stage daedalus-desktop
+            tar -czf "dist/archives/daedalus-desktop-linux-$arch.tar.gz" -C stage daedalus-desktop miniapp-dist
             rm stage/daedalus-desktop
           done
           cp dist/bin/daedalus-desktop-windows-amd64.exe stage/daedalus-desktop.exe
-          (cd stage && zip -q ../dist/archives/daedalus-desktop-windows-amd64.zip daedalus-desktop.exe)
+          (cd stage && zip -qr ../dist/archives/daedalus-desktop-windows-amd64.zip daedalus-desktop.exe miniapp-dist)
           rm -rf stage
           ls -l dist/archives
 
@@ -163,7 +177,7 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           chmod +x dist/bin/daedalus-desktop-darwin-*
-          ./package-macos.sh "${{ github.ref_name }}" \
+          MINIAPP_DIST=../miniapp/dist ./package-macos.sh "${{ github.ref_name }}" \
             dist/bin/daedalus-desktop-darwin-amd64 \
             dist/bin/daedalus-desktop-darwin-arm64 \
             dist/app

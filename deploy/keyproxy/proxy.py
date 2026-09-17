@@ -544,9 +544,15 @@ def make_app() -> web.Application:
 
 def main() -> None:
     port = int(os.environ.get("KEYPROXY_PORT", "3200"))
+    # In a container every interface is the container's own private one, and the agent reaches this
+    # by service name over a network nothing else is on. On the operator's own machine "every
+    # interface" is the machine's, and a proxy that injects provider keys must not be one the local
+    # network can call: the launcher sets this to the loopback address.
+    host = os.environ.get("KEYPROXY_HOST", "").strip() or "0.0.0.0"
     if not upstreams():
         logger.warning("no upstream keys configured; every call will be refused")
-    web.run_app(make_app(), host="0.0.0.0", port=port, print=None, access_log=None)
+    logger.warning("listening on %s:%d", host, port)
+    web.run_app(make_app(), host=host, port=port, print=None, access_log=None)
 
 
 if __name__ == "__main__":

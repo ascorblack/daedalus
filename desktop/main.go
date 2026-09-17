@@ -9,11 +9,32 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
+
+// followFile is `tail -f` for one file, for the launcher's own logs command: the platforms this
+// runs on do not all have tail, and shelling out to one for twenty lines of Go is not worth the
+// dependency.
+func followFile(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("no log yet at %s: %w", path, err)
+	}
+	defer file.Close()
+	for {
+		if _, err := io.Copy(os.Stdout, file); err != nil {
+			return err
+		}
+		time.Sleep(time.Second)
+	}
+}
 
 // version is stamped at build time; a plain `go build` leaves it as it is.
 var version = "dev"
@@ -33,6 +54,9 @@ commands:
   open        open the app in the browser
   pair        print a fresh pairing link for signing in to the app
   uninstall   remove the containers, networks and volumes
+  install X   native mode only: fetch a runtime extra — "node" for the skills that
+              shell out to npx and for rebuilding the app, "browser" for the headless
+              Chromium the browser skills drive. Neither is part of a first run.
 
 A daedalus:// link may be given instead of a command — daedalus://open/<session-id> opens that
 conversation. A launcher that is already running is brought to the front and handed the link; a
@@ -41,6 +65,10 @@ second one never starts.
 flags:
   --data DIR  where the checkouts, the keys and the environment live
               (default: ./data, or data/ beside the app when run from Daedalus.app)
+  --mode M    docker or native. Docker puts the agent in a container; native runs it on
+              this machine out of a portable runtime the launcher downloads — lighter and
+              faster, with no container boundary. Asked once on the first run and
+              remembered; DAEDALUS_MODE does the same for a shell that sets it up once.
   --port N    the port the launcher's own page listens on (default: 8770)
   --setup     ask the setup questions even though the configuration exists
   --keep-data uninstall: keep the volumes and the data folder
@@ -59,6 +87,8 @@ type options struct {
 	command  string
 	link     string
 	data     string
+	extra    string
+	mode     Mode
 	port     int
 	setup    bool
 	keepData bool
@@ -84,9 +114,24 @@ func run(argv []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// Both signals, not only Ctrl+C. A native installation is stopped by the launcher going away,
+	// so a SIGTERM from a service manager, a shutdown or a `kill` has to reach the same code path
+	// that a Ctrl+C does — otherwise the launcher dies and leaves an agent running behind it.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	app := NewApp(paths)
+	mode, err := ResolveMode(paths, opts.mode)
+	if err != nil {
+		return err
+	}
+	app.SetMode(mode)
+	if opts.mode != ModeUnset && StoredMode(paths) == ModeUnset {
+		// A mode named on the command line of a first run is the choice, not an override for one
+		// run: the launcher would otherwise ask the question again on the next start.
+		if err := StoreMode(paths, opts.mode); err != nil {
+			return err
+		}
+	}
 
 	switch opts.command {
 	case "", "start":
@@ -100,6 +145,9 @@ func run(argv []string) error {
 		app.PrintStatus(ctx)
 		return nil
 	case "logs":
+		if app.Native() {
+			return printNativeLogs(paths, opts.follow)
+		}
 		if err := CheckDocker(ctx); err != nil {
 			return err
 		}
@@ -132,6 +180,11 @@ func run(argv []string) error {
 		}
 		fmt.Println(url)
 		return nil
+	case "install":
+		if opts.extra == "" {
+			return errors.New("install takes the name of a runtime extra: node or browser")
+		}
+		return app.InstallExtra(ctx, opts.extra)
 	case "uninstall":
 		return app.Uninstall(ctx, opts.keepData)
 	default:
@@ -187,7 +240,26 @@ func startCommand(ctx context.Context, app *App, opts options) error {
 	server.OnFocus(surface.Focus)
 	go bringUp(ctx, app, server, surface, opts)
 	surface.Run(ctx)
+	// Native mode does not leave an agent behind a closed launcher: it is a process of this one's,
+	// with no restart policy and nothing to show that it is there. Docker mode does, because a
+	// container is visible in `docker ps` and comes back with the machine.
+	app.StopOnQuit()
 	return nil
+}
+
+// printNativeLogs shows the supervisor's log, which in native mode is a file the launcher owns
+// rather than something docker holds.
+func printNativeLogs(paths Paths, follow bool) error {
+	path := filepath.Join(paths.RuntimeLogs, "supervisor.log")
+	if !follow {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("no log yet at %s: %w", path, err)
+		}
+		os.Stdout.Write(body)
+		return nil
+	}
+	return followFile(path)
 }
 
 // bringUp is the work, off the thread the window needs: the questions, the stack, and then the app
@@ -235,7 +307,11 @@ func bringUp(ctx context.Context, app *App, server *Server, surface *Surface, op
 	fmt.Println("opening", url)
 	surface.Show(ctx, url)
 	if !surface.Windowed() {
-		fmt.Printf("The launcher is at %s — leave it running for the buttons, or close it with Ctrl+C: the stack keeps running.\n", server.URL())
+		after := "the stack keeps running"
+		if app.Native() {
+			after = "the agent stops with it, and a run in flight resumes at the next start"
+		}
+		fmt.Printf("The launcher is at %s — leave it running for the buttons, or close it with Ctrl+C: %s.\n", server.URL(), after)
 	}
 	watch(ctx, app)
 }
@@ -310,6 +386,16 @@ func parseArgs(argv []string) (options, error) {
 				return opts, err
 			}
 			opts.data = data
+		case "--mode":
+			value, err := next()
+			if err != nil {
+				return opts, err
+			}
+			mode, err := ParseMode(value)
+			if err != nil {
+				return opts, err
+			}
+			opts.mode = mode
 		case "--port":
 			port, err := next()
 			if err != nil {
@@ -330,6 +416,11 @@ func parseArgs(argv []string) (options, error) {
 			// arrives in the place a command would. It is not a command: it says what to show.
 			if IsDeepLink(arg) {
 				opts.link = arg
+				continue
+			}
+			if opts.command == "install" && opts.extra == "" {
+				// The one command that takes an argument of its own: which extra to fetch.
+				opts.extra = arg
 				continue
 			}
 			if opts.command != "" {
