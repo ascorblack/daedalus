@@ -745,6 +745,16 @@ class VoiceConfig(BaseModel):
     enabled: bool = True
     preset: str = ""
     """The concierge's model preset; pick a fast one (no thinking, or low effort). Empty = the default preset."""
+    progress: bool = True
+    """Whether an agent's mid-run words are relayed to the concierge at all. Off leaves the final answer
+    and the questions, which is the quieter conversation and the cheaper one."""
+    progress_window_seconds: float = Field(default=20.0, ge=0)
+    """How long an agent's newest interim waits before it is relayed. An agent writes a line, calls a tool,
+    writes another: the window lets the later line replace the earlier one instead of spending a turn on each."""
+    progress_min_gap_seconds: float = Field(default=60.0, ge=0)
+    """The floor between two interims of the same agent. A busy agent narrates every few seconds; a
+    conversation interrupted that often is unusable, so the newest line waits for the gap and the rest are
+    superseded. Finals and questions do not pass through here and are never held back by it."""
     tts: TtsConfig = Field(default_factory=TtsConfig)
 
 

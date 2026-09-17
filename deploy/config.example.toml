@@ -204,6 +204,13 @@ verbosity = 1
 enabled = true
 preset = ""              # a preset id; empty = the default preset
 
+# What a delegated agent says while it works ("found the problem, testing the fix") is relayed to the
+# concierge as well as its final answer — only while the page is open, coalesced over a window, and at
+# most one per agent per gap, so a talkative agent cannot take the conversation over.
+progress = true
+progress_window_seconds = 20     # the newest line of an agent replaces the older ones for this long
+progress_min_gap_seconds = 60    # the floor between two of the same agent's interims
+
 # Reading the answer out loud. Empty url and provider = the browser's own synthesiser.
 # Any OpenAI-compatible /audio/speech endpoint works: a hosted one, or a local server.
 [voice.tts]

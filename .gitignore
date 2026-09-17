@@ -29,3 +29,4 @@ miniapp/dist/
 
 # screenshots the browser checks write with SHOTS=1
 tests/browser/*.png
+miniapp/tsconfig.tsbuildinfo

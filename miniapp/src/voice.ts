@@ -343,3 +343,38 @@ export async function sendUtterance(blob: Blob): Promise<string> {
   if (!response.ok) throw new Error(response.status === 413 ? "that recording is too long" : `the utterance was not accepted (${response.status})`);
   return String(((await response.json()) as { transcript?: string }).transcript ?? "");
 }
+
+// ── the agents panel ───────────────────────────────────────────────────────────────────────
+
+/** One delegated agent as the voice endpoint reports it. */
+export type AgentNews = {
+  session_id: string;
+  title: string;
+  status: string;
+  last_message_at: string;
+  answer: string;
+  /** The last thing it said mid-run: narration, or what it is waiting for. */
+  progress?: string;
+  progress_at?: string;
+  /** "operator" — it asked a question; "approval" — the policy stopped a call; "" — it is getting on with it. */
+  waiting?: string;
+};
+
+/** The one line the panel shows for an agent, and when that line is from. */
+export type AgentNote = { line: string; when: string; waiting: string; live: boolean };
+
+const WAITING_WORDS: Record<string, string> = { operator: "Waiting for you", approval: "Waiting for approval" };
+
+/**
+ * What to show under an agent's title: its latest words and the moment they are from.
+ *
+ * Mid-run words win over the last answer while they exist, because they are newer and they are what the
+ * operator is waiting to hear about; the panel says so with the timestamp of the line itself, not of the
+ * session, so "2 min ago" on a running agent means it spoke two minutes ago rather than started then.
+ */
+export function agentNote(a: AgentNews): AgentNote {
+  const progress = (a.progress ?? "").trim();
+  const waiting = WAITING_WORDS[a.waiting ?? ""] ?? "";
+  if (progress) return { line: progress, when: a.progress_at || a.last_message_at, waiting, live: true };
+  return { line: (a.answer ?? "").trim(), when: a.last_message_at, waiting, live: false };
+}

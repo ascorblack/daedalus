@@ -13,6 +13,14 @@ A run of a delegated agent that ends, or that stops to ask the operator somethin
 the concierge's conversation — but only while somebody is listening. With no client connected the
 lines are held and delivered together when one connects, so the concierge does not talk to an empty
 room and does not pay for a turn nobody hears.
+
+An agent also talks while it works: between two tool calls it writes a paragraph saying what it just
+found and what it is doing next, and that is what makes a four-minute job bearable to listen to. Those
+interim lines are relayed too, under a much tighter rule than a final answer: only while somebody is
+listening (an interim is worthless late — it is superseded by the next one, and by the final answer),
+coalesced over a window so a burst of narration costs one turn, and rate-capped per agent so a talkative
+agent cannot take the conversation over. What is relayed is the agent's own prose only: not a tool
+result, not its thinking, not a token at a time.
 """
 
 from __future__ import annotations
@@ -21,7 +29,9 @@ import asyncio
 import contextlib
 import logging
 import re
+import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -45,6 +55,14 @@ ANSWER_CLIP = 4000
 """How much of an agent's answer AgentResult returns; a spoken summary needs no more."""
 LIST_CLIP = 300
 REPORT_CLIP = 500
+PROGRESS_CLIP = 300
+"""How much of an interim line is relayed. One spoken sentence comes out of it; the rest would be read
+by a model that is about to throw it away, and an agent's next paragraph supersedes it anyway."""
+RELAY_POLL_SECONDS = 0.25
+"""How often a held interim looks again at whether the concierge has finished its own turn."""
+DRAFT_CLIP = 8000
+"""The most of one agent message held while it is being written. A message longer than this is not a
+progress line by then, and an unbounded buffer per delegated run is how a long-running page leaks."""
 MAX_AGENTS = 20
 MAX_PENDING = 8
 """Reports held for a client that is not connected; the oldest go first, the newest are what matters."""
@@ -64,10 +82,17 @@ def quoted(text: str) -> str:
     return text.replace("⟪", "«").replace("⟫", "»")
 
 
-def report_block(*, title: str, session_id: str, state: str, body: str) -> str:
-    """One agent's news, framed. ``state`` is ours to write; ``title`` and ``body`` are the agent's."""
+def report_block(*, kind: str, title: str, session_id: str, state: str, body: str) -> str:
+    """One agent's news, framed. ``kind`` and ``state`` are ours to write; ``title`` and ``body`` are the agent's.
+
+    ``kind`` is the one word the concierge needs before it reads a word of the body: ``progress`` is an
+    agent thinking out loud and means nothing is finished, ``final`` is a result, ``question`` and
+    ``approval`` are the two ways a run stops until the operator says something. It is written by us,
+    on its own line, so the difference between "it found the bug" and "it fixed the bug" does not
+    depend on how the agent happened to phrase a sentence.
+    """
     head = f"agent: {quoted(title.strip())[:TITLE_CLIP] or session_id} ({session_id}) {state}"
-    return "\n".join([REPORT_OPEN, head, quoted(body.strip()), REPORT_CLOSE])
+    return "\n".join([REPORT_OPEN, f"kind: {kind}", head, quoted(body.strip()), REPORT_CLOSE])
 
 
 SENTENCE_END = re.compile(r"(?<=[.!?…。！？])[\s\n]+|(?<=[.!?…])$|\n\n+")
@@ -106,6 +131,49 @@ def speakable(text: str) -> str:
     return re.sub(r"[ \t]+", " ", body).strip()
 
 
+EVIDENCE_RE = re.compile(r"<(?:file|run)\b[^>]*/?>")
+"""The evidence tags an answer carries for the app to render as chips. Spoken, they are punctuation read
+out loud, so an interim line drops them rather than trying to say them."""
+
+APPROVAL_KEY_RE = re.compile(r"Approval key: ([0-9a-f]{12})")
+"""How a refusal by the policy is recognised in a tool result: the key the operator approves it with.
+A session whose next step is an approval is not working, and the operator is the only one who can
+unblock it — which makes it something the concierge must say, not something it may summarise later."""
+
+
+def delta_text(payload: dict[str, Any]) -> str:
+    """The assistant's own words in one delta, and nothing else.
+
+    A run publishes three kinds of stream to the operator: prose, thinking, and tool traffic. Only the
+    first is what the operator would read in the session view as the agent talking, and only the first
+    is worth a sentence out loud — thinking is a draft the model did not commit to, and tool arguments
+    and results are the detail the concierge is explicitly told never to read aloud.
+    """
+    delta = payload.get("delta") or {}
+    return str(delta.get("text") or "") if delta.get("type") == "text_delta" else ""
+
+
+def settles_interim(payload: dict[str, Any]) -> bool:
+    """Whether this end-of-message is an interim one: the agent stopped writing to call a tool.
+
+    Any other stop reason ends the turn, and the turn's own text is the final answer, which is reported
+    by the finished-run path with everything it knows — its status included.
+    """
+    return str(payload.get("stop_reason") or "") == "tool_use"
+
+
+def progress_line(text: str) -> str:
+    """One settled paragraph of an agent's prose, as a line a concierge can turn into a sentence.
+
+    The same cleaning a spoken answer gets, plus the evidence tags and the line breaks: what arrives at
+    the concierge is one clipped line of plain words, because everything else is either unsayable or a
+    detail that will be superseded before anyone could ask about it.
+    """
+    # The tags go first: what makes an answer sayable also strips the punctuation that makes a tag a tag.
+    body = speakable(EVIDENCE_RE.sub(" ", text))
+    return re.sub(r"\s+", " ", body).strip()[:PROGRESS_CLIP]
+
+
 def effective_tts(config: TtsConfig, manager: Any) -> TtsConfig:
     """The endpoint to call: a configured provider's base URL and key when ``provider`` is set, else ``url``/``api_key``."""
     if not config.provider:
@@ -138,6 +206,18 @@ class Voice:
         """The voice session's id, held in memory: every event of every session passes through the sink, and
         a database read per event would make the whole installation pay for the voice page being installed."""
         self._lock = asyncio.Lock()
+        self._agent_drafts: dict[tuple[str, str], str] = {}
+        """Per delegated run: the message an agent is writing, until it stops to call a tool."""
+        self._news: dict[str, dict[str, str]] = {}
+        """Per delegated agent, for the page: its last interim line, when, and what it is waiting for."""
+        self._waiting_relay: dict[str, str] = {}
+        """Per delegated agent: the interim line that has not been relayed yet. One entry, not a queue —
+        a newer line supersedes an older one, which is the whole point of coalescing progress."""
+        self._relay_tasks: dict[str, asyncio.Task[None]] = {}
+        self._relayed_at: dict[str, float] = {}
+        """Per delegated agent: when its last interim was relayed, for the rate cap."""
+        self._approvals: dict[str, str] = {}
+        """Per delegated agent: the approval key already reported, so a retry loop is reported once."""
 
     # -- the session ------------------------------------------------------------------
 
@@ -171,7 +251,19 @@ class Voice:
         await self.app.db.kv_set(SESSION_KEY, "")
         self._id = ""
         self._pending.clear()
+        self._forget_agents()
         return await self.session_id()
+
+    def _forget_agents(self) -> None:
+        """Drop everything held about the old conversation's agents, scheduled relays included."""
+        for task in self._relay_tasks.values():
+            task.cancel()
+        self._relay_tasks.clear()
+        self._agent_drafts.clear()
+        self._news.clear()
+        self._waiting_relay.clear()
+        self._relayed_at.clear()
+        self._approvals.clear()
 
     async def state(self) -> dict[str, Any]:
         config = self.app.config.voice
@@ -285,6 +377,7 @@ class Voice:
             if row.get("metadata", {}).get("voice_parent") != voice_id or not voice_id:
                 continue
             answer = await self.last_answer(row["id"])
+            news = self._news.get(row["id"], {})
             out.append(
                 {
                     "session_id": row["id"],
@@ -292,6 +385,9 @@ class Voice:
                     "status": row["status"],
                     "last_message_at": row["last_message_at"],
                     "answer": answer[:LIST_CLIP],
+                    "progress": news.get("line", ""),
+                    "progress_at": news.get("at", ""),
+                    "waiting": news.get("waiting", ""),
                 }
             )
             if len(out) >= MAX_AGENTS:
@@ -383,9 +479,19 @@ class Voice:
             # cheap check on what the process already holds: is this one of the concierge's agents?
             if not self._is_delegated(session_id):
                 return
-            if event.type is EventType.TOOL_CALL_PENDING and event.payload.get("kind") == "ask_user":
+            payload = event.payload
+            run_id = str(getattr(event, "run_id", "") or "")
+            if event.type is EventType.TOOL_CALL_PENDING and payload.get("kind") == "ask_user":
                 await self._agent_asks(session_id, event)
-            elif self._listeners and event.type in (EventType.MESSAGE_START, EventType.STATE_CHANGED):
+            elif event.type is EventType.CONTENT_BLOCK_DELTA:
+                self._collect(session_id, run_id, delta_text(payload))
+            elif event.type is EventType.MESSAGE_START:
+                self._agent_drafts.pop((session_id, run_id), None)
+            elif event.type is EventType.MESSAGE_STOP:
+                await self._agent_paused(session_id, run_id, payload)
+            elif event.type is EventType.TOOL_RESULT and payload.get("is_error"):
+                await self._agent_blocked(session_id, payload)
+            elif self._listeners and event.type is EventType.STATE_CHANGED:
                 await self.emit("agents", {"agents": await self.agents()})
             return
         if not self._listeners:
@@ -413,6 +519,153 @@ class Voice:
         elif event.type is EventType.ERROR:
             await self.emit("error", {"message": str(event.payload.get("message") or "the run failed")})
 
+    def _collect(self, session_id: str, run_id: str, text: str) -> None:
+        """Hold what an agent is writing, up to the cap; a delta that is not prose adds nothing."""
+        if not text or not self.app.config.voice.progress:
+            return
+        key = (session_id, run_id)
+        self._agent_drafts[key] = (self._agent_drafts.get(key, "") + text)[:DRAFT_CLIP]
+
+    async def _agent_paused(self, session_id: str, run_id: str, payload: dict[str, Any]) -> None:
+        """An agent stopped writing. If it stopped to call a tool, what it wrote is progress."""
+        draft = self._agent_drafts.pop((session_id, run_id), "")
+        if not draft or not settles_interim(payload):
+            return
+        await self._note_progress(session_id, progress_line(draft))
+
+    async def _note_progress(self, session_id: str, line: str) -> None:
+        """Record an interim for the page, and schedule the one the concierge will hear.
+
+        The page gets it immediately — it is a line of text in a panel, it costs nothing and it is what
+        the operator looks at when they want the detail. The concierge gets it through the window below,
+        because for the concierge an interim is a spoken turn, and spoken turns are expensive in the one
+        currency that matters here: the operator's attention.
+        """
+        if not line:
+            return
+        self._news.pop(session_id, None)  # re-inserted, so the trim below drops the quietest agent, not this one
+        self._news[session_id] = {"line": line, "at": datetime.now(UTC).isoformat(), "waiting": ""}
+        for stale in list(self._news)[: -2 * MAX_AGENTS]:
+            # A delegated session that never finishes leaves its news behind; the panel shows at most
+            # MAX_AGENTS of them anyway, so the oldest are dropped rather than kept for a restart.
+            del self._news[stale]
+        if self._listeners:
+            await self.emit("agents", {"agents": await self.agents()})
+        config = self.app.config.voice
+        if not config.progress or not self._listeners:
+            # Nobody is listening: an interim is not held for later. By the time a page connects the
+            # agent has either moved on or finished, and the final report says more than this would.
+            return
+        self._waiting_relay[session_id] = line
+        task = self._relay_tasks.get(session_id)
+        if task is None or task.done():
+            self._relay_tasks[session_id] = asyncio.create_task(self._relay_progress(session_id), name=f"voice-progress:{session_id}")
+
+    async def _relay_progress(self, session_id: str) -> None:
+        """Wait out the window and the rate cap, then relay whichever interim is the newest by then."""
+        config = self.app.config.voice
+        try:
+            await asyncio.sleep(config.progress_window_seconds)
+            gap = config.progress_min_gap_seconds - (time.monotonic() - self._relayed_at.get(session_id, -config.progress_min_gap_seconds))
+            if gap > 0:
+                await asyncio.sleep(gap)
+            line = self._waiting_relay.pop(session_id, "")
+            manager = self.app.manager
+            if not line or not self._listeners or manager is None:
+                return
+            if not await self._concierge_free(config.progress_window_seconds):
+                # The concierge is in the middle of a turn of its own. Submitting here would steer that
+                # turn, and the operator would hear their own answer interrupted by an agent's aside.
+                # A progress line is not worth that, and the agent's next paragraph replaces it anyway.
+                return
+            state = await manager.get_state(session_id)
+            if state is None or state.metadata.get("voice_parent") != self._id:
+                return
+            self._relayed_at[session_id] = time.monotonic()
+            await self.say_to_concierge(
+                report_block(
+                    kind="progress",
+                    title=state.session.title,
+                    session_id=session_id,
+                    state="is still working; this is what it said on the way, not a result",
+                    body=line,
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a progress line is the least important thing here
+            logger.exception("could not relay an agent's progress")
+        finally:
+            self._relay_tasks.pop(session_id, None)
+
+    async def _concierge_free(self, hold_seconds: float) -> bool:
+        """Whether the concierge can be told something now, after waiting up to ``hold_seconds`` for it.
+
+        The operator's own turn comes first, always: the voice session answers what was said to it, and an
+        interim that arrives mid-answer waits its turn or is dropped. Barge-in keeps working as before —
+        the operator talking over the answer still goes through ``interrupt``.
+        """
+        manager = self.app.manager
+        if manager is None or not self._id:
+            return False
+        deadline = time.monotonic() + max(hold_seconds, 0.0)
+        while True:
+            state = manager.live_state(self._id)
+            if state is None or not state.running:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(min(RELAY_POLL_SECONDS, max(deadline - time.monotonic(), 0.0)))
+
+    def _stop_relay(self, session_id: str) -> None:
+        """Nothing more is relayed for this agent: what it was about to say is behind the news it just made."""
+        self._waiting_relay.pop(session_id, None)
+        task = self._relay_tasks.pop(session_id, None)
+        if task is not None:
+            task.cancel()
+
+    async def drain_progress(self) -> None:
+        """Wait for the scheduled interims to be relayed or dropped. The tests' way to see what the window decided."""
+        while True:
+            tasks = [t for t in self._relay_tasks.values() if not t.done()]
+            if not tasks:
+                return
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _agent_blocked(self, session_id: str, payload: dict[str, Any]) -> None:
+        """A tool call the policy refused: the agent is stopped until the operator approves it.
+
+        This is relayed like a question, not like progress — it is held for a page that is not connected
+        and it does not wait out the window — because it is the one interim state that goes nowhere on its
+        own. An agent narrating gets on with its job; an agent waiting for an approval does not.
+        """
+        match = APPROVAL_KEY_RE.search(str(payload.get("content") or ""))
+        if match is None or not self.app.config.voice.progress:
+            return
+        key = match.group(1)
+        if self._approvals.get(session_id) == key:
+            return  # the agent retries the refused call; the operator is told about it once
+        manager = self.app.manager
+        assert manager is not None
+        state = await manager.get_state(session_id)
+        if state is None or state.metadata.get("voice_parent") != self._id:
+            return
+        self._approvals[session_id] = key
+        pending = (state.metadata.get("policy_pending") or {}).get(key) or {}
+        what = f"{pending.get('tool')}: {pending.get('text')}" if pending else "a call it tried to make"
+        self._news[session_id] = {"line": f"waiting for approval — {what}"[:PROGRESS_CLIP], "at": datetime.now(UTC).isoformat(), "waiting": "approval"}
+        self._stop_relay(session_id)
+        await self.report(
+            report_block(
+                kind="approval",
+                title=state.session.title,
+                session_id=session_id,
+                state="is stopped: the policy will not run one of its calls until the operator approves it in that session",
+                body=what[:REPORT_CLIP],
+            )
+        )
+        await self.emit("agents", {"agents": await self.agents()})
+
     def _is_delegated(self, session_id: str) -> bool:
         """Whether the concierge started this session, read from what the process already holds."""
         manager = self.app.manager
@@ -432,8 +685,11 @@ class Voice:
             return
         questions = (event.payload.get("ask_user_payload") or {}).get("questions") or []
         asked = str(questions[0].get("question") if questions else "").strip()
+        self._news[session_id] = {"line": asked[:PROGRESS_CLIP], "at": datetime.now(UTC).isoformat(), "waiting": "operator"}
+        self._stop_relay(session_id)
         await self.report(
             report_block(
+                kind="question",
                 title=state.session.title,
                 session_id=session_id,
                 state="is waiting for the operator and does nothing until it is answered; the answer goes back with Delegate(title, task, session_id) naming that id",
@@ -459,7 +715,13 @@ class Voice:
             return
         answer = await self.last_answer(session_id) if status == "completed" else ""
         body = answer[:REPORT_CLIP] if answer else f"no final answer ({status}); its session has the detail"
-        await self.report(report_block(title=state.session.title, session_id=session_id, state="finished", body=body))
+        # Whatever it was about to say on the way is behind us now: the answer says more, and a progress
+        # line spoken after "it finished" would tell the operator the job is still running.
+        self._stop_relay(session_id)
+        self._news.pop(session_id, None)
+        self._approvals.pop(session_id, None)
+        self._agent_drafts = {k: v for k, v in self._agent_drafts.items() if k[0] != session_id}
+        await self.report(report_block(kind="final", title=state.session.title, session_id=session_id, state="finished", body=body))
         await self.emit("agents", {"agents": await self.agents()})
 
     # -- speech ------------------------------------------------------------------------
@@ -513,4 +775,19 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     return []
 
 
-__all__ = ["REPORT_CLOSE", "REPORT_OPEN", "SESSION_KEY", "Voice", "effective_tts", "install", "quoted", "report_block", "speakable", "split_sentences", "tts_configured"]
+__all__ = [
+    "REPORT_CLOSE",
+    "REPORT_OPEN",
+    "SESSION_KEY",
+    "Voice",
+    "delta_text",
+    "effective_tts",
+    "install",
+    "progress_line",
+    "quoted",
+    "report_block",
+    "settles_interim",
+    "speakable",
+    "split_sentences",
+    "tts_configured",
+]
