@@ -163,6 +163,54 @@ class SessionState:
         return self.task is not None and not self.task.done()
 
 
+def _ensure_inbox(workspace: Path, project: Project | None) -> None:
+    """Make the session's inbox — but never make a project root that is not there.
+
+    ``mkdir(parents=True)`` on an unmounted root creates the whole path, and the mount point is then
+    a local empty folder that answers ``reachable`` for ever after: the "not mounted — mount it and
+    restart" signal the whole Docker story rests on would be erased by loading the session. On a
+    removable or network mount it is worse than that, because the real folder is shadowed by the
+    empty one when it comes back. A folder the operator added is theirs to create.
+    """
+    if project is not None and not project.reachable:
+        return
+    (workspace / "inbox").mkdir(parents=True, exist_ok=True)
+    if project is not None:
+        _exclude_artefacts(workspace)
+
+
+# The directories a session writes into the folder it works in: the inbox files arrive in, and the
+# per-tool scratch of Exec, its background jobs, the services it hosts and the snapshots. In a
+# workspace of the session's own they are the whole of the directory. In a project they land in the
+# operator's repository, where they have no business showing up in `git status` or being swept into a
+# commit by `git add -A`.
+SESSION_ARTEFACTS = ("inbox/", ".exec/", ".jobs/", ".services/", ".checkpoints/")
+_EXCLUDE_MARKER = "# daedalus: what an agent working in this folder writes into it"
+
+
+def _exclude_artefacts(root: Path) -> None:
+    """Keep the agent's own directories out of the operator's git status.
+
+    ``.git/info/exclude`` rather than ``.gitignore``: the ignore file is the repository's and is
+    committed, and a project is somebody else's repository — this is our note to their checkout, not
+    a change to their project. A root that is not a git repository has nothing to write and nothing
+    to worry about.
+    """
+    info = root / ".git" / "info"
+    if not (root / ".git").is_dir():
+        return
+    try:
+        info.mkdir(parents=True, exist_ok=True)
+        path = info / "exclude"
+        current = path.read_text(encoding="utf-8") if path.exists() else ""
+        if _EXCLUDE_MARKER in current:
+            return
+        prefix = "" if not current or current.endswith("\n") else "\n"
+        path.write_text(current + prefix + _EXCLUDE_MARKER + "\n" + "".join(f"/{name}\n" for name in SESSION_ARTEFACTS), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("could not write %s: %s", info / "exclude", exc)
+
+
 class SessionManager:
     def __init__(
         self,
@@ -180,7 +228,13 @@ class SessionManager:
         self.events = SqliteEventStream(db)
         self.usage = SqliteUsageSink(db)
         self.live = LiveControlStore(db)
-        self.projects = ProjectStore(db)
+        # The installation's own folders are not projects, and neither is the whole home folder:
+        # a project root is reachable to every agent in it and is an open root to the policy.
+        self.projects = ProjectStore(
+            db,
+            reserved=[Path(p) for p in settings.sandbox_never_writable] + [settings.secrets_dir, settings.workspaces_dir],
+            home=Path.home(),
+        )
         self.blobs = FileBlobStore(settings.blobs_dir)
         self.memory = PersistentMemory(db)
         self.workspace_units = PersistentWorkspace(db)
@@ -458,7 +512,7 @@ class SessionManager:
         # which is why the project is the stored link and the directory is derived from it.
         named = (metadata or {}).get("workspace")
         workspace = project.root if project is not None else (workspace or (Path(str(named)) if named else self.workspace_for(sid)))
-        (workspace / "inbox").mkdir(parents=True, exist_ok=True)
+        _ensure_inbox(workspace, project)
         session = Session(id=sid, tenant_id=TENANT, title=title, metadata=dict(metadata or {}))
         await self.sessions.create(session)
         if project is not None:
@@ -472,6 +526,19 @@ class SessionManager:
         """The state of a session this process already holds; ``None`` for one it would have to load."""
         return self._states.get(session_id)
 
+    async def project_of(self, session_id: str) -> Project | None:
+        """The project a session works in, for anything that makes a child of it.
+
+        Every path that creates a session from another one — a subagent, a spawned agent, a fork, a
+        scheduled task, the voice concierge's delegate — asks this and passes the answer on. A child
+        that did not would carry the parent's directory without the parent's wall, which is the whole
+        of the boundary gone through the commonest way of making a new worker.
+        """
+        state = self._states.get(session_id)
+        if state is not None:
+            return state.project
+        return await self.projects.for_session(session_id)
+
     async def get_state(self, session_id: str) -> SessionState | None:
         state = self._states.get(session_id)
         if state is not None:
@@ -482,7 +549,7 @@ class SessionManager:
             return None
         project = await self.projects.for_session(session_id)
         workspace = project.root if project is not None else Path(session.metadata.get("workspace") or self.workspace_for(session_id))
-        (workspace / "inbox").mkdir(parents=True, exist_ok=True)
+        _ensure_inbox(workspace, project)
         state = SessionState(session=session, workspace=workspace, metadata=dict(session.metadata), project=project)
         self._states[session_id] = state
         self.register_services(state)
@@ -1053,6 +1120,10 @@ class SessionManager:
         Turns a revert undid and turns a compaction summary already stands for are left out of
         the working history; the archived originals still go into the fork's transcript, and
         the summary is re-pointed at the fork's own seqs so HistoryExpand keeps working there.
+
+        Two sessions in the same project share one directory and nothing is copied at all. Where a
+        copy does happen it is a whole directory tree, so it is measured first and refused above
+        ``ops.checkpoint_max_gb`` rather than written into the state directory unbounded.
         """
         source = await self.get_state(source_id)
         if source is None:
@@ -1096,7 +1167,19 @@ class SessionManager:
             await self.sessions.replace_messages(target.session.id, TENANT, history)
             target.history_keys = [self.sessions.transcript_key(m) for m in history]
             copied = False
-            if source.workspace.exists():
+            if target.workspace == source.workspace:
+                # Both sessions are in the same project: the folder is the operator's and there is one
+                # of it. Copying it would take the repository out of the folder they chose, unbounded,
+                # and leave the fork working on a stale duplicate of it.
+                pass
+            elif source.workspace.exists():
+                scan = await asyncio.to_thread(scan_workspace, source.workspace)
+                limit = self.config.ops.checkpoint_max_gb
+                if limit and scan.size > limit * 1e9:
+                    raise RuntimeError(
+                        f"{source.workspace} is {scan.size / 1e9:.1f} GB, over ops.checkpoint_max_gb={limit}; "
+                        "a fork copies the whole directory, so this one is refused rather than written twice"
+                    )
                 await asyncio.to_thread(shutil.copytree, source.workspace, target.workspace, dirs_exist_ok=True)
                 copied = True
                 checkpoints = Checkpoints(target.workspace)
@@ -1108,7 +1191,7 @@ class SessionManager:
                     except CheckpointError as exc:
                         logger.warning("fork workspace restore failed: %s", exc)
         await self.sessions.update_metadata(target.session.id, {**target.session.metadata, "forked_from": {"session_id": source_id, "seq": seq}})
-        return {"messages": len(history), "workspace_copied": copied}
+        return {"messages": len(history), "workspace_copied": copied, "workspace_shared": target.workspace == source.workspace}
 
     async def closed_topic_sessions(self) -> list[dict[str, Any]]:
         """Sessions whose topic is closed but whose data is still on disk."""
@@ -1176,11 +1259,15 @@ class SessionManager:
             else:
                 state.workspace = Path(state.session.metadata.get("workspace") or self.workspace_for(state.session.id))
             with suppress(OSError):
-                (state.workspace / "inbox").mkdir(parents=True, exist_ok=True)
+                _ensure_inbox(state.workspace, project)
             self.register_services(state)
 
     def running_run_ids(self) -> set[str]:
         return {s.run_id for s in self._states.values() if s.run_id and (s.running or s.pending is not None)}
+
+    def busy_sessions(self) -> set[str]:
+        """Sessions with a turn in flight or a question outstanding — the same test ``revert`` and ``fork`` use."""
+        return {sid for sid, state in self._states.items() if state.running or state.pending is not None}
 
     def register_services(self, state: SessionState) -> None:
         hooks = self.service_hooks

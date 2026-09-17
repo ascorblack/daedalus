@@ -8,6 +8,8 @@ is told.
 
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -326,5 +328,343 @@ async def test_a_project_is_not_snapshotted_unless_the_operator_asked(settings: 
         # A session with a workspace of its own snapshots as it always has, with nothing asked for.
         plain = await manager.create_session("on its own")
         assert await manager.checkpoint(plain, kind="before")
+    finally:
+        await manager.close()
+
+
+# -- the children a project session makes ----------------------------------------------------------
+
+
+async def test_a_subagent_of_a_project_session_is_in_the_project(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    """The commonest way to make a new worker is the one that must not leave the wall behind: a child
+    that carried the leader's directory without the leader's project resolved anything at all."""
+    from daedalus.extensions.subagents import Subagents
+
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    root = tmp_path / "repo"
+    root.mkdir()
+    app = SimpleNamespace(settings=settings, config=config, db=db, manager=manager, front=None, extensions={})
+    try:
+        submitted: list[str] = []
+
+        async def fake_submit(session_id: str, text: str, attachments: Any = (), **kw: Any) -> str:
+            submitted.append(session_id)
+            return "run-x"
+
+        manager.submit = fake_submit  # type: ignore[method-assign]
+        project = await manager.projects.create("Repo", str(root))
+        leader = await manager.create_session("lead", project_id=project.id)
+        result = await Subagents(app).spawn(leader_id=leader.session.id, task="count the files", name="counter")
+
+        child = await manager.get_state(result["session_id"])
+        assert child is not None and child.workspace == root
+        assert child.project is not None and child.project.id == project.id
+        assert child.services is not None and child.services.project_root == root
+        with pytest.raises(PathOutsideProject):
+            child.services.resolve("/etc/passwd")
+        # And it is one of the project's agents in every list, not a session that merely names the folder.
+        assert result["session_id"] in {s["id"] for s in await manager.projects.sessions_of(project.id)}
+        assert "workspace" not in child.metadata, "the project is the one source for where a session works"
+        assert submitted == [result["session_id"]]
+    finally:
+        await manager.close()
+
+
+async def test_a_subagent_of_a_plain_session_still_shares_its_directory(settings: Settings, config: RuntimeConfig, db: Database) -> None:
+    from daedalus.extensions.subagents import Subagents
+
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    app = SimpleNamespace(settings=settings, config=config, db=db, manager=manager, front=None, extensions={})
+    try:
+
+        async def fake_submit(session_id: str, text: str, attachments: Any = (), **kw: Any) -> str:
+            return "run-x"
+
+        manager.submit = fake_submit  # type: ignore[method-assign]
+        leader = await manager.create_session("lead")
+        result = await Subagents(app).spawn(leader_id=leader.session.id, task="count", name="counter")
+        child = await manager.get_state(result["session_id"])
+        assert child is not None and child.workspace == leader.workspace and child.project is None
+        assert child.services is not None and child.services.project_root is None
+    finally:
+        await manager.close()
+
+
+async def test_a_fork_of_a_project_session_stays_in_it_and_copies_nothing(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    """A fork used to copy the whole of the operator's repository into the state directory and leave
+    the copy uncontained. Two sessions of one project share the folder; there is nothing to copy."""
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]", encoding="utf-8")
+    (root / "big.bin").write_bytes(b"x" * 4096)
+    try:
+        async with await _client(settings, config, db, manager) as client:
+            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Repo", "root": str(root)})).json()
+            sid = (await client.post("/api/sessions", headers=HEADERS, json={"title": "work", "project_id": project["id"]})).json()["id"]
+            forked = await client.post(f"/api/sessions/{sid}/fork", headers=HEADERS, json={"seq": 1})
+            assert forked.status_code == 200
+            body = forked.json()
+            assert body["workspace_copied"] is False and body["workspace_shared"] is True
+
+            fork = await manager.get_state(body["id"])
+            assert fork is not None and fork.workspace == root
+            assert fork.project is not None and fork.project.id == project["id"]
+            assert fork.services is not None and fork.services.project_root == root
+            with pytest.raises(PathOutsideProject):
+                fork.services.resolve("/etc/passwd")
+            # Not one byte of the folder was duplicated into the state directory.
+            assert not (manager.workspace_for(body["id"]) / ".git").exists()
+    finally:
+        await manager.close()
+
+
+async def test_a_fork_of_a_workspace_over_the_size_cap_is_refused_by_name(settings: Settings, config: RuntimeConfig, db: Database) -> None:
+    """A fork copies a whole directory tree. ``ops.checkpoint_max_gb`` guarded the snapshot and said
+    nothing about this one, so a session on a large tree wrote it twice without being asked."""
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    manager.config.ops.checkpoint_max_gb = 1e-6  # a kilobyte
+    try:
+        source = await manager.create_session("big")
+        (source.workspace / "payload.bin").write_bytes(b"x" * 8192)
+        target = await manager.create_session("fork")
+        with pytest.raises(RuntimeError, match="over ops.checkpoint_max_gb"):
+            await manager.fork_into(source.session.id, 1, target)
+        assert not (target.workspace / "payload.bin").exists()
+    finally:
+        await manager.close()
+
+
+async def test_a_spawned_agent_of_a_project_session_stays_in_the_project(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    """SpawnAgent resolved its files correctly and then handed the absolute paths to a child with no
+    project: one tool call moved the operator's repository into an uncontained session."""
+    from daedalus.transport.telegram.front import TelegramFront
+
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "howto.md").write_text("step 1", encoding="utf-8")
+    try:
+
+        async def fake_submit(session_id: str, text: str, attachments: Any = (), **kw: Any) -> str:
+            return "run-x"
+
+        manager.submit = fake_submit  # type: ignore[method-assign]
+        front = TelegramFront.__new__(TelegramFront)
+        front.manager = manager
+
+        async def create_session_topic(title: str, *, metadata: dict[str, Any] | None = None, project_id: str | None = None, **kw: Any) -> Any:
+            return await manager.create_session(title, metadata=metadata, project_id=project_id), None
+
+        front.create_session_topic = create_session_topic  # type: ignore[method-assign]
+
+        project = await manager.projects.create("Repo", str(root))
+        parent = await manager.create_session("parent", project_id=project.id)
+        child_id = await front._service_spawn_agent(
+            parent.session.id, title="Helper", brief="help", files=[str(root / "howto.md")],
+            first_message=None, preset=None, mode=None, mcp=[], peer_name=None,
+        )
+        child = await manager.get_state(child_id)
+        assert child is not None and child.project is not None and child.project.id == project.id
+        assert child.workspace == root
+        with pytest.raises(PathOutsideProject):
+            child.services.resolve("/etc/passwd")  # type: ignore[union-attr]
+        # The file was already where the new agent works, so it was not copied anywhere.
+        assert not (root / "inbox" / "howto.md").exists()
+    finally:
+        await manager.close()
+
+
+async def test_a_scheduled_task_of_a_project_session_fires_in_the_project(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    from daedalus.extensions.scheduler import Scheduler
+
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "notes.md").write_text("n", encoding="utf-8")
+    fired: list[str] = []
+
+    async def create_session(title: str, *, metadata: dict[str, Any] | None = None, project_id: str | None = None, workspace: Path | None = None) -> Any:
+        return await manager.create_session(title, metadata=metadata, project_id=project_id, workspace=workspace)
+
+    app = SimpleNamespace(settings=settings, config=config, db=db, manager=manager, front=None, extensions={}, create_session=create_session)
+    try:
+
+        async def fake_submit(session_id: str, text: str, attachments: Any = (), **kw: Any) -> str:
+            fired.append(session_id)
+            return "run-x"
+
+        manager.submit = fake_submit  # type: ignore[method-assign]
+        scheduler = Scheduler(app)  # type: ignore[arg-type]
+        project = await manager.projects.create("Repo", str(root))
+        owner = await manager.create_session("owner", project_id=project.id)
+
+        created = await scheduler.create(
+            name="nightly", prompt="tidy up", cron="0 3 * * *", run_at=None,
+            files=[str(root / "notes.md")], created_by_session=owner.session.id,
+        )
+        # The task runs in the folder, and the file it was given is not copied out of it.
+        assert created["workspace"] == str(root)
+        assert not (settings.workspaces_dir / f"sched-{created['id']}").exists()
+
+        row = dict(await db.fetchone("SELECT * FROM schedules WHERE id = ?", (created["id"],)))
+        session_id = await scheduler._fire_agent(row)
+        task = await manager.get_state(session_id)
+        assert task is not None and task.project is not None and task.project.id == project.id
+        assert task.workspace == root and fired == [session_id]
+        with pytest.raises(PathOutsideProject):
+            task.services.resolve("/etc/passwd")  # type: ignore[union-attr]
+    finally:
+        await manager.close()
+
+
+# -- the folder is the operator's ------------------------------------------------------------------
+
+
+async def test_an_unmounted_root_is_never_created_and_keeps_saying_it_is_not_mounted(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    """``mkdir(parents=True)`` on an unmounted root made the whole path, and the mount point became a
+    local empty folder that answered ``reachable`` for ever after — erasing the one signal the Docker
+    story rests on, and shadowing the real folder when it came back."""
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    root = tmp_path / "mounted"
+    root.mkdir()
+    try:
+        project = await manager.projects.create("Mounted", str(root))
+        state = await manager.create_session("worker", project_id=project.id)
+        sid = state.session.id
+        assert (root / "inbox").is_dir()
+
+        # The mount goes away and the process is restarted: the state is loaded from the database again.
+        shutil.rmtree(root)
+        manager._states.pop(sid)
+        assert (await manager.projects.get(project.id)).reachable is False
+        reloaded = await manager.get_state(sid)
+        assert reloaded is not None
+        assert not root.exists(), "the folder the operator added is theirs to create"
+        assert (await manager.projects.get(project.id)).reachable is False
+    finally:
+        await manager.close()
+
+
+async def test_a_project_may_not_be_the_installation_or_the_whole_home_folder(db: Database, tmp_path: Path) -> None:
+    """A project root is reachable to every agent in it and is an open root to the policy, so the
+    state directory, the checkouts and the home folder as a whole are refused — in both directions."""
+    state_dir = tmp_path / "own" / "state"
+    workspaces = tmp_path / "own" / "workspaces"
+    home = tmp_path / "own" / "home"
+    for path in (state_dir, workspaces, home, home / "work"):
+        path.mkdir(parents=True, exist_ok=True)
+    store = ProjectStore(db, reserved=[state_dir, workspaces], home=home)
+
+    with pytest.raises(ProjectError, match="belongs to the installation"):
+        await store.create("State", str(state_dir))
+    with pytest.raises(ProjectError, match="is inside"):
+        await store.create("Inside", str(state_dir / "blobs"))
+    with pytest.raises(ProjectError, match="contains"):
+        await store.create("Above", str(tmp_path / "own"))
+    with pytest.raises(ProjectError, match="your home folder"):
+        await store.create("Home", str(home))
+    # A folder inside the home folder is the ordinary case and stays allowed.
+    assert (await store.create("Work", str(home / "work"))).root == home / "work"
+
+
+async def test_a_project_cannot_be_moved_or_removed_while_an_agent_is_working_in_it(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    """Re-pointing a loaded session's workspace mid-turn means its next tool call lands in a different
+    directory from its earlier reads — the refusal ``revert`` and ``fork`` already make."""
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    root = tmp_path / "repo"
+    root.mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    try:
+        async with await _client(settings, config, db, manager) as client:
+            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Repo", "root": str(root)})).json()
+            sid = (await client.post("/api/sessions", headers=HEADERS, json={"title": "worker", "project_id": project["id"]})).json()["id"]
+            manager.live_state(sid).pending = SimpleNamespace(payload={})  # a question outstanding: the turn is in flight
+
+            listing = (await client.get("/api/projects", headers=HEADERS)).json()
+            assert listing[0]["sessions"] == [{"id": sid, "title": "worker", "running": True}]
+
+            moved = await client.patch(f"/api/projects/{project['id']}", headers=HEADERS, json={"root": str(tmp_path / "elsewhere")})
+            assert moved.status_code == 409 and "working in Repo right now" in moved.json()["detail"]
+            removed = await client.delete(f"/api/projects/{project['id']}", headers=HEADERS, params={"detach": 1})
+            assert removed.status_code == 409 and "mid-turn" in removed.json()["detail"]
+            # A rename touches no directory and is not refused.
+            assert (await client.patch(f"/api/projects/{project['id']}", headers=HEADERS, json={"name": "Repo 2"})).status_code == 200
+
+            manager.live_state(sid).pending = None
+            assert (await client.delete(f"/api/projects/{project['id']}", headers=HEADERS, params={"detach": 1})).status_code == 200
+    finally:
+        await manager.close()
+
+
+def test_a_resolved_path_comes_back_as_the_path_that_was_judged(tmp_path: Path) -> None:
+    """``contains`` judges the real path; returning the candidate left a window in which a name
+    inside the root could be turned into a link out of it before the caller opened it."""
+    root = Path(os.path.realpath(tmp_path)) / "project"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "real.txt").write_text("inside", encoding="utf-8")
+    (root / "link.txt").symlink_to(root / "src" / "real.txt")
+    services = _services(root)
+    assert services.resolve("link.txt") == root / "src" / "real.txt"
+
+
+async def test_the_agent_directories_are_excluded_from_the_operators_checkout(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    """A project root is somebody's repository: what a session writes into it must not turn up in
+    their ``git status`` or be swept into a commit by ``git add -A``."""
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    try:
+        project = await manager.projects.create("Repo", str(root))
+        await manager.create_session("worker", project_id=project.id)
+        written = (root / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        for name in ("inbox/", ".exec/", ".jobs/", ".services/", ".checkpoints/"):
+            assert f"/{name}" in written
+        # Loading another session of the same project does not write the block a second time.
+        await manager.create_session("second", project_id=project.id)
+        assert (root / ".git" / "info" / "exclude").read_text(encoding="utf-8") == written
+
+        # A root that is not a git repository has nothing to write and nothing to worry about.
+        plain = tmp_path / "docs"
+        plain.mkdir()
+        other = await manager.projects.create("Docs", str(plain))
+        await manager.create_session("third", project_id=other.id)
+        assert not (plain / ".git").exists()
+    finally:
+        await manager.close()
+
+
+async def test_a_service_started_in_a_project_cannot_choose_a_directory_outside_it(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    """Every other path-taking tool goes through the session's resolve; ``ServiceStart`` took its cwd
+    raw, which made it the one way into the filesystem the project's containment did not judge — and
+    a service is the one thing here that outlives the turn."""
+    from daedalus.extensions.inbox import Inbox
+    from daedalus.extensions.services import Services
+
+    settings.services_port_range = "18140-18142"
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    root = tmp_path / "repo"
+    (root / "site").mkdir(parents=True)
+    app = SimpleNamespace(settings=settings, config=config, db=db, manager=manager, front=None, extensions={})
+    app.extensions["inbox"] = Inbox(app)  # type: ignore[arg-type]
+    try:
+        services = Services(app)  # type: ignore[arg-type]
+        project = await manager.projects.create("Repo", str(root))
+        state = await manager.create_session("host", project_id=project.id)
+        with pytest.raises(PathOutsideProject):
+            await services.start(state.session.id, name="escape", command="sleep 30", cwd="/", port=None)
+        started = await services.start(state.session.id, name="inside", command="sleep 30", cwd="site", port=None)
+        assert started["cwd"] == str(root / "site")
+        await services.stop(state.session.id, "inside")
     finally:
         await manager.close()
