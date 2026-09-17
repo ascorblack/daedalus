@@ -108,8 +108,10 @@ def test_core_never_mentions_the_host() -> None:
 
 
 def test_environment_is_read_in_one_place() -> None:
-    # settings come from daedalus.config.Settings; these modules only pass the environment on to child processes
-    allowed = {"daedalus/tools/shell.py", "daedalus/tools/verify.py", "daedalus/extensions/selfdev.py", "daedalus/host/checkpoints.py"}
+    # settings come from daedalus.config.Settings; these modules only pass the environment on to child processes.
+    # config.py is the one place itself: a handful of defaults depend on what kind of installation this is —
+    # a container or the operator's own machine — and that is decided before any configuration is read.
+    allowed = {"daedalus/config.py", "daedalus/tools/shell.py", "daedalus/tools/verify.py", "daedalus/extensions/selfdev.py", "daedalus/host/checkpoints.py"}
     hits = []
     for path, tree in _modules(PKG):
         rel = path.relative_to(ROOT).as_posix()
