@@ -158,6 +158,50 @@ async def test_a_store_a_session_is_working_in_is_left_for_the_next_pass(manager
     assert (await manager.checkpoint_retention.run(RetentionBounds(keep_days=30, total_max_gb=0, keep_last=2))).dropped == 4
 
 
+async def test_a_session_with_no_snapshots_yet_still_makes_its_store_busy(manager: SessionManager, db: Database) -> None:
+    """A subagent sharing its leader's workspace has no ``checkpoints`` rows until it takes its first
+    snapshot — and taking it is a ``git add`` into the chain a pass would otherwise consider idle."""
+    leader = await manager.create_session("leader")
+    await _snapshots(manager, leader, 6)
+    await _backdate(db, leader.session.id, 6, days=400)
+    follower = await manager.create_session("follower", workspace=leader.workspace, metadata={"workspace": str(leader.workspace)})
+    assert await _rows(db, follower.session.id) == [], "the follower has snapshots; the case under test is that it has none"
+    follower.task = asyncio.create_task(asyncio.Event().wait())
+
+    report = await manager.checkpoint_retention.run(RetentionBounds(keep_days=30, total_max_gb=0, keep_last=2))
+    assert report.dropped == 0 and report.skipped == 1, "a store being written into was packed"
+    follower.task.cancel()
+    follower.task = None
+    assert (await manager.checkpoint_retention.run(RetentionBounds(keep_days=30, total_max_gb=0, keep_last=2))).dropped == 4
+
+
+async def test_a_session_that_starts_between_two_cuts_keeps_its_store(manager: SessionManager, db: Database) -> None:
+    """``_usable`` decided once per pass, and every cut in between is a ``git gc --prune=now``: the
+    two-week grace on loose objects is exactly what the session that just started is writing into."""
+    first = await manager.create_session("first")
+    second = await manager.create_session("second")
+    for state in (first, second):
+        await _snapshots(manager, state, 6)
+        await _backdate(db, state.session.id, 6, days=400)
+
+    retention = manager.checkpoint_retention
+    real_cut = retention._cut
+    started: list[str] = []
+
+    async def cut_and_start_a_run(store: Any, count: int, report: Any) -> None:
+        if not started:
+            started.append("yes")
+            second.task = asyncio.create_task(asyncio.Event().wait())  # a run begins while the first store is packed
+        await real_cut(store, count, report)
+
+    retention._cut = cut_and_start_a_run  # type: ignore[assignment]
+    report = await retention.run(RetentionBounds(keep_days=30, total_max_gb=0, keep_last=2))
+    assert len(await _rows(db, second.session.id)) == 6, "the store of a session that started mid-pass was cut"
+    assert report.dropped == 4
+    second.task.cancel()
+    second.task = None
+
+
 async def test_the_store_size_is_measured_again_only_when_the_store_was_written_to(manager: SessionManager) -> None:
     """A gigabyte of stores walked on every maintenance tick to learn that nothing changed is the
     cost the cache exists to avoid; a snapshot taken since is the thing that must invalidate it."""
@@ -243,6 +287,9 @@ async def test_the_maintenance_tick_runs_the_pass_and_says_what_it_freed(manager
 
     with caplog.at_level("WARNING"):
         await scheduler._maintain_database(datetime.now(UTC))
+        # The pass is a task of its own: the tick starts it and goes on dispatching cron and
+        # heartbeats while a store is being packed. Nothing waits for it but a shutdown.
+        await scheduler.drain_retention()
     assert len(await _rows(db, state.session.id)) == 2
     line = next(r.getMessage() for r in caplog.records if "checkpoint retention" in r.getMessage())
     assert "6 checkpoint(s) dropped from 1 store(s)" in line and "MB freed" in line
@@ -251,6 +298,7 @@ async def test_the_maintenance_tick_runs_the_pass_and_says_what_it_freed(manager
     caplog.clear()
     with caplog.at_level("WARNING"):
         await scheduler._maintain_database(datetime.now(UTC))
+        await scheduler.drain_retention()
     assert not [r for r in caplog.records if "checkpoint retention" in r.getMessage()]
 
 

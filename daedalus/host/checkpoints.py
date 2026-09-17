@@ -126,7 +126,11 @@ class Checkpoints:
             await self._git("cat-file", "-e", f"{sha}^{{commit}}")
         except CheckpointError:
             return False
-        (self.git_dir / "shallow").write_text(sha + "\n", encoding="utf-8")
+        # Written beside the file and moved onto it: git takes its own ``shallow.lock`` for this, and
+        # a crash halfway through a plain write leaves a truncated boundary that git reads as garbage.
+        temporary = self.git_dir / "shallow.new"
+        temporary.write_text(sha + "\n", encoding="utf-8")
+        os.replace(temporary, self.git_dir / "shallow")
         try:
             await self._git("reflog", "expire", "--expire=now", "--all")
             await self._git("gc", "--prune=now", "--quiet")

@@ -44,6 +44,7 @@ from protocore.tools.memory import build_memory_tools
 from daedalus.config import VOICE_ONLY_TOOLS, VOICE_TOOLS, NoModelConfigured, RuntimeConfig, Settings
 from daedalus.host import capabilities, prompts
 from daedalus.host.checkpoint_retention import CheckpointRetention, RetentionBounds, RetentionReport
+from daedalus.host.checkpoints import DIR_NAME as CHECKPOINT_DIR_NAME
 from daedalus.host.checkpoints import CheckpointError, Checkpoints, scan_workspace
 from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
 from daedalus.host.hooks import DaedalusHookManager
@@ -247,7 +248,7 @@ class SessionManager:
             reserved=[Path(p) for p in settings.sandbox_never_writable] + [settings.secrets_dir, settings.workspaces_dir],
             home=Path.home(),
         )
-        self.checkpoint_retention = CheckpointRetention(db, workspaces_dir=settings.workspaces_dir, busy=self.busy_sessions)
+        self.checkpoint_retention = CheckpointRetention(db, workspaces_dir=settings.workspaces_dir, busy=self.busy_sessions, occupants=self.store_occupants)
         self.blobs = FileBlobStore(settings.blobs_dir)
         self.memory = PersistentMemory(db)
         self.workspace_units = PersistentWorkspace(db)
@@ -1310,6 +1311,20 @@ class SessionManager:
     def busy_sessions(self) -> set[str]:
         """Sessions with a turn in flight or a question outstanding — the same test ``revert`` and ``fork`` use."""
         return {sid for sid, state in self._states.items() if state.running or state.pending is not None}
+
+    def store_occupants(self) -> dict[Path, set[str]]:
+        """Which sessions this process holds open in each snapshot store, by the store's own directory.
+
+        Retention reads the ``checkpoints`` rows to find the stores, which is every session that has
+        taken a snapshot — and not the one that has not taken its first yet. A subagent sharing its
+        leader's workspace is exactly that session, and its before-turn snapshot is a ``git add`` into
+        the chain a pass would otherwise consider idle. This is read from the sessions the process
+        actually holds, so a store is busy from the moment one of them is loaded in it.
+        """
+        out: dict[Path, set[str]] = {}
+        for session_id, state in self._states.items():
+            out.setdefault(state.workspace / CHECKPOINT_DIR_NAME, set()).add(session_id)
+        return out
 
     def register_services(self, state: SessionState) -> None:
         hooks = self.service_hooks

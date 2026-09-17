@@ -56,6 +56,7 @@ class Scheduler:
         self._active_runs: dict[str, str] = {}  # schedule id -> run id, so a session's other runs are not mistaken for the task's
         self._delivering: dict[str, list[int]] = {}  # session id -> lazy note ids folded into a message not yet started
         self._maintained_at: datetime | None = None  # last database housekeeping pass
+        self._retention: asyncio.Task[None] | None = None  # the checkpoint pass, which runs off the tick
 
     @property
     def root(self) -> Path:
@@ -260,12 +261,18 @@ class Scheduler:
     # -- loop -----------------------------------------------------------------------
 
     async def loop(self) -> None:
-        while True:
-            try:
-                await self.tick()
-            except Exception:  # noqa: BLE001
-                logger.exception("scheduler tick failed")
-            await asyncio.sleep(30)
+        try:
+            while True:
+                try:
+                    await self.tick()
+                except Exception:  # noqa: BLE001
+                    logger.exception("scheduler tick failed")
+                await asyncio.sleep(30)
+        finally:
+            # The maintenance the tick started runs on its own; it goes down with the loop that
+            # started it rather than being left behind for the interpreter to complain about.
+            if self._retention is not None and not self._retention.done():
+                self._retention.cancel()
 
     async def tick(self) -> None:
         now = _now()
@@ -323,11 +330,38 @@ class Scheduler:
             pages = await self.app.db.reclaim()
             if dropped or pages:
                 logger.warning("database maintenance: %d event rows dropped, %d pages reclaimed", dropped, pages)
-            report = await self.app.manager.prune_checkpoints()
-            if report.dropped or report.freed:
-                logger.warning("checkpoint retention: %s", report.line())
+            self._start_retention()
         except Exception:  # noqa: BLE001 — housekeeping must never take the tick down
             logger.exception("database maintenance failed")
+
+    def _start_retention(self) -> None:
+        """Start the checkpoint retention pass, unless the one from an earlier tick is still going.
+
+        It does not run *on* the tick. The size pass cuts a batch of snapshots, runs a full
+        ``reflog expire`` and ``git gc --prune=now``, measures again and goes round; each of those
+        subprocesses may take minutes, and a store on a long-running installation holds hundreds of
+        snapshots. Everything else the tick does — firing cron tasks, heartbeats, the inbox — would
+        wait behind it. As its own task it takes as long as it takes, and the next tick finds it
+        still running and leaves it alone.
+        """
+        if self._retention is not None and not self._retention.done():
+            return
+        self._retention = asyncio.create_task(self._prune_checkpoints(), name="checkpoint-retention")
+
+    async def _prune_checkpoints(self) -> None:
+        try:
+            report = await self.app.manager.prune_checkpoints()
+        except Exception:  # noqa: BLE001 — housekeeping must never take anything else down
+            logger.exception("checkpoint retention failed")
+            return
+        if report.dropped or report.freed:
+            logger.warning("checkpoint retention: %s", report.line())
+
+    async def drain_retention(self) -> None:
+        """Wait for the retention pass to finish — what a shutdown and the tests wait on."""
+        task = self._retention
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)
 
     async def _record_start_failure(self, schedule: dict[str, Any], error: str) -> None:
         """A run that could not even start counts as a failure and is reported; the slot was consumed."""

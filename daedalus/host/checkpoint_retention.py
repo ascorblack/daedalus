@@ -133,10 +133,18 @@ class StoreSizes:
 class CheckpointRetention:
     """The retention pass: read the rows, decide what goes, cut the stores, write the rows back."""
 
-    def __init__(self, db: Database, *, workspaces_dir: Path, busy: Callable[[], set[str]] | None = None) -> None:
+    def __init__(
+        self,
+        db: Database,
+        *,
+        workspaces_dir: Path,
+        busy: Callable[[], set[str]] | None = None,
+        occupants: Callable[[], dict[Path, set[str]]] | None = None,
+    ) -> None:
         self.db = db
         self.workspaces_dir = workspaces_dir
         self._busy = busy or (lambda: set())
+        self._occupants = occupants or (lambda: {})
         self.sizes = StoreSizes()
 
     async def total_size(self) -> int:
@@ -185,6 +193,8 @@ class CheckpointRetention:
         # The bound is on every store together, including the ones this pass may not touch: a
         # session working through a big one is a reason to leave it alone, not to stop counting it.
         limit = bounds.total_max_gb * 1e9
+        if limit and await self._size_of(found) > limit:
+            self._name_the_biggest_untouchable(found, stores)
         while limit and await self._size_of(found) > limit:
             store = self._fullest_with_something_to_drop(stores)
             if store is None:
@@ -198,16 +208,44 @@ class CheckpointRetention:
 
         A workspace that is not there is not an empty workspace — a project's folder is unreachable
         until it is mounted — so its rows stay and its undo with them.
+
+        Who is working in it is asked of the process, not only of the ``checkpoints`` rows: a session
+        that has not taken its first snapshot yet has no rows and is about to write into the chain
+        anyway. And it is asked again before every cut, because a cut is a ``git gc --prune=now``
+        that takes minutes, and a session can start running in any of them.
         """
         if not (store.git_dir / "HEAD").exists():
             return False
-        return not (store.sessions & self._busy())
+        return not (self._sessions_in(store) & self._busy())
+
+    def _sessions_in(self, store: _Store) -> set[str]:
+        """Every session that shares this store: the ones with rows, and the ones this process holds open."""
+        return store.sessions | self._occupants().get(store.git_dir, set())
 
     async def _size_of(self, stores: Iterable[_Store]) -> int:
         total = 0
         for store in stores:
             total += await asyncio.to_thread(self.sizes.size, store.git_dir)
         return total
+
+    def _name_the_biggest_untouchable(self, found: Iterable[_Store], stores: Iterable[_Store]) -> None:
+        """Say which store the size bound could not reach, when the pass is about to take it out of the others.
+
+        The bound is a total over every store, and a store a session is working in is left alone —
+        so one big busy store is paid for by every other session's oldest undos. That is deliberate,
+        and worth a line naming the store, because from the outside it looks like retention running
+        far harder than the numbers say it should.
+        """
+        touchable = {store.git_dir for store in stores}
+        skipped = [store for store in found if store.git_dir not in touchable]
+        if not skipped:
+            return
+        biggest = max(skipped, key=lambda store: self.sizes.size(store.git_dir))
+        logger.warning(
+            "checkpoint store %s (%.2f GB) is in use and cannot be cut; the size bound is being met from the other stores",
+            biggest.git_dir,
+            self.sizes.size(biggest.git_dir) / 1e9,
+        )
 
     def _fullest_with_something_to_drop(self, stores: Iterable[_Store]) -> _Store | None:
         """The biggest store that still has an unprotected snapshot: the size bound is a total, and
@@ -221,6 +259,13 @@ class CheckpointRetention:
     async def _cut(self, store: _Store, count: int, report: RetentionReport) -> None:
         """Drop the ``count`` oldest snapshots of one store: the chain first, then the rows."""
         if count <= 0:
+            return
+        if not self._usable(store):
+            # Decided again here rather than once for the pass: every cut before this one ran a
+            # ``git gc --prune=now``, which drops the grace period on loose objects — the very
+            # objects a session that started meanwhile is writing.
+            store.blocked = True
+            report.skipped += 1
             return
         doomed, kept = store.rows[:count], store.rows[count:]
         if not kept:
