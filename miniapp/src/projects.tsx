@@ -211,7 +211,7 @@ export function ProjectSettingsSheet({ project, onClose, onRemoved, toast }: { p
           ? project.writable
             ? "Reachable from where the bot runs."
             : "Reachable, but read-only from where the bot runs: agents can read it and not write it."
-          : "Not reachable from where the bot runs. In Docker a folder has to be mounted into the container at the same path: the launcher offers to write that mount and restart the stack, and the desktop README has the entry to add by hand where it cannot."}
+          : "Not reachable from where the bot runs. In Docker a folder has to be mounted into the container at the same path: the launcher writes that mount, and Stop then Start is what applies it. Where the launcher cannot, the desktop README has the entry to add by hand."}
       </div>
       <label className="toggle-row">
         <input type="checkbox" checked={snapshots} onChange={(e) => setSnapshots(e.target.checked)} />

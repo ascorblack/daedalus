@@ -310,7 +310,7 @@ Open it and a page asks the one question that matters, with what each answer cos
 | First run fetches | **103 MB** on Linux, ~96 MB on macOS, ~148 MB on Windows — a pinned `uv`, a CPython, `rg` and the app's environment, each checked against the hash its publisher published | **114 MB** to pull one image (478 MB unpacked), plus Docker itself: a ~600 MB application with a VM disk behind it |
 | Ready in | 26 s from an empty folder, **4.3 s** warm | seconds, once Docker is up |
 | The agent is | a process under the launcher, which keeps it alive and stops it on quit | a container that comes back with the machine |
-| Isolation | the policy rules, and bubblewrap on Linux where it is present — see [what each gives up](#what-each-gives-up) | the container's own edge |
+| Isolation | the policy rules, and bubblewrap on Linux where it can actually run — see [what each gives up](#what-each-gives-up) | the container's own edge |
 
 Then it opens a window of its own — the system's web view on macOS and Windows, a browser window
 with no tabs or address bar on Linux, the default browser if neither — asks for a provider key and a
@@ -560,8 +560,9 @@ max_run_tokens = 0           # cap on tokens per run, every call counted (0 = no
 max_output_chars = 60000     # the most one tool call returns to the model
 sandbox = "off"              # off | workspace — bubblewrap: the filesystem read-only except this
                              # session's own directory, a private /tmp, its own PID namespace.
-                             # Defaults to "workspace" on a native install that has bwrap, "off"
-                             # where a container is the boundary instead.
+                             # Defaults to "workspace" on a native install where bubblewrap can
+                             # actually run — installed is not enough, the machine has to allow the
+                             # namespaces — and "off" everywhere else, a container included.
 
 [tools.results]              # what happens to results the agent has moved past
 fresh_count = 6              # the newest results, always shown whole

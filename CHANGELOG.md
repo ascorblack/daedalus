@@ -92,7 +92,8 @@ Notable changes, newest first. The repository's `main` is the released version.
   of — are refused to read as well as to write, through `Exec` as much as through the file tools; and
   a path in your home folder outside every project, workspace, checkout and the installation itself is
   a question you answer once for one exact call. `Exec` is sandboxed by default on a native Linux
-  machine that has `bwrap`. Where the supervisor's command channel has to be a loopback port rather
+  machine where bubblewrap can actually run — `bwrap` installed and the kernel refusing it
+  unprivileged namespaces, which is the Ubuntu 24.04 and Debian 13 default, starts with it off. Where the supervisor's command channel has to be a loopback port rather
   than a socket file, it asks for a secret it keeps beside the state. `daedalus doctor` and the
   launcher's status page say what the isolation is in one line rather than implying a wall that is
   not there.
