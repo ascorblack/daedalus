@@ -206,10 +206,13 @@ preset = ""              # a preset id; empty = the default preset
 
 # What a delegated agent says while it works ("found the problem, testing the fix") is relayed to the
 # concierge as well as its final answer — only while the page is open, coalesced over a window, and at
-# most one per agent per gap, so a talkative agent cannot take the conversation over.
+# most one per agent per gap, so a talkative agent cannot take the conversation over. The last cap is
+# the fleet's: the gap bounds one agent, and twenty agents obeying it is still twenty spoken turns a
+# minute, so past the cap a line is dropped rather than queued — the next paragraph supersedes it.
 progress = true
 progress_window_seconds = 20     # the newest line of an agent replaces the older ones for this long
 progress_min_gap_seconds = 60    # the floor between two of the same agent's interims
+progress_max_per_minute = 3      # interims relayed in a minute across all the agents together
 
 # Reading the answer out loud. Empty url and provider = the browser's own synthesiser.
 # Any OpenAI-compatible /audio/speech endpoint works: a hosted one, or a local server.

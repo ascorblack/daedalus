@@ -63,6 +63,8 @@ RELAY_POLL_SECONDS = 0.25
 DRAFT_CLIP = 8000
 """The most of one agent message held while it is being written. A message longer than this is not a
 progress line by then, and an unbounded buffer per delegated run is how a long-running page leaks."""
+APPROVALS_REMEMBERED = 8
+"""Approval keys kept per agent, so an agent alternating between two refused calls reports each once."""
 MAX_AGENTS = 20
 MAX_PENDING = 8
 """Reports held for a client that is not connected; the oldest go first, the newest are what matters."""
@@ -92,7 +94,23 @@ def report_block(*, kind: str, title: str, session_id: str, state: str, body: st
     depend on how the agent happened to phrase a sentence.
     """
     head = f"agent: {quoted(title.strip())[:TITLE_CLIP] or session_id} ({session_id}) {state}"
-    return "\n".join([REPORT_OPEN, f"kind: {kind}", head, quoted(body.strip()), REPORT_CLOSE])
+    return "\n".join([REPORT_OPEN, f"kind: {kind}", head, no_kind_line(quoted(body.strip())), REPORT_CLOSE])
+
+
+def no_kind_line(text: str) -> str:
+    """The agent's words with any line of its own that reads as our ``kind:`` header defused.
+
+    The word on the second line is what the concierge acts on — whether the work is done or the
+    agent is only talking — and it is ours to write. A progress line cannot forge one (its
+    whitespace is collapsed into a single line), but a final answer, a question and an approval are
+    the agent's own prose, and an agent answering a question *about* this format would write one by
+    accident as readily as a hostile page would write one on purpose. The words are kept — the line
+    is marked as quoted, so it is no longer a line that begins with ours.
+    """
+    return KIND_LINE_RE.sub(lambda match: "> " + match.group(0).strip(), text)
+
+
+KIND_LINE_RE = re.compile(r"(?mi)^[ \t]*kind[ \t]*:")
 
 
 SENTENCE_END = re.compile(r"(?<=[.!?…。！？])[\s\n]+|(?<=[.!?…])$|\n\n+")
@@ -216,8 +234,12 @@ class Voice:
         self._relay_tasks: dict[str, asyncio.Task[None]] = {}
         self._relayed_at: dict[str, float] = {}
         """Per delegated agent: when its last interim was relayed, for the rate cap."""
-        self._approvals: dict[str, str] = {}
-        """Per delegated agent: the approval key already reported, so a retry loop is reported once."""
+        self._relays: list[float] = []
+        """When each interim was relayed, across every agent, for the cap that is a total rather than a floor."""
+        self._approvals: dict[str, list[str]] = {}
+        """Per delegated agent: the approval keys already reported, so a retry loop is reported once. A few
+        per agent, because an agent that alternates between two refused calls would otherwise report each
+        of them again every time it changed its mind."""
 
     # -- the session ------------------------------------------------------------------
 
@@ -453,7 +475,8 @@ class Voice:
 
     async def say_to_concierge(self, text: str) -> None:
         manager = self.app.manager
-        assert manager is not None
+        if manager is None:
+            raise RuntimeError("there is no session manager to say anything to")
         session_id = await self.session_id()
         await manager.submit(session_id, text, as_answer=False, origin="agent")
 
@@ -487,6 +510,8 @@ class Voice:
                 self._collect(session_id, run_id, delta_text(payload))
             elif event.type is EventType.MESSAGE_START:
                 self._agent_drafts.pop((session_id, run_id), None)
+                if self._listeners:
+                    await self.emit("agents", {"agents": await self.agents()})
             elif event.type is EventType.MESSAGE_STOP:
                 await self._agent_paused(session_id, run_id, payload)
             elif event.type is EventType.TOOL_RESULT and payload.get("is_error"):
@@ -573,6 +598,8 @@ class Voice:
             manager = self.app.manager
             if not line or not self._listeners or manager is None:
                 return
+            if not self._fleet_has_room():
+                return
             if not await self._concierge_free(config.progress_window_seconds):
                 # The concierge is in the middle of a turn of its own. Submitting here would steer that
                 # turn, and the operator would hear their own answer interrupted by an agent's aside.
@@ -582,6 +609,7 @@ class Voice:
             if state is None or state.metadata.get("voice_parent") != self._id:
                 return
             self._relayed_at[session_id] = time.monotonic()
+            self._relays.append(self._relayed_at[session_id])
             await self.say_to_concierge(
                 report_block(
                     kind="progress",
@@ -597,6 +625,22 @@ class Voice:
             logger.exception("could not relay an agent's progress")
         finally:
             self._relay_tasks.pop(session_id, None)
+            if self._waiting_relay.get(session_id) and self._listeners:
+                # A line that arrived while this task was awaiting: it found the task not done, so
+                # nothing scheduled another, and this one has already taken its own line away.
+                self._relay_tasks[session_id] = asyncio.create_task(self._relay_progress(session_id), name=f"voice-progress:{session_id}")
+
+    def _fleet_has_room(self) -> bool:
+        """Whether another interim may be spoken at all this minute, counting every agent together.
+
+        The per-agent floor bounds one narrator; twenty agents is what ``MAX_AGENTS`` allows, and
+        twenty of them each obeying their own floor is a conversation nobody can hold. Over the cap
+        the oldest relays are what age out of the window, and the line that arrives is dropped.
+        """
+        cap = int(self.app.config.voice.progress_max_per_minute)
+        now = time.monotonic()
+        self._relays = [at for at in self._relays if now - at < 60.0]
+        return len(self._relays) < cap
 
     async def _concierge_free(self, hold_seconds: float) -> bool:
         """Whether the concierge can be told something now, after waiting up to ``hold_seconds`` for it.
@@ -640,17 +684,18 @@ class Voice:
         own. An agent narrating gets on with its job; an agent waiting for an approval does not.
         """
         match = APPROVAL_KEY_RE.search(str(payload.get("content") or ""))
-        if match is None or not self.app.config.voice.progress:
+        manager = self.app.manager
+        if match is None or manager is None or not self.app.config.voice.progress:
             return
         key = match.group(1)
-        if self._approvals.get(session_id) == key:
+        reported = self._approvals.setdefault(session_id, [])
+        if key in reported:
             return  # the agent retries the refused call; the operator is told about it once
-        manager = self.app.manager
-        assert manager is not None
         state = await manager.get_state(session_id)
         if state is None or state.metadata.get("voice_parent") != self._id:
             return
-        self._approvals[session_id] = key
+        reported.append(key)
+        del reported[:-APPROVALS_REMEMBERED]
         pending = (state.metadata.get("policy_pending") or {}).get(key) or {}
         what = f"{pending.get('tool')}: {pending.get('text')}" if pending else "a call it tried to make"
         self._news[session_id] = {"line": f"waiting for approval — {what}"[:PROGRESS_CLIP], "at": datetime.now(UTC).isoformat(), "waiting": "approval"}
@@ -679,7 +724,8 @@ class Voice:
 
     async def _agent_asks(self, session_id: str, event: Any) -> None:
         manager = self.app.manager
-        assert manager is not None
+        if manager is None:
+            return
         state = await manager.get_state(session_id)
         if state is None or state.metadata.get("voice_parent") != self._id:
             return

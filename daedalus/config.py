@@ -780,6 +780,12 @@ class VoiceConfig(BaseModel):
     """The floor between two interims of the same agent. A busy agent narrates every few seconds; a
     conversation interrupted that often is unusable, so the newest line waits for the gap and the rest are
     superseded. Finals and questions do not pass through here and are never held back by it."""
+    progress_max_per_minute: int = Field(default=3, ge=0)
+    """Interims relayed in any one minute across *all* the agents together. The gap above is per agent, and
+    twenty agents each obeying it is still twenty spoken turns a minute — twenty model calls, each one
+    growing the concierge's context. Past this cap the line is dropped rather than queued: an interim is
+    superseded by the agent's next paragraph and by its final answer, so a late one is worth nothing.
+    ``0`` relays no interims at all, which is what ``progress = false`` says more plainly."""
     tts: TtsConfig = Field(default_factory=TtsConfig)
 
 
