@@ -1,6 +1,7 @@
 // What this installation can do, from GET /api/capabilities. The app offers what is there and
 // nothing else: a destination that answers 404 is worse than a destination that is not in the nav.
 
+import { t } from "./i18n";
 import type { Screen } from "./router";
 
 export type SelfDevMode = "off" | "local" | "server";
@@ -29,15 +30,15 @@ export type Notice = { kind: "pending" | "done" | "failed"; title: string; body:
 export function changeNotice(caps: Capabilities | undefined, dismissed: string): Notice | null {
   const pending = caps?.restart_required;
   if (pending?.commit) {
-    const image = pending.needs_image ? " This change also rewrites the image, which a restart cannot replace — run an update for that part." : "";
-    return { kind: "pending", title: "Changes are ready — restart to apply", body: pending.summary + image, commit: pending.commit, action: true };
+    const image = pending.needs_image ? t("change.pending.image") : "";
+    return { kind: "pending", title: t("change.pending.title"), body: pending.summary + image, commit: pending.commit, action: true };
   }
   const last = caps?.last_change;
   if (!last?.commit || last.commit === dismissed) return null;
   if (last.status === "applied") {
-    return { kind: "done", title: "The change is running", body: last.summary, commit: last.commit, action: false };
+    return { kind: "done", title: t("change.done.title"), body: last.summary, commit: last.commit, action: false };
   }
-  const title = last.status === "rolled_back" ? "The change was reversed" : "The change was not applied";
+  const title = t(last.status === "rolled_back" ? "change.reversed.title" : "change.failed.title");
   return { kind: "failed", title, body: last.detail || last.summary, commit: last.commit, action: false };
 }
 

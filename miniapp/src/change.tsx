@@ -10,6 +10,7 @@ import { api } from "./api";
 import type { Capabilities } from "./capabilities";
 import { changeNotice } from "./capabilities";
 import type { Query } from "./store";
+import { t } from "./i18n";
 
 const SEEN_KEY = "daedalus.changeSeen";
 
@@ -76,12 +77,12 @@ export function ChangeStrip({ caps }: { caps: Query<Capabilities> }) {
       <div className="change-actions">
         {notice.action && (
           <button className="btn primary" onClick={() => void restart()} disabled={restarting}>
-            {restarting ? "Restarting…" : "Restart"}
+            {restarting ? t("change.restarting") : t("change.restart")}
           </button>
         )}
         {!notice.action && (
           <button className="btn" onClick={dismiss}>
-            Dismiss
+            {t("change.dismiss")}
           </button>
         )}
       </div>

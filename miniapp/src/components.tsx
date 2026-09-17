@@ -8,7 +8,7 @@ import { LANGS, t, useLang } from "./i18n";
 
 export type Status = "idle" | "running" | "waiting" | "failed" | "done" | "compacting";
 
-/** Two words, one chosen: the language the screens a person meets before signing in are written in. */
+/** Two words, one chosen: the language every screen of the app is written in. */
 export function LangPicker() {
   const [lang, pick] = useLang();
   return (
@@ -38,8 +38,13 @@ export function Avatar({ status, seed }: { status: Status; seed: string }) {
   );
 }
 
+/** The states the app has a word for; anything else the server invents is shown as it came. */
+const STATUS_WORDS = ["idle", "running", "waiting", "compacting", "failed", "done", "paused", "stopped", "pending", "merged", "approved", "rejected", "closed", "dead"];
+
 /** One word for a state, in the one colour that state has everywhere: idle stays grey. */
-export const STATUS_WORD: Record<string, string> = { idle: "Idle", running: "Working", waiting: "Needs you", compacting: "Compacting", failed: "Failed", done: "Done", paused: "Paused", stopped: "Stopped", pending: "Pending", merged: "Merged", approved: "Approved", rejected: "Rejected", closed: "Closed", dead: "Died", stopped_: "Stopped" };
+export function statusWord(status: string): string {
+  return STATUS_WORDS.includes(status) ? t(`status.${status}`) : status;
+}
 
 export function Dot({ status, className }: { status: string; className?: string }) {
   return <span className={`dot ${status} ${className ?? ""}`} aria-hidden />;
@@ -50,13 +55,13 @@ export function StatusLabel({ status, word }: { status: string; word?: string })
   return (
     <span className={`status ${status}`}>
       <span className="dot" aria-hidden />
-      {word ?? STATUS_WORD[status] ?? status}
+      {word ?? statusWord(status)}
     </span>
   );
 }
 
 export function Pill({ status, children }: { status: string; children?: React.ReactNode }) {
-  return <span className={`pill ${status}`}>{children ?? STATUS_WORD[status] ?? status}</span>;
+  return <span className={`pill ${status}`}>{children ?? statusWord(status)}</span>;
 }
 
 /** A row of grey lines while the first load is on its way. */
@@ -96,9 +101,9 @@ export function ToolPicker({ off, onChange, note }: { off: string[]; onChange: (
   return (
     <div className="toolpicker">
       <button type="button" className="toolpicker-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <span className={`chev ${open ? "down" : ""}`}>›</span> Tools{off.length ? ` · ${off.length} off` : " · all on"}
+        <span className={`chev ${open ? "down" : ""}`}>›</span> {t("tools.title")}{off.length ? t("tools.off", { n: off.length }) : t("tools.allon")}
       </button>
-      {open && tools === null && <div className="sub">Loading…</div>}
+      {open && tools === null && <div className="sub">{t("common.loading")}</div>}
       {open && tools !== null && (
         <div className="toolpicker-body">
           {note && <div className="sub" style={{ marginBottom: 6 }}>{note}</div>}
@@ -124,17 +129,17 @@ export function ToolPicker({ off, onChange, note }: { off: string[]; onChange: (
 }
 
 export function fmtInterval(seconds: number | null | undefined): string {
-  if (!seconds) return "dynamic";
-  for (const [size, suffix] of [[86400, "d"], [3600, "h"], [60, "m"]] as [number, string][]) if (seconds >= size && seconds % size === 0) return `${seconds / size}${suffix}`;
-  return `${seconds}s`;
+  if (!seconds) return t("tools.interval.dynamic");
+  for (const [size, key] of [[86400, "fmt.dur.d"], [3600, "fmt.dur.h"], [60, "fmt.dur.m"]] as [number, string][]) if (seconds >= size && seconds % size === 0) return t(key, { n: seconds / size });
+  return t("fmt.dur.s", { n: seconds });
 }
 
 /** "loop · 10m · #12" / "loop · paused" — the short form of a session's loop. */
 export function loopLabel(loop: LoopView | null | undefined): string {
   if (!loop) return "";
-  const cadence = loop.mode === "interval" ? `every ${fmtInterval(loop.interval_seconds)}` : "self-paced";
-  const status = loop.status === "active" ? "" : ` · ${loop.status}`;
-  return `loop · ${cadence} · #${loop.run_count}${loop.max_runs ? "/" + loop.max_runs : ""}${status}`;
+  const cadence = loop.mode === "interval" ? t("loop.every", { t: fmtInterval(loop.interval_seconds) }) : t("loop.selfpaced");
+  const status = loop.status === "active" ? "" : ` · ${statusWord(loop.status).toLowerCase()}`;
+  return `${t("loop.word")} · ${cadence} · #${loop.run_count}${loop.max_runs ? "/" + loop.max_runs : ""}${status}`;
 }
 
 export function timeAgo(iso: string | null | undefined): string {
@@ -154,27 +159,27 @@ export async function copyText(text: string): Promise<boolean> {
   }
 }
 
-const ACCESS_WORD: Record<ShareMode, string> = { local: "Local only", key: "Private link", public: "Public" };
+const accessWord = (mode: ShareMode) => t(`svc.access.${mode}`);
 
 /** One hosted service: what it is, whether it runs, where to open it, and the rest behind a menu. */
 export function ServiceRow({ s, sessionId, onChange, toast, onLogs, card }: { s: ServiceView; sessionId: string; onChange: () => void; toast: (t: string) => void; onLogs: (text: string) => void; card?: boolean }) {
   const [share, setShare] = useState(false);
   const [busy, setBusy] = useState(false);
   async function stop() {
-    if (!(await confirmAsync(`Stop "${s.name}"?`, { body: "The process is ended; the agent can start it again with ServiceStart.", action: "Stop" }))) return;
+    if (!(await confirmAsync(t("svc.stop.title", { name: s.name }), { body: t("svc.stop.body"), action: t("common.stop") }))) return;
     try {
       await api.post(`/api/sessions/${sessionId}/services/${encodeURIComponent(s.name)}/stop`);
-      toast(`${s.name}: stopped`);
+      toast(t("svc.stopped", { name: s.name }));
       onChange();
     } catch (e) {
       toast(errorText(e));
     }
   }
   async function remove() {
-    if (!(await confirmAsync(s.status === "running" ? `Stop and remove "${s.name}"?` : `Remove "${s.name}" from the list?`, { body: "Its log stays in the workspace.", action: "Remove" }))) return;
+    if (!(await confirmAsync(t(s.status === "running" ? "svc.remove.title.running" : "svc.remove.title", { name: s.name }), { body: t("svc.remove.body"), action: t("common.remove") }))) return;
     try {
       await api.delete(`/api/sessions/${sessionId}/services/${encodeURIComponent(s.name)}`);
-      toast(`${s.name}: removed`);
+      toast(t("svc.removed", { name: s.name }));
       onChange();
     } catch (e) {
       toast(errorText(e));
@@ -189,11 +194,11 @@ export function ServiceRow({ s, sessionId, onChange, toast, onLogs, card }: { s:
     }
   }
   async function setMode(mode: ShareMode, rotate = false) {
-    if (mode === "public" && s.share?.mode !== "public" && !(await confirmAsync(`Open "${s.name}" to the internet?`, { body: "Anyone with the link reaches it through the site, without a login.", action: "Make public" }))) return;
+    if (mode === "public" && s.share?.mode !== "public" && !(await confirmAsync(t("svc.public.title", { name: s.name }), { body: t("svc.public.body"), action: t("svc.public.action") }))) return;
     setBusy(true);
     try {
       await api.post(`/api/sessions/${sessionId}/services/${encodeURIComponent(s.name)}/share`, { mode, rotate_key: rotate });
-      toast(mode === "local" ? `${s.name}: local only` : mode === "public" ? `${s.name}: public` : rotate ? `${s.name}: new key` : `${s.name}: private link`);
+      toast(t(mode === "local" ? "svc.mode.local" : mode === "public" ? "svc.mode.public" : rotate ? "svc.mode.newkey" : "svc.mode.key", { name: s.name }));
       onChange();
     } catch (e) {
       toast(errorText(e));
@@ -201,8 +206,8 @@ export function ServiceRow({ s, sessionId, onChange, toast, onLogs, card }: { s:
       setBusy(false);
     }
   }
-  async function copy(text: string, what: string) {
-    toast((await copyText(text)) ? `${what} copied` : "select and copy the text below");
+  async function copy(text: string, what: "address" | "link" | "key") {
+    toast((await copyText(text)) ? t(`svc.copied.${what}`) : t("svc.copyfail"));
   }
   const mode = s.share?.mode ?? "local";
   const shared = mode !== "local" && s.status === "running";
@@ -211,14 +216,14 @@ export function ServiceRow({ s, sessionId, onChange, toast, onLogs, card }: { s:
   const menu = (
     <OverflowMenu
       small
-      label={`${s.name} actions`}
+      label={t("svc.actions", { name: s.name })}
       items={[
-        ...(s.status === "running" && s.port ? [{ label: "Access…", icon: "share" as const, onSelect: () => setShare(true) }] : []),
-        { label: "Log", icon: "file", onSelect: logs },
-        ...(openUrl ? [{ label: "Copy address", icon: "copy" as const, onSelect: () => copy(openUrl, "address") }] : []),
+        ...(s.status === "running" && s.port ? [{ label: t("svc.menu.access"), icon: "share" as const, onSelect: () => setShare(true) }] : []),
+        { label: t("svc.menu.log"), icon: "file", onSelect: logs },
+        ...(openUrl ? [{ label: t("svc.menu.copyaddr"), icon: "copy" as const, onSelect: () => copy(openUrl, "address") }] : []),
         "-" as const,
-        ...(s.status === "running" ? [{ label: "Stop", icon: "stop" as const, onSelect: stop }] : []),
-        { label: s.status === "running" ? "Stop and remove…" : "Remove from the list", icon: "trash", danger: true, onSelect: remove },
+        ...(s.status === "running" ? [{ label: t("common.stop"), icon: "stop" as const, onSelect: stop }] : []),
+        { label: t(s.status === "running" ? "svc.menu.remove.running" : "svc.menu.remove"), icon: "trash", danger: true, onSelect: remove },
       ]}
     />
   );
@@ -230,53 +235,53 @@ export function ServiceRow({ s, sessionId, onChange, toast, onLogs, card }: { s:
           <div className="service-name">
             {s.name}
             {s.port && <span className="chip mono port">:{s.port}</span>}
-            {shared && <span className={`chip ${mode === "public" ? "bad" : "attn"}`}>{ACCESS_WORD[mode]}</span>}
+            {shared && <span className={`chip ${mode === "public" ? "bad" : "attn"}`}>{accessWord(mode)}</span>}
           </div>
           <div className="sub service-meta">
-            {s.status === "running" ? `Running · ${relTime(s.started_at)}` : `${s.status === "dead" ? "Died" : "Stopped"}${s.note ? `: ${s.note}` : ""}${s.stopped_at ? ` · ${relTime(s.stopped_at)}` : ""}`}
+            {s.status === "running" ? t("svc.running", { t: relTime(s.started_at) }) : `${statusWord(s.status === "dead" ? "dead" : "stopped")}${s.note ? `: ${s.note}` : ""}${s.stopped_at ? ` · ${relTime(s.stopped_at)}` : ""}`}
             {s.status === "running" && lan && !shared ? ` · ${lan}` : ""}
           </div>
           <div className="sub mono service-cmd" title={s.command}>{s.command}</div>
         </div>
         {openUrl && s.status === "running" && (
-          <a className="btn small open" href={openUrl} target="_blank" rel="noreferrer" title={shared ? "opens through the site" : "reachable on the local network only"}>
-            Open
+          <a className="btn small open" href={openUrl} target="_blank" rel="noreferrer" title={t(shared ? "svc.open.shared" : "svc.open.lan")}>
+            {t("common.open")}
           </a>
         )}
         {menu}
       </div>
       {share && s.status === "running" && (
-        <Sheet title={`Access to ${s.name}`} onClose={() => setShare(false)} size="narrow">
+        <Sheet title={t("svc.sheet.title", { name: s.name })} onClose={() => setShare(false)} size="narrow">
           <div className="access-options" role="radiogroup">
             {(["local", "key", "public"] as ShareMode[]).map((m) => (
               <label key={m} className={`access-option ${mode === m ? "on" : ""}`}>
                 <input type="radio" name={`access-${s.name}`} checked={mode === m} disabled={busy} onChange={() => setMode(m)} />
                 <span>
-                  <b>{ACCESS_WORD[m]}</b>
-                  <span className="sub">{m === "local" ? `Reachable only from your network at ${lan ?? "its LAN address"}.` : m === "key" ? "Served through the site; the link carries a key once and sets a cookie." : "Served through the site; anyone with the link, no login."}</span>
+                  <b>{accessWord(m)}</b>
+                  <span className="sub">{m === "local" ? t("svc.access.local.sub", { addr: lan ?? t("svc.access.local.addr") }) : m === "key" ? t("svc.access.key.sub") : t("svc.access.public.sub")}</span>
                 </span>
               </label>
             ))}
           </div>
-          {!s.share?.public_base && mode !== "local" && <div className="sub" style={{ color: "var(--warn)", margin: "8px 0" }}>MINIAPP_PUBLIC_URL is not set: the link has no public address yet.</div>}
+          {!s.share?.public_base && mode !== "local" && <div className="sub" style={{ color: "var(--warn)", margin: "8px 0" }}>{t("svc.nopublic")}</div>}
           {mode !== "local" && s.share?.url && (
             <>
-              <label className="field">Link</label>
+              <label className="field">{t("svc.link")}</label>
               <div className="share-field">
-                <input className="field mono" readOnly value={s.share.url} onFocus={(e) => e.target.select()} aria-label="share link" />
-                <button className="btn small" onClick={() => copy(s.share!.url!, "link")}><Icon name="copy" size={13} /> Copy</button>
+                <input className="field mono" readOnly value={s.share.url} onFocus={(e) => e.target.select()} aria-label={t("svc.sharelink")} />
+                <button className="btn small" onClick={() => copy(s.share!.url!, "link")}><Icon name="copy" size={13} /> {t("common.copy")}</button>
               </div>
               {mode === "key" && s.share.key && (
                 <>
-                  <label className="field">Key</label>
+                  <label className="field">{t("svc.key")}</label>
                   <div className="share-field">
-                    <input className="field mono" readOnly value={s.share.key} onFocus={(e) => e.target.select()} aria-label="share key" />
-                    <button className="btn small" onClick={() => copy(s.share!.key!, "key")}><Icon name="copy" size={13} /> Copy</button>
-                    <button className="btn small" disabled={busy} onClick={() => setMode("key", true)} title="Mint a new key; the old link stops working">New key</button>
+                    <input className="field mono" readOnly value={s.share.key} onFocus={(e) => e.target.select()} aria-label={t("svc.sharekey")} />
+                    <button className="btn small" onClick={() => copy(s.share!.key!, "key")}><Icon name="copy" size={13} /> {t("common.copy")}</button>
+                    <button className="btn small" disabled={busy} onClick={() => setMode("key", true)} title={t("svc.newkey.title")}>{t("svc.newkey")}</button>
                   </div>
                 </>
               )}
-              <div className="sub" style={{ marginTop: 8 }}>The service lives under /s/{s.share.slug}/: pages must use relative links (or honour X-Forwarded-Prefix); plain HTTP only, no WebSocket.</div>
+              <div className="sub" style={{ marginTop: 8 }}>{t("svc.prefix", { slug: s.share.slug ?? "" })}</div>
             </>
           )}
         </Sheet>

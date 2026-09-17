@@ -8,7 +8,7 @@ import { Sheet } from "./dialogs";
 import { Icon } from "./icons";
 import { invalidate, useQuery } from "./store";
 import { confirmAsync, errorText } from "./ui";
-import { t } from "./i18n";
+import { plural, t } from "./i18n";
 
 const PICKED = "daedalus.project";
 
@@ -52,7 +52,7 @@ export function ProjectChip({ projects, current, onOpen, collapsed }: { projects
     <button className="project-chip" onClick={onOpen} title={active ? active.root : t("shell.projects")} aria-haspopup="dialog">
       <Icon name="folder" size={16} />
       <span className="rail-text truncate">{collapsed ? "" : label}</span>
-      {!collapsed && active && !active.reachable && <span className="badge attn" title="the folder is not mounted here">not mounted</span>}
+      {!collapsed && active && !active.reachable && <span className="badge attn" title={t("project.notmounted.here")}>{t("project.notmounted")}</span>}
       {!collapsed && <span className="chev">›</span>}
     </button>
   );
@@ -69,10 +69,8 @@ export function ProjectSwitcher({ projects, current, onPick, onClose, toast }: {
   if (adding) return <AddProjectSheet onClose={() => (projects.length ? setAdding(false) : onClose())} onAdded={(p) => { setAdding(false); pick(p.id); }} toast={toast} />;
   if (editing) return <ProjectSettingsSheet project={editing} onClose={() => setEditing(null)} onRemoved={() => { setEditing(null); if (editing.id === current) onPick(""); onClose(); }} toast={toast} />;
   return (
-    <Sheet title="Projects" onClose={onClose} size="narrow">
-      <div className="sub" style={{ marginBottom: 8 }}>
-        A project is a folder you add. Agents you start in it work in that folder and nowhere else.
-      </div>
+    <Sheet title={t("shell.projects")} onClose={onClose} size="narrow">
+      <div className="sub" style={{ marginBottom: 8 }}>{t("project.intro")}</div>
       <button className={`menu-item ${current ? "" : "on"}`} onClick={() => pick("")}>
         <span className="grow truncate">{t("shell.projects.all")}</span>
         {!current && <Icon name="check" size={16} />}
@@ -82,20 +80,20 @@ export function ProjectSwitcher({ projects, current, onPick, onClose, toast }: {
           <button className="grow project-pick" onClick={() => pick(p.id)}>
             <span className="project-name truncate">
               {p.name}
-              {!p.reachable && <span className="badge attn" title="the folder is not reachable from where the bot runs">not mounted</span>}
-              {p.settings.snapshots && <span className="badge" title="every turn is snapshotted, so a change can be undone">snapshots</span>}
+              {!p.reachable && <span className="badge attn" title={t("project.notmounted.bot")}>{t("project.notmounted")}</span>}
+              {p.settings.snapshots && <span className="badge" title={t("project.snapshots.title")}>{t("project.snapshots.badge")}</span>}
             </span>
             <span className="sub mono truncate">{p.root}</span>
-            <span className="sub">{p.sessions.length ? `${p.sessions.length} agent${p.sessions.length === 1 ? "" : "s"}` : "no agents yet"}</span>
+            <span className="sub">{p.sessions.length ? plural("project.agents", p.sessions.length) : t("project.noagents")}</span>
           </button>
-          <button className="iconbtn small" onClick={() => setEditing(p)} title={`Settings for ${p.name}`} aria-label={`Settings for ${p.name}`}>
+          <button className="iconbtn small" onClick={() => setEditing(p)} title={t("project.settings.for", { name: p.name })} aria-label={t("project.settings.for", { name: p.name })}>
             <Icon name="settings" size={15} />
           </button>
         </div>
       ))}
       <div className="sheet-foot">
-        <button className="btn ghost" onClick={onClose}>Close</button>
-        <button className="btn primary" onClick={() => setAdding(true)}><Icon name="plus" size={15} /> Add a project</button>
+        <button className="btn ghost" onClick={onClose}>{t("common.close")}</button>
+        <button className="btn primary" onClick={() => setAdding(true)}><Icon name="plus" size={15} /> {t("shell.projects.add")}</button>
       </div>
     </Sheet>
   );
@@ -121,14 +119,14 @@ export function AddProjectSheet({ onClose, onAdded, toast }: { onClose: () => vo
   // The server answers 400 on a path that is not absolute, but it answers it into a toast; the
   // mistake belongs beside the field it was made in.
   const typed = root.trim();
-  const rootProblem = typed && !(typed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(typed)) ? "a project folder is a full path: it starts with / (or a drive letter on Windows)" : "";
+  const rootProblem = typed && !(typed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(typed)) ? t("project.root.problem") : "";
   async function add() {
     if (!name.trim() || !typed || rootProblem || busy) return;
     setBusy(true);
     try {
       const created = await api.post<Project>("/api/projects", { name: name.trim(), root: root.trim(), snapshots });
       afterChange();
-      toast(created.reachable ? `${created.name} added` : `${created.name} added — its folder is not mounted here yet`);
+      toast(t(created.reachable ? "project.added" : "project.added.unmounted", { name: created.name }));
       onAdded(created);
     } catch (e) {
       toast(errorText(e));
@@ -137,23 +135,23 @@ export function AddProjectSheet({ onClose, onAdded, toast }: { onClose: () => vo
     }
   }
   return (
-    <Sheet title="Add a project" onClose={onClose} size="narrow">
-      <label className="field" htmlFor="project-name">Name</label>
-      <input id="project-name" className="field" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="What this folder is" />
-      <label className="field" htmlFor="project-root">Folder</label>
+    <Sheet title={t("shell.projects.add")} onClose={onClose} size="narrow">
+      <label className="field" htmlFor="project-name">{t("common.name")}</label>
+      <input id="project-name" className="field" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder={t("project.name.placeholder")} />
+      <label className="field" htmlFor="project-root">{t("project.folder")}</label>
       <div className="composer-row" style={{ marginTop: 0 }}>
         <input id="project-root" className="field mono" value={root} onChange={(e) => setRoot(e.target.value)} placeholder="/home/you/projects/bakery" onKeyDown={(e) => e.key === "Enter" && add()} />
-        {canPickFolder() && <button className="btn" onClick={browse} title="Choose a folder"><Icon name="folder" size={15} /> Browse</button>}
+        {canPickFolder() && <button className="btn" onClick={browse} title={t("project.browse.title")}><Icon name="folder" size={15} /> {t("project.browse")}</button>}
       </div>
-      <div className={rootProblem ? "sub attn" : "sub"}>{rootProblem || "The full path of the folder on this machine. Everything an agent of this project reads or writes stays inside it."}</div>
+      <div className={rootProblem ? "sub attn" : "sub"}>{rootProblem || t("project.root.hint")}</div>
       <label className="toggle-row">
         <input type="checkbox" checked={snapshots} onChange={(e) => setSnapshots(e.target.checked)} />
-        <span>Snapshots</span>
-        <span className="sub">a hidden commit before every turn, so a change can be undone. Off by default: on a large repository it costs more than the undo is worth.</span>
+        <span>{t("project.snapshots")}</span>
+        <span className="sub">{t("project.snapshots.hint.add")}</span>
       </label>
       <div className="sheet-foot">
-        <button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn primary" onClick={add} disabled={busy || !name.trim() || !typed || !!rootProblem}>Add</button>
+        <button className="btn ghost" onClick={onClose}>{t("common.cancel")}</button>
+        <button className="btn primary" onClick={add} disabled={busy || !name.trim() || !typed || !!rootProblem}>{t("common.add")}</button>
       </div>
     </Sheet>
   );
@@ -175,7 +173,7 @@ export function ProjectSettingsSheet({ project, onClose, onRemoved, toast }: { p
     try {
       await api.patch(`/api/projects/${encodeURIComponent(project.id)}`, { name: name.trim(), snapshots });
       afterChange();
-      toast("saved");
+      toast(t("common.saved"));
       onClose();
     } catch (e) {
       toast(errorText(e));
@@ -187,47 +185,41 @@ export function ProjectSettingsSheet({ project, onClose, onRemoved, toast }: { p
     const agents = project.sessions.length;
     const running = project.sessions.filter((s) => s.running);
     const body = running.length
-      ? `${running.map((s) => s.title).join(", ")} ${running.length === 1 ? "is" : "are"} working in it right now, so this will be refused until ${running.length === 1 ? "it stops" : "they stop"}: removing the project mid-turn would move the folder under ${running.length === 1 ? "it" : "them"}.`
+      ? plural("project.remove.running", running.length, { names: running.map((s) => s.title).join(", ") })
       : agents
-        ? `${agents} agent${agents === 1 ? "" : "s"} work${agents === 1 ? "s" : ""} in it. They keep their history and go back to a directory of their own, which is empty. Not one file of the folder is deleted.`
-        : "The folder and everything in it stays exactly as it is; only the project is forgotten.";
-    if (!(await confirmAsync(`Remove the project "${project.name}"?`, { body, action: "Remove" }))) return;
+        ? plural("project.remove.agents", agents)
+        : t("project.remove.empty");
+    if (!(await confirmAsync(t("project.remove.title", { name: project.name }), { body, action: t("common.remove") }))) return;
     try {
       await api.delete(`/api/projects/${encodeURIComponent(project.id)}?detach=1`);
       afterChange();
-      toast(`${project.name} removed`);
+      toast(t("project.removed", { name: project.name }));
       onRemoved();
     } catch (e) {
       toast(errorText(e));
     }
   }
   return (
-    <Sheet title={project.name} ariaLabel={`project ${project.name}`} onClose={onClose} size="narrow">
-      <label className="field" htmlFor="project-rename">Name</label>
+    <Sheet title={project.name} ariaLabel={t("project.settings.for", { name: project.name })} onClose={onClose} size="narrow">
+      <label className="field" htmlFor="project-rename">{t("common.name")}</label>
       <input id="project-rename" className="field" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && save()} />
-      <label className="field">Folder</label>
+      <label className="field">{t("project.folder")}</label>
       <div className="readonly-path mono">{project.root}</div>
-      <div className="sub">
-        {project.reachable
-          ? project.writable
-            ? "Reachable from where the bot runs."
-            : "Reachable, but read-only from where the bot runs: agents can read it and not write it."
-          : "Not reachable from where the bot runs. In Docker a folder has to be mounted into the container at the same path: the launcher writes that mount, and Stop then Start is what applies it. Where the launcher cannot, the desktop README has the entry to add by hand."}
-      </div>
+      <div className="sub">{project.reachable ? (project.writable ? t("project.reachable") : t("project.readonly")) : t("project.unreachable")}</div>
       <label className="toggle-row">
         <input type="checkbox" checked={snapshots} onChange={(e) => setSnapshots(e.target.checked)} />
-        <span>Snapshots</span>
-        <span className="sub">a hidden commit before every turn and after every run, so a change can be undone. On a large repository this costs a walk of the whole tree twice a turn.</span>
+        <span>{t("project.snapshots")}</span>
+        <span className="sub">{t("project.snapshots.hint.edit")}</span>
       </label>
       {project.sessions.length > 0 && (
         <>
-          <label className="field">Agents in this project</label>
+          <label className="field">{t("project.agents.in")}</label>
           <div className="sub">{project.sessions.map((s) => s.title).join(" · ")}</div>
         </>
       )}
       <div className="sheet-foot">
-        <button className="btn danger" onClick={remove}><Icon name="trash" size={15} /> Remove</button>
-        <button className="btn primary" onClick={save} disabled={!dirty || !name.trim() || busy}>Save</button>
+        <button className="btn danger" onClick={remove}><Icon name="trash" size={15} /> {t("common.remove")}</button>
+        <button className="btn primary" onClick={save} disabled={!dirty || !name.trim() || busy}>{t("common.save")}</button>
       </div>
     </Sheet>
   );

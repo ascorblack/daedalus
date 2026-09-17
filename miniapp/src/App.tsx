@@ -76,10 +76,10 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
       const stale = isChunkError(this.state.error.message);
       return (
         <div className="empty">
-          <b>{stale ? "This screen belongs to an older version of the app" : "Something broke in this screen"}</b>
-          <div>{stale ? "The app was updated while this page was open." : this.state.error.message}</div>
+          <b>{t(stale ? "app.stale.title" : "app.broken.title")}</b>
+          <div>{stale ? t("app.stale.body") : this.state.error.message}</div>
           <button className="btn" onClick={() => (stale ? location.reload() : this.setState({ error: null }))}>
-            {stale ? "Reload the app" : "Try again"}
+            {t(stale ? "app.stale.action" : "common.retry")}
           </button>
         </div>
       );
@@ -319,22 +319,22 @@ export function App() {
     ];
   };
 
-  if (authed === null) return <div className="app"><div className="empty">Loading…</div></div>;
+  if (authed === null) return <div className="app"><div className="empty">{t("common.loading")}</div></div>;
   if (authed === false) {
     // Outside the shell on purpose: the shell's wide layout reserves the rail's column, and a login page has no rail.
     return (
-      <Suspense fallback={<div className="gate"><div className="empty">Loading…</div></div>}>
+      <Suspense fallback={<div className="gate"><div className="empty">{t("common.loading")}</div></div>}>
         <LoginScreen onDone={() => setAuthed(true)} />
       </Suspense>
     );
   }
-  if (onboarding === null) return <div className="app"><div className="empty">Loading…</div></div>;
+  if (onboarding === null) return <div className="app"><div className="empty">{t("common.loading")}</div></div>;
   if (!onboarding.has_model) {
     // Outside the shell, like the login page: the wide shell is a grid whose first column belongs
     // to the rail, and a screen drawn in it without one sits beside the rail's width of nothing.
     return (
       <>
-        <Suspense fallback={<div className="gate"><div className="empty">Loading…</div></div>}>
+        <Suspense fallback={<div className="gate"><div className="empty">{t("common.loading")}</div></div>}>
           <OnboardingScreen toast={showToast} onDone={() => setOnboarding({ ...onboarding, has_model: true })} />
         </Suspense>
         <ToastHost />
@@ -381,8 +381,8 @@ export function App() {
         {route.screen === "changes" &&
           (selfdev === "off" ? (
             <div className="empty">
-              <b>This installation does not change its own code</b>
-              <div>Self-development is off; there is nothing to review here.</div>
+              <b>{t("app.selfdev.off.title")}</b>
+              <div>{t("app.selfdev.off.body")}</div>
             </div>
           ) : (
             <ProposalsScreen toast={showToast} selected={route.detail} />
@@ -401,10 +401,10 @@ export function App() {
     <div className={`app ${railCollapsed ? "rail-collapsed" : ""}`}>
       {wide && <Rail screen={route.screen} counts={counts} selfdev={selfdev} collapsed={railCollapsed} onToggle={toggleRail} onPalette={openPalette} projects={projectList} project={project} onProjects={() => setSwitching(true)} />}
       <div ref={main} className={`main ${sessionId ? "chat-open" : ""}`}>
-        {offline && <div className="offline-strip" role="status">No connection to the bot · retrying…</div>}
+        {offline && <div className="offline-strip" role="status">{t("app.offline")}</div>}
         <ChangeStrip caps={caps} />
         <PasskeyNudge />
-        <Suspense fallback={<div className="empty">Loading…</div>}>{content}</Suspense>
+        <Suspense fallback={<div className="empty">{t("common.loading")}</div>}>{content}</Suspense>
       </div>
       {palette && <Palette items={paletteItems()} onClose={() => setPalette(false)} />}
       {switching && <ProjectSwitcher projects={projectList} current={project} onPick={pickProject} onClose={() => setSwitching(false)} toast={showToast} />}
@@ -443,9 +443,9 @@ function PasskeyNudge() {
   };
   return (
     <div className="nudge-strip" role="status">
-      <span>This browser signs in with a link. Add a passkey and it signs in by itself.</span>
-      <a href={pathFor("settings", "security")} onClick={(e) => (go(e, pathFor("settings", "security")), dismiss())}>Add one</a>
-      <button className="linkbtn" onClick={dismiss}>Not now</button>
+      <span>{t("app.passkey.nudge")}</span>
+      <a href={pathFor("settings", "security")} onClick={(e) => (go(e, pathFor("settings", "security")), dismiss())}>{t("app.passkey.add")}</a>
+      <button className="linkbtn" onClick={dismiss}>{t("app.passkey.later")}</button>
     </div>
   );
 }
@@ -465,10 +465,10 @@ function SessionPicker({ exclude, onPick, onClose }: { exclude: string | null; o
   const q = filter.trim().toLowerCase();
   const items = (sessions ?? []).filter((s) => s.id !== exclude && (!q || s.title.toLowerCase().includes(q) || s.id.includes(q)));
   return (
-    <Sheet title="Open beside" onClose={onClose} size="narrow">
-      <input className="field" autoFocus placeholder="filter by title" value={filter} onChange={(e) => setFilter(e.target.value)} style={{ marginBottom: 8 }} />
-      {sessions === null && <div className="empty">Loading…</div>}
-      {sessions !== null && items.length === 0 && <div className="empty">No other sessions.</div>}
+    <Sheet title={t("app.beside.title")} onClose={onClose} size="narrow">
+      <input className="field" autoFocus placeholder={t("app.beside.filter")} value={filter} onChange={(e) => setFilter(e.target.value)} style={{ marginBottom: 8 }} />
+      {sessions === null && <div className="empty">{t("common.loading")}</div>}
+      {sessions !== null && items.length === 0 && <div className="empty">{t("app.beside.empty")}</div>}
       {items.map((s) => (
         <button key={s.id} className="menu-item" onClick={() => onPick(s.id)}>
           <span className="grow truncate">{s.title}</span>

@@ -3,6 +3,7 @@
 import { telegram } from "./api";
 import { confirmDialog } from "./dialogs";
 import { bytes, tokens } from "./format";
+import { t } from "./i18n";
 
 /** The Telegram bridge only when the app really runs inside Telegram: the script also loads in a plain
  *  browser, where it reports version 6.0 and rejects every method (showConfirm → WebAppMethodUnsupported). */
@@ -13,7 +14,7 @@ function insideTelegram() {
 
 /** Ask before a destructive action: the app's own dialog, which says what the action does. */
 export function confirmAsync(text: string, opts: { body?: string; action?: string; danger?: boolean } = {}): Promise<boolean> {
-  return confirmDialog({ title: text, body: opts.body, action: opts.action ?? "Confirm", danger: opts.danger ?? true });
+  return confirmDialog({ title: text, body: opts.body, action: opts.action ?? t("common.confirm"), danger: opts.danger ?? true });
 }
 
 /** Whether Enter should send: desktop clients send, phones insert a newline. */
@@ -49,6 +50,6 @@ export function numInput(raw: string, min?: number): number | null {
 /** A readable message for a failed request. */
 export function errorText(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
-  if (!msg || msg === "Failed to fetch" || msg === "Load failed" || msg === "NetworkError when attempting to fetch resource.") return "No connection to the bot";
+  if (!msg || msg === "Failed to fetch" || msg === "Load failed" || msg === "NetworkError when attempting to fetch resource.") return t("common.noconnection");
   return msg;
 }
