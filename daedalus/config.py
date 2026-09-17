@@ -693,6 +693,26 @@ class AsrConfig(BaseModel):
     """Send the transcript to the agent without the confirm step (dictation is error-prone; off by default)."""
 
 
+class SttConfig(BaseModel):
+    """Speech recognition that runs here, with no endpoint and no key.
+
+    Empty ``local_model`` is the default and means nothing changes: the browser recognises speech
+    itself where it can, and a configured ``[asr]`` endpoint transcribes what it cannot. Naming a
+    model from the catalog puts it in front of both — the order is local model, then the configured
+    endpoint, then the browser — so one setting is the whole switch, and clearing it is the whole
+    way back.
+    """
+
+    local_model: str = ""
+    """A catalog id (``gigaam-ru``, ``parakeet-unified-en``, …). Empty = no local recognition."""
+    local_language: str = "auto"
+    """ISO code the model is loaded for. "auto" lets a multilingual model decide and pins a
+    Whisper-class one to English, which is what it does with no hint anyway."""
+    local_threads: int = Field(default=2, ge=1, le=16)
+    """Decoding threads. Two is enough to run many times faster than real time on an ordinary CPU;
+    more buys little and takes cores away from the rest of the process."""
+
+
 class TtsConfig(BaseModel):
     """Text-to-speech for the voice page: any OpenAI-compatible ``/audio/speech`` endpoint.
 
@@ -969,6 +989,7 @@ class RuntimeConfig(BaseModel):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)
     asr: AsrConfig = Field(default_factory=AsrConfig)
+    stt: SttConfig = Field(default_factory=SttConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     board: BoardConfig = Field(default_factory=BoardConfig)
     peers: PeersConfig = Field(default_factory=PeersConfig)
@@ -1263,6 +1284,7 @@ __all__ = [
     "WebSearchConfig",
     "ExecToolsConfig",
     "AsrConfig",
+    "SttConfig",
     "BoardConfig",
     "PeersConfig",
     "DEFAULT_MODES",

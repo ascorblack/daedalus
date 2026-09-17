@@ -44,6 +44,11 @@ from daedalus.host.session_runner import TENANT, Attachment
 from daedalus.host.transcript_view import message_view
 from daedalus.providers.openai_compat import UsageRecord
 from daedalus.security import redact
+from daedalus.speech import catalog as speech_catalog
+from daedalus.speech import models as speech_models
+from daedalus.speech import service as speech_service
+from daedalus.speech.engine import SpeechError
+from daedalus.speech.service import recogniser_available, transcribe_recording
 from daedalus.stores import pairing, passkeys
 from daedalus.stores.projects import ProjectError, ProjectSettings, normalise_root
 from daedalus.tools import websearch
@@ -53,7 +58,6 @@ from daedalus.transport.telegram.voice import (
     TranscriptionError,
     asr_configured,
     effective_asr,
-    transcribe,
     voice_note_text,
 )
 
@@ -75,6 +79,16 @@ SESSION_TTL = 30 * 24 * 3600
 VOICE_AUDIO_MAX = 25 << 20
 """One spoken utterance, not a recording session: anything larger is a mistake, not speech."""
 VOICE_SAY_MAX_CHARS = 4000
+
+LISTEN_CHUNK_MAX = 2 << 20
+"""Largest PCM chunk one POST may carry — about a minute of 16 kHz mono. A page sends a fifth of a
+second at a time; anything near this is a client that stopped streaming and started uploading."""
+
+LISTEN_IDLE_SECONDS = 120.0
+"""A listening stream nobody has fed for this long is abandoned and its engine handle released."""
+
+LISTEN_MAX_STREAMS = 4
+"""More open streams than this means a page that never closes them; the oldest idle one goes."""
 """One utterance in words. Dictation runs long, a pasted document is not speech: past this it is refused."""
 VOICE_TTS_MAX_CHARS = 2000
 """One sentence to read aloud. The page only ever sends what ``split_sentences`` cut, and the speech
@@ -383,6 +397,15 @@ class SettingsBody(BaseModel):
     ops: dict[str, Any] | None = None
     compaction: dict[str, Any] | None = None
     answer_language: str | None = None
+
+
+class SttSelectBody(BaseModel):
+    """Choosing a local speech model. Every field is optional; what is sent is what changes."""
+
+    model: str | None = None
+    """A catalog id, or "" to stop using a local model."""
+    language: str | None = None
+    threads: int | None = Field(default=None, ge=1, le=16)
 
 
 class SearchCheckBody(BaseModel):
@@ -1270,7 +1293,21 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 effective_asr(asr, manager)
             except TranscriptionError as exc:
                 ready, reason = False, str(exc)
-        return {"configured": ready, "reason": reason, "provider": asr.provider, "model": asr.model, "max_seconds": asr.max_seconds, "autosend": asr.autosend}
+        local = app.speech.state()
+        if local["active"]:
+            # A local model answers before the endpoint is consulted, so "configured" must be true
+            # even on an installation that has no endpoint at all — otherwise the site hides the
+            # microphone from the one setup that needs nothing.
+            ready, reason = True, ""
+        return {
+            "configured": ready,
+            "reason": reason,
+            "provider": asr.provider,
+            "model": asr.model,
+            "max_seconds": asr.max_seconds,
+            "autosend": asr.autosend,
+            "local": local,
+        }
 
     @api.post("/api/sessions/{session_id}/transcribe")
     async def transcribe_audio(session_id: str, audio: UploadFile = File(...), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -1278,8 +1315,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         state = await manager.get_state(session_id)
         if state is None:
             raise HTTPException(404, "no such session")
-        if not asr_configured(app.config.asr):
-            raise HTTPException(409, "speech-to-text is not configured (Settings → Tools → Voice notes)")
+        if not recogniser_available(app.speech, app.config):
+            raise HTTPException(409, "speech-to-text is not set up (Settings → Voice → Speech recognition)")
         suffix = Path(audio.filename or "").suffix or mimetypes.guess_extension((audio.content_type or "").split(";")[0]) or ".webm"
         inbox = state.workspace / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
@@ -1294,7 +1331,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                     raise HTTPException(413, "recording is over 50 MB")
                 fh.write(chunk)
         try:
-            transcript = await transcribe(target, effective_asr(app.config.asr, manager))
+            transcript = await transcribe_recording(app.speech, app.config, manager, target)
         except TranscriptionError as exc:
             raise HTTPException(502, str(exc)) from exc
         finally:
@@ -1318,7 +1355,18 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         extension = app.extensions.get("voice")
         if extension is None or not app.config.voice.enabled:
             return {"enabled": False, "session_id": "", "model": "", "tts": {"configured": False}, "stt": {"configured": False}, "agents": [], "listening": False}
-        return await extension.state()
+        state = await extension.state()
+        # Which recogniser the page should use is decided here rather than in the extension: the
+        # extension knows about endpoints, and a local model is not one.
+        local = app.speech.state()
+        stt = dict(state.get("stt") or {})
+        stt["local"] = local
+        if local["active"]:
+            stt["configured"] = True
+            stt["reason"] = ""
+            stt["model"] = local["label"]
+        state["stt"] = stt
+        return state
 
     @api.get("/api/voice/stream")
     async def voice_stream(request: Request, _: dict[str, Any] = Depends(auth)) -> StreamingResponse:
@@ -1357,8 +1405,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def voice_audio(audio: UploadFile = File(...), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """One utterance as a recording, for a browser with no speech recognition of its own."""
         extension = voice()
-        if not asr_configured(app.config.asr):
-            raise HTTPException(409, "speech-to-text is not configured (Settings → Tools → Voice notes)")
+        if not recogniser_available(app.speech, app.config):
+            raise HTTPException(409, "speech-to-text is not set up (Settings → Voice → Speech recognition)")
         suffix = Path(audio.filename or "").suffix or mimetypes.guess_extension((audio.content_type or "").split(";")[0]) or ".webm"
         target = settings.state_dir / "tmp" / f"utterance-{secrets.token_hex(4)}{suffix}"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1370,7 +1418,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                     if size > VOICE_AUDIO_MAX:
                         raise HTTPException(413, f"an utterance may be up to {VOICE_AUDIO_MAX >> 20} MB")
                     fh.write(chunk)
-            transcript = await transcribe(target, effective_asr(app.config.asr, manager))
+            transcript = await transcribe_recording(app.speech, app.config, manager, target)
         except TranscriptionError as exc:
             raise HTTPException(502, str(exc)) from exc
         finally:
@@ -1411,6 +1459,152 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"the speech endpoint could not be reached: {type(exc).__name__}") from exc
         return StreamingResponse(chunks, media_type=media_type)
+
+    # -- local speech recognition ------------------------------------------------------------
+    #
+    # A model is chosen from the catalog, downloaded into the state directory and used in front of
+    # everything else. The endpoints below are the whole of that: the list with what is installed,
+    # a download that reports itself over SSE, a selection that is one line of configuration, and a
+    # stream the voice page talks into so that a browser without its own recognition still sees words
+    # appear while the sentence is being said.
+
+    listening: dict[str, dict[str, Any]] = {}
+    """Open streams by id. Small, short-lived, and pruned on every new one."""
+
+    def _prune_streams() -> None:
+        now = time.monotonic()
+        stale = [sid for sid, entry in listening.items() if now - entry["seen"] > LISTEN_IDLE_SECONDS]
+        while len(listening) - len(stale) > LISTEN_MAX_STREAMS:
+            oldest = min((sid for sid in listening if sid not in stale), key=lambda sid: listening[sid]["seen"])
+            stale.append(oldest)
+        for sid in stale:
+            listening.pop(sid, None)
+
+    @api.get("/api/stt")
+    async def stt_models(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The picker: every model, what is installed, what is downloading, and what it all costs."""
+        view = speech_models.view(app.speech.downloads, selected=app.config.stt.local_model)
+        view["language"] = app.config.stt.local_language
+        view["threads"] = app.config.stt.local_threads
+        view["engine_installed"] = _speech_engine_present()
+        view["converter"] = speech_service.converter_present()
+        view["recommended"] = {code: model.id for code in ("en", "ru") if (model := speech_catalog.recommended(code))}
+        return view
+
+    def _speech_engine_present() -> bool:
+        """Whether the wheel that runs a model is installed. A model can be downloaded without it."""
+        try:
+            import sherpa_onnx  # noqa: F401  # Lazy: the engine is an optional extra, and this asks whether it is here
+        except ImportError:
+            return False
+        return True
+
+    @api.post("/api/stt/models/{model_id}/download")
+    async def stt_download(model_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Fetch a model. Returns at once; the bar is fed by /api/stt/progress."""
+        try:
+            progress = app.speech.downloads.start(model_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"id": progress.id, "state": progress.state, "fraction": progress.fraction}
+
+    @api.post("/api/stt/models/{model_id}/cancel")
+    async def stt_cancel(model_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Stop a download. What has arrived is kept, so starting again continues from there."""
+        return {"cancelled": app.speech.downloads.cancel(model_id)}
+
+    @api.delete("/api/stt/models/{model_id}")
+    async def stt_delete(model_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Remove an installed model, and unselect it if it was the one in use."""
+        removed = app.speech.downloads.delete(model_id)
+        if app.config.stt.local_model == model_id:
+            await app.save_config(app.config.model_copy(update={"stt": app.config.stt.model_copy(update={"local_model": ""})}))
+        app.speech.forget()
+        return {"deleted": removed, **speech_models.view(app.speech.downloads, selected=app.config.stt.local_model)}
+
+    @api.post("/api/stt/select")
+    async def stt_select(body: SttSelectBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Use this model — or, with an empty id, go back to the endpoint and the browser."""
+        patch: dict[str, Any] = {}
+        if body.model is not None:
+            if body.model and not app.speech.downloads.is_installed(body.model):
+                raise HTTPException(409, f"{body.model} is not installed yet")
+            patch["local_model"] = body.model
+        if body.language is not None:
+            patch["local_language"] = body.language.strip() or "auto"
+        if body.threads is not None:
+            patch["local_threads"] = body.threads
+        if patch:
+            await app.save_config(app.config.model_copy(update={"stt": app.config.stt.model_copy(update=patch)}))
+        view = speech_models.view(app.speech.downloads, selected=app.config.stt.local_model)
+        view["language"] = app.config.stt.local_language
+        view["threads"] = app.config.stt.local_threads
+        return view
+
+    @api.get("/api/stt/progress")
+    async def stt_progress(request: Request, _: dict[str, Any] = Depends(auth)) -> StreamingResponse:
+        """Download progress as it happens, so the bar moves rather than being polled at."""
+
+        async def gen():  # type: ignore[no-untyped-def]
+            async with app.speech.downloads.watch() as queue:
+                for current in app.speech.downloads.progress().values():
+                    yield f"data: {json.dumps({'id': current.id, 'state': current.state, 'fraction': current.fraction, 'error': current.error})}\n\n"
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    try:
+                        update = await asyncio.wait_for(queue.get(), timeout=15)
+                    except TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
+                    body = {"id": update.id, "state": update.state, "fraction": update.fraction, "error": update.error}
+                    yield f"data: {json.dumps(body)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @api.post("/api/voice/listen")
+    async def voice_listen(request: Request, stream: str, final: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """One chunk of 16 kHz mono PCM from the page, answered with the words heard so far.
+
+        POSTed chunks rather than a socket: the app authenticates with a header that a browser cannot
+        put on a WebSocket, and inside Telegram there is no cookie to fall back on either. A fifth of
+        a second per request is well within what the loop and the model can keep up with — decoding
+        runs tens of times faster than real time — and it makes the transport the same one every other
+        call already uses.
+
+        A ``final`` answer is an utterance: the page hands it to the concierge exactly as it hands one
+        the browser recognised itself.
+        """
+        if not app.speech.available():
+            raise HTTPException(409, "no local speech model is installed and selected (Settings → Voice)")
+        chunk = await request.body()
+        if len(chunk) > LISTEN_CHUNK_MAX:
+            raise HTTPException(413, f"a chunk may be up to {LISTEN_CHUNK_MAX >> 20} MB of samples")
+        entry = listening.get(stream)
+        if entry is None:
+            _prune_streams()
+            try:
+                entry = {"session": await app.speech.session(), "seen": time.monotonic()}
+            except SpeechError as exc:
+                raise HTTPException(503, str(exc)) from exc
+            listening[stream] = entry
+        entry["seen"] = time.monotonic()
+        try:
+            partial = await entry["session"].feed(chunk) if chunk else None
+            if final:
+                partial = await entry["session"].finish()
+                listening.pop(stream, None)
+        except SpeechError as exc:
+            listening.pop(stream, None)
+            raise HTTPException(502, str(exc)) from exc
+        if partial is None:
+            return {"text": "", "final": False}
+        return {"text": partial.text, "final": partial.final}
+
+    @api.post("/api/voice/listen/close")
+    async def voice_listen_close(stream: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The page stopped listening; let go of the stream without decoding what is left."""
+        return {"closed": listening.pop(stream, None) is not None}
 
     @api.post("/api/sessions/{session_id}/answer")
     async def answer(session_id: str, body: AnswerBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

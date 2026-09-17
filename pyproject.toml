@@ -30,6 +30,18 @@ browser = [
     "playwright==1.62.0",  # webapp-testing, web-design-reviewer, accessibility, core-web-vitals
     "pillow>=11.0",        # canvas-design
 ]
+# Local speech-to-text. sherpa-onnx carries its own ONNX Runtime, so nothing else is needed to
+# run a downloaded model on the CPU; the wheels are small (about 15 MB for the pair on Linux x86_64)
+# and exist for Linux, macOS and Windows on both x86_64 and arm64, which is why the runtime image
+# can carry them unconditionally. Models themselves are never vendored — they are downloaded on
+# demand into the state directory (daedalus/speech/models.py).
+speech = [
+    "sherpa-onnx>=1.13.8",
+    # The wheel names this itself, but only in the wheel metadata, so a resolver that reads the
+    # sdist misses it and leaves a build that cannot load its ONNX Runtime. Naming it here is what
+    # actually pins it into the lock file.
+    "sherpa-onnx-core>=1.13.8",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
