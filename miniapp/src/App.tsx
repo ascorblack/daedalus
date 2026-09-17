@@ -8,6 +8,7 @@ import * as passkeys from "./passkeys";
 import { back, migrateLegacyLocation, navigate, pathFor, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
 import { Counts, MoreSheet, Palette, PaletteItem, Rail, TabBar, go, screenTitle, useMedia, useShortcuts } from "./shell";
 import { Capabilities, SelfDevMode, visibleScreens } from "./capabilities";
+import { ProjectSwitcher, rememberProject, storedProject, useProjects } from "./projects";
 import { ChangeStrip } from "./change";
 import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
@@ -110,6 +111,14 @@ export function App() {
   };
   const [more, setMore] = useState(false);
   const [palette, setPalette] = useState(false);
+  // Which project the operator is looking at ("" is all of them). A lens over every list of agents
+  // rather than a destination, so it lives in the shell and not in the route.
+  const [project, setProject] = useState(storedProject);
+  const [switching, setSwitching] = useState(false);
+  const pickProject = useCallback((id: string) => {
+    rememberProject(id);
+    setProject(id);
+  }, []);
   const [railCollapsed, setRailCollapsed] = useState(() => {
     try {
       return localStorage.getItem("daedalus.rail") === "collapsed";
@@ -142,6 +151,12 @@ export function App() {
       .catch(() => setOnboarding({ has_model: true } as OnboardingState)); // an older bot has no such route: let the app through
   }, [authed]);
   const inbox = useQuery<{ unread: number }>(authed ? "/api/inbox/unread" : null, { pollMs: 20000, staleMs: 5000 });
+  const projects = useProjects();
+  const projectList = projects.data ?? [];
+  // A project removed elsewhere must not leave the shell filtering by something that is gone.
+  useEffect(() => {
+    if (project && projects.data && !projects.data.some((p) => p.id === project)) pickProject("");
+  }, [project, projects.data, pickProject]);
   // What this installation can do decides what the app offers. Until the answer arrives the nav is the
   // one a server install has: hiding a destination and putting it back a moment later reads as a glitch.
   // A minute rather than five: the mode never changes, but whether a change of the agent's own is
@@ -295,6 +310,8 @@ export function App() {
     const sessions = peek<SessionSummary[]>("/api/sessions") ?? [];
     return [
       { id: "new-agent", label: "New agent", icon: "plus", run: () => navigate(pathFor("agents", null, { new: "1" })) },
+      { id: "projects", label: "Projects", hint: projectList.find((p) => p.id === project)?.name ?? "all projects", icon: "folder", run: () => setSwitching(true) },
+      ...projectList.map((p) => ({ id: `p-${p.id}`, label: `Work in ${p.name}`, hint: p.root, icon: "folder" as const, run: () => pickProject(p.id) })),
       ...visibleScreens(SCREENS, selfdev).map((s) => ({ id: `go-${s}`, label: `Go to ${screenTitle(s)}`, icon: "back" as const, run: () => navigate(pathFor(s)) })),
       ...sessions.map((s) => ({ id: `s-${s.id}`, label: s.title, hint: s.model ?? "", icon: "bots" as const, run: () => open(s.id) })),
     ];
@@ -344,7 +361,7 @@ export function App() {
       <div className="with-list">
         {showList && (
           <div className="session-list-pane">
-            <SessionsScreen onOpen={open} toast={showToast} current={sessionId} compact />
+            <SessionsScreen onOpen={open} toast={showToast} current={sessionId} compact project={project} projects={projectList} />
           </div>
         )}
         <ErrorBoundary key={sessionId}>
@@ -355,7 +372,7 @@ export function App() {
   } else {
     content = (
       <ErrorBoundary key={route.screen}>
-        {route.screen === "agents" && <SessionsScreen onOpen={open} toast={showToast} />}
+        {route.screen === "agents" && <SessionsScreen onOpen={open} toast={showToast} project={project} projects={projectList} onProjects={wide ? undefined : () => setSwitching(true)} />}
         {route.screen === "voice" && <VoiceScreen onOpen={open} />}
         {route.screen === "inbox" && <InboxScreen onOpen={open} toast={showToast} />}
         {route.screen === "board" && <BoardScreen onOpen={open} toast={showToast} selected={route.detail} />}
@@ -380,7 +397,7 @@ export function App() {
 
   return (
     <div className={`app ${railCollapsed ? "rail-collapsed" : ""}`}>
-      {wide && <Rail screen={route.screen} counts={counts} selfdev={selfdev} collapsed={railCollapsed} onToggle={toggleRail} onPalette={openPalette} />}
+      {wide && <Rail screen={route.screen} counts={counts} selfdev={selfdev} collapsed={railCollapsed} onToggle={toggleRail} onPalette={openPalette} projects={projectList} project={project} onProjects={() => setSwitching(true)} />}
       <div ref={main} className={`main ${sessionId ? "chat-open" : ""}`}>
         {offline && <div className="offline-strip" role="status">No connection to the bot · retrying…</div>}
         <ChangeStrip caps={caps} />
@@ -388,6 +405,7 @@ export function App() {
         <Suspense fallback={<div className="empty">Loading…</div>}>{content}</Suspense>
       </div>
       {palette && <Palette items={paletteItems()} onClose={() => setPalette(false)} />}
+      {switching && <ProjectSwitcher projects={projectList} current={project} onPick={pickProject} onClose={() => setSwitching(false)} toast={showToast} />}
       {!wide && !sessionId && <TabBar screen={route.screen} counts={counts} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} />}
       {more && <MoreSheet screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMore(false)} />}
       {picking && sessionId && <SessionPicker exclude={sessionId} onPick={(id) => { navigate(sessionPath(sessionId, id)); setPicking(false); }} onClose={() => setPicking(false)} />}

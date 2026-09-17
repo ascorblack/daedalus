@@ -28,6 +28,11 @@ declare global {
         HapticFeedback?: { impactOccurred: (style: string) => void; notificationOccurred: (t: string) => void };
       };
     };
+    /** What the desktop window binds into the page. Absent in a browser and inside Telegram. */
+    daedalus?: {
+      /** Open the platform's folder chooser; resolves to the path, or null when the operator cancelled. */
+      pickFolder?: () => Promise<string | null>;
+    };
   }
 }
 
@@ -151,6 +156,9 @@ export type SessionSummary = {
   /** The name of the directory the session works in, and whether that directory is its own. */
   workspace?: string;
   workspace_own?: boolean;
+  /** The project this agent works in, where it works in one: the id it is grouped by and the name shown. */
+  project_id?: string | null;
+  project?: string | null;
   metadata?: { subagent_of?: string; subagent_name?: string; loop?: LoopView; forked_from?: { session_id: string; seq: number }; [k: string]: unknown };
 };
 
@@ -234,6 +242,19 @@ export type SessionDetail = {
 export type MemoryRecord = { id: string; scope: string; scope_key: string; kind: string; text: string; salience: number; version: number; created_at: string | null; last_accessed_at: string | null };
 export type MemoryBucket = { scope: string; scope_key: string; title: string | null; count: number };
 export type MemoryListing = { records: MemoryRecord[]; buckets: MemoryBucket[]; sessions: Record<string, string> };
+
+export type Project = {
+  id: string;
+  name: string;
+  /** The folder, as the operator gave it. Shown, never edited in place: moving a project is a deliberate act. */
+  root: string;
+  created_at: string;
+  settings: { snapshots: boolean };
+  /** Whether the bot can reach the folder from where it runs. False in Docker until the folder is mounted. */
+  reachable: boolean;
+  writable: boolean;
+  sessions: { id: string; title: string }[];
+};
 
 export type Workspace = { name: string; path: string; sessions: { id: string; title: string }[]; files: number; size: number; mtime: number; own_session: boolean; kind: "session" | "schedule" | "heartbeat" | "named"; schedule: string | null };
 

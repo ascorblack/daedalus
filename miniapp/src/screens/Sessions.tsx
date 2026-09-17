@@ -1,21 +1,23 @@
 import { Fragment, useCallback, useMemo, useState } from "react";
-import { api, SessionSummary, Settings, Workspace } from "../api";
+import { api, Project, SessionSummary, Settings, Workspace } from "../api";
 import { Avatar, Dot, STATUS_WORD, Skeleton, Status, ToolPicker, fmtInterval } from "../components";
 import { Sheet } from "../dialogs";
 import { relTime, shortModel, untilShort } from "../format";
 import { Icon } from "../icons";
 import { FilePreview, PreviewSource, workspaceBase } from "../preview";
+import { useProjects } from "../projects";
 import { PageHeader } from "../shell";
 import { useQuery } from "../store";
 import { confirmAsync, errorText, fmtBytes } from "../ui";
 import { Files } from "./Session";
 
 type Filter = "all" | "working" | "loops";
-type GroupBy = "status" | "workspace";
+type GroupBy = "status" | "workspace" | "project";
 
 const OWN = "\u0000own";  // sessions in a directory of their own: one group, not one group each
+const NO_PROJECT = "\u0000none";  // agents that belong to no project: one group at the end
 
-export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (id: string) => void; toast: (t: string) => void; current?: string; compact?: boolean }) {
+export function SessionsScreen({ onOpen, toast, current, compact, project = "", projects = [], onProjects }: { onOpen: (id: string) => void; toast: (t: string) => void; current?: string; compact?: boolean; project?: string; projects?: Project[]; onProjects?: () => void }) {
   const { data: sessions, error, loading } = useQuery<SessionSummary[]>("/api/sessions", { pollMs: 5000, staleMs: 3000 });
   const [creating, setCreating] = useState(() => new URLSearchParams(window.location.search).get("new") === "1");
   const [showWorkspaces, setShowWorkspaces] = useState(false);
@@ -23,10 +25,13 @@ export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (i
   const [searching, setSearching] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
   const [groupBy, setGroupBy] = useState<GroupBy>(() => (localStorage.getItem("agents.groupBy") as GroupBy) || "status");
+  const inProject = projects.find((p) => p.id === project);
   const setGrouping = (g: GroupBy) => { setGroupBy(g); localStorage.setItem("agents.groupBy", g); };
 
   // Subagents sit under their leader; a child whose leader is gone is listed on its own.
-  const all = sessions ?? [];
+  // The project the shell is showing is a lens over the whole list: everything below counts and
+  // groups what is left, so "3 agents · 1 active" describes the project and not the installation.
+  const all = (sessions ?? []).filter((s) => !project || s.project_id === project);
   const ids = new Set(all.map((s) => s.id));
   const children = new Map<string, SessionSummary[]>();
   for (const s of all) {
@@ -75,17 +80,30 @@ export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (i
   const byWorkspace = [...buckets.entries()]
     .sort((a, b) => (a[0] === OWN ? 1 : b[0] === OWN ? -1 : a[0].localeCompare(b[0])))
     .map(([key, items]) => ({ key, label: key === OWN ? "Own directory" : titleOf.get(key) ?? key, items }));
-  const groups = groupBy === "workspace" ? byWorkspace : byStatus;
+  // By project the named ones come first and everything without a project goes into one group at the
+  // end — an agent in a directory of its own is not a project, and there is nothing to call its group.
+  const projectName = new Map(projects.map((p) => [p.id, p.name]));
+  const byProjectBuckets = new Map<string, SessionSummary[]>();
+  for (const s of kept) {
+    const key = s.project_id && projectName.has(s.project_id) ? s.project_id : NO_PROJECT;
+    byProjectBuckets.set(key, [...(byProjectBuckets.get(key) ?? []), s]);
+  }
+  const byProject = [...byProjectBuckets.entries()]
+    .sort((a, b) => (a[0] === NO_PROJECT ? 1 : b[0] === NO_PROJECT ? -1 : (projectName.get(a[0]) ?? "").localeCompare(projectName.get(b[0]) ?? "")))
+    .map(([key, items]) => ({ key, label: key === NO_PROJECT ? "No project" : projectName.get(key) ?? key, items }));
+  const groups = groupBy === "project" ? byProject : groupBy === "workspace" ? byWorkspace : byStatus;
   const activeCount = top.filter((s) => kind(s) === "waiting" || kind(s) === "working").length;
   const shown = groups.reduce((n, g) => n + g.items.length, 0);
 
   return (
     <>
       <PageHeader
-        title="Agents"
-        subtitle={sessions ? `${top.length} agent${top.length === 1 ? "" : "s"}${activeCount ? ` · ${activeCount} active` : ""}` : undefined}
+        title={inProject ? inProject.name : "Agents"}
+        subtitle={sessions ? `${top.length} agent${top.length === 1 ? "" : "s"}${activeCount ? ` · ${activeCount} active` : ""}${inProject ? ` · ${inProject.root}` : ""}` : undefined}
         actions={
           <>
+            {/* Not a folder glyph: Workspaces sits beside it with one, and two identical icons next to each other name nothing. */}
+            {!compact && onProjects && <button className="iconbtn" onClick={onProjects} title="Projects" aria-label="Projects"><Icon name="skill" /></button>}
             <button className={`iconbtn ${searching ? "on" : ""}`} onClick={() => { setSearching((v) => !v); if (searching) setQuery(""); }} title="Search" aria-label="Search" aria-pressed={searching}><Icon name="search" /></button>
             {!compact && <button className="iconbtn" onClick={() => setShowWorkspaces(true)} title="Workspaces" aria-label="Workspaces"><Icon name="folder" /></button>}
             <button className="iconbtn primary" onClick={() => setCreating(true)} title="New agent" aria-label="New agent"><Icon name="plus" /></button>
@@ -99,6 +117,11 @@ export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (i
               {f === "all" ? `All · ${top.length}` : f === "working" ? `Active · ${activeCount}` : `Loops · ${top.filter((s) => kind(s) === "loop").length}`}
             </button>
           ))}
+          {!project && projects.length > 0 && (
+            <button className="chip select" aria-pressed={groupBy === "project"} onClick={() => setGrouping(groupBy === "project" ? "status" : "project")} title="Group the list by the project each agent works in">
+              <Icon name="folder" size={13} /> By project
+            </button>
+          )}
           <button className="chip select" aria-pressed={groupBy === "workspace"} onClick={() => setGrouping(groupBy === "workspace" ? "status" : "workspace")} title="Group the list by the workspace each agent works in">
             <Icon name="folder" size={13} /> By workspace
           </button>
@@ -107,19 +130,19 @@ export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (i
       <div className="screen narrow">
         {loading && !error && <Skeleton rows={5} />}
         {error && !sessions && <div className="empty"><b>Could not load agents</b><div>{error}</div></div>}
-        {sessions && sessions.length === 0 && (
+        {sessions && all.length === 0 && (
           <div className="empty">
-            <b>No agents yet</b>
-            <div>Create one here, or write to the bot in Telegram.</div>
+            <b>{inProject ? `No agents in ${inProject.name} yet` : "No agents yet"}</b>
+            <div>{inProject ? `An agent started here works in ${inProject.root}.` : "Create one here, or write to the bot in Telegram."}</div>
             <button className="btn primary" onClick={() => setCreating(true)}>Create agent</button>
           </div>
         )}
-        {sessions && sessions.length > 0 && shown === 0 && <div className="empty">Nothing matches.</div>}
+        {sessions && all.length > 0 && shown === 0 && <div className="empty">Nothing matches.</div>}
         {groups.map((g) =>
           g.items.length === 0 ? null : (
             <section key={g.key} className="erow-group">
               <div className="section-title">
-                {groupBy === "workspace" && g.key !== OWN && <Icon name="folder" size={13} />} {g.label} <span className="n">{g.items.length}</span>
+                {((groupBy === "workspace" && g.key !== OWN) || (groupBy === "project" && g.key !== NO_PROJECT)) && <Icon name="folder" size={13} />} {g.label} <span className="n">{g.items.length}</span>
               </div>
               {g.items.map((s) => (
                 <Fragment key={s.id}>
@@ -133,7 +156,7 @@ export function SessionsScreen({ onOpen, toast, current, compact }: { onOpen: (i
           ),
         )}
       </div>
-      {creating && <NewAgentSheet onClose={() => setCreating(false)} onCreated={onOpen} toast={toast} />}
+      {creating && <NewAgentSheet onClose={() => setCreating(false)} onCreated={onOpen} toast={toast} project={project} />}
       {showWorkspaces && (
         <Sheet title="Workspaces" onClose={() => setShowWorkspaces(false)}>
           <WorkspacesPanel onOpen={(id) => { setShowWorkspaces(false); onOpen(id); }} toast={toast} />
@@ -200,8 +223,8 @@ function Row({ s, kids, onOpen, current, fork }: { s: SessionSummary; kids: Sess
   );
 }
 
-/** The form for a new agent: a name and a first task; the workspace, the loop and the tools sit behind Advanced. */
-function NewAgentSheet({ onClose, onCreated, toast }: { onClose: () => void; onCreated: (id: string) => void; toast: (t: string) => void }) {
+/** The form for a new agent: a name, a first task and where it works; the loop and the tools sit behind Advanced. */
+function NewAgentSheet({ onClose, onCreated, toast, project: initial = "" }: { onClose: () => void; onCreated: (id: string) => void; toast: (t: string) => void; project?: string }) {
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [toolsOff, setToolsOff] = useState<string[]>([]);
@@ -211,10 +234,13 @@ function NewAgentSheet({ onClose, onCreated, toast }: { onClose: () => void; onC
   const [loopMinutes, setLoopMinutes] = useState("10");
   const [loopMax, setLoopMax] = useState("");
   const [workspace, setWorkspace] = useState("");
+  const [project, setProject] = useState(initial);
   const [preset, setPreset] = useState("");
   const [advanced, setAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const workspaces = useQuery<Workspace[]>("/api/workspaces", { staleMs: 30000 });
+  const projects = useProjects();
+  const chosen = (projects.data ?? []).find((p) => p.id === project);
   const settings = useQuery<Settings>("/api/settings", { staleMs: 60000 });
   const presets = settings.data?.presets ?? {};
   const defaultPreset = settings.data?.model?.preset ?? "";
@@ -230,7 +256,9 @@ function NewAgentSheet({ onClose, onCreated, toast }: { onClose: () => void; onC
       const loop = loopOn && loopText.trim()
         ? { instruction: loopText.trim(), mode: loopMode, interval_minutes: loopMode === "interval" ? Math.max(1, Number(loopMinutes) || 10) : null, max_runs: loopMax.trim() ? Math.max(1, Number(loopMax) || 1) : null }
         : undefined;
-      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff, loop, workspace: workspace || undefined, preset: preset || undefined });
+      // A project and a workspace are two answers to the same question; the project wins, and the
+      // workspace select is not shown while one is chosen.
+      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff, loop, project_id: project || undefined, workspace: project ? undefined : workspace || undefined, preset: preset || undefined });
       onClose();
       onCreated(created.id);
     } catch (e) {
@@ -253,13 +281,27 @@ function NewAgentSheet({ onClose, onCreated, toast }: { onClose: () => void; onC
           <option key={id} value={id}>{presetLabel(id)}</option>
         ))}
       </select>
-      <label className="field">Workspace</label>
-      <select className="field" value={workspace} onChange={(e) => setWorkspace(e.target.value)}>
-        <option value="">A directory of its own</option>
-        {(workspaces.data ?? []).map((w) => (
-          <option key={w.name} value={w.name}>{wsLabel(w)}</option>
+      <label className="field">Where it works</label>
+      <select className="field" value={project} onChange={(e) => setProject(e.target.value)}>
+        <option value="">No project — a directory of its own</option>
+        {(projects.data ?? []).map((p) => (
+          <option key={p.id} value={p.id} disabled={!p.reachable}>
+            {p.name} · {p.root}{p.reachable ? "" : " (not mounted)"}
+          </option>
         ))}
       </select>
+      {chosen && <div className="sub">Everything this agent reads, writes and runs stays inside {chosen.root}.</div>}
+      {!project && (
+        <>
+          <label className="field">Workspace</label>
+          <select className="field" value={workspace} onChange={(e) => setWorkspace(e.target.value)}>
+            <option value="">A directory of its own</option>
+            {(workspaces.data ?? []).map((w) => (
+              <option key={w.name} value={w.name}>{wsLabel(w)}</option>
+            ))}
+          </select>
+        </>
+      )}
       <button type="button" className="disclosure" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced}>
         <span className={`chev ${advanced ? "down" : ""}`}>›</span> Advanced{loopOn ? " · loop" : ""}{toolsOff.length ? ` · ${toolsOff.length} tools off` : ""}
       </button>

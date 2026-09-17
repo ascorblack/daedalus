@@ -1187,3 +1187,19 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
   .modelgrid { max-height: 460px; overflow-y: auto; }
   .addmodel .step { padding: 16px 20px 18px; }
 }
+
+/* ── projects: the folder an agent works in ─────────────────────────────────────────────── */
+
+.project-chip { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 38px; padding: 8px 10px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-1); color: var(--fg); font: inherit; font-weight: 600; cursor: pointer; text-align: left; }
+.project-chip:hover { background: var(--surface-2); }
+.project-chip .ic { color: var(--fg-3); flex: none; }
+.project-chip .chev { margin-left: auto; color: var(--fg-3); }
+.project-chip .badge { margin-left: auto; }
+.rail.collapsed .project-chip { justify-content: center; }
+.project-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); padding-right: 8px; }
+.project-row.on { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.project-pick { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; padding: 12px 14px; background: none; border: 0; color: var(--fg); font: inherit; cursor: pointer; text-align: left; min-width: 0; }
+.project-name { display: flex; align-items: center; gap: 6px; font-size: 15px; }
+.project-pick .sub { font-size: 12.5px; }
+.menu-item.on { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.readonly-path { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-1); color: var(--fg-2); font-size: 13px; word-break: break-all; }
