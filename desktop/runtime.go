@@ -166,7 +166,7 @@ var nodeDownloads = map[string]download{
 	"linux/arm64": {
 		name: "node", version: nodeVersion, kind: "tar.gz", strip: 1,
 		url:    "https://nodejs.org/dist/v" + nodeVersion + "/node-v" + nodeVersion + "-linux-arm64.tar.gz",
-		sha256: "724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5", size: 55000000,
+		sha256: "724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5", size: 57824078,
 	},
 	"darwin/arm64": {
 		name: "node", version: nodeVersion, kind: "tar.gz", strip: 1,
@@ -176,7 +176,7 @@ var nodeDownloads = map[string]download{
 	"darwin/amd64": {
 		name: "node", version: nodeVersion, kind: "tar.gz", strip: 1,
 		url:    "https://nodejs.org/dist/v" + nodeVersion + "/node-v" + nodeVersion + "-darwin-x64.tar.gz",
-		sha256: "1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097", size: 55000000,
+		sha256: "1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097", size: 54203979,
 	},
 	"windows/amd64": {
 		name: "node", version: nodeVersion, kind: "zip", strip: 1,
@@ -186,7 +186,7 @@ var nodeDownloads = map[string]download{
 	"windows/arm64": {
 		name: "node", version: nodeVersion, kind: "zip", strip: 1,
 		url:    "https://nodejs.org/dist/v" + nodeVersion + "/node-v" + nodeVersion + "-win-arm64.zip",
-		sha256: "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921", size: 36000000,
+		sha256: "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921", size: 33679608,
 	},
 }
 
@@ -208,6 +208,26 @@ func pick(table map[string]download, goos, goarch string) (download, error) {
 // pinned archive is MinGit at 39 MB.
 const downloadLimit = 512 << 20
 
+// httpsOnly is the client every download uses. http.DefaultClient follows a redirect from https to
+// http without a word, which for a hashed archive turns an attack into a hash mismatch and for the
+// checkout tarball — which has no hash — turns it into code that is unpacked and executed as the
+// supervisor on the next start. A hop that leaves https, or leaves the host the download started
+// from, is refused rather than followed.
+var httpsOnly = &http.Client{
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("%s: too many redirects", req.URL.Host)
+		}
+		if req.URL.Scheme != "https" {
+			return fmt.Errorf("%s redirects to %s, which is not https", via[0].URL.Host, req.URL.Scheme)
+		}
+		if req.URL.Host != via[0].URL.Host {
+			return fmt.Errorf("%s redirects to %s, which is a different host", via[0].URL.Host, req.URL.Host)
+		}
+		return nil
+	},
+}
+
 // fetchVerified downloads an archive and returns it only when its hash is the pinned one. The whole
 // archive is held in memory and checked before a single byte of it is written anywhere: a runtime
 // half-written from a download that turned out to be something else is worse than no runtime.
@@ -216,7 +236,7 @@ func fetchVerified(ctx context.Context, d download) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := httpsOnly.Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +351,9 @@ func unpackZipInto(d download, body []byte, dir string) error {
 	}
 	for _, entry := range archive.File {
 		name := stripName(entry.Name, d.strip)
-		if !d.wanted(name) || entry.FileInfo().IsDir() {
+		// Regular files only, as on the tar path: a zip symlink entry holds its target as content,
+		// so writing it out makes a file full of a path where a link was meant.
+		if !d.wanted(name) || !entry.FileInfo().Mode().IsRegular() {
 			continue
 		}
 		mode := entry.Mode().Perm()
@@ -402,8 +424,9 @@ func (p Paths) writeStamp(d download) error {
 }
 
 // installTool downloads, checks and unpacks one archive, and does nothing at all when the pinned
-// version is already there. It returns how many bytes were downloaded, which is what the first-run
-// figure in the README is measured with.
+// version is already there. It returns how many bytes of archive it fetched — not the first-run
+// total, which is mostly the uv-managed CPython and `uv sync` and is several times larger. The
+// README's figure is measured on the folder afterwards, not on this.
 func installTool(ctx context.Context, p Paths, d download, dir string, log func(string, ...any)) (int64, error) {
 	if p.installed(d) {
 		return 0, nil

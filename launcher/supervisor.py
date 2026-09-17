@@ -316,17 +316,23 @@ def loopback_token() -> str:
     reason it is preferred. A port on 127.0.0.1 has no owner — every process of every user on the
     machine can connect to it, and ``restart``, ``rollback`` and ``panic`` are not commands to leave
     open to all of them. So the port asks for a secret kept the way the socket was: a file in the
-    state directory that only its owner can read. The same secret across restarts, so a bot that is
-    already running goes on being able to ask.
+    state directory, created with mode 0600 rather than created and then chmod'ed. On Windows —
+    which is the only platform that uses the port — that mode reaches no ACL: ``os.chmod`` there
+    toggles the read-only attribute, so the file is as readable as the directory it sits in, and the
+    honest claim is that the secret raises the cost of asking rather than that it settles who may.
+    The same secret across restarts, so a bot that is already running goes on being able to ask.
     """
     with contextlib.suppress(OSError):
         if existing := SUPERVISOR_TOKEN.read_text("utf-8").strip():
             return existing
     token = secrets.token_urlsafe(32)
     SUPERVISOR_TOKEN.parent.mkdir(parents=True, exist_ok=True)
-    SUPERVISOR_TOKEN.write_text(token, encoding="utf-8")
-    with contextlib.suppress(OSError):
-        os.chmod(SUPERVISOR_TOKEN, 0o600)
+    # Created with the mode rather than created and then chmod'ed: the second form writes the secret
+    # under the process umask first, and there is a window in which anyone may read it.
+    SUPERVISOR_TOKEN.unlink(missing_ok=True)  # an empty file from a previous start is not a token
+    fd = os.open(SUPERVISOR_TOKEN, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(token)
     return token
 
 
@@ -537,10 +543,15 @@ def end_tree(pid: int, *, hard: bool) -> None:
     if POSIX:
         os.killpg(pid, signal.SIGKILL if hard else signal.SIGTERM)
         return
-    args = ["taskkill", "/T", "/PID", str(pid)]
-    if hard:
-        args.insert(1, "/F")
-    run(args, timeout=60)
+    if not hard:
+        # `taskkill` without /F posts WM_CLOSE to top-level windows, and a console-less Python has
+        # none: nothing arrived, the caller waited out its whole timeout and killed the tree anyway.
+        # A console control event reaches the process group the child was started in, which is what
+        # this process's own signal handler is waiting for.
+        with contextlib.suppress(OSError, ValueError, AttributeError):
+            os.kill(pid, signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+            return
+    run(["taskkill", "/F", "/T", "/PID", str(pid)] if hard else ["taskkill", "/T", "/PID", str(pid)], timeout=60)
 
 
 def reap_zombies(keep: set[int]) -> int:
@@ -1018,10 +1029,11 @@ class Supervisor:
     async def panic(self) -> str:
         child = self.child
         if child is not None and child.returncode is None:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            # Through end_tree, which is what reaches the bot on both platforms: os.killpg does not
+            # exist on Windows, so the emergency stop used to raise on the one platform end_tree
+            # was written for.
+            with contextlib.suppress(ProcessLookupError, OSError):
+                end_tree(child.pid, hard=True)
         if POSIX:
             run(["pkill", "-9", "-f", "python[0-9.]* -m daedalus"], timeout=10)
         log("PANIC: process tree killed")
@@ -1088,7 +1100,7 @@ class Supervisor:
             SOCKET.parent.mkdir(parents=True, exist_ok=True)
             SOCKET.unlink(missing_ok=True)
             server = await asyncio.start_unix_server(self.handle, path=str(SOCKET))
-            os.chmod(SOCKET, 0o660)
+            os.chmod(SOCKET, 0o600)  # the owner's alone, which is the argument for preferring a socket
         async with server:
             await server.serve_forever()
 

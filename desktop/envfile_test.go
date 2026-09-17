@@ -81,7 +81,7 @@ func TestEnvUpdatesPointAtTheDataFolderAndLoopback(t *testing.T) {
 func TestWriteSetupKeepsProviderKeysOutOfTheCheckout(t *testing.T) {
 	paths := setupTempInstall(t)
 	setup := Setup{DeepseekKey: "sk-deepseek", OpenrouterKey: "sk-router", BotToken: "123:abc", OwnerID: "42", USDPerDay: "7"}
-	if err := WriteSetup(paths, setup); err != nil {
+	if err := WriteSetup(paths, setup, ModeDocker); err != nil {
 		t.Fatal(err)
 	}
 	env := readFile(paths.Env)
@@ -104,14 +104,14 @@ func TestWriteSetupKeepsProviderKeysOutOfTheCheckout(t *testing.T) {
 
 func TestWriteSetupKeepsTheSearxngSecretAndUntypedKeys(t *testing.T) {
 	paths := setupTempInstall(t)
-	if err := WriteSetup(paths, Setup{DeepseekKey: "sk-one"}); err != nil {
+	if err := WriteSetup(paths, Setup{DeepseekKey: "sk-one"}, ModeDocker); err != nil {
 		t.Fatal(err)
 	}
 	first := readEnv(readFile(paths.Env))["SEARXNG_SECRET"]
 	if len(first) < 32 {
 		t.Fatalf("the SearXNG secret is too short to be one: %q", first)
 	}
-	if err := WriteSetup(paths, Setup{DeepseekKey: "sk-one"}); err != nil {
+	if err := WriteSetup(paths, Setup{DeepseekKey: "sk-one"}, ModeDocker); err != nil {
 		t.Fatal(err)
 	}
 	if second := readEnv(readFile(paths.Env))["SEARXNG_SECRET"]; second != first {
@@ -127,14 +127,14 @@ func TestWriteSetupKeepsTheSearxngSecretAndUntypedKeys(t *testing.T) {
 func TestWriteSetupLeavesAloneWhatTheFormDidNotCarry(t *testing.T) {
 	paths := setupTempInstall(t)
 	full := Setup{DeepseekKey: "sk-deepseek", OpenrouterKey: "sk-router", BotToken: "123:abc", OwnerID: "42", APIID: "7", APIHash: "hash", USDPerDay: "9"}
-	if err := WriteSetup(paths, full); err != nil {
+	if err := WriteSetup(paths, full, ModeDocker); err != nil {
 		t.Fatal(err)
 	}
 	// A public address is not on the setup page at all; passkeys are enrolled against that host.
 	if err := os.WriteFile(paths.Env, []byte(readFile(paths.Env)+"MINIAPP_PUBLIC_URL=https://example.test\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteSetup(paths, Setup{USDPerDay: "9"}); err != nil {
+	if err := WriteSetup(paths, Setup{USDPerDay: "9"}, ModeDocker); err != nil {
 		t.Fatal(err)
 	}
 	got := CurrentSetup(paths)
@@ -151,10 +151,10 @@ func TestWriteSetupLeavesAloneWhatTheFormDidNotCarry(t *testing.T) {
 
 func TestWriteSetupEmptiesOnlyWhatWasAskedFor(t *testing.T) {
 	paths := setupTempInstall(t)
-	if err := WriteSetup(paths, Setup{DeepseekKey: "sk-deepseek", OpenrouterKey: "sk-router", BotToken: "123:abc", OwnerID: "42"}); err != nil {
+	if err := WriteSetup(paths, Setup{DeepseekKey: "sk-deepseek", OpenrouterKey: "sk-router", BotToken: "123:abc", OwnerID: "42"}, ModeDocker); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteSetup(paths, Setup{Clear: map[string]bool{"deepseek": true, "bot_token": true}}); err != nil {
+	if err := WriteSetup(paths, Setup{Clear: map[string]bool{"deepseek": true, "bot_token": true}}, ModeDocker); err != nil {
 		t.Fatal(err)
 	}
 	got := CurrentSetup(paths)
@@ -207,4 +207,30 @@ func setupTempInstall(t *testing.T) Paths {
 		t.Fatal(err)
 	}
 	return paths
+}
+
+// The bot token is full control of one of the two front doors. In Docker mode the copy in the
+// checkout is what compose interpolates; natively there is no compose, and the checkout is a
+// directory the agent works in freely — so the copy put the token in the one place the rules open.
+func TestNativeModeDoesNotCopyTheTokenIntoTheCheckout(t *testing.T) {
+	paths := setupTempInstall(t)
+	if err := os.MkdirAll(paths.Bot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSetup(paths, Setup{BotToken: "123:abc", OwnerID: "42"}, ModeNative); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(paths.BotEnv) != "" {
+		t.Fatalf("the bot token reached the checkout: %q", readFile(paths.BotEnv))
+	}
+	if !strings.Contains(readFile(paths.Env), "123:abc") {
+		t.Fatal("the launcher's own env file did not get the token")
+	}
+	// Docker still gets it: compose reads ../.env as the agent container's environment.
+	if err := WriteSetup(paths, Setup{BotToken: "123:abc", OwnerID: "42"}, ModeDocker); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(paths.BotEnv) != readFile(paths.Env) {
+		t.Fatal("the checkout's .env is not the one compose reads for the container")
+	}
 }

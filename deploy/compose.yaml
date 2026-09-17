@@ -159,6 +159,10 @@ services:
       HOME: /home/keyproxy
       PYTHONPATH: /opt/keyproxy
       KEYPROXY_PORT: "3200"
+      # Every interface here is the container's own, on a network only the agent is on; the proxy
+      # binds the loopback address unless it is told otherwise, which is the right default on a
+      # machine and the wrong one in here.
+      KEYPROXY_HOST: 0.0.0.0
       KEYPROXY_BUDGET_FLAG: /srv/state/BUDGET_EXCEEDED
       KEYPROXY_BUDGET_DB: /srv/state/daedalus.sqlite
       KEYPROXY_AGENT_API: http://daedalus:${API_PORT:-8765}

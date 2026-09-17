@@ -163,6 +163,21 @@ as well, so a fork's code never runs upstream's image. A fork that publishes no 
 pull, and the first start builds it locally instead. Both remotes must be GitHub repositories — the
 checkouts are fetched from `codeload.github.com`, not cloned.
 
+### The launcher runs the Python from the published branch, so releases go core first
+
+The launcher is a binary; the supervisor and the key proxy it starts are `launcher/supervisor.py` and
+`deploy/keyproxy/proxy.py` **out of the checkout it fetched**, which is the published branch and not
+the tree the launcher was built from. So a launcher built from a branch whose Python has not been
+published yet pairs with code that does not have that branch's fixes, and the two disagree silently:
+the launcher passes `KEYPROXY_HOST=127.0.0.1` and a proxy that predates that variable binds every
+interface anyway.
+
+Release in the order **core → checkout → launcher**: publish the Python to the branch the launcher
+fetches first, and cut the `desktop-v*` tag afterwards. Where the two must be able to disagree —
+they always can, since the checkout moves on `update` — the Python side is written to fail safe on
+its own: the key proxy binds the loopback interface unless something asks it for more, and a base URL
+persisted against a container's address is migrated to this machine's on start rather than trusted.
+
 Double-clicked from Finder there is no terminal to read, so the launcher's page opens in the browser
 first and everything — the progress, a Docker that is not installed or not started, and the buttons
 to try again — is on it. The launcher keeps serving that page whether the start succeeded or not;

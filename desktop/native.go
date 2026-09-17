@@ -325,9 +325,6 @@ func (n *Native) Ensure(ctx context.Context) error {
 	if err := EnsureRepos(ctx, n.paths, n.gitRunner(), n.log); err != nil {
 		return err
 	}
-	if err := SyncBotEnv(n.paths); err != nil {
-		return err
-	}
 	if err := n.syncVenv(ctx); err != nil {
 		return err
 	}
@@ -335,7 +332,7 @@ func (n *Native) Ensure(ctx context.Context) error {
 		return err
 	}
 	if downloaded > 0 {
-		n.log("the runtime is installed: %.0f MB downloaded into %s", float64(downloaded)/1e6, n.paths.Runtime)
+		n.log("the runtime is installed: %.0f MB of archives downloaded into %s, plus the interpreter and the environment uv fetches", float64(downloaded)/1e6, n.paths.Runtime)
 	}
 	return nil
 }
@@ -492,6 +489,9 @@ func supervisorEnv(p Paths, base []string, settings map[string]string) []string 
 	if exe, err := os.Executable(); err == nil {
 		add("DAEDALUS_LAUNCHER", exe)
 	}
+	// The Telegram bot token and the API hash live in this file. The agent needs the path in order
+	// to refuse a tool that reaches for it, which it cannot do for a file it has never been told about.
+	add("DAEDALUS_ENV_FILE", p.Env)
 	add("DAEDALUS_SSH_SOURCE", p.SSH)
 	// The Mini App as a release archive carries it, beside the launcher. It is not the checkout's
 	// own miniapp/dist: that is the thing this would be a fallback for, and pointing one at the
@@ -650,6 +650,11 @@ func (n *Native) Stop(ctx context.Context) {
 	if n.keyproxy != nil {
 		n.keyproxy.Stop(ctx)
 	}
+	// Both are forgotten rather than kept for the next Start. A Process reads its environment once,
+	// when it is built, while APIPort and WaitReadyNative read the env file every time: a stop, an
+	// edit to the ports and a start would otherwise bring the old ports back up and then wait on the
+	// new ones, which is a launcher hanging on a port nothing is serving.
+	n.supervisor, n.keyproxy = nil, nil
 }
 
 // Running counts what is answering rather than what this process started. A `status` from a second
@@ -743,7 +748,14 @@ func (n *Native) SupervisorReachable() bool {
 		conn.Close()
 		return true
 	}
-	return exists(filepath.Join(n.paths.State, "supervisor.sock"))
+	// Dialled, not stat'ed: a supervisor that was killed leaves the socket file behind, and a status
+	// page that reads the file offers buttons that talk to nothing.
+	conn, err := net.DialTimeout("unix", filepath.Join(n.paths.State, "supervisor.sock"), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 // InstallExtra fetches one of the optional pieces: node, for the four skills that shell out to npx

@@ -130,7 +130,7 @@ func (a *App) start(ctx context.Context) error {
 	if err := WriteOverride(a.paths); err != nil {
 		return err
 	}
-	if err := SyncBotEnv(a.paths); err != nil {
+	if err := SyncBotEnv(a.paths, a.Mode()); err != nil {
 		return err
 	}
 	telegram := a.Telegram()

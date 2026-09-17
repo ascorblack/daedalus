@@ -177,7 +177,7 @@ func keyproxyUpdates(s Setup, current map[string]string) []envVar {
 // WriteSetup writes both env files. The existing values are read first, so re-running setup keeps
 // a key the form did not carry, keeps a public address set by hand, and keeps the SearXNG secret
 // stable across runs.
-func WriteSetup(p Paths, s Setup) error {
+func WriteSetup(p Paths, s Setup, mode Mode) error {
 	if err := p.EnsureDirs(); err != nil {
 		return err
 	}
@@ -200,14 +200,19 @@ func WriteSetup(p Paths, s Setup) error {
 	if err := os.WriteFile(p.KeyproxyEnv, []byte(mergeEnv(readFile(p.KeyproxyEnv), keyproxyUpdates(s, keys))), 0o600); err != nil {
 		return err
 	}
-	return SyncBotEnv(p)
+	return SyncBotEnv(p, mode)
 }
 
-// SyncBotEnv copies <data>/.env to the checkout root. The compose file reads ../.env as the agent
-// container's environment and the rebuilder reads .env from the project directory, both of which
-// are the checkout, while the launcher keeps the file it owns next to the data folder.
-func SyncBotEnv(p Paths) error {
-	if !exists(p.Bot) {
+// SyncBotEnv copies <data>/.env to the checkout root, in Docker mode. The compose file reads ../.env
+// as the agent container's environment and the rebuilder reads .env from the project directory, both
+// of which are the checkout, while the launcher keeps the file it owns next to the data folder.
+//
+// Native mode has no compose to interpolate and is not given the copy. The file holds the Telegram
+// bot token and the API hash — full control of one of the two front doors — and the checkout is a
+// directory the agent works in freely, so copying it there put the token inside the one place the
+// rules open rather than the one they seal.
+func SyncBotEnv(p Paths, mode Mode) error {
+	if mode == ModeNative || !exists(p.Bot) {
 		return nil
 	}
 	body, err := os.ReadFile(p.Env)

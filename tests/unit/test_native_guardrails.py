@@ -310,6 +310,37 @@ def test_the_sandbox_is_on_by_default_only_where_it_actually_works(monkeypatch: 
     assert native_sandbox_default() == "off"
 
 
+def test_a_container_key_proxy_address_is_migrated_to_this_machines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A base URL is a default only until the first run writes it down. An installation whose
+    config.toml was written against a compose project — or by a launcher whose checkout still held
+    the container default — reaches a host that does not resolve here, and every provider answers
+    ConnectError with a remedy about the network."""
+    from daedalus.config import RuntimeConfig
+
+    monkeypatch.setenv("DAEDALUS_NATIVE", "1")
+    monkeypatch.setenv("KEYPROXY_BASE_URL", "http://127.0.0.1:3201")
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[providers.deepseek]\nkind = \"deepseek\"\nbase_url = \"http://keyproxy:3200/deepseek\"\n"
+        "[tools.web.search.tavily]\nbase_url = \"http://keyproxy:3200/tavily\"\n",
+        encoding="utf-8",
+    )
+    config = RuntimeConfig.load(path)
+    assert config.providers["deepseek"].base_url == "http://127.0.0.1:3201/deepseek"
+    assert config.tools.web.search.tavily.base_url == "http://127.0.0.1:3201/tavily"
+    # Written back, and running it again changes nothing: there is no container address left to find.
+    assert "keyproxy:3200" not in path.read_text(encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+    RuntimeConfig.load(path)
+    assert path.read_text(encoding="utf-8") == before
+    # A container is left alone: the service name is where the proxy really answers there.
+    monkeypatch.setenv("DAEDALUS_NATIVE", "0")
+    monkeypatch.delenv("KEYPROXY_BASE_URL")
+    docker = tmp_path / "docker.toml"
+    docker.write_text("[providers.deepseek]\nkind = \"deepseek\"\nbase_url = \"http://keyproxy:3200/deepseek\"\n", encoding="utf-8")
+    assert RuntimeConfig.load(docker).providers["deepseek"].base_url == "http://keyproxy:3200/deepseek"
+
+
 async def test_the_manager_builds_the_policy_from_the_installation_it_is_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The rules above are only as good as the paths the host hands them, so this is where they come from."""
     from daedalus.config import Settings as RealSettings

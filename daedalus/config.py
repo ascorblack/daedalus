@@ -63,10 +63,14 @@ def env_path(name: str) -> Path | None:
     return Path(raw) if raw else None
 
 
+CONTAINER_KEYPROXY_BASE = "http://keyproxy:3200"
+"""Where the key proxy answers inside a compose project: a service name on a private network."""
+
+
 def keyproxy_base() -> str:
     """Where the key proxy answers. In a container it is a service name on a private network; on a
     machine it is a port on the loopback interface, and the launcher says which."""
-    return os.environ.get("KEYPROXY_BASE_URL", "").strip().rstrip("/") or "http://keyproxy:3200"
+    return os.environ.get("KEYPROXY_BASE_URL", "").strip().rstrip("/") or CONTAINER_KEYPROXY_BASE
 
 
 def _runtime_paths() -> list[str]:
@@ -1170,9 +1174,40 @@ def _migrate_web_search(raw: dict[str, Any]) -> bool:
     return True
 
 
+def _migrate_keyproxy_base(raw: dict[str, Any], base: str = "") -> bool:
+    """Move a container's key-proxy address to this machine's, wherever it was written down.
+
+    ``keyproxy_base()`` only decides a *default*, and the first run persists what it decided. An
+    installation whose ``config.toml`` was written against a compose project — or written by a
+    launcher whose checkout still held the container default — keeps eleven base URLs pointing at a
+    host that does not resolve here, and every provider and every search backend answers
+    ConnectError with a remedy about the network. Rewriting the prefix is idempotent: after it there
+    is no container address left to find.
+    """
+    base = base or keyproxy_base()
+    if not native_mode() or base == CONTAINER_KEYPROXY_BASE:
+        return False
+    changed = False
+
+    def walk(node: Any) -> Any:
+        nonlocal changed
+        if isinstance(node, dict):
+            return {k: walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        if isinstance(node, str) and node.startswith(CONTAINER_KEYPROXY_BASE):
+            changed = True
+            return base + node[len(CONTAINER_KEYPROXY_BASE) :]
+        return node
+
+    raw.update(walk(raw))
+    return changed
+
+
 def _migrate(raw: dict[str, Any]) -> bool:
     """Rewrite config shapes older versions wrote; returns True when something changed."""
     changed = _seed_presets(raw)
+    changed = _migrate_keyproxy_base(raw) or changed
     changed = _seed_claude_subscription(raw) or changed
     changed = _migrate_web_search(raw) or changed
     for provider in (raw.get("providers") or {}).values():

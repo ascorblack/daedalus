@@ -260,7 +260,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 			USDPerDay:     r.PostFormValue("usd_per_day"),
 			Clear:         clearedFields(r.PostForm["clear"]),
 		}
-		if err := WriteSetup(s.app.paths, setup); err != nil {
+		if err := WriteSetup(s.app.paths, setup, s.app.Mode()); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

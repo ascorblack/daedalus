@@ -76,7 +76,7 @@ func TestTheSetupPageAsksAndWrites(t *testing.T) {
 
 func TestTheStatusPageRendersOnceConfigured(t *testing.T) {
 	paths := setupTempInstall(t)
-	if err := WriteSetup(paths, Setup{}); err != nil {
+	if err := WriteSetup(paths, Setup{}, ModeDocker); err != nil {
 		t.Fatal(err)
 	}
 	server := NewServer(NewApp(paths), 0)
@@ -104,7 +104,7 @@ func TestTheStatusPageRendersOnceConfigured(t *testing.T) {
 // restarts the stack under them, are both requests a browser sends cross-site without asking.
 func TestTheSetupFormRefusesWhatAnotherPageCouldSend(t *testing.T) {
 	paths := setupTempInstall(t)
-	if err := WriteSetup(paths, Setup{DeepseekKey: "sk-mine", BotToken: "123:mine", OwnerID: "1"}); err != nil {
+	if err := WriteSetup(paths, Setup{DeepseekKey: "sk-mine", BotToken: "123:mine", OwnerID: "1"}, ModeDocker); err != nil {
 		t.Fatal(err)
 	}
 	server := NewServer(NewApp(paths), 0)
@@ -137,7 +137,7 @@ func TestTheSetupFormRefusesWhatAnotherPageCouldSend(t *testing.T) {
 
 func TestAnActionNeedsTheLauncherOwnHeader(t *testing.T) {
 	paths := setupTempInstall(t)
-	if err := WriteSetup(paths, Setup{}); err != nil {
+	if err := WriteSetup(paths, Setup{}, ModeDocker); err != nil {
 		t.Fatal(err)
 	}
 	server := NewServer(NewApp(paths), 0)

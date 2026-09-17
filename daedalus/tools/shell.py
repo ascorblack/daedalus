@@ -43,10 +43,12 @@ def _native() -> bool:
 def shell_argv(command: str, *, windows: bool | None = None) -> list[str]:
     """The program and arguments that run one shell command on this platform.
 
-    Everywhere but Windows it is ``bash -lc``, as it has always been. Windows has no bash: the
-    portable runtime's git is MinGit, whose ``usr/bin/sh.exe`` is a dash, and that is what Exec runs
-    there. It is a POSIX shell and not a Git Bash — a command written with arrays or ``[[ ]]`` will
-    not run — which the tool's own description says rather than leaving the model to find out.
+    Everywhere but Windows it is ``bash -lc``, as it has always been. Windows has no bash of its own:
+    what the portable runtime's MinGit brings is ``usr/bin/sh.exe``, and that is what Exec runs there.
+    In the non-busybox MinGit it is an MSYS2 bash under another name, but it is run as ``sh -c`` and
+    the tool's description promises no more than a POSIX shell — a command written with arrays or
+    ``[[ ]]`` may work and is not something to rely on. Under-promising here is deliberate: the
+    busybox flavour of MinGit really does ship an ash, and which one is on the machine is not known.
     """
     if windows is None:
         windows = os.name == "nt"

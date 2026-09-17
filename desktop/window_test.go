@@ -76,7 +76,7 @@ func TestGeometryKeepsWhatIsUsable(t *testing.T) {
 
 func TestSecondLaunchFocusesTheFirst(t *testing.T) {
 	paths := setupTempInstall(t)
-	if err := WriteSetup(paths, Setup{}); err != nil {
+	if err := WriteSetup(paths, Setup{}, ModeDocker); err != nil {
 		t.Fatal(err)
 	}
 	// No launcher is running: there is nothing to focus and nothing to wait for.

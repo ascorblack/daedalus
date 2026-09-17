@@ -2,9 +2,10 @@
 
 package main
 
-// A child of the launcher is put in a process group of its own, so stopping it stops what it
-// started. The supervisor starts the bot in a session of its own and the bot starts tools in
-// theirs; signalling the supervisor alone would leave the agent running with nothing above it.
+// A child of the launcher is put in a process group of its own, so a signal reaches it and anything
+// still in that group. What it does not reach is the bot: the supervisor starts it in a session of
+// its own, so a measured stop goes launcher -> supervisor group -> the supervisor's own handler ->
+// the bot, drained. The group is the way in, not the way all the way down.
 
 import (
 	"os/exec"

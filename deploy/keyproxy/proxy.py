@@ -544,11 +544,12 @@ def make_app() -> web.Application:
 
 def main() -> None:
     port = int(os.environ.get("KEYPROXY_PORT", "3200"))
-    # In a container every interface is the container's own private one, and the agent reaches this
-    # by service name over a network nothing else is on. On the operator's own machine "every
-    # interface" is the machine's, and a proxy that injects provider keys must not be one the local
-    # network can call: the launcher sets this to the loopback address.
-    host = os.environ.get("KEYPROXY_HOST", "").strip() or "0.0.0.0"
+    # A proxy that injects provider keys must not be one the local network can call, so the default
+    # is the loopback interface and reaching further is something a caller asks for by name. In a
+    # container every interface is the container's own private one and the agent reaches this by
+    # service name, so deploy/compose.yaml sets KEYPROXY_HOST there; the launcher sets it too, and a
+    # checkout older than either of them now binds the safe side rather than the whole machine.
+    host = os.environ.get("KEYPROXY_HOST", "").strip() or "127.0.0.1"
     if not upstreams():
         logger.warning("no upstream keys configured; every call will be refused")
     logger.warning("listening on %s:%d", host, port)
