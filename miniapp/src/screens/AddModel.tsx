@@ -74,6 +74,9 @@ function keyWords(p: ProviderCard): { pill: string; tone: string; note: string }
     return { pill, tone: "done", note: p.via_proxy ? t("add.key.held") : p.key_kind === "endpoint" ? t("add.key.free") : t("add.key.own") };
   }
   if (p.key_held === null) return { pill: t("add.key.unknown"), tone: "", note: "" };
+  // An endpoint with nowhere to reach is not a key problem, whatever the key says: advice about a
+  // key sends the reader to add one to something that still points nowhere.
+  if (!p.base_url) return { pill: t("add.key.none"), tone: "pending", note: t("add.noaddress.hint") };
   const note = p.key_kind === "cli_login" ? t("add.key.hint.cli") : p.via_proxy ? t("add.key.hint.proxy") : t("add.key.hint.settings");
   return { pill: t("add.key.none"), tone: "pending", note };
 }
@@ -106,7 +109,10 @@ function ProviderStep({ state, chosen, onPick }: { state: OnboardingState | null
         // HTTP codes, and the operator had to work backwards from those to "there is no key".
         const blocked = p.key_held === false;
         return (
-          <button key={p.id} className={`pick ${chosen === p.id ? "on" : ""} ${blocked ? "blocked" : ""}`} disabled={blocked} aria-disabled={blocked} onClick={() => onPick(p.id)} aria-pressed={chosen === p.id}>
+          // `disabled` would take it out of the tab order, and the sentence under it — why this
+          // endpoint cannot be used — is exactly what a keyboard or screen-reader user needs.
+          // `aria-disabled` says the same thing and keeps the card reachable.
+          <button key={p.id} className={`pick ${chosen === p.id ? "on" : ""} ${blocked ? "blocked" : ""}`} aria-disabled={blocked} onClick={() => !blocked && onPick(p.id)} aria-pressed={chosen === p.id}>
             <span className="pick-top">
               <b className="truncate">{providerName(p.id, p.kind)}</b>
               <span className={`pill ${tone}`}>{pill}</span>
@@ -343,11 +349,11 @@ export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: str
         )}
       </Step>
 
-      <Step n={3} title={t("add.step3")} sub={t("add.step3.sub")} active={ready} done={false}>
+      <Step n={3} title={t("add.step3")} sub={t("add.step3.sub")} active={ready} done={ready}>
         <div className="mfields">
           <label className="mfield">
             <span>{t("add.label")}</span>
-            <input className="field" value={preset.label} placeholder={model ? `${provider}/${model}` : ""} onChange={(e) => setPreset({ ...preset, label: e.target.value })} />
+            <input className="field" value={preset.label} placeholder={model ? `${provider}/${model}` : t("add.label.hint")} onChange={(e) => setPreset({ ...preset, label: e.target.value })} />
           </label>
           <label className="mfield">
             <span>{t("add.window")}</span>
