@@ -261,7 +261,14 @@ class Voice:
             await self.emit("agents", {"agents": await self.agents()})
             return {"session_id": session_id, "title": state.session.title, "steered": True, "answered": answering}
         name = title.strip() or body[:40]
-        state = await self.app.create_session(name, metadata={"voice_parent": voice_id, "brief": body})
+        # The concierge hands work to an agent of its own; where the concierge itself works in a
+        # project, so does the agent it makes, or the boundary would end at the microphone.
+        parent_project = await manager.project_of(voice_id)
+        state = await self.app.create_session(
+            name,
+            metadata={"voice_parent": voice_id, "brief": body},
+            project_id=parent_project.id if parent_project is not None else None,
+        )
         await manager.submit(state.session.id, body, as_answer=False, origin="voice")
         await self.emit("status", {"state": "delegating", "title": name})
         await self.emit("agents", {"agents": await self.agents()})

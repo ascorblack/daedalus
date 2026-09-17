@@ -2023,17 +2023,28 @@ class TelegramFront:
         tools_off: list[str] | None = None,
         loop: dict[str, Any] | None = None,
     ) -> str:
-        """A standing agent: its own topic and workspace, a brief in its system prompt, copies of the files it needs."""
+        """A standing agent: its own topic and workspace, a brief in its system prompt, copies of the files it needs.
+
+        Spawned from a project session it joins that project. An independent agent outside a project
+        is a normal thing to want; an agent that carries the operator's repository out of the folder
+        they walled it into, in one tool call, is not — and that is what a child without the project
+        and a list of absolute paths from inside it came to.
+        """
         metadata: dict[str, Any] = {"brief": brief.strip(), "spawned_by": session_id}
         if tools_off:
             metadata["tools_off"] = sorted(set(tools_off))
-        state, _ = await self.create_session_topic(title, metadata=metadata)
+        project = await self.manager.project_of(session_id)
+        state, _ = await self.create_session_topic(title, metadata=metadata, project_id=project.id if project is not None else None)
         copied: list[str] = []
         for raw in files:
             source = Path(raw)
             if not source.exists():
                 continue
             target = state.workspace / "inbox" / source.name
+            if target == source or (project is not None and source.is_relative_to(state.workspace)):
+                # Already where the new agent works: the two share the project root.
+                copied.append(str(source))
+                continue
             if source.is_dir():
                 shutil.copytree(source, target, dirs_exist_ok=True)
             else:

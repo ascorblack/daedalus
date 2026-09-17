@@ -12,7 +12,7 @@ needs on a page of its own, writes the environment files, and then runs the agen
 | **What it needs** | nothing | Docker Desktop (macOS, Windows) or Docker Engine with the compose plugin |
 | **What runs the agent** | a process under the launcher, out of a private folder of pinned, checksummed binaries | a container from one published image, with its own filesystem and its own network |
 | **First run downloads** | **103 MB** measured on Linux x86-64; ~96 MB on macOS (CPython is half the size there), ~148 MB on Windows (MinGit) | **114 MB** to pull the runtime image — 478 MB once unpacked — plus Docker itself, which is a ~600 MB application with a multi-gigabyte VM disk behind it |
-| **On disk** | 245 MB of `data/runtime/` (73 MB of it a wheel cache you can delete), 390 MB for the whole installation | ~480 MB of image, plus the volumes |
+| **On disk** | 245 MB of `data/runtime/` (73 MB of it a wheel cache you can delete), 390 MB for the whole installation | 478 MB of image, plus the volumes |
 | **Start to app** | 26 s from an empty folder, **4.3 s** warm | the image pull, then seconds; Docker Desktop itself must be up first |
 | **Browser skills** | `daedalus-desktop install browser` — ~100 MB into `data/runtime/browsers/` | the `:browser` tag of the same image, +~550 MB, sharing every layer below the last |
 | **Isolation** | **no container boundary** — `Exec` runs as you, behind the policy rules ([the isolation, honestly](#the-isolation-honestly)) | a command that goes wrong stops at the container's edge |
@@ -187,9 +187,18 @@ closing it leaves the containers running.
 
 A project is a folder of your own — a repository, a directory of documents — that you add in the app
 (Projects in the rail, the grid icon on the Agents screen). The agents you start in it work in that
-folder and nowhere else: every path they read, write or run in is checked against the project root,
-and one that leads out of it is refused. Several agents share one project and see the same files. An
-agent started without a project still gets a scratch directory of its own, as before.
+folder: every path they *resolve* is checked against the project root and one that leads out of it is
+refused — the file tools, the file browser, the preview, the download and the files they send you,
+all at the one point that turns a path into a place. `Exec` runs **in** the folder and is bounded by
+whatever bounds a command here: the sandbox where one is switched on, and the policy rules where it
+is not (see [What the agent may do](../README.md#what-the-agent-may-do)). Several agents share one
+project and see the same files. An agent started without a project still gets a scratch directory of
+its own, as before.
+
+A session writes five directories into the folder it works in — `inbox/`, `.exec/`, `.jobs/`,
+`.services/`, and `.checkpoints/` when snapshots are on. Where the project root is a git checkout
+they are added to `.git/info/exclude` when the first agent starts there, so they stay out of your
+`git status` and out of a `git add -A`; they are yours to delete whenever you like.
 
 `GET /api/projects` reports, per project, whether its folder is reachable from inside the running
 process (`reachable`) and whether it may be written (`writable`).
@@ -197,8 +206,15 @@ process (`reachable`) and whether it may be written (`writable`).
 **In Docker mode a project is also a bind mount, and that is the one place this mode is visibly
 heavier than native.** The agent container sees only what is mounted into it, so a folder that is not
 mounted is a project whose files are simply not there — which is what `reachable: false` says. The
-launcher is what closes that gap: for a project whose folder is unreachable it adds one entry to the
-agent service's `volumes` in `data/compose.desktop.yaml` and restarts the stack.
+launcher is what closes that gap: once the stack is up it asks the app which project folders it
+cannot see and puts each of them in `data/project-mounts`, one path per line, which it splices into
+the agent service's `volumes` in `data/compose.desktop.yaml` every time it writes that file. It then
+says so on its page. **It does not restart anything by itself** — a restart takes the agent away from
+whatever it is doing — so **Stop** and **Start** are what mount the folder, and until you press them
+the project keeps saying it is not mounted.
+
+If the launcher cannot reach the app or cannot write the file, it prints the entry to add by hand,
+which is the same entry.
 
 The entry is the folder mapped to **itself** — the same absolute path inside the container as outside:
 
@@ -472,7 +488,7 @@ In **Docker mode**, one image, and the key proxy is a second container from it:
 
 | Image | Size on disk | Why |
 |---|---|---|
-| `ghcr.io/ascorblack/daedalus` | ~480 MB (~115 MB to pull) | Ubuntu, Python, uv, the environment, the built Mini App. Runs the agent and the key proxy |
+| `ghcr.io/ascorblack/daedalus` | 478 MB unpacked (114 MB to pull) | Ubuntu, Python, uv, the environment, the built Mini App. Runs the agent and the key proxy |
 | `aiogram/telegram-bot-api` | ~66 MB | the local Bot API server; only with Telegram on |
 
 Budget **about half a gigabyte for the image**, plus the volumes: the database and the agent's
@@ -505,8 +521,10 @@ Three things live outside it, all of them small, all of them optional to clean u
 | the `daedalus://` link registration | `~/.local/share/applications/daedalus-desktop.desktop` on Linux, `HKCU\Software\Classes\daedalus` on Windows, Launch Services on macOS (which forgets a bundle that is gone) | delete the file or the key; on macOS nothing to do |
 | a browser profile, if the app was shown in one | `data/browser-profile/` | inside the folder already |
 
-Your projects are **not** in the folder and are not touched: a project is a folder of your own that
-the installation only ever pointed at.
+Your projects are **not** in the folder: a project is a folder of your own that the installation only
+ever pointed at, and nothing here deletes one. What an agent wrote inside it stays there — the files
+it was asked to make, and the five directories listed under [Projects](#projects) — so a project
+folder you are finished with is cleaned up by deleting those, in the folder itself.
 
 ## Building it yourself
 

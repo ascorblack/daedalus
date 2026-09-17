@@ -134,6 +134,7 @@ a { color: var(--accent); text-decoration: none; }
 .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sub { color: var(--fg-2); font-size: 13px; }
 .sub.faint { color: var(--fg-3); }
+.sub.attn { color: var(--warn); }
 
 /* one status vocabulary: idle is not a colour, so waiting and running stand out */
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-3); flex: none; display: inline-block; }
@@ -607,6 +608,10 @@ input.field, select.field, textarea.field {
 .aside-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .aside-row .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); display: inline-block; flex: none; }
 .aside-row .dot.failed { background: var(--bad); }
+/* The project root is the boundary, so it is shown whole: a path clipped after two segments says
+   nothing about which folder the agent is walled into. */
+.aside-row.project-root { align-items: flex-start; gap: 6px; padding-bottom: 4px; }
+.aside-row.project-root .mono { white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
 .aside-text { font-size: 13px; line-height: 1.4; white-space: pre-wrap; max-height: 7.5em; overflow: hidden; margin-bottom: 4px; }
 .ctxbar.wide { width: 60px; }
 /* sheet sections */

@@ -45,7 +45,7 @@ from daedalus.host.transcript_view import message_view
 from daedalus.providers.openai_compat import UsageRecord
 from daedalus.security import redact
 from daedalus.stores import pairing, passkeys
-from daedalus.stores.projects import ProjectError, ProjectSettings
+from daedalus.stores.projects import ProjectError, ProjectSettings, normalise_root
 from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
@@ -912,9 +912,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         in a container the folder is only there once it is bind-mounted, so the app can say "restart
         to mount this" instead of showing a project whose files are mysteriously absent.
         """
+        busy = manager.busy_sessions()
         out = []
         for project in await manager.projects.list():
-            out.append({**project.view(), "sessions": await manager.projects.sessions_of(project.id)})
+            # Which of them are working right now, so the app can name them before it asks the
+            # operator to confirm something that would move the folder under them.
+            sessions = [{**s, "running": s["id"] in busy} for s in await manager.projects.sessions_of(project.id)]
+            out.append({**project.view(), "sessions": sessions})
         return out
 
     @api.post("/api/projects")
@@ -925,12 +929,36 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         return {**project.view(), "sessions": []}
 
+    async def _busy_in(project_id: str) -> list[dict[str, str]]:
+        """The agents of this project with a turn in flight.
+
+        Moving a root or forgetting a project re-points the workspace of every loaded session of it.
+        Doing that mid-turn means the agent's next tool call resolves into a different directory from
+        the one its earlier reads and its snapshot refer to, so it is refused while a run is up — the
+        same rule ``revert`` and ``fork`` already keep.
+        """
+        busy = manager.busy_sessions()
+        return [s for s in await manager.projects.sessions_of(project_id) if s["id"] in busy]
+
+    def _refuse_busy(project: Any, busy: list[dict[str, str]], what: str) -> None:
+        if not busy:
+            return
+        names = ", ".join(s["title"] or s["id"] for s in busy)
+        one = len(busy) == 1
+        raise HTTPException(409, f"{len(busy)} agent{'' if one else 's'} {'is' if one else 'are'} working in {project.name} right now ({names}); {what} would move the folder under {'it' if one else 'them'} mid-turn — stop {'it' if one else 'them'} first")
+
     @api.patch("/api/projects/{project_id}")
     async def patch_project(project_id: str, body: ProjectPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         current = await manager.projects.get(project_id)
         if current is None:
             raise HTTPException(404, "no such project")
         settings_patch = None if body.snapshots is None else ProjectSettings(snapshots=body.snapshots)
+        try:
+            moving = body.root is not None and normalise_root(body.root) != current.root
+        except ProjectError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if moving:
+            _refuse_busy(current, await _busy_in(project_id), "moving it")
         try:
             project = await manager.projects.update(project_id, name=body.name, root=body.root, settings=settings_patch)
         except ProjectError as exc:
@@ -952,6 +980,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if project is None:
             raise HTTPException(404, "no such project")
         sessions = await manager.projects.sessions_of(project_id)
+        _refuse_busy(project, await _busy_in(project_id), "removing it")
         if sessions and not detach:
             one = len(sessions) == 1
             raise HTTPException(409, f"{len(sessions)} agent{'' if one else 's'} {'works' if one else 'work'} in {project.name}; removing it leaves them without its files (pass detach=1 to do it anyway)")
@@ -1430,7 +1459,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such session")
         title = (body.title or f"{re.sub(r'\s*\(fork @\d+\)$', '', source.session.title)} (fork @{body.seq})")[:128]
         try:
-            target = await app.create_session(title, metadata={"forked_from": {"session_id": session_id, "seq": body.seq}})
+            # A fork of a project session stays in the project: the two sessions share the root, which
+            # is what "several agents work in one project" already means, and the fork keeps the wall.
+            target = await app.create_session(
+                title,
+                metadata={"forked_from": {"session_id": session_id, "seq": body.seq}},
+                project_id=source.project.id if source.project is not None else None,
+            )
         except TelegramBusy as exc:
             raise HTTPException(429, str(exc)) from exc
         except TelegramRefused as exc:

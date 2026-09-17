@@ -225,7 +225,11 @@ class Services:
         existing = await self.get(session_id, name)
         if existing and existing["status"] == "running" and pid_alive(existing.get("pid")):
             raise ValueError(f"service {name!r} is already running (pid {existing['pid']}); ServiceStop it first")
-        workdir = Path(cwd) if cwd else state.workspace
+        # The directory goes through the session's own resolve, as every other path-taking tool's
+        # does: a service is the one thing here that outlives the turn, and a cwd taken raw was the
+        # single path into the filesystem that the project's containment did not judge.
+        session_services = manager.locator_services(session_id)
+        workdir = session_services.resolve(cwd) if session_services is not None else (Path(cwd) if cwd else state.workspace)
         if not workdir.is_absolute():
             workdir = state.workspace / workdir
         if not workdir.is_dir():
@@ -237,7 +241,6 @@ class Services:
         env = shell_environment(session_id, {"PORT": str(chosen)} if chosen else None)
         env["HOST"] = "0.0.0.0"
         # The same wall Exec has: a service is a long-lived command, not a way around the sandbox.
-        session_services = manager.locator_services(session_id)
         argv, _sandboxed = await sandbox_argv(command, workdir, state.workspace, self.app.config.tools.exec, writable=getattr(session_services, "writable", ()))
         with open(log_path, "ab") as log:
             log.write(f"\n=== {_now()} start: {command}\n".encode())

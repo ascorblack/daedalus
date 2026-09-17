@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -112,9 +113,15 @@ def normalise_root(raw: str) -> Path:
 class ProjectStore:
     """The projects table, and the one column on ``sessions`` that points into it."""
 
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, *, reserved: Iterable[Path] = (), home: Path | None = None) -> None:
         self._db = db
         self._roots: tuple[Path, ...] = ()
+        self._reserved = tuple(dict.fromkeys(Path(os.path.normpath(Path(p).expanduser())) for p in reserved))
+        """This installation's own directories. A project may not be one, contain one or sit inside one."""
+        self._home = Path(os.path.normpath(Path(home).expanduser())) if home is not None else None
+        """The operator's home folder, refused as a whole and allowed one folder in: every project
+        lives inside it, and taking the whole of it is what switches off the rule that asks before a
+        path in the home folder is touched."""
 
     @property
     def roots(self) -> tuple[Path, ...]:
@@ -141,6 +148,7 @@ class ProjectStore:
         if not label:
             raise ProjectError("a project needs a name")
         path = normalise_root(root)
+        self._refuse_reserved(path)
         await self._refuse_overlap(path)
         project = Project(id=uuid.uuid4().hex[:12], name=label, root=path, created_at=datetime.now(UTC), settings=settings or ProjectSettings())
         await self._db.execute(
@@ -159,6 +167,7 @@ class ProjectStore:
             raise ProjectError("a project needs a name")
         path = project.root if root is None else normalise_root(root)
         if path != project.root:
+            self._refuse_reserved(path)
             await self._refuse_overlap(path, ignore=project_id)
         merged = project.settings if settings is None else settings
         await self._db.execute(
@@ -173,6 +182,26 @@ class ProjectStore:
         await self._db.execute("UPDATE sessions SET project_id = NULL WHERE project_id = ?", (project_id,))
         await self._db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         await self.list()
+
+    def _refuse_reserved(self, path: Path) -> None:
+        """The folders that are the installation's, or are the whole of the operator's home.
+
+        A project root is inside the wall as well as outside it: every path under it is reachable to
+        the agents of that project, and it is in the policy's open roots, which is what makes the
+        home-folder question stop being asked for anything under it. So the state directory, the
+        secrets, the workspaces root and the two checkouts are refused in both directions — as the
+        root, above it and below it — and the home folder is refused as a whole while any folder
+        inside it stays the ordinary case.
+        """
+        if self._home is not None and path == self._home:
+            raise ProjectError(f"{path} is your home folder; a project is a folder inside it, not the whole of it")
+        for reserved in self._reserved:
+            if path == reserved:
+                raise ProjectError(f"{path} belongs to the installation itself and cannot be a project")
+            if reserved in path.parents:
+                raise ProjectError(f"{path} is inside {reserved}, which belongs to the installation itself")
+            if path in reserved.parents:
+                raise ProjectError(f"{path} contains {reserved}, which belongs to the installation itself")
 
     async def _refuse_overlap(self, path: Path, *, ignore: str = "") -> None:
         """Two projects may not nest, because containment would then mean two different things at once.

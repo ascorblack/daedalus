@@ -139,9 +139,16 @@ docker exec deploy-daedalus-1 /srv/venv/bin/python -m daedalus check   # "model:
 ## 3b. Projects, when the operator has folders of their own on the server
 
 A **project** is a folder the operator adds in the app (Projects in the rail, or the grid icon on the
-Agents screen): the agents started in it work in that folder and may not read or write outside it.
-Without a project a session gets a scratch directory of its own under the workspaces root, which is
-what every session had before and still gets.
+Agents screen): the agents started in it work in that folder, and every path they resolve is checked
+against it — the file tools, the file browser, the preview, the download and the files they send.
+`Exec` runs in the folder; the body of a command is bounded by `tools.exec.sandbox`, which is `off` by
+default in a container, so switch it on if the boundary has to hold against a shell too. Without a
+project a session gets a scratch directory of its own under the workspaces root, which is what every
+session had before and still gets.
+
+Each session writes `inbox/`, `.exec/`, `.jobs/`, `.services/` and — with snapshots on —
+`.checkpoints/` into the folder it works in; where the root is a git checkout these go into
+`.git/info/exclude` the first time an agent starts there.
 
 In this Compose install the container sees only what is mounted into it, so a folder outside the stack
 needs a bind mount before an agent can work in it. The app says which projects are not reachable; add

@@ -88,7 +88,7 @@ Talk to a small fast model that answers out loud in a second, hands anything sub
 <td valign="top">
 
 **📁 Projects**<br/>
-Add a folder of your own — a repository, a directory of documents — and the agents you start in it work there. The folder is the whole of their reach: every path they read, write or run in is inside it, and one that leads out is refused, not followed. Several agents share one project and see the same files; an agent started without one still gets a scratch directory of its own, as before.
+Add a folder of your own — a repository, a directory of documents — and the agents you start in it work there. Every path they resolve is checked against that folder and one that leads out is refused, not followed: the file tools, the file browser, the preview, the download and the files they send you. `Exec` runs in the folder and is bounded by the sandbox where one is on and by the policy rules where it is not. Several agents share one project and see the same files; an agent started without one still gets a scratch directory of its own, as before.
 
 </td>
 <td valign="top">
@@ -263,9 +263,18 @@ than something in a container:
 - **a path in your home folder, outside every project and outside the installation, asks.** Inside a
   project, a workspace or the checkouts it does not — that is where the work is.
 
-Beside the policy: a **project** contains every path a session resolves (`..`, an absolute path
-elsewhere and a symlink out of the tree are one refusal, checked on the real path); the **egress
-allowlist** turns an unknown host into a question and logs every host either way; the **spend caps**
+Beside the policy: a **project** contains every path a session *resolves* (`..`, an absolute path
+elsewhere and a symlink out of the tree are one refusal, checked on the real path). That is the file
+tools, the file browser, the preview, the download and `SendFile` — the one point a path becomes a
+place. It is not the body of a shell command: `Exec` runs in the project folder and what it reaches
+from there is what the sandbox allows, and where no sandbox is on, what the policy rules allow. On a
+native install those rules refuse the installation's own files outright and ask before a path in your
+home folder outside every project is touched; in a container they do not fire at all, and the
+container's edge is the boundary instead — so a session of one project can read another project's
+folder through `Exec` unless a sandbox is switched on. Tools an MCP server provides are the server's
+own and pass through none of this: a filesystem server pointed at a folder outside the project
+reaches it. The **egress allowlist** turns an unknown host into a question and logs every host either
+way; the **spend caps**
 are the supervisor's, from its own environment, and the agent cannot edit them; `GOVERNANCE.md` — the
 rules the agent always sees — is a protected path it cannot write, and a read-only mount on top of
 that in a container. `daedalus doctor` prints what this installation's boundary actually is in one
@@ -301,7 +310,7 @@ Open it and a page asks the one question that matters, with what each answer cos
 | First run fetches | **103 MB** on Linux, ~96 MB on macOS, ~148 MB on Windows — a pinned `uv`, a CPython, `rg` and the app's environment, each checked against the hash its publisher published | **114 MB** to pull one image (478 MB unpacked), plus Docker itself: a ~600 MB application with a VM disk behind it |
 | Ready in | 26 s from an empty folder, **4.3 s** warm | seconds, once Docker is up |
 | The agent is | a process under the launcher, which keeps it alive and stops it on quit | a container that comes back with the machine |
-| Isolation | the policy rules and nothing behind them — see [what each gives up](#what-each-gives-up) | the container's own edge |
+| Isolation | the policy rules, and bubblewrap on Linux where it is present — see [what each gives up](#what-each-gives-up) | the container's own edge |
 
 Then it opens a window of its own — the system's web view on macOS and Windows, a browser window
 with no tabs or address bar on Linux, the default browser if neither — asks for a provider key and a
