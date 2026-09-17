@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MessageView } from "./api";
-import { applyLive, buildTurns, EMPTY_LIVE, isOlderPage, liveBase, prepend, reconcile } from "./turns";
+import type { LiveState } from "./turns";
+import { applyLive, buildTurns, EMPTY_LIVE, isOlderPage, liveAfter, liveBase, prepend, reconcile } from "./turns";
 
 let clock = 1_700_000_000_000;
 
@@ -226,5 +227,53 @@ describe("older pages", () => {
 
   it("changes nothing when the page holds nothing older", () => {
     expect(prepend(history, [answer(11, "dup")])).toBe(history);
+  });
+});
+
+describe("when the streaming turn ends", () => {
+  /** A run of one tool step and one answer, as the stream carries it. */
+  const run: [string, Record<string, any>][] = [
+    ["message_start", {}],
+    ["content_block_delta", { delta: { type: "thinking_delta", text: "the log is on the box" } }],
+    ["tool_use_start", { tool_call_id: "c1", tool_name: "Exec" }],
+    ["tool_use_stop", { tool_call_id: "c1", final_input: { command: "tail -n 40 log" } }],
+    ["message_stop", { stop_reason: "tool_use" }],
+    ["tool_result", { tool_call_id: "c1", content: "ok" }],
+    ["message_start", {}],
+    ["content_block_delta", { delta: { type: "text_delta", text: "One slow query, " } }],
+    ["content_block_delta", { delta: { type: "text_delta", text: "on the events table." } }],
+    ["message_stop", { stop_reason: "end_turn" }],
+  ];
+
+  const replay = (upto: number): LiveState => run.slice(0, upto).reduce((s, [event, p]) => liveAfter(s, event, p), EMPTY_LIVE);
+
+  it("ends on the model's full stop and not on the one before it", () => {
+    // The message that ended to call a tool is not the end of the turn: the run goes on.
+    expect(replay(5).ended).toBe(false);
+    expect(replay(run.length - 1).ended).toBe(false);
+    const done = replay(run.length);
+    expect(done.ended).toBe(true);
+    // The text stays put: the written copy takes its place when the read of the transcript lands,
+    // and until then the answer must not blink out.
+    expect(done.text).toBe("One slow query, on the events table.");
+  });
+
+  it("is live again from the first event of the next run", () => {
+    const next = liveAfter(replay(run.length), "message_start", {});
+    expect(next.ended).toBe(false);
+    expect(next.text).toBe("");
+  });
+
+  it("is not put back by anything the session does after the answer", () => {
+    // These arrive in the gap between the last token and the session reporting itself idle: the
+    // snapshot, the delivery to the other fronts, the record of what the run learned.
+    const after: [string, Record<string, any>][] = [
+      ["run_settled", { status: "completed", housekeeping: true }],
+      ["state_changed", { from: "running", to: "running" }],
+      ["run_settled", { status: "completed", housekeeping: false }],
+    ];
+    const state = after.reduce((s, [event, p]) => liveAfter(s, event, p), replay(run.length));
+    expect(state.ended).toBe(true);
+    expect(state.text).toBe("One slow query, on the events table.");
   });
 });

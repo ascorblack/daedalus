@@ -1457,6 +1457,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "session.compacted.group": { en: "{n} older turns folded into summaries", ru: "ранних ходов свёрнуто в выжимки: {n}" },
   "session.reasoning": { en: "Reasoning", ru: "Рассуждение" },
   "session.livebar.writing": { en: "Writing the answer", ru: "Пишет ответ" },
+  "session.livebar.saving": { en: "Saving the turn", ru: "Сохраняет ход" },
   "session.livebar.waiting": { en: "Waiting for your answer", ru: "Ждёт вашего ответа" },
   "session.livebar.thinking": { en: "Thinking", ru: "Думает" },
   "session.livebar.step": { en: "· step {n}", ru: "· шаг {n}" },

@@ -9,8 +9,14 @@
 import type { MessageView } from "./api";
 
 export type LiveTool = { id: string; name: string; args: string; result?: string; error?: boolean };
-export type LiveState = { text: string; thinking: string; tools: LiveTool[]; startedAt: number | null };
-export const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null };
+/**
+ * `ended` is the model's own full stop: the last `message_stop` of the run said `end_turn`, so the
+ * answer on the screen is the whole answer. The text stays until the written copy takes its place,
+ * but nothing about the turn is live any more — no cursor under it, no dots over it — however long
+ * the session takes to report itself idle afterwards.
+ */
+export type LiveState = { text: string; thinking: string; tools: LiveTool[]; startedAt: number | null; ended: boolean };
+export const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null, ended: false };
 
 export type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean; length?: number; clipped?: boolean };
 export type NoteItem = { kind: "note"; text: string };
@@ -241,6 +247,31 @@ export function isOlderPage(older: readonly MessageView[], oldestKnown: number |
   return older.every((m) => m.seq != null && m.seq < oldestKnown);
 }
 
+/**
+ * The streaming turn's state after one event off the wire. Pure, so what the screen shows during a
+ * run is decided in one place and can be read back without a browser.
+ *
+ * The turn ends on the model's own full stop — `message_stop` with `end_turn` — and on nothing else.
+ * The session reports itself idle later, after it has written the answer down, snapshotted the files
+ * and told the other fronts, and waiting for that is what used to leave a cursor blinking under a
+ * finished answer. The text is kept: the written copy takes its place when the read lands.
+ */
+export function liveAfter(state: LiveState, event: string, p: Record<string, any>): LiveState {
+  if (event === "message_start") return { ...state, text: "", thinking: "", ended: false, startedAt: state.startedAt ?? Date.now() };
+  if (event === "content_block_delta") {
+    const d = p.delta ?? {};
+    if (d.type === "text_delta") return { ...state, text: state.text + (d.text ?? "") };
+    if (d.type === "thinking_delta") return { ...state, thinking: state.thinking + (d.text ?? "") };
+    return state;
+  }
+  if (event === "tool_use_start") return { ...state, tools: [...state.tools, { id: p.tool_call_id, name: p.tool_name, args: "" }] };
+  if (event === "tool_use_stop") return { ...state, tools: state.tools.map((t) => (t.id === p.tool_call_id ? { ...t, args: JSON.stringify(p.final_input ?? {}) } : t)) };
+  if (event === "tool_result") return { ...state, tools: state.tools.map((t) => (t.id === p.tool_call_id ? { ...t, result: String(p.content ?? p.output ?? ""), error: !!p.is_error } : t)) };
+  // A message that ended to make a tool call is not the end of the turn: the run goes on.
+  if (event === "message_stop" && (p.stop_reason === "end_turn" || p.stop_reason === "max_tokens")) return { ...state, ended: true };
+  return state;
+}
+
 // ── the streaming turn's state, outside React ─────────────────────────────────────────────
 
 export type LiveStore = {
@@ -274,7 +305,12 @@ export function createLiveStore(): LiveStore {
       };
     },
     update(fn) {
-      state = fn(state);
+      const next = fn(state);
+      // An event the streaming turn has nothing to do with — a state change, a hook, the end of the
+      // run — leaves the state as it was, and repainting for it would cost a frame per event during
+      // a run for nothing on the screen.
+      if (next === state) return;
+      state = next;
       if (!frame) frame = raf(flush);
     },
     reset() {

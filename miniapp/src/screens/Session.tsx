@@ -8,7 +8,7 @@ import { EVIDENCE_EVENT, EvidenceRequest, codeBlock, renderCached, renderMarkdow
 import { confirmAsync, enterSends, errorText, fmtBytes, fmtTok, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
 import { AuthImg, FilePreview, PreviewSource, canPreview, fileGlyph, previewKind, sessionBase } from "../preview";
-import { Activity, LiveStore, SummaryItem, ToolItem, Turn, applyLive, buildTurns, createLiveStore, isOlderPage, liveBase, prepend, reconcile } from "../turns";
+import { Activity, LiveStore, SummaryItem, ToolItem, Turn, applyLive, buildTurns, createLiveStore, isOlderPage, liveAfter, liveBase, prepend, reconcile } from "../turns";
 import { Windowed } from "../virtual";
 import { plural, t } from "../i18n";
 
@@ -408,28 +408,32 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
         }
         if (stop) return;
         // The stream ended (server restart, proxy timeout): re-read the transcript and reconnect.
+        // Whatever the last stream was in the middle of is over as far as this screen knows, and a
+        // half-written turn kept across the gap would put the cursor back under an answer that
+        // finished while the connection was down. The re-read brings back everything that is real.
+        live.reset();
         load(true);
         await new Promise((r) => setTimeout(r, backoff));
         backoff = Math.min(backoff * 2, 15000);
       }
     })();
     function handle(event: string, p: Record<string, any>) {
-      if (event === "message_start") live.update((s) => ({ ...s, text: "", thinking: "", startedAt: s.startedAt ?? Date.now() }));
-      else if (event === "content_block_delta") {
-        const d = p.delta ?? {};
-        if (d.type === "text_delta") live.update((s) => ({ ...s, text: s.text + (d.text ?? "") }));
-        if (d.type === "thinking_delta") live.update((s) => ({ ...s, thinking: s.thinking + (d.text ?? "") }));
-      } else if (event === "tool_use_start") {
-        live.update((s) => ({ ...s, tools: [...s.tools, { id: p.tool_call_id, name: p.tool_name, args: "" }] }));
-      } else if (event === "tool_use_stop") {
-        live.update((s) => ({ ...s, tools: s.tools.map((t) => (t.id === p.tool_call_id ? { ...t, args: JSON.stringify(p.final_input ?? {}) } : t)) }));
-      } else if (event === "tool_result") {
-        live.update((s) => ({ ...s, tools: s.tools.map((t) => (t.id === p.tool_call_id ? { ...t, result: String(p.content ?? p.output ?? ""), error: !!p.is_error } : t)) }));
+      live.update((s) => liveAfter(s, event, p));
+      if (event === "message_start") {
+        // The queue the last run left behind starts the next one without anybody pressing send:
+        // the chip says so as the first token arrives, not at the next read.
+        setDetail((prev) => (prev && prev.status === "idle" ? { ...prev, status: "running" } : prev));
       } else if (event === "message_stop") {
-        // The message the stream just finished is on the screen already; reading the end of the
-        // conversation puts the written copy in its place, and only then is the streamed one dropped.
+        // The streamed copy is dropped only once the written one is on the screen, so the answer
+        // never blinks out and back in. The cursor does not wait for that read — `liveAfter` has
+        // already ended the turn — and so the read being slow costs nothing anybody can see.
         void refresh("tail").then(() => live.update((s) => ({ ...s, text: "", thinking: "" })));
-      } else if (event === "run_settled" || event === "compaction_completed") refreshSoon("tail");
+      } else if (event === "run_settled") {
+        // The run is over as the host knows it. The chip flips on this event, not on the read it
+        // triggers: the read says the same thing a round trip later.
+        setDetail((prev) => (prev ? { ...prev, status: p.status === "awaiting" ? "waiting" : "idle", housekeeping: !!p.housekeeping } : prev));
+        refreshSoon("tail");
+      } else if (event === "compaction_completed") refreshSoon("tail");
       else if (event === "state_changed" || event === "tool_call_pending") refreshSoon("state");
     }
     return () => {
@@ -1739,9 +1743,11 @@ function LiveTurn({ base, live, onTurnAction, onRender }: { base: Turn | null; l
   useClock(1000);
   useLayoutEffect(() => onRender?.());
   const turn = applyLive(base, state, Date.now());
+  // `ended` is the model's full stop. From it the turn reads as written — no cursor under it, no
+  // dots over it — whatever the session is still doing behind the answer.
   return (
     <Safe>
-      <TurnView turn={turn} live onTurnAction={onTurnAction} />
+      <TurnView turn={turn} live={!state.ended} onTurnAction={onTurnAction} />
     </Safe>
   );
 }
@@ -1758,7 +1764,9 @@ function LiveBar({ status, base, live, workspace, atBottom, onJump }: { status: 
         const d = describe(running, workspace);
         return `${d.verb}${d.detail ? ` ${d.detail}` : ""}`;
       })()
-    : turn.answer
+    : state.ended
+      ? t("session.livebar.saving")
+      : turn.answer
       ? t("session.livebar.writing")
       : state.thinking
         ? t("session.reasoning")

@@ -214,6 +214,8 @@ export type SessionDetail = {
   id: string;
   title: string;
   status: string;
+  /** The run is over and its answer is written; what the session is still saving behind it is not a run. */
+  housekeeping?: boolean;
   compacting?: Compacting | null;
   run_id: string | null;
   workspace: string;
