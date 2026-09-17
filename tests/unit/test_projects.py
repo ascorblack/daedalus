@@ -230,14 +230,20 @@ async def test_project_crud_and_a_session_that_works_in_one(settings: Settings, 
             download = await client.get(f"/api/sessions/{sid}/download", headers=HEADERS, params={"path": "../../etc/hostname"})
             assert download.status_code == 400
 
+            # The other agents of a project are its agents, not the ones that happen to name the same
+            # directory: a project session carries no workspace in its metadata to be matched on.
+            second = (await client.post("/api/sessions", headers=HEADERS, json={"title": "Photos", "project_id": project["id"]})).json()["id"]
+            beside = (await client.get(f"/api/sessions/{sid}", headers=HEADERS)).json()["workspace_sessions"]
+            assert [u["id"] for u in beside] == [second]
+
             renamed = await client.patch(f"/api/projects/{project['id']}", headers=HEADERS, json={"name": "Bakery site", "snapshots": True})
             assert renamed.status_code == 200 and renamed.json()["name"] == "Bakery site" and renamed.json()["settings"]["snapshots"] is True
             assert manager.live_state(sid).project.settings.snapshots is True, "a live session must see the change, not the next one to open"
 
             busy = await client.delete(f"/api/projects/{project['id']}", headers=HEADERS)
-            assert busy.status_code == 409 and "1 agent works in" in busy.json()["detail"]
+            assert busy.status_code == 409 and "2 agents work in" in busy.json()["detail"]
             gone = await client.delete(f"/api/projects/{project['id']}", headers=HEADERS, params={"detach": 1})
-            assert gone.status_code == 200 and gone.json()["detached"] == [sid]
+            assert sorted(gone.json()["detached"]) == sorted([sid, second]) and gone.status_code == 200
             assert (await client.get("/api/projects", headers=HEADERS)).json() == []
             # Not one file of it was touched.
             assert (root / "menu" / "items.json").is_file()

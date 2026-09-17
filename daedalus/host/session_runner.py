@@ -637,15 +637,18 @@ class SessionManager:
         return True
 
     async def workspace_users(self, workspace: Path) -> list[dict[str, str]]:
-        """The sessions that work in ``workspace``: their own directory, or one they were attached to."""
+        """The sessions that work in ``workspace``: a project's, their own directory, or one they were attached to."""
         target = workspace.resolve()
+        roots = {p.id: p.root for p in await self.projects.list()}
         out: list[dict[str, str]] = []
-        for row in await self.db.fetchall("SELECT id, title, metadata FROM sessions"):
+        for row in await self.db.fetchall("SELECT id, title, metadata, project_id FROM sessions"):
             try:
                 named = json.loads(row["metadata"] or "{}").get("workspace")
             except (ValueError, AttributeError):
                 named = None
-            path = Path(str(named)) if named else self.workspace_for(row["id"])
+            # A project's root comes first: a session in one has no workspace in its metadata, and
+            # without this the sessions sharing a project would not see each other in the list.
+            path = roots.get(row["project_id"]) or (Path(str(named)) if named else self.workspace_for(row["id"]))
             if path.resolve() == target:
                 out.append({"id": row["id"], "title": row["title"]})
         return out
