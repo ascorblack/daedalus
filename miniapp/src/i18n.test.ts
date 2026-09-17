@@ -84,6 +84,14 @@ describe("the dictionary", () => {
   });
 });
 
+// Every language code either speech catalog can name. The recognition catalog is the longer of the
+// two and the synthesis one is a subset of it, so this list is the recognition side's.
+const SPOKEN = [
+  "ar", "be", "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "he", "hi", "hr", "hu",
+  "id", "it", "ja", "ko", "lt", "lv", "mt", "nb", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv",
+  "th", "tr", "uk", "vi", "yue", "zh",
+];
+
 describe("the keys the code asks for", () => {
   it("are all in the table", () => {
     const missing = new Set<string>();
@@ -134,6 +142,11 @@ describe("the keys the code asks for", () => {
       ["settings.sec.", ["models", "rules", "limits", "tools", "voice", "chat", "security", "heartbeat", "about"]],
       ["tool.group.", ["Exec", "Read", "Write", "Edit", "search", "WebFetch", "SendFile", "other"]],
       ["tool.board.", ["get", "list"]],
+      // Both speech pickers build a language name from a catalog's own code, and the recognition
+      // one reaches far past the ten languages the synthesis catalog speaks. A code with no row
+      // here is a bare `[lang.of.xx]` in a filter someone is choosing from.
+      ["lang.of.", SPOKEN],
+      ["stt.progress.", ["downloading", "verifying", "unpacking", "queued", "failed"]],
     ];
     const missing = families.flatMap(([prefix, names]) => names.map((n) => prefix + n)).filter((key) => !(key in DICT));
     // The section hints sit beside the section names, and a hint nobody wrote is a blank line.

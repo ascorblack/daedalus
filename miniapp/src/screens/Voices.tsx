@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { Icon } from "../icons";
+import { modelSize as size } from "../format";
 import { t } from "../i18n";
 import { errorText, haptic } from "../ui";
 
@@ -62,12 +63,7 @@ export type TtsView = {
   };
 };
 
-const name = (code: string) => t(`tts.lang.${code}`);
-
-function size(bytes: number): string {
-  if (bytes >= 1 << 30) return `${(bytes / (1 << 30)).toFixed(1)} GB`;
-  return `${Math.round(bytes / (1 << 20))} MB`;
-}
+const name = (code: string) => t(`lang.of.${code}`);
 
 /** One 0-100 score as a bar. Two of these side by side are the whole comparison most people make. */
 function Bar({ label, value }: { label: string; value: number }) {

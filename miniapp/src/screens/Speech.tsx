@@ -12,6 +12,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { Icon } from "../icons";
+import { modelSize as size } from "../format";
+import { plural, t } from "../i18n";
 import { invalidate } from "../store";
 import { errorText, haptic } from "../ui";
 import type { SpeechModel, SpeechView } from "../sttview";
@@ -19,21 +21,9 @@ import { fetchSttView, mergeSttView, postSttSelect, sttFrame } from "../sttview"
 
 export type { SpeechModel, SpeechView } from "../sttview";
 
-const NAMES: Record<string, string> = {
-  en: "English", ru: "Russian", de: "German", fr: "French", es: "Spanish", it: "Italian", pt: "Portuguese",
-  nl: "Dutch", pl: "Polish", uk: "Ukrainian", cs: "Czech", sk: "Slovak", sv: "Swedish", da: "Danish",
-  fi: "Finnish", nb: "Norwegian", et: "Estonian", lv: "Latvian", lt: "Lithuanian", bg: "Bulgarian",
-  hr: "Croatian", sl: "Slovenian", ro: "Romanian", hu: "Hungarian", el: "Greek", mt: "Maltese",
-  be: "Belarusian", tr: "Turkish", ar: "Arabic", hi: "Hindi", he: "Hebrew", ja: "Japanese",
-  ko: "Korean", vi: "Vietnamese", zh: "Chinese", yue: "Cantonese", th: "Thai", id: "Indonesian",
-};
-
-const name = (code: string) => NAMES[code] ?? code.toUpperCase();
-
-function size(bytes: number): string {
-  if (bytes >= 1 << 30) return `${(bytes / (1 << 30)).toFixed(1)} GB`;
-  return `${Math.round(bytes / (1 << 20))} MB`;
-}
+// The same table the synthesis picker beside this one reads: one language is one word, whichever of
+// the two lists it came from.
+const name = (code: string) => t(`lang.of.${code}`);
 
 /** One 0-100 score as a bar. Two of these side by side are the whole comparison most people make. */
 function Bar({ label, value }: { label: string; value: number }) {
@@ -50,7 +40,7 @@ function Bar({ label, value }: { label: string; value: number }) {
 function Languages({ model }: { model: SpeechModel }) {
   const shown = model.languages.slice(0, 4).map(name);
   const rest = model.language_count - shown.length;
-  return <>{shown.join(", ")}{rest > 0 ? ` +${rest} more` : ""}</>;
+  return <>{shown.join(", ")}{rest > 0 ? ` ${t("stt.languages.more", { n: rest })}` : ""}</>;
 }
 
 /** Where the chosen model is: in memory and quick, on its way there, or refusing to load. */
@@ -59,22 +49,22 @@ function LoadLine({ load }: { load: SpeechView["load"] }) {
   if (load.state === "loading") {
     return (
       <div className="kv stt-load">
-        <span>In memory</span>
-        <b className="stt-loading">loading now — the first utterance would have waited for this</b>
+        <span>{t("stt.memory")}</span>
+        <b className="stt-loading">{t("stt.memory.loading")}</b>
       </div>
     );
   }
   if (load.state === "error") {
     return (
       <div className="sub attn" style={{ marginTop: 6 }}>
-        That model would not load: {load.error || "the engine refused it"}
+        {t("stt.load.failed", { reason: load.error || t("stt.load.refused") })}
       </div>
     );
   }
   return (
     <div className="kv">
-      <span>In memory</span>
-      <b>ready{load.loaded_in_ms ? ` · loaded in ${(load.loaded_in_ms / 1000).toFixed(1)} s` : ""}</b>
+      <span>{t("stt.memory")}</span>
+      <b>{load.loaded_in_ms ? t("stt.memory.ready.in", { s: (load.loaded_in_ms / 1000).toFixed(1) }) : t("stt.memory.ready")}</b>
     </div>
   );
 }
@@ -158,11 +148,11 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
         // The engine is an optional extra natively; the first download is when it becomes worth
         // installing, so it is fetched before the model rather than after, when it would be missed.
         if (view && !view.engine_installed) {
-          toast("installing the speech engine…");
+          toast(t("stt.engine.installing"));
           await api.post("/api/stt/engine");
         }
         await api.post(`/api/stt/models/${encodeURIComponent(id)}/download`);
-        toast("downloading…");
+        toast(t("stt.toast.downloading"));
       } else if (what === "cancel") {
         await api.post(`/api/stt/models/${encodeURIComponent(id)}/cancel`);
       } else if (what === "use") {
@@ -171,12 +161,12 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
         // just changed that, so they are told rather than left until something reloads them.
         invalidate("/api/voice");
         haptic("medium");
-        toast(id ? "this model is now used for speech — it is loading into memory now" : "back to the endpoint and the browser");
+        toast(id ? t("stt.toast.using") : t("stt.toast.stopped"));
         return;
       } else {
         take(await api.delete<Partial<SpeechView>>(`/api/stt/models/${encodeURIComponent(id)}`));
         invalidate("/api/voice");
-        toast("removed");
+        toast(t("stt.toast.removed"));
       }
       await load();
     } catch (e) {
@@ -186,7 +176,7 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
     }
   }
 
-  if (!view) return <div className="card"><div className="sub">{problem || "Loading…"}</div></div>;
+  if (!view) return <div className="card"><div className="sub">{problem || t("stt.loading")}</div></div>;
 
   const wanted = query.trim().toLowerCase();
   const shown = view.models.filter((m) => {
@@ -205,40 +195,32 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
 
   return (
     <div className="card">
-      <div className="section-title" style={{ marginTop: 0 }}>Speech recognition</div>
-      <div className="sub">
-        A model that runs here, on this machine's processor, with no endpoint and no key. Pick one, download it, and it
-        is used for every voice note and everything said on the voice page — ahead of the transcription endpoint and
-        ahead of the browser's own recognition. Nothing is downloaded until you ask for it, and deleting one puts the
-        disk back.
-      </div>
+      <div className="section-title" style={{ marginTop: 0 }}>{t("stt.title")}</div>
+      <div className="sub">{t("stt.intro")}</div>
 
       <div className="kv" style={{ marginTop: 10 }}>
-        <span>In use</span>
-        <b>{view.selected ? view.models.find((m) => m.id === view.selected)?.label ?? view.selected : "none — the endpoint or the browser listens"}</b>
+        <span>{t("stt.inuse")}</span>
+        <b>{view.selected ? view.models.find((m) => m.id === view.selected)?.label ?? view.selected : t("stt.inuse.none")}</b>
       </div>
       <div className="kv">
-        <span>On disk</span>
-        <b>{installedCount ? `${installedCount} model${installedCount > 1 ? "s" : ""} · ${size(view.disk_bytes)}` : "nothing yet"}</b>
+        <span>{t("stt.ondisk")}</span>
+        <b>{installedCount ? plural("stt.ondisk.some", installedCount, { size: size(view.disk_bytes) }) : t("stt.ondisk.none")}</b>
       </div>
       {view.selected && <LoadLine load={view.load} />}
       {view.selected && !view.decoders?.opus && !view.decoders?.any && (
-        <div className="sub attn" style={{ marginTop: 6 }}>
-          No audio decoder is installed here, so only plain WAV can be read — a Telegram voice note cannot. Install
-          opus-tools (small) or ffmpeg (large).
-        </div>
+        <div className="sub attn" style={{ marginTop: 6 }}>{t("stt.nodecoder")}</div>
       )}
 
       <div className="stt-filters">
-        <input className="field" style={{ margin: 0 }} placeholder="Search models" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <input className="field" style={{ margin: 0 }} placeholder={t("stt.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
         <select className="field" style={{ margin: 0 }} value={language} onChange={(e) => setLanguage(e.target.value)}>
-          <option value="">Any language</option>
+          <option value="">{t("stt.language.any")}</option>
           {view.languages.map((code) => (
             <option key={code} value={code}>{name(code)}</option>
           ))}
         </select>
         <button className={`chip select ${streamingOnly ? "on" : ""}`} aria-pressed={streamingOnly} onClick={() => setStreamingOnly((v) => !v)}>
-          Streaming only
+          {t("stt.streaming.only")}
         </button>
       </div>
 
@@ -254,23 +236,22 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
             <div key={m.id} className={`stt-card ${m.selected ? "using" : ""}`}>
               <div className="stt-head">
                 <b>{m.label}</b>
-                {recommended && <span className="chip accent">Recommended{language ? ` for ${name(language)}` : ""}</span>}
-                {m.streaming ? <span className="chip ok">Streaming</span> : <span className="chip">Whole sentences</span>}
-                {m.selected && <span className="chip accent">In use</span>}
+                {recommended && <span className="chip accent">{language ? t("stt.recommended.for", { lang: name(language) }) : t("stt.recommended")}</span>}
+                {m.streaming ? <span className="chip ok">{t("stt.chip.streaming")}</span> : <span className="chip">{t("stt.chip.sentences")}</span>}
+                {m.selected && <span className="chip accent">{t("stt.card.using")}</span>}
               </div>
               <div className="sub">{m.note}</div>
               <div className="stt-facts sub faint">
                 <span><Languages model={m} /></span>
-                <span>{size(m.size_bytes)} download · {size(m.disk_bytes)} on disk · ~{m.memory_mb} MB in memory</span>
+                <span>{t("stt.facts.size", { dl: size(m.size_bytes), disk: size(m.disk_bytes), mem: m.memory_mb })}</span>
                 <span>
-                  {m.licence}
-                  {m.verified ? " · checksum published" : " · no published checksum — size and file list only"}
-                  {m.detects_language ? "" : " · transcribes as English unless a language is chosen"}
+                  {t(m.verified ? "stt.facts.checksum" : "stt.facts.nochecksum", { licence: m.licence })}
+                  {m.detects_language ? "" : ` · ${t("stt.facts.englishonly")}`}
                 </span>
               </div>
               <div className="stt-bars">
-                <Bar label="Accuracy" value={m.accuracy} />
-                <Bar label="Speed" value={m.speed} />
+                <Bar label={t("stt.accuracy")} value={m.accuracy} />
+                <Bar label={t("stt.speed")} value={m.speed} />
               </div>
               {downloading && (
                 <div className="stt-progress">
@@ -278,23 +259,23 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
                     <span className="stt-bar-fill accent" style={{ width: `${Math.round((progress?.fraction ?? 0) * 100)}%` }} />
                   </span>
                   <span className="sub faint">
-                    {progress?.state === "downloading" ? `${Math.round((progress?.fraction ?? 0) * 100)}%` : progress?.state}
+                    {progress?.state === "downloading" ? `${Math.round((progress?.fraction ?? 0) * 100)}%` : t(`stt.progress.${progress?.state}`)}
                   </span>
                 </div>
               )}
-              {progress?.state === "failed" && <div className="sub attn">{progress.error || "the download failed"}</div>}
-              {queued && <div className="sub faint">Waiting — models are fetched one at a time.</div>}
+              {progress?.state === "failed" && <div className="sub attn">{progress.error || t("stt.failed")}</div>}
+              {queued && <div className="sub faint">{t("stt.queued")}</div>}
               <div className="btnrow">
                 {downloading ? (
-                  <button className="btn small" onClick={() => void act(m.id, "cancel")}>Stop</button>
+                  <button className="btn small" onClick={() => void act(m.id, "cancel")}>{t("stt.cancel")}</button>
                 ) : m.installed ? (
                   <>
                     {m.selected ? (
-                      <button className="btn small" onClick={() => void act("", "use")}>Stop using it</button>
+                      <button className="btn small" onClick={() => void act("", "use")}>{t("stt.stop")}</button>
                     ) : (
-                      <button className="btn small primary" disabled={busy === m.id} onClick={() => void act(m.id, "use")}>Use this one</button>
+                      <button className="btn small primary" disabled={busy === m.id} onClick={() => void act(m.id, "use")}>{t("stt.use")}</button>
                     )}
-                    <button className="btn small danger" disabled={busy === m.id} onClick={() => void act(m.id, "delete")}>Delete</button>
+                    <button className="btn small danger" disabled={busy === m.id} onClick={() => void act(m.id, "delete")}>{t("stt.delete")}</button>
                   </>
                 ) : (
                   <button
@@ -302,29 +283,29 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
                     disabled={busy === m.id || (busyElsewhere && !queued)}
                     onClick={() => void act(m.id, "download")}
                   >
-                    <Icon name="download" size={14} /> Download {size(m.size_bytes)}
+                    <Icon name="download" size={14} /> {t("stt.download", { size: size(m.size_bytes) })}
                   </button>
                 )}
               </div>
             </div>
           );
         })}
-        {!shown.length && <div className="sub faint">No model matches that. Clear the filters to see all {view.models.length}.</div>}
+        {!shown.length && <div className="sub faint">{t("stt.nomatch", { n: view.models.length })}</div>}
       </div>
 
       {view.selected && (
         <div className="grid2" style={{ marginTop: 12 }}>
           <div>
-            <label className="field">Language</label>
+            <label className="field">{t("stt.language")}</label>
             <select className="field" value={view.language} onChange={(e) => void postSttSelect({ language: e.target.value }).then(take).catch((x) => setProblem(errorText(x)))}>
-              <option value="auto">{autoDetects ? "auto — the model decides" : "auto — English for this model"}</option>
+              <option value="auto">{t(autoDetects ? "stt.language.auto" : "stt.language.auto.english")}</option>
               {view.languages.map((code) => (
                 <option key={code} value={code}>{name(code)}</option>
               ))}
             </select>
           </div>
           <div>
-            <label className="field">Decoding threads</label>
+            <label className="field">{t("stt.threads")}</label>
             <input
               className="field"
               type="number"

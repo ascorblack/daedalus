@@ -127,6 +127,16 @@ export function bytes(n: number): string {
   return t("fmt.bytes.mb", { n: (n / (1024 * 1024)).toFixed(1) });
 }
 
+/**
+ * A downloadable's size, coarser than `bytes`: a speech model is "170 MB", never "170.3 MB". Both
+ * speech pickers show one, and they showed it through a copy of this each, with the unit written
+ * into the code where no language could reach it.
+ */
+export function modelSize(n: number): string {
+  if (n >= 1 << 30) return t("fmt.bytes.gb", { n: (n / (1 << 30)).toFixed(1) });
+  return t("fmt.bytes.mb", { n: Math.round(n / (1 << 20)) });
+}
+
 /** Keeps both ends of a long path or id: "/srv/works…/round8_probe.py". */
 export function middleTruncate(s: string, max = 32): string {
   if (s.length <= max) return s;

@@ -13,10 +13,10 @@ import { describe, expect, it } from "vitest";
 
 const SOURCES = import.meta.glob("./**/*.{ts,tsx}", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 
-// The voice screens are translated by their own work, through the same table under `voice.*`,
-// `stt.*` and `tts.*`. They are listed here so that this test says what it is not looking at rather
-// than quietly passing over it.
-const ELSEWHERE = ["./screens/Voice.tsx", "./screens/Speech.tsx", "./voice.ts", "./stt.ts", "./tts.ts"];
+// The voice screens are translated through the same table, under `voice.*`, `stt.*` and `tts.*`,
+// and are read by this test like every other screen. What stays on this list is the machinery under
+// them — a reducer, two transports — which holds no words a reader ever sees.
+const ELSEWHERE = ["./voice.ts", "./stt.ts", "./tts.ts"];
 
 // Strings left in English on purpose, with the reason. Everything else has to come from the table.
 const ALLOWED: Record<string, string[]> = {

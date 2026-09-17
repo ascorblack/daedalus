@@ -46,7 +46,15 @@ type VoiceState = {
   enabled: boolean;
   session_id: string;
   model: string;
-  tts?: { configured: boolean; reason?: string; voice?: string; model?: string };
+  tts?: {
+    configured: boolean;
+    reason?: string;
+    voice?: string;
+    model?: string;
+    /** Which of the three speaks, decided by the server and merely followed here, as with `stt`. */
+    kind?: string;
+    state?: string;
+  };
   stt?: {
     configured: boolean;
     reason?: string;
@@ -75,7 +83,18 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
   const listener = useRef<Listener | null>(null);
   const meter = useRef<ReturnType<typeof createMeter> | null>(null);
   const lang = useMemo(() => voiceLang(), []);
+  // The server produces the audio for both of the first two: a voice on this machine and a speech
+  // endpoint both answer /api/voice/tts, and only the browser's own synthesiser does not.
   const serverTts = !!state?.tts?.configured;
+  // What the page calls that, which is a third thing: a voice running here is not the server's, and
+  // the recognition half of this very page has said so about its own three for a unit already.
+  const ttsKind = state?.tts?.kind ?? (serverTts ? "endpoint" : "browser");
+  const spokenBy =
+    ttsKind === "local"
+      ? t("voice.out.local", { voice: state?.tts?.voice || "" })
+      : ttsKind === "endpoint"
+        ? t("voice.out.server")
+        : t("voice.out.browser");
   // Which recogniser listens, in the order the server decides and the page merely follows: a model
   // that runs on the server's processor first, then this browser's own recognition, then a recorder
   // whose cut utterances the server transcribes. The local model wins over the browser because it is
@@ -363,7 +382,7 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
     <>
       <PageHeader
         title={<VoiceTitle />}
-        subtitle={state ? `${state.model} · ${serverTts ? t("voice.out.server") : t("voice.out.browser")}` : "…"}
+        subtitle={state ? `${state.model} · ${spokenBy}` : "…"}
         actions={
           <>
             {state?.session_id && (
@@ -382,7 +401,7 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
           <section className={`voice-stage card phase-${ui.phase}`}>
             <div className="voice-chips">
               <PhaseChip ui={ui} />
-              <span className="chip quiet">{serverTts ? t("voice.out.server") : t("voice.out.browser")}</span>
+              <span className="chip quiet">{spokenBy}</span>
             </div>
 
             <div className="voice-orb-wrap">
@@ -501,6 +520,14 @@ function VoiceTitle() {
   );
 }
 
+/** Which of the three speaks, in one line: the same order /api/voice decides and the chip follows. */
+function spokenLine(data: VoiceState): string {
+  const tts = data.tts;
+  if (tts?.kind === "local") return t("voice.card.out.local", { voice: tts.voice || "" });
+  if (tts?.configured) return t("voice.card.out.server", { model: tts.model || "", voice: tts.voice || "" });
+  return tts?.reason || t("voice.card.out.browser");
+}
+
 /** The Settings card: what the page runs on and what it can and cannot do here. */
 export function VoiceSettings() {
   const { data } = useQuery<VoiceState>("/api/voice", { staleMs: 10000 });
@@ -508,49 +535,49 @@ export function VoiceSettings() {
   const local = data.stt?.local;
   return (
     <div className="card">
-      <div className="section-title" style={{ marginTop: 0 }}>Voice (beta)</div>
-      <div className="sub">A small fast model the operator talks to. It answers what it can itself and hands real work to agent sessions, then reports when they finish.</div>
+      <div className="section-title" style={{ marginTop: 0 }}>{t("voice.card.title")}</div>
+      <div className="sub">{t("voice.card.intro")}</div>
       <div className="kv">
-        <span>Enabled</span>
-        <b>{data.enabled ? "yes" : "no — set enabled in [voice]"}</b>
+        <span>{t("voice.card.enabled")}</span>
+        <b>{t(data.enabled ? "voice.card.enabled.yes" : "voice.card.enabled.no")}</b>
       </div>
       <div className="kv">
-        <span>Model</span>
+        <span>{t("voice.card.model")}</span>
         <b>{data.model || "—"}</b>
       </div>
       <div className="kv">
-        <span>Speech out</span>
-        <b>{data.tts?.configured ? `server · ${data.tts.model} · ${data.tts.voice}` : data.tts?.reason || "the browser's own synthesiser ([voice.tts] is empty)"}</b>
+        <span>{t("voice.card.out")}</span>
+        <b>{spokenLine(data)}</b>
       </div>
       <div className="kv">
-        <span>Speech in</span>
+        <span>{t("voice.card.in")}</span>
         <b>
           {local?.active
-            ? `${local.label}, running on this machine${local.streaming ? " — words appear as they are said" : ""}`
+            ? t(local.streaming ? "voice.card.in.local.streaming" : "voice.card.in.local", { label: local.label })
             : recognitionSupported()
-              ? "this browser recognises speech itself"
+              ? t("voice.card.in.browser")
               : data.stt?.configured
-                ? "recorded here, transcribed on the server"
-                : "not available in this browser, and nothing is configured to transcribe a recording"}
+                ? t("voice.card.in.server")
+                : t("voice.card.in.none")}
         </b>
       </div>
       {local?.active && (
         <div className="kv">
-          <span>In memory</span>
+          <span>{t("voice.card.memory")}</span>
           <b>
             {data.stt?.state === "loading"
-              ? "loading now"
+              ? t("voice.card.memory.loading")
               : data.stt?.state === "error"
-                ? data.stt.error || "the last load failed"
+                ? data.stt.error || t("voice.card.memory.failed")
                 : data.stt?.loaded_in_ms
-                  ? `ready · loaded in ${(data.stt.loaded_in_ms / 1000).toFixed(1)} s`
-                  : "loads when the voice page opens"}
+                  ? t("voice.card.memory.ready", { s: (data.stt.loaded_in_ms / 1000).toFixed(1) })
+                  : t("voice.card.memory.later")}
           </b>
         </div>
       )}
       <div className="btnrow">
         <a className="btn small" href={pathFor("voice")} onClick={(e) => go(e, pathFor("voice"))}>
-          Open the voice page
+          {t("voice.card.open")}
         </a>
       </div>
     </div>
