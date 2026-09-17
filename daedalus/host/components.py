@@ -125,7 +125,16 @@ class Status:
     state: str
     """``installed``, ``missing``, ``installing`` or ``unavailable``."""
     detail: str = ""
-    """One sentence of runtime fact: what was found, or why this platform cannot have it."""
+    """One sentence of runtime fact, in English: what was found, or why this platform cannot have it.
+
+    Kept for the places that read the answer rather than render it — the doctor, the command line,
+    the reason a refusal carries. The page shows ``detail_key`` instead, because a page that is in
+    Russian everywhere except its largest body line is worse than one that is not translated at all.
+    """
+    detail_key: str = ""
+    """The same fact as a key the app writes out in the reader's language, with ``detail_args``
+    filling the holes. Empty only where nothing measured has been said."""
+    detail_args: dict[str, str] = field(default_factory=dict)
     installable: bool = False
     how: str = "none"
     fix: str = ""
@@ -148,6 +157,8 @@ class Status:
             "id": self.id,
             "state": self.state,
             "detail": self.detail,
+            "detail_key": self.detail_key,
+            "detail_args": dict(self.detail_args),
             "installable": self.installable,
             "how": self.how,
             "fix": self.fix,
@@ -303,14 +314,15 @@ class Registry:
 
     def _speech(self) -> Status:
         if engine_installed():
-            return Status(SPEECH, "installed", "the speech engine is importable")
+            return Status(SPEECH, "installed", "the speech engine is importable", detail_key="comp.detail.speech.ok")
         if self.settings.native:
             if shutil.which("uv") is None:
                 return Status(SPEECH, "missing", "uv is not on the PATH, so the extra cannot be synced from here",
-                              fix="uv sync --frozen --inexact --extra speech")
-            return Status(SPEECH, "missing", "the speech extra is not in this environment", installable=True, how="extra",
-                          fix="uv sync --frozen --inexact --extra speech")
-        return Status(SPEECH, "missing", "this image was built without the speech extra", fix="run the published image, which carries it")
+                              detail_key="comp.detail.speech.nouv", fix="uv sync --frozen --inexact --extra speech")
+            return Status(SPEECH, "missing", "the speech extra is not in this environment", detail_key="comp.detail.speech.missing",
+                          installable=True, how="extra", fix="uv sync --frozen --inexact --extra speech")
+        return Status(SPEECH, "missing", "this image was built without the speech extra", detail_key="comp.detail.speech.image",
+                      fix="run the published image, which carries it")
 
     def _stt_models(self) -> Status:
         return self._models("stt", STT_MODELS)
@@ -334,6 +346,8 @@ class Registry:
         detail = f"{len(installed)} of {len(catalogue)} downloaded" if installed else "none downloaded yet"
         return Status(
             component_id, state, detail,
+            detail_key="comp.detail.models.some" if installed else "comp.detail.models.none",
+            detail_args={"n": str(len(installed)), "total": str(len(catalogue))},
             installable=False, how="models",
             # Not a button here and not a command either: one model at a time is a choice, made in
             # front of the catalogue that says what each one speaks and what it costs.
@@ -343,32 +357,35 @@ class Registry:
 
     def _browser(self) -> Status:
         if toolchain.status("browser") == "ok":
-            return Status(BROWSER, "installed", "Playwright, a headless Chromium and Pillow are here")
+            return Status(BROWSER, "installed", "Playwright, a headless Chromium and Pillow are here", detail_key="comp.detail.browser.ok")
         if self.settings.native:
             return Status(BROWSER, "missing", "the browser extra and the headless shell are not in this installation",
-                          installable=True, how="launcher",
+                          detail_key="comp.detail.browser.missing", installable=True, how="launcher",
                           fix="uv sync --extra browser && python -m playwright install chromium-headless-shell")
-        return Status(BROWSER, "missing", "this image tag leaves the browser out",
+        return Status(BROWSER, "missing", "this image tag leaves the browser out", detail_key="comp.detail.browser.image",
                       fix="run the :browser tag of the agent image")
 
     def _node(self) -> Status:
         if toolchain.status("node") == "ok":
-            return Status(NODE, "installed", "node and npx are on the PATH")
+            return Status(NODE, "installed", "node and npx are on the PATH", detail_key="comp.detail.node.ok")
         if self.settings.native:
-            return Status(NODE, "missing", "Node is not in this installation's runtime folder",
+            return Status(NODE, "missing", "Node is not in this installation's runtime folder", detail_key="comp.detail.node.missing",
                           installable=True, how="launcher", fix="install Node and put it on the PATH")
         return Status(NODE, "unavailable", "no published image carries Node; a native installation fetches it on demand",
-                      fix="run this installation natively, or install Node in a derived image")
+                      detail_key="comp.detail.node.image", fix="run this installation natively, or install Node in a derived image")
 
     def _binary_status(self, component_id: str, binary: str, package: str):  # type: ignore[no-untyped-def]
         def probe() -> Status:
             where = shutil.which(binary)
             if _found(where):
-                return Status(component_id, "installed", f"{binary} is at {where}")
+                return Status(component_id, "installed", f"{binary} is at {where}",
+                              detail_key="comp.detail.binary.ok", detail_args={"binary": binary, "path": str(where)})
             if self.settings.native:
                 return Status(component_id, "missing", f"{binary} is not on the PATH",
+                              detail_key="comp.detail.binary.nopath", detail_args={"binary": binary},
                               fix=f"install {package} with this machine's package manager")
             return Status(component_id, "missing", f"{binary} is not in this image",
+                          detail_key="comp.detail.binary.noimage", detail_args={"binary": binary},
                           fix=f"add {package} to deploy/apt-packages.txt and rebuild")
 
         return probe
@@ -378,14 +395,16 @@ class Registry:
 
         answer = bwrap_status()
         if answer == "ok":
-            return Status(BWRAP, "installed", "bubblewrap can create the namespaces the sandbox needs")
+            return Status(BWRAP, "installed", "bubblewrap can create the namespaces the sandbox needs", detail_key="comp.detail.bwrap.ok")
         if not sys.platform.startswith("linux"):
-            return Status(BWRAP, "unavailable", answer)
+            return Status(BWRAP, "unavailable", answer, detail_key="comp.detail.bwrap.platform", detail_args={"platform": sys.platform})
         if shutil.which("bwrap") is None:
-            return Status(BWRAP, "missing", answer, fix="install bubblewrap with this machine's package manager")
+            return Status(BWRAP, "missing", answer, detail_key="comp.detail.bwrap.missing",
+                          fix="install bubblewrap with this machine's package manager")
         # Installed and refused: a kernel that forbids unprivileged user namespaces, or a seccomp
         # profile in the way. Nothing to install; the fix is a setting on the machine.
-        return Status(BWRAP, "unavailable", answer, fix="allow unprivileged user namespaces on this machine")
+        return Status(BWRAP, "unavailable", answer, detail_key="comp.detail.bwrap.refused",
+                      fix="allow unprivileged user namespaces on this machine")
 
 
 __all__ = [

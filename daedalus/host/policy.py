@@ -335,6 +335,25 @@ def hosts_in(segments: list[list[str]]) -> list[str]:
     return hosts
 
 
+_LOOPBACK_TARGET = re.compile(r"\b(localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::(\d{1,5}))?", re.IGNORECASE)
+
+
+def is_loopback(host: str) -> bool:
+    """Whether this hostname names the machine the agent itself is running on."""
+    host = host.strip().strip("[]").lower()
+    return host in ("localhost", "::1") or host.startswith("127.")
+
+
+def loopback_targets(text: str) -> list[tuple[str, int]]:
+    """Every loopback address the text names, with the port where it gave one and 0 where it did not.
+
+    Read off the words rather than off a parsed URL, because the forms are many — ``curl
+    http://127.0.0.1:8770/…``, ``nc localhost 8765``, a ``--url`` with the address inside it — and
+    all of them arrive at the same door.
+    """
+    return [(m.group(1).lower(), int(m.group(2) or 0)) for m in _LOOPBACK_TARGET.finditer(text)]
+
+
 def host_allowed(host: str, allow: Iterable[str]) -> bool:
     for entry in allow:
         entry = entry.lower().strip()
@@ -566,9 +585,13 @@ def _under(path: str, roots: Iterable[str]) -> bool:
 class Policy:
     """The rule set: built-ins plus the operator's, evaluated per call."""
 
-    def __init__(self, *, protected_paths: Iterable[Path] = (), egress_allow: Iterable[str] = (), rules: Iterable[Rule] = (), workspace_roots: Iterable[Path] = (), operator_checkouts: Iterable[Path] = (), selfdev_mode: str = "server", native: bool = False, home_dir: Path | str = "", project_roots: Iterable[Path] = (), worktrees_root: Path | str = "", sealed_paths: Iterable[Path] = (), base_dir: Path | str = "") -> None:
+    def __init__(self, *, protected_paths: Iterable[Path] = (), egress_allow: Iterable[str] = (), rules: Iterable[Rule] = (), workspace_roots: Iterable[Path] = (), operator_checkouts: Iterable[Path] = (), selfdev_mode: str = "server", native: bool = False, home_dir: Path | str = "", project_roots: Iterable[Path] = (), worktrees_root: Path | str = "", sealed_paths: Iterable[Path] = (), sealed_ports: Iterable[int] = (), base_dir: Path | str = "") -> None:
         self.protected = [str(p) for p in protected_paths]
         self.egress_allow = [e for e in egress_allow if e.strip()]
+        # The installation's own doors on the loopback interface: the app's API and the launcher's
+        # action page. Refused by port rather than by hostname, so that a server the agent starts in
+        # its own workspace and then checks with curl is untouched — which is work, and this is not.
+        self.sealed_ports = {int(p) for p in sealed_ports if int(p) > 0}
         self.rules = list(rules)
         self.workspace_roots = [str(p) for p in workspace_roots]
         self.operator_checkouts = [str(p) for p in operator_checkouts] or list(CONTAINER_CHECKOUTS)
@@ -696,6 +719,9 @@ class Policy:
                     origin = real_path(expand_home(at, self.home), where) if at else where
                     if (origin and real_under(origin, checkouts)) or any(real_under(_norm(w), checkouts, base=where) for w in words[1:]):
                         escalate(DENY, f"pushing from the operator's checkout; {PUSH_REASON.get(self.selfdev_mode, PUSH_REASON["server"])}", "git.operator_push")
+        for host, port in loopback_targets(command):
+            if port in self.sealed_ports:
+                escalate(DENY, f"{host}:{port} is this installation's own door — the launcher and the app's own API are asked through the app, which holds their keys", "egress.sealed_port")
         if self.egress_allow:
             blocked = [h for h in hosts if not host_allowed(h, self.egress_allow)]
             if blocked:
@@ -703,8 +729,15 @@ class Policy:
         return worst
 
     def _web(self, url: str) -> Decision:
-        host = (urlsplit(url).hostname or "").lower()
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
         hosts = [host] if host else []
+        try:
+            port = parts.port or 0
+        except ValueError:
+            port = 0  # a URL whose port is not a number reaches nothing; nothing to refuse
+        if port in self.sealed_ports and is_loopback(host):
+            return Decision(DENY, f"{host}:{port} is this installation's own door — the launcher and the app's own API are asked through the app, which holds their keys", "egress.sealed_port", hosts=hosts)
         if self.egress_allow and host and not host_allowed(host, self.egress_allow):
             return Decision(ASK, f"fetching {host} is outside the egress allowlist", "egress.allowlist", hosts=hosts)
         return Decision(ALLOW, hosts=hosts)

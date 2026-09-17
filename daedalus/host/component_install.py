@@ -128,13 +128,16 @@ class Installer:
             with contextlib.suppress(ValueError):
                 self._watchers.remove(queue)
 
-    def _publish(self, component_id: str, state: str, *, step: str = "", error: str = "", restart: bool | None = None) -> dict[str, object]:
+    def _publish(self, component_id: str, state: str, *, step: str = "", step_key: str = "", error: str = "", restart: bool | None = None) -> dict[str, object]:
         # The restart a component needs is a property of the component, not of the moment: every frame
         # carries it, so a page that joins the stream half-way through knows what the end will ask for.
         if restart is None:
             known = components.CATALOGUE.get(component_id)
             restart = bool(known and known.requires_restart)
-        frame: dict[str, object] = {"id": component_id, "state": state, "step": step, "error": error, "restart_required": restart}
+        # ``step`` is a line of output — uv's, or the launcher's own — and stays as it was written.
+        # ``step_key`` is for the one step that is this module's own sentence rather than somebody
+        # else's output, so the page can write it in the reader's language.
+        frame: dict[str, object] = {"id": component_id, "state": state, "step": step, "step_key": step_key, "error": error, "restart_required": restart}
         self._progress[component_id] = frame
         for queue in list(self._watchers):
             with contextlib.suppress(asyncio.QueueFull):
@@ -314,7 +317,7 @@ class Installer:
                 "no launcher is running, and only the launcher can put this into the installation's runtime folder",
                 f"daedalus-desktop --extra {component_id}",
             )
-        self._publish(component_id, "running", step="the launcher was asked")
+        self._publish(component_id, "running", step="the launcher was asked", step_key="comp.step.launcher")
         try:
             job = await launcher_bridge.act(launcher, f"extra/{component_id}")
         except launcher_bridge.LauncherBusy as exc:
@@ -350,7 +353,7 @@ class Installer:
                         if answer["state"] == "done":
                             return
                         busy, _failure = await launcher_bridge.busy(launcher)
-                        self._publish(component_id, "running", step=busy or "the launcher was asked")
+                        self._publish(component_id, "running", step=busy, step_key="" if busy else "comp.step.launcher")
                     else:
                         # An older launcher hands out no job ids, so the only thing it says about
                         # itself is whether it is busy. Watch that — and give up on a launcher that
@@ -368,7 +371,7 @@ class Installer:
                             idle += 1
                             if idle > LAUNCHER_IDLE_POLLS:
                                 raise NotInstallable(f"the launcher never started installing {component_id}; it does one thing at a time and may be busy with something else")
-                            self._publish(component_id, "running", step="the launcher was asked")
+                            self._publish(component_id, "running", step="the launcher was asked", step_key="comp.step.launcher")
                     await asyncio.sleep(LAUNCHER_POLL)
         except TimeoutError:
             raise NotInstallable(

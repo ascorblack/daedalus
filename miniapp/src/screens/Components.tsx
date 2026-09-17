@@ -49,12 +49,15 @@ function Progress({ entry }: { entry: ComponentEntry }) {
   if (!p) return null;
   if (p.state === "failed") return <div className="sub attn comp-line">{t("comp.failed", { reason: p.error })}</div>;
   if (p.state === "queued" || p.state === "running") {
+    // The step is whatever uv or the launcher last wrote, which is its output and stays as it was
+    // written; the one step that is the app's own sentence comes as a key instead.
+    const step = p.step_key ? t(p.step_key) : p.step || "…";
     return (
       <div className="comp-running">
         <span className="comp-bar">
           <span className="comp-bar-fill" />
         </span>
-        <span className="sub faint comp-step">{t("comp.step", { step: p.step || "…" })}</span>
+        <span className="sub faint comp-step">{t("comp.step", { step })}</span>
       </div>
     );
   }
@@ -140,10 +143,14 @@ function Card({
           <code className="mono comp-fix">{entry.fix}</code>
         </div>
       )}
-      {/* The server's own sentence about what it found. English, like every other runtime fact this
-          app repeats, and kept small: the card above it is the answer, this is the evidence. The two
-          model cards are the exception — their sentence is the count, and the count is already above. */}
-      {entry.detail && entry.total_count === 0 && <div className="sub faint comp-detail">{entry.detail}</div>}
+      {/* What the server found, in the reader's language and kept small: the card above it is the
+          answer, this is the evidence. It is hidden while an install is going, because the fact it
+          reports is the one the install is in the middle of changing and a live bar with "not
+          installed" under it says two things at once. The two model cards are the other exception —
+          their sentence is the count, and the count is already above. */}
+      {!installing && entry.total_count === 0 && (entry.detail_key || entry.detail) && (
+        <div className="sub faint comp-detail">{entry.detail_key ? t(entry.detail_key, entry.detail_args) : entry.detail}</div>
+      )}
     </div>
   );
 }
@@ -316,6 +323,12 @@ export function SpeechRuntimeNotice({ toast, onInstalled }: { toast: (t: string)
     const timer = window.setInterval(() => void load(), 3000);
     return () => window.clearInterval(timer);
   }, [asked, load]);
+
+  // A finished install is over whichever way it finished. The card unmounts when it succeeds, which
+  // stopped the poll by accident; one that failed left it running for as long as the page was open.
+  useEffect(() => {
+    if (asked && entry?.progress && settled(entry.progress)) setAsked(false);
+  }, [asked, entry]);
 
   if (!entry || entry.state === "installed") return null;
   const installing = entry.state === "installing";

@@ -42,7 +42,7 @@ from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
 
 from daedalus.config import VOICE_ONLY_TOOLS, VOICE_TOOLS, NoModelConfigured, RuntimeConfig, Settings
-from daedalus.host import capabilities, prompts
+from daedalus.host import capabilities, launcher_bridge, prompts
 from daedalus.host.checkpoint_retention import CheckpointRetention, RetentionBounds, RetentionReport
 from daedalus.host.checkpoints import DIR_NAME as CHECKPOINT_DIR_NAME
 from daedalus.host.checkpoints import CheckpointError, Checkpoints, scan_workspace
@@ -2471,10 +2471,27 @@ class SessionManager:
             project_roots=self.projects.roots,
             worktrees_root=self.settings.worktrees_dir,
             sealed_paths=self.settings.sealed_paths,
+            sealed_ports=self._sealed_ports(),
             # Where a relative path is resolved from, so that `../../daedalus-secrets/keyproxy.env`
             # is read as the file it names rather than as a word with no slash at the front.
             base_dir=base_dir,
         )
+
+    def _sealed_ports(self) -> tuple[int, ...]:
+        """The installation's own doors on the loopback interface: the app's API, and the launcher's
+        action page where a launcher is holding this installation.
+
+        The file that carries the launcher's token is sealed, but sealing a path is matched against
+        the words of a command and a path a command builds for itself is not matched by it. The port
+        is not built by anybody: whatever reaches the launcher reaches it there. The agent asks the
+        app for a restart or an install the way the operator does, and the app is what holds the keys
+        to both — so a request made to either door directly is a way round that, and is refused.
+        """
+        ports = [self.settings.api_port]
+        launcher = launcher_bridge.read(self.settings.state_dir)
+        if launcher is not None:
+            ports.append(launcher.port)
+        return tuple(ports)
 
     def protected_paths(self) -> tuple[Path, ...]:
         """What no session may read or write: the installation itself.

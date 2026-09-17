@@ -29,6 +29,32 @@ def test_hosts_are_found_in_network_commands_only() -> None:
     assert host_allowed("api.example.com", ["*.example.com"]) and not host_allowed("example.org", ["*.example.com"]) and host_allowed("example.com", ["*.example.com"])
 
 
+def test_this_installations_own_doors_are_refused_and_a_local_server_is_not() -> None:
+    """The launcher's port and the app's own API, by port rather than by hostname.
+
+    Sealing the launcher's handover file stops the file tools and a command that spells the path
+    out, and nothing more: a path a command builds for itself — from the home directory, inside a
+    one-liner — is not matched by a check against the words of that command. The port is not built
+    by anybody. Whatever reaches the launcher reaches it at one address, and the agent has no
+    business there: it asks the app for a restart or an install the way the operator does, and the
+    app is what holds the keys to both.
+
+    By port, because a server the agent starts in its own workspace and then checks with curl is
+    work, and a rule that refused the whole loopback interface would take that with it.
+    """
+    policy = Policy(sealed_ports=[8765, 8770])
+    assert policy.evaluate("Exec", {"command": "curl -X POST http://127.0.0.1:8770/api/action/restart"}).action == DENY
+    assert policy.evaluate("Exec", {"command": "curl -s http://localhost:8765/api/components"}).action == DENY
+    assert policy.evaluate("Exec", {"command": "nc localhost:8770 < payload"}).action == DENY
+    assert policy.evaluate("WebFetch", {"url": "http://127.0.0.1:8770/"}).action == DENY
+    assert policy.evaluate("WebFetch", {"url": "http://[::1]:8765/api/capabilities"}).action == DENY
+    # The dev server the agent just started, and somebody else's machine on the same port.
+    assert policy.evaluate("Exec", {"command": "curl -s http://127.0.0.1:3000/health"}).action == "allow"
+    assert policy.evaluate("WebFetch", {"url": "https://example.com:8765/"}).action == "allow"
+    # And a policy that was told no ports refuses none of it.
+    assert Policy().evaluate("WebFetch", {"url": "http://127.0.0.1:8770/"}).action == "allow"
+
+
 def test_builtin_rules_deny_the_machine_and_the_operators_paths() -> None:
     policy = Policy(protected_paths=[Path("/opt/launcher"), Path("/srv/state/secrets")], workspace_roots=[Path("/srv/workspaces")])
     assert policy.evaluate("Exec", {"command": "ls -la && cat README.md"}).action == "allow"

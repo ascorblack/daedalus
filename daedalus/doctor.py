@@ -21,7 +21,7 @@ import httpx
 
 from daedalus import supervisor_client
 from daedalus.config import RuntimeConfig, Settings, keyproxy_base, keyproxy_configured, keyproxy_unresolved
-from daedalus.host import capabilities, components
+from daedalus.host import capabilities, components, launcher_bridge
 from daedalus.providers.pricing import pricing_table
 from daedalus.providers.registry import _is_vendor_host
 from daedalus.security.redact import redact as redact_text
@@ -160,6 +160,11 @@ async def _components(ctx: DoctorContext) -> list[Check]:
     which is how to get the piece if it is wanted.
     """
     registry = components.Registry(ctx.settings, ctx.config)
+    # Node and the headless browser land in a folder the launcher owns, so the button that installs
+    # them exists only where a launcher is holding this installation. Without asking, a headless
+    # native start would be told "Settings → Components installs it" about a button that can only
+    # ever answer 501 — the page asks, and so does this.
+    launcher = await asyncio.to_thread(launcher_bridge.read, ctx.settings.state_dir)
     out: list[Check] = []
     for component_id in components.ORDER:
         status = await asyncio.to_thread(registry.status, component_id)
@@ -169,7 +174,8 @@ async def _components(ctx: DoctorContext) -> list[Check]:
         if status.state == "installed":
             out.append(Check(f"component {component_id}", True, detail, "ok"))
             continue
-        fix = "Settings → Components installs it" if status.installable else (status.fix or "")
+        from_here = status.installable and (status.how != "launcher" or launcher is not None)
+        fix = "Settings → Components installs it" if from_here else (status.fix or "")
         out.append(Check(f"component {component_id}", False, detail, "info", fix))
     return out
 

@@ -15,7 +15,10 @@ export type ComponentState = "installed" | "missing" | "installing" | "unavailab
 export type InstallProgress = {
   id: string;
   state: string;
+  /** A line of output from whatever is doing the work — uv's, or the launcher's. English as written. */
   step: string;
+  /** The one step that is the app's own sentence rather than somebody's output, as a key. */
+  step_key: string;
   error: string;
   restart_required: boolean;
 };
@@ -23,8 +26,14 @@ export type InstallProgress = {
 export type ComponentEntry = {
   id: string;
   state: ComponentState;
-  /** One sentence of runtime fact from the server, in English: what was found, or why not. */
+  /** One sentence of runtime fact from the server, in English: what was found, or why not. Shown
+   *  only where the server sent no key for it — it is the fallback, not the line the page draws. */
   detail: string;
+  /** The same fact as a key this app writes out in the reader's language, with the holes filled
+   *  from `detail_args`. The detail line is the largest body text on a card; an English sentence
+   *  in the middle of a Russian page reads as a gap rather than as a term of art. */
+  detail_key: string;
+  detail_args: Record<string, string>;
   installable: boolean;
   /** `extra` | `launcher` | `models` | `none` — which of the four ways this one arrives. */
   how: string;
@@ -86,6 +95,7 @@ export function installFrame(raw: unknown): InstallProgress | null {
     id: body.id,
     state: String(body.state ?? ""),
     step: String(body.step ?? ""),
+    step_key: String(body.step_key ?? ""),
     error: String(body.error ?? ""),
     restart_required: Boolean(body.restart_required),
   };

@@ -122,6 +122,11 @@ LISTEN_IDLE_SECONDS = 120.0
 LISTEN_MAX_STREAMS = 4
 """More open streams than this means a page that never closes them; the oldest idle one goes."""
 
+STT_ENGINE_WAIT_SECONDS = 600.0
+"""How long ``POST /api/stt/engine`` waits for the engine before it answers that it is still going.
+The installer's own bound is longer, so without this the picker's request would be held past any
+sensible answer and the caller could not tell a slow install from a stuck one."""
+
 VOICE_TTS_MAX_CHARS = 2000
 """One sentence to read aloud. The page only ever sends what ``split_sentences`` cut, and the speech
 endpoint is usually metered by the character, so an unbounded body is somebody else's bill."""
@@ -1433,10 +1438,14 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if extension is None or not app.config.voice.enabled:
             # The model is still named and still choosable with the page switched off: which model a
             # concierge would answer with is a decision the operator can make before switching it on.
+            # Validated here as well as on the enabled path: a preset id that names nothing would
+            # reach the picker as a value no option carries, and a select given one silently shows
+            # its first entry instead — so the page would draw a choice the file does not hold.
+            preset = app.config.voice.preset if app.config.voice.preset in app.config.presets else ""
             return {
                 "enabled": False,
                 "session_id": "",
-                "preset": app.config.voice.preset,
+                "preset": preset,
                 "using": "",
                 "model": "",
                 "presets": model_options(app.config),
@@ -1842,7 +1851,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 raise HTTPException(409, f"{exc.component_id} is installing; one at a time") from None
         except component_install.NotInstallable as exc:
             raise HTTPException(501 if settings.native else 409, exc.reason) from None
-        await installer.wait(component_list.SPEECH)
+        try:
+            async with asyncio.timeout(STT_ENGINE_WAIT_SECONDS):
+                await installer.wait(component_list.SPEECH)
+        except TimeoutError:
+            # Still going, and the install is not abandoned: it is the same installer the Components
+            # page drives, and the frame is on its stream. What is given up on is this request.
+            raise HTTPException(504, "the speech engine is still installing; Settings → Components shows where it has got to") from None
         frame = installer.progress_of(component_list.SPEECH) or {}
         if frame.get("state") != "installed":
             raise HTTPException(502, str(frame.get("error") or "the speech engine could not be installed"))
@@ -1962,7 +1977,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.get("/api/components")
     async def components_view(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Every optional piece: what it unlocks, whether it is here, and what it would take."""
-        return component_registry().view()
+        return await asyncio.to_thread(lambda: component_registry().view())
 
     @api.post("/api/components/{component_id}/install")
     async def components_install(component_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -3053,7 +3068,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         # The components ride here for the same reason the pending change does: the shell already asks
         # this question, and a tab that should be badged because a configured feature is missing its
         # runtime must not wait for a second poll to find out.
-        answer["components"] = component_registry().summary()
+        # Off the loop: nine probes, two walks of the models tree, four `which` calls and, the first
+        # time, a subprocess. Milliseconds, but this is the path every page polls.
+        answer["components"] = await asyncio.to_thread(lambda: component_registry().summary())
         return answer
 
     @api.post("/api/self/restart")

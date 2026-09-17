@@ -16,6 +16,8 @@ function entry(id: string, over: Partial<ComponentEntry> = {}): ComponentEntry {
     id,
     state: "missing",
     detail: "not here",
+    detail_key: "",
+    detail_args: {},
     installable: true,
     how: "extra",
     fix: "",
@@ -51,7 +53,7 @@ describe("merging an answer into the view", () => {
   });
 
   it("keeps a bar that is moving when the list is reloaded under it", () => {
-    const running = { id: "speech", state: "running", step: "uv sync", error: "", restart_required: false };
+    const running = { id: "speech", state: "running", step: "uv sync", step_key: "", error: "", restart_required: false };
     const before = view({ components: [entry("speech", { progress: running })] });
     const merged = mergeComponents(before, { components: [entry("speech")] });
     expect(merged.components[0].progress).toEqual(running);
@@ -64,6 +66,7 @@ describe("a frame off the install stream", () => {
       id: "speech",
       state: "running",
       step: "x",
+      step_key: "",
       error: "",
       restart_required: false,
     });
@@ -73,7 +76,7 @@ describe("a frame off the install stream", () => {
   });
 
   it("moves one card and only that card", () => {
-    const next = applyFrame(view(), { id: "speech", state: "running", step: "uv sync", error: "", restart_required: false });
+    const next = applyFrame(view(), { id: "speech", state: "running", step: "uv sync", step_key: "", error: "", restart_required: false });
     expect(next.components[0].state).toBe("installing");
     expect(next.components[0].progress?.step).toBe("uv sync");
     expect(next.components[1].state).toBe("missing");
@@ -81,13 +84,13 @@ describe("a frame off the install stream", () => {
   });
 
   it("gives the lane back when the install it was holding finishes", () => {
-    const running = applyFrame(view(), { id: "speech", state: "running", step: "", error: "", restart_required: false });
-    const done = applyFrame(running, { id: "speech", state: "installed", step: "done", error: "", restart_required: false });
+    const running = applyFrame(view(), { id: "speech", state: "running", step: "", step_key: "", error: "", restart_required: false });
+    const done = applyFrame(running, { id: "speech", state: "installed", step: "done", step_key: "", error: "", restart_required: false });
     expect(done.busy).toBe("");
   });
 
   it("knows which states end an install", () => {
-    const frame = (state: string) => ({ id: "speech", state, step: "", error: "", restart_required: false });
+    const frame = (state: string) => ({ id: "speech", state, step: "", step_key: "", error: "", restart_required: false });
     expect(["installed", "failed", "cancelled"].map((s) => settled(frame(s)))).toEqual([true, true, true]);
     expect(["queued", "running"].map((s) => settled(frame(s)))).toEqual([false, false]);
   });
@@ -95,14 +98,14 @@ describe("a frame off the install stream", () => {
 
 describe("the restart an install can ask for", () => {
   it("is pending only after something that needs one has actually gone in", () => {
-    const done = (restart: boolean) => ({ id: "node", state: "installed", step: "", error: "", restart_required: restart });
+    const done = (restart: boolean) => ({ id: "node", state: "installed", step: "", step_key: "", error: "", restart_required: restart });
     expect(restartPending(view())).toBe(false);
     expect(restartPending(applyFrame(view(), done(false)))).toBe(false);
     expect(restartPending(applyFrame(view(), done(true)))).toBe(true);
   });
 
   it("is not pending for one that only failed", () => {
-    const failed = { id: "node", state: "failed", step: "", error: "no launcher is running", restart_required: true };
+    const failed = { id: "node", state: "failed", step: "", step_key: "", error: "no launcher is running", restart_required: true };
     expect(restartPending(applyFrame(view(), failed))).toBe(false);
   });
 });

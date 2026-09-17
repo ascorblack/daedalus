@@ -684,6 +684,28 @@ def test_the_stream_is_mounted_and_behind_the_same_authentication_as_everything_
     assert native_client.get("/api/components/stream").status_code == 401
 
 
+def test_every_sentence_the_page_shows_comes_as_a_key_the_app_can_translate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The detail line is the largest body text on a card, and it used to be this module's English.
+
+    A Russian page with an English sentence in the middle of it reads as a gap, not as a term of
+    art. So every state every probe can return carries a key, and every key has a row in the
+    dictionary. The fix line is exempt: it is a command, and a command is the same in both.
+    """
+    dictionary = (Path(__file__).resolve().parents[2] / "miniapp" / "src" / "i18n.ts").read_text(encoding="utf-8")
+    seen: set[str] = set()
+    for native in (True, False):
+        settings = settings_for(tmp_path / ("native" if native else "docker"), native=native)
+        for found in (set(), {"git", "rg", "opusdec", "bwrap", "uv", "node", "npx"}):
+            present(monkeypatch, found)
+            for entry in components.Registry(settings, RuntimeConfig()).view()["components"]:  # type: ignore[union-attr]
+                assert entry["detail_key"], f"{entry['id']} says {entry['detail']!r} with no key to say it by"
+                seen.add(str(entry["detail_key"]))
+    for key in sorted(seen):
+        assert f'"{key}"' in dictionary, key
+
+
 def test_every_component_id_the_page_can_show_has_a_name_in_the_app(native_client: TestClient) -> None:
     """The ids are the join between this module and the dictionary; a new one with no row is a
     bracketed key on the page that exists to explain it. The app's own suite asserts the other half."""
