@@ -9,7 +9,10 @@ operator's own sessions. Build the app, serve it with tests/browser/serve_app.py
     python3 tests/browser/serve_app.py 8101 /tmp/app-root &
     APP_URL=http://127.0.0.1:8101/app OUT=docs/screenshots python3 tests/browser/screenshots.py
 
-One PNG per screen lands in OUT (default: the directory this file is in).
+One PNG per screen lands in OUT (default: the directory this file is in). The Russian set is the
+same run in the other language:
+
+    LANG_UI=ru OUT=docs/screenshots/ru python3 tests/browser/screenshots.py
 
 CHROMIUM points at the browser to drive and defaults to /usr/local/bin/chromium, which is where a
 container puts one. On a machine that installed its browser through Playwright it has to be set, or
@@ -31,6 +34,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from api_stub import GATES, Unhandled  # noqa: E402
 
 BASE = os.environ.get("APP_URL", "http://127.0.0.1:8101/app")
+# The app is bilingual, and so is this set: LANG_UI=ru opens every page with ?lang=ru and the words
+# the helpers click on come from the same column the app reads. The pictures go wherever OUT says.
+LANG = os.environ.get("LANG_UI", "en")
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
 OUT = Path(os.environ.get("OUT", str(Path(__file__).parent)))
 NOW = datetime.now(UTC)
@@ -504,8 +510,20 @@ DESK = {"width": 1440, "height": 900}
 PHONE = {"width": 390, "height": 844}
 
 
+# The handful of words these helpers click on, in the language the run is in. Everything else is
+# picked by class or by data, which no translation moves.
+WORDS = {
+    "en": {"steps": "8 steps", "files": "Workspace files", "workspaces": "Workspaces", "access": "Access"},
+    "ru": {"steps": "8 шагов", "files": "Файлы рабочей папки", "workspaces": "Рабочие папки", "access": "Доступ"},
+}
+
+
+def word(key: str) -> str:
+    return WORDS[LANG][key]
+
+
 def shot(page: Page, name: str, route: str, *, wait: str = ".screen, .chat", settle: int = 900, before=None, full: bool = False) -> None:  # type: ignore[no-untyped-def]
-    page.goto(f"{BASE}/{route}{'&' if '?' in route else '?'}token=t&scheme=dark")
+    page.goto(f"{BASE}/{route}{'&' if '?' in route else '?'}token=t&scheme=dark&lang={LANG}")
     page.wait_for_selector(wait, timeout=15000)
     if before:
         before(page)
@@ -515,7 +533,7 @@ def shot(page: Page, name: str, route: str, *, wait: str = ".screen, .chat", set
 
 
 def expand_steps(page: Page) -> None:
-    page.get_by_text("8 steps").first.click()
+    page.get_by_text(word("steps")).first.click()
     page.wait_for_timeout(600)
     # Scroll like a hand does: the timeline follows the newest content only until the reader scrolls.
     box = page.locator(".chat-scroll").bounding_box()
@@ -529,7 +547,7 @@ def open_files_and_preview(page: Page) -> None:
     page.evaluate("() => { localStorage.setItem('daedalus.sessionList', '0'); localStorage.setItem('daedalus.session.aside', '0'); }")
     page.reload()
     page.wait_for_selector(".chat-scroll .timeline", timeout=15000)
-    page.locator("button[aria-label='Workspace files']").click()
+    page.locator(f"button[aria-label='{word('files')}']").click()
     page.wait_for_selector(".side-pane", timeout=5000)
     page.locator(".side-pane .title", has_text="NOTES.md").click()
     page.wait_for_selector(".preview-backdrop .markdown, .preview-backdrop .md, .preview-backdrop", timeout=5000)
@@ -538,7 +556,7 @@ def open_files_and_preview(page: Page) -> None:
 def open_share(page: Page) -> None:
     page.locator(".service-row").first.locator("button[aria-haspopup='menu']").click()
     page.wait_for_selector(".menu[role='menu']", timeout=5000)
-    page.locator(".menu[role='menu'] button", has_text="Access").first.click()
+    page.locator(".menu[role='menu'] button", has_text=word("access")).first.click()
     page.wait_for_selector(".access-options", timeout=5000)
 
 
@@ -549,8 +567,14 @@ def pick_a_model(page: Page) -> None:
     page.locator(".modelgrid .pick", has_text="Claude Opus 5").first.click()
 
 
+def open_more(page: Page) -> None:
+    """The More sheet on a phone: every other destination, and the language switch under them."""
+    page.locator(".tabbar button").last.click()
+    page.wait_for_selector(".more-grid", timeout=5000)
+
+
 def open_workspaces(page: Page) -> None:
-    page.locator("button[aria-label='Workspaces']").click()
+    page.locator(f"button[aria-label='{word('workspaces')}']").click()
     page.wait_for_selector(".sheet", timeout=5000)
 
 
@@ -583,6 +607,8 @@ def run() -> int:
         shot(page, "services", "services")
         shot(page, "usage", "usage", settle=1500)
         shot(page, "memory", "memory")
+        # The settings index, because the language switch is its first row.
+        shot(page, "settings", "settings")
         stub.fresh = True  # type: ignore[attr-defined]
         shot(page, "add-model", "agents", wait=".addmodel", before=pick_a_model, settle=600)
         stub.fresh = False  # type: ignore[attr-defined]
@@ -599,6 +625,7 @@ def run() -> int:
         shot(page, "phone-session", f"agents/{S1}", wait=".chat-scroll .timeline", before=expand_steps, settle=300)
         shot(page, "phone-voice", "voice")
         shot(page, "phone-memory", "memory")
+        shot(page, "phone-more", "agents", before=open_more)
         stub.fresh = True  # type: ignore[attr-defined]
         shot(page, "phone-add-model", "agents", wait=".addmodel", before=pick_a_model, settle=600)
         stub.fresh = False  # type: ignore[attr-defined]
