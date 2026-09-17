@@ -331,6 +331,12 @@ class Settings(BaseSettings):
             paths.append(self.launcher_path)
         if self.env_file_path is not None:
             paths.append(self.env_file_path)
+        # The launcher's handover file. It carries the token that authorises start, stop, update,
+        # apply and the runtime extras — the whole installation — and it sits beside the state
+        # directory rather than inside it, so sealing the state directory does not cover it. The app
+        # reads it to ask the launcher for a component; the agent asks the app.
+        if self.native:
+            paths.append(self.state_dir.parent / "launcher.json")
         return tuple(paths)
 
     @property

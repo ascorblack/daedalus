@@ -48,7 +48,8 @@ from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import tts_configured
-from daedalus.host import capabilities
+from daedalus.host import capabilities, component_install, launcher_bridge
+from daedalus.host import components as component_list
 from daedalus.host.policy import sealed_root
 from daedalus.host.prompts import DEFAULT_RULES
 from daedalus.host.session_runner import TENANT, Attachment
@@ -120,10 +121,6 @@ LISTEN_IDLE_SECONDS = 120.0
 
 LISTEN_MAX_STREAMS = 4
 """More open streams than this means a page that never closes them; the oldest idle one goes."""
-
-ENGINE_INSTALL_TIMEOUT = 600.0
-"""How long the speech engine's install may take before it is killed. A resolution against a slow
-index is minutes; anything past this is hung, and it is holding a worker while it hangs."""
 
 VOICE_TTS_MAX_CHARS = 2000
 """One sentence to read aloud. The page only ever sends what ``split_sentences`` cut, and the speech
@@ -1761,53 +1758,30 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         """The picker: every model, what is installed, what is downloading, and what it all costs."""
         return stt_view()
 
-    engine_install = asyncio.Lock()
-    """One install of the speech engine at a time; the second caller waits rather than racing."""
-
     @api.post("/api/stt/engine")
     async def stt_install_engine(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """Install the engine that runs a downloaded model.
+        """Install the engine that runs a downloaded model, and wait for it.
 
-        In a container it is already there — the image carries it — and this answers so. Natively it
-        is an optional extra the installation has not paid for yet, and the first download is when it
-        starts being worth paying for, so the wheels are fetched into the installation's own
-        environment. ``--inexact`` is what keeps that from removing whatever else was installed into
-        it (the browser extra, typically).
+        The picker calls this by itself before the first download, so this endpoint waits rather than
+        answering "started": the download that follows it needs the engine to be there. Everything
+        underneath is the components installer — the same one the Components page drives — because two
+        installers running ``uv sync`` into one environment is how a site-packages directory ends up
+        half written, and because "the speech runtime" ought to mean the same thing on both pages.
         """
-        if speech_service.engine_present():
+        if component_list.engine_installed():
             return {"installed": True, "message": "the speech engine is already installed"}
-        if not settings.native:
-            raise HTTPException(409, "the runtime image carries the speech engine; this one was built without it")
-        uv = shutil.which("uv")
-        if uv is None:
-            raise HTTPException(503, "uv is not on the PATH, so the speech engine cannot be installed from here")
-        # The picker calls this by itself before the first download, so two tabs or one impatient
-        # double-click is the ordinary case rather than the adversarial one — and two `uv sync` runs
-        # into the same virtualenv at once is how it ends up with a half-written site-packages.
-        async with engine_install:
-            if speech_service.engine_present():
-                return {"installed": True, "message": "the speech engine is already installed"}
-            process = await asyncio.create_subprocess_exec(
-                uv, "sync", "--frozen", "--inexact", "--extra", "speech",
-                cwd=str(settings.bot_repo_dir),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            )
-            try:
-                out, _unused = await asyncio.wait_for(process.communicate(), timeout=ENGINE_INSTALL_TIMEOUT)
-            except TimeoutError:
-                process.kill()
-                await process.wait()
-                raise HTTPException(504, "installing the speech engine took too long and was stopped") from None
-            if process.returncode:
-                tail = out.decode(errors="replace").strip()[-400:]
-                # The engine ships wheels and no sdist, so a platform without a prebuilt wheel fails
-                # at resolution rather than building. That is not a broken installation and the
-                # operator should not go looking for one.
-                raise HTTPException(502, (
-                    f"the speech engine could not be installed: {tail}\n\n"
-                    "If this says no matching distribution, this platform has no prebuilt wheel for the "
-                    "engine: local recognition is not available here, and a transcription endpoint is."
-                ))
+        status = component_registry().status(component_list.SPEECH)
+        try:
+            app.components.start(status)
+        except component_install.Busy as exc:
+            if exc.component_id != component_list.SPEECH:
+                raise HTTPException(409, f"{exc.component_id} is installing; one at a time") from None
+        except component_install.NotInstallable as exc:
+            raise HTTPException(501 if settings.native else 409, exc.reason) from None
+        await app.components.wait(component_list.SPEECH)
+        frame = app.components.progress_of(component_list.SPEECH) or {}
+        if frame.get("state") != "installed":
+            raise HTTPException(502, str(frame.get("error") or "the speech engine could not be installed"))
         speech_service.forget_engine()
         logger.warning("the local speech engine was installed on demand")
         return {"installed": True, "message": "the speech engine is installed; the model can be downloaded now"}
@@ -1908,6 +1882,87 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 finally:
                     downloading.cancel()
                     loading.cancel()
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    # -- components ---------------------------------------------------------------------
+
+    def component_registry() -> component_list.Registry:
+        """A registry over the configuration as it is now.
+
+        Built per call rather than held: every answer on this page is a measurement, and the one thing
+        an operator does here is change what the measurement would say.
+        """
+        return component_list.Registry(settings, app.config, installer=app.components)
+
+    @api.get("/api/components")
+    async def components_view(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Every optional piece: what it unlocks, whether it is here, and what it would take."""
+        return component_registry().view()
+
+    @api.post("/api/components/{component_id}/install")
+    async def components_install(component_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Install one component. Answers at once; the bar is fed by /api/components/stream.
+
+        Three refusals, and each is a different thing the operator can do about it: 404 is not a
+        component, 409 is one already going in, and 501 is a component this installation cannot put in
+        place from here — which carries the command or the image tag that can.
+        """
+        if component_id not in component_list.CATALOGUE:
+            raise HTTPException(404, f"no such component: {component_id}")
+        status = component_registry().status(component_id)
+        if status.state == "installed":
+            return {"id": component_id, "state": "installed", "step": "", "error": "", "restart_required": False}
+        try:
+            return app.components.start(status)
+        except component_install.Busy as exc:
+            raise HTTPException(409, f"{exc.component_id} is installing; one at a time") from None
+        except component_install.NotInstallable as exc:
+            raise HTTPException(501, f"{exc.reason}{chr(10) + chr(10) + exc.fix if exc.fix else ''}") from None
+
+    @api.post("/api/components/{component_id}/cancel")
+    async def components_cancel(component_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Stop an install where the step underneath can be stopped — which is not all of them."""
+        if component_id not in component_list.CATALOGUE:
+            raise HTTPException(404, f"no such component: {component_id}")
+        return {"cancelled": app.components.cancel(component_id)}
+
+    @api.post("/api/components/restart")
+    async def components_restart(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Restart the agent, so a component that arrived in the environment is in force.
+
+        The answer comes back before the restart does — this process is what goes away — so it says
+        what was asked for rather than what happened.
+        """
+        try:
+            return {"result": await app.components.restart()}
+        except component_install.NotInstallable as exc:
+            raise HTTPException(501, f"{exc.reason}{chr(10) + chr(10) + exc.fix if exc.fix else ''}") from None
+        except launcher_bridge.LauncherUnavailable as exc:
+            raise HTTPException(503, str(exc)) from None
+
+    @api.get("/api/components/stream")
+    async def components_stream(request: Request, _: dict[str, Any] = Depends(auth)) -> StreamingResponse:
+        """Install progress as it happens, so a three-hundred-megabyte download looks like one."""
+
+        async def gen():  # type: ignore[no-untyped-def]
+            async with app.components.watch() as queue:
+                for frame in app.components.all_progress():
+                    yield f"data: {json.dumps(frame)}\n\n"
+                waiting = asyncio.ensure_future(queue.get())
+                try:
+                    while True:
+                        if await request.is_disconnected():
+                            return
+                        done, _pending = await asyncio.wait({waiting}, timeout=15)
+                        if not done:
+                            yield ": keepalive\n\n"
+                            continue
+                        frame = waiting.result()
+                        waiting = asyncio.ensure_future(queue.get())
+                        yield f"data: {json.dumps(frame)}\n\n"
+                finally:
+                    waiting.cancel()
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -2905,7 +2960,12 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         selfdev = app.extensions.get("selfdev")
         pending = selfdev.pending_change() if selfdev is not None else None  # type: ignore[attr-defined]
         last = selfdev.last_change() if selfdev is not None else None  # type: ignore[attr-defined]
-        return replace(caps, restart_required=pending, last_change=last).as_dict()
+        answer = replace(caps, restart_required=pending, last_change=last).as_dict()
+        # The components ride here for the same reason the pending change does: the shell already asks
+        # this question, and a tab that should be badged because a configured feature is missing its
+        # runtime must not wait for a second poll to find out.
+        answer["components"] = component_registry().summary()
+        return answer
 
     @api.post("/api/self/restart")
     async def self_restart(_: dict[str, Any] = Depends(auth), __: None = Depends(selfdev_on)) -> dict[str, Any]:

@@ -1,0 +1,163 @@
+"""Asking the launcher to do the one thing only it can do.
+
+Two pieces of a native installation are not Python packages and not files the app can put in place
+for itself: Node, which lands in the installation's own runtime folder, and the headless browser,
+which Playwright unpacks where the launcher told it to. Both are fetched by the launcher, because
+the launcher owns that folder and decides what goes into it — the app is a process it started.
+
+The launcher already has a loopback page with an action endpoint, so this does not invent a channel;
+it uses that one. The handshake is the file the launcher writes when it takes ownership of the
+installation, ``<data>/launcher.json``, mode 0600 and owned by the same account this process runs
+as. It carries the port the page listens on and the token every action has to bear.
+
+**What the token is and what it is not.** It authorises start, stop, update, apply and the runtime
+extras — everything the launcher's own buttons do. It is not a credential of the operator's and it
+never leaves the machine: the file is read here, the header is set on one request to 127.0.0.1, and
+neither the value nor anything derived from it is logged, returned to a caller or put in an error.
+An error from here names the port and the action, never the token.
+
+**Why the launcher accepts this request at all.** Its rules refuse anything that changes state and
+did not come from its own page: a ``Sec-Fetch-Site`` that is cross-site, an ``Origin`` that is not
+the page's, a ``Host`` that is not the loopback address it is listening on, or a missing token. A
+request from this module carries no ``Sec-Fetch-Site`` and no ``Origin`` — a browser writes those,
+a client does not — aims at ``127.0.0.1:<port>``, and carries the token. So it passes without the
+rules being loosened: what a hostile page still cannot do is read a 0600 file to learn the token,
+and it could not set the custom header cross-site even if it had one.
+
+The agent is not given this path either: ``Settings.sealed_paths`` names it, so a tool that reaches
+for the file is refused before it is opened. The agent asks the app for an install like the operator
+does; it does not get the launcher's keys.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+HEADER = "X-Daedalus-Desktop"
+"""The header the launcher's actions are authorised with. A custom header cannot be set on a
+cross-site form post, which is the launcher's first line rather than ours."""
+
+TIMEOUT = 10.0
+"""An action answers 202 as soon as it is started — the work happens behind it — so this bounds the
+handshake and nothing else."""
+
+STATUS_TIMEOUT = 5.0
+
+
+@dataclass(frozen=True, slots=True)
+class Launcher:
+    """A running launcher of this installation: where it listens, and what it answers to."""
+
+    port: int
+    token: str
+    pid: int
+
+    @property
+    def base(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def __repr__(self) -> str:  # pragma: no cover - trivial, but it is the point of the class
+        # Never let a token reach a traceback, a log line or a test's failure output.
+        return f"Launcher(port={self.port}, pid={self.pid}, token=<redacted>)"
+
+
+class LauncherUnavailable(RuntimeError):
+    """No launcher is holding this installation, so nothing here can be asked of one."""
+
+
+def instance_path(state_dir: Path) -> Path:
+    """Where the launcher writes its handover file: beside the state directory, in the data folder.
+
+    The launcher's layout puts ``state/`` inside the folder it owns, and the file at the top of it.
+    """
+    return state_dir.parent / "launcher.json"
+
+
+def read(state_dir: Path) -> Launcher | None:
+    """The launcher holding this installation, or ``None`` when there is none.
+
+    A launcher that was killed rather than stopped leaves the file behind, so the process it names is
+    checked before the file is believed. Everything unreadable, unparseable or incomplete is the same
+    answer: no launcher.
+    """
+    path = instance_path(state_dir)
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    port, token, pid = body.get("port"), body.get("token"), body.get("pid")
+    if not isinstance(port, int) or not isinstance(token, str) or not port or not token:
+        return None
+    pid = pid if isinstance(pid, int) else 0
+    if pid > 0 and not _alive(pid):
+        return None
+    return Launcher(port=port, token=token, pid=pid)
+
+
+def _alive(pid: int) -> bool:
+    """Whether the process that wrote the file is still there. Signal 0 asks without sending one."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Another account's process on that pid. Not ours, so not our launcher.
+        return False
+    except OSError:
+        return False
+    return True
+
+
+async def act(launcher: Launcher, action: str) -> None:
+    """Start one of the launcher's actions. Returns once it has been accepted, not once it is done.
+
+    The launcher answers 202 and does the work behind it, which is why :func:`busy` exists: the caller
+    watches the status until the action it asked for is no longer running.
+    """
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        try:
+            response = await client.post(f"{launcher.base}/api/action/{action}", headers={HEADER: launcher.token}, content=b"")
+        except httpx.HTTPError as exc:
+            # The exception carries the URL, which is the port and the action; it does not carry the
+            # header, and this message does not add it.
+            raise LauncherUnavailable(f"the launcher on port {launcher.port} did not answer: {type(exc).__name__}") from None
+    if response.status_code == 403:
+        raise LauncherUnavailable("the launcher refused the request; it may have been restarted since this process started")
+    if response.status_code == 404:
+        raise LauncherUnavailable(f"this launcher has no {action!r} action; it is older than this build of the app")
+    if response.status_code >= 400:
+        raise LauncherUnavailable(f"the launcher answered {response.status_code} to {action!r}")
+
+
+async def status(launcher: Launcher) -> dict[str, object]:
+    """What the launcher is doing: ``busy`` while an action runs, ``failure`` after one went wrong.
+
+    A read, so it needs no token — the launcher's rules gate what changes something, not what reports.
+    """
+    async with httpx.AsyncClient(timeout=STATUS_TIMEOUT) as client:
+        try:
+            response = await client.get(f"{launcher.base}/api/status")
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise LauncherUnavailable(f"the launcher on port {launcher.port} stopped answering: {type(exc).__name__}") from None
+    return body if isinstance(body, dict) else {}
+
+
+async def busy(launcher: Launcher) -> tuple[str, str]:
+    """``(what it is doing, what last failed)`` — the two fields a watcher needs, as strings."""
+    body = await status(launcher)
+    return str(body.get("busy") or ""), str(body.get("failure") or "")
+
+
+__all__ = ["HEADER", "Launcher", "LauncherUnavailable", "act", "busy", "instance_path", "read", "status"]
