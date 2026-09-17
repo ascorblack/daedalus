@@ -89,13 +89,13 @@ func fetchTarball(ctx context.Context, url string) ([]byte, error) {
 	// There is no hash for this archive — it is whatever the branch holds today — so what comes back
 	// is unpacked into the checkout and run as the supervisor and the key proxy on the next start.
 	// The host is fixed by tarballURL, which builds it rather than taking it from the remote, and
-	// the client below refuses a redirect that leaves https or leaves that host: without it, a
-	// downgrade to http on the way is all it would take to choose the code.
+	// onCodeload refuses a redirect that leaves https or leaves that host: without it, a downgrade
+	// to http on the way is all it would take to choose the code.
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	response, err := httpsOnly.Do(request)
+	response, err := onCodeload.Do(request)
 	if err != nil {
 		return nil, err
 	}

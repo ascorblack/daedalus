@@ -28,7 +28,7 @@ docker run --rm \
   -e HOME=/tmp -e GOENV=/tmp/goenv -e GOFLAGS=-mod=mod -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomod \
   -e CGO_ENABLED=0 -e VERSION="$VERSION" \
   "$GO_IMAGE" sh -euc '
-    # On Linux the window's build constraint excludes it, so the tagged and the untagged commands
+    # On Linux the build constraint on the window excludes it, so the tagged and untagged commands
     # compile the same code: one pass is what this checks, and the window is checked on a macOS and
     # a Windows runner by the release workflow.
     go vet -tags nowebview ./...

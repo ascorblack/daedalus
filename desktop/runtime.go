@@ -208,24 +208,33 @@ func pick(table map[string]download, goos, goarch string) (download, error) {
 // pinned archive is MinGit at 39 MB.
 const downloadLimit = 512 << 20
 
-// httpsOnly is the client every download uses. http.DefaultClient follows a redirect from https to
-// http without a word, which for a hashed archive turns an attack into a hash mismatch and for the
+// httpsOnly is the client the pinned downloads use. http.DefaultClient follows a redirect from https
+// to http without a word, which for a hashed archive turns an attack into a hash mismatch and for the
 // checkout tarball — which has no hash — turns it into code that is unpacked and executed as the
-// supervisor on the next start. A hop that leaves https, or leaves the host the download started
-// from, is refused rather than followed.
-var httpsOnly = &http.Client{
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+// supervisor on the next start. A hop that leaves https is refused rather than followed.
+//
+// The host is deliberately not pinned here: a GitHub release asset redirects to
+// release-assets.githubusercontent.com by design, and refusing that refuses every download the
+// launcher makes. What stands behind these is the sha256 in the table beside the URL. The one
+// download with no hash — the checkout tarball — gets onCodeload below instead.
+var httpsOnly = &http.Client{CheckRedirect: refuseUnlessHTTPS("")}
+
+// onCodeload is httpsOnly with the host pinned as well, for the download that is not hashed.
+var onCodeload = &http.Client{CheckRedirect: refuseUnlessHTTPS("codeload.github.com")}
+
+func refuseUnlessHTTPS(host string) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return fmt.Errorf("%s: too many redirects", req.URL.Host)
 		}
 		if req.URL.Scheme != "https" {
 			return fmt.Errorf("%s redirects to %s, which is not https", via[0].URL.Host, req.URL.Scheme)
 		}
-		if req.URL.Host != via[0].URL.Host {
-			return fmt.Errorf("%s redirects to %s, which is a different host", via[0].URL.Host, req.URL.Host)
+		if host != "" && req.URL.Host != host {
+			return fmt.Errorf("%s redirects to %s, which is not %s", via[0].URL.Host, req.URL.Host, host)
 		}
 		return nil
-	},
+	}
 }
 
 // fetchVerified downloads an archive and returns it only when its hash is the pinned one. The whole
