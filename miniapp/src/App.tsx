@@ -12,6 +12,7 @@ import { ProjectSwitcher, rememberProject, storedProject, useProjects } from "./
 import { ChangeStrip } from "./change";
 import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
+import { useLang } from "./i18n";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -88,6 +89,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 }
 
 export function App() {
+  useLang();
   const route = useRoute();
   const wide = useWide();
   const [picking, setPicking] = useState(false);
@@ -321,23 +323,23 @@ export function App() {
   if (authed === false) {
     // Outside the shell on purpose: the shell's wide layout reserves the rail's column, and a login page has no rail.
     return (
-      <Suspense fallback={<div className="app"><div className="empty">Loading…</div></div>}>
+      <Suspense fallback={<div className="gate"><div className="empty">Loading…</div></div>}>
         <LoginScreen onDone={() => setAuthed(true)} />
       </Suspense>
     );
   }
   if (onboarding === null) return <div className="app"><div className="empty">Loading…</div></div>;
   if (!onboarding.has_model) {
+    // Outside the shell, like the login page: the wide shell is a grid whose first column belongs
+    // to the rail, and a screen drawn in it without one sits beside the rail's width of nothing.
     return (
-      <div className="app">
-        <div className="main">
-          <Suspense fallback={<div className="empty">Loading…</div>}>
-            <OnboardingScreen toast={showToast} onDone={() => setOnboarding({ ...onboarding, has_model: true })} />
-          </Suspense>
-        </div>
+      <>
+        <Suspense fallback={<div className="gate"><div className="empty">Loading…</div></div>}>
+          <OnboardingScreen toast={showToast} onDone={() => setOnboarding({ ...onboarding, has_model: true })} />
+        </Suspense>
         <ToastHost />
         <ConfirmHost />
-      </div>
+      </>
     );
   }
 

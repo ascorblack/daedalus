@@ -3,22 +3,42 @@
 // address, not a choice of model, so nothing is picked on the operator's behalf — but everything the
 // endpoint is willing to say about a model (its window, whether it sees pictures, whether it
 // reasons, what it costs) fills the form in, so the choice is one click and a glance, not research.
+//
+// What an endpoint's card says about its key comes from the key proxy, which is the only process
+// that knows. The configuration says where an endpoint is, never whether anything behind it can
+// authenticate, and reading readiness out of it is how an installation with one key came to offer
+// six ready endpoints and fail on the first one picked.
 
-import { useEffect, useMemo, useState } from "react";
+import { ReactNode, useEffect, useMemo, useState } from "react";
 import { api, Preset, Settings } from "../api";
 import { Icon } from "../icons";
-import { PageHeader } from "../shell";
+import { t, useLang } from "../i18n";
+import { LangPicker } from "../components";
 import { errorText, numInput } from "../ui";
 import { BLANK, ModelEntry, Picked, presetIdFor, priceFor, retyped } from "../models";
 
 export type { ModelEntry, Picked } from "../models";
 export { presetIdFor } from "../models";
 
+/** What a missing credential would be: a key the proxy holds, a CLI login, or nothing at all. */
+export type KeyKind = "api_key" | "cli_login" | "endpoint";
+
+export type ProviderCard = {
+  id: string;
+  kind: string;
+  base_url: string;
+  via_proxy: boolean;
+  /** Whether a credential really exists. `null` only when nothing could answer — the proxy is down. */
+  key_held: boolean | null;
+  key_kind: KeyKind;
+  ready: boolean;
+};
+
 export type OnboardingState = {
   has_model: boolean;
   presets: number;
   default_preset: string;
-  providers: { id: string; kind: string; base_url: string; via_proxy: boolean; key_held: boolean | null; ready: boolean }[];
+  providers: ProviderCard[];
   needs: string[];
   message: string;
 };
@@ -29,15 +49,17 @@ const KIND_NAMES: Record<string, string> = {
   deepseek: "DeepSeek",
   openrouter: "OpenRouter",
   opencode: "OpenCode Go",
-  vllm: "vLLM (self-hosted)",
+  vllm: "vLLM",
 };
+/** Endpoints named after the tool whose login they borrow: the kind says nothing, the id does. */
+const ID_NAMES: Record<string, string> = { codex: "Codex", grok: "Grok", claude: "Claude", openai: "OpenAI" };
 
 function providerName(id: string, kind: string): string {
-  return KIND_NAMES[kind] ?? id;
+  return ID_NAMES[id] ?? KIND_NAMES[kind] ?? id;
 }
 
 function money(usd: number): string {
-  if (usd === 0) return "free";
+  if (usd === 0) return t("add.pill.free");
   return usd < 1 ? `$${usd.toFixed(usd < 0.1 ? 3 : 2)}` : `$${usd.toFixed(2)}`;
 }
 
@@ -45,6 +67,32 @@ function tokens(n: number): string {
   return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 }
 
+/** The one word on the card about its key, and the one line under it about what to do. */
+function keyWords(p: ProviderCard): { pill: string; tone: string; note: string } {
+  if (p.ready) {
+    const pill = p.key_kind === "cli_login" ? t("add.key.signedin") : p.key_kind === "endpoint" ? t("add.key.free") : t("add.key.ready");
+    return { pill, tone: "done", note: p.via_proxy ? t("add.key.held") : p.key_kind === "endpoint" ? t("add.key.free") : t("add.key.own") };
+  }
+  if (p.key_held === null) return { pill: t("add.key.unknown"), tone: "", note: "" };
+  const note = p.key_kind === "cli_login" ? t("add.key.hint.cli") : p.via_proxy ? t("add.key.hint.proxy") : t("add.key.hint.settings");
+  return { pill: t("add.key.none"), tone: "pending", note };
+}
+
+/** A step of the flow: a card that lightens when it is the one being worked on. */
+function Step({ n, title, sub, active, done, children }: { n: number; title: string; sub: string; active: boolean; done: boolean; children: ReactNode }) {
+  return (
+    <section className={`card step reveal ${active ? "on" : "waiting"}`} style={{ animationDelay: `${(n - 1) * 70}ms` }}>
+      <div className="step-head">
+        <span className={`step-n ${done ? "done" : ""}`}>{done ? <Icon name="check" size={14} /> : n}</span>
+        <div className="grow">
+          <b>{title}</b>
+          <div className="sub">{sub}</div>
+        </div>
+      </div>
+      {children}
+    </section>
+  );
+}
 
 /** Step 1: which endpoint the model runs on. */
 function ProviderStep({ state, chosen, onPick }: { state: OnboardingState | null; chosen: string; onPick: (id: string) => void }) {
@@ -52,22 +100,28 @@ function ProviderStep({ state, chosen, onPick }: { state: OnboardingState | null
   const ordered = [...providers.filter((p) => p.ready), ...providers.filter((p) => !p.ready)];
   return (
     <div className="pickgrid">
-      {ordered.map((p) => (
-        <button key={p.id} className={`pick ${chosen === p.id ? "on" : ""}`} onClick={() => onPick(p.id)} aria-pressed={chosen === p.id}>
-          <span className="pick-top">
-            <b className="truncate">{providerName(p.id, p.kind)}</b>
-            {p.ready ? <span className="pill done">key ready</span> : <span className="pill">no key</span>}
-          </span>
-          <span className="sub mono truncate">{p.base_url || "no address configured"}</span>
-          <span className="sub faint">{p.via_proxy ? "its key is held by the key proxy" : "keyed from this installation's configuration"}</span>
-        </button>
-      ))}
+      {ordered.map((p) => {
+        const { pill, tone, note } = keyWords(p);
+        // An endpoint with no credential is not a choice: picking it produced a list of URLs and
+        // HTTP codes, and the operator had to work backwards from those to "there is no key".
+        const blocked = p.key_held === false;
+        return (
+          <button key={p.id} className={`pick ${chosen === p.id ? "on" : ""} ${blocked ? "blocked" : ""}`} disabled={blocked} aria-disabled={blocked} onClick={() => onPick(p.id)} aria-pressed={chosen === p.id}>
+            <span className="pick-top">
+              <b className="truncate">{providerName(p.id, p.kind)}</b>
+              <span className={`pill ${tone}`}>{pill}</span>
+            </span>
+            <span className="sub mono truncate">{p.base_url || t("add.noaddress")}</span>
+            {note && <span className="sub faint">{note}</span>}
+          </button>
+        );
+      })}
       <button className={`pick dashed ${chosen === CUSTOM ? "on" : ""}`} onClick={() => onPick(CUSTOM)} aria-pressed={chosen === CUSTOM}>
         <span className="pick-top">
-          <b>OpenAI-compatible endpoint</b>
-          <span className="pill">new</span>
+          <b>{t("add.custom")}</b>
+          <span className="pill">{t("add.custom.new")}</span>
         </span>
-        <span className="sub">Anything serving /v1/chat/completions: a local vLLM, a machine on the network, another vendor.</span>
+        <span className="sub">{t("add.custom.sub")}</span>
       </button>
     </div>
   );
@@ -80,23 +134,22 @@ function CustomProvider({ busy, onCreate }: { busy: boolean; onCreate: (id: stri
   const [apiKey, setApiKey] = useState("");
   const clean = id.trim().replace(/[^A-Za-z0-9._-]+/g, "-");
   return (
-    <div className="mfields" style={{ marginTop: 12 }}>
+    <div className="mfields reveal" style={{ marginTop: 12 }}>
       <label className="mfield">
-        <span>Name it</span>
-        <input className="field" value={id} placeholder="e.g. workshop" onChange={(e) => setId(e.target.value)} />
+        <span>{t("add.custom.name")}</span>
+        <input className="field" value={id} placeholder="workshop" onChange={(e) => setId(e.target.value)} />
       </label>
       <label className="mfield wide">
-        <span>Address (the OpenAI API root, usually ending in /v1)</span>
-        <input className="field mono" value={baseUrl} placeholder="http://10.0.0.5:9000/v1" onChange={(e) => setBaseUrl(e.target.value)} spellCheck={false} />
+        <span>{t("add.custom.url")}</span>
+        <input className="field mono" value={baseUrl} placeholder="http://localhost:9000/v1" onChange={(e) => setBaseUrl(e.target.value)} spellCheck={false} />
       </label>
       <label className="mfield">
-        <span>Key (blank for an endpoint that needs none)</span>
-        <input className="field" type="password" value={apiKey} placeholder="the endpoint's API key" onChange={(e) => setApiKey(e.target.value)} autoComplete="off" />
+        <span>{t("add.custom.key")}</span>
+        <input className="field" type="password" value={apiKey} placeholder="sk-…" onChange={(e) => setApiKey(e.target.value)} autoComplete="off" />
       </label>
-      <div className="mfield">
-        <span>&nbsp;</span>
+      <div className="mfield end">
         <button className="btn primary" disabled={busy || !clean || !baseUrl.trim()} onClick={() => onCreate(clean, baseUrl.trim(), apiKey)}>
-          {busy ? "Adding…" : "Add this endpoint"}
+          {busy ? t("add.custom.saving") : t("add.custom.save")}
         </button>
       </div>
     </div>
@@ -123,21 +176,29 @@ function ModelStep({ entries, loading, error, chosen, typed, onPick, onType, onR
   return (
     <>
       <div className="modelbar">
-        <input className="field" placeholder={entries ? `Filter ${entries.length} models` : "Filter"} value={filter} onChange={(e) => setFilter(e.target.value)} disabled={!entries} />
-        <input className="field mono" placeholder="…or type the model id" value={typed} onChange={(e) => onType(e.target.value)} spellCheck={false} />
+        <label className="mfield">
+          <span>{entries ? t("add.filter", { n: entries.length }) : t("add.filter.plain")}</span>
+          <input className="field" placeholder={t("add.filter.plain")} value={filter} onChange={(e) => setFilter(e.target.value)} disabled={!entries} />
+        </label>
+        <label className="mfield">
+          <span>{t("add.typed")}</span>
+          {/* Prefilled with whatever was picked from the list, and editable from there: an id the
+              endpoint did not list is typed over it, not into an empty box beside it. */}
+          <input className="field mono" placeholder={t("add.typed.hint")} value={typed} onChange={(e) => onType(e.target.value)} spellCheck={false} />
+        </label>
       </div>
-      {loading && <div className="empty">Asking the endpoint what it serves…</div>}
+      {loading && <div className="empty calm">{t("add.asking")}</div>}
       {!loading && error && (
-        <div className="empty">
-          <b>The endpoint did not list its models</b>
+        <div className="empty calm reveal">
+          <b>{t("add.nolist")}</b>
           <div className="sub">{error}</div>
-          <div className="sub faint">Type the model id above instead — the list is a convenience, not a requirement.</div>
-          <button className="btn small" onClick={onRetry}>Try again</button>
+          <div className="sub faint">{t("add.nolist.sub")}</div>
+          <button className="btn small" onClick={onRetry}>{t("common.retry")}</button>
         </div>
       )}
-      {!loading && !error && entries && shown.length === 0 && <div className="empty">Nothing matches that filter.</div>}
+      {!loading && !error && entries && shown.length === 0 && <div className="empty calm">{t("add.nomatch")}</div>}
       {!loading && shown.length > 0 && (
-        <div className="modelgrid">
+        <div className="modelgrid reveal">
           {shown.map((e) => (
             <button key={e.id} className={`pick model ${chosen === e.id ? "on" : ""}`} onClick={() => onPick(e)} aria-pressed={chosen === e.id}>
               <span className="pick-top">
@@ -146,11 +207,11 @@ function ModelStep({ entries, loading, error, chosen, typed, onPick, onType, onR
               </span>
               <span className="sub mono truncate">{e.id}</span>
               <span className="mtags">
-                {e.context_length ? <span className="pill">{tokens(e.context_length)} context</span> : null}
-                {e.images ? <span className="pill">images</span> : null}
-                {e.reasoning ? <span className="pill">reasoning</span> : null}
+                {e.context_length ? <span className="pill">{t("add.pill.context", { n: tokens(e.context_length) })}</span> : null}
+                {e.images ? <span className="pill">{t("add.pill.images")}</span> : null}
+                {e.reasoning ? <span className="pill">{t("add.pill.reasoning")}</span> : null}
                 {e.pricing?.input !== undefined && e.pricing?.output !== undefined ? (
-                  <span className="pill">{money(e.pricing.input)} in · {money(e.pricing.output)} out / 1M</span>
+                  <span className="pill num">{t("add.pill.price", { in: money(e.pricing.input), out: money(e.pricing.output) })}</span>
                 ) : null}
               </span>
             </button>
@@ -166,6 +227,7 @@ function ModelStep({ entries, loading, error, chosen, typed, onPick, onType, onR
  * decides what happens next — the first model ends onboarding, a later one closes the sheet.
  */
 export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: string, settings: Settings) => void; onCancel?: () => void; toast: (t: string) => void }) {
+  useLang();
   const [state, setState] = useState<OnboardingState | null>(null);
   const [provider, setProvider] = useState("");
   const [entries, setEntries] = useState<ModelEntry[] | null>(null);
@@ -242,7 +304,8 @@ export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: str
   }
 
   const model = (typed.trim() || preset.model).trim();
-  const ready = !!provider && provider !== CUSTOM && !!model;
+  const onEndpoint = !!provider && provider !== CUSTOM;
+  const ready = onEndpoint && !!model;
 
   async function save() {
     if (!ready) return;
@@ -267,96 +330,91 @@ export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: str
 
   return (
     <div className="addmodel">
-      <section className="card step">
-        <div className="step-head">
-          <span className="step-n">1</span>
-          <div className="grow">
-            <b>Where it runs</b>
-            <div className="sub">An endpoint this installation can reach. The ones with a key are ready to use; the others need one in Settings → Models first.</div>
-          </div>
-        </div>
+      <Step n={1} title={t("add.step1")} sub={t("add.step1.sub")} active={!provider} done={!!provider}>
         <ProviderStep state={state} chosen={provider} onPick={pickProvider} />
         {provider === CUSTOM && <CustomProvider busy={busy} onCreate={createProvider} />}
-      </section>
+      </Step>
 
-      <section className={`card step ${provider && provider !== CUSTOM ? "" : "muted"}`}>
-        <div className="step-head">
-          <span className="step-n">2</span>
-          <div className="grow">
-            <b>Which model</b>
-            <div className="sub">Listed straight from the endpoint. Whatever it says about a model fills the next step in.</div>
-          </div>
-        </div>
-        {provider && provider !== CUSTOM ? (
+      <Step n={2} title={t("add.step2")} sub={t("add.step2.sub")} active={onEndpoint && !model} done={!!model}>
+        {onEndpoint ? (
           <ModelStep entries={entries} loading={loading} error={lookupError} chosen={model} typed={typed} onPick={pickModel} onType={typeModel} onRetry={() => void lookup(provider)} />
         ) : (
-          <div className="sub faint">Pick an endpoint above.</div>
+          <div className="sub faint">{t("add.step2.wait")}</div>
         )}
-      </section>
+      </Step>
 
-      <section className={`card step ${ready ? "" : "muted"}`}>
-        <div className="step-head">
-          <span className="step-n">3</span>
-          <div className="grow">
-            <b>How it runs</b>
-            <div className="sub">All of it changeable later in Settings → Models; nothing here is permanent.</div>
-          </div>
-        </div>
+      <Step n={3} title={t("add.step3")} sub={t("add.step3.sub")} active={ready} done={false}>
         <div className="mfields">
           <label className="mfield">
-            <span>Label</span>
-            <input className="field" value={preset.label} placeholder={model ? `${provider}/${model}` : "what the app calls it"} onChange={(e) => setPreset({ ...preset, label: e.target.value })} />
+            <span>{t("add.label")}</span>
+            <input className="field" value={preset.label} placeholder={model ? `${provider}/${model}` : ""} onChange={(e) => setPreset({ ...preset, label: e.target.value })} />
           </label>
           <label className="mfield">
-            <span>Context window (tokens)</span>
-            <input className="field" type="number" min={8000} step={1000} value={preset.context_window} onChange={(e) => { const v = numInput(e.target.value); if (v !== null) setPreset({ ...preset, context_window: v }); }} />
+            <span>{t("add.window")}</span>
+            <input className="field num" type="number" min={8000} step={1000} value={preset.context_window} onChange={(e) => { const v = numInput(e.target.value); if (v !== null) setPreset({ ...preset, context_window: v }); }} />
           </label>
           <label className="mfield">
-            <span>Max output per reply</span>
-            <input className="field" type="number" min={1024} step={1000} value={preset.max_output_tokens} onChange={(e) => { const v = numInput(e.target.value); if (v !== null) setPreset({ ...preset, max_output_tokens: v }); }} />
+            <span>{t("add.output")}</span>
+            <input className="field num" type="number" min={1024} step={1000} value={preset.max_output_tokens} onChange={(e) => { const v = numInput(e.target.value); if (v !== null) setPreset({ ...preset, max_output_tokens: v }); }} />
           </label>
         </div>
         <div className="btnrow">
           <button className={`btn small ${preset.thinking ? "primary" : ""}`} aria-pressed={preset.thinking} onClick={() => setPreset({ ...preset, thinking: !preset.thinking })}>
-            thinking {preset.thinking ? "on" : "off"}
+            {preset.thinking ? t("add.thinking.on") : t("add.thinking.off")}
           </button>
-          <div className="segmented inline" role="group" aria-label="reasoning effort">
+          <div className="segmented inline" role="group" aria-label={t("add.effort")}>
             {["low", "medium", "high"].map((e) => (
               <button key={e} className={preset.reasoning_effort === e ? "on" : ""} disabled={!preset.thinking} onClick={() => setPreset({ ...preset, reasoning_effort: e })}>
-                {e}
+                {t(`add.effort.${e}`)}
               </button>
             ))}
           </div>
-          <button className={`btn small ${preset.images ? "primary" : ""}`} aria-pressed={preset.images} title="the model accepts pictures" onClick={() => setPreset({ ...preset, images: !preset.images })}>
-            images {preset.images ? "on" : "off"}
+          <button className={`btn small ${preset.images ? "primary" : ""}`} aria-pressed={preset.images} title={t("add.images.title")} onClick={() => setPreset({ ...preset, images: !preset.images })}>
+            {preset.images ? t("add.images.on") : t("add.images.off")}
           </button>
         </div>
-      </section>
+      </Step>
 
       <div className="addmodel-foot">
-        <div className="sub mono truncate">{ready ? presetIdFor(provider, model) : "pick an endpoint and a model"}</div>
+        {/* The name this model will be known by, once there is one to show; a sentence until then,
+            and a sentence is not monospaced. */}
+        <div className={`sub truncate ${ready ? "mono" : ""}`}>{ready ? presetIdFor(provider, model) : t("add.foot.empty")}</div>
         <span className="grow" />
         {onCancel && (
           <button className="btn" onClick={onCancel}>
-            Cancel
+            {t("common.cancel")}
           </button>
         )}
         <button className="btn primary" disabled={!ready || busy} onClick={() => void save()}>
-          {busy ? "Saving…" : state?.has_model ? "Add this model" : "Add this model and start"}
+          {busy ? t("add.saving") : state?.has_model ? t("add.save") : t("add.save.first")}
         </button>
       </div>
     </div>
   );
 }
 
-/** The first-run page: the app opens here until a model exists, because nothing else can work yet. */
+/**
+ * The first-run page: the app opens here until a model exists, because nothing else can work yet.
+ *
+ * Outside the shell on purpose, the way the login page is. The wide shell is a grid whose first
+ * column is the rail's, and a page drawn inside it without a rail sits in the second column with the
+ * rail's width of nothing beside it — which is exactly what a 2000 px window showed.
+ */
 export function OnboardingScreen({ onDone, toast }: { onDone: () => void; toast: (t: string) => void }) {
+  useLang();
   return (
-    <>
-      <PageHeader title="Add a model" subtitle="Your agent has no model yet — one is all it takes to start." />
-      <div className="screen wide">
+    <div className="gate tall">
+      <div className="onboard">
+        <header className="onboard-head">
+          <img className="onboard-logo" src="/app/icons/icon-192.png" alt="" width={44} height={44} />
+          <div className="grow">
+            <h1>{t("add.title")}</h1>
+            <p className="sub">{t("add.sub")}</p>
+          </div>
+          <LangPicker />
+        </header>
         <AddModel toast={toast} onSaved={onDone} />
       </div>
-    </>
+    </div>
   );
 }
