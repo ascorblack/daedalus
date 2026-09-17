@@ -6,16 +6,25 @@ the reason there is a gap at all (a finished run still has files to snapshot and
 tell), but the gap is not supposed to be visible: the turn ends on the model's own full stop, and
 the chip flips on the event the host sends the moment the run is over.
 
-The stub here is the worst honest case. It streams an answer, ends it with ``message_stop`` /
-``end_turn``, and then goes on reporting the session as running for ``--gap`` seconds before it
-sends ``run_settled`` — which is what a run with slow housekeeping behind it used to look like.
+The stub here sends what the host sends, which is two events and not one: ``run_settled`` with
+``housekeeping: true`` in the same breath as ``message_stop`` — the run is over, the session is idle
+and the answer is written — and a second one with ``housekeeping: false`` ``--gap`` seconds later,
+when the snapshot of the turn and the handover to the other fronts are done too. A stub that sent
+only the last of those measured a gap the shipped code does not have, and never exercised the half
+of the protocol that exists to be drawn.
+
+So there are three things timed here and not two: the cursor under the answer, the running chip, and
+the quiet "saving" bar that has to stand in the window between the two events. That window is when
+an undo waits for the files and a restart is refused, and an app that draws it as fully idle is an
+app whose refusals look like malfunctions.
 
     cd miniapp && npm run build
     mkdir -p /tmp/app-root/app && cp -r dist/* /tmp/app-root/app/
     CHROMIUM=... python3 tests/browser/check_settle.py
 
-Exit 0 when the cursor is gone within 300 ms of the final token and the run chip within 300 ms of
-``run_settled``, and non-zero with the measured numbers when either lags.
+Exit 0 when the cursor and the running chip are both gone within 300 ms of the final token, the
+saving bar stands in their place through the gap, and it in turn goes within 300 ms of the second
+``run_settled``. Non-zero with the measured numbers when any of them lags.
 """
 from __future__ import annotations
 
@@ -95,18 +104,21 @@ class Stub(BaseHTTPRequestHandler):
                 time.sleep(0.03)
             with Stub.lock:
                 Stub.written = ANSWER
+                # The host writes the answer down, marks the run completed and says so, all before
+                # it hands the rest to a task: from here the session reads idle, with housekeeping.
+                Stub.settled = True
                 Stub.housekeeping = True
             stopped = time.time()
             self.wfile.write(b'event: message_stop\ndata: {"stop_reason": "end_turn"}\n\n')
+            self.wfile.write(b'event: run_settled\ndata: {"status": "completed", "housekeeping": true}\n\n')
             self.wfile.flush()
-            print(f"stub: final token at +0.00s, message_stop sent; run_settled in {Stub.gap:.1f}s")
+            print(f"stub: final token at +0.00s, message_stop and the first run_settled sent; the second in {Stub.gap:.1f}s")
             time.sleep(Stub.gap)
             with Stub.lock:
-                Stub.settled = True
                 Stub.housekeeping = False
             self.wfile.write(b'event: run_settled\ndata: {"status": "completed", "housekeeping": false}\n\n')
             self.wfile.flush()
-            print(f"stub: run_settled sent at +{time.time() - stopped:.2f}s")
+            print(f"stub: the second run_settled sent at +{time.time() - stopped:.2f}s")
             while True:
                 time.sleep(1)
                 self.wfile.write(b": keepalive\n\n")
@@ -141,11 +153,13 @@ class Stub(BaseHTTPRequestHandler):
 
 WATCH = """
 () => {
-  window.__settle = { cursor: null, chip: null, start: performance.now() };
+  window.__settle = { cursor: null, chip: null, saving: null, bar: null, start: performance.now() };
   const look = () => {
     const s = window.__settle;
     if (s.cursor === null && !document.querySelector(".answer.streaming")) s.cursor = performance.now();
-    if (s.chip === null && !document.querySelector(".livebar")) s.chip = performance.now();
+    if (s.chip === null && !document.querySelector(".livebar:not(.saving)")) s.chip = performance.now();
+    if (s.saving === null && document.querySelector(".livebar.saving")) s.saving = performance.now();
+    if (s.bar === null && !document.querySelector(".livebar")) s.bar = performance.now();
     requestAnimationFrame(look);
   };
   requestAnimationFrame(look);
@@ -174,16 +188,29 @@ def run(gap: float, chromium: str, base: str, port: int) -> int:
             seen = page.evaluate("() => window.__settle")
             cursor_ms = (seen["cursor"] - stopped) if seen["cursor"] else None
             chip_ms = (seen["chip"] - stopped) if seen["chip"] else None
+            saving_ms = (seen["saving"] - stopped) if seen["saving"] else None
+            bar_ms = (seen["bar"] - stopped) if seen["bar"] else None
             print(f"cursor gone {cursor_ms if cursor_ms is None else round(cursor_ms)} ms after the last token (budget {BUDGET_MS} ms)")
-            print(f"run chip gone {chip_ms if chip_ms is None else round(chip_ms)} ms after the last token (the host said so at {gap * 1000:.0f} ms)")
+            print(f"run chip gone {chip_ms if chip_ms is None else round(chip_ms)} ms after the last token (budget {BUDGET_MS} ms)")
+            print(f"saving bar up {saving_ms if saving_ms is None else round(saving_ms)} ms after the last token, gone {bar_ms if bar_ms is None else round(bar_ms)} ms after it (the host finished at {gap * 1000:.0f} ms)")
             if cursor_ms is None:
                 problems.append("the cursor was still under the answer when the run had been over for seconds")
             elif cursor_ms > BUDGET_MS:
                 problems.append(f"the cursor stayed {cursor_ms:.0f} ms past the last token")
             if chip_ms is None:
-                problems.append("the session still reads as running after run_settled")
-            elif chip_ms > gap * 1000 + BUDGET_MS:
-                problems.append(f"the run chip stayed {chip_ms - gap * 1000:.0f} ms past run_settled")
+                problems.append("the session still reads as running after the run ended")
+            elif chip_ms > BUDGET_MS:
+                problems.append(f"the run chip stayed {chip_ms:.0f} ms past the end of the run")
+            if saving_ms is None:
+                problems.append("nothing said the turn was still being written down: the app went straight to idle, which is the window an undo waits in")
+            elif saving_ms > BUDGET_MS:
+                problems.append(f"the saving bar took {saving_ms:.0f} ms to appear")
+            if bar_ms is None:
+                problems.append("the saving bar never went away after the turn was written down")
+            elif bar_ms < gap * 1000 - BUDGET_MS:
+                problems.append(f"the saving bar went {gap * 1000 - bar_ms:.0f} ms before the host said the turn was written down")
+            elif bar_ms > gap * 1000 + BUDGET_MS:
+                problems.append(f"the saving bar stayed {bar_ms - gap * 1000:.0f} ms past the second run_settled")
             context.close()
             browser.close()
     finally:

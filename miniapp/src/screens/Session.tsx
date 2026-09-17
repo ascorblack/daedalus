@@ -357,6 +357,13 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
 
   const status = (detail?.status ?? "idle") as Status;
   const busy = status === "running" || status === "waiting";
+  // The run is over, its answer is on the screen, and behind it the snapshot of the turn and the
+  // handover to the other fronts are still being written. Not a run — nothing is being generated,
+  // and the composer is open — but not nothing either: it is exactly the window in which an undo
+  // waits for the files and a restart is refused, and drawing it as fully idle is what made both
+  // of those read as the app misbehaving. The host says so twice, once to raise it and once to
+  // take it away; between the two this is what there is to show.
+  const saving = !busy && !!detail?.housekeeping;
   const compacting = detail?.compacting ?? null;
 
   // The event stream carries every change while a run is active; this is the safety net, not the
@@ -1091,7 +1098,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
             </button>
           )}
           {compacting && <CompactionBar c={compacting} />}
-          {busy && <LiveBar status={status} base={tail} live={live} workspace={detail?.workspace} atBottom={atBottom} onJump={jumpToBottom} />}
+          {(busy || saving) && <LiveBar status={status} saving={saving} base={tail} live={live} workspace={detail?.workspace} atBottom={atBottom} onJump={jumpToBottom} />}
           <div className="composer">
             {pending.length > 0 && (
               <div className="attachments" aria-label={t("session.attachments")}>
@@ -1752,10 +1759,24 @@ function LiveTurn({ base, live, onTurnAction, onRender }: { base: Turn | null; l
   );
 }
 
-/** The bar over the composer while a run is going: what the agent is on, and for how long. */
-function LiveBar({ status, base, live, workspace, atBottom, onJump }: { status: Status; base: Turn | null; live: LiveStore; workspace?: string; atBottom: boolean; onJump: () => void }) {
+/** The bar over the composer while a run is going: what the agent is on, and for how long.
+ *
+ *  It stays for the moment after the run, quieter, while the turn is being written down — see
+ *  `saving` above the composer. Same bar rather than a second one: the thing it reports on is the
+ *  same turn, and a line that appears somewhere else would read as a new event.
+ */
+function LiveBar({ status, saving, base, live, workspace, atBottom, onJump }: { status: Status; saving: boolean; base: Turn | null; live: LiveStore; workspace?: string; atBottom: boolean; onJump: () => void }) {
   const state = useSyncExternalStore(live.subscribe, live.get);
   useClock(1000);
+  if (saving) {
+    return (
+      <button className="livebar saving" onClick={onJump} role="status" aria-live="polite" title={t("session.jump.step")}>
+        <Dot status="idle" />
+        <b>{t("session.livebar.saving")}</b>
+        {!atBottom && <Icon name="down" size={16} />}
+      </button>
+    );
+  }
   const turn = applyLive(base, state, Date.now());
   const steps = stepCount(turn.activity);
   const running = [...turn.activity].reverse().find((a) => a.kind === "tool" && a.running) as ToolItem | undefined;

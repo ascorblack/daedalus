@@ -919,6 +919,9 @@ body.resizing iframe { pointer-events: none; }
 .livebar .bar i { background: var(--info); }
 .livebar .truncate { min-width:0; }
 .livebar.waiting { border-color:color-mix(in srgb, var(--warn) 50%, transparent); }
+/* The moment after a run, while the turn is being written down: present, and quieter than a run. */
+.livebar.saving { border-color:var(--line); color:var(--fg-2); }
+.livebar.saving b { color:var(--fg-2); font-weight:500; }
 .livebar .ic { flex:none; color:var(--fg); }
 .kv { display:flex; justify-content:space-between; align-items:baseline; gap:12px; padding:5px 0; font-size:14px; }
 .kv > span:first-child { color:var(--fg-2); flex:none; }
