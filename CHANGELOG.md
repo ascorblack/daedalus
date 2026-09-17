@@ -2,6 +2,94 @@
 
 Notable changes, newest first. The repository's `main` is the released version.
 
+## 2026-09-17
+
+- **Install it without Docker.** The desktop launcher now has a second mode: instead of a container,
+  it downloads a runtime into a folder it owns — a pinned `uv`, the CPython uv manages, `rg`, and the
+  app's environment built from the checkout's own lock file — and starts `launcher/supervisor.py`
+  under it as its own child. Every download is checked against the SHA-256 its publisher published
+  before a byte of it is written, and a hash that does not match refuses the start by name.
+  **Measured on Linux x86-64: 103 MB over the wire, 26 seconds from an empty folder to the app
+  answering, 4.3 seconds warm**; 245 MB of runtime on disk, 390 MB for the whole installation with
+  both checkouts. macOS is smaller and Windows larger by MinGit. The supervisor is unchanged and
+  serves both modes — it never knew what a container was — and the first run's page asks which mode
+  you want with what each costs written beside it.
+- **The runtime image is 478 MB instead of 3.07 GB, and 114 MB to pull instead of 827.** It is built
+  in stages now: the environment and the Mini App are made in builder stages and copied into a final
+  image that carries neither a compiler, nor Node, nor the GitHub CLI, nor a second CPython, nor a
+  browser. A container from it serves `/app/` at first start with no `uv sync` and no `npm` — the
+  environment and the built app are baked. Browser skills move to the `:browser` tag (995 MB
+  unpacked, 368 MB to pull, sharing every layer below the last), and without it they say they are not
+  installed rather than writing scripts that cannot run. Both tags are `linux/amd64` **and**
+  `linux/arm64`, so Apple Silicon pulls like everything else instead of building locally.
+- **One image, two containers, three profiles.** The key proxy runs from the agent's own image with a
+  different command — the isolation was always the container and never the image — which is 222 MB of
+  download and one fewer image to build and sign. SearXNG (382 MB), the rebuilder (237 MB) and the
+  local Bot API server (66 MB) are behind `--profile search`, `selfdev` and `telegram`, all off by
+  default; `WebSearch` uses DuckDuckGo with no key and falls back to SearXNG when one is running. The
+  launcher fetches both repositories as GitHub tarballs over `net/http` and commits them locally
+  instead of pulling `alpine/git` (144 MB). **A desktop install went from 4.06 GB across five images
+  to about 0.48 GB in one.**
+- **An installation ships no model, and "no model yet" is a state rather than a crash.** A provider
+  key is an address; which model runs on it — and what it costs — was never ours to guess, so the
+  preset table is empty on a fresh install. The app opens on **Add a model** and stays there: the
+  endpoint (the ones whose key the proxy holds are marked ready), the model from the list that
+  endpoint serves with its context window, modalities and prices, and how it runs. Every other way in
+  — the chat commands, the API (409), Telegram, `daedalus check`, `daedalus doctor` — answers one
+  sentence naming the fix instead of a traceback. An existing `config.toml` is untouched.
+- **An app window of its own.** The launcher opens the operating system's web view (WKWebView,
+  WebView2) where there is one, a Chromium-family browser in application mode where there is not, and
+  the default browser if neither — decided at run time, never a hard failure, and a Linux machine
+  without WebKitGTK simply lands on the second step. The window remembers its size and position,
+  `daedalus://open/<session-id>` opens a conversation from anywhere the desktop follows a link, a
+  second launch focuses the first instead of starting another, and the inbox and a waiting question
+  raise a real desktop notification. Binaries are 8 MB without the window and 10–12 MB with it.
+- **`[self_change] mode`: `auto`, `off`, `local` or `server`.** What an installation may do to its own
+  code is now one value, resolved once at startup from the prerequisites actually present — writable
+  checkouts, a GitHub token, an `origin` on both, a way to deliver a build — and everything follows
+  it: which `Self*` tools are registered at all, the extension, `/api/proposals`, the Changes screen,
+  the self-development paragraphs of the prompt, the policy's push rule and the doctor's GitHub
+  checks. `GET /api/capabilities` and `daedalus doctor` both name the mode and the reasons for it.
+- **A desktop install improves itself locally.** In `local` mode the agent works in a worktree, runs
+  the same relevance, evidence and size gates, and calls `SelfApply`, which fast-forwards its commits
+  onto the checkout's own branch — no fork, no remote, no pull request. The app then shows *"Changes
+  are ready — restart to apply"* with a **Restart** button, the launcher's status page shows the same,
+  and closing the app and opening it again does it too, because the checkout is what runs. The restart
+  is not a leap: the supervisor checks that commit out into a detached worktree of its own and runs
+  `uv sync` (only when the lock or the project file changed), `compileall`, `daedalus check` and the
+  smoke tests **in a virtualenv of its own**, so a refused change has touched nothing the running bot
+  imports — and a change that passes but cannot stay up, three starts dying inside ten minutes, puts
+  the last known-good commit back by itself.
+- **Projects: a folder of yours is where an agent works, and the only place it can reach.** A project
+  is a row — name, root, settings — and a session points at one. `SessionServices.resolve` is the
+  single point every file path passes through, so the containment could not be forgotten by a tool:
+  the check is on the real path, which makes `..`, an absolute path elsewhere and a symlink out of the
+  tree one refusal. Several agents share a project and see the same files; a session without one still
+  gets a scratch directory, exactly as before, and every session that already existed keeps it.
+  Snapshots are off for a project by default — a project root is your repository, not a scratch
+  directory. In Docker mode adding a project also adds a bind mount, which the launcher writes and
+  restarts the stack for; natively it is reachable the moment it is added.
+- **Voice mode (beta).** `/app/voice` is a conversation: a small fast model answers out loud in a
+  second or two and hands anything substantial to real agent sessions while you keep talking, several
+  at once, telling you when each comes back. It is an ordinary session with one flag — its transcript
+  is in the app, its calls are in Usage — but the host, not a prompt, narrows it to five tools and
+  keeps every other session away from them, and no mode can widen that.
+- **Tool results stop growing the request.** `[tools.exec] max_output_chars` always bounded one call;
+  it said nothing about the twenty results already in the transcript that every turn sent again.
+  `[tools.results]` bounds those: the newest few are whole, older ones keep a head, and the trimming
+  happens in batches so the prefix the provider caches is not invalidated on every turn. The stored
+  history keeps every result intact — only the copy sent to the model is cut.
+- **Native guardrails.** On your own machine the agent is a process of your own user, so two rules
+  exist there that a container made unnecessary: the installation's own files — the provider keys, the
+  state database, the secret that opens the restart channel, the launcher and the runtime it runs out
+  of — are refused to read as well as to write, through `Exec` as much as through the file tools; and
+  a path in your home folder outside every project, workspace, checkout and the installation itself is
+  a question you answer once for one exact call. `Exec` is sandboxed by default on a native Linux
+  machine that has `bwrap`. Where the supervisor's command channel has to be a loopback port rather
+  than a socket file, it asks for a secret it keeps beside the state. `daedalus doctor` and the
+  launcher's status page say what the isolation is in one line rather than implying a wall that is
+  not there.
+
 ## 2026-09-15
 
 - **The desktop launcher is something you download and open.** The first release attached the bare

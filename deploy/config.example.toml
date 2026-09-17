@@ -94,7 +94,20 @@ preset = ""
 
 [mcp.servers]
 
+# Projects are not in this file. A project is a folder you add in the app, and it is a row in the
+# database — its name, its root and its own settings (today: whether the root is snapshotted before
+# every turn, off by default, because a project root is your repository and not a scratch
+# directory). They are edited where they are made: Projects in the app's rail, or the API.
+
+# Whether this installation may change its own code, and how.
+#   auto   (the default) work it out at startup from what is really here
+#   server a worktree, a pull request you approve, a merge, a rebuild
+#   local  the checkout this installation runs from, edited in place and applied by a restart
+#   off    not at all: no tools, no API, no screen, nothing in the prompt about it
+# An explicit value wins over the resolution, and `daedalus doctor` says what it is missing.
+# A change of mode takes effect on the next restart.
 [self_change]
+mode = "auto"
 approval = "manual"
 auto_rebuild = true
 
@@ -108,6 +121,13 @@ tool_timeout_seconds = 900.0
 # The most one tool call may return to the model. Exec streams past it into a spill file and
 # shows a head and a tail; Read pages; every other tool is clipped to it.
 max_output_chars = 60000
+# Whether Exec runs inside bubblewrap: the filesystem read-only except the session's own
+# directory, a private /tmp, a PID namespace of its own. "workspace" is the default on a native
+# installation with bwrap on the machine — there is no container there to be the wall instead —
+# and "off" in a container, where there is. A sandbox that is configured and unavailable refuses
+# the command rather than running it unsandboxed.
+# sandbox = "off"                # off | workspace
+# sandbox_extra_writable = []    # absolute paths the sandbox may write beside the workspace
 
 [tools.results]
 # What happens to a result the agent has already moved past. max_output_chars above bounds ONE

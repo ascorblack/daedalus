@@ -5,17 +5,18 @@
 <h1 align="center">Daedalus</h1>
 
 <p align="center">
-  A personal, self-developing agent that lives in Telegram and in its own web app,<br/>
-  runs inside a Linux container with real tools, and changes its own code through pull requests you approve from the chat.
+  A personal, self-developing agent with its own app window, real tools and a folder of your own to work in —<br/>
+  on your machine with no Docker, in a container, or on a server, and in Telegram as well if you want it there.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
   <img alt="Python 3.12" src="https://img.shields.io/badge/python-3.12-3776ab.svg" />
+  <img alt="Desktop app" src="https://img.shields.io/badge/desktop-macOS%20%7C%20Linux%20%7C%20Windows-5b5bd6.svg" />
   <img alt="Docker Compose" src="https://img.shields.io/badge/deploy-docker%20compose-2496ed.svg" />
   <img alt="Telegram" src="https://img.shields.io/badge/chat-Telegram-26a5e4.svg" />
   <img alt="React" src="https://img.shields.io/badge/app-React%2019-61dafb.svg" />
-  <img alt="tests" src="https://img.shields.io/badge/tests-440%2B-4ade80.svg" />
+  <img alt="tests" src="https://img.shields.io/badge/tests-680%2B-4ade80.svg" />
 </p>
 
 <p align="center">
@@ -28,7 +29,9 @@
 
 ## Why
 
-Most agent products are a chat box in someone else's cloud. Daedalus is the opposite: **one operator, one container, everything inside it** — a shell, a browser, git, a filesystem, long-running services on ports you can open, a scheduler, subagents, memory — reachable from the Telegram app you already have open and from a web app that works on a phone and on a desk.
+Most agent products are a chat box in someone else's cloud. Daedalus is the opposite: **one operator, one installation, everything inside it** — a shell, a browser, git, a filesystem, long-running services on ports you can open, a scheduler, subagents, memory — in an app window on your own machine, in a browser on your phone, and in the Telegram app you already have open if you want it there.
+
+Where "inside it" is is your choice, and it is one download either way: a process on your machine in a folder it owns, a container from one published image, or a server you install it on.
 
 It is built to run for weeks: sessions survive restarts, runs resume from snapshots, context is compacted instead of lost, spend is capped by a supervisor the agent cannot edit, and the agent's own improvements land as pull requests, not as silent edits.
 
@@ -71,7 +74,7 @@ The agent edits its host or its core in a git worktree, opens a PR, you approve 
 <td valign="top">
 
 **🔐 Keys it never sees**<br/>
-Provider keys live in a key-proxy container that injects them into upstream calls and stops paying once the daily budget is spent. Your ChatGPT, Claude Code and SuperGrok logins work as providers too, with their quota windows on screen.
+Provider keys live in a key proxy — a second container in Docker mode, a second process on `127.0.0.1` natively — that injects them into upstream calls and stops paying once the daily budget is spent. The agent's own process never holds one. Your ChatGPT, Claude Code and SuperGrok logins work as providers too, with their quota windows on screen.
 
 </td>
 </tr>
@@ -88,7 +91,32 @@ Talk to a small fast model that answers out loud in a second, hands anything sub
 Add a folder of your own — a repository, a directory of documents — and the agents you start in it work there. The folder is the whole of their reach: every path they read, write or run in is inside it, and one that leads out is refused, not followed. Several agents share one project and see the same files; an agent started without one still gets a scratch directory of its own, as before.
 
 </td>
-<td valign="top"></td>
+<td valign="top">
+
+**🖥️ An app, not a deployment**<br/>
+One download opens a window of its own on macOS, Linux and Windows — the system's web view, or a browser window with nothing around it, decided at run time and never a hard failure. Native mode needs no Docker at all: about 100 MB into a folder the launcher owns, and four seconds from launch to the app.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**🧾 Evidence you can open**<br/>
+An answer that cites a file or a check carries it as a chip: click it and the file opens at the lines it named. `Verify` records a receipt against a criterion, and a change to the agent's own code cannot be applied without one that covers the bytes in it.
+
+</td>
+<td valign="top">
+
+**📦 A context that stays bounded**<br/>
+A single tool result is clipped to a limit you set; the twenty results already behind it are trimmed to their heads as the turn moves past them, in batches, so the request stops growing without the transcript losing anything. The stored history keeps every result whole — only the copy sent to the model is cut.
+
+</td>
+<td valign="top">
+
+**🧩 An installation that says what it is**<br/>
+`GET /api/capabilities` answers what *this* install can do — which self-development mode it resolved and why, whether a change is waiting for a restart — and the app, the prompt, the tool registry and the doctor all read that one answer. A tool the installation cannot honour is not registered at all, so the model is never offered a name that fails.
+
+</td>
 </tr>
 </table>
 
@@ -142,7 +170,9 @@ Add a folder of your own — a repository, a directory of documents — and the 
 
 <sub>Diagram sources: <code>docs/diagrams/</code> is rendered from the mermaid text kept beside the README.</sub>
 
-Five containers, one job each. The agent container has no provider keys and no docker socket; the supervisor and the governance rules are mounted read-only. Services the agent hosts (a demo site, a dev server) listen on a published port range and can be shared through your domain — to anyone, or to whoever holds a key — without opening another port.
+The diagram is the full stack with every profile on. A default install is **two** of those containers, from one image: the agent, and the key proxy that holds the provider keys. SearXNG, the rebuilder and the local Bot API server are the three profiles, off unless you ask for them. The agent container has no provider keys and no docker socket; the supervisor and the governance rules are mounted read-only. Services the agent hosts (a demo site, a dev server) listen on a published port range and can be shared through your domain — to anyone, or to whoever holds a key — without opening another port.
+
+**In native mode the boxes are the same and the containers are not there.** The supervisor and the key proxy are two processes the launcher starts, the key proxy on `127.0.0.1` instead of a private network, and the workspaces and the state are files in the installation's own folder instead of volumes. The supervisor is the same program either way: it has never known what a container is.
 
 ## A run, step by step
 
@@ -197,8 +227,8 @@ What follows the mode: the `Self*` tools (absent in `off`, `SelfWorkspace` and `
 
 | Area | Tools |
 |---|---|
-| Files & shell | `Exec` (with an optional bubblewrap sandbox; `background=true` with `JobOutput` / `JobKill` / `JobList` for what outlives the call; a long `sleep` or a polling loop in the foreground is refused — reports and finished jobs arrive as messages), `Read`, `Write`, `Edit`, `Find`, `Search` |
-| Web | `WebFetch`, `WebSearch` — SearXNG by default; Serper, Tavily, Exa, Perplexity, Keenable through the key proxy |
+| Files & shell | `Exec` (inside a bubblewrap sandbox — the default on a native install with `bwrap` present, optional in a container, which is a boundary already; `background=true` with `JobOutput` / `JobKill` / `JobList` for what outlives the call; a long `sleep` or a polling loop in the foreground is refused — reports and finished jobs arrive as messages), `Read`, `Write`, `Edit`, `Find`, `Search` |
+| Web | `WebFetch`, `WebSearch` — DuckDuckGo out of the box with no key at all; a self-hosted SearXNG behind a profile; Serper, Tavily, Exa, Perplexity, Keenable through the key proxy |
 | Seeing | `ImageView` — a separate vision model answers questions about an image, so the main context never carries pixels |
 | Delegation | `SubAgent`, `SubAgentSend`, `SubAgentList`, `SpawnAgent`, `AskPeer` — helpers in the same workspace (a report wakes the leader when it is ready; an idle helper can be raised without a task; `tools_off` takes tools away from a helper, so a launch it must not make is impossible rather than discouraged), sibling sessions, named peers |
 | Time | `ScheduleCreate`, `LoopNext`, `IntentCreate` — cron, self-paced loops, standing intents on inbound events |
@@ -211,27 +241,82 @@ What follows the mode: the `Self*` tools (absent in `off`, `SelfWorkspace` and `
 
 Every tool can be switched off per session from the app, and a **mode** (`quick`, `deep`, `careful`) bundles limits and extra rules.
 
+## What the agent may do
+
+Every tool call is judged from its arguments before it runs — a shell command is parsed into its
+simple commands first, so `cd x && rm -rf /` is seen as `rm -rf /` — and the answer is allow, **ask**
+or **deny**. A denial is final. An *ask* is a denial you can lift: the refusal carries a key, and
+*Allow once* in the app or `/allow <key>` in the chat lets that one exact call through, once.
+
+The built-in rules are in the repository (`daedalus/host/policy.py`), so they change only through a
+reviewed change: fork bombs, `mkfs`/`shutdown`, `dd` onto a raw device, a recursive delete or `chmod`
+of a system path, writing into one, pushing from the operator's checkouts. Your own rules in
+`config.toml` can add denials and questions and can never lift a built-in one.
+
+Two more exist **only on a native install**, where the agent is a process of your own user rather
+than something in a container:
+
+- **the installation's own files are refused, to read as well as to write** — the provider keys, the
+  state database, the secret that opens the restart channel, the launcher's executable and the
+  runtime it runs out of. Through `Exec` as well: the rule reads the paths in the command, so `cat`,
+  `cp` and a redirection are the same refusal as the file tools;
+- **a path in your home folder, outside every project and outside the installation, asks.** Inside a
+  project, a workspace or the checkouts it does not — that is where the work is.
+
+Beside the policy: a **project** contains every path a session resolves (`..`, an absolute path
+elsewhere and a symlink out of the tree are one refusal, checked on the real path); the **egress
+allowlist** turns an unknown host into a question and logs every host either way; the **spend caps**
+are the supervisor's, from its own environment, and the agent cannot edit them; `GOVERNANCE.md` — the
+rules the agent always sees — is a protected path it cannot write, and a read-only mount on top of
+that in a container. `daedalus doctor` prints what this installation's boundary actually is in one
+line, and the desktop launcher's status page prints the same one.
+
 ## Run it
 
-Three ways, and the first two are the same program:
+Two programs, three ways in. **The desktop app is the one to start with**; the server install is the
+same stack with a domain in front of it.
 
-| | What it needs | What it is |
-|---|---|---|
-| **Desktop, native** | nothing but the launcher | The agent runs as a process on your machine, out of a private folder the launcher fills with a pinned `uv`, a managed CPython, `rg` and the app's environment — about 115 MB to fetch, no Docker, ready in a second. There is no container boundary: `Exec` runs as you. |
-| **Desktop, Docker** | Docker Desktop or Docker Engine | The agent runs in a container with its own filesystem and its own network, from one published image. About 480 MB of images on top of Docker itself. |
-| **Server** | Docker with Compose, a checkout | What the rest of this section describes: the compose file, the checkouts, self-development against GitHub. |
+### 1. The desktop app
 
-The first two are [`daedalus-desktop`](desktop/README.md): one binary, one folder, and a page of its
-own that asks which of the two you want and says plainly what each costs. `--mode native` or
-`--mode docker` answers it from a script instead.
+One download, one folder, and everything the installation owns is inside that folder — including, in
+native mode, the Python it runs on. Nothing is installed system-wide and nothing is put anywhere
+else, so uninstalling is deleting the folder.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ascorblack/daedalus/main/desktop/install.sh | sh
 ```
 
-The rest of this section is the server install.
+That takes the newest `desktop-v*` release, checks it against the release's `SHA256SUMS`, and
+unpacks it into `./Daedalus`. By hand, take the archive for your machine from the
+[releases](https://github.com/ascorblack/daedalus/releases): `Daedalus-macOS.zip` holds
+`Daedalus.app` for both kinds of Mac and is opened with a double-click,
+`daedalus-desktop-linux-<arch>.tar.gz` and `daedalus-desktop-windows-amd64.zip` hold the executable.
 
-Requirements: Docker with Compose, and at least one model API key **or** a ChatGPT / Claude Code / SuperGrok login on the host. **Telegram is optional**: with a bot token you get the chat as a front; without one the app in the browser is the whole interface.
+Open it and a page asks the one question that matters, with what each answer costs written beside it
+(`--mode native` / `--mode docker` answers it from a script):
+
+| | **Native** — no Docker | **Docker** |
+|---|---|---|
+| Needs | nothing at all | Docker Desktop or Docker Engine |
+| First run fetches | **103 MB** on Linux, ~96 MB on macOS, ~148 MB on Windows — a pinned `uv`, a CPython, `rg` and the app's environment, each checked against the hash its publisher published | **114 MB** to pull one image (478 MB unpacked), plus Docker itself: a ~600 MB application with a VM disk behind it |
+| Ready in | 26 s from an empty folder, **4.3 s** warm | seconds, once Docker is up |
+| The agent is | a process under the launcher, which keeps it alive and stops it on quit | a container that comes back with the machine |
+| Isolation | the policy rules and nothing behind them — see [what each gives up](#what-each-gives-up) | the container's own edge |
+
+Then it opens a window of its own — the system's web view on macOS and Windows, a browser window
+with no tabs or address bar on Linux, the default browser if neither — asks for a provider key and a
+daily cap, and hands you the app. [desktop/README.md](desktop/README.md) has the folder layout, the
+window's three fallbacks, the disk each mode takes, projects in Docker mode, local self-development,
+release signing and uninstalling.
+
+### 2. A server
+
+The same stack with Compose in front of it: one published image, two containers from it, and every
+other piece behind a profile that is off unless you ask for it.
+
+Requirements: Docker with Compose, and at least one model API key **or** a ChatGPT / Claude Code /
+SuperGrok login on the host. **Telegram is optional**: with a bot token you get the chat as a front;
+without one the app in the browser is the whole interface.
 
 ```bash
 git clone https://github.com/ascorblack/daedalus
@@ -239,34 +324,47 @@ cd daedalus
 bash deploy/setup.sh            # asks for the values, writes .env and ../daedalus-secrets/keyproxy.env, starts the stack
 ```
 
-**The install ends in the app: add a model.** A provider key is an address, not a choice of model,
-so nothing is picked for you and the installation ships with none. The app opens on *Add a model*
-until one exists: pick an endpoint, pick a model from the list it serves — with its context window,
-its modalities and its prices beside it — and save. The same screen adds the next one later, from
-Settings → Models.
-
-<p align="center"><img src="docs/screenshots/add-model.png" alt="Add a model: the endpoint, the model from its own list with context window and prices, and how it runs" width="100%" /></p>
+Or have a coding agent do it: [`docs/AGENT-SETUP.md`](docs/AGENT-SETUP.md) is written for one, every
+step a command with the output it must see. [Let your agent install it](#let-your-agent-install-it)
+below has the paragraph to paste.
 
 By hand instead: clone `protocore-exp` next to this repository, copy `deploy/env.example` to `.env` and
 `deploy/keyproxy.env.example` to `../daedalus-secrets/keyproxy.env` (provider keys go there, outside the
-checkout, `chmod 600`), then `docker compose -f deploy/compose.yaml --env-file .env up -d --build`. With a
-bot token add `--profile telegram`, which also starts the local Bot API server (files up to 2 GB, instead of
-Telegram's 20 MB, and it needs `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from https://my.telegram.org/apps).
-
-The stack is one image — about 480 MB, 115 MB to pull — and two containers from it: the agent, and
-the key proxy that holds the provider keys. Everything else is a profile, and none of them is on by
-default:
+checkout, `chmod 600`), then `docker compose -f deploy/compose.yaml --env-file .env up -d --build`.
 
 | `--profile` | What it starts | Cost |
 |---|---|---|
-| `telegram` | the local Bot API server: files up to 2 GB instead of 20 MB | ~66 MB |
+| `telegram` | the local Bot API server: files up to 2 GB instead of 20 MB (it needs `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from https://my.telegram.org/apps) | ~66 MB |
 | `search` | a self-hosted SearXNG. Without it `WebSearch` goes to DuckDuckGo directly; with it, SearXNG is the backend the tool falls back to | ~382 MB |
 | `selfdev` | the rebuilder, the only container that can reach Docker. Needed only to build a new agent image, which is what a change to the image's own recipe asks for | ~237 MB |
 
 The browser skills — driving a page with Playwright, drawing with Pillow — are not in the default
-image either: they are a third of it and most sessions never open a page. Run the `:browser` tag
-instead (`ghcr.io/ascorblack/daedalus:browser`, about 1 GB) where they are wanted; without it the
+image either: they are two thirds of one and most sessions never open a page. Run the `:browser` tag
+instead (`ghcr.io/ascorblack/daedalus:browser`, 368 MB to pull) where they are wanted; without it the
 skills say so instead of writing scripts that cannot run, and `daedalus doctor` says it too.
+
+### The install ends in the app: add a model
+
+**Whichever way you installed it.** A provider key is an address, not a choice of model, so nothing
+is picked for you and the installation ships with none. The app opens on *Add a model* until one
+exists: pick an endpoint, pick a model from the list it serves — with its context window, its
+modalities and its prices beside it — and save. The same screen adds the next one later, from
+Settings → Models.
+
+<p align="center"><img src="docs/screenshots/add-model.png" alt="Add a model: the endpoint, the model from its own list with context window and prices, and how it runs" width="100%" /></p>
+
+### What each gives up
+
+Nothing here is a tier: it is the same program, and each row is a real consequence of where it runs.
+
+| | Native | Docker desktop | Server |
+|---|---|---|---|
+| **Isolation** | no container boundary: `Exec` runs as you, behind the policy rules, the approval gates and — on Linux with `bwrap` present, where it is now the default — bubblewrap. Two rules exist only here: the installation's own files (the provider keys, the state database, the restart secret, the launcher and its runtime) are refused to read as well as to write, and a path in your home folder outside every project is a question you answer once | the container's edge, as on a server | the container's edge |
+| **Telegram** | `api.telegram.org`, so files are capped at 20 MB in and out | the local Bot API server behind `--profile telegram`: 2 GB | the same profile |
+| **Self-development** | `local`: the agent commits into the checkout the app runs from and the change applies on a restart, with a preflight on a copy of itself first and an automatic rollback if it cannot stay up | `local` by default; `server` with a GitHub token | `server`: a worktree, a pull request you approve in the chat, a merge, a rebuild |
+| **Browser skills** | `daedalus-desktop install browser`, ~100 MB into the folder | the `:browser` tag | the `:browser` tag |
+| **Reach** | your machine only: services a session starts bind `127.0.0.1` | the same | a domain, a PWA, Telegram's Mini App |
+| **When you close it** | the agent stops, and a run in flight is drained, snapshotted and resumed on the next start | it keeps running and comes back with the machine | it keeps running |
 
 ### Signing in without Telegram
 
@@ -304,32 +402,13 @@ Then clone, configure, start the stack, verify it as the page says, and give me 
 and the two-line summary section 8 asks for. Never paste keys or tokens back into this chat.
 ```
 
-### Desktop app
-
-On a machine of your own there is a launcher that does all of the above for you: it clones both
-repositories, asks for the keys on a page in your browser, and runs this same compose file, with
-Docker as the only thing you install.
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/ascorblack/daedalus/main/desktop/install.sh | sh
-```
-
-That takes the newest `desktop-v*` release, checks it against the release's `SHA256SUMS`, and
-unpacks it into `./Daedalus`. By hand, take the archive for your machine from the
-[releases](https://github.com/ascorblack/daedalus/releases): `Daedalus-macOS.zip` holds
-`Daedalus.app` for both kinds of Mac and is opened with a double-click,
-`daedalus-desktop-linux-<arch>.tar.gz` and `daedalus-desktop-windows-amd64.zip` hold the executable.
-Everything the installation owns is made inside the folder you unpack into.
-[desktop/README.md](desktop/README.md) has the layout, the disk the images take, and how releases
-are signed.
-
 ### Models and keys
 
 Providers are OpenAI-compatible endpoints (DeepSeek, OpenRouter, a self-hosted vLLM, anything else) with their own base URL, key and timeout; **presets** on top of them name a model with its thinking mode, effort, image support, context window and output cap. One preset is the default, others are fallbacks, any session can switch. Speech-to-text and the vision model pick a provider the same way.
 
 **An installation ships no preset at all.** The endpoints are configured; which model runs on one — and what it costs per million tokens — is the first thing you decide, in *Add a model* (the app opens there until a model exists, and Settings → Models → **Add a model** is the same screen). The first model added becomes the default. Until then every way in says so and names the fix rather than failing: the chat commands, the API (409), `daedalus doctor`, `daedalus check`.
 
-Keys never enter the agent container: the **key proxy** injects them (`http://keyproxy:3200/deepseek`, `…/openrouter`, `…/opencode`, plus any `KEYPROXY_UPSTREAM_<NAME>`), meters the calls, and refuses model calls once the daily budget is spent. An [OpenCode Go](https://opencode.ai/go) subscription is the `opencode` provider: set `OPENCODE_API_KEY` and its models (DeepSeek, GLM, Qwen, Kimi, MiniMax, GPT-5.6 Luna …) are presets with the gateway's list prices, refreshed daily from [models.dev](https://models.dev), so the metered spend tracks the subscription's allowance, whose 5-hour, weekly and monthly windows show on the Usage screen; every request carries the session id the gateway routes and caches by. Your **ChatGPT (Codex), SuperGrok and Claude Code** logins are read from the CLIs' own auth files, refreshed in place, and exposed as the `codex`, `grok` and `claude` providers — their quota windows show on the Usage screen and beside every session that uses them.
+Keys never reach the agent's process: the **key proxy** injects them (one path per upstream — `/deepseek`, `/openrouter`, `/opencode`, plus any `KEYPROXY_UPSTREAM_<NAME>` — under `http://keyproxy:3200` in a container and `http://127.0.0.1:3201` natively), meters the calls, and refuses model calls once the daily budget is spent. An [OpenCode Go](https://opencode.ai/go) subscription is the `opencode` provider: set `OPENCODE_API_KEY` and its models (DeepSeek, GLM, Qwen, Kimi, MiniMax, GPT-5.6 Luna …) are presets with the gateway's list prices, refreshed daily from [models.dev](https://models.dev), so the metered spend tracks the subscription's allowance, whose 5-hour, weekly and monthly windows show on the Usage screen; every request carries the session id the gateway routes and caches by. Your **ChatGPT (Codex), SuperGrok and Claude Code** logins are read from the CLIs' own auth files, refreshed in place, and exposed as the `codex`, `grok` and `claude` providers — their quota windows show on the Usage screen and beside every session that uses them.
 
 ### Without Docker, for development
 
@@ -385,7 +464,8 @@ miniapp/        Vite + React app (Telegram Mini App and browser); src/router.ts,
 skills/         SKILL.md skills the agent can load
 personas/       the persona the prompt is built from
 deploy/         Dockerfile, compose, key proxy, SearXNG settings, env examples
-desktop/        the launcher: one binary that runs the stack on a personal machine
+desktop/        the launcher: one binary that runs the stack on a personal machine — the setup
+                page, the app window, the portable runtime native mode downloads into data/runtime/
 tests/          unit and integration tests; tests/browser drives the built app with a real mouse
 docs/           design and decisions (2026-09-06, historical), screenshots, diagrams
 ```
@@ -469,6 +549,10 @@ max_run_tokens = 0           # cap on tokens per run, every call counted (0 = no
 
 [tools.exec]
 max_output_chars = 60000     # the most one tool call returns to the model
+sandbox = "off"              # off | workspace — bubblewrap: the filesystem read-only except this
+                             # session's own directory, a private /tmp, its own PID namespace.
+                             # Defaults to "workspace" on a native install that has bwrap, "off"
+                             # where a container is the boundary instead.
 
 [tools.results]              # what happens to results the agent has moved past
 fresh_count = 6              # the newest results, always shown whole
@@ -490,6 +574,10 @@ run_finished = ""
 
 [compaction]
 preset = ""                  # a cheaper preset for the summariser; empty = the session's model
+
+[self_change]
+mode = "auto"                # auto | off | local | server — see Self-development above.
+                             # auto resolves at startup from the prerequisites actually present
 
 [board]
 wip_limit = 3                # tasks one agent (with its subagents) may hold in 'doing' at once

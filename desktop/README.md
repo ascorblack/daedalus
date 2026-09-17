@@ -7,10 +7,15 @@ needs on a page of its own, writes the environment files, and then runs the agen
 **The first run asks which**, and the choice is written next to the data and never asked again
 (`--mode docker` / `--mode native`, or `DAEDALUS_MODE`, answers it from a script):
 
-| | What it needs | What you get |
+| | Native | Docker |
 |---|---|---|
-| **Docker** | Docker Desktop (macOS, Windows) or Docker Engine with the compose plugin | The agent in a container with its own filesystem and its own network. A command that goes wrong stops at the container's edge. ~480 MB of images on top of Docker itself. |
-| **Native** | nothing | The agent as a process on your machine, out of a private folder of pinned binaries the launcher downloads and checksums: ~115 MB to fetch on Linux, ~1 s from launch to the app. **No container boundary** — `Exec` runs as you. |
+| **What it needs** | nothing | Docker Desktop (macOS, Windows) or Docker Engine with the compose plugin |
+| **What runs the agent** | a process under the launcher, out of a private folder of pinned, checksummed binaries | a container from one published image, with its own filesystem and its own network |
+| **First run downloads** | **103 MB** measured on Linux x86-64; ~96 MB on macOS (CPython is half the size there), ~148 MB on Windows (MinGit) | **114 MB** to pull the runtime image — 478 MB once unpacked — plus Docker itself, which is a ~600 MB application with a multi-gigabyte VM disk behind it |
+| **On disk** | 245 MB of `data/runtime/` (73 MB of it a wheel cache you can delete), 390 MB for the whole installation | ~480 MB of image, plus the volumes |
+| **Start to app** | 26 s from an empty folder, **4.3 s** warm | the image pull, then seconds; Docker Desktop itself must be up first |
+| **Browser skills** | `daedalus-desktop install browser` — ~100 MB into `data/runtime/browsers/` | the `:browser` tag of the same image, +~550 MB, sharing every layer below the last |
+| **Isolation** | **no container boundary** — `Exec` runs as you, behind the policy rules ([the isolation, honestly](#the-isolation-honestly)) | a command that goes wrong stops at the container's edge |
 
 Neither is the "real" one. Docker buys a wall; native buys weight and speed, and
 [Native mode](#native-mode) says exactly what the wall was doing and what still stands without it.
@@ -263,7 +268,7 @@ read gets no notifications and says so; nothing else changes.
 | `daedalus-desktop update` | move both checkouts to what is published, refresh the images, restart |
 | `daedalus-desktop open` | open the app in the browser |
 | `daedalus-desktop pair` | print a fresh pairing link for signing in to the app |
-| `daedalus-desktop uninstall [--keep-data]` | remove the containers, networks and volumes |
+| `daedalus-desktop uninstall [--keep-data]` | remove the containers, networks and volumes (Docker mode; see [Uninstalling](#uninstalling)) |
 
 Flags: `--data DIR` (default `./data`), `--port N` for the launcher's own page (default 8770),
 `--setup` to ask the questions again on a start, `--version`.
@@ -369,17 +374,33 @@ public-text gate. `daedalus doctor` prints the same sentence.
 What is gone is the wall behind them:
 
 - **`Exec` runs as you.** A command the agent runs has your files and your credentials, and the only
-  things between it and them are the rules above. On Linux bubblewrap still confines it when
-  `tools.exec.sandbox = workspace`, and that is worth switching on; on macOS and Windows there is no
+  things between it and them are the rules above. On Linux bubblewrap still confines it, and on a
+  native install with `bwrap` on the machine `tools.exec.sandbox` **defaults to `workspace`** rather
+  than to `off` — there is no container here to be the wall instead. On macOS and Windows there is no
   bubblewrap, and the doctor says so rather than reporting it as missing software.
 - **Key isolation is weaker, but not gone.** The key proxy is still a separate process, still the
   only one that holds a provider key, still bound to `127.0.0.1` and nothing else, and the key file
   is still `0600` outside every folder the agent works in — the agent process never holds a key. But
-  a shell the agent starts runs as the same user and could read that file. The residual risk is
-  real; the mitigation is the policy rule that denies reading it.
+  a shell the agent starts runs as the same user, and a file mode protects nothing from a process
+  that owns the file. So the rule below names it instead.
 - **The ports are the machine's.** `SERVICES_PUBLIC_HOST` is `127.0.0.1` and a service a session
   starts binds there, so nothing is published to the network — but it is the same loopback interface
-  every other program of yours can reach.
+  every other program of yours can reach. The supervisor's own command channel is a socket file with
+  an owner everywhere but Windows, where it has to be a loopback port: there it asks for a secret it
+  keeps in `data/state/supervisor.token`, because a port has no owner and a file does.
+
+**Two rules exist only here**, and both are off in Docker mode, where the directories they name are
+not in the container at all:
+
+| | |
+|---|---|
+| **The installation's own files are refused, to read as well as to write** | `data/daedalus-secrets/` (the provider keys), `data/state/daedalus.sqlite` and its journals, `data/state/supervisor.token`, the launcher's executable and the whole of `data/runtime/`. Through `Exec` too — `cat`, `cp`, a redirection, a `tar -C` — because the rule reads the paths in the command, not only the tool that was called. A denial is final: no approval lifts it. |
+| **A path in your home folder, outside every project, asks** | Anything under `$HOME` that is not a project root, a session workspace, one of the two checkouts or part of the installation is a question with an approval key. *Allow once* in the app, or `/allow <key>` in the chat, lets that exact call through one time. |
+
+Everything else is where it was: the egress allowlist still escalates a host it does not know, the
+spend caps are still the supervisor's and not the agent's to edit, and `GOVERNANCE.md` is still the
+one file the agent can read and cannot change. `daedalus doctor` prints the isolation in one line,
+and so does the launcher's status page.
 
 If any of that matters more than 500 MB and a second of start-up, use Docker mode. That is the
 whole of the trade, and the setup page says it in those terms.
@@ -423,7 +444,11 @@ limitation, not a choice, and it is stated here rather than hidden.
 
 ## Disk
 
-In Docker mode, one image, and the key proxy is a second container from it:
+In **native mode** there are no images at all: `data/runtime/` is 245 MB after a first start (73 MB
+of it uv's wheel cache, safe to delete at any time) and the whole installation is about 390 MB with
+both checkouts in it. `install node` adds 58 MB of download, `install browser` about 100 MB.
+
+In **Docker mode**, one image, and the key proxy is a second container from it:
 
 | Image | Size on disk | Why |
 |---|---|---|
@@ -445,6 +470,23 @@ What is not in it, and what it costs to add:
 The image is published for `linux/amd64` and `linux/arm64`, so Apple Silicon pulls it like
 everything else. If a pull fails anyway the launcher builds locally instead — a few minutes the
 first time, and everything after it is the same.
+
+## Uninstalling
+
+**Delete the folder.** Everything the installation owns is inside it — the checkouts, the database,
+the sessions, the workspaces, the keys, and in native mode the runtime as well — and nothing was put
+anywhere else: no package manager was run, no PATH was changed, nothing was installed system-wide.
+
+Three things live outside it, all of them small, all of them optional to clean up:
+
+| | Where | Remove it with |
+|---|---|---|
+| Docker images and volumes (Docker mode only) | Docker's own storage | `daedalus-desktop uninstall` before deleting the folder — it takes the containers, networks and volumes; then `docker image prune -a` for the images |
+| the `daedalus://` link registration | `~/.local/share/applications/daedalus-desktop.desktop` on Linux, `HKCU\Software\Classes\daedalus` on Windows, Launch Services on macOS (which forgets a bundle that is gone) | delete the file or the key; on macOS nothing to do |
+| a browser profile, if the app was shown in one | `data/browser-profile/` | inside the folder already |
+
+Your projects are **not** in the folder and are not touched: a project is a folder of your own that
+the installation only ever pointed at.
 
 ## Building it yourself
 

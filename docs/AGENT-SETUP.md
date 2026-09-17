@@ -69,12 +69,26 @@ Fill `../daedalus-secrets/keyproxy.env` with the provider keys (`DEEPSEEK_API_KE
 Start:
 
 ```bash
-# with Telegram
-docker compose -f deploy/compose.yaml --env-file .env --profile telegram up -d --build
 # without Telegram
 docker compose -f deploy/compose.yaml --env-file .env up -d --build
-# a server that develops itself also needs the rebuilder: add --profile selfdev
+# with Telegram
+docker compose -f deploy/compose.yaml --env-file .env --profile telegram up -d --build
 ```
+
+That is **one image and two containers from it**: the agent, and the key proxy that holds the
+provider keys. Everything else is a profile, and none of them is on unless you name it. Add only the
+ones the operator's answers in section 1 asked for:
+
+| `--profile` | What it starts | Cost | Add it when |
+|---|---|---|---|
+| `telegram` | the local Bot API server — files up to 2 GB instead of Telegram's 20 MB | ~66 MB | they want Telegram **and** gave you `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` |
+| `search` | a self-hosted SearXNG | ~382 MB | they asked for one. Without it `WebSearch` goes to DuckDuckGo directly and SearXNG is only the fallback it cannot reach |
+| `selfdev` | the rebuilder, the only container that can reach Docker | ~237 MB | self-development is to resolve to `server` (section 7), which needs a way to build a new image |
+
+The browser skills — driving a page with Playwright, drawing with Pillow — are not in the default
+image: they are two thirds of one and most sessions never open a page. A server that needs them runs
+the `:browser` tag of the same image instead (`ghcr.io/ascorblack/daedalus:browser`); without it the
+skills say they are not installed rather than writing scripts that cannot run.
 
 The first build takes a few minutes (the Python environment and the Mini App). Check:
 
@@ -224,6 +238,19 @@ docker exec deploy-daedalus-1 /srv/venv/bin/python -m daedalus db vacuum
 
 It rewrites the file, hands the free pages back, and puts it on incremental auto-vacuum so the bot's
 own maintenance pass can do it from then on. The bot may be running.
+
+## 7a. What the doctor tells you
+
+`docker exec deploy-daedalus-1 /srv/venv/bin/python -m daedalus doctor` is the one command that says
+whether this installation is finished. The lines worth reading back to the operator:
+
+| line | what it means |
+|---|---|
+| `default model` | fails with "no model is configured; nothing can run yet" until section 3a is done. This is the expected state of a fresh install, not a fault |
+| `self-development` | the resolved mode and the reason for it; a mode set by hand that is missing a prerequisite is a warning naming what to provide |
+| `browser tools` | whether this image carries a headless Chromium. "not installed in this image" is correct for `:latest` |
+| `isolation` | on a server, nothing: the agent is in a container. It appears only on a native desktop installation, where it says there is no container boundary |
+| `container image`, `image rebuild channel`, `published ports` | the container-only checks. On a native installation each says "not applicable (native)" rather than being left out |
 
 ## 8. What to report back
 
