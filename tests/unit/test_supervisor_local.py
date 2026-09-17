@@ -452,3 +452,20 @@ async def test_a_first_revision_that_cannot_boot_says_so_rather_than_guessing(mo
         await supervisor._note_failed_boot()
     assert not any("reset" in c for c in calls)
     assert sup.last_change()["status"] == "no_rollback"
+
+
+def test_the_sync_holds_the_environment_to_the_image_extras(monkeypatch) -> None:
+    sup = _load()
+    monkeypatch.setenv("DAEDALUS_VENV_EXTRAS", "speech,browser")
+    assert sup.sync_argv() == ["uv", "sync", "--frozen", "--inexact", "--extra", "speech", "--extra", "browser"]
+    monkeypatch.setenv("DAEDALUS_VENV_EXTRAS", "")
+    assert sup.sync_argv() == ["uv", "sync", "--frozen", "--inexact"]
+
+
+def test_a_new_extra_on_the_image_stales_the_stamp(tmp_path: Path, monkeypatch) -> None:
+    sup = _load()
+    (tmp_path / "pyproject.toml").write_text("x")
+    monkeypatch.setenv("DAEDALUS_VENV_EXTRAS", "")
+    before = sup.dependency_digest(tmp_path)
+    monkeypatch.setenv("DAEDALUS_VENV_EXTRAS", "speech")
+    assert sup.dependency_digest(tmp_path) != before

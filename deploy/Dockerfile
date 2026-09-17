@@ -93,6 +93,7 @@ COPY deploy/keyproxy /opt/keyproxy
 
 WORKDIR /srv/daedalus
 # The virtualenv lives outside the mounted checkout so host and container never share one.
+ENV DAEDALUS_VENV_EXTRAS=speech
 ENV DAEDALUS_BOT_REPO=/srv/daedalus \
     DAEDALUS_CORE_REPO=/srv/protocore-exp \
     DAEDALUS_STATE=/srv/state \
@@ -110,6 +111,7 @@ ENTRYPOINT ["python3", "/opt/launcher/supervisor.py"]
 # outside the virtualenv so a re-sync of the environment never re-downloads it.
 FROM runtime AS browser
 
+ENV DAEDALUS_VENV_EXTRAS=speech,browser
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 COPY --from=venv /build/requirements-browser.txt /tmp/requirements-browser.txt
 COPY deploy/apt-packages-browser.txt /tmp/apt-packages-browser.txt

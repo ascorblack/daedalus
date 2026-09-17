@@ -386,7 +386,26 @@ def dependency_digest(repo: Path) -> str:
     for name in DEPENDENCY_FILES:
         path = repo / name
         digest.update(path.read_bytes() if path.exists() else b"")
+    digest.update(",".join(image_extras()).encode())
     return digest.hexdigest()
+
+
+def image_extras() -> list[str]:
+    """The optional extras the image was built with, so a sync holds the environment to the same shape.
+
+    The environment lives on a volume that outlives the image: without this, a new image that carries a
+    new extra (the speech models' runtime, say) would install it into a venv nobody runs, while the sync
+    of the venv in use — asked only for the lock's core set — would never put it there.
+    """
+    raw = os.environ.get("DAEDALUS_VENV_EXTRAS", "")
+    return [name for name in (part.strip() for part in raw.split(",")) if name]
+
+
+def sync_argv() -> list[str]:
+    argv = ["uv", "sync", "--frozen", "--inexact"]
+    for extra in image_extras():
+        argv += ["--extra", extra]
+    return argv
 
 
 def sync_venv_if_stale(repo: Path, *, venv: Path | None = None) -> bool:
@@ -407,7 +426,7 @@ def sync_venv_if_stale(repo: Path, *, venv: Path | None = None) -> bool:
     # --inexact: the lock is what the environment must *hold*, not the whole of what it may hold. An
     # exact sync removes everything the image installed beside it — the headless browser and its
     # bindings on the browser image — from a running installation, and only a new image puts them back.
-    code, out = run(["uv", "sync", "--frozen", "--inexact"], cwd=repo, timeout=1200)
+    code, out = run(sync_argv(), cwd=repo, timeout=1200)
     if code != 0:
         log(f"the sync failed; starting on the environment that is there\n{out}")
         return True
@@ -485,7 +504,7 @@ def install_from_candidate(repo: Path) -> tuple[bool, str]:
 
     No development extra and no exact reconciliation: the bot runs no tests, and what the image installed
     beside the lock is not this sync's to remove."""
-    code, out = run(["uv", "sync", "--frozen", "--inexact"], cwd=repo, timeout=1200)
+    code, out = run(sync_argv(), cwd=repo, timeout=1200)
     if code != 0:
         return False, out
     built = candidate_dir(repo) / "miniapp" / "dist"
