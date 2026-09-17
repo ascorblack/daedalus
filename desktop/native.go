@@ -263,10 +263,34 @@ type Native struct {
 	supervisor *Process
 	keyproxy   *Process
 	git        string
+
+	// What the progress page is told: which piece of a start this is, and how far through the one
+	// download whose size is known in advance. Both are optional — the command line has no page to
+	// draw and passes neither.
+	stage      func(Stage)
+	downloaded func(done, total int64)
 }
 
 func NewNative(p Paths, log func(string, ...any)) *Native {
 	return &Native{paths: p, log: log}
+}
+
+// OnProgress is how the launcher's page follows a start. Without it nothing here changes: the
+// reports are made through these two and both are checked before they are called.
+func (n *Native) OnProgress(stage func(Stage), downloaded func(done, total int64)) {
+	n.stage, n.downloaded = stage, downloaded
+}
+
+func (n *Native) enter(stage Stage) {
+	if n.stage != nil {
+		n.stage(stage)
+	}
+}
+
+func (n *Native) progress(done, total int64) {
+	if n.downloaded != nil {
+		n.downloaded(done, total)
+	}
 }
 
 // venvPython is the interpreter everything native runs through: the supervisor, the key proxy and
@@ -295,36 +319,54 @@ func (n *Native) Ensure(ctx context.Context) error {
 	if err := n.paths.EnsureNativeDirs(); err != nil {
 		return err
 	}
-	var downloaded int64
+	n.enter(StageRuntime)
 	uv, err := pick(uvDownloads, runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return fmt.Errorf("uv: %w", err)
 	}
+	rg, err := pick(ripgrepDownloads, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return fmt.Errorf("ripgrep: %w", err)
+	}
+	// What is still to be fetched, before anything is fetched. The archives are pinned, so their
+	// sizes are known here rather than guessed from a Content-Length that may not arrive — and a
+	// warm start, which downloads nothing, reports a total of zero and gets no bar at all.
+	var downloaded, total int64
+	for _, d := range []download{uv, rg} {
+		if !n.paths.installed(d) {
+			total += d.size
+		}
+	}
+	if git, err := pick(gitDownloads, runtime.GOOS, runtime.GOARCH); err == nil && !n.paths.installed(git) {
+		total += git.size
+	}
+	n.progress(0, total)
 	got, err := installTool(ctx, n.paths, uv, n.paths.RuntimeUV, n.log)
 	if err != nil {
 		return err
 	}
 	downloaded += got
-	rg, err := pick(ripgrepDownloads, runtime.GOOS, runtime.GOARCH)
-	if err != nil {
-		return fmt.Errorf("ripgrep: %w", err)
-	}
+	n.progress(downloaded, total)
 	got, err = installTool(ctx, n.paths, rg, n.paths.RuntimeBin, n.log)
 	if err != nil {
 		return err
 	}
 	downloaded += got
+	n.progress(downloaded, total)
 	gitPath, got, err := EnsureGit(ctx, n.paths, n.log)
 	if err != nil {
 		return err
 	}
 	n.git, downloaded = gitPath, downloaded+got
+	n.progress(downloaded, total)
 	if err := n.ensurePython(ctx); err != nil {
 		return err
 	}
+	n.enter(StageCheckouts)
 	if err := EnsureRepos(ctx, n.paths, n.gitRunner(), n.log); err != nil {
 		return err
 	}
+	n.enter(StageEnvironment)
 	if err := n.syncVenv(ctx); err != nil {
 		return err
 	}
@@ -592,6 +634,7 @@ func (n *Native) Start(ctx context.Context) error {
 	}
 	n.keyproxy.Start(ctx)
 	n.supervisor.Start(ctx)
+	n.enter(StageStart)
 	n.log("waiting for the app to answer")
 	return WaitReadyNative(ctx, APIPort(n.paths), nativeReadyTimeout)
 }

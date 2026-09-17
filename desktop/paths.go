@@ -16,6 +16,7 @@ import (
 //	<data>/.env                           the values compose interpolates
 //	<data>/compose.desktop.yaml           the override that points at the published images
 //	<data>/mode                           docker or native, chosen once and remembered
+//	<data>/lang                           en or ru, the language the launcher's own pages speak
 //
 // Native mode adds the pieces a container would otherwise have held. The database, the workspaces
 // and the runtime are files under the same folder rather than Docker volumes, which is what makes
@@ -42,6 +43,7 @@ type Paths struct {
 	Compose     string
 	Override    string
 	Mode        string
+	Lang        string
 
 	Runtime         string
 	RuntimeUV       string
@@ -86,6 +88,7 @@ func NewPaths(dataDir string) (Paths, error) {
 		Compose:     filepath.Join(bot, "deploy", "compose.yaml"),
 		Override:    filepath.Join(abs, "compose.desktop.yaml"),
 		Mode:        filepath.Join(abs, "mode"),
+		Lang:        filepath.Join(abs, "lang"),
 
 		Runtime:         runtimeDir,
 		RuntimeUV:       filepath.Join(runtimeDir, "uv"),

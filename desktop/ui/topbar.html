@@ -1,0 +1,11 @@
+{{define "topbar"}}<header class="top">
+  <span class="brand">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 3 8v8l9 5 9-5V8Z" /><path d="M12 12v9" /><path d="m3 8 9 4 9-4" /></svg>
+    Daedalus
+  </span>
+  <span class="spacer"></span>
+  <div class="langs" role="group">
+    <button type="button" data-lang="en" aria-pressed="{{if eq .Lang "en"}}true{{else}}false{{end}}">EN</button>
+    <button type="button" data-lang="ru" aria-pressed="{{if eq .Lang "ru"}}true{{else}}false{{end}}">RU</button>
+  </div>
+</header>{{end}}

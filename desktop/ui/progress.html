@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="{{.Lang}}">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Daedalus</title>
+<meta name="csrf" content="{{.CSRF}}" />
+<link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body data-page="progress" data-lang="{{.Lang}}">
+{{template "topbar" .}}
+
+<main class="centre">
+  <section class="card rise" id="working">
+    <h1>{{.T "progress.title"}}</h1>
+    <p class="lead">{{.T "progress.lead"}}</p>
+    <div class="track indeterminate" id="track"><span></span></div>
+    <div class="list" id="steps">
+      {{range .Steps}}<div class="row{{if .Done}} done{{end}}{{if .Now}} now{{end}}" data-stage="{{.Stage}}"><span class="dot"></span><span>{{.Label}}</span></div>
+      {{end}}
+    </div>
+    <p class="live" id="live"></p>
+    <div class="bar" id="idle" hidden>
+      <button class="primary" data-action="start">{{.T "status.start"}}</button>
+    </div>
+  </section>
+
+  <section class="card trouble rise" id="trouble" hidden>
+    <h2>{{.T "progress.error.title"}}</h2>
+    <p class="what" id="what"></p>
+    <div class="bar">
+      <button class="primary" data-action="start">{{.T "progress.error.retry"}}</button>
+      <a class="button" href="/setup">{{.T "progress.error.setup"}}</a>
+    </div>
+    <details class="detail">
+      <summary>{{.T "progress.error.details"}}</summary>
+      <div class="body"><pre id="trouble-log"></pre></div>
+    </details>
+  </section>
+</main>
+<script type="application/json" id="messages">{{.Messages}}</script>
+<script src="/assets/app.js"></script>
+</body>
+</html>

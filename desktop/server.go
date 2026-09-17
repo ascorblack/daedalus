@@ -80,6 +80,9 @@ func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/setup", s.handleSetup)
+	mux.HandleFunc("/progress", s.handleProgress)
+	mux.HandleFunc("/status", s.handleStatusPage)
+	mux.HandleFunc("/api/lang", s.handleLang)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/action/", s.handleAction)
 	mux.HandleFunc("/focus", s.handleFocus)
@@ -207,7 +210,7 @@ func refuse(w http.ResponseWriter) {
 type pageData struct {
 	Setup         Setup
 	Status        Status
-	DockerMissing string
+	DockerMissing bool
 	LauncherURL   string
 	CSRF          string
 	Windowed      bool
@@ -216,8 +219,43 @@ type pageData struct {
 	Mode      string
 	Suggested string
 	Native    bool
+
+	// Lang is the language this page is written in, and Messages is the same table the script on
+	// the page reads, so a line the browser writes matches the ones Go wrote around it.
+	Lang     Lang
+	Messages template.JS
+	// Steps is the start, drawn out, with the stage each one belongs to. The page renders it from
+	// here rather than from the script, so it reads correctly before anything has answered.
+	Steps []stepLine
 }
 
+// stepLine is one row of the progress page's list.
+type stepLine struct {
+	Stage string
+	Label string
+	Done  bool
+	Now   bool
+}
+
+// T is how a template asks for a line. Every sentence on every page comes through here.
+func (d pageData) T(key string) string { return Translate(d.Lang, key) }
+
+// KeyField is the provider key already on file for one of the three providers, so the field the
+// operator opens is the one they last wrote rather than an empty box.
+func (d pageData) KeyField(provider string) string {
+	switch provider {
+	case "deepseek":
+		return d.Setup.DeepseekKey
+	case "openrouter":
+		return d.Setup.OpenrouterKey
+	default:
+		return d.Setup.OpencodeKey
+	}
+}
+
+// handleIndex sends the operator to whichever of the three pages this installation is at: the
+// questions when there are questions, the progress while it is being brought up or has never been
+// brought up, and the status once it is running.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -227,7 +265,48 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/setup", http.StatusSeeOther)
 		return
 	}
-	s.render(w, r, "status.html")
+	status := s.app.Status(r.Context())
+	if status.Busy != "" || !status.Repos {
+		s.render(w, r, "progress.html", status)
+		return
+	}
+	s.render(w, r, "status.html", status)
+}
+
+// handleProgress is the waiting page on its own address. The page decides for itself when the wait
+// is over and leaves for the status page; asking for it directly shows where a start has got to.
+func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
+	s.render(w, r, "progress.html", s.app.Status(r.Context()))
+}
+
+// handleStatusPage is the status page on its own address, which is where the progress page sends
+// the operator when the installation is up.
+func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
+	s.render(w, r, "status.html", s.app.Status(r.Context()))
+}
+
+// handleLang records the language the operator picked in the corner of any launcher page. It is a
+// change to the installation, so it carries the token like every other one, and it is written
+// rather than kept in the session: the next start opens in the same language.
+func (s *Server) handleLang(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "post a language", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.hasToken(r.Header.Get(csrfHeader)) {
+		refuse(w)
+		return
+	}
+	var body struct {
+		Lang string `json:"lang"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := StoreLang(s.app.paths, ParseLang(body.Lang)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"saved":true}`))
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
@@ -239,6 +318,14 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		if !s.hasToken(r.PostFormValue("csrf")) {
 			refuse(w)
 			return
+		}
+		if lang := r.PostFormValue("lang"); lang != "" {
+			// The language travels with the form as well as with the switch, so a first run that
+			// was answered in Russian and never touched the switch is remembered as Russian.
+			if err := StoreLang(s.app.paths, ParseLang(lang)); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		// The mode is stored beside the configuration rather than in it: it decides how the
 		// launcher starts things, which is the launcher's business and not the agent's.
@@ -269,7 +356,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	s.render(w, r, "setup.html")
+	s.render(w, r, "setup.html", s.app.Status(r.Context()))
 }
 
 // clearedFields turns the ticked "remove" boxes into the set WriteSetup reads. An untouched field
@@ -282,32 +369,61 @@ func clearedFields(values []string) map[string]bool {
 	return out
 }
 
-func (s *Server) render(w http.ResponseWriter, r *http.Request, name string) {
-	status := s.app.Status(r.Context())
-	data := pageData{Setup: CurrentSetup(s.app.paths), Status: status, LauncherURL: s.URL(), CSRF: s.csrf, Windowed: s.windowed, Mode: status.Mode, Native: s.app.Native()}
+func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, status Status) {
+	lang := LangFor(s.app.paths, r.Header.Get("Accept-Language"))
+	data := pageData{
+		Setup:       CurrentSetup(s.app.paths),
+		Status:      status,
+		LauncherURL: s.URL(),
+		CSRF:        s.csrf,
+		Windowed:    s.windowed,
+		Mode:        status.Mode,
+		Native:      s.app.Native(),
+		Lang:        lang,
+		Messages:    template.JS(MessagesJSON(lang)),
+		Steps:       stepLines(lang, status),
+	}
 	data.Suggested = status.Mode
 	if data.Suggested == "" {
 		data.Suggested = string(SuggestMode(r.Context()))
 	}
 	// Docker's absence is only news to an installation that means to use it.
-	if status.Docker == "" && !s.app.Native() {
-		data.DockerMissing = dockerMissing
-	}
+	data.DockerMissing = status.Docker == "" && !s.app.Native()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := uiTemplates.ExecuteTemplate(w, name, data); err != nil {
 		fmt.Println("the page could not be rendered:", err)
 	}
 }
 
+// stepLines turns the stage list into the rows the progress page draws, with everything before the
+// current stage already ticked. A start that has not begun has no current stage and no ticks.
+func stepLines(lang Lang, status Status) []stepLine {
+	current := -1
+	for i, stage := range status.Steps {
+		if stage == status.Stage {
+			current = i
+		}
+	}
+	lines := make([]stepLine, 0, len(status.Steps))
+	for i, stage := range status.Steps {
+		lines = append(lines, stepLine{
+			Stage: stage,
+			Label: Translate(lang, stageKey(Stage(stage))),
+			Done:  current >= 0 && i < current,
+			Now:   i == current,
+		})
+	}
+	return lines
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := s.app.Status(r.Context())
+	// Whether Docker is missing, not what to say about it: the sentence is on the page, in the
+	// page's own language.
 	body := struct {
 		Status
-		DockerMissing string `json:"docker_missing"`
-	}{Status: status}
-	if status.Docker == "" && !s.app.Native() {
-		body.DockerMissing = dockerMissing
-	}
+		DockerMissing bool `json:"docker_missing"`
+	}{Status: status, DockerMissing: status.Docker == "" && !s.app.Native()}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(body)
 }
