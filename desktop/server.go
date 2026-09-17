@@ -140,7 +140,7 @@ func (s *Server) handleFocus(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	target := ""
 	if IsDeepLink(body.URL) {
-		target = DeepLinkTarget(body.URL, AppURL(APIPort(s.app.paths)))
+		target = DeepLinkTarget(body.URL, AppURL(APIPort(s.app.paths), s.app.Lang()))
 	}
 	if s.focus != nil {
 		// The asking launcher is waiting for an answer, and showing a window is the running

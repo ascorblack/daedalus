@@ -68,6 +68,22 @@ var messages = map[Lang]map[string]string{
 		"step.environment": "Building the environment",
 		"step.start":       "Starting",
 
+		// The one line that moves while a start runs. It says what the launcher is at in the
+		// operator's language; the machine's own commentary stays under it, where it reads as the
+		// log it is.
+		"live.runtime":     "Downloading the tools it runs on. This happens once.",
+		"live.images":      "Fetching the container images — the long part of a first run.",
+		"live.checkouts":   "Getting the agent's own code.",
+		"live.environment": "Building the environment. The longest step, and only the first time.",
+		"live.start":       "Bringing everything up.",
+
+		// The failures that actually happen on a first run, answered rather than reported. What
+		// the program itself said is kept on the page, behind "What happened".
+		"trouble.network": "This machine could not reach the internet. Check the connection — a VPN or a company proxy is the usual reason — and try again.",
+		"trouble.docker":  "Docker is not answering. Start Docker Desktop, wait until it says it is running, and try again. Or set this up to run on this machine instead.",
+		"trouble.port":    "A port Daedalus needs is taken by something else on this machine. Close whatever is using it, or set a different port in the configuration, and try again.",
+		"trouble.disk":    "This machine has run out of disk space. Free some up and try again — a first start needs a couple of gigabytes.",
+
 		"status.title":           "Daedalus",
 		"status.mode.native":     "runs on this machine",
 		"status.mode.docker":     "runs in a container",
@@ -155,6 +171,17 @@ var messages = map[Lang]map[string]string{
 		"step.checkouts":   "Загрузка кода",
 		"step.environment": "Сборка окружения",
 		"step.start":       "Запуск",
+
+		"live.runtime":     "Загружаем то, на чём он работает. Это бывает один раз.",
+		"live.images":      "Загружаем образы контейнеров — самая долгая часть первого запуска.",
+		"live.checkouts":   "Загружаем код самого агента.",
+		"live.environment": "Собираем окружение. Самый долгий шаг, и только в первый раз.",
+		"live.start":       "Поднимаем всё остальное.",
+
+		"trouble.network": "С этого компьютера не получилось выйти в интернет. Проверьте соединение — чаще всего мешает VPN или корпоративный прокси — и попробуйте снова.",
+		"trouble.docker":  "Docker не отвечает. Запустите Docker Desktop, дождитесь, пока он скажет, что работает, и попробуйте снова. Или выберите запуск прямо на этом компьютере.",
+		"trouble.port":    "Порт, который нужен Daedalus, занят другой программой. Закройте её или укажите другой порт в настройках и попробуйте снова.",
+		"trouble.disk":    "На диске закончилось место. Освободите его и попробуйте снова — первому запуску нужна пара гигабайт.",
 
 		"status.title":           "Daedalus",
 		"status.mode.native":     "работает на этом компьютере",

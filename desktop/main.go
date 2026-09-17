@@ -302,7 +302,7 @@ func bringUp(ctx context.Context, app *App, server *Server, surface *Surface, op
 	if opts.link != "" {
 		// Opened by following a link, what the operator asked for is the thing at the end of it,
 		// not the app's front page.
-		url = DeepLinkTarget(opts.link, AppURL(APIPort(app.paths)))
+		url = DeepLinkTarget(opts.link, AppURL(APIPort(app.paths), app.Lang()))
 	}
 	fmt.Println("opening", url)
 	surface.Show(ctx, url)

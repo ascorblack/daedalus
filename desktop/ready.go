@@ -26,8 +26,14 @@ const pairingFile = "/srv/state/pairing-url"
 // an installed second copy of the two checkouts the image deliberately mounts instead.
 const containerPython = "/srv/venv/bin/python"
 
-// AppURL is the address of the app on this machine.
-func AppURL(port string) string { return "http://127.0.0.1:" + port + "/app/" }
+// AppURL is the address of the app on this machine, in the language the launcher is speaking. The
+// app resolves its own language from the reader's browser when nobody says otherwise, which on a
+// machine whose browser is set to one language and whose operator chose the other is the wrong
+// answer — so the launcher says. The app remembers what the parameter named and drops it from the
+// address, so this settles the question once rather than on every visit.
+func AppURL(port string, lang Lang) string {
+	return "http://127.0.0.1:" + port + "/app/?lang=" + string(lang)
+}
 
 // WaitReady polls the app until it answers 200. A redirect is followed, so /app answering with the
 // index page counts. The last status seen goes into the error: an API that answers 404 means the
