@@ -57,8 +57,10 @@ from daedalus.security import redact
 from daedalus.speech import catalog as speech_catalog
 from daedalus.speech import models as speech_models
 from daedalus.speech import service as speech_service
+from daedalus.speech import tts_catalog
 from daedalus.speech.engine import SAMPLE_RATE, SpeechError, clamp_rate
 from daedalus.speech.service import recogniser_available, transcribe_recording
+from daedalus.speech.tts_engine import MAX_SPEED, MIN_SPEED, TtsError
 from daedalus.stores import pairing, passkeys
 from daedalus.stores.projects import ProjectError, ProjectSettings, normalise_root
 from daedalus.tools import websearch
@@ -434,6 +436,17 @@ class SttSelectBody(BaseModel):
     model: str | None = None
     """A catalog id, or "" to stop using a local model."""
     language: str | None = None
+    threads: int | None = Field(default=None, ge=1, le=16)
+
+
+class TtsSelectBody(BaseModel):
+    """Choosing a local voice. Every field is optional; what is sent is what changes."""
+
+    voice: str | None = None
+    """A catalog id, or "" to stop speaking here and go back to the endpoint and the browser."""
+    speaker: str | None = None
+    """A named speaker inside a multi-speaker voice; ignored by the single-voice ones."""
+    speed: float | None = Field(default=None, ge=MIN_SPEED, le=MAX_SPEED)
     threads: int | None = Field(default=None, ge=1, le=16)
 
 
@@ -1401,6 +1414,17 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         state = await extension.state()
         # Which recogniser the page should use is decided here rather than in the extension: the
         # extension knows about endpoints, and a local model is not one.
+        spoken = app.tts.state()
+        tts = dict(state.get("tts") or {})
+        tts["local"] = spoken
+        # Which of the three actually speaks, said once here so the page does not have to work it out
+        # from three flags. The order is the same one `voice_tts` enforces below.
+        if spoken["active"]:
+            tts.update(configured=True, reason="", kind="local", voice=spoken["label"], state=spoken["state"])
+        else:
+            tts["kind"] = "endpoint" if tts.get("configured") else "browser"
+            tts["state"] = "error" if spoken["voice"] and not spoken["active"] else "ready"
+        state["tts"] = tts
         local = app.speech.state()
         stt = dict(state.get("stt") or {})
         stt["local"] = local
@@ -1486,15 +1510,29 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return {"session_id": await voice().new_session()}
 
     @api.post("/api/voice/tts")
-    async def voice_tts(body: VoiceSpeakBody, _: dict[str, Any] = Depends(auth)) -> StreamingResponse:
-        """One sentence read aloud by the configured endpoint; 404 tells the page to use the browser's own voice."""
+    async def voice_tts(body: VoiceSpeakBody, _: dict[str, Any] = Depends(auth)) -> Response:
+        """One sentence read aloud: a downloaded voice, then the configured endpoint, then 404.
+
+        The 404 is the page's signal to use the browser's own synthesiser, so it is an answer rather
+        than a failure and stays a 404 whatever the reason nothing here speaks.
+        """
         extension = voice()
         if len(body.text) > VOICE_TTS_MAX_CHARS:
             raise HTTPException(413, f"a sentence may be up to {VOICE_TTS_MAX_CHARS} characters")
-        if not tts_configured(app.config.voice.tts):
-            raise HTTPException(404, "no speech endpoint is configured; the browser speaks this one itself")
         if not body.text.strip():
             raise HTTPException(400, "nothing to say")
+        # A voice that was downloaded here comes first: the operator chose it, it costs nothing per
+        # sentence and it works with the network down. A local voice that fails is *not* silently
+        # replaced by the endpoint — an endpoint is metered and may not be configured at all, and a
+        # failure hidden behind a fallback is a failure nobody fixes.
+        if app.tts.available():
+            try:
+                clip, media_type = await app.tts.audio(body.text.strip())
+            except TtsError as exc:
+                raise HTTPException(503, f"the local voice could not speak this: {exc}") from exc
+            return Response(clip, media_type=media_type)
+        if not tts_configured(app.config.voice.tts):
+            raise HTTPException(404, "nothing here speaks; the browser says this one itself")
         try:
             chunks, media_type = await extension.speech(body.text.strip())
         except RuntimeError as exc:
@@ -1502,6 +1540,124 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"the speech endpoint could not be reached: {type(exc).__name__}") from exc
         return StreamingResponse(chunks, media_type=media_type)
+
+    # -- local speech synthesis --------------------------------------------------------------
+    #
+    # The same shape as the recognition endpoints below, and deliberately so: a catalog, a download
+    # that reports itself over SSE, a choice that is one line of configuration, and a delete. The one
+    # thing recognition has no use for is `sample` — nobody picks a voice from a table of numbers, so
+    # a card can be made to say a sentence in its own language before it is chosen.
+
+    def _tts_view() -> dict[str, Any]:
+        """The picker's whole state. Three endpoints answer with it, so it is built in one place."""
+        view = speech_models.view(
+            app.tts.downloads,
+            selected=app.config.voice.tts.local_voice,
+            entries=tts_catalog.VOICES,
+            to_json=tts_catalog.as_json,
+            all_languages=tts_catalog.languages,
+        )
+        view["engine_installed"] = speech_service.engine_present()
+        view["recommended"] = {code: found.id for code in tts_catalog.languages() if (found := tts_catalog.recommended(code))}
+        view["state"] = app.tts.state()
+        return view
+
+    @api.get("/api/tts")
+    async def tts_voices(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The picker: every voice, what is installed, what is downloading, and what it all costs."""
+        return _tts_view()
+
+    @api.post("/api/tts/voices/{voice_id}/download")
+    async def tts_download(voice_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Fetch a voice. Returns at once; the bar is fed by /api/tts/progress."""
+        try:
+            progress = app.tts.downloads.start(voice_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"id": progress.id, "state": progress.state, "fraction": progress.fraction}
+
+    @api.post("/api/tts/voices/{voice_id}/cancel")
+    async def tts_cancel(voice_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Stop a download. What has arrived is kept, so starting again continues from there."""
+        try:
+            return {"cancelled": app.tts.downloads.cancel(voice_id)}
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @api.delete("/api/tts/voices/{voice_id}")
+    async def tts_delete(voice_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Remove an installed voice, and stop using it if it was the one in use."""
+        try:
+            removed = await app.tts.downloads.delete(voice_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        if app.config.voice.tts.local_voice == voice_id:
+            await app.save_config(app.config.model_copy(update={"voice": app.config.voice.model_copy(
+                update={"tts": app.config.voice.tts.model_copy(update={"local_voice": "", "local_speaker": ""})})}))
+        app.tts.forget()
+        return {"deleted": removed, **_tts_view()}
+
+    @api.post("/api/tts/select")
+    async def tts_select(body: TtsSelectBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Use this voice — or, with an empty id, go back to the endpoint and the browser.
+
+        Choosing one loads it straight away rather than at the first sentence. Loading takes a second
+        or two; paying for it here, while the operator is looking at the page they asked on, is much
+        better than paying for it in the middle of the first answer they wanted to hear.
+        """
+        patch: dict[str, Any] = {}
+        if body.voice is not None:
+            if body.voice and not app.tts.downloads.is_installed(body.voice):
+                raise HTTPException(409, f"{body.voice} is not downloaded yet")
+            patch["local_voice"] = body.voice
+            # A speaker belongs to the voice that has it; carrying one across is a name the new model
+            # does not know, which silently becomes speaker zero.
+            patch["local_speaker"] = ""
+        if body.speaker is not None:
+            patch["local_speaker"] = body.speaker.strip()
+        if body.speed is not None:
+            patch["local_speed"] = body.speed
+        if body.threads is not None:
+            patch["local_threads"] = body.threads
+        if patch:
+            voice_config = app.config.voice
+            await app.save_config(app.config.model_copy(update={"voice": voice_config.model_copy(
+                update={"tts": voice_config.tts.model_copy(update=patch)})}))
+        if app.tts.available():
+            await app.tts.warm()
+        return _tts_view()
+
+    @api.post("/api/tts/voices/{voice_id}/sample")
+    async def tts_sample(voice_id: str, _: dict[str, Any] = Depends(auth)) -> Response:
+        """A short phrase in this voice, in its own language, so it can be heard before it is chosen."""
+        try:
+            clip, media_type = await app.tts.sample(voice_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except TtsError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return Response(clip, media_type=media_type)
+
+    @api.get("/api/tts/progress")
+    async def tts_progress(request: Request, _: dict[str, Any] = Depends(auth)) -> StreamingResponse:
+        """Download progress as it happens, so the bar moves rather than being polled at."""
+
+        async def gen():  # type: ignore[no-untyped-def]
+            async with app.tts.downloads.watch() as queue:
+                for current in app.tts.downloads.progress().values():
+                    yield f"data: {json.dumps({'id': current.id, 'state': current.state, 'fraction': current.fraction, 'error': current.error})}\n\n"
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    try:
+                        update = await asyncio.wait_for(queue.get(), timeout=15)
+                    except TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
+                    body = {"id": update.id, "state": update.state, "fraction": update.fraction, "error": update.error}
+                    yield f"data: {json.dumps(body)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
 
     # -- local speech recognition ------------------------------------------------------------
     #

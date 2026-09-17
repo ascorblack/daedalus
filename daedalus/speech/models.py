@@ -13,6 +13,13 @@ bar should move. :meth:`Downloads.watch` hands out a queue that the API turns in
 
 Nothing here imports the engine's wheel: downloading a model must work on an installation that has not
 installed the extra yet, since that is exactly the installation that is about to.
+
+Two catalogs use this, and it belongs to neither. Recognition models and synthesis voices are fetched,
+resumed, verified, unpacked and deleted identically — the only differences are which catalog an id is
+looked up in and which loader is asked whether the unpacked directory makes sense — so both are
+constructor arguments and the rest of the file never asks which kind it is holding. The two live in
+separate trees (``models/stt/`` and ``models/tts/``), so an id that exists in both catalogs would still
+be two directories and two manifests.
 """
 
 from __future__ import annotations
@@ -25,14 +32,14 @@ import logging
 import shutil
 import tarfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-from daedalus.speech.catalog import SpeechModel, get
+from daedalus.speech.catalog import get as get_speech_model
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +101,25 @@ class Installed:
 class Downloads:
     """The models directory: what is in it, what is arriving, and what to throw away.
 
-    One instance per process, held by the application. It owns the directory layout — ``<id>/`` for an
+    One per kind per process, held by the application. It owns the directory layout — ``<id>/`` for an
     installed model, ``.part/`` for archives in flight — and nothing else writes there.
+
+    ``lookup`` turns an id into a catalog entry and ``resolver`` decides whether an unpacked directory
+    is loadable. Both default to the recognition catalog, which is what every existing caller wants;
+    passing the synthesis pair is the whole of what makes this manager serve voices too.
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        lookup: Callable[[str], Any] = get_speech_model,
+        resolver: Callable[[Path, Any], None] | None = None,
+    ) -> None:
         self.root = root
         self.parts = root / ".part"
+        self.lookup = lookup
+        self.resolver = resolver
         self._running: dict[str, asyncio.Task[None]] = {}
         self._progress: dict[str, Progress] = {}
         self._watchers: list[asyncio.Queue[Progress]] = []
@@ -159,7 +178,7 @@ class Downloads:
         carries on, writes its manifest record over ours and unpacks the model back into place: a
         deleted model that returns by itself, which is worse than one that would not delete.
         """
-        model = get(model_id)
+        model = self.lookup(model_id)
         self.cancel(model.id)
         task = self._running.get(model.id)
         if task is not None:
@@ -210,7 +229,7 @@ class Downloads:
 
     def start(self, model_id: str, *, client: httpx.AsyncClient | None = None, url: str = "") -> Progress:
         """Begin, or report the one already running. Returns at once; the work is a background task."""
-        model = get(model_id)
+        model = self.lookup(model_id)
         if model_id in self._running and not self._running[model_id].done():
             return self._progress.get(model_id, Progress(id=model_id, state="downloading"))
         running = [mid for mid, task in self._running.items() if not task.done()]
@@ -229,7 +248,7 @@ class Downloads:
 
     def cancel(self, model_id: str) -> bool:
         """Stop a download in flight. The part file stays, so starting again resumes where it stopped."""
-        model_id = get(model_id).id
+        model_id = self.lookup(model_id).id
         task = self._running.get(model_id)
         if task is None or task.done():
             return False
@@ -245,7 +264,7 @@ class Downloads:
                 await task
         self._running.clear()
 
-    async def _run(self, model: SpeechModel, client: httpx.AsyncClient | None, url: str) -> None:
+    async def _run(self, model: Any, client: httpx.AsyncClient | None, url: str) -> None:
         try:
             await asyncio.to_thread(self._check_room, model)
             archive = await self._fetch(model, client, url)
@@ -269,7 +288,7 @@ class Downloads:
         finally:
             self._running.pop(model.id, None)
 
-    async def _fetch(self, model: SpeechModel, client: httpx.AsyncClient | None, url: str) -> Path:
+    async def _fetch(self, model: Any, client: httpx.AsyncClient | None, url: str) -> Path:
         """The archive on disk, continuing a part file where one is already there."""
         self.parts.mkdir(parents=True, exist_ok=True)
         target = self.parts / model.archive
@@ -313,7 +332,7 @@ class Downloads:
                 await client.aclose()
         return target
 
-    def _check_room(self, model: SpeechModel) -> None:
+    def _check_room(self, model: Any) -> None:
         """Refuse before the first byte where the disk cannot hold the result. Blocking; cheap."""
         self.root.mkdir(parents=True, exist_ok=True)
         try:
@@ -327,7 +346,7 @@ class Downloads:
                 f"{free >> 20} MB — the archive and the unpacked model are both on it until the last step"
             )
 
-    def _unpack(self, archive: Path, model: SpeechModel) -> int:
+    def _unpack(self, archive: Path, model: Any) -> int:
         """Unpack into place and answer with the bytes it took. Blocking; runs on a worker thread.
 
         The archive holds one top-level directory whose name is the zoo's, not ours, so the contents
@@ -352,7 +371,7 @@ class Downloads:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         check_contents(directory, model)
-        _check_loadable(directory, model)
+        (self.resolver or _check_loadable)(directory, model)
         return sum(p.stat().st_size for p in directory.rglob("*") if p.is_file())
 
 
@@ -387,7 +406,7 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify(archive: Path, model: SpeechModel) -> None:
+def verify(archive: Path, model: Any) -> None:
     """Refuse an archive that is not what the catalog describes.
 
     Size is checked always, and the digest wherever there is one — which, since GitHub began reporting
@@ -405,7 +424,7 @@ def verify(archive: Path, model: SpeechModel) -> None:
             raise DownloadError(f"the download's checksum is {actual[:16]}…, not the published one")
 
 
-def check_contents(directory: Path, model: SpeechModel) -> None:
+def check_contents(directory: Path, model: Any) -> None:
     """The unpacked tree holds exactly the files the catalog pinned, for an archive with no digest.
 
     Nothing to do where ``contents`` is empty: there is a digest in that case and it is a stronger
@@ -423,7 +442,7 @@ def check_contents(directory: Path, model: SpeechModel) -> None:
         raise DownloadError(f"the archive does not hold the files the catalog pinned for {model.id}: {detail}")
 
 
-def _check_loadable(directory: Path, model: SpeechModel) -> None:
+def _check_loadable(directory: Path, model: Any) -> None:
     """The unpacked directory holds what its kind needs. Imported late: this must work without the extra."""
     from daedalus.speech.engine import (  # Lazy: downloading must work before the engine's wheel is installed
         SpeechError,
@@ -436,30 +455,43 @@ def _check_loadable(directory: Path, model: SpeechModel) -> None:
         raise DownloadError(str(exc)) from exc
 
 
-def view(downloads: Downloads, *, selected: str = "") -> dict[str, Any]:
-    """The whole picker in one object: the catalog, what is installed, what is arriving, what it costs."""
+def view(
+    downloads: Downloads,
+    *,
+    selected: str = "",
+    entries: Sequence[Any] | None = None,
+    to_json: Callable[[Any], dict[str, Any]] | None = None,
+    all_languages: Callable[[], list[str]] | None = None,
+) -> dict[str, Any]:
+    """The whole picker in one object: the catalog, what is installed, what is arriving, what it costs.
+
+    The three catalog arguments default to the recognition one. The synthesis picker passes its own,
+    which is why there is one view function and not two nearly identical ones drifting apart.
+    """
     from daedalus.speech.catalog import (  # Lazy: only this view joins the catalog to the manager
         MODELS,
         as_json,
         languages,
     )
 
+    models = MODELS if entries is None else entries
+    as_json = as_json if to_json is None else to_json
+    languages = languages if all_languages is None else all_languages
     records = downloads.manifest()
     running = downloads.progress()
-    entries = []
-    for model in MODELS:
+    cards: list[dict[str, Any]] = []
+    for model in models:
         entry = as_json(model)
         record = records.get(model.id)
         progress = running.get(model.id)
         entry["installed"] = record is not None
         entry["installed_bytes"] = record.disk_bytes if record else 0
         entry["selected"] = model.id == selected
-        entry["verified"] = model.verified
         if progress is not None and progress.state in ("downloading", "verifying", "unpacking", "failed"):
             entry["progress"] = {"state": progress.state, "fraction": progress.fraction, "error": progress.error}
-        entries.append(entry)
+        cards.append(entry)
     return {
-        "models": entries,
+        "models": cards,
         "languages": languages(),
         "selected": selected,
         "disk_bytes": downloads.disk_usage(),
