@@ -408,6 +408,8 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
             return respond(route, REPORT_MD, content_type="text/markdown")
         if tail == "tools/timing":
             return respond(route, {"items": [{"name": "Exec", "calls": 9, "errors": 0, "total_ms": 21000, "mean_ms": 2333}, {"name": "Read", "calls": 14, "errors": 0, "total_ms": 900, "mean_ms": 64}]})
+        if tail == "checkpoints":
+            return respond(route, {"checkpoints": [], "total": 0, "pruned": False, "pruned_before": None, "removed": 0, "note": "", "keep_days": 30, "keep_last": 50})
         if tail == "mcp":
             return respond(route, {"enabled": [], "servers": []})
         if tail == "tools":

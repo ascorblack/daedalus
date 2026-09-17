@@ -106,6 +106,34 @@ class Checkpoints:
         await self._git("commit", "-q", "--allow-empty", "-m", f"restored to {sha[:12]}")
         return nested
 
+    async def truncate(self, sha: str) -> bool:
+        """Make ``sha`` the oldest snapshot this store keeps, and give the rest back to the filesystem.
+
+        The snapshots of a workspace are one chain of commits, so an older one cannot be dropped by
+        deleting a ref — it is an ancestor of every newer one. The boundary is written into the
+        store's ``shallow`` file instead, which is the same mechanism a ``git clone --depth`` uses:
+        git then reads ``sha`` as a commit without parents, everything before it is unreachable, and
+        ``git gc --prune=now`` removes those objects. The shas of the snapshots that stay do not
+        change, which matters because the checkpoint rows and the undo point at them.
+
+        Returns False when there is no such commit here and nothing was cut. The packing is
+        best-effort: once the boundary is written the older snapshots are gone whether or not the
+        objects were collected, and the next pass collects them.
+        """
+        if not (self.git_dir / "HEAD").exists():
+            return False
+        try:
+            await self._git("cat-file", "-e", f"{sha}^{{commit}}")
+        except CheckpointError:
+            return False
+        (self.git_dir / "shallow").write_text(sha + "\n", encoding="utf-8")
+        try:
+            await self._git("reflog", "expire", "--expire=now", "--all")
+            await self._git("gc", "--prune=now", "--quiet")
+        except CheckpointError as exc:
+            logger.warning("checkpoints cut at %s but not packed: %s", sha[:12], exc)
+        return True
+
     async def head(self) -> str | None:
         if not (self.git_dir / "HEAD").exists():
             return None

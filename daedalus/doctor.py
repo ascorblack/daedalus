@@ -218,6 +218,20 @@ async def _state(ctx: DoctorContext) -> list[Check]:
         gb = total / 1e9
         warn_gb = ctx.config.ops.doctor_workspaces_warn_gb
         out.append(Check("workspace size", gb < warn_gb, f"{gb:.1f} GB in {st.workspaces_dir}", "ok" if gb < warn_gb else "warn", "close finished sessions with 'delete the agent + workspace', or /cleanup"))
+    if ctx.manager is not None:
+        ops = ctx.config.ops
+        snapshots = await ctx.manager.checkpoint_retention.total_size() / 1e9
+        within = not ops.checkpoint_total_max_gb or snapshots <= ops.checkpoint_total_max_gb
+        bound = f"{ops.checkpoint_total_max_gb:.1f} GB" if ops.checkpoint_total_max_gb else "no size bound"
+        out.append(
+            Check(
+                "checkpoint store",
+                within,
+                f"{snapshots:.2f} GB of workspace snapshots; bounds: {bound} and {ops.checkpoint_keep_days} days, last {ops.checkpoint_keep_last} per session always kept",
+                "ok" if within else "warn",
+                "the maintenance tick prunes it every ops.db_maintenance_minutes; `python -m daedalus db checkpoints-prune` does it now",
+            )
+        )
     private = not st.secrets_dir.exists() or (st.secrets_dir.stat().st_mode & 0o077) == 0
     out.append(Check("secrets dir", private, "private" if private else f"{st.secrets_dir} is readable by others", "ok" if private else "warn", f"chmod 700 {st.secrets_dir}"))
     budget = st.state_dir / "BUDGET_EXCEEDED"

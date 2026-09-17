@@ -150,6 +150,14 @@ Each session writes `inbox/`, `.exec/`, `.jobs/`, `.services/` and — with snap
 `.checkpoints/` into the folder it works in; where the root is a git checkout these go into
 `.git/info/exclude` the first time an agent starts there.
 
+`.checkpoints/` is what "revert to this turn" restores the files from, and it is kept inside bounds
+rather than growing for ever: `[ops]` in `config.toml` carries `checkpoint_keep_days` (30),
+`checkpoint_total_max_gb` (2.0, every store together) and `checkpoint_keep_last` (50 per session,
+kept whatever the other two say). The maintenance tick prunes the oldest past either bound and packs
+the stores; `python -m daedalus db checkpoints-prune` does it now and prints what it freed, and
+`doctor` shows the stores against their bounds. A turn whose snapshot has been dropped is no longer
+offered as an undo in the app, which says once that the older ones were removed.
+
 In this Compose install the container sees only what is mounted into it, so a folder outside the stack
 needs a bind mount before an agent can work in it. The app says which projects are not reachable; add
 the mount to the agent service and restart:

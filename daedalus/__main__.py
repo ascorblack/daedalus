@@ -4,6 +4,7 @@
 ``daedalus check``  — open the state, register tools and providers, exit.
 ``daedalus run``    — run one agent session from the terminal (no Telegram).
 ``daedalus doctor`` — check the deployment (config, state, git, providers); ``--fix`` applies safe repairs.
+``daedalus db checkpoints-prune`` — apply the workspace-snapshot retention bounds now.
 ``daedalus auth pair`` — mint a one-time link that signs a browser in, for an installation without Telegram.
 ``daedalus self restart`` — ask the supervisor to preflight the checkout and restart onto it if it passes.
 """
@@ -17,6 +18,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from daedalus.config import NO_MODEL_MESSAGE, RuntimeConfig, Settings
 
@@ -176,11 +178,36 @@ async def cmd_db(args: argparse.Namespace) -> int:
     await db.open()
     try:
         started = time.monotonic()
+        if args.db_command == "checkpoints-prune":
+            return await _prune_checkpoints(settings, db, started)
         before, after = await db.vacuum()
     finally:
         await db.close()
     print(f"{before / 1e6:.1f} MB -> {after / 1e6:.1f} MB in {time.monotonic() - started:.1f}s")
     print("The file is now on incremental auto-vacuum; freed pages are given back as the bot runs.")
+    return 0
+
+
+async def _prune_checkpoints(settings: Settings, db: Any, started: float) -> int:
+    """The retention pass the maintenance tick runs, by hand and with the numbers printed.
+
+    The tick skips a store whose session has a turn in flight. This cannot: from outside the
+    serving process there is no way to ask which those are, and ``git gc`` collects what is
+    unreachable at the moment it runs. So it says as much, and the safe time for it is a bot that
+    is idle — or the tick, which needs nothing said to it.
+    """
+    from daedalus.host.checkpoint_retention import (  # Lazy: each subcommand imports only what it runs
+        CheckpointRetention,
+        RetentionBounds,
+    )
+
+    config = RuntimeConfig.load(settings.config_path)
+    retention = CheckpointRetention(db, workspaces_dir=settings.workspaces_dir)
+    bounds = RetentionBounds.from_ops(config.ops)
+    print(f"bounds: {bounds.keep_days} days, {bounds.total_max_gb:.1f} GB in total, the last {bounds.keep_last} per session always kept")
+    print("This packs the snapshot repositories; run it while no agent is working, or leave it to the maintenance tick.")
+    report = await retention.run(bounds)
+    print(report.line() + f" in {time.monotonic() - started:.1f}s")
     return 0
 
 
@@ -215,6 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     database = sub.add_parser("db", help="maintenance of the state database")
     database_sub = database.add_subparsers(dest="db_command", required=True)
     database_sub.add_parser("vacuum", help="rewrite the file, reclaiming free pages and switching it to incremental auto-vacuum")
+    database_sub.add_parser("checkpoints-prune", help="apply the checkpoint retention bounds now: drop old snapshots and pack the stores")
     bench = sub.add_parser("bench", help="run a task manifest headless and record pass/turns/tokens/cost per task")
     bench.add_argument("manifest", help="JSON manifest: {name, tasks: [{id, prompt, setup, check, files, timeout_minutes, tags}], tools_off}")
     bench.add_argument("--preset", default=None, help="model preset id for every task (default: the configured default)")

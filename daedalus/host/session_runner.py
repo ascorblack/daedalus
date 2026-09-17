@@ -43,6 +43,7 @@ from protocore.tools.memory import build_memory_tools
 
 from daedalus.config import VOICE_ONLY_TOOLS, VOICE_TOOLS, NoModelConfigured, RuntimeConfig, Settings
 from daedalus.host import capabilities, prompts
+from daedalus.host.checkpoint_retention import CheckpointRetention, RetentionBounds, RetentionReport
 from daedalus.host.checkpoints import CheckpointError, Checkpoints, scan_workspace
 from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
 from daedalus.host.hooks import DaedalusHookManager
@@ -235,6 +236,7 @@ class SessionManager:
             reserved=[Path(p) for p in settings.sandbox_never_writable] + [settings.secrets_dir, settings.workspaces_dir],
             home=Path.home(),
         )
+        self.checkpoint_retention = CheckpointRetention(db, workspaces_dir=settings.workspaces_dir, busy=self.busy_sessions)
         self.blobs = FileBlobStore(settings.blobs_dir)
         self.memory = PersistentMemory(db)
         self.workspace_units = PersistentWorkspace(db)
@@ -700,6 +702,7 @@ class SessionManager:
             await conn.execute("DELETE FROM pending_questions WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM topics WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM checkpoints WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM checkpoint_retention WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM verifications WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM learning_records WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
@@ -1013,6 +1016,30 @@ class SessionManager:
         """The snapshot taken right before the operator turn at transcript ``seq``."""
         row = await self.db.fetchone("SELECT sha FROM checkpoints WHERE session_id = ? AND kind = 'before' AND seq = ? ORDER BY id DESC LIMIT 1", (session_id, seq))
         return row["sha"] if row else None
+
+    async def list_checkpoints(self, session_id: str) -> dict[str, Any]:
+        """The snapshots this session can still be put back to, and what retention took away.
+
+        The app asks before it offers an undo: a turn whose snapshot has been dropped would revert
+        the history and quietly leave the files where they are, which is not what "revert" reads as.
+        """
+        rows = await self.db.fetchall("SELECT seq, run_id, kind, sha, at FROM checkpoints WHERE session_id = ? ORDER BY id", (session_id,))
+        cut = await self.db.fetchone("SELECT removed_before, removed, at FROM checkpoint_retention WHERE session_id = ?", (session_id,))
+        ops = self.config.ops
+        return {
+            "checkpoints": [{"seq": r["seq"], "run_id": r["run_id"], "kind": r["kind"], "sha": r["sha"], "at": r["at"]} for r in rows],
+            "total": len(rows),
+            "pruned": cut is not None,
+            "pruned_before": cut["removed_before"] if cut else None,
+            "removed": int(cut["removed"]) if cut else 0,
+            "note": "older checkpoints were removed by retention" if cut is not None else "",
+            "keep_days": ops.checkpoint_keep_days,
+            "keep_last": ops.checkpoint_keep_last,
+        }
+
+    async def prune_checkpoints(self) -> RetentionReport:
+        """Bring the snapshot stores inside the configured bounds; returns what the pass freed."""
+        return await self.checkpoint_retention.run(RetentionBounds.from_ops(self.config.ops))
 
     async def revert(self, session_id: str, seq: int) -> dict[str, Any]:
         """Undo everything from the operator turn at transcript ``seq`` on: history and workspace.

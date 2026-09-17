@@ -843,6 +843,14 @@ class OpsConfig(BaseModel):
     doctor_probe_timeout_seconds: float = Field(default=6.0, ge=1)
     checkpoint_max_gb: float = Field(default=2.0, ge=0)
     """Workspaces larger than this are not snapshotted (revert then restores the history only)."""
+    checkpoint_keep_days: int = Field(default=30, ge=1)
+    """Age past which a workspace snapshot is dropped. Nothing bounded the stores before: they grew
+    for as long as the installation did."""
+    checkpoint_total_max_gb: float = Field(default=2.0, ge=0)
+    """Ceiling on every snapshot store together; over it, the oldest go first. 0 = no size bound."""
+    checkpoint_keep_last: int = Field(default=50, ge=1)
+    """Snapshots every session keeps whatever the two bounds say, so the undo the operator reaches
+    for cannot be taken away by a store somebody else filled."""
     learning_digest_days: int = Field(default=7, ge=1)
     learning_repeat_threshold: int = Field(default=3, ge=2)
     """A failure or an ask seen this many times in a digest window becomes an improvement candidate."""
