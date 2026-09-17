@@ -143,6 +143,17 @@ class SessionState:
     persist_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """Serialises history persistence so an older snapshot can never overwrite a newer one."""
     persist_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    persist_chain: asyncio.Task[None] | None = None
+    """The persist queued last. Each hand-over waits for it before writing, so the writes of a session
+    land in the order the rounds happened however the loop schedules the tasks."""
+    persist_rewrite: bool = False
+    """Set when a write did not land and nobody has rewritten the history since: there is a hole in the
+    stored history, and the next persist writes it whole instead of appending onto rows that are not there."""
+    persist_epoch: int = 0
+    """Bumped by every failed write. A hand-over queued before the bump describes a history the store no
+    longer matches, so it is written whole rather than appended, however late it runs."""
+    persist_repair: asyncio.Task[None] | None = None
+    """The rewrite scheduled by a failed write, so a store that is down is retried once and not in a loop."""
     persist_gen: int = 0
     """Bumped by every history rewrite (manual compaction); a persist captured before the bump is dropped."""
     run_history_start: int = 0
@@ -1629,11 +1640,24 @@ class SessionManager:
             )
 
         def start_persist(history: list[Message], fresh: list[Message] | None) -> None:
+            """Queue one round's write behind the writes of the rounds before it.
+
+            The hook returns as soon as the write is a task, so the rounds of a session are only in
+            order if the tasks are made to be: each waits for the one queued before it. Without that,
+            a write that fails could have its repair overtaken by a hand-over queued behind it, and
+            the round's messages were simply never written.
+            """
             previous = state.history_keys
             state.history_keys = [self.sessions.transcript_key(m) for m in history]
-            task = asyncio.get_running_loop().create_task(
-                self._persist_history(state, history, previous, state.persist_gen, fresh=fresh)
-            )
+            prior, gen, epoch = state.persist_chain, state.persist_gen, state.persist_epoch
+
+            async def ordered() -> None:
+                if prior is not None and not prior.done():
+                    await asyncio.wait([prior])  # its outcome is its own; this waits only for its turn
+                await self._persist_history(state, history, previous, gen, fresh=fresh, epoch=epoch)
+
+            task = asyncio.get_running_loop().create_task(ordered(), name=f"persist:{session_id}")
+            state.persist_chain = task
             state.persist_tasks.add(task)
             task.add_done_callback(_log_task_failure)
             task.add_done_callback(_forget_if_dropped(state))
@@ -1668,6 +1692,7 @@ class SessionManager:
         gen: int | None = None,
         *,
         fresh: list[Message] | None = None,
+        epoch: int | None = None,
     ) -> None:
         """Persist the working history and the transcript, then label fresh summaries with what they replaced.
 
@@ -1675,46 +1700,109 @@ class SessionManager:
         turns it stands for, in its metadata (for the Mini App) and in its text (so the model
         knows what HistoryExpand would return). Persists are serialised per session and a
         snapshot taken before a history rewrite is dropped, so an older picture never lands last.
+
+        A write that did not land leaves the stored history short of a round, and the rounds after
+        it would append onto messages that are not there — the working history the next load reads
+        comes from ``session_messages``, so the hole is what the session would resume from, with a
+        tool result missing under a tool call that is not. So a failure is recorded on the session
+        before this call returns, and the next persist of that session writes the history whole
+        rather than adding to the end of it, whichever hand-over gets there first. A hand-over made
+        before that failure and still queued behind it is written whole too: what it holds is what
+        the round added, and the rows it would be added to are the ones that went missing.
         """
-        session_id = state.session.id
         async with state.persist_lock:
             if gen is not None and gen != state.persist_gen:
                 return
-            current = {self.sessions.transcript_key(m) for m in history}
-            removed = [k for k in previous_keys if k not in current]
-            unlabelled = [i for i, m in enumerate(history) if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in m.metadata]
-            if unlabelled:
-                seqs = await self.sessions.transcript_seqs(session_id, removed) if removed else []
-                if removed and len(seqs) < len(removed):
-                    logger.warning("session %s: %d of %d archived turns were never in the transcript", session_id, len(removed) - len(seqs), len(removed))
-                for index in unlabelled:
-                    original = history[index]
-                    if seqs:
-                        contiguous = seqs[-1] - seqs[0] + 1 == len(seqs)
-                        span = f"seq {seqs[0]}–{seqs[-1]}" if contiguous else f"within seq {seqs[0]}–{seqs[-1]} ({len(seqs)} turns)"
-                        note = f"[archived turns {span}: HistoryExpand({seqs[0]}, {seqs[-1]}) returns them verbatim]"
-                        annotated = annotate_summary(original, note, seqs)
-                    else:
-                        annotated = original.model_copy(update={"metadata": {**original.metadata, "daedalus.archived": {"seqs": []}}})
-                    history[index] = annotated
-                    # Locate the live message by identity, never by position: the core may have
-                    # reshaped its history since this snapshot was taken.
-                    key = self.sessions.transcript_key(original)
-                    if state.engine is not None:
-                        live = state.engine.history
-                        for li, lm in enumerate(live):
-                            if lm.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in lm.metadata and self.sessions.transcript_key(lm) == key:
-                                live[li] = annotated
-                                break
-            await self.sessions.append_transcript(session_id, fresh if fresh is not None else history, from_history=True)
-            # A round adds to the end of the history it was given; only a rewrite of the
-            # sequence starts a generation, and that is not what a round does. ``fresh`` is
-            # what the round added, when the caller knows; ``None`` means it does not, and
-            # the stored history is brought up to this one the long way.
+            if state.persist_rewrite or (epoch is not None and epoch != state.persist_epoch):
+                # The stored history is missing a round. Appending is not an option, and the
+                # snapshot this call was given may be older than what the session holds now — a
+                # rewrite from that would drop the rounds taken since — so the engine's own history
+                # is written where there is one.
+                fresh = None
+                live = state.engine.history if state.engine is not None else None
+                if live is not None and len(live) >= len(history):
+                    history = list(live)
+            try:
+                await self._write_history(state, history, previous_keys, fresh=fresh)
+            except (Exception, asyncio.CancelledError):
+                self._persist_failed(state, history)
+                raise
             if fresh is None:
-                await self.sessions.sync_messages(session_id, TENANT, history)
-            elif fresh:
-                await self.sessions.append_messages(session_id, TENANT, fresh)
+                state.persist_rewrite = False  # the history was written whole; there is no hole left
+
+    def _persist_failed(self, state: SessionState, history: list[Message]) -> None:
+        """A write did not land: take the promise back, and make sure somebody rewrites the history.
+
+        The core is told at once — not from a done-callback, which fires a loop iteration later,
+        by which time the hand-overs made in between have already been queued as appends. The
+        rewrite is scheduled as well as marked, because the failing round may have been the last of
+        the run: with no traffic after it, a mark nobody reads repairs nothing.
+        """
+        state.persist_rewrite = True
+        state.persist_epoch += 1
+        _forget_persisted(state)
+        if state.persist_repair is not None and not state.persist_repair.done():
+            # The failure happened inside the repair itself, or one is already on its way: a store
+            # that is refusing every write is retried by the next round, not by this one forever.
+            return
+        task = asyncio.get_running_loop().create_task(self._repair_history(state, history), name=f"persist-repair:{state.session.id}")
+        state.persist_repair = task
+        state.persist_tasks.add(task)
+        task.add_done_callback(_log_task_failure)
+        task.add_done_callback(state.persist_tasks.discard)
+
+    async def _repair_history(self, state: SessionState, history: list[Message]) -> None:
+        """Write the history whole after a failed write, unless a hand-over has already done it."""
+        await asyncio.sleep(0)  # let a hand-over queued behind the failure take it first
+        if not state.persist_rewrite:
+            return
+        await self._persist_history(state, history, state.history_keys)
+
+    async def _write_history(
+        self,
+        state: SessionState,
+        history: list[Message],
+        previous_keys: list[str],
+        *,
+        fresh: list[Message] | None,
+    ) -> None:
+        """The writes themselves, under the caller's lock: the transcript, then the working history."""
+        session_id = state.session.id
+        current = {self.sessions.transcript_key(m) for m in history}
+        removed = [k for k in previous_keys if k not in current]
+        unlabelled = [i for i, m in enumerate(history) if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in m.metadata]
+        if unlabelled:
+            seqs = await self.sessions.transcript_seqs(session_id, removed) if removed else []
+            if removed and len(seqs) < len(removed):
+                logger.warning("session %s: %d of %d archived turns were never in the transcript", session_id, len(removed) - len(seqs), len(removed))
+            for index in unlabelled:
+                original = history[index]
+                if seqs:
+                    contiguous = seqs[-1] - seqs[0] + 1 == len(seqs)
+                    span = f"seq {seqs[0]}–{seqs[-1]}" if contiguous else f"within seq {seqs[0]}–{seqs[-1]} ({len(seqs)} turns)"
+                    note = f"[archived turns {span}: HistoryExpand({seqs[0]}, {seqs[-1]}) returns them verbatim]"
+                    annotated = annotate_summary(original, note, seqs)
+                else:
+                    annotated = original.model_copy(update={"metadata": {**original.metadata, "daedalus.archived": {"seqs": []}}})
+                history[index] = annotated
+                # Locate the live message by identity, never by position: the core may have
+                # reshaped its history since this snapshot was taken.
+                key = self.sessions.transcript_key(original)
+                if state.engine is not None:
+                    live = state.engine.history
+                    for li, lm in enumerate(live):
+                        if lm.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in lm.metadata and self.sessions.transcript_key(lm) == key:
+                            live[li] = annotated
+                            break
+        await self.sessions.append_transcript(session_id, fresh if fresh is not None else history, from_history=True)
+        # A round adds to the end of the history it was given; only a rewrite of the
+        # sequence starts a generation, and that is not what a round does. ``fresh`` is
+        # what the round added, when the caller knows; ``None`` means it does not, and
+        # the stored history is brought up to this one the long way.
+        if fresh is None:
+            await self.sessions.sync_messages(session_id, TENANT, history)
+        elif fresh:
+            await self.sessions.append_messages(session_id, TENANT, fresh)
 
     async def _start_run(
         self, state: SessionState, message: Message | None, *, continue_turn: bool = False

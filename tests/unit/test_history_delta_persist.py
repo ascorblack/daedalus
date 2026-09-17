@@ -304,3 +304,84 @@ async def test_a_write_that_never_landed_is_not_left_behind(settings: Settings, 
         assert _marker(engine) is None, "the core still believes a write that failed"
     finally:
         await manager.close()
+
+
+@needs_delta
+async def test_a_round_the_store_dropped_is_written_by_the_next_one(settings: Settings, db: Database) -> None:
+    """Hand-overs outrunning the writes: the repair may not depend on one more round arriving late.
+
+    The forget used to be a done-callback, which fires a loop iteration after the failure — by
+    which time every hand-over made in between was queued as an append onto rows that were never
+    written, and the round's messages were simply absent from the history the next load reads.
+    """
+    manager = SessionManager(settings, model_config(), db=db)
+    await manager.start()
+    try:
+        state = await manager.create_session("delta")
+        engine = await manager._build_engine(state, "run-1")
+        state.engine = engine
+        store = manager.sessions
+        real_append = store.append_messages
+        calls = {"n": 0}
+
+        async def flaky(session_id: str, tenant_id: str, messages: list[Message]) -> int:
+            calls["n"] += 1
+            if calls["n"] == 20:
+                raise RuntimeError("the store is down")
+            return await real_append(session_id, tenant_id, messages)
+
+        store.append_messages = flaky  # type: ignore[assignment]
+        history: list[Message] = []
+        for i in range(30):
+            history = [*history, _msg(f"m{i}")]
+            engine.history = history
+            persist_history(engine)
+            await asyncio.sleep(0)  # the next round hands over before the last one's write has run
+        await _settled(state)
+        assert calls["n"] >= 20, "the failing write never fired"
+
+        stored = [b.text for m in await manager.sessions.list_messages(state.session.id, TENANT, limit=500) for b in m.content_blocks]
+        assert stored == [f"m{i}" for i in range(30)], f"the history the next load reads has a hole: {stored}"
+    finally:
+        await manager.close()
+
+
+@needs_delta
+async def test_the_last_round_of_a_run_is_repaired_with_nothing_following_it(settings: Settings, db: Database) -> None:
+    """The failing write is the last hand-over of the run: no round follows it to carry the repair.
+
+    Recovery used to be entirely in the hands of the next hand-over. When the run goes idle after
+    the failure there is no next hand-over, and the round stayed missing until something else
+    happened to write the history — which, for a session nobody comes back to, is never.
+    """
+    manager = SessionManager(settings, model_config(), db=db)
+    await manager.start()
+    try:
+        state = await manager.create_session("delta")
+        engine = await manager._build_engine(state, "run-1")
+        state.engine = engine
+        engine.history = [_msg("a")]
+        persist_history(engine)
+        await _settled(state)
+
+        store = manager.sessions
+        real_append = store.append_messages
+        failed = {"n": 0}
+
+        async def once(session_id: str, tenant_id: str, messages: list[Message]) -> int:
+            failed["n"] += 1
+            if failed["n"] == 1:
+                raise RuntimeError("the store is down")
+            return await real_append(session_id, tenant_id, messages)
+
+        store.append_messages = once  # type: ignore[assignment]
+        engine.history = [*engine.history, _msg("b")]
+        persist_history(engine)
+        await _settled(state)
+        assert failed["n"] == 1, "the failing write never fired"
+
+        stored = [b.text for m in await manager.sessions.list_messages(state.session.id, TENANT, limit=500) for b in m.content_blocks]
+        assert stored == ["a", "b"], f"nothing followed the failure, so nothing repaired it: {stored}"
+        assert _marker(engine) is None, "the core still believes a write that failed"
+    finally:
+        await manager.close()
