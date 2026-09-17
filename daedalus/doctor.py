@@ -21,8 +21,7 @@ import httpx
 
 from daedalus import supervisor_client
 from daedalus.config import RuntimeConfig, Settings, keyproxy_base, keyproxy_configured, keyproxy_unresolved
-from daedalus.host import capabilities
-from daedalus.host.toolchain import status as toolchain_status
+from daedalus.host import capabilities, components
 from daedalus.providers.pricing import pricing_table
 from daedalus.providers.registry import _is_vendor_host
 from daedalus.security.redact import redact as redact_text
@@ -66,7 +65,7 @@ class DoctorContext:
 
 async def run_checks(ctx: DoctorContext) -> list[Check]:
     checks: list[Check] = []
-    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _token_counter, _runtime, _keyproxy, _providers, _github_org):
+    for probe in (_config, _telegram, _state, _selfdev, _git_probe, _supervisor, _native, _token_counter, _runtime, _components, _keyproxy, _providers, _github_org):
         try:
             checks.extend(await probe(ctx))
         except Exception as exc:  # noqa: BLE001 — one broken probe must not hide the others
@@ -146,19 +145,32 @@ async def _config(ctx: DoctorContext) -> list[Check]:
     # a row saying commands run unsandboxed would send the operator looking for the wrong problem.
     detail = f"{sandbox} (available: {status})" if sandbox == "off" else ("workspace" if usable else f"requested but unavailable — every Exec is refused until it is off or it works: {status}")
     out.append(Check("exec sandbox", sandbox == "off" or usable, detail, "ok" if sandbox == "off" or usable else "fail", sandbox_fix))
-    # Informational, not warnings: an installation that never opens a page or runs npx is not a broken one.
-    browser = await asyncio.to_thread(toolchain_status, "browser")
-    browser_fix = "run the `:browser` tag of the agent image if the browser skills are wanted"
-    node_fix = "the skills that shell out to npx cannot run here; nothing else needs it"
-    if st.native:
-        browser_fix = "the launcher installs it on demand: `daedalus-desktop` → the runtime extras, or `daedalus-desktop install browser`"
-        node_fix = "the launcher installs it on demand: `daedalus-desktop install node`; nothing but those skills needs it"
-    out.append(Check("browser tools", browser == "ok", "Playwright, a headless Chromium and Pillow are here" if browser == "ok" else browser, "ok" if browser == "ok" else "info", browser_fix))
-    node = await asyncio.to_thread(toolchain_status, "node")
-    out.append(Check("node", node == "ok", "available" if node == "ok" else node, "ok" if node == "ok" else "info", node_fix))
     out.append(await asyncio.to_thread(_local_speech, ctx))
     out.append(await asyncio.to_thread(_local_voice, ctx))
     out.append(Check("per-run spend cap", cfg.limits.usd_per_run > 0, f"${cfg.limits.usd_per_run:.2f} per run, ${st.usd_per_day:.2f} per day" if cfg.limits.usd_per_run > 0 else f"no per-run cap (daily cap ${st.usd_per_day:.2f})", "ok" if cfg.limits.usd_per_run > 0 else "warn", "set limits.usd_per_run in Settings"))
+    return out
+
+
+async def _components(ctx: DoctorContext) -> list[Check]:
+    """The optional pieces, in one block rather than scattered through the report.
+
+    Informational throughout, never a failure: an installation that never opens a page, never runs
+    npx and never says a word out loud is not a broken one — it is a smaller one, which is the whole
+    reason these are optional. What each row adds is the sentence that was missing everywhere else,
+    which is how to get the piece if it is wanted.
+    """
+    registry = components.Registry(ctx.settings, ctx.config)
+    out: list[Check] = []
+    for component_id in components.ORDER:
+        status = await asyncio.to_thread(registry.status, component_id)
+        detail = status.detail
+        if status.skills:
+            detail += f" — {len(status.skills)} skill(s) held back: {', '.join(status.skills)}"
+        if status.state == "installed":
+            out.append(Check(f"component {component_id}", True, detail, "ok"))
+            continue
+        fix = "Settings → Components installs it" if status.installable else (status.fix or "")
+        out.append(Check(f"component {component_id}", False, detail, "info", fix))
     return out
 
 

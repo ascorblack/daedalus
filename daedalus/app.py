@@ -16,6 +16,7 @@ from typing import Any
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.boot_guard import BootGuard
+from daedalus.host.component_install import Installer
 from daedalus.host.session_runner import SessionManager, SessionState
 from daedalus.speech.service import LocalSpeech
 from daedalus.speech.tts_service import LocalTts
@@ -42,6 +43,10 @@ class Application:
         # And the voices it speaks with, on the same terms: a directory listing and a configuration
         # read, no engine and no voice until something actually asks to be heard.
         self.tts = LocalTts(settings.state_dir, self.config)
+        # What the installation is missing and how a missing piece arrives. It is held here rather
+        # than built per request because an install outlives the request that asked for it: the
+        # headless browser takes minutes, and the page that started it may be reloaded meanwhile.
+        self.components = Installer(settings)
         self.guard = BootGuard(settings.state_dir, window_minutes=self.config.ops.boot_loop_window_minutes, threshold=self.config.ops.boot_loop_threshold)
 
     async def save_config(self, config: RuntimeConfig) -> None:

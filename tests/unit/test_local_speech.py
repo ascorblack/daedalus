@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions.api import build_app
+from daedalus.host.component_install import Installer
 from daedalus.speech import catalog
 from daedalus.speech.engine import SAMPLE_RATE, Partial, SpeechError, resolve, rms, to_float
 from daedalus.speech.models import DownloadError, Downloads, sha256_of, verify, view
@@ -734,6 +735,9 @@ class FakeApp:
         # The API reads both halves of speech on one request: /api/voice says which recogniser
         # listens and which voice speaks, so a fake with only the listening half falls over there.
         self.tts = LocalTts(self.settings.state_dir, self.config)
+        # The installer behind every optional piece, including the speech engine the picker installs
+        # before its first download: /api/stt/engine goes through it rather than running its own sync.
+        self.components = Installer(self.settings)
 
     async def save_config(self, config: RuntimeConfig) -> None:
         self.config = config

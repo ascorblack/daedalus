@@ -22,6 +22,7 @@ import { PageHeader, go, screenTitle } from "../shell";
 import { useQuery } from "../store";
 import { errorText, haptic } from "../ui";
 import { createLocalListener, localListenSupported } from "../stt";
+import { SpeechRuntimeNotice } from "./Components";
 import { sttFrame } from "../sttview";
 import type { AgentNews, Listener, Speaker, VoicePreset, VoiceUi } from "../voice";
 import {
@@ -82,7 +83,7 @@ type VoiceState = {
 const ECHO_TAIL_MS = 400;
 
 
-export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
+export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; toast: (t: string) => void }) {
   const { data: state, refresh } = useQuery<VoiceState>("/api/voice", { staleMs: 10000, pollMs: 60000 });
   const [ui, dispatch] = useReducer(voiceReducer, IDLE_VOICE);
   const [typed, setTyped] = useState("");
@@ -466,6 +467,11 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
               <span className="chip quiet">{spokenBy}</span>
             </div>
 
+            {/* The page where the absence is felt: the chip above says "the browser's own" and this
+                says what would change that, with the size on the button. It renders nothing once the
+                runtime is installed. */}
+            <SpeechRuntimeNotice toast={toast} onInstalled={refresh} />
+
             <div className="voice-orb-wrap">
               <button
                 ref={orb}
@@ -599,7 +605,7 @@ function spokenLine(data: VoiceState): string {
 }
 
 /** The Settings card: what the page runs on and what it can and cannot do here. */
-export function VoiceSettings() {
+export function VoiceSettings({ toast }: { toast: (t: string) => void }) {
   const { data, refresh } = useQuery<VoiceState>("/api/voice", { staleMs: 10000 });
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState("");
@@ -682,6 +688,9 @@ export function VoiceSettings() {
           </b>
         </div>
       )}
+      {/* Where the two lines above say "the browser's own" because nothing else is installed, the
+          offer to install it belongs directly under them rather than on another page. */}
+      <SpeechRuntimeNotice toast={toast} onInstalled={refresh} />
       <div className="btnrow">
         <a className="btn small" href={pathFor("voice")} onClick={(e) => go(e, pathFor("voice"))}>
           {t("voice.card.open")}
