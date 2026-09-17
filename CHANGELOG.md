@@ -60,15 +60,22 @@ Notable changes, newest first. The repository's `main` is the released version.
   smoke tests **in a virtualenv of its own**, so a refused change has touched nothing the running bot
   imports — and a change that passes but cannot stay up, three starts dying inside ten minutes, puts
   the last known-good commit back by itself.
-- **Projects: a folder of yours is where an agent works, and the only place it can reach.** A project
-  is a row — name, root, settings — and a session points at one. `SessionServices.resolve` is the
-  single point every file path passes through, so the containment could not be forgotten by a tool:
-  the check is on the real path, which makes `..`, an absolute path elsewhere and a symlink out of the
-  tree one refusal. Several agents share a project and see the same files; a session without one still
-  gets a scratch directory, exactly as before, and every session that already existed keeps it.
-  Snapshots are off for a project by default — a project root is your repository, not a scratch
-  directory. In Docker mode adding a project also adds a bind mount, which the launcher writes and
-  restarts the stack for; natively it is reachable the moment it is added.
+- **Projects: a folder of yours is where an agent works, and the limit of every path it resolves.** A
+  project is a row — name, root, settings — and a session points at one. `SessionServices.resolve` is
+  the single point every file path passes through, so the containment could not be forgotten by a
+  tool: the check is on the real path, which makes `..`, an absolute path elsewhere and a symlink out
+  of the tree one refusal, and what comes back is the path that was judged. It bounds the file tools,
+  the file browser, the preview, the download and `SendFile`; `Exec` runs in the folder and is bounded
+  by the sandbox where one is on and by the policy rules where it is not. Every session a project
+  session makes — a subagent, a spawned agent, a fork, a scheduled task, a delegate from the voice
+  concierge — is in the same project, so the wall does not end at the first child. Several agents
+  share a project and see the same files; a session without one still gets a scratch directory,
+  exactly as before, and every session that already existed keeps it. Snapshots are off for a project
+  by default — a project root is your repository, not a scratch directory — and the five directories
+  a session writes into a folder go into `.git/info/exclude` where that folder is a git checkout. In
+  Docker mode a project also needs a bind mount: the launcher asks the app which folders the container
+  cannot see, writes them into the override, and says that a restart will mount them. Natively a
+  project is reachable the moment it is added.
 - **Voice mode (beta).** `/app/voice` is a conversation: a small fast model answers out loud in a
   second or two and hands anything substantial to real agent sessions while you keep talking, several
   at once, telling you when each comes back. It is an ordinary session with one flag — its transcript
