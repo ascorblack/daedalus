@@ -547,8 +547,15 @@ export function voiceReducer(state: VoiceUi, event: VoiceEvent): VoiceUi {
       return { ...state, asked: event.text, heard: "", spoken: [], partial: "", problem: "", phase: "thinking" };
     case "partial":
       return { ...state, partial: event.text };
-    case "say":
-      return event.text.trim() ? { ...state, spoken: [...state.spoken, event.text.trim()] } : state;
+    case "say": {
+      // A sentence handed to the speaker is the answer being read out, and the page says so without
+      // waiting for audio to arrive: fetching a sentence from a speech endpoint takes long enough
+      // that the page would otherwise still be saying "Thinking" while the answer is on the screen.
+      // A speaker that then fails reports it has stopped, and the phase comes back on its own.
+      if (!event.text.trim()) return state;
+      const spoken = [...state.spoken, event.text.trim()];
+      return { ...state, spoken, phase: state.engine.state === "loading" ? state.phase : "speaking" };
+    }
     case "status": {
       if (event.state === "idle") return { ...state, delegating: "", phase: state.phase === "speaking" ? state.phase : resting(state) };
       const phase = event.state === "delegating" ? "delegating" : event.state === "thinking" ? "thinking" : state.phase;

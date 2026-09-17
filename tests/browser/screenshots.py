@@ -311,12 +311,37 @@ def png(width: int, height: int) -> bytes:
 PHONE_PNG = png(390, 520)
 
 
+def wav(seconds: float = 30.0, rate: int = 8000) -> bytes:
+    """A playable, silent WAV.
+
+    The speaking state is not a flag the page can be put into: it is true while an `<audio>` element
+    is playing, so the picture needs something that really plays. Silence for half a minute is the
+    smallest thing that is really audio.
+    """
+    frames = int(seconds * rate)
+    body = b"\x00\x00" * frames
+    header = b"RIFF" + struct.pack("<I", 36 + len(body)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16) + b"data" + struct.pack("<I", len(body))
+    return header + body
+
+
+SILENCE = wav()
+
+
 VOICE = {
     "enabled": True,
     "session_id": S2,
     "model": "Qwen 3.7 Flash",
     "tts": {"configured": True, "reason": "", "voice": "alloy", "model": "kokoro"},
-    "stt": {"configured": True, "reason": ""},
+    # A model that runs on this machine, in memory and ready: the case the page is designed around.
+    "stt": {
+        "configured": True,
+        "reason": "",
+        "kind": "local",
+        "state": "ready",
+        "loaded_in_ms": 5400,
+        "error": "",
+        "local": {"model": "nemotron-streaming-multi", "label": "Nemotron 3.5 Streaming 0.6B", "installed": True, "active": True, "streaming": True, "loaded": "nemotron-streaming-multi"},
+    },
     # One of each state the panel can be in: a line it said mid-run, which wins over the answer and
     # carries its own timestamp; a finished answer; and the two things it can be waiting for.
     "agents": [
@@ -405,8 +430,20 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     rel = path[path.index("/api/") :]
     if rel == "/api/providers/lookup-models":
         return respond(route, {"base_url": "http://keyproxy:3200/openrouter/v1", "models": [e["id"] for e in CATALOGUE], "entries": CATALOGUE})
+    if rel == "/api/voice/tts":
+        return respond(route, SILENCE, content_type="audio/wav")
     if request.method != "GET":
         return respond(route, {"ok": True})
+    if rel == "/api/stt/progress":
+        # The voice page opens this to hear the engine finish loading; the picker opens it for the
+        # download bars. Neither needs anything to happen here — what is true now is on /api/voice.
+        over = getattr(stub, "voice_over", None) or {}
+        load = {"kind": "engine", "state": over.get("state", VOICE["stt"]["state"]), "model": VOICE["stt"]["local"]["model"], "loaded_in_ms": over.get("loaded_in_ms", VOICE["stt"]["loaded_in_ms"]), "error": ""}
+        return respond(route, f"data: {json.dumps(load)}\n\n", content_type="text/event-stream")
+    if rel == "/api/voice/stream":
+        # The concierge's half of the conversation, canned: the page has no other way into its
+        # thinking, delegating and speaking states, and those are three of the five worth a picture.
+        return respond(route, "event: hello\ndata: {}\n\n" + getattr(stub, "voice_frames", ""), content_type="text/event-stream")
     if rel.endswith("/stream"):
         return respond(route, "event: hello\ndata: {}\n\n", content_type="text/event-stream")
     if rel == "/api/auth/me":
@@ -477,7 +514,8 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     if rel == "/api/commands":
         return respond(route, [])
     if rel == "/api/voice":
-        return respond(route, VOICE)
+        over = getattr(stub, "voice_over", None)
+        return respond(route, {**VOICE, "stt": {**VOICE["stt"], **over}} if over else VOICE)
     if rel == "/api/asr":
         return respond(route, {"configured": False, "reason": "", "provider": "", "model": "", "max_seconds": 120, "autosend": False})
     if rel == "/api/heartbeat":
@@ -560,6 +598,96 @@ def open_projects(page: Page) -> None:
     page.wait_for_selector(".project-row", timeout=5000)
 
 
+# ---- the voice page in each of its states --------------------------------------------------
+#
+# Five states, three widths. None of them can be reached by clicking: the page's phase comes from the
+# concierge's event stream, from the engine loading a model into memory, and from a microphone. So the
+# stream is canned above, the engine state is set on /api/voice, and the microphone is a fake capture
+# device the browser is launched with — which also gives the orb a real level to react to.
+
+
+def sse(*frames: tuple[str, dict]) -> str:
+    return "".join(f"event: {name}\ndata: {json.dumps(body)}\n\n" for name, body in frames)
+
+
+VOICE_STATES: dict[str, dict] = {
+    "ready": {"over": {}, "frames": "", "mic": False, "ask": False},
+    "loading": {"over": {"state": "loading", "loaded_in_ms": 0}, "frames": "", "mic": False, "ask": False},
+    "listening": {"over": {}, "frames": "", "mic": True, "ask": False},
+    "thinking": {
+        "over": {},
+        "frames": sse(("status", {"state": "thinking"}), ("partial", {"text": "Looking at the board and the two invoices that came back"})),
+        "mic": True,
+        "ask": True,
+    },
+    "speaking": {
+        "over": {},
+        "frames": sse(
+            ("status", {"state": "idle"}),
+            ("say", {"text": "All eleven invoices went out this morning."}),
+            ("say", {"text": "Two came back with the wrong VAT line, and I have put both on the board."}),
+            ("say", {"text": "Shall I have someone redo them now?"}),
+        ),
+        "mic": True,
+        "ask": True,
+    },
+}
+
+VOICE_ASKED = "How did the invoice run go?"
+
+
+def listening(page: Page) -> None:
+    """Open the microphone and say nothing: the state the page spends most of its time in."""
+    page.locator(".voice-orb").click()
+    page.wait_for_timeout(900)
+
+
+def talking(page: Page) -> None:
+    """Open the microphone and ask something, the way a hand does.
+
+    The wait in the middle is not padding. The canned event stream is a finite body, so the page
+    reads it, reaches the end and reconnects a second later — and asking something clears the answer
+    on the screen. Asking after the first delivery and shooting before the third is what leaves
+    exactly one answer under exactly one question.
+    """
+    page.locator(".voice-orb").click()
+    page.wait_for_timeout(1200)
+    page.fill(".voice-compose .field", VOICE_ASKED)
+    page.locator(".voice-compose button[type=submit]").click()
+
+
+def voice_shots(page: Page, prefix: str) -> None:
+    for name, plan in VOICE_STATES.items():
+        stub.voice_over = plan["over"]  # type: ignore[attr-defined]
+        stub.voice_frames = plan["frames"]  # type: ignore[attr-defined]
+        before = talking if plan["ask"] else listening if plan["mic"] else None
+        shot(page, f"{prefix}{name}", "voice", settle=1000, before=before)
+    stub.voice_over = None  # type: ignore[attr-defined]
+    stub.voice_frames = ""  # type: ignore[attr-defined]
+
+
+FAKE_MEDIA = ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", "--autoplay-policy=no-user-gesture-required"]
+
+
+def run_voice() -> int:
+    """Only the voice page, in every state, at the three widths that have to hold it."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM, args=FAKE_MEDIA)
+        for prefix, viewport, mobile in (
+            ("voice-", {"width": 1440, "height": 900}, False),
+            ("voice-wide-", {"width": 2560, "height": 1300}, False),
+            ("voice-phone-", {"width": 390, "height": 844}, True),
+        ):
+            context = browser.new_context(viewport=viewport, color_scheme="dark", is_mobile=mobile, has_touch=mobile, permissions=["microphone"])
+            page = context.new_page()
+            page.route("**/api/**", stub)
+            voice_shots(page, prefix)
+            context.close()
+        browser.close()
+    return UNHANDLED.report()
+
+
 def run() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
@@ -608,4 +736,4 @@ def run() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(run())
+    sys.exit(run_voice() if os.environ.get("ONLY") == "voice" else run())

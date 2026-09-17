@@ -1120,10 +1120,13 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .voice-beta { padding: 2px 8px; font-size: 11px; vertical-align: middle; }
 /* Wide by design: the conversation takes the room it needs and the agents stand beside it, not under
    it. The right column grows with the glass rather than pinning the page to a column in the middle. */
-.voice-grid { display: grid; grid-template-columns: minmax(0, 1fr) clamp(300px, 26vw, 460px); gap: 16px; align-items: start; }
+/* The page takes the height it is given as well as the width: on a 1300 px tall window the stage
+   used to stop two thirds of the way down and leave the rest of the glass empty under it. */
+.screen.voice { width: min(100%, 2160px); }
+.voice-grid { display: grid; grid-template-columns: minmax(0, 1fr) clamp(300px, 24vw, 480px); gap: 16px; align-items: stretch; min-height: calc(100dvh - 132px); }
 .voice-stage {
   position: relative; overflow: hidden; display: flex; flex-direction: column; align-items: center;
-  gap: 16px; padding: 40px 20px 22px; min-height: min(72vh, 660px);
+  gap: 16px; padding: clamp(28px, 5vh, 64px) 20px 22px; min-height: min(72vh, 660px);
   --orb-color: var(--accent);
   --orb-scale: 1; --orb-glow: .3; --orb-spin: 8s;
 }
@@ -1142,7 +1145,9 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .voice-stage.phase-speaking { --orb-color: var(--ok); }
 .voice-stage > * { position: relative; }
 
-.voice-chips { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+/* Two auto margins, and the free height splits evenly: the chip stays at the top, the composer at the
+   bottom, and the orb with its captions sits in the middle of whatever is left. */
+.voice-chips { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-bottom: auto; }
 .chip.quiet { color: var(--fg-3); }
 /* The state chip animates between states rather than swapping: three bars that stand still when idle,
    rise and fall with a listening page, travel while it thinks, and pulse together while it speaks. */
@@ -1185,15 +1190,17 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .orb-shell {
   position: absolute; inset: 0; border-radius: 50%;
   background:
-    radial-gradient(circle at 34% 28%, color-mix(in srgb, var(--orb-color) 42%, var(--surface-3)) 0%, var(--surface-2) 58%, var(--surface-1) 100%);
+    radial-gradient(circle at 36% 26%, color-mix(in srgb, var(--orb-color) 38%, var(--surface-3)) 0%, color-mix(in srgb, var(--orb-color) 10%, var(--surface-2)) 52%, var(--bg) 100%);
   box-shadow: inset 0 1px 0 var(--line-strong), 0 18px 44px rgba(0, 0, 0, .45);
   border: 1px solid color-mix(in srgb, var(--orb-color) 28%, var(--line-strong));
   animation: orb-breathe 5.5s ease-in-out infinite;
 }
+/* Light travelling inside the sphere rather than a rim around it: blurred, so it reads as something
+   moving under the surface and not as a dial with a pointer on it. */
 .orb-sweep {
-  position: absolute; inset: 6%; border-radius: 50%; pointer-events: none;
-  background: conic-gradient(from 0deg, transparent 0deg, color-mix(in srgb, var(--orb-color) 65%, transparent) 70deg, transparent 150deg, color-mix(in srgb, var(--orb-color) 28%, transparent) 250deg, transparent 330deg);
-  opacity: calc(.18 + var(--orb-glow) * .5); mix-blend-mode: screen;
+  position: absolute; inset: 12%; border-radius: 50%; pointer-events: none;
+  background: conic-gradient(from 0deg, transparent 0deg, color-mix(in srgb, var(--orb-color) 60%, transparent) 60deg, transparent 170deg, color-mix(in srgb, var(--orb-color) 22%, transparent) 260deg, transparent 340deg);
+  opacity: calc(.12 + var(--orb-glow) * .38); mix-blend-mode: screen; filter: blur(16px);
   animation: orb-turn var(--orb-spin, 8s) linear infinite;
 }
 .orb-ring {
@@ -1204,7 +1211,8 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .voice-orb.on .orb-ring.two { animation-delay: 1.2s; }
 .phase-speaking .orb-ring { animation: orb-ripple 1.5s cubic-bezier(.25, .7, .35, 1) infinite; }
 .phase-speaking .orb-ring.two { animation-delay: .75s; }
-.orb-glyph { display: grid; place-items: center; color: color-mix(in srgb, var(--orb-color) 70%, var(--fg)); transition: color .3s ease; }
+/* Above the four painted layers: they are positioned and would otherwise cover a static child. */
+.orb-glyph { position: relative; z-index: 1; display: grid; place-items: center; color: color-mix(in srgb, var(--orb-color) 70%, var(--fg)); transition: color .3s ease; }
 .voice-orb.on .orb-glyph { color: var(--fg); }
 @keyframes orb-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.035); } }
 @keyframes orb-turn { to { rotate: 360deg; } }
@@ -1232,7 +1240,7 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 .voice-compose .field { flex: 1; background: transparent; }
 .voice-why { width: min(100%, 720px); text-align: center; }
 
-.voice-agents { display: grid; gap: 8px; align-content: start; animation: panel-slide .34s cubic-bezier(.2, .7, .3, 1) both; }
+.voice-agents { display: grid; gap: 8px; align-content: start; overflow-y: auto; animation: panel-slide .34s cubic-bezier(.2, .7, .3, 1) both; }
 .voice-agents-head { margin: 4px 2px 2px; font-size: 14px; font-weight: 600; }
 .voice-agents-empty { padding: 8px 2px; }
 .voice-agent { width: 100%; text-align: left; border: 1px solid var(--line); cursor: pointer; transition: background .15s ease, border-color .15s ease; }
@@ -1245,7 +1253,7 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 @keyframes panel-slide { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
 
 @media (max-width: 900px) {
-  .voice-grid { grid-template-columns: minmax(0, 1fr); }
+  .voice-grid { grid-template-columns: minmax(0, 1fr); min-height: 0; }
   /* On a phone the orb has to be under the thumb, so the captions move above it and the control sits
      at the bottom of the card, just over the composer and the tab bar. The panel stacks below rather
      than sliding in from a side that is not there. */

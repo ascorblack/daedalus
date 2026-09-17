@@ -75,6 +75,8 @@ describe("the page's state machine", () => {
       { type: "say", text: "   " },
     ]);
     expect(answered.spoken).toEqual(["All eleven went out.", "Two came back."]);
+    // The first sentence is the answer being read out, whatever the audio is doing.
+    expect(answered.phase).toBe("speaking");
     expect(run([{ type: "asked", text: "and the rest?" }], answered).spoken).toEqual([]);
   });
 
