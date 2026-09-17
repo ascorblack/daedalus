@@ -163,6 +163,41 @@ first and everything — the progress, a Docker that is not installed or not sta
 to try again — is on it. The launcher keeps serving that page whether the start succeeded or not;
 closing it leaves the containers running.
 
+## Projects
+
+A project is a folder of your own — a repository, a directory of documents — that you add in the app
+(Projects in the rail, the grid icon on the Agents screen). The agents you start in it work in that
+folder and nowhere else: every path they read, write or run in is checked against the project root,
+and one that leads out of it is refused. Several agents share one project and see the same files. An
+agent started without a project still gets a scratch directory of its own, as before.
+
+`GET /api/projects` reports, per project, whether its folder is reachable from inside the running
+process (`reachable`) and whether it may be written (`writable`).
+
+**In Docker mode a project is also a bind mount, and that is the one place this mode is visibly
+heavier than native.** The agent container sees only what is mounted into it, so a folder that is not
+mounted is a project whose files are simply not there — which is what `reachable: false` says. The
+launcher is what closes that gap: for a project whose folder is unreachable it adds one entry to the
+agent service's `volumes` in `data/compose.desktop.yaml` and restarts the stack.
+
+The entry is the folder mapped to **itself** — the same absolute path inside the container as outside:
+
+```yaml
+services:
+  daedalus:
+    volumes:
+      - /home/you/work/bakery:/home/you/work/bakery
+```
+
+Same path on both sides, because the project stores the path you gave and that one string has to name
+the folder from inside the container and from outside it. Read-only (`:ro`) is a supported choice and
+is reported back as `writable: false`; the agents of that project can then read it and not change it.
+Nothing else about the project lives in compose: the name, the root and the settings are in the
+database, and the mount is only how the container comes to see the folder.
+
+In native mode there is no container and nothing to mount: a project is reachable the moment it is
+added.
+
 ## The window
 
 What shows the app is decided when the launcher starts, by what the machine can actually do, and

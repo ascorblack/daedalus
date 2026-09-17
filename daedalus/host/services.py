@@ -8,6 +8,7 @@ bundle in the process-wide :class:`ServiceLocator`, and a tool resolves it from 
 
 from __future__ import annotations
 
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,10 @@ ProgressFn = Callable[[str], Awaitable[None]]
 SendFileFn = Callable[[Path, str | None], Awaitable[str]]
 ScheduleFn = Callable[..., Awaitable[Any]]
 SelfDevFn = Callable[..., Awaitable[str]]
+
+
+class PathOutsideProject(PermissionError):
+    """A path a session in a project may not touch. Raised where the path is resolved, so no tool can forget the check."""
 
 
 @dataclass(slots=True)
@@ -42,6 +47,11 @@ class SessionServices:
     """Where Exec runs and the file tools look when the session drives another machine (a benchmark container)."""
     writable: list[Path] = field(default_factory=list)
     """Paths outside the workspace this session may write to under the sandbox: the worktrees it opened for its own changes."""
+    project_root: Path | None = None
+    """The project this session works in, if any: every path it resolves stays inside this folder.
+
+    ``None`` is a session with a directory of its own, which is every session that existed before
+    projects did — those resolve paths exactly as they always have, anywhere on the filesystem."""
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -49,13 +59,42 @@ class SessionServices:
         return ShellFS(self.exec_backend, timeout=min(self.tool_timeout_seconds, 120.0)) if self.exec_backend is not None else LocalFS()
 
     def resolve(self, path: str | None) -> Path:
-        """Resolve a tool path: absolute stays absolute, relative is workspace-relative."""
+        """Resolve a tool path: absolute stays absolute, relative is workspace-relative.
+
+        In a project the answer is also contained: the resolved path must be the project root or
+        inside it (or inside one of the paths the host opened for this session), and the check is
+        made on the real path, so ``../..``, a symlink out of the tree and an absolute path
+        elsewhere are all the same refusal. Every file tool, the file browser, the preview, the
+        download and SendFile reach the filesystem through here, which is the reason the refusal
+        lives at this one point rather than in each of them.
+        """
         if not path or path == ".":
             return self.workspace_dir
         candidate = Path(path).expanduser()
         if not candidate.is_absolute():
             candidate = self.workspace_dir / candidate
+        if self.project_root is None:
+            return candidate
+        if not self.contains(candidate):
+            raise PathOutsideProject(
+                f"{candidate} is outside this project. This session works in {self.project_root} and everything it reads or writes stays there."
+            )
         return candidate
+
+    def contains(self, path: Path) -> bool:
+        """Whether ``path`` is inside the project root, or inside a path the host opened for this session.
+
+        ``os.path.realpath`` resolves the symlinks it can and leaves a not-yet-created tail alone,
+        so a file about to be written is judged by where it would land.
+        """
+        if self.project_root is None:
+            return True
+        real = Path(os.path.realpath(path))
+        for root in (self.project_root, *self.writable):
+            base = Path(os.path.realpath(root))
+            if real == base or base in real.parents:
+                return True
+        return False
 
     def is_protected(self, path: Path) -> bool:
         try:
@@ -92,4 +131,4 @@ class ServiceLocator:
 
 locator = ServiceLocator()
 
-__all__ = ["ServiceLocator", "SessionServices", "locator"]
+__all__ = ["PathOutsideProject", "ServiceLocator", "SessionServices", "locator"]

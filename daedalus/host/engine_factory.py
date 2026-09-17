@@ -150,6 +150,7 @@ def build_engine(
     blocked_tools: set[str] | None = None,
     mode: ModeConfig | None = None,
     voice: bool = False,
+    project: str = "",
 ) -> QueryEngine:
     primary_provider, primary_model = rungs[0]
     model = model_name or primary_model
@@ -175,6 +176,7 @@ def build_engine(
             github_org=deps.github_org,
             ssh_hosts=prompts.ssh_hosts(deps.ssh_config) if deps.ssh_config else (),
             selfdev_mode=deps.selfdev_mode,
+            project=project,
         ),
     )
     engine_config = QueryEngineConfig(

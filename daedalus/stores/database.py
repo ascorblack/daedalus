@@ -469,6 +469,23 @@ MIGRATIONS: list[str] = [
     );
     DELETE FROM kv WHERE key = 'transcript_fts_watermark';
     """,
+    # 26 — projects: a folder the operator adds, shared by every session that works in it. A
+    # session without one keeps the per-session directory under the workspaces root, which is why
+    # the column is nullable and nothing backfills it: existing sessions are project-less and stay
+    # exactly as they were. ``root`` is the absolute path as the operator gave it; in a container
+    # it may name a directory that is not mounted yet, which is a state the API reports rather than
+    # a row it refuses to keep.
+    """
+    CREATE TABLE projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        root TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        settings TEXT NOT NULL DEFAULT '{}'
+    );
+    ALTER TABLE sessions ADD COLUMN project_id TEXT;
+    CREATE INDEX sessions_by_project ON sessions(project_id);
+    """,
 ]
 
 

@@ -30,6 +30,8 @@ GATES: dict[str, object] = {
     "/api/proposals": [],
     "/api/schedules": [],
     "/api/sessions": [],
+    # The shell asks which projects there are before it draws the rail.
+    "/api/projects": [],
 }
 
 

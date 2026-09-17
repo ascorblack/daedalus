@@ -316,6 +316,7 @@ def environment_section(
     github_org: str = "",
     ssh_hosts: Sequence[tuple[str, str]] = (),
     selfdev_mode: str = "off",
+    project: str = "",
 ) -> str:
     lines = [
         "Environment:",
@@ -326,6 +327,16 @@ def environment_section(
         f"- Your core repository: {core_repo}",
         f"- Current model: {model}",
     ]
+    if project:
+        lines.append(
+            f"- This session belongs to the project {project}, whose folder is {workspace}. The folder is the "
+            "operator's own — their repository, their documents, their work — and it is the whole of your reach: "
+            "everything you read, write, run and deliver is inside it, and a path that leads out of it is refused "
+            "rather than followed. It is shared: other sessions of this project work in the same files, and files "
+            "you find there were put there by the operator or by them, so read before you rewrite, leave the tree "
+            "as somebody else can pick it up, and do not reorganise what you were not asked to reorganise. If a "
+            "task genuinely needs something outside the folder, say so and ask — do not go looking for a way round."
+        )
     if github_org:
         own = {
             "server": " The operator's repositories (your host and core) change only through SelfPropose.",

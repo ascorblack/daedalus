@@ -47,19 +47,30 @@ S1, S2, S3, S4, S5, S6, S7, S8 = "a1b2c3d4e5f6", "b2c3d4e5f6a1", "c3d4e5f6a1b2",
 LOOP = {"mode": "interval", "interval_seconds": 5400, "status": "active", "run_count": 14, "max_runs": None, "next_run_at": ahead(minutes=38), "last_run_at": ago(minutes=52), "last_reason": None, "stop_reason": None, "pause_note": None, "instruction": "Read the support inbox, answer what you can, and put the rest on the board."}
 
 
-def session(id_: str, title: str, model: str, *, status: str = "idle", last: str, workspace: str | None = None, own: bool = True, meta: dict | None = None) -> dict:
-    return {"id": id_, "title": title, "status": status, "created_at": ago(days=3), "last_message_at": last, "run_id": "run1" if status == "running" else None, "model": model, "workspace": workspace or id_, "workspace_own": own, "metadata": meta or {}}
+P1, P2 = "9f3c2a1b7d40", "2e7b5c9a1f88"
+
+PROJECTS = [
+    {"id": P1, "name": "Bakery site", "root": "/home/operator/work/bakery", "created_at": ago(days=9), "settings": {"snapshots": True}, "reachable": True, "writable": True, "sessions": [{"id": "a1b2c3d4e5f6", "title": "Bakery site"}, {"id": "b2c3d4e5f6a1", "title": "Bakery site: photos"}, {"id": "e5f6a1b2c3d4", "title": "Bakery site (fork @412)"}]},
+    {"id": P2, "name": "Expenses", "root": "/home/operator/work/expenses", "created_at": ago(days=4), "settings": {"snapshots": False}, "reachable": True, "writable": True, "sessions": [{"id": "f6a1b2c3d4e5", "title": "Expense tracker"}]},
+    # A folder added but not mounted yet: in Docker that is a restart away, and the app says so.
+    {"id": "5a8d1c0b6e22", "name": "Courier rates", "root": "/home/operator/documents/courier", "created_at": ago(hours=2), "settings": {"snapshots": False}, "reachable": False, "writable": False, "sessions": []},
+]
+
+
+def session(id_: str, title: str, model: str, *, status: str = "idle", last: str, workspace: str | None = None, own: bool = True, meta: dict | None = None, project: str | None = None) -> dict:
+    name = next((p["name"] for p in PROJECTS if p["id"] == project), None)
+    return {"id": id_, "title": title, "status": status, "created_at": ago(days=3), "last_message_at": last, "run_id": "run1" if status == "running" else None, "model": model, "workspace": workspace or id_, "workspace_own": own, "metadata": meta or {}, "project_id": project, "project": name}
 
 
 SESSIONS = [
-    session(S1, "Bakery site", "Claude Opus 5", status="running", last=ago(seconds=40)),
-    session(S2, "Bakery site: photos", "Local Qwen3.8", last=ago(minutes=12), workspace=S1, own=False),
+    session(S1, "Bakery site", "Claude Opus 5", status="running", last=ago(seconds=40), project=P1),
+    session(S2, "Bakery site: photos", "Local Qwen3.8", last=ago(minutes=12), workspace=S1, own=False, project=P1),
     session(S3, "Support inbox", "GPT-5.6 Luna", last=ago(minutes=52), meta={"loop": LOOP}),
     session(S7, "[sub] triage", "GPT-5.6 Luna", last=ago(minutes=53), meta={"subagent_of": S3, "subagent_name": "triage"}),
     session(S8, "[sub] reply-drafts", "GPT-5.6 Luna", last=ago(minutes=51), meta={"subagent_of": S3, "subagent_name": "reply-drafts"}),
     session(S4, "Weekly digest", "DeepSeek Flash", status="waiting", last=ago(minutes=4)),
-    session(S5, "Bakery site (fork @412)", "DeepSeek Flash", last=ago(hours=1), meta={"forked_from": {"session_id": S1, "seq": 412}}),
-    session(S6, "Expense tracker", "Local Qwen3.8", last=ago(days=1)),
+    session(S5, "Bakery site (fork @412)", "DeepSeek Flash", last=ago(hours=1), meta={"forked_from": {"session_id": S1, "seq": 412}}, project=P1),
+    session(S6, "Expense tracker", "Local Qwen3.8", last=ago(days=1), project=P2),
 ]
 
 ANSWER = """The menu page is live and checked on a phone.
@@ -122,6 +133,7 @@ def detail(id_: str) -> dict:
     return {
         "id": id_, "title": s["title"], "status": "idle" if id_ != S4 else "waiting", "run_id": None, "compacting": None,
         "workspace": f"/srv/workspaces/{s['workspace']}", "workspace_name": s["workspace"], "workspace_own": s["workspace_own"],
+        "project": next((p for p in PROJECTS if p["id"] == s["project_id"]), None),
         "workspace_sessions": [{"id": S2, "title": "Bakery site: photos"}] if id_ == S1 else [{"id": S1, "title": "Bakery site"}] if id_ == S2 else [],
         "pending": QUESTION if id_ == S4 else None, "model": s["model"], "provider": "claude" if id_ == S1 else "opencode",
         "messages": messages, "mode": "", "usd_cap": 4.0, "brief": "Site of a small bakery. Static HTML, no frameworks; the owner edits data files, never markup.", "spawned_by": None, "tools_off": [],
@@ -411,6 +423,8 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, PROPOSALS)
     if rel == "/api/schedules":
         return respond(route, SCHEDULES)
+    if rel == "/api/projects":
+        return respond(route, PROJECTS)
     if rel == "/api/workspaces":
         return respond(route, WORKSPACES)
     if rel.startswith("/api/workspaces/"):
@@ -501,6 +515,12 @@ def open_workspaces(page: Page) -> None:
     page.wait_for_selector(".sheet", timeout=5000)
 
 
+def open_projects(page: Page) -> None:
+    """The switcher over a list already grouped by project: the folders on one side, the agents in them on the other."""
+    page.locator(".rail .project-chip").click()
+    page.wait_for_selector(".project-row", timeout=5000)
+
+
 def run() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
@@ -515,6 +535,8 @@ def run() -> int:
         shot(page, "files-preview", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_files_and_preview, settle=1200)
         shot(page, "session-share", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_share, settle=800)
         shot(page, "workspaces", "agents", before=open_workspaces)
+        desk.add_init_script("try { localStorage.setItem('agents.groupBy', 'project'); } catch (e) {}")
+        shot(page, "projects", "agents", before=open_projects)
         shot(page, "voice", "voice")
         shot(page, "board", "board")
         shot(page, "inbox", "inbox")

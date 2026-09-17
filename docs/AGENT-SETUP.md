@@ -122,6 +122,29 @@ which one and what it may cost first. You can confirm the state from the shell a
 docker exec deploy-daedalus-1 /srv/venv/bin/python -m daedalus check   # "model: none — …" until one is added
 ```
 
+## 3b. Projects, when the operator has folders of their own on the server
+
+A **project** is a folder the operator adds in the app (Projects in the rail, or the grid icon on the
+Agents screen): the agents started in it work in that folder and may not read or write outside it.
+Without a project a session gets a scratch directory of its own under the workspaces root, which is
+what every session had before and still gets.
+
+In this Compose install the container sees only what is mounted into it, so a folder outside the stack
+needs a bind mount before an agent can work in it. The app says which projects are not reachable; add
+the mount to the agent service and restart:
+
+```yaml
+# deploy/compose.yaml → services.daedalus.volumes
+      - /home/<operator>/work/<folder>:/home/<operator>/work/<folder>
+```
+
+Mount it at **the same path inside the container as outside**: the project stores the path the operator
+gave, and the same string has to name the folder on both sides. Then
+`docker compose up -d daedalus` and the project reports itself reachable.
+
+This is the operator's decision too: do not add folders they did not ask for, and never mount their
+whole home directory — the point of a project is that the boundary is a real one.
+
 ## 4. HTTPS (when there is a domain)
 
 Put any reverse proxy with TLS in front of port 8765 and set `MINIAPP_PUBLIC_URL=https://<domain>` (that is

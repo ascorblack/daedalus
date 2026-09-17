@@ -44,6 +44,7 @@ from daedalus.host.transcript_view import message_view
 from daedalus.providers.openai_compat import UsageRecord
 from daedalus.security import redact
 from daedalus.stores import pairing, passkeys
+from daedalus.stores.projects import ProjectError, ProjectSettings
 from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
@@ -184,9 +185,25 @@ class SpaFiles(StaticFiles):
             raise
 
 
+class ProjectBody(BaseModel):
+    name: str
+    root: str
+    """The absolute path of the folder, as the operator gave it. It need not exist here: in a container
+    it becomes reachable once the launcher mounts it, and until then the row is what the launcher reads."""
+    snapshots: bool = False
+
+
+class ProjectPatch(BaseModel):
+    name: str | None = None
+    root: str | None = None
+    snapshots: bool | None = None
+
+
 class NewSessionBody(BaseModel):
     title: str
     prompt: str | None = None
+    project_id: str | None = None
+    """The project to work in: its folder becomes the session's workspace and the limit of its reach."""
     workspace: str | None = None
     """A workspace directory name to work in (another session's id or a named workspace); empty = a directory of its own."""
     tools_off: list[str] = Field(default_factory=list)
@@ -884,11 +901,69 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         response.delete_cookie(SESSION_COOKIE, path="/")
         return {"ok": True}
 
+    # -- projects: the folders the operator adds, and the sessions that work inside them -------
+
+    @api.get("/api/projects")
+    async def list_projects(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        """Every project, with who works in it and whether this process can reach its folder.
+
+        ``reachable`` is the Docker seam: the row exists as soon as the operator adds the folder, but
+        in a container the folder is only there once it is bind-mounted, so the app can say "restart
+        to mount this" instead of showing a project whose files are mysteriously absent.
+        """
+        out = []
+        for project in await manager.projects.list():
+            out.append({**project.view(), "sessions": await manager.projects.sessions_of(project.id)})
+        return out
+
+    @api.post("/api/projects")
+    async def create_project(body: ProjectBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            project = await manager.projects.create(body.name, body.root, settings=ProjectSettings(snapshots=body.snapshots))
+        except ProjectError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {**project.view(), "sessions": []}
+
+    @api.patch("/api/projects/{project_id}")
+    async def patch_project(project_id: str, body: ProjectPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        current = await manager.projects.get(project_id)
+        if current is None:
+            raise HTTPException(404, "no such project")
+        settings_patch = None if body.snapshots is None else ProjectSettings(snapshots=body.snapshots)
+        try:
+            project = await manager.projects.update(project_id, name=body.name, root=body.root, settings=settings_patch)
+        except ProjectError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        # The sessions this process already holds keep their own copy of the project: without this, a
+        # folder moved in the app would reach only the sessions opened after the change.
+        await manager.reload_project(project, project_id)
+        return {**project.view(), "sessions": await manager.projects.sessions_of(project.id)}
+
+    @api.delete("/api/projects/{project_id}")
+    async def delete_project(project_id: str, detach: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Forget a project. Not one file of it is deleted — the folder is the operator's.
+
+        A project with sessions in it is refused unless ``detach=1`` says what should happen to them:
+        they keep their history and go back to a directory of their own, which is empty. Saying that
+        out loud is the point of the refusal.
+        """
+        project = await manager.projects.get(project_id)
+        if project is None:
+            raise HTTPException(404, "no such project")
+        sessions = await manager.projects.sessions_of(project_id)
+        if sessions and not detach:
+            one = len(sessions) == 1
+            raise HTTPException(409, f"{len(sessions)} agent{'' if one else 's'} {'works' if one else 'work'} in {project.name}; removing it leaves them without its files (pass detach=1 to do it anyway)")
+        await manager.projects.delete(project_id)
+        await manager.reload_project(None, project_id)
+        return {"ok": True, "detached": [s["id"] for s in sessions]}
+
     # -- sessions -------------------------------------------------------------------
 
     @api.get("/api/sessions")
     async def list_sessions(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
         rows = await manager.list_sessions(limit=200)
+        names = {p.id: p.name for p in await manager.projects.list()}
         default = app.config.default_preset()
         default_label = default[1].display(default[0]) if default else NO_MODEL_LABEL
         overrides_by_id = await manager.live.load_models([row["id"] for row in rows])
@@ -897,6 +972,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             workspace = Path(str(row["metadata"].get("workspace"))) if row["metadata"].get("workspace") else manager.workspace_for(row["id"])
             row["workspace"] = workspace.name
             row["workspace_own"] = workspace == manager.workspace_for(row["id"])
+            row["project"] = names.get(row.get("project_id") or "")
             overrides = overrides_by_id.get(row["id"], {})
             if overrides.get("preset") and overrides["preset"] in app.config.presets:
                 row["model"] = app.config.presets[overrides["preset"]].display(overrides["preset"])
@@ -909,13 +985,21 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/sessions")
     async def new_session(body: NewSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         metadata: dict[str, Any] = {"tools_off": sorted(set(body.tools_off))} if body.tools_off else {}
+        if body.project_id and body.workspace:
+            raise HTTPException(400, "a session works in a project or in a workspace directory, not both")
+        if body.project_id:
+            project = await manager.projects.get(body.project_id)
+            if project is None:
+                raise HTTPException(404, "no such project")
+            if not project.reachable:
+                raise HTTPException(409, f"the folder of {project.name} ({project.root}) is not reachable from here yet; mount it and restart before starting an agent in it")
         if body.workspace:
             directory = _workspace_dir(body.workspace)
             if not directory.is_dir():
                 raise HTTPException(404, f"no workspace named {body.workspace!r}")
             metadata["workspace"] = str(directory)
         try:
-            state = await app.create_session(body.title, metadata=metadata or None)
+            state = await app.create_session(body.title, metadata=metadata or None, project_id=body.project_id or None)
         except TelegramBusy as exc:
             raise HTTPException(429, f"Telegram asks to wait {exc.retry_after}s before creating another topic (session {exc.session_id} exists without a topic)") from exc
         except TelegramRefused as exc:
@@ -994,6 +1078,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "workspace": str(state.workspace),
             "workspace_name": state.workspace.name,
             "workspace_own": state.workspace == manager.workspace_for(session_id),
+            "project": state.project.view() if state.project is not None else None,
             # Subagents share their leader's workspace by design; they are listed under Subagents (and the leader under
             # "leader:"), so the workspace list shows only the sessions that were attached to it.
             "workspace_sessions": [u for u in await manager.workspace_users(state.workspace) if u["id"] != session_id and u["id"] not in {c["session_id"] for c in subagents} and u["id"] != state.metadata.get("subagent_of")],
@@ -1091,6 +1176,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                         raise HTTPException(404, "the call named no file")
                     candidate = Path(raw).expanduser()
                     target = candidate if candidate.is_absolute() else state.workspace / candidate
+                    # The path is read back out of the transcript, so it is checked again rather than
+                    # trusted: a project whose folder has moved since the call must not serve the old one.
+                    if state.services is not None and not state.services.contains(target):
+                        raise HTTPException(403, "that file is outside this project")
                     if not target.is_file():
                         raise HTTPException(404, "the file is gone")
                     return FileResponse(target, media_type=mimetypes.guess_type(target.name)[0] or "application/octet-stream", filename=target.name, headers={"Access-Control-Allow-Origin": "https://web.telegram.org"})

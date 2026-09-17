@@ -4,6 +4,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Icon, IconName } from "./icons";
 import { Sheet } from "./dialogs";
+import { Project } from "./api";
+import { ProjectChip } from "./projects";
 import { Screen, navigate, pathFor } from "./router";
 import { SelfDevMode, screenTag, visibleScreens } from "./capabilities";
 
@@ -115,7 +117,7 @@ export function MoreSheet({ screen, counts, selfdev, onClose }: { screen: Screen
   );
 }
 
-export function Rail({ screen, counts, selfdev, collapsed, onToggle, onPalette }: { screen: Screen; counts: Counts; selfdev: SelfDevMode; collapsed: boolean; onToggle: () => void; onPalette: () => void }) {
+export function Rail({ screen, counts, selfdev, collapsed, onToggle, onPalette, projects, project, onProjects }: { screen: Screen; counts: Counts; selfdev: SelfDevMode; collapsed: boolean; onToggle: () => void; onPalette: () => void; projects: Project[]; project: string; onProjects: () => void }) {
   const item = (s: Screen) => {
     const n = countFor(s, counts);
     const tag = tagFor(s, selfdev);
@@ -134,6 +136,7 @@ export function Rail({ screen, counts, selfdev, collapsed, onToggle, onPalette }
         <img src="/app/icons/icon-192.png" alt="" width={26} height={26} />
         <span className="rail-text">Daedalus</span>
       </a>
+      <ProjectChip projects={projects} current={project} onOpen={onProjects} collapsed={collapsed} />
       <button className="rail-item search" onClick={onPalette} title="Search and go (Ctrl/⌘ K)">
         <Icon name="search" size={18} />
         <span className="rail-text">Search…</span>
