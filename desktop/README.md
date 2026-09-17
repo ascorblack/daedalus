@@ -374,10 +374,15 @@ public-text gate. `daedalus doctor` prints the same sentence.
 What is gone is the wall behind them:
 
 - **`Exec` runs as you.** A command the agent runs has your files and your credentials, and the only
-  things between it and them are the rules above. On Linux bubblewrap still confines it, and on a
-  native install with `bwrap` on the machine `tools.exec.sandbox` **defaults to `workspace`** rather
-  than to `off` — there is no container here to be the wall instead. On macOS and Windows there is no
-  bubblewrap, and the doctor says so rather than reporting it as missing software.
+  things between it and them are the rules above. On Linux bubblewrap still confines what a command
+  **writes**: `tools.exec.sandbox` **defaults to `workspace`** on a native install where bubblewrap
+  actually runs — there is no container here to be the wall instead. It binds the filesystem
+  read-only rather than hiding it, so it is a wall against writing and not against reading; what
+  refuses the installation's own files is the rule below. Ubuntu 24.04 and Debian 13 forbid
+  unprivileged user namespaces out of the box, and `bwrap` is often installed on them anyway by
+  flatpak or a desktop; there the probe fails, the default is `off`, and the doctor says which of
+  the two it is. On macOS and Windows there is no bubblewrap, and the doctor says so rather than
+  reporting it as missing software.
 - **Key isolation is weaker, but not gone.** The key proxy is still a separate process, still the
   only one that holds a provider key, still bound to `127.0.0.1` and nothing else, and the key file
   is still `0600` outside every folder the agent works in — the agent process never holds a key. But

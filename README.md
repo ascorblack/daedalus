@@ -227,7 +227,7 @@ What follows the mode: the `Self*` tools (absent in `off`, `SelfWorkspace` and `
 
 | Area | Tools |
 |---|---|
-| Files & shell | `Exec` (inside a bubblewrap sandbox — the default on a native install with `bwrap` present, optional in a container, which is a boundary already; `background=true` with `JobOutput` / `JobKill` / `JobList` for what outlives the call; a long `sleep` or a polling loop in the foreground is refused — reports and finished jobs arrive as messages), `Read`, `Write`, `Edit`, `Find`, `Search` |
+| Files & shell | `Exec` (inside a bubblewrap sandbox — the default on a native install where a namespace probe succeeds, optional in a container, which is a boundary already; `background=true` with `JobOutput` / `JobKill` / `JobList` for what outlives the call; a long `sleep` or a polling loop in the foreground is refused — reports and finished jobs arrive as messages), `Read`, `Write`, `Edit`, `Find`, `Search` |
 | Web | `WebFetch`, `WebSearch` — DuckDuckGo out of the box with no key at all; a self-hosted SearXNG behind a profile; Serper, Tavily, Exa, Perplexity, Keenable through the key proxy |
 | Seeing | `ImageView` — a separate vision model answers questions about an image, so the main context never carries pixels |
 | Delegation | `SubAgent`, `SubAgentSend`, `SubAgentList`, `SpawnAgent`, `AskPeer` — helpers in the same workspace (a report wakes the leader when it is ready; an idle helper can be raised without a task; `tools_off` takes tools away from a helper, so a launch it must not make is impossible rather than discouraged), sibling sessions, named peers |
@@ -359,7 +359,7 @@ Nothing here is a tier: it is the same program, and each row is a real consequen
 
 | | Native | Docker desktop | Server |
 |---|---|---|---|
-| **Isolation** | no container boundary: `Exec` runs as you, behind the policy rules, the approval gates and — on Linux with `bwrap` present, where it is now the default — bubblewrap. Two rules exist only here: the installation's own files (the provider keys, the state database, the restart secret, the launcher and its runtime) are refused to read as well as to write, and a path in your home folder outside every project is a question you answer once | the container's edge, as on a server | the container's edge |
+| **Isolation** | no container boundary: `Exec` runs as you, behind the policy rules, the approval gates and — on Linux where bubblewrap actually runs, which is now probed rather than assumed — bubblewrap, which confines what a command writes and not what it reads. Two rules exist only here: the installation's own files (the provider keys, the whole state directory, the launcher, its environment file and its runtime) are refused to read as well as to write, and a path in your home folder outside every project is a question you answer once | the container's edge, as on a server | the container's edge |
 | **Telegram** | `api.telegram.org`, so files are capped at 20 MB in and out | the local Bot API server behind `--profile telegram`: 2 GB | the same profile |
 | **Self-development** | `local`: the agent commits into the checkout the app runs from and the change applies on a restart, with a preflight on a copy of itself first and an automatic rollback if it cannot stay up | `local` by default; `server` with a GitHub token | `server`: a worktree, a pull request you approve in the chat, a merge, a rebuild |
 | **Browser skills** | `daedalus-desktop install browser`, ~100 MB into the folder | the `:browser` tag | the `:browser` tag |

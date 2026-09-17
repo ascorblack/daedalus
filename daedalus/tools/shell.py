@@ -34,6 +34,12 @@ class SandboxUnavailable(RuntimeError):
     """The configured sandbox cannot be created here; commands do not run unsandboxed instead."""
 
 
+def _native() -> bool:
+    """Whether this process is the agent on the operator's own machine. Read from the environment
+    rather than from :mod:`daedalus.config`, which imports this module for the sandbox default."""
+    return os.environ.get("DAEDALUS_NATIVE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def shell_argv(command: str, *, windows: bool | None = None) -> list[str]:
     """The program and arguments that run one shell command on this platform.
 
@@ -71,13 +77,25 @@ def native_sandbox_note() -> str:
     and the spend caps are in the agent and all still apply. The wall behind them is what a container
     was, and what stands where it stood is a question the operator answers.
     """
-    if sys.platform.startswith("linux"):
-        return "native mode: no container boundary; the policy asks before leaving the project, and bubblewrap confines Exec while tools.exec.sandbox = workspace (the default here)."
-    return "native mode: no container boundary and no bubblewrap on this platform; the policy asks before leaving the project, and the approval gates are what stands behind it."
+    if not sys.platform.startswith("linux"):
+        return "native mode: no container boundary and no bubblewrap on this platform; the policy asks before leaving the project, and the approval gates are what stands behind it."
+    status = bwrap_status()
+    if status != "ok":
+        return f"native mode: no container boundary, and no sandbox for Exec on this machine ({status}); the policy asks before leaving the project, and the approval gates are what stands behind it."
+    # What the sandbox is and is not: it binds / read-only, so it confines what a command writes and
+    # not what it reads. Every file on the machine, the sealed set included, is readable inside it —
+    # what refuses those is the policy, and saying otherwise here would offer a wall that is not there.
+    return "native mode: no container boundary; the policy asks before leaving the project, and bubblewrap confines what Exec writes while tools.exec.sandbox = workspace (the default here). It binds the filesystem read-only rather than hiding it, so it is a wall against writing, not against reading."
 
 
 def bwrap_status() -> str:
-    """Whether bubblewrap can create namespaces in this container (Docker's default seccomp profile forbids it).
+    """Whether bubblewrap can create namespaces here: "ok", or why not.
+
+    In a container the usual answer is Docker's default seccomp profile; on a machine it is a kernel
+    that forbids unprivileged user namespaces, which Ubuntu 24.04 and Debian 13 do out of the box.
+    The probe runs the sandbox's own flags, so what it answers is what the sandbox would do, and the
+    answer is cached — once when it works, for five minutes when it does not, so that a machine given
+    namespaces later picks them up without a restart.
 
     Blocking (it runs a subprocess): call it through ``asyncio.to_thread`` from the event loop.
     """
@@ -98,8 +116,8 @@ def bwrap_status() -> str:
     try:
         probe = subprocess.run([bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "true"], capture_output=True, text=True, timeout=20)
         remedy = (
-            "this machine restricts unprivileged user namespaces; the agent runs Exec unsandboxed until they are allowed"
-            if os.environ.get("DAEDALUS_NATIVE", "").strip().lower() in ("1", "true", "yes", "on")
+            "this machine restricts unprivileged user namespaces, so a fresh installation starts with tools.exec.sandbox = off; allowing them (sysctl kernel.apparmor_restrict_unprivileged_userns=0) and setting it back to workspace is what turns the sandbox on"
+            if _native()
             else "the container needs cap_add SYS_ADMIN and an unconfined seccomp profile"
         )
         _bwrap_state = "ok" if probe.returncode == 0 else f"bwrap cannot create namespaces here: {(probe.stderr or probe.stdout).strip()[:120]} ({remedy})"
@@ -126,7 +144,8 @@ async def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config
             logging.getLogger(__name__).warning("tools.exec.sandbox=workspace but the sandbox is unavailable (%s); commands are refused until it is", status)
             _warned_missing_bwrap = True
         # Fail closed: a sandbox the operator asked for and did not get is not a warning, it is a missing wall.
-        raise SandboxUnavailable(f"the sandbox is configured (tools.exec.sandbox=workspace) but unavailable: {status}. The operator can switch it off in Settings → Tools or enable namespaces for the container.")
+        where = "allow unprivileged user namespaces on this machine" if _native() else "enable namespaces for the container"
+        raise SandboxUnavailable(f"the sandbox is configured (tools.exec.sandbox=workspace) but unavailable: {status}. The operator can switch it off in Settings → Tools or {where}.")
     bwrap = shutil.which("bwrap") or "bwrap"
     argv = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--unshare-pid", "--die-with-parent", "--new-session"]
     paths = [workspace, *[Path(p) for p in getattr(exec_config, "sandbox_extra_writable", [])], *writable]

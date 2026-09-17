@@ -152,8 +152,10 @@ def shell_segments(command: str, *, depth: int = 0) -> list[list[str]]:
 
     What a lexer cannot see, and this one does not claim to: a command assembled at run time (``eval``,
     ``$(...)``, backticks, a variable holding the verb), a heredoc fed to ``sh``, and code inside
-    another interpreter (``python -c``, ``perl -e``). The container is the boundary for those; the
-    policy catches what is written plainly.
+    another interpreter (``python -c``, ``perl -e``). In a container that did not matter, because the
+    container was the boundary for those. Natively there is no such boundary, so the sealed set is
+    not left to the lexer at all: :func:`mentions_sealed` reads the whole command line as text, which
+    catches the interpreter payload, the heredoc and the variable holding half the path alike.
     """
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>")
     lexer.whitespace_split = True
@@ -425,8 +427,35 @@ def sealed_root(path: str, roots: Iterable[str], *, base: str = "") -> str | Non
     return None
 
 
+def _substitute(text: str, variables: dict[str, str] | None) -> str:
+    """A path with the variables the same command line set expanded into it."""
+    for name, value in (variables or {}).items():
+        text = text.replace("${" + name + "}", value).replace("$" + name, value)
+    return text
+
+
 def real_under(path: str, roots: Iterable[str], *, base: str = "") -> bool:
     return sealed_root(path, roots, base=base) is not None
+
+
+def mentions_sealed(text: str, roots: Iterable[str]) -> str | None:
+    """A sealed directory named anywhere in a command line, whatever the shape around it.
+
+    Parsing a shell command reaches what is written plainly and no further: ``python -c
+    "open('…/keyproxy.env')"``, a heredoc fed to an interpreter, ``H=…; cat $H/keyproxy.env`` — the
+    lexer sees a string, a word and a variable. A container used to be the wall behind that reading;
+    natively there is none, so the sealed set is also matched as text. It is deliberately blunt: the
+    sealed directories are the installation's own, and a command with one of their paths in it has
+    no business the agent has.
+    """
+    for root in roots:
+        at = text.find(str(root))
+        while at >= 0:
+            after = text[at + len(str(root)) : at + len(str(root)) + 1]
+            if after in ("", "/", '"', "'", " ", "\t", "\n", ";", ")", "`"):
+                return str(root)
+            at = text.find(str(root), at + 1)
+    return None
 
 
 def _option_operands(words: list[str]) -> list[str]:
@@ -476,6 +505,20 @@ def _archive_members(words: list[str]) -> list[str]:
             continue
         members.append(w)
     return [posixpath.join(directory, m) for m in members] if directory else []
+
+
+_ASSIGNMENT = re.compile(r"(?:^|[;&|(]|\b(?:export|declare|local)\s)\s*([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|]+)")
+
+
+def shell_assignments(command: str) -> dict[str, str]:
+    """The variables a command line sets itself, so that a later operand made out of one is read.
+
+    ``H=/…/Daedalus; cat $H/daedalus-secrets/keyproxy.env`` names the key file as surely as writing
+    it out does, and the lexer that reads the second half has already thrown the first half away.
+    This reaches the value the same line assigned; a value from the environment, or one computed by
+    a command, is still beyond it.
+    """
+    return {name: value.strip("\"'") for name, value in _ASSIGNMENT.findall(command)}
 
 
 def path_operands(words: list[str]) -> list[str]:
@@ -540,7 +583,7 @@ class Policy:
 
     # -- the machine's own paths ------------------------------------------------------
 
-    def _host_paths(self, paths: Iterable[str], *, base: str = "") -> Decision | None:
+    def _host_paths(self, paths: Iterable[str], *, base: str = "", variables: dict[str, str] | None = None) -> Decision | None:
         """The two rules a machine needs and a container does not, over the paths a call names.
 
         In Docker mode this answers nothing at all, and that is deliberate rather than an omission:
@@ -565,7 +608,7 @@ class Policy:
         where = base or self.base_dir or (self.workspace_roots[0] if self.workspace_roots else "")
         asked: Decision | None = None
         for raw in paths:
-            path = expand_home(str(raw), self.home)
+            path = expand_home(_substitute(str(raw), variables), self.home)
             if path.startswith(("~", "$")):
                 continue  # a home form with no home to resolve it against: nothing to compare
             target = path.rstrip("*").rstrip("/") or "/"
@@ -579,6 +622,7 @@ class Policy:
 
     def _shell(self, command: str, cwd: str | None, *, foreground: bool = True) -> Decision:
         segments = shell_segments(command)
+        variables = shell_assignments(command)
         hosts = hosts_in(segments)
         worst = Decision(ALLOW, hosts=hosts)
         checkouts = list(self.operator_checkouts)
@@ -591,6 +635,8 @@ class Policy:
 
         if (host := self._host_paths([cwd] if cwd else [])) is not None:
             escalate(host.action, host.reason, host.rule)
+        if self.native and (named := mentions_sealed(command, self.sealed)) is not None:
+            escalate(DENY, f"{named}: {INSTALLATION_REASON}", "host.installation")
         if re.search(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}", command):
             escalate(DENY, "a fork bomb", "shell.forkbomb")
         if foreground:
@@ -635,7 +681,7 @@ class Policy:
                     escalate(DENY, f"writing to a protected path ({target})", "shell.protected_write")
                 elif normed in DANGEROUS_TARGETS or normed.rstrip("/*") in _DANGEROUS_BASES[1:]:
                     escalate(DENY, f"writing into a system directory ({target})", "shell.system_write")
-            if (host := self._host_paths(path_operands(words), base=where)) is not None:
+            if (host := self._host_paths(path_operands(words), base=where, variables=variables)) is not None:
                 escalate(host.action, host.reason, host.rule)
             if head == "git":
                 sub, at = _git_subcommand(words)
@@ -722,4 +768,4 @@ class Policy:
         return rows
 
 
-__all__ = ["ALLOW", "ASK", "DENY", "SHELL_TOOLS", "Decision", "Policy", "Rule", "approval_key", "argument_paths", "canonical", "expand_home", "host_allowed", "hosts_in", "path_operands", "real_path", "real_under", "sealed_root", "shell_segments"]
+__all__ = ["ALLOW", "ASK", "DENY", "SHELL_TOOLS", "Decision", "Policy", "Rule", "approval_key", "argument_paths", "canonical", "expand_home", "host_allowed", "hosts_in", "mentions_sealed", "path_operands", "real_path", "real_under", "sealed_root", "shell_assignments", "shell_segments"]

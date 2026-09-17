@@ -12,7 +12,6 @@ Two layers, deliberately separate:
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 import tomllib
 from pathlib import Path
@@ -38,17 +37,24 @@ def native_mode() -> bool:
 def native_sandbox_default() -> str:
     """Whether Exec is confined by default on this installation.
 
-    Natively on Linux, where bubblewrap is installed, it is. Outside Docker bubblewrap needs no added
-    capability and no relaxed seccomp profile, and there is no container around the agent to be the
-    boundary in its place, so the one wall that is available is up by default.
+    Natively on Linux, where bubblewrap is installed **and can actually create a namespace**, it is.
+    Outside Docker bubblewrap needs no added capability and no relaxed seccomp profile, and there is
+    no container around the agent to be the boundary in its place, so the one wall that is available
+    is up by default.
 
-    The check is for the binary and not for a working namespace, because this runs whenever a default
-    configuration is built and a namespace probe is a subprocess. A machine that has ``bwrap`` and
-    forbids unprivileged namespaces gets the sandbox's own fail-closed message, which names the
-    setting to turn off; a machine without it gets the policy rules, which is what macOS, Windows and
-    a container get too.
+    The presence of the binary is not the question, and asking it that way made a fresh installation
+    dead on arrival: Ubuntu 24.04 and Debian 13 forbid unprivileged user namespaces by default and
+    pull ``bwrap`` in with flatpak, Steam and half the desktops, and the sandbox fails closed — so
+    every Exec was refused on a machine that had never been asked about a sandbox at all. So the
+    default is decided by a real probe, run once and cached for the life of the process, and a
+    machine that cannot sandbox starts with the sandbox off and the policy rules, which is what
+    macOS, Windows and a container get too.
     """
-    return "workspace" if native_mode() and sys.platform.startswith("linux") and shutil.which("bwrap") else "off"
+    if not (native_mode() and sys.platform.startswith("linux")):
+        return "off"
+    from daedalus.tools.shell import bwrap_status  # Lazy: the tools package imports this module
+
+    return "workspace" if bwrap_status() == "ok" else "off"
 
 
 def env_path(name: str) -> Path | None:

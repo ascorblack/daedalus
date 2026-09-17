@@ -157,8 +157,15 @@ def test_bubblewrap_is_not_reported_as_missing_software_off_linux(monkeypatch: p
 
 def test_the_isolation_note_says_what_is_gone_and_what_is_not(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shell_tool.sys, "platform", "linux")
+    monkeypatch.setattr(shell_tool, "bwrap_status", lambda: "ok")
     note = shell_tool.native_sandbox_note()
     assert "no container boundary" in note and "bubblewrap" in note
+    # And what the sandbox is: / is bound read-only, so it confines writing and not reading.
+    assert "read-only" in note and "not against reading" in note
+    # A machine where bubblewrap cannot run is not offered one that it has.
+    monkeypatch.setattr(shell_tool, "bwrap_status", lambda: "bwrap cannot create namespaces here")
+    unusable = shell_tool.native_sandbox_note()
+    assert "no sandbox for Exec on this machine" in unusable and "cannot create namespaces" in unusable
     monkeypatch.setattr(shell_tool.sys, "platform", "win32")
     assert "no container boundary" in shell_tool.native_sandbox_note()
 
@@ -172,10 +179,10 @@ async def test_the_doctor_says_which_checks_a_container_would_have_answered() ->
     ctx = doctor.DoctorContext(settings=settings, config=RuntimeConfig())
     checks = await doctor._native(ctx)
     by_name = {c.name: c for c in checks}
-    for name, _why in doctor.CONTAINER_ONLY:
-        assert name in by_name, name
-        assert by_name[name].message.startswith("not applicable (native)")
-        assert by_name[name].ok is True  # a check that does not apply is not a failure
+    # One line about what a container would have carried, rather than three rows named after probes
+    # that no mode emits: the rows invented the questions they claimed to be answering.
+    assert by_name["container-only checks"].message == doctor.CONTAINER_ONLY
+    assert by_name["container-only checks"].ok is True
     assert "no container boundary" in by_name["isolation"].message
     assert "policy rules" in by_name["isolation"].fix_hint
 

@@ -122,6 +122,24 @@ def test_a_file_is_sealed_whichever_direction_the_command_carries_it() -> None:
         assert decision.action == DENY and decision.rule == "host.installation", command
 
 
+def test_an_interpreter_is_not_a_way_of_not_writing_the_path() -> None:
+    """``python -c`` was outside what a shell lexer reads, and the container used to be the wall
+    behind that. There is no container here, so the sealed set is matched as text as well."""
+    policy = native_policy()
+    key = f"{INSTALL}/daedalus-secrets/keyproxy.env"
+    for command in (
+        f"python -c \"print(open('{key}').read())\"",
+        f"perl -e 'print`cat {key}`'",
+        f"uv run python -c \"print(open('{key}').read())\"",
+        f"H={INSTALL}; cat $H/daedalus-secrets/keyproxy.env",
+        f"node -e \"console.log(require('fs').readFileSync('{key}','utf8'))\"",
+    ):
+        decision = policy.evaluate("Exec", {"command": command})
+        assert decision.action == DENY and decision.rule == "host.installation", command
+    # A directory that merely begins with the same letters is a different directory.
+    assert policy.evaluate("Exec", {"command": f"ls {INSTALL}/runtime-notes"}).action != DENY
+
+
 def test_a_relative_path_is_the_path_it_names() -> None:
     """``../../daedalus-secrets/keyproxy.env`` from a workspace is the key file, and was allowed:
     the rules skipped every operand that did not begin with a slash."""
@@ -265,20 +283,29 @@ def test_without_a_launcher_the_paths_are_the_containers(tmp_path: Path, monkeyp
     assert tmp_path / "runtime" not in set(settings.sealed_paths)
 
 
-def test_the_sandbox_is_on_by_default_where_it_is_the_only_wall(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A container is a boundary; natively bubblewrap is the only one there is, so it is up."""
+def test_the_sandbox_is_on_by_default_only_where_it_actually_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A container is a boundary; natively bubblewrap is the only one there is, so it is up — but
+    only where it runs. ``bwrap`` installed and forbidden by the kernel is the common case on
+    Ubuntu 24.04 and Debian 13, and defaulting to a sandbox that fails closed there refused every
+    Exec on a fresh install of a machine nobody had asked about a sandbox."""
+    import daedalus.tools.shell as shell_tool
+
     monkeypatch.setattr("daedalus.config.sys.platform", "linux")
-    monkeypatch.setattr("daedalus.config.shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setenv("DAEDALUS_NATIVE", "1")
+    monkeypatch.setattr(shell_tool, "bwrap_status", lambda: "ok")
     assert native_sandbox_default() == "workspace"
     assert ExecToolsConfig().sandbox == "workspace"
-    # Not where a container is the boundary, and not where there is no bubblewrap to turn on.
+    # Present but unusable: the probe is the question, not the binary.
+    monkeypatch.setattr(shell_tool, "bwrap_status", lambda: "bwrap cannot create namespaces here: setting up uid map: Permission denied")
+    assert native_sandbox_default() == "off"
+    assert ExecToolsConfig().sandbox == "off"
+    monkeypatch.setattr(shell_tool, "bwrap_status", lambda: "bwrap is not installed")
+    assert native_sandbox_default() == "off"
+    # Not where a container is the boundary, and not on a platform that has no bubblewrap at all.
+    monkeypatch.setattr(shell_tool, "bwrap_status", lambda: "ok")
     monkeypatch.setenv("DAEDALUS_NATIVE", "0")
     assert native_sandbox_default() == "off"
     monkeypatch.setenv("DAEDALUS_NATIVE", "1")
-    monkeypatch.setattr("daedalus.config.shutil.which", lambda name: None)
-    assert native_sandbox_default() == "off"
-    monkeypatch.setattr("daedalus.config.shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr("daedalus.config.sys.platform", "darwin")
     assert native_sandbox_default() == "off"
 

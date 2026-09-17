@@ -136,8 +136,11 @@ async def _config(ctx: DoctorContext) -> list[Check]:
     usable = status == "ok"
     sandbox_fix = "give the container cap_add SYS_ADMIN and security_opt seccomp=unconfined (see deploy/compose.yaml), then rebuild"
     if st.native:
-        sandbox_fix = "set tools.exec.sandbox = off in Settings → Tools, or run this installation in Docker mode for a container boundary"
-    out.append(Check("exec sandbox", sandbox == "off" or usable, f"{sandbox}" + (f" (available: {status})" if sandbox == "off" else ("" if usable else f" requested but unavailable — Exec runs unsandboxed: {status}")), "ok" if sandbox == "off" or usable else "warn", sandbox_fix))
+        sandbox_fix = "set tools.exec.sandbox = off in Settings → Tools, or allow unprivileged user namespaces on this machine (sysctl kernel.apparmor_restrict_unprivileged_userns=0)"
+    # An unavailable sandbox that was asked for is not a degraded one: Exec is refused outright, and
+    # a row saying commands run unsandboxed would send the operator looking for the wrong problem.
+    detail = f"{sandbox} (available: {status})" if sandbox == "off" else ("workspace" if usable else f"requested but unavailable — every Exec is refused until it is off or it works: {status}")
+    out.append(Check("exec sandbox", sandbox == "off" or usable, detail, "ok" if sandbox == "off" or usable else "fail", sandbox_fix))
     # Informational, not warnings: an installation that never opens a page or runs npx is not a broken one.
     browser = await asyncio.to_thread(toolchain_status, "browser")
     browser_fix = "run the `:browser` tag of the agent image if the browser skills are wanted"
@@ -370,13 +373,10 @@ async def _supervisor(ctx: DoctorContext) -> list[Check]:
     return out
 
 
-# Checks that only mean something one side or the other of a container boundary. Each says so rather
-# than being left out: an operator reading the doctor should see that the question was asked.
-CONTAINER_ONLY = (
-    ("container image", "the image the agent runs in is what carries its environment"),
-    ("image rebuild channel", "a new image is built by the rebuilder sidecar and the container replaced"),
-    ("published ports", "the ports a session's services listen on are published from the container to the host"),
-)
+# What a container would have carried, said once and plainly rather than as three rows named after
+# checks that exist nowhere. Docker mode emits no probe called "container image" either, so listing
+# these as skipped checks invented the questions it claimed to be answering.
+CONTAINER_ONLY = "a container would carry the environment in an image, rebuild it through the rebuilder sidecar and publish a session's service ports to the host; natively the runtime folder, the launcher and the loopback interface do those three things"
 
 
 async def _native(ctx: DoctorContext) -> list[Check]:
@@ -384,11 +384,10 @@ async def _native(ctx: DoctorContext) -> list[Check]:
     if not ctx.settings.native:
         return []
     out = [
-        Check("isolation", True, native_sandbox_note(), "info", "the policy rules, the approval gates, the protected paths, the egress allowlist and the spend caps all still apply"),
+        Check("isolation", True, await asyncio.to_thread(native_sandbox_note), "info", "the policy rules, the approval gates, the protected paths, the egress allowlist and the spend caps all still apply"),
         Check("services address", True, f"{ctx.settings.services_public_host or '127.0.0.1'}:{ctx.settings.services_port_range} — bound on this machine, not published from anywhere", "ok"),
     ]
-    for name, why in CONTAINER_ONLY:
-        out.append(Check(name, True, f"not applicable (native): {why}", "info"))
+    out.append(Check("container-only checks", True, CONTAINER_ONLY, "info"))
     git = shutil.which("git")
     out.append(Check("portable runtime", bool(git), f"git {git}" if git else "git is not on PATH; the checkouts and self-development need it", "ok" if git else "fail", "install git, or start the launcher again — it puts the runtime's own on PATH"))
     return out
