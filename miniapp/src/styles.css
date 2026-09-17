@@ -1239,7 +1239,13 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 /* Nothing said yet: a fixed width, breathed on with a transform. It animated `width` before, on the
    element the page shows most of the time, which is a layout pass sixty times a second for a dash. */
 .voice-waiting { display: inline-block; width: 52px; height: 6px; border-radius: 3px; background: currentColor; opacity: .16; transform: scaleX(.808); animation: waiting-breathe 2.4s ease-in-out infinite; }
+/* A sentence nobody read out. It is still the answer, so it keeps its size and its place; what it
+   loses is the claim to have been heard, which is one shade of the text and one small word after it. */
+.voice-sentence.unspoken { color: var(--fg-2); }
+.voice-unspoken { font-style: normal; font-size: .62em; color: var(--fg-3); vertical-align: .35em; margin-left: .3em; white-space: nowrap; }
 .voice-problem { margin: 0; color: var(--bad); font-size: 13.5px; }
+/* The tap the browser wants before it will make a sound, offered where the answer would have been. */
+.voice-blocked { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; font-size: 13.5px; color: var(--fg-2); }
 @keyframes caption-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes sentence-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes waiting-breathe { 0%, 100% { opacity: .1; transform: scaleX(.654); } 50% { opacity: .28; transform: scaleX(1); } }

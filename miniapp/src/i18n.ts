@@ -79,6 +79,13 @@ export const DICT: Record<string, Record<Lang, string>> = {
   // machine. It is named, because which voice is reading matters to whoever chose it.
   "voice.out.local": { en: "{voice}, on this machine", ru: "{voice}, на этой машине" },
   "voice.tap": { en: "Tap to talk.", ru: "Нажмите и говорите." },
+  // The browser will not make a sound until something on the page is tapped, and there is no way to
+  // ask it whether that is the case — it is inferred from an utterance that started no audio. So the
+  // page offers the tap rather than going quiet without saying why.
+  "voice.sound.blocked": { en: "This browser will not speak until you allow it.", ru: "Этот браузер не заговорит, пока вы не разрешите." },
+  "voice.sound.enable": { en: "Tap to enable sound", ru: "Нажмите, чтобы включить звук" },
+  // A sentence the synthesiser was handed and never read out. The page is not going to wait for it.
+  "voice.unspoken": { en: "not spoken", ru: "не озвучено" },
   "voice.tap.stop": { en: "Talk. Tap again to stop.", ru: "Говорите. Нажмите ещё раз, чтобы закончить." },
   "voice.tap.none": { en: "This browser cannot listen; type below instead.", ru: "Этот браузер не слышит — напишите ниже." },
   "voice.loading.model": { en: "Loading {name}… the first time takes a moment.", ru: "Загружаю {name}… в первый раз это занимает время." },

@@ -100,6 +100,33 @@ describe("the page's state machine", () => {
     expect(voiceReducer(thinking, { type: "barge" })).toBe(thinking);
   });
 
+  it("marks the sentences nobody read out, and forgets them when the next thing is asked", () => {
+    const answered = run([
+      { type: "asked", text: "how did the invoices go?" },
+      { type: "say", text: "All eleven went out." },
+      { type: "say", text: "Two came back." },
+      { type: "unspoken", text: "Two came back." },
+      { type: "unspoken", text: "Two came back." },
+      { type: "unspoken", text: "   " },
+    ]);
+    // The sentence stays where it was — it is the answer — and only the claim that it was heard goes.
+    expect(answered.spoken).toEqual(["All eleven went out.", "Two came back."]);
+    expect(answered.unspoken).toEqual(["Two came back."]);
+    expect(run([{ type: "asked", text: "and the rest?" }], answered).unspoken).toEqual([]);
+    // One of two read out is still an answer being spoken; none of them is not.
+    expect(answered.phase).toBe("speaking");
+    expect(voiceReducer(answered, { type: "unspoken", text: "All eleven went out." }).phase).toBe("idle");
+  });
+
+  it("remembers that the browser wants a tap before it will speak, past a cleared conversation", () => {
+    const blocked = run([{ type: "blocked", on: true }]);
+    expect(blocked.blocked).toBe(true);
+    expect(voiceReducer(blocked, { type: "blocked", on: true })).toBe(blocked);
+    // Starting a new conversation does not un-block a browser; only speaking successfully does.
+    expect(run([{ type: "cleared" }], blocked).blocked).toBe(true);
+    expect(run([{ type: "blocked", on: false }], blocked).blocked).toBe(false);
+  });
+
   it("shows a problem without pretending the page is still working", () => {
     const failed = run([{ type: "mic", on: true }, { type: "asked", text: "x" }, { type: "problem", message: "the concierge stopped" }]);
     expect([failed.phase, failed.problem]).toEqual(["listening", "the concierge stopped"]);
