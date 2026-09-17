@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import sys
 import time
@@ -110,6 +111,68 @@ def upstreams() -> dict[str, tuple[str, str]]:
             name = var[len("KEYPROXY_UPSTREAM_"):].lower()
             out[name] = (value.rstrip("/"), os.environ.get(f"KEYPROXY_KEY_{name.upper()}", ""))
     return out
+
+
+CLI_LOGINS = ("codex", "grok", "claude")
+"""Upstreams whose credential is a CLI's own login on this machine, not a key in the environment."""
+API_KEY, CLI_LOGIN, ENDPOINT = "api_key", "cli_login", "endpoint"
+"""What an upstream's credential is: a key the proxy holds, a CLI login it reads, or an address that needs neither."""
+
+
+def credential_readable(auth: Any) -> bool:
+    """Whether a CLI's login file is there AND can be read: an unreadable one is not a login.
+
+    ``available()`` on the auth objects answers the first half only, and a credentials file left
+    behind by another user — a very ordinary thing in a container that mounts the operator's home —
+    reads as logged in right up to the first call, which then fails with something about a token.
+    """
+    if not auth.available():
+        return False
+    path = getattr(auth, "path", None)
+    if path is None:
+        return True  # an env-var login: available() already read what there is to read
+    try:
+        with open(path, "rb") as handle:
+            handle.read(1)
+    except OSError:
+        return False
+    return True
+
+
+def key_status() -> dict[str, dict[str, Any]]:
+    """Per upstream: whether a credential is really there, and what kind it is. Never the credential.
+
+    This is what the bot asks before it tells the operator an endpoint is ready to use. The
+    difference from :func:`upstreams` is that the answer names every upstream the proxy can serve,
+    including the ones it has no key for — "no key" is the fact worth reporting.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for name, (_base, env_key) in DEFAULT_UPSTREAMS.items():
+        out[name] = {"configured": bool(os.environ.get(env_key, "")), "kind": API_KEY}
+    for var, value in os.environ.items():
+        if var.startswith("KEYPROXY_UPSTREAM_") and value:
+            name = var[len("KEYPROXY_UPSTREAM_"):].lower()
+            key = os.environ.get(f"KEYPROXY_KEY_{name.upper()}", "")
+            # An extra upstream is an address the operator wrote down; with no key beside it, it is
+            # an endpoint that needs none rather than one whose key went missing.
+            out[name] = {"configured": True, "kind": API_KEY if key else ENDPOINT}
+    for name, auth in (("codex", CODEX_AUTH), ("grok", GROK_AUTH), ("claude", CLAUDE_AUTH)):
+        out[name] = {"configured": credential_readable(auth), "kind": CLI_LOGIN}
+    return out
+
+
+def agent_call(request: web.Request) -> bool:
+    """Whether this request carries the bot's own API token, which only the bot can read from its database."""
+    token = agent_api_token()
+    offered = request.headers.get("x-daedalus-token", "")
+    return bool(token) and bool(offered) and secrets.compare_digest(offered, token)
+
+
+async def handle_keys(request: web.Request) -> web.Response:
+    """What the proxy holds a credential for, per upstream — for the bot alone, and without any key in it."""
+    if not agent_call(request):
+        return web.json_response({"error": "this endpoint answers the agent only"}, status=403)
+    return web.json_response({"upstreams": key_status()})
 
 
 def auth_scheme(name: str) -> str:
@@ -481,6 +544,10 @@ async def handle(request: web.Request) -> web.StreamResponse:
         base, key = GROK_BASE, ""
         rest = rest.strip("/").removeprefix("v1/")
     elif name not in table:
+        # A name the proxy knows but has no key for is a different fact from a name it never heard
+        # of, and 404 on both made a missing key look like a vendor whose /models path moved.
+        if name in DEFAULT_UPSTREAMS or name in CLI_LOGINS:
+            return web.json_response({"error": {"message": f"upstream {name!r} has no credential in the key proxy", "type": "no_credential"}}, status=503)
         return web.json_response({"error": f"unknown upstream {name!r}"}, status=404)
     else:
         base, key = table[name]
@@ -532,6 +599,7 @@ def make_app() -> web.Application:
     app = web.Application(client_max_size=64 * 1024 * 1024)
     app["client"] = httpx.AsyncClient(timeout=httpx.Timeout(900.0, connect=30.0, pool=10.0), limits=httpx.Limits(max_connections=64, max_keepalive_connections=16), follow_redirects=False)
     app.router.add_get("/healthz", health)
+    app.router.add_get("/keys", handle_keys)
     app.router.add_get("/subscriptions/usage", handle_subscriptions_usage)
     app.router.add_route("*", "/{upstream}/{rest:.*}", handle)
 
