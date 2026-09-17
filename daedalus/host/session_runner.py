@@ -94,6 +94,13 @@ class Attachment:
     caption: str | None = None
 
 
+def _set_event() -> asyncio.Event:
+    """An event that starts raised: a session with no run behind it has nothing to wait for."""
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass(slots=True)
 class PendingQuestion:
     session_id: str
@@ -126,6 +133,14 @@ class SessionState:
     """Consecutive runs the model provider failed; each one waits longer before the work is driven again."""
     outage_task: asyncio.Task[None] | None = None
     """The wait before the next attempt after a provider failure, so a session sleeps at most once."""
+    housekeeping: asyncio.Task[None] | None = None
+    """What the last run left to do after its answer was on the screen: the snapshot, the run-finished
+    callbacks, the queue it drains, the compaction check. The run itself is over while this is going —
+    that is the point of it — so the app draws an idle session and the work goes on behind it."""
+    settled: asyncio.Event = field(default_factory=lambda: _set_event())
+    """Lowered when a run starts, raised again once its history is persisted and its snapshot taken.
+    The next run waits for it: the files a revert would restore must describe the turn that just ended,
+    not the one starting. The rest of the housekeeping nobody waits for."""
     compacting: dict[str, Any] | None = None
     """A compaction in flight: reason, stage (summarising/merging/writing), parts done of total, started_at.
     The Mini App and the list read it; ``None`` when none is running."""
@@ -346,7 +361,7 @@ class SessionManager:
     async def close(self) -> None:
         """Shut down keeping every active run resumable (snapshots stay in place)."""
         self.shutting_down = True
-        tasks = [t for s in self._states.values() for t in (s.task, s.outage_task) if t and not t.done()]
+        tasks = [t for s in self._states.values() for t in (s.task, s.outage_task, s.housekeeping) if t and not t.done()]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -1305,12 +1320,23 @@ class SessionManager:
                 _ensure_inbox(state.workspace, project)
             self.register_services(state)
 
+    @staticmethod
+    def _settling(state: SessionState) -> bool:
+        """The run is over but its snapshot is not on disk yet.
+
+        Not a run — the app draws the session as idle and the next message may be typed into it —
+        but a restart or a retention pass landing here would still take the snapshot away from the
+        turn that just ended, so everything that asks "is anything going on in this session" is told
+        yes until the files are safe.
+        """
+        return not state.settled.is_set()
+
     def running_run_ids(self) -> set[str]:
-        return {s.run_id for s in self._states.values() if s.run_id and (s.running or s.pending is not None)}
+        return {s.run_id for s in self._states.values() if s.run_id and (s.running or s.pending is not None or self._settling(s))}
 
     def busy_sessions(self) -> set[str]:
         """Sessions with a turn in flight or a question outstanding — the same test ``revert`` and ``fork`` use."""
-        return {sid for sid, state in self._states.items() if state.running or state.pending is not None}
+        return {sid for sid, state in self._states.items() if state.running or state.pending is not None or self._settling(state)}
 
     def store_occupants(self) -> dict[Path, set[str]]:
         """Which sessions this process holds open in each snapshot store, by the store's own directory.
@@ -1437,6 +1463,11 @@ class SessionManager:
                     session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind, "daedalus.origin": origin})]
                 )
                 return state.run_id or ""
+            # A new run starts. The one before it may still be tidying up behind the answer, and most
+            # of that is none of this run's business — but the files are: a revert of the turn that
+            # just ended restores the snapshot taken after it, so that snapshot has to exist before
+            # anything is allowed to change the workspace again.
+            await state.settled.wait()
             # A new run starts: hooks may decorate the message (a fired reminder rides along); their
             # side effects are committed only once the run exists, so a refused start loses nothing.
             for hook in self.prompt_hooks:
@@ -1881,7 +1912,6 @@ class SessionManager:
     async def _drive(
         self, state: SessionState, engine: QueryEngine, message: Message | None, continue_turn: bool
     ) -> None:
-        session_id = state.session.id
         run_id = engine.config.run_id
         status = "completed"
         try:
@@ -1906,6 +1936,10 @@ class SessionManager:
                 TurnEvent(type=EventType.ERROR, run_id=run_id, payload={"message": f"{type(exc).__name__}: {exc}"}),
             )
         finally:
+            # Everything between the last token and the end of this function is time the app spends
+            # drawing a run that is over: the chip says "running" and the cursor blinks under the
+            # finished answer. So only what the answer itself depends on — writing it down and saying
+            # the run ended — happens here; the rest is handed to a task nobody watches.
             await self._persist_history(state, list(engine.history), state.history_keys)
             state.history_keys = [self.sessions.transcript_key(m) for m in engine.history]
             try:
@@ -1920,33 +1954,84 @@ class SessionManager:
                         "cancelled": RunStatus.cancelled,
                     }.get(status, RunStatus.completed)
                     await self.runs.update_status(run_id, TENANT, run_status)
-                    await self.events.delete_snapshot(run_id)
-                    self.events.close_run(run_id)
-                    await self.events.trim(run_id, TENANT, max_len=self.config.ops.events_keep_per_run)
             except Exception:  # noqa: BLE001
                 logger.exception("run %s bookkeeping failed", run_id)
+            # The announcement goes out before the task is made, and the task before this function
+            # returns: a created task does not run until the loop gets the turn back, which is after
+            # ``_drive`` has ended and the session reads as idle. A run-finished callback that starts
+            # the next run — the voice concierge answering, a leader collecting a subagent — would
+            # otherwise be told the run is over while this one is still technically going.
+            await self._announce_settled(state, run_id, status, housekeeping=status != "interrupted")
+            if status != "interrupted":
+                state.settled.clear()
+                state.housekeeping = asyncio.create_task(self._settle_run(state, run_id, status), name=f"settle:{run_id}")
+                state.housekeeping.add_done_callback(_log_task_failure)
+
+    async def _announce_settled(self, state: SessionState, run_id: str, status: str, *, housekeeping: bool) -> None:
+        """Say on the wire that the run is over — once when the answer is written down, once when the rest is.
+
+        The app ends the streaming turn on the model's own ``message_stop``; this is what puts the
+        session back to idle beside it. ``housekeeping`` says whether anything is still being written
+        behind the answer, so a front that wants to show it has something to show and something to
+        take away again.
+        """
+        try:
+            await self._dispatch_event(
+                state,
+                TurnEvent(type=EventType.RUN_SETTLED, run_id=run_id, payload={"status": status, "housekeeping": housekeeping, "session_id": state.session.id}),
+            )
+        except Exception:  # noqa: BLE001 — the run is over either way; a front that missed the event polls
+            logger.warning("could not announce the end of run %s", run_id, exc_info=True)
+
+    async def _settle_run(self, state: SessionState, run_id: str, status: str) -> None:
+        """What a finished run still owes, off the path the operator is watching.
+
+        Order is the contract. The snapshot comes first and raises ``state.settled``, because that is
+        the one thing the next run may not start without: a revert of the turn that just ended has to
+        find the files as that turn left them. Everything after it — the event log's own tidying, the
+        run-finished callbacks (delivery to the other fronts, the learning record, a memory extraction
+        that is a model call of its own), the queue that filled up while the run was settling, the
+        compaction check — nobody waits for, and each is guarded so one failure does not eat the rest.
+        """
+        session_id = state.session.id
+        try:
             if status in ("completed", "failed", "cancelled"):
                 await self.checkpoint(state, kind="after", run_id=run_id)
-            for callback in self._finished:
-                try:
-                    await callback(session_id, run_id, status)
-                except Exception:  # noqa: BLE001
-                    logger.exception("run-finished callback failed")
-            if status in ("completed", "failed"):
-                # A run that ended in an error still owes an answer to what arrived meanwhile.
+        except Exception:  # noqa: BLE001
+            logger.exception("run %s snapshot failed", run_id)
+        finally:
+            state.settled.set()  # the next run may start: the history is written and the files are snapshotted
+        if status in ("completed", "failed", "cancelled"):
+            try:
+                await self.events.delete_snapshot(run_id)
+                self.events.close_run(run_id)
+                await self.events.trim(run_id, TENANT, max_len=self.config.ops.events_keep_per_run)
+            except Exception:  # noqa: BLE001
+                logger.exception("run %s event bookkeeping failed", run_id)
+        for callback in self._finished:
+            try:
+                await callback(session_id, run_id, status)
+            except Exception:  # noqa: BLE001
+                logger.exception("run-finished callback failed")
+        await self._announce_settled(state, run_id, status, housekeeping=False)
+        if status in ("completed", "failed"):
+            # A run that ended in an error still owes an answer to what arrived meanwhile.
+            try:
                 await self._drain_leftover_follow_ups(state)
-            if status in ("completed", "failed", "cancelled"):
-                # On a task of its own, and not awaited here: a summariser call is a minute or two,
-                # and while this task is unfinished the session reads as running — which blocks the
-                # next message in submit() and tells the app a run is in progress that is not one.
-                self._spawn_background(self._maybe_auto_compact(state), f"auto-compact:{session_id}")
-            if status == "completed":
-                state.overflow_streak = 0
-                state.outage_streak = 0
-            elif status == "failed" and state.last_error_kind == "llm_context_window_exceeded" and not state.running:
-                await self._recover_from_overflow(state)
-            elif status == "failed" and state.last_error_kind in PROVIDER_OUTAGE_KINDS and not state.running:
-                self._schedule_outage_recovery(state)
+            except Exception:  # noqa: BLE001
+                logger.exception("draining the queue of session %s failed", session_id)
+        if status in ("completed", "failed", "cancelled"):
+            # On a task of its own, and not awaited here: a summariser call is a minute or two,
+            # and while this task is unfinished the session reads as running — which blocks the
+            # next message in submit() and tells the app a run is in progress that is not one.
+            self._spawn_background(self._maybe_auto_compact(state), f"auto-compact:{session_id}")
+        if status == "completed":
+            state.overflow_streak = 0
+            state.outage_streak = 0
+        elif status == "failed" and state.last_error_kind == "llm_context_window_exceeded" and not state.running:
+            await self._recover_from_overflow(state)
+        elif status == "failed" and state.last_error_kind in PROVIDER_OUTAGE_KINDS and not state.running:
+            self._schedule_outage_recovery(state)
 
     OUTAGE_NOTE = (
         "[The previous turn stopped because the model provider was unreachable for a while. "
@@ -2015,7 +2100,18 @@ class SessionManager:
             logger.warning("session %s: overflow recovery did not start: %s", state.session.id, exc)
 
     async def _drain_leftover_follow_ups(self, state: SessionState) -> None:
-        """Input that arrived while the run was settling starts the next turn instead of rotting in the queue."""
+        """Input that arrived while the run was settling starts the next turn instead of rotting in the queue.
+
+        Under ``submit_lock`` because this is the second place a run is started: the settling run's
+        queue and an operator message arriving at the same moment must become one run, not two driving
+        one history. A message that got there first is already running — it took the queue with it.
+        """
+        async with state.submit_lock:
+            if state.running:
+                return
+            await self._drain_locked(state)
+
+    async def _drain_locked(self, state: SessionState) -> None:
         queued = await self.live.load(state.session.id)
         items = [item for item in queued["follow_up"] + queued["steer"] if str(item.get("text") or "").strip()]
         if not items:

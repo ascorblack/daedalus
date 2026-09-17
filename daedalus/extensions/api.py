@@ -1186,6 +1186,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "id": session_id,
             "title": state.session.title,
             "status": status,
+            # The run is over and its answer is on the screen; what is still being written behind it
+            # (the snapshot, the delivery to the other fronts, the learning record) is not the run,
+            # and a front that draws it draws it as "saving", not as "running".
+            "housekeeping": state.housekeeping is not None and not state.housekeeping.done(),
             "compacting": state.compacting,
             "run_id": state.run_id,
             "workspace": str(state.workspace),
