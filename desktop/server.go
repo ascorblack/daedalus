@@ -39,10 +39,6 @@ type Server struct {
 	// opened with. It is set by whoever owns the window; without one it opens the app in a browser.
 	focus func(ctx context.Context, url string)
 
-	// windowed records that the page is being shown in the launcher's own window rather than in a
-	// browser, which changes one sentence on it: what closing it does.
-	windowed bool
-
 	once  sync.Once
 	saved chan struct{} // closed when the setup form has been written
 }
@@ -106,9 +102,6 @@ func (s *Server) Stop(ctx context.Context) {
 		_ = s.http.Shutdown(ctx)
 	}
 }
-
-// SetWindowed says that this page is inside the launcher's own window.
-func (s *Server) SetWindowed(windowed bool) { s.windowed = windowed }
 
 // OnFocus records what to do when a second launch asks for the front.
 func (s *Server) OnFocus(focus func(ctx context.Context, url string)) { s.focus = focus }
@@ -213,7 +206,6 @@ type pageData struct {
 	DockerMissing bool
 	LauncherURL   string
 	CSRF          string
-	Windowed      bool
 	// Mode is what the installation runs in, and Suggested is what the first run offers before the
 	// operator has said. They differ only on a first run: afterwards the suggestion is the choice.
 	Mode      string
@@ -239,19 +231,6 @@ type stepLine struct {
 
 // T is how a template asks for a line. Every sentence on every page comes through here.
 func (d pageData) T(key string) string { return Translate(d.Lang, key) }
-
-// KeyField is the provider key already on file for one of the three providers, so the field the
-// operator opens is the one they last wrote rather than an empty box.
-func (d pageData) KeyField(provider string) string {
-	switch provider {
-	case "deepseek":
-		return d.Setup.DeepseekKey
-	case "openrouter":
-		return d.Setup.OpenrouterKey
-	default:
-		return d.Setup.OpencodeKey
-	}
-}
 
 // handleIndex sends the operator to whichever of the three pages this installation is at: the
 // questions when there are questions, the progress while it is being brought up or has never been
@@ -376,7 +355,6 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, sta
 		Status:      status,
 		LauncherURL: s.URL(),
 		CSRF:        s.csrf,
-		Windowed:    s.windowed,
 		Mode:        status.Mode,
 		Native:      s.app.Native(),
 		Lang:        lang,

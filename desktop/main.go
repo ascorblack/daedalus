@@ -236,7 +236,6 @@ func startCommand(ctx context.Context, app *App, opts options) error {
 	// The surface is made after the page is listening, because the first thing it shows is that
 	// page: the status, the buttons, and on a first start the questions.
 	surface := OpenSurface(app.paths, server.URL())
-	server.SetWindowed(surface.Windowed())
 	server.OnFocus(surface.Focus)
 	go bringUp(ctx, app, server, surface, opts)
 	surface.Run(ctx)
