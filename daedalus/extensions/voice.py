@@ -38,7 +38,7 @@ import httpx
 from protocore.contracts.types import MessageRole, TextBlock
 from protocore.runtime.events.types import EventType
 
-from daedalus.config import TtsConfig
+from daedalus.config import ModelPresetConfig, RuntimeConfig, TtsConfig
 from daedalus.host.prompts import split_headline, without_turn_context
 from daedalus.transport.telegram.voice import TranscriptionError, asr_configured, effective_asr
 
@@ -210,6 +210,41 @@ def tts_configured(config: TtsConfig) -> bool:
     return bool(config.provider or config.url)
 
 
+FAST_MAX_OUTPUT = 8_000
+"""The largest reply a model may be allowed to write before it is no longer a concierge's model.
+
+A spoken answer is two sentences; a model configured to write thirty thousand tokens is configured
+for a different job, and it takes the time to match. This and ``thinking`` are the two things the
+page warns about, and they are decided here rather than in the app so that the warning and the
+default the page suggests cannot disagree.
+"""
+
+
+def fast_enough(preset: ModelPresetConfig) -> bool:
+    """Whether a preset answers while the operator is still listening: no thinking, a short reply."""
+    return not preset.thinking and preset.max_output_tokens <= FAST_MAX_OUTPUT
+
+
+def model_options(config: RuntimeConfig) -> list[dict[str, Any]]:
+    """Every preset the concierge could be pointed at, as the app lists them.
+
+    The label, the provider and the model id are what the operator picks by; ``fast`` is the
+    judgement, made here once. The order is the table's own, which is the order Settings shows.
+    """
+    return [
+        {
+            "id": pid,
+            "label": preset.display(pid),
+            "provider": preset.provider,
+            "model": preset.model,
+            "thinking": preset.thinking,
+            "max_output_tokens": preset.max_output_tokens,
+            "fast": fast_enough(preset),
+        }
+        for pid, preset in config.presets.items()
+    ]
+
+
 AUDIO_TYPES = {"mp3": "audio/mpeg", "opus": "audio/ogg", "pcm": "audio/pcm"}
 
 
@@ -256,12 +291,45 @@ class Voice:
             if not create:
                 return ""
             state = await self.app.create_session(TITLE, metadata={"voice": True})
-            preset = self.app.config.voice.preset
-            if preset in self.app.config.presets:
-                await manager.set_model(state.session.id, preset=preset)
             await self.app.db.kv_set(SESSION_KEY, state.session.id)
             self._id = state.session.id
+            await self._point_at(state.session.id)
             return state.session.id
+
+    async def _point_at(self, session_id: str) -> str:
+        """Put the configured preset on the session, or take the override off when none is configured.
+
+        The session carries the choice, not the configuration: the run reads a live override written
+        when the session was made. So a preset changed in the app reached a session made before the
+        change never — the concierge went on answering with the model it was born with until the
+        operator started a new conversation. Reconciling is one write, and only when the two differ.
+
+        It also decides the argument: Settings → Voice is where this conversation's model is chosen,
+        so a model put on the voice session from the session screen does not outlive the next
+        utterance. One setting, in the place the operator went looking for it.
+        """
+        manager = self.app.manager
+        assert manager is not None
+        wanted = self.app.config.voice.preset
+        if wanted not in self.app.config.presets:
+            wanted = ""
+        current = str((await manager.live.load(session_id)).get("preset") or "")
+        if wanted == current:
+            return wanted
+        if wanted:
+            await manager.set_model(session_id, preset=wanted)
+        else:
+            # Empty means "the default preset", which is what a session with no override of its own
+            # already resolves to — so the way to say it is to stop saying anything.
+            await manager.set_model(session_id, clear=True)
+        return wanted
+
+    async def apply_model(self) -> str:
+        """Point the standing conversation at the configured preset; the app calls this after a change."""
+        if self.app.manager is None:
+            return ""
+        session_id = await self.session_id(create=False)
+        return await self._point_at(session_id) if session_id else ""
 
     async def restore(self) -> str:
         """Pick the remembered session up after a restart, so the sink knows it before the page is opened."""
@@ -296,11 +364,19 @@ class Voice:
                 effective_tts(tts, self.app.manager)
             except RuntimeError as exc:
                 ready, reason = False, str(exc)
-        preset = self.app.config.presets.get(config.preset)
+        chosen = config.preset if config.preset in self.app.config.presets else ""
+        resolved = self.app.config.default_preset(chosen)
         return {
             "enabled": config.enabled,
             "session_id": await self.session_id(create=False),
-            "model": preset.display(config.preset) if preset else config.preset,
+            # Three answers to one question, because the page asks it three ways: which preset the
+            # operator picked ("" is "whatever the default is"), which one that comes out as, and
+            # what there is to pick from. A page that had only the first showed "—" for the model
+            # an installation was in fact talking to.
+            "preset": chosen,
+            "using": resolved[0] if resolved else "",
+            "model": resolved[1].display(resolved[0]) if resolved else "",
+            "presets": model_options(self.app.config),
             "tts": {"configured": ready, "reason": reason, "voice": tts.voice, "model": tts.model, "format": tts.format},
             "stt": await self._asr_state(),
             "agents": await self.agents(),
@@ -327,6 +403,10 @@ class Voice:
         manager = self.app.manager
         assert manager is not None
         session_id = await self.session_id()
+        # Read the configured model at every utterance rather than once at the birth of the session:
+        # the engine is built per run, so this is the last moment the choice can still take effect
+        # without a restart and without a new conversation.
+        await self._point_at(session_id)
         await self.emit("status", {"state": "thinking"})
         return await manager.submit(session_id, body)
 

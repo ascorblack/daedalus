@@ -4,6 +4,13 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-17
 
+- **The voice concierge's model is chosen in the app.** Settings → Voice → Model is a list of the
+  configured presets rather than a line of text you could only read: each one shows its label, its
+  endpoint and its model id, the ones that think or that may write at length are marked as slow, and
+  the first entry is the default model. The choice is written to `config.toml` and reaches the
+  standing conversation at once — the next thing you say is answered by the model you just picked,
+  with no restart and no new conversation. Where nothing configured answers quickly enough, both the
+  card and the voice page say so and link to Add a model.
 - **Install it without Docker.** The desktop launcher now has a second mode: instead of a container,
   it downloads a runtime into a folder it owns — a pinned `uv`, the CPython uv manages, `rg`, and the
   app's environment built from the checkout's own lock file — and starts `launcher/supervisor.py`

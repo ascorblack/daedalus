@@ -153,3 +153,43 @@ describe("the orb", () => {
     expect(smoothLevel(0.5, 5)).toBeLessThanOrEqual(1);
   });
 });
+
+const { modelRow } = await import("./voice");
+
+const fast = { id: "or.qwen-flash", label: "Qwen Flash", provider: "openrouter", model: "qwen/qwen3.7-flash", thinking: false, max_output_tokens: 4000, fast: true };
+const thinker = { id: "ds.reasoner", label: "", provider: "deepseek", model: "deepseek-reasoner", thinking: true, max_output_tokens: 32000, fast: false };
+const wordy = { id: "ds.chat", label: "DeepSeek Chat", provider: "deepseek", model: "deepseek-chat", thinking: false, max_output_tokens: 32000, fast: false };
+
+describe("modelRow", () => {
+  it("offers every configured preset with what it is, and marks the ones a conversation cannot wait for", () => {
+    const row = modelRow({ preset: "or.qwen-flash", using: "or.qwen-flash", presets: [fast, thinker] });
+    expect(row.value).toBe("or.qwen-flash");
+    expect(row.choices).toEqual([
+      { id: "or.qwen-flash", label: "Qwen Flash", detail: "openrouter · qwen/qwen3.7-flash", slow: false },
+      // A preset with no label of its own is shown by its id, never as an empty line.
+      { id: "ds.reasoner", label: "ds.reasoner", detail: "deepseek · deepseek-reasoner", slow: true },
+    ]);
+    expect(row.warn).toBe("");
+    expect(row.fallback).toBe("");
+    expect(row.addFast).toBe(false);
+  });
+
+  it("names the model an empty choice comes out as, so the first option is not a guess", () => {
+    const row = modelRow({ preset: "", using: "or.qwen-flash", presets: [fast, thinker] });
+    expect(row.value).toBe("");
+    expect(row.fallback).toBe("Qwen Flash");
+    expect(row.warn).toBe("");
+  });
+
+  it("says which kind of slow the model in use is: thinking, or allowed to write at length", () => {
+    expect(modelRow({ preset: "", using: "ds.reasoner", presets: [fast, thinker] }).warn).toBe("voice.card.model.slow");
+    expect(modelRow({ preset: "ds.chat", using: "ds.chat", presets: [fast, wordy] }).warn).toBe("voice.card.model.long");
+  });
+
+  it("asks for a fast model only where there is none to pick, and survives a page with no answer yet", () => {
+    expect(modelRow({ preset: "", using: "ds.reasoner", presets: [thinker, wordy] }).addFast).toBe(true);
+    expect(modelRow({ preset: "", using: "or.qwen-flash", presets: [fast, thinker] }).addFast).toBe(false);
+    const empty = modelRow(null);
+    expect(empty).toEqual({ value: "", choices: [], warn: "", fallback: "", addFast: true });
+  });
+});

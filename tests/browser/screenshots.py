@@ -279,7 +279,7 @@ SETTINGS = {
         "deepseek-flash": {"provider": "deepseek", "model": "deepseek-flash", "label": "DeepSeek Flash", "thinking": True, "reasoning_effort": "medium", "images": False, "context_window": 128000, "max_output_tokens": 16384},
         "claude-opus-5": {"provider": "claude", "model": "claude-opus-5", "label": "Claude Opus 5", "thinking": True, "reasoning_effort": "high", "images": True, "context_window": 200000, "max_output_tokens": 32000},
         "gpt-5.6-luna": {"provider": "opencode", "model": "gpt-5.6-luna", "label": "GPT-5.6 Luna", "thinking": True, "reasoning_effort": "medium", "images": True, "context_window": 200000, "max_output_tokens": 32000},
-        "qwen-local": {"provider": "vllm", "model": "Qwen3.8", "label": "Local Qwen3.8", "thinking": False, "reasoning_effort": "", "images": False, "context_window": 65536, "max_output_tokens": 8192},
+        "qwen-local": {"provider": "vllm", "model": "Qwen3.8", "label": "Local Qwen3.8", "thinking": False, "reasoning_effort": "", "images": False, "context_window": 65536, "max_output_tokens": 4096},
     },
     "providers": {}, "prompt": {"rules": ""}, "vision": {"preset": "gpt-5.6-luna", "max_output_tokens": 800},
     "asr": {"provider": "", "url": "", "api_key": "", "model": "", "language": "auto", "timeout_seconds": 60, "max_seconds": 120, "autosend": False},
@@ -336,7 +336,23 @@ SILENCE = wav()
 VOICE = {
     "enabled": True,
     "session_id": S2,
-    "model": "Qwen 3.7 Flash",
+    "model": "Local Qwen3.8",
+    # The Model row: the same table Settings shows, with the server's judgement of which of them
+    # answers quickly enough to hold a conversation, and which one this installation is on.
+    "preset": "qwen-local",
+    "using": "qwen-local",
+    "presets": [
+        {
+            "id": pid,
+            "label": p["label"],
+            "provider": p["provider"],
+            "model": p["model"],
+            "thinking": p["thinking"],
+            "max_output_tokens": p["max_output_tokens"],
+            "fast": not p["thinking"] and p["max_output_tokens"] <= 8_000,
+        }
+        for pid, p in SETTINGS["presets"].items()
+    ],
     # A voice downloaded onto this machine, which is what the chip on the page is there to say: the
     # stub used to leave `kind` out, so every picture of the page called it "server voice" instead.
     "tts": {"configured": True, "reason": "", "kind": "local", "voice": "Dmitri", "model": "vits-piper-ru_RU-dmitri", "state": "ready"},
