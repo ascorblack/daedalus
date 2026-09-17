@@ -14,6 +14,26 @@ Notable changes, newest first. The repository's `main` is the released version.
   only fail. Where a component only takes effect after a restart, the page says so and offers one.
   The voice pages carry the same install button directly under the lines that explain that the
   browser is doing the listening and the speaking.
+- **The moment after a run is drawn, and nothing is rewritten inside it.** A run that has ended
+  still has a little to do behind the answer — the snapshot of the turn, the delivery to the other
+  fronts — and the app said nothing about it at all: the session read as fully idle from the moment
+  the answer landed. Now the bar stays up, quieter, saying the turn is being saved, and it goes when
+  the saving is done. Undo, clear, fork and compaction wait for that moment to finish instead of
+  running inside it, where an undo used to be overwritten by the snapshot it had just invalidated. A
+  shutdown gives the same moment time to finish rather than cutting it off, and a restart asked for
+  from Settings or from the agent's own apply button refuses while an agent is working, naming it.
+- **The launcher says how an install ended.** Fetching Node or the headless browser is the
+  launcher's job, and the only thing it used to say about itself was whether it was busy — which
+  reads the same before the work starts and after it finishes. An install of something already
+  cached, and one the launcher refused because it was doing something else, therefore both looked
+  like an install still in progress: the Components page froze for half an hour and then reported a
+  failure with no message in it. The launcher now claims the work before it answers, refuses what it
+  cannot take, and reports the outcome of each action by name. There is a free-space check before a
+  download starts, too.
+- **Settings → Components is Russian on a Russian page.** The line on each card saying what was
+  found — the largest text on it — was the server's English under translated headings. It is
+  translated now, and hidden while an install is going, since it describes the very thing the
+  install is changing.
 - **A finished answer stops looking unfinished.** A run now announces that it is over before it
   tidies up after itself, and the app ends the turn on the model's own full stop rather than on the
   next poll. The cursor used to go on blinking under a completed answer for anything up to twenty
