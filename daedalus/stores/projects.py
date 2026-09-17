@@ -89,6 +89,11 @@ def _row(row: Any) -> Project:
     )
 
 
+PSEUDO_FILESYSTEMS = (Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"))
+"""Kernel interfaces the operating system mounts, not folders with work in them. A project rooted on
+one of them would list a running machine's processes and devices as if they were files to edit."""
+
+
 def normalise_root(raw: str) -> Path:
     """The path a project is anchored at: absolute, ``~`` expanded, no trailing slash, no ``..``.
 
@@ -105,6 +110,9 @@ def normalise_root(raw: str) -> Path:
     path = Path(os.path.normpath(path))
     if path == Path(path.root):
         raise ProjectError("the filesystem root is not a project")
+    for pseudo in PSEUDO_FILESYSTEMS:
+        if path == pseudo or pseudo in path.parents:
+            raise ProjectError(f"{pseudo} is the kernel's, not a folder of work; a project is a folder with files in it")
     if path.is_file():
         raise ProjectError(f"{path} is a file, not a folder")
     return path

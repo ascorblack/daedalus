@@ -95,6 +95,15 @@ def test_a_root_is_normalised_without_touching_the_filesystem() -> None:
         normalise_root("/")
 
 
+def test_the_kernels_own_filesystems_are_not_folders_of_work() -> None:
+    """``/proc`` has no files in it to edit, and a listing of it is a listing of the machine."""
+    for raw in ("/proc", "/proc/1", "/sys", "/sys/class/net", "/dev", "/dev/shm/work", "/run", "/run/user/1000"):
+        with pytest.raises(ProjectError, match="kernel"):
+            normalise_root(raw)
+    # Nothing that merely reads like one: the refusal is by mount point, not by name.
+    assert normalise_root("/srv/proc") == Path("/srv/proc")
+
+
 # -- containment ------------------------------------------------------------------------------
 
 
