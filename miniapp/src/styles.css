@@ -1266,6 +1266,16 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
   .voice-agents { animation-name: panel-rise; }
 }
 @keyframes panel-rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+/* The global rule at the top of this file takes every animation and transition away for a reader who
+   asked for less motion. That is not enough here: the orb's size and glow are driven by the
+   microphone, sixty times a second, through custom properties no animation rule can reach. So they
+   are pinned, and the six states stay apart by colour and by the word on the chip. */
+@media (prefers-reduced-motion: reduce) {
+  .voice-orb { transform: none !important; }
+  .orb-halo { opacity: .3 !important; }
+  .orb-sweep { opacity: .18 !important; }
+  .voice-stage::before { opacity: .5 !important; }
+}
 
 /* ── add a model: the first-run flow and the same three steps from Settings ───────────────── */
 /* The flow is its own page when a fresh install opens it, wide enough that the endpoints and the
