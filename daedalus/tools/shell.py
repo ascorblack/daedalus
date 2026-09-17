@@ -96,7 +96,12 @@ def bwrap_status() -> str:
         return _bwrap_state
     try:
         probe = subprocess.run([bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "true"], capture_output=True, text=True, timeout=20)
-        _bwrap_state = "ok" if probe.returncode == 0 else f"bwrap cannot create namespaces here: {(probe.stderr or probe.stdout).strip()[:120]} (the container needs cap_add SYS_ADMIN and an unconfined seccomp profile)"
+        remedy = (
+            "this machine restricts unprivileged user namespaces; the agent runs Exec unsandboxed until they are allowed"
+            if os.environ.get("DAEDALUS_NATIVE", "").strip().lower() in ("1", "true", "yes", "on")
+            else "the container needs cap_add SYS_ADMIN and an unconfined seccomp profile"
+        )
+        _bwrap_state = "ok" if probe.returncode == 0 else f"bwrap cannot create namespaces here: {(probe.stderr or probe.stdout).strip()[:120]} ({remedy})"
     except (OSError, subprocess.TimeoutExpired) as exc:
         _bwrap_state = f"bwrap probe failed: {type(exc).__name__}"
     return _bwrap_state

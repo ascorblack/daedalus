@@ -331,6 +331,9 @@ func (n *Native) Ensure(ctx context.Context) error {
 	if err := n.syncVenv(ctx); err != nil {
 		return err
 	}
+	if err := n.ensureApp(ctx); err != nil {
+		return err
+	}
 	if downloaded > 0 {
 		n.log("the runtime is installed: %.0f MB downloaded into %s", float64(downloaded)/1e6, n.paths.Runtime)
 	}
@@ -483,7 +486,12 @@ func supervisorEnv(p Paths, base []string, settings map[string]string) []string 
 	add("DAEDALUS_STATE", p.State)
 	add("DAEDALUS_WORKSPACES", p.Workspaces)
 	add("DAEDALUS_SSH_SOURCE", p.SSH)
-	add("DAEDALUS_BAKED_APP", filepath.Join(p.Bot, "miniapp", "dist"))
+	// The Mini App as a release archive carries it, beside the launcher. It is not the checkout's
+	// own miniapp/dist: that is the thing this would be a fallback for, and pointing one at the
+	// other makes the fallback a no-op that looks like a copy.
+	if bundle := bundledApp(); bundle != "" {
+		add("DAEDALUS_BAKED_APP", bundle)
+	}
 	add("DAEDALUS_BOT_CMD", quoteArgv(venvPython(p))+" -m daedalus serve")
 	add("DAEDALUS_PREFLIGHT_VENV", filepath.Join(p.Runtime, "preflight-venv"))
 	add("UV_PROJECT_ENVIRONMENT", p.RuntimeVenv)
@@ -578,7 +586,44 @@ func (n *Native) Start(ctx context.Context) error {
 	n.keyproxy.Start(ctx)
 	n.supervisor.Start(ctx)
 	n.log("waiting for the app to answer")
-	return WaitReady(ctx, APIPort(n.paths), nativeReadyTimeout)
+	return WaitReadyNative(ctx, APIPort(n.paths), nativeReadyTimeout)
+}
+
+// bundledApp is the prebuilt Mini App shipped next to the launcher, or an empty string when this
+// build was not packaged with one — a `go build` in the source tree, most often.
+func bundledApp() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	candidates := []string{filepath.Join(filepath.Dir(exe), "miniapp-dist")}
+	if app, ok := bundleRoot(exe); ok {
+		candidates = append(candidates, filepath.Join(app, "Contents", "Resources", "miniapp-dist"))
+	}
+	for _, dir := range candidates {
+		if exists(filepath.Join(dir, "index.html")) {
+			return dir
+		}
+	}
+	return ""
+}
+
+// ensureApp makes sure something will serve /app. The checkout carries no built bundle — it is not
+// in git — so it is either the one packaged with the launcher, or one built by node. Where there is
+// neither, node is fetched: an installation that reaches this point has been promised a working app
+// by one binary, and 58 MB is the honest price of keeping that promise.
+func (n *Native) ensureApp(ctx context.Context) error {
+	if exists(filepath.Join(n.paths.Bot, "miniapp", "dist", "index.html")) || bundledApp() != "" {
+		return nil
+	}
+	if _, err := exec.LookPath("npm"); err == nil {
+		return nil
+	}
+	if exists(n.paths.RuntimeNode) {
+		return nil
+	}
+	n.log("this build carries no prebuilt app and there is no node to build one; fetching node")
+	return n.InstallExtra(ctx, "node")
 }
 
 // nativeReadyTimeout is shorter than the Docker one: there is no image to pull and no virtual
@@ -600,15 +645,33 @@ func (n *Native) Stop(ctx context.Context) {
 	}
 }
 
-// Running counts what is up, so the status page reads the same way it does in Docker mode.
+// Running counts what is answering rather than what this process started. A `status` from a second
+// terminal has no children of its own and would otherwise report an installation that is plainly
+// serving the app as nothing running at all — which is the question the operator was asking.
 func (n *Native) Running() int {
 	count := 0
-	for _, pr := range []*Process{n.supervisor, n.keyproxy} {
-		if pr != nil && pr.Running() {
+	if n.SupervisorReachable() {
+		count++
+	}
+	settings := readEnv(readFile(n.paths.Env))
+	for _, port := range []string{parsePort(settings["API_PORT"], "8765"), parsePort(settings["KEYPROXY_PORT"], defaultKeyproxyPort)} {
+		if portAnswers(port) {
 			count++
 		}
 	}
 	return count
+}
+
+// portAnswers reports whether something is listening on a loopback port. It is a connection and not
+// a request: what is on the other end says what it is in its own log, and the launcher only needs to
+// know that it is there.
+func portAnswers(port string) bool {
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:"+port, time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 // Apply asks the supervisor to take the change in the checkout — it preflights the commit on a
@@ -624,9 +687,41 @@ func (n *Native) Apply(ctx context.Context, reason string) (string, error) {
 func (n *Native) RunPython(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, n.venvPython(), args...)
 	cmd.Dir = n.paths.Bot
-	cmd.Env = supervisorEnv(n.paths, append(environWithout("PATH"), "PATH="+n.searchPath()), readEnv(readFile(n.paths.Env)))
+	base := append(environWithout("PATH", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT"), "PATH="+n.searchPath())
+	cmd.Env = botEnv(n.paths, supervisorEnv(n.paths, base, readEnv(readFile(n.paths.Env))))
 	out, err := runCmd(cmd)
 	return strings.TrimSpace(out), err
+}
+
+// botEnv adds the names the agent reads its own settings under. The supervisor translates its
+// DAEDALUS_* variables into these before it starts the bot, so a command the launcher runs for the
+// installation — minting a pairing link, asking for a restart — has to be given the same pair of
+// spellings, or it reads the defaults of a container that is not there and finds no database and no
+// supervisor to talk to.
+func botEnv(p Paths, env []string) []string {
+	out := append([]string(nil), env...)
+	out = append(out,
+		"STATE_DIR="+p.State,
+		"WORKSPACES_DIR="+p.Workspaces,
+		"BOT_REPO_DIR="+p.Bot,
+		"CORE_REPO_DIR="+p.Core,
+	)
+	if runtime.GOOS == "windows" {
+		out = append(out, "SUPERVISOR_TCP="+envValue(env, "DAEDALUS_SUPERVISOR_TCP"))
+	} else {
+		out = append(out, "SUPERVISOR_SOCKET="+envValue(env, "DAEDALUS_SUPERVISOR_SOCKET"))
+	}
+	return out
+}
+
+// envValue reads one name back out of an environment that has already been built.
+func envValue(env []string, name string) string {
+	for i := len(env) - 1; i >= 0; i-- {
+		if key, value, _ := strings.Cut(env[i], "="); key == name {
+			return value
+		}
+	}
+	return ""
 }
 
 // SupervisorReachable reports whether the supervisor is listening, which is what the status page

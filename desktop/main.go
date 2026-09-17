@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -113,7 +114,10 @@ func run(argv []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// Both signals, not only Ctrl+C. A native installation is stopped by the launcher going away,
+	// so a SIGTERM from a service manager, a shutdown or a `kill` has to reach the same code path
+	// that a Ctrl+C does — otherwise the launcher dies and leaves an agent running behind it.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	app := NewApp(paths)
 	mode, err := ResolveMode(paths, opts.mode)
@@ -303,7 +307,11 @@ func bringUp(ctx context.Context, app *App, server *Server, surface *Surface, op
 	fmt.Println("opening", url)
 	surface.Show(ctx, url)
 	if !surface.Windowed() {
-		fmt.Printf("The launcher is at %s — leave it running for the buttons, or close it with Ctrl+C: the stack keeps running.\n", server.URL())
+		after := "the stack keeps running"
+		if app.Native() {
+			after = "the agent stops with it, and a run in flight resumes at the next start"
+		}
+		fmt.Printf("The launcher is at %s — leave it running for the buttons, or close it with Ctrl+C: %s.\n", server.URL(), after)
 	}
 	watch(ctx, app)
 }

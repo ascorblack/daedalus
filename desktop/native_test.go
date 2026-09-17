@@ -247,6 +247,34 @@ func TestASpaceInThePathIsQuotedInTheBotCommand(t *testing.T) {
 	}
 }
 
+// The launcher runs commands of the installation's own — a pairing link, a restart request — and
+// those read their settings under the names the agent uses, not the ones the supervisor is given.
+// Both spellings have to be there or the command reads the defaults of a container that is not here.
+func TestACommandRunForTheInstallationSeesBothSpellings(t *testing.T) {
+	paths, err := NewPaths(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := envMap(botEnv(paths, supervisorEnv(paths, nil, map[string]string{"API_PORT": "19985"})))
+	for key, want := range map[string]string{
+		"STATE_DIR":      paths.State,
+		"WORKSPACES_DIR": paths.Workspaces,
+		"BOT_REPO_DIR":   paths.Bot,
+		"CORE_REPO_DIR":  paths.Core,
+	} {
+		if env[key] != want {
+			t.Errorf("%s = %q, want %q", key, env[key], want)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		if env["SUPERVISOR_TCP"] == "" {
+			t.Error("the command has no supervisor to talk to")
+		}
+	} else if env["SUPERVISOR_SOCKET"] != filepath.Join(paths.State, "supervisor.sock") {
+		t.Errorf("the command was pointed at %q", env["SUPERVISOR_SOCKET"])
+	}
+}
+
 func envMap(env []string) map[string]string {
 	out := map[string]string{}
 	for _, kv := range env {
@@ -254,4 +282,22 @@ func envMap(env []string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+// The one value a command is run for is on the first line that carries anything; what comes before
+// it is the environment clearing its throat. (It once called itself, which no test had asked it to
+// do and which took the launcher down with a stack overflow the moment a token was read.)
+func TestTheFirstLineThatCarriesSomethingIsTheAnswer(t *testing.T) {
+	cases := map[string]string{
+		"":                                    "",
+		"\n\n":                                "",
+		"token-abc\n":                         "token-abc",
+		"\n  warning: something\ntoken-abc\n": "warning: something",
+		"  token-abc  ":                       "token-abc",
+	}
+	for out, want := range cases {
+		if got := firstLine(out); got != want {
+			t.Errorf("firstLine(%q) = %q, want %q", out, got, want)
+		}
+	}
 }

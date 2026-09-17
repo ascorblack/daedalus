@@ -34,6 +34,25 @@ func APIToken(ctx context.Context, p Paths, telegram bool) string {
 	if err != nil {
 		return ""
 	}
+	return firstLine(out)
+}
+
+// apiToken reads the token the app minted for itself, whichever mode this is: through the container
+// in one, and by running the same one-liner in the runtime's own environment in the other.
+func (a *App) apiToken(ctx context.Context) string {
+	if a.Native() {
+		out, err := a.native.RunPython(ctx, "-c", tokenScript)
+		if err != nil {
+			return ""
+		}
+		return firstLine(out)
+	}
+	return APIToken(ctx, a.paths, a.Telegram())
+}
+
+// firstLine is the first line of a command's output that carries anything. What is read this way is
+// one value — a token, a link — and what comes before it is the environment clearing its throat.
+func firstLine(out string) string {
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if value := strings.TrimSpace(line); value != "" {
 			return value
@@ -57,7 +76,7 @@ type stackStatus struct {
 // unread entries does not announce all nine the moment the launcher starts — and everything after
 // it is compared against what was there before.
 func (a *App) Watch(ctx context.Context, show func(Notification)) {
-	token := APIToken(ctx, a.paths, a.Telegram())
+	token := a.apiToken(ctx)
 	if token == "" {
 		a.log("desktop notifications are off: the launcher could not read the app's API token")
 		return

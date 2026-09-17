@@ -135,9 +135,14 @@ func envUpdates(p Paths, s Setup, current map[string]string, searxngSecret, home
 		// The public address is not on the setup page: an operator who set one by hand keeps it,
 		// and passkeys are enrolled against that host, so blanking it would invalidate them.
 		{"MINIAPP_PUBLIC_URL", current["MINIAPP_PUBLIC_URL"]},
-		{"API_PORT", "8765"},
-		{"SERVICES_PORT_RANGE", "8100-8119"},
-		{"SERVICES_PUBLIC_HOST", "127.0.0.1"},
+		// The ports are written once and then left to the operator. Nothing on the setup page asks
+		// about them, and rewriting them on every save would take back a change made by hand in the
+		// file — which in native mode is the only way to move them, since there is no container
+		// publishing a port that could be remapped instead.
+		{"API_PORT", firstSet(current["API_PORT"], "8765")},
+		{"SERVICES_PORT_RANGE", firstSet(current["SERVICES_PORT_RANGE"], "8100-8119")},
+		{"SERVICES_PUBLIC_HOST", firstSet(current["SERVICES_PUBLIC_HOST"], "127.0.0.1")},
+		{"KEYPROXY_PORT", firstSet(current["KEYPROXY_PORT"], "3201")},
 		{"DAEDALUS_COMPOSE_PROJECT_DIR", p.Bot},
 		{"DAEDALUS_COMPOSE_FILE", p.Compose},
 		{"DAEDALUS_CORE_PROJECT_DIR", p.Core},
@@ -145,6 +150,15 @@ func envUpdates(p Paths, s Setup, current map[string]string, searxngSecret, home
 		{"DAEDALUS_SSH_DIR", p.SSH},
 		{"DAEDALUS_HARNESS_HOME", home},
 	}
+}
+
+// firstSet is the first value that was written down: what a previous run left, else the default a
+// fresh installation starts with.
+func firstSet(existing, fallback string) string {
+	if strings.TrimSpace(existing) != "" {
+		return strings.TrimSpace(existing)
+	}
+	return fallback
 }
 
 // keyproxyUpdates is everything the launcher sets in daedalus-secrets/keyproxy.env. Provider keys
