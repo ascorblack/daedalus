@@ -19,7 +19,8 @@
       {{range .Steps}}<div class="row{{if .Done}} done{{end}}{{if .Now}} now{{end}}" data-stage="{{.Stage}}"><span class="dot"></span><span>{{.Label}}</span></div>
       {{end}}
     </div>
-    <p class="live" id="live"></p>
+    <p class="saying" id="live"></p>
+    <p class="live" id="livelog"></p>
     <div class="bar" id="idle" hidden>
       <button class="primary" data-action="start">{{.T "status.start"}}</button>
     </div>

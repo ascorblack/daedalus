@@ -14,7 +14,7 @@ export function LangPicker() {
   return (
     <div className="segmented inline lang" role="group" aria-label={t("lang.pick")}>
       {LANGS.map((l) => (
-        <button key={l} className={lang === l ? "on" : ""} aria-pressed={lang === l} onClick={() => pick(l)}>
+        <button key={l} className={lang === l ? "on" : ""} aria-pressed={lang === l} onClick={() => pick(l)} title={t(`lang.name.${l}`)} aria-label={t(`lang.name.${l}`)}>
           {l.toUpperCase()}
         </button>
       ))}

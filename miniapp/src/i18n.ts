@@ -31,6 +31,30 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "nav.settings": { en: "Settings", ru: "Настройки" },
   "nav.more": { en: "More", ru: "Ещё" },
 
+  // The rail's own chrome. A destination translated under an English heading is the half-and-half
+  // the rest of this file exists to avoid, so the group names, the two buttons and the project
+  // chip are here even though what they lead to is still English.
+  "nav.group.work": { en: "Work", ru: "Работа" },
+  "nav.group.autonomy": { en: "Autonomy", ru: "Самостоятельность" },
+  "nav.group.knowledge": { en: "Knowledge", ru: "Знания" },
+  "nav.group.observe": { en: "Observe", ru: "Наблюдение" },
+  "shell.projects": { en: "Projects", ru: "Проекты" },
+  "shell.projects.all": { en: "All projects", ru: "Все проекты" },
+  "shell.projects.add": { en: "Add a project", ru: "Добавить проект" },
+  "shell.search": { en: "Search…", ru: "Поиск…" },
+  "shell.search.title": { en: "Search and go (Ctrl/⌘ K)", ru: "Поиск и переход (Ctrl/⌘ K)" },
+  "shell.search.label": { en: "Search and go", ru: "Поиск и переход" },
+  "shell.search.placeholder": { en: "Go to, open, create…", ru: "Перейти, открыть, создать…" },
+  "shell.search.nomatch": { en: "Nothing matches.", ru: "Ничего не нашлось." },
+  "shell.search.goto": { en: "Go to {name}", ru: "Перейти: {name}" },
+  "shell.search.newagent": { en: "New agent", ru: "Новый агент" },
+  "shell.search.workin": { en: "Work in {name}", ru: "Работать в «{name}»" },
+  "shell.collapse": { en: "Collapse", ru: "Свернуть" },
+  "shell.collapse.title": { en: "Collapse the rail", ru: "Свернуть панель" },
+  "shell.expand.title": { en: "Expand the rail", ru: "Развернуть панель" },
+  "shell.back": { en: "Back", ru: "Назад" },
+  "shell.waiting": { en: "{n} waiting", ru: "{n} ждут вас" },
+
   "common.loading": { en: "Loading…", ru: "Загрузка…" },
   "common.cancel": { en: "Cancel", ru: "Отмена" },
   "common.retry": { en: "Try again", ru: "Ещё раз" },
@@ -53,6 +77,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
     en: "No passkey yet: sign in, then add one in Settings → Security, and next time Face ID, Touch ID or a security key is enough.",
     ru: "Ключа доступа ещё нет: войдите и добавьте его в «Настройки → Безопасность» — дальше хватит Face ID, Touch ID или ключа.",
   },
+  "login.pairing.placeholder": { en: "https://…/api/auth/pair?code=… or the code", ru: "https://…/api/auth/pair?code=… или код" },
   "login.busy": { en: "Signing in…", ru: "Входим…" },
   "login.install": {
     en: "Install the site as an app from your browser's menu to open it like any other app.",
@@ -80,6 +105,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "add.key.own": { en: "keyed here", ru: "ключ хранится здесь" },
   "add.key.free": { en: "needs no key", ru: "ключ не нужен" },
   "add.noaddress": { en: "no address configured", ru: "адрес не задан" },
+  "add.noaddress.hint": { en: "Give it an address in Settings → Models.", ru: "Укажите адрес в «Настройки → Модели»." },
 
   "add.custom": { en: "OpenAI-compatible endpoint", ru: "Совместимый с OpenAI адрес" },
   "add.custom.new": { en: "new", ru: "новый" },
@@ -100,6 +126,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "add.nomatch": { en: "Nothing matches that filter.", ru: "Под фильтр ничего не подошло." },
 
   "add.label": { en: "Label", ru: "Название" },
+  "add.label.hint": { en: "what the app calls it", ru: "как приложение будет её называть" },
   "add.window": { en: "Context window", ru: "Окно контекста" },
   "add.output": { en: "Max output", ru: "Максимум ответа" },
   "add.thinking.on": { en: "thinking on", ru: "рассуждение вкл" },
@@ -148,9 +175,25 @@ function fromBrowser(): Lang {
 }
 
 // A language named in the URL is a choice too: the launcher opens the app in the language its own
-// window is in, and the reader should not have to make it twice.
+// window is in, and the reader should not have to make it twice. It is kept and then taken out of
+// the address, so that it settles the question once instead of overriding the reader on every
+// visit — and so that a link copied out of the bar carries no answer with it.
 let current: Lang = fromUrl() ?? stored() ?? fromBrowser();
-if (fromUrl()) remember(current);
+if (fromUrl()) {
+  remember(current);
+  stripUrl();
+}
+
+/** Take `lang` out of the address without reloading or adding to the history. */
+function stripUrl(): void {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("lang");
+    window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+  } catch {
+    /* no history to speak of */
+  }
+}
 
 const listeners = new Set<() => void>();
 

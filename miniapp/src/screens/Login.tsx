@@ -116,7 +116,7 @@ export function LoginScreen({ onDone }: { onDone: () => void }) {
             <form className="login-pair" onSubmit={withPairing}>
               <label className="field" htmlFor="pairing">{t("login.pairing.label")}</label>
               <div className="share-field">
-                <input id="pairing" className="field mono" value={pairing} onChange={(e) => setPairing(e.target.value)} placeholder="https://…/api/auth/pair?code=… or the code" autoComplete="off" spellCheck={false} />
+                <input id="pairing" className="field mono" value={pairing} onChange={(e) => setPairing(e.target.value)} placeholder={t("login.pairing.placeholder")} autoComplete="off" spellCheck={false} />
                 <button className="btn" type="submit" disabled={!pairing.trim() || busy}>{t("common.continue")}</button>
               </div>
               <p className="sub small">{t("login.pairing.hint")}</p>

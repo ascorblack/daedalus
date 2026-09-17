@@ -317,10 +317,30 @@ VOICE = {
     "model": "Qwen 3.7 Flash",
     "tts": {"configured": True, "reason": "", "voice": "alloy", "model": "kokoro"},
     "stt": {"configured": True, "reason": ""},
+    # One of each state the panel can be in: a line it said mid-run, which wins over the answer and
+    # carries its own timestamp; a finished answer; and the two things it can be waiting for.
     "agents": [
-        {"session_id": S1, "title": "Bakery site", "status": "running", "last_message_at": ago(seconds=40), "answer": "Rewriting the menu page so the seasonal section reads from one JSON file."},
+        {
+            "session_id": S1,
+            "title": "Bakery site",
+            "status": "running",
+            "last_message_at": ago(minutes=6),
+            "answer": "Rewriting the menu page so the seasonal section reads from one JSON file.",
+            "progress": "Reading the menu page to see how the seasonal section is put together.",
+            "progress_at": ago(seconds=20),
+        },
         {"session_id": S3, "title": "Support inbox", "status": "idle", "last_message_at": ago(minutes=52), "answer": "Answered nine of eleven; two went on the board as they need a price decision."},
-        {"session_id": S4, "title": "Weekly digest", "status": "waiting", "last_message_at": ago(minutes=4), "answer": "Which week should the digest cover — the one that just ended, or the running one?"},
+        {"session_id": S4, "title": "Weekly digest", "status": "waiting", "last_message_at": ago(minutes=4), "answer": "Which week should the digest cover — the one that just ended, or the running one?", "waiting": "operator"},
+        {
+            "session_id": S2,
+            "title": "Invoice run",
+            "status": "waiting",
+            "last_message_at": ago(minutes=1),
+            "answer": "Ready to send the eleven invoices for last month.",
+            "progress": "Asking to send the invoices.",
+            "progress_at": ago(seconds=50),
+            "waiting": "approval",
+        },
     ],
     "listening": True,
 }

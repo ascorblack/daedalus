@@ -8,6 +8,7 @@ import { Sheet } from "./dialogs";
 import { Icon } from "./icons";
 import { invalidate, useQuery } from "./store";
 import { confirmAsync, errorText } from "./ui";
+import { t } from "./i18n";
 
 const PICKED = "daedalus.project";
 
@@ -46,9 +47,9 @@ function afterChange(): void {
 /** The control that says which project is in view and opens the list: rail, header or palette. */
 export function ProjectChip({ projects, current, onOpen, collapsed }: { projects: Project[]; current: string; onOpen: () => void; collapsed?: boolean }) {
   const active = projects.find((p) => p.id === current);
-  const label = active ? active.name : projects.length ? "All projects" : "Add a project";
+  const label = active ? active.name : projects.length ? t("shell.projects.all") : t("shell.projects.add");
   return (
-    <button className="project-chip" onClick={onOpen} title={active ? active.root : "Projects"} aria-haspopup="dialog">
+    <button className="project-chip" onClick={onOpen} title={active ? active.root : t("shell.projects")} aria-haspopup="dialog">
       <Icon name="folder" size={16} />
       <span className="rail-text truncate">{collapsed ? "" : label}</span>
       {!collapsed && active && !active.reachable && <span className="badge attn" title="the folder is not mounted here">not mounted</span>}
@@ -73,7 +74,7 @@ export function ProjectSwitcher({ projects, current, onPick, onClose, toast }: {
         A project is a folder you add. Agents you start in it work in that folder and nowhere else.
       </div>
       <button className={`menu-item ${current ? "" : "on"}`} onClick={() => pick("")}>
-        <span className="grow truncate">All projects</span>
+        <span className="grow truncate">{t("shell.projects.all")}</span>
         {!current && <Icon name="check" size={16} />}
       </button>
       {projects.map((p) => (

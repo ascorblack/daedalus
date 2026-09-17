@@ -62,9 +62,21 @@ func DeepLinkTarget(link, appURL string) string {
 		if !isIdentifier(segments[1]) {
 			return appURL
 		}
-		return strings.TrimSuffix(appURL, "/") + "/agents/" + segments[1]
+		return appPath(appURL, "/agents/"+segments[1])
 	}
 	return appURL
+}
+
+// appPath puts a path under the app's address. The address carries the language the launcher is
+// speaking after the `?`, and that belongs on a deep link as much as on the front page: the link
+// is often the first thing a new installation opens.
+func appPath(appURL, path string) string {
+	base, query, hasQuery := strings.Cut(appURL, "?")
+	target := strings.TrimSuffix(base, "/") + path
+	if hasQuery {
+		target += "?" + query
+	}
+	return target
 }
 
 // isIdentifier reports whether a segment is something the app could have made: letters, digits and

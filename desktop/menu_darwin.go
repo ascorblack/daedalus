@@ -57,6 +57,11 @@ static void daedalus_install_menu(const char *cname) {
     daedalus_item(appMenu, [@"Quit " stringByAppendingString:name], @selector(terminate:), @"q", 0);
 
     // Edit: the reason this file exists. Every selector here is one WKWebView already answers.
+    //
+    // undo: and redo: are answered by the responder chain but declared in no public header, so a
+    // build with -Wundeclared-selector turned on (and fatal under -Werror) rejects them. If
+    // CGO_CFLAGS ever grows either flag, this is the file it will stop at, and the fix is to
+    // exempt these two rather than to drop the menu items.
     NSMenu *editMenu = daedalus_submenu(bar, @"Edit");
     daedalus_item(editMenu, @"Undo", @selector(undo:), @"z", 0);
     daedalus_item(editMenu, @"Redo", @selector(redo:), @"z", NSEventModifierFlagCommand | NSEventModifierFlagShift);

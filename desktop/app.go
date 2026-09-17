@@ -91,6 +91,10 @@ func (a *App) Mode() Mode {
 // Native reports whether this installation runs without a container.
 func (a *App) Native() bool { return a.Mode() == ModeNative }
 
+// Lang is the language this installation chose, and English until it has. Everything the launcher
+// hands to a browser — the app's address above all — is in it.
+func (a *App) Lang() Lang { return LangFor(a.paths, "") }
+
 // log records a line and echoes it to the terminal, so the operator sees the same progress whether
 // they are watching the window the launcher runs in or the page in the browser.
 func (a *App) log(format string, args ...any) {
@@ -184,7 +188,7 @@ func (a *App) start(ctx context.Context) error {
 	if err := WaitReady(ctx, APIPort(a.paths), readyTimeout); err != nil {
 		return err
 	}
-	a.log("the app is up at %s", AppURL(APIPort(a.paths)))
+	a.log("the app is up at %s", AppURL(APIPort(a.paths), a.Lang()))
 	a.mountProjects(ctx) // projects: folders the container cannot see yet (desktop/projects.go)
 	return nil
 }
@@ -198,7 +202,7 @@ func (a *App) startNative(ctx context.Context) error {
 	if err := a.native.Start(ctx); err != nil {
 		return err
 	}
-	a.log("the app is up at %s", AppURL(APIPort(a.paths)))
+	a.log("the app is up at %s", AppURL(APIPort(a.paths), a.Lang()))
 	return nil
 }
 
@@ -408,7 +412,7 @@ func (a *App) Open(ctx context.Context) (string, error) {
 // place than a link that has already been spent — and the only answer at all when the stack is not
 // running.
 func (a *App) OpenURL(ctx context.Context) string {
-	app := AppURL(APIPort(a.paths))
+	app := AppURL(APIPort(a.paths), a.Lang())
 	a.mu.Lock()
 	started, paired := a.startedAt, a.paired
 	a.mu.Unlock()
@@ -473,18 +477,21 @@ func (a *App) Pair(ctx context.Context) (string, error) {
 
 // Status is what the status command prints and what the page renders.
 type Status struct {
-	Data       string   `json:"data"`
-	Mode       string   `json:"mode"`
-	ModeDetail string   `json:"mode_detail"`
-	Ports      string   `json:"ports"`
-	Configured bool     `json:"configured"`
-	Repos      bool     `json:"repos"`
-	Docker     string   `json:"docker"`
-	Running    int      `json:"running"`
-	AppURL     string   `json:"app_url"`
-	Telegram   bool     `json:"telegram"`
-	Busy       string   `json:"busy"`
-	Failure    string   `json:"failure"`
+	Data       string `json:"data"`
+	Mode       string `json:"mode"`
+	ModeDetail string `json:"mode_detail"`
+	Ports      string `json:"ports"`
+	Configured bool   `json:"configured"`
+	Repos      bool   `json:"repos"`
+	Docker     string `json:"docker"`
+	Running    int    `json:"running"`
+	AppURL     string `json:"app_url"`
+	Telegram   bool   `json:"telegram"`
+	Busy       string `json:"busy"`
+	Failure    string `json:"failure"`
+	// FailureKey is the sentence that explains the failure, where the launcher recognises it, and
+	// empty where it does not. The page shows the sentence and keeps Failure behind the disclosure.
+	FailureKey string   `json:"failure_key"`
 	Log        []string `json:"log"`
 
 	// What a start is doing and how far through the piece with a known size it is. The progress
@@ -508,11 +515,12 @@ func (a *App) Status(ctx context.Context) Status {
 		ModeDetail: a.mode.Describe(),
 		Configured: a.paths.Configured(),
 		Repos:      exists(a.paths.Bot) && exists(a.paths.Core),
-		AppURL:     AppURL(APIPort(a.paths)),
+		AppURL:     AppURL(APIPort(a.paths), a.Lang()),
 		Telegram:   a.Telegram(),
 		Busy:       a.busy,
 		Failure:    a.failure,
-		Log:        append([]string(nil), a.lines...),
+		FailureKey: FailureKey(a.failure),
+		Log:        append(make([]string, 0, len(a.lines)), a.lines...),
 		Stage:      string(a.stage),
 		Done:       a.stageDone,
 		Size:       a.stageSize,

@@ -34,6 +34,12 @@ func TestDeepLinkTargetFindsTheSession(t *testing.T) {
 			t.Fatalf("%s opened %s, want %s", one.link, got, one.want)
 		}
 	}
+	// The language the launcher hands the app rides on a deep link too: it is after the `?`, and
+	// the session goes on the path in front of it rather than inside the parameter.
+	withLang := "http://127.0.0.1:8765/app/?lang=ru"
+	if got := DeepLinkTarget("daedalus://open/abc123", withLang); got != "http://127.0.0.1:8765/app/agents/abc123?lang=ru" {
+		t.Fatalf("a deep link lost the language: %s", got)
+	}
 	// A link arrives from outside, so an id that is not one opens the app and nothing else.
 	for _, refused := range []string{"daedalus://open/../../etc", "daedalus://open/a b", "daedalus://open/a%2Fb", "daedalus://open/a\u0000b"} {
 		if got := DeepLinkTarget(refused, app); got != app {
@@ -96,7 +102,7 @@ func TestSecondLaunchFocusesTheFirst(t *testing.T) {
 	}
 	select {
 	case url := <-focused:
-		if !strings.HasSuffix(url, "/app/agents/abc123") {
+		if !strings.Contains(url, "/app/agents/abc123") {
 			t.Fatalf("the link arrived as %s", url)
 		}
 	case <-time.After(5 * time.Second):

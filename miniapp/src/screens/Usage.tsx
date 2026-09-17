@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Skeleton } from "../components";
 import { absTime, clock, dayLabel, int, planName, tokens, untilShort, usd } from "../format";
-import { PageHeader } from "../shell";
+import { PageHeader, screenTitle } from "../shell";
 import { useQuery } from "../store";
 
 type Daily = { day: string; provider_id: string; model: string; calls: number; input_tokens: number; output_tokens: number; cache_read_tokens: number; reasoning_tokens: number; cost_usd: number | null; unmetered: number };
@@ -79,7 +79,7 @@ export function UsageScreen({ onOpen }: { onOpen?: (id: string) => void }) {
 
   return (
     <>
-      <PageHeader title="Usage" subtitle={`last ${days} days`}>
+      <PageHeader title={screenTitle("usage")} subtitle={`last ${days} days`}>
         <div className="chips">
           {([7, 14, 30] as const).map((d) => (
             <button key={d} className="chip select" aria-pressed={days === d} onClick={() => setDays(d)}>{d} days</button>

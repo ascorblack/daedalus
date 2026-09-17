@@ -236,7 +236,6 @@ func startCommand(ctx context.Context, app *App, opts options) error {
 	// The surface is made after the page is listening, because the first thing it shows is that
 	// page: the status, the buttons, and on a first start the questions.
 	surface := OpenSurface(app.paths, server.URL())
-	server.SetWindowed(surface.Windowed())
 	server.OnFocus(surface.Focus)
 	go bringUp(ctx, app, server, surface, opts)
 	surface.Run(ctx)
@@ -302,7 +301,7 @@ func bringUp(ctx context.Context, app *App, server *Server, surface *Surface, op
 	if opts.link != "" {
 		// Opened by following a link, what the operator asked for is the thing at the end of it,
 		// not the app's front page.
-		url = DeepLinkTarget(opts.link, AppURL(APIPort(app.paths)))
+		url = DeepLinkTarget(opts.link, AppURL(APIPort(app.paths), app.Lang()))
 	}
 	fmt.Println("opening", url)
 	surface.Show(ctx, url)

@@ -125,13 +125,19 @@ The launcher serves three pages of its own, on the loopback address and nowhere 
 
 Both languages are complete: every line of every page is in a table in `i18n.go`, and a key in one
 language and not the other fails a test rather than leaving an English sentence in a Russian page.
-The choice is written to `data/lang` beside `data/mode`, so the next start opens in it. The one thing
-not translated is the launcher's own running commentary — the line under the steps and the log — and
-it is shown as what it is: the same words that go to the terminal.
+The choice is written to `data/lang` beside `data/mode`, so the next start opens in it. What the launcher is
+doing is a sentence in the same language, chosen by the stage it has reached, and its own running
+commentary sits under that in monospace, shown as what it is: the same words that go to the
+terminal. A failure the launcher recognises — no network, Docker not answering, a port taken, a full
+disk — is a sentence too, with the program's own text kept behind *What happened*.
+
+<p align="center">
+  <img src="../docs/screenshots/launcher-setup-en-1440.png" alt="The launcher's first screen: how it runs, one provider key, a daily spending cap" width="100%" />
+</p>
 
 Pictures of all three, in both languages, at a window's width and a phone's, are in
 `docs/screenshots/launcher-*.png`; `tests/browser/launcher_shots.py` renders them against an
-invented installation.
+invented installation and checks there that a language switch loses nothing that was typed.
 
 ## The folder
 

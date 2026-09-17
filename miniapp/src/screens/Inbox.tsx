@@ -5,7 +5,7 @@ import { OverflowMenu, Sheet, deleteWithUndo } from "../dialogs";
 import { absTime, dayLabel, relTime } from "../format";
 import { Icon, IconName } from "../icons";
 import { navigate, pathFor } from "../router";
-import { PageHeader } from "../shell";
+import { PageHeader, screenTitle } from "../shell";
 import { hold, invalidate, prime, release, useQuery } from "../store";
 import { errorText } from "../ui";
 
@@ -135,7 +135,7 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
   return (
     <>
       <PageHeader
-        title="Inbox"
+        title={screenTitle("inbox")}
         subtitle={unread > 0 ? `${unread} unread` : undefined}
         actions={<button className="iconbtn" onClick={markAll} disabled={unread === 0} title="Mark all read" aria-label="Mark all read"><Icon name="check" /></button>}
       >

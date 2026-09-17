@@ -281,10 +281,16 @@ button[disabled] { opacity: 0.45; cursor: default; transform: none; }
 /* The launcher's own commentary, which is the machine talking rather than the page: it is shown as
    such — one faint monospace line — and is the one thing here that is not translated, because it is
    the same words that go to the terminal and into the log. */
+/* What is happening, in the operator's words, with the launcher's own commentary under it. */
+.saying {
+  color: var(--muted);
+  margin-top: 18px;
+  min-height: 22px;
+}
 .live {
   color: var(--faint);
   font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  margin-top: 18px;
+  margin-top: 4px;
   min-height: 20px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -292,7 +298,9 @@ button[disabled] { opacity: 0.45; cursor: default; transform: none; }
 }
 .trouble { border-color: rgba(240, 180, 41, 0.4); }
 .trouble h2 { font-size: 17px; }
-.trouble .what { color: var(--muted); font-size: 13px; margin-top: 8px; }
+/* On this card the sentence is the explanation, not a caption under one: it reads at the size of
+   the page's own text rather than at a footnote's. */
+.trouble .what { color: var(--text); margin-top: 10px; }
 .trouble .detail { margin-top: 14px; }
 .trouble pre {
   background: var(--bg);
@@ -349,6 +357,9 @@ button[disabled] { opacity: 0.45; cursor: default; transform: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.001ms !important;
+    /* The stagger is a delay, not a duration: without this the page still appears in six steps,
+       each element held at opacity 0 by the animation's `both` fill until its turn comes. */
+    animation-delay: 0s !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }

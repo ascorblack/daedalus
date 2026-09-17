@@ -9,7 +9,7 @@ import { api } from "../api";
 import { Dot, StatusLabel, timeAgo } from "../components";
 import { Icon } from "../icons";
 import { pathFor, sessionPath } from "../router";
-import { PageHeader, go } from "../shell";
+import { PageHeader, go, screenTitle } from "../shell";
 import { useQuery } from "../store";
 import { errorText, haptic } from "../ui";
 import { AgentNews, Listener, Speaker, agentNote, createRecognition, createRecorder, createSpeaker, recognitionSupported, recorderSupported, sendUtterance, voiceLang } from "../voice";
@@ -342,7 +342,7 @@ export function VoiceScreen({ onOpen }: { onOpen: (id: string) => void }) {
 function VoiceTitle() {
   return (
     <>
-      Voice <span className="chip accent voice-beta">beta</span>
+      {screenTitle("voice")} <span className="chip accent voice-beta">beta</span>
     </>
   );
 }

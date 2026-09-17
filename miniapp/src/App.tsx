@@ -12,7 +12,7 @@ import { ProjectSwitcher, rememberProject, storedProject, useProjects } from "./
 import { ChangeStrip } from "./change";
 import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
-import { useLang } from "./i18n";
+import { t, useLang } from "./i18n";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -311,10 +311,10 @@ export function App() {
   const paletteItems = (): PaletteItem[] => {
     const sessions = peek<SessionSummary[]>("/api/sessions") ?? [];
     return [
-      { id: "new-agent", label: "New agent", icon: "plus", run: () => navigate(pathFor("agents", null, { new: "1" })) },
-      { id: "projects", label: "Projects", hint: projectList.find((p) => p.id === project)?.name ?? "all projects", icon: "folder", run: () => setSwitching(true) },
-      ...projectList.map((p) => ({ id: `p-${p.id}`, label: `Work in ${p.name}`, hint: p.root, icon: "folder" as const, run: () => pickProject(p.id) })),
-      ...visibleScreens(SCREENS, selfdev).map((s) => ({ id: `go-${s}`, label: `Go to ${screenTitle(s)}`, icon: "back" as const, run: () => navigate(pathFor(s)) })),
+      { id: "new-agent", label: t("shell.search.newagent"), icon: "plus", run: () => navigate(pathFor("agents", null, { new: "1" })) },
+      { id: "projects", label: t("shell.projects"), hint: projectList.find((p) => p.id === project)?.name ?? t("shell.projects.all"), icon: "folder", run: () => setSwitching(true) },
+      ...projectList.map((p) => ({ id: `p-${p.id}`, label: t("shell.search.workin", { name: p.name }), hint: p.root, icon: "folder" as const, run: () => pickProject(p.id) })),
+      ...visibleScreens(SCREENS, selfdev).map((s) => ({ id: `go-${s}`, label: t("shell.search.goto", { name: screenTitle(s) }), icon: "back" as const, run: () => navigate(pathFor(s)) })),
       ...sessions.map((s) => ({ id: `s-${s.id}`, label: s.title, hint: s.model ?? "", icon: "bots" as const, run: () => open(s.id) })),
     ];
   };

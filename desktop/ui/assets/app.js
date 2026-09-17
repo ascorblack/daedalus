@@ -35,15 +35,23 @@ async function act(action) {
 // the typed values are carried across instead — they never leave the page to do it.
 async function switchLang(lang) {
   if (lang === document.body.dataset.lang) return;
-  await fetch("/api/lang", {
+  // The language is written beside the data before the page is swapped. If that write failed the
+  // re-fetched page comes back in the old language, and a page that says it is Russian while
+  // showing English is worse than one that did not switch at all.
+  const saved = await fetch("/api/lang", {
     method: "POST",
     headers: { "X-Daedalus-Desktop": token, "Content-Type": "application/json" },
     body: JSON.stringify({ lang }),
   });
-  const name = (field) => field.name + ":" + (field.type === "checkbox" ? field.value : "");
+  if (!saved.ok) return;
+  // A field is remembered by its name and, where one name covers several controls, by the value
+  // that tells them apart: both mode radios are `name="mode"` and only their value says which one
+  // the operator chose. What is carried across is the checked state, not the value attribute —
+  // the fresh page brings back the machine's suggestion, and that is exactly what must not win.
+  const name = (field) => field.name + ":" + (field.type === "checkbox" || field.type === "radio" ? field.value : "");
   const typed = new Map();
   for (const field of document.querySelectorAll("input[name]")) {
-    typed.set(name(field), field.type === "checkbox" ? field.checked : field.value);
+    typed.set(name(field), field.type === "checkbox" || field.type === "radio" ? field.checked : field.value);
   }
   // What was open and which provider was showing are part of where the operator was, too.
   const opened = [...document.querySelectorAll("details")].map((one) => one.open);
@@ -61,8 +69,8 @@ async function switchLang(lang) {
   for (const field of document.querySelectorAll("input[name]")) {
     const key = name(field);
     if (!typed.has(key)) continue;
-    if (field.type === "checkbox") field.checked = typed.get(key);
-    else if (field.type !== "radio") field.value = typed.get(key);
+    if (field.type === "checkbox" || field.type === "radio") field.checked = typed.get(key);
+    else field.value = typed.get(key);
   }
   document.querySelectorAll("details").forEach((one, i) => (one.open = opened[i] ?? false));
   if (page === "setup") setupPanels(provider);
@@ -123,12 +131,19 @@ function drawProgress(status) {
   el("working").hidden = failed;
   el("trouble").hidden = !failed;
   if (failed) {
-    el("what").textContent = status.docker_missing ? T("docker.missing") : status.failure;
-    el("trouble-log").textContent = (status.log || []).join("\n");
+    // What the launcher can name, it names — in the language of the page. What it cannot stays as
+    // the program said it, which is a visible gap rather than a silent one. Either way the original
+    // text is under "What happened", above the log.
+    const said = status.docker_missing ? T("docker.missing") : status.failure_key ? T(status.failure_key) : status.failure;
+    el("what").textContent = said;
+    el("trouble-log").textContent = [status.failure, ...(status.log || [])].filter(Boolean).join("\n");
     return;
   }
   el("idle").hidden = Boolean(status.busy) || ready;
-  el("live").textContent = ready ? T("progress.done") : (status.log || []).slice(-1)[0] || T("progress.working");
+  // Two lines: what is happening, in the operator's language, and under it the launcher's own
+  // commentary, which is machine output and looks like it.
+  el("live").textContent = ready ? T("progress.done") : status.stage ? T("live." + status.stage) : T("progress.working");
+  el("livelog").textContent = ready ? "" : (status.log || []).slice(-1)[0] || "";
   if (ready) setTimeout(() => (location.href = "/status"), 900);
 }
 
@@ -158,7 +173,8 @@ function drawStatus(status) {
   const message = status.docker_missing ? T("docker.missing") : status.failure;
   el("alert").textContent = message || "";
   el("alert").hidden = !message;
-  el("log").textContent = status.log.length ? status.log.join("\n") : T("status.log.empty");
+  const log = status.log || [];
+  el("log").textContent = log.length ? log.join("\n") : T("status.log.empty");
 }
 
 // The supervisor's word for what happened, in the operator's.

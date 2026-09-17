@@ -56,7 +56,15 @@ def run() -> int:
                 continue
             left = box["x"]
             right = width - (box["x"] + box["width"])
-            scrolls = page.evaluate("() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1")
+            # The flow scrolls inside `.gate.tall`, so an overflowing child grows *that* element's
+            # scrollWidth and never the document's: asking the document would always answer no.
+            scrolls = page.evaluate(
+                """() => {
+                    const doc = document.documentElement;
+                    const gate = document.querySelector('.gate.tall') ?? doc;
+                    return gate.scrollWidth > gate.clientWidth + 1 || doc.scrollWidth > doc.clientWidth + 1;
+                }"""
+            )
             print(f"{width:>5}px  content {box['width']:>7.1f}  gutters {left:>6.1f} / {right:>6.1f}  h-scroll {scrolls}")
             if abs(left - right) > SLACK:
                 failures.append(f"{width}: gutters differ by {abs(left - right):.1f}px — the flow is not centred")

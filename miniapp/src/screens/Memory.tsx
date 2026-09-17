@@ -4,7 +4,7 @@ import { Skeleton } from "../components";
 import { Sheet, deleteWithUndo } from "../dialogs";
 import { absTime, relTime } from "../format";
 import { Icon } from "../icons";
-import { PageHeader } from "../shell";
+import { PageHeader, screenTitle } from "../shell";
 import { hold, prime, release, useQuery } from "../store";
 import { confirmAsync, errorText } from "../ui";
 
@@ -82,7 +82,7 @@ export function MemoryScreen({ toast, onOpen }: { toast: (t: string) => void; on
   return (
     <>
       <PageHeader
-        title="Memory"
+        title={screenTitle("memory")}
         subtitle={data ? `${records.length === all.length ? all.length : `${records.length} of ${all.length}`} memories` : undefined}
         actions={
           <>

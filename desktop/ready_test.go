@@ -89,7 +89,15 @@ func TestWaitReadySaysWhatItLastSaw(t *testing.T) {
 }
 
 func TestAppURLIsLoopbackOnly(t *testing.T) {
-	if got := AppURL("8765"); got != "http://127.0.0.1:8765/app/" {
+	if got := AppURL("8765", LangEN); got != "http://127.0.0.1:8765/app/?lang=en" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// The app is opened in the language the launcher is speaking, not in the browser's: an operator who
+// chose Russian in the corner of the launcher gets a Russian app on an English machine.
+func TestAppURLCarriesTheLanguage(t *testing.T) {
+	if got := AppURL("8765", LangRU); got != "http://127.0.0.1:8765/app/?lang=ru" {
 		t.Fatalf("got %q", got)
 	}
 }
