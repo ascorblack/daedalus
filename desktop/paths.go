@@ -15,6 +15,21 @@ import (
 //	<data>/daedalus-secrets/ssh           hosts the agent may reach (may stay empty)
 //	<data>/.env                           the values compose interpolates
 //	<data>/compose.desktop.yaml           the override that points at the published images
+//	<data>/mode                           docker or native, chosen once and remembered
+//
+// Native mode adds the pieces a container would otherwise have held. The database, the workspaces
+// and the runtime are files under the same folder rather than Docker volumes, which is what makes
+// the whole installation one directory to back up and one directory to delete:
+//
+//	<data>/runtime/uv/uv                  the installer for everything below it
+//	<data>/runtime/python/                the CPython uv manages
+//	<data>/runtime/venv/                  the app's environment
+//	<data>/runtime/bin/rg                 the one binary Search needs
+//	<data>/runtime/git/                   MinGit, on Windows only
+//	<data>/runtime/node/                  an extra, on demand
+//	<data>/runtime/browsers/              an extra, on demand
+//	<data>/runtime/logs/                  the supervisor's output, rotated by the launcher
+//	<data>/state/  <data>/workspaces/     what the volumes hold in Docker mode
 type Paths struct {
 	Data        string
 	Bot         string
@@ -26,6 +41,20 @@ type Paths struct {
 	BotEnv      string
 	Compose     string
 	Override    string
+	Mode        string
+
+	Runtime         string
+	RuntimeUV       string
+	RuntimePython   string
+	RuntimeVenv     string
+	RuntimeBin      string
+	RuntimeGit      string
+	RuntimeNode     string
+	RuntimeBrowsers string
+	RuntimeStamps   string
+	RuntimeLogs     string
+	State           string
+	Workspaces      string
 }
 
 // NewPaths resolves the data directory: --data when given, otherwise the default the executable's
@@ -44,6 +73,7 @@ func NewPaths(dataDir string) (Paths, error) {
 	}
 	bot := filepath.Join(abs, "daedalus")
 	secrets := filepath.Join(abs, "daedalus-secrets")
+	runtimeDir := filepath.Join(abs, "runtime")
 	return Paths{
 		Data:        abs,
 		Bot:         bot,
@@ -55,6 +85,20 @@ func NewPaths(dataDir string) (Paths, error) {
 		BotEnv:      filepath.Join(bot, ".env"),
 		Compose:     filepath.Join(bot, "deploy", "compose.yaml"),
 		Override:    filepath.Join(abs, "compose.desktop.yaml"),
+		Mode:        filepath.Join(abs, "mode"),
+
+		Runtime:         runtimeDir,
+		RuntimeUV:       filepath.Join(runtimeDir, "uv"),
+		RuntimePython:   filepath.Join(runtimeDir, "python"),
+		RuntimeVenv:     filepath.Join(runtimeDir, "venv"),
+		RuntimeBin:      filepath.Join(runtimeDir, "bin"),
+		RuntimeGit:      filepath.Join(runtimeDir, "git"),
+		RuntimeNode:     filepath.Join(runtimeDir, "node"),
+		RuntimeBrowsers: filepath.Join(runtimeDir, "browsers"),
+		RuntimeStamps:   filepath.Join(runtimeDir, "installed"),
+		RuntimeLogs:     filepath.Join(runtimeDir, "logs"),
+		State:           filepath.Join(abs, "state"),
+		Workspaces:      filepath.Join(abs, "workspaces"),
 	}, nil
 }
 
@@ -107,6 +151,20 @@ func (p Paths) EnsureDirs() error {
 		return err
 	}
 	return os.MkdirAll(p.SSH, 0o700)
+}
+
+// EnsureNativeDirs creates what native mode writes into and Docker mode keeps in volumes. The state
+// directory is 0700: it holds the database, the sessions and the pairing links.
+func (p Paths) EnsureNativeDirs() error {
+	if err := p.EnsureDirs(); err != nil {
+		return err
+	}
+	for _, dir := range []string{p.Runtime, p.RuntimeBin, p.RuntimeStamps, p.RuntimeLogs, p.Workspaces} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	return os.MkdirAll(p.State, 0o700)
 }
 
 // Configured reports whether a previous run already wrote the environment. A missing .env is the

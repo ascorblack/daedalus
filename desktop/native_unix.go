@@ -1,0 +1,36 @@
+//go:build !windows
+
+package main
+
+// A child of the launcher is put in a process group of its own, so stopping it stops what it
+// started. The supervisor starts the bot in a session of its own and the bot starts tools in
+// theirs; signalling the supervisor alone would leave the agent running with nothing above it.
+
+import (
+	"os/exec"
+	"syscall"
+)
+
+func setProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
+
+// terminateGroup asks the whole group to end. SIGTERM is what the supervisor handles: it drains the
+// bot, which is the difference between stopping an installation and interrupting it.
+func terminateGroup(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+	}
+}
+
+func killGroup(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		_ = cmd.Process.Kill()
+	}
+}
