@@ -139,3 +139,103 @@ async def test_a_queued_message_still_starts_the_next_run(settings: Settings, db
     texts = [b.text for m in history for b in m.content_blocks if getattr(b, "text", "")]
     assert any("and then this" in t for t in texts), "the queued message never started a run"
     await manager.close()
+
+
+async def test_an_undo_during_the_settling_window_lands_after_the_snapshot(settings: Settings, db: Database) -> None:
+    """The one operation the settling window exists to protect used to ignore it.
+
+    Between the two ``run_settled`` events the run is over, ``state.running`` is already False and
+    the undo button in the session screen is live — while the snapshot of the turn the undo would
+    undo is still being written. An undo accepted there restores the workspace to the *before* tree,
+    and the housekeeping behind it then writes that reverted tree into the checkpoint labelled
+    "after" the run it just undid. So the undo waits for the snapshot instead.
+    """
+    provider = ScriptedProvider([{"text": "the answer"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("t")
+    manager.config.compaction.auto_ratio = 0.0
+    order: list[str] = []
+    entered = asyncio.Event()
+
+    async def slow_snapshot(st: Any, *, kind: str, seq: int | None = None, run_id: str | None = None) -> str | None:
+        if kind == "after":
+            entered.set()
+            await asyncio.sleep(SLOW)
+            order.append("after-snapshot")
+        return "sha"
+
+    manager.checkpoint = slow_snapshot  # type: ignore[method-assign]
+    events, _ = await _settled_at(manager, state.session.id)
+    await manager.submit(state.session.id, "hello")
+    await asyncio.wait_for(entered.wait(), timeout=30)
+    # Exactly the state the app is in when the undo button is live: not running, first event out.
+    assert not state.running
+    assert events and events[0].payload["housekeeping"] is True
+    assert state.session.id in manager.busy_sessions()
+    seq = (await manager.sessions.list_transcript(state.session.id))[0].metadata["daedalus.seq"]
+    await manager.revert(state.session.id, int(seq))
+    order.append("revert")
+    assert order == ["after-snapshot", "revert"], f"the undo overtook the snapshot it invalidates: {order}"
+    await manager.close()
+
+
+async def test_a_shutdown_finishes_the_snapshot_and_the_handover(settings: Settings, db: Database) -> None:
+    """A restart in the settling window used to drop both halves of what a finished run still owes.
+
+    Before the housekeeping was a task of its own it ran inside the run, which had already ended by
+    the time ``close()`` looked at it. As a task it is something a shutdown can kill — so the
+    shutdown gives it the moment it needs first.
+    """
+    provider = ScriptedProvider([{"text": "the answer"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("t")
+    manager.config.compaction.auto_ratio = 0.0
+    kinds: list[str] = []
+    finished: list[str] = []
+    entered = asyncio.Event()
+
+    async def slow_snapshot(st: Any, *, kind: str, seq: int | None = None, run_id: str | None = None) -> str | None:
+        if kind == "after":
+            entered.set()
+            await asyncio.sleep(SLOW)
+        kinds.append(kind)
+        return "sha"
+
+    async def on_finished(session_id: str, run_id: str, status: str) -> None:
+        finished.append(status)
+
+    manager.checkpoint = slow_snapshot  # type: ignore[method-assign]
+    manager.on_finished(on_finished)
+    await manager.submit(state.session.id, "hello")
+    await asyncio.wait_for(entered.wait(), timeout=30)
+    await manager.close()
+    assert "after" in kinds, "the shutdown took the snapshot of the turn that had just ended"
+    assert finished == ["completed"], f"the shutdown dropped the handover to the other fronts: {finished}"
+
+
+async def test_a_shutdown_mid_run_announces_nothing(settings: Settings, db: Database) -> None:
+    """A parked run has not settled, so nothing says it ended.
+
+    ``resume_unfinished()`` drives it on after the restart. Announcing the end of it would put every
+    front back to idle on a turn that is about to continue, and the run-finished callbacks would
+    hand on an answer that is not finished.
+    """
+    provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "sleep 3"}}, {"text": "never reached"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("t")
+    events, _ = await _settled_at(manager, state.session.id)
+    finished: list[str] = []
+
+    async def on_finished(session_id: str, run_id: str, status: str) -> None:
+        finished.append(status)
+
+    manager.on_finished(on_finished)
+    await manager.submit(state.session.id, "start")
+    for _ in range(200):
+        await asyncio.sleep(0.02)
+        if state.running:
+            break
+    assert state.running
+    await manager.close()
+    assert events == [], f"a parked run announced itself as settled: {[e.payload for e in events]}"
+    assert finished == [], f"a parked run handed its unfinished answer on: {finished}"

@@ -1002,7 +1002,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         in a container the folder is only there once it is bind-mounted, so the app can say "restart
         to mount this" instead of showing a project whose files are mysteriously absent.
         """
-        busy = manager.busy_sessions()
+        # The narrower question on purpose: a session whose run has ended and whose snapshot is
+        # still being written may not be rewritten, but it is not working, and a list that draws it
+        # as running contradicts its own screen — which says idle, because it is.
+        busy = manager.active_sessions()
         out = []
         for project in await manager.projects.list():
             # Which of them are working right now, so the app can name them before it asks the
@@ -1988,13 +1991,38 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, f"no such component: {component_id}")
         return {"cancelled": installer.cancel(component_id)}
 
+    async def _refuse_restart_while_busy(force: bool) -> None:
+        """A restart is refused while any session is running or still writing its last turn down.
+
+        Both are losses nothing recovers. During a run it is the run. In the moment after one — the
+        window the app draws as idle — it is the snapshot of the turn that just ended and the
+        handover to the other fronts, which is a finished answer somebody is waiting for. So the
+        button says what is in the way, by name, instead of taking it with it.
+        """
+        if force:
+            return
+        busy = manager.busy_sessions()
+        if not busy:
+            return
+        names = []
+        for session_id in sorted(busy):
+            state = await manager.get_state(session_id)
+            names.append((state.session.title if state is not None else "") or session_id)
+        one = len(busy) == 1
+        raise HTTPException(
+            409,
+            f"{len(busy)} agent{'' if one else 's'} {'is' if one else 'are'} working or still saving the last turn ({', '.join(names)}); "
+            f"a restart now loses what {'it is' if one else 'they are'} writing — stop {'it' if one else 'them'} first, or pass force=1",
+        )
+
     @api.post("/api/components/restart")
-    async def components_restart(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+    async def components_restart(force: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Restart the agent, so a component that arrived in the environment is in force.
 
         The answer comes back before the restart does — this process is what goes away — so it says
         what was asked for rather than what happened.
         """
+        await _refuse_restart_while_busy(force)
         try:
             return {"result": await installer.restart()}
         except component_install.NotInstallable as exc:
@@ -3029,7 +3057,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return answer
 
     @api.post("/api/self/restart")
-    async def self_restart(_: dict[str, Any] = Depends(auth), __: None = Depends(selfdev_on)) -> dict[str, Any]:
+    async def self_restart(force: bool = False, _: dict[str, Any] = Depends(auth), __: None = Depends(selfdev_on)) -> dict[str, Any]:
         """Apply the change the agent committed: the supervisor checks it and restarts onto it.
 
         The answer comes back before the restart does — this very process is what goes away — so it says
@@ -3038,6 +3066,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         selfdev = app.extensions.get("selfdev")
         if selfdev is None:
             raise HTTPException(404, "self-development is off in this installation")
+        await _refuse_restart_while_busy(force)
         return {"result": await selfdev.restart_to_apply("the operator asked the app to apply the change")}  # type: ignore[attr-defined]
 
     # -- doctor -------------------------------------------------------------------------

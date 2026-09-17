@@ -361,6 +361,17 @@ class SessionManager:
     async def close(self) -> None:
         """Shut down keeping every active run resumable (snapshots stay in place)."""
         self.shutting_down = True
+        # What a finished run still owes is a task of its own now, and a task is something a shutdown
+        # can kill. It used to run inside the run, which had already ended by the time this looked at
+        # it, so nothing was ever lost here. So it is given its moment before anything is cancelled:
+        # the snapshot it is taking is the one an undo of that turn depends on, and the callbacks
+        # behind it are an answer somebody is waiting for on another front.
+        grace = self.config.ops.shutdown_grace_seconds
+        housekeeping = [s.housekeeping for s in self._states.values() if s.housekeeping is not None and not s.housekeeping.done()]
+        if housekeeping and grace > 0:
+            _done, unfinished = await asyncio.wait(housekeeping, timeout=grace)
+            if unfinished:
+                logger.warning("%d run(s) were still being written down after %.0f s; the shutdown cancels them", len(unfinished), grace)
         tasks = [t for s in self._states.values() for t in (s.task, s.outage_task, s.housekeeping) if t and not t.done()]
         for task in tasks:
             task.cancel()
@@ -706,6 +717,11 @@ class SessionManager:
             if state.task is not None:
                 state.task.cancel()
                 await asyncio.gather(state.task, return_exceptions=True)
+        # Everything the last run still owes is about to be deleted along with the session; a
+        # snapshot row written after the rows are gone would belong to a session that does not exist.
+        if state.housekeeping is not None and not state.housekeeping.done():
+            state.housekeeping.cancel()
+            await asyncio.gather(state.housekeeping, return_exceptions=True)
         self._states.pop(session_id, None)
         locator.unregister(session_id)
         for job in self._jobs.pop(session_id, {}).values():
@@ -782,6 +798,8 @@ class SessionManager:
         if state is None:
             raise KeyError(session_id)
         async with state.lock:
+            # A summary replaces the history of the turn whose snapshot may still be being written.
+            await self._wait_until_quiet(state)
             return await self._compact_locked(state, instructions, keep_recent=keep_recent)
 
     async def _maybe_auto_compact(self, state: SessionState, *, required_only: bool = False) -> None:
@@ -1079,8 +1097,7 @@ class SessionManager:
         if state is None:
             raise KeyError(session_id)
         async with state.lock:
-            if state.running or state.pending is not None:
-                raise RuntimeError("the session is busy; stop the run (or answer the question) first")
+            await self._wait_until_quiet(state)
             pending = [t for t in state.persist_tasks if not t.done()]
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
@@ -1138,8 +1155,7 @@ class SessionManager:
         if state is None:
             raise KeyError(session_id)
         async with state.lock:
-            if state.running or state.pending is not None:
-                raise RuntimeError("the session is busy; stop the run (or answer the question) first")
+            await self._wait_until_quiet(state)
             pending = [t for t in state.persist_tasks if not t.done()]
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
@@ -1186,8 +1202,7 @@ class SessionManager:
         if source is None:
             raise KeyError(source_id)
         async with source.lock:
-            if source.running:
-                raise RuntimeError("the source session is running; wait for the run to finish (or stop it) first")
+            await self._wait_until_quiet(source, what="the source session")
             pending = [t for t in source.persist_tasks if not t.done()]
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
@@ -1331,12 +1346,51 @@ class SessionManager:
         """
         return not state.settled.is_set()
 
+    async def _wait_until_quiet(self, state: SessionState, *, what: str = "the session") -> None:
+        """Hold until nothing else is writing this session's history or its files.
+
+        One test for every way a session can be rewritten from underneath — undo, clear, fork,
+        compaction — because they all depend on the same two things being finished: the history of
+        the last turn, and the snapshot of the workspace as that turn left it. A run in flight and a
+        question outstanding are refused, as they always were. The third state is the one this
+        exists for: the run is over, the app draws the session as idle, and the snapshot of the very
+        turn an undo would undo is still being written. That one is waited for rather than refused —
+        it is a second or two, and the operator pressed the button on a session that looked idle
+        because it *is* idle; what is behind it is ours to finish, not theirs to retry around.
+
+        The wait is bounded (``ops.settle_wait_seconds``): a snapshot on a mount that never answers
+        would otherwise wedge the session with nothing on the screen to say why.
+        """
+        if state.running or state.pending is not None:
+            raise RuntimeError(f"{what} is busy; stop the run (or answer the question) first")
+        if self._settling(state):
+            try:
+                async with asyncio.timeout(self.config.ops.settle_wait_seconds):
+                    await state.settled.wait()
+            except TimeoutError:
+                raise RuntimeError(f"{what} is still saving the last turn; nothing may rewrite it until that finishes") from None
+            # Nothing here holds ``submit``: a run may have started in the moment we waited.
+            if state.running or state.pending is not None:
+                raise RuntimeError(f"{what} is busy; stop the run (or answer the question) first")
+
     def running_run_ids(self) -> set[str]:
         return {s.run_id for s in self._states.values() if s.run_id and (s.running or s.pending is not None or self._settling(s))}
 
     def busy_sessions(self) -> set[str]:
-        """Sessions with a turn in flight or a question outstanding — the same test ``revert`` and ``fork`` use."""
+        """Sessions nothing may be rewritten under: a turn in flight, a question outstanding, or a
+        finished turn still being written down — the same test ``revert``, ``clear_history``,
+        ``fork`` and ``compact`` wait on."""
         return {sid for sid, state in self._states.items() if state.running or state.pending is not None or self._settling(state)}
+
+    def active_sessions(self) -> set[str]:
+        """Sessions the operator would call working: a turn in flight or a question outstanding.
+
+        Narrower than :meth:`busy_sessions` on purpose, and the difference is the point. A session
+        whose run has ended and whose snapshot is still being written may not be rewritten — so the
+        refusals ask the wider question — but it is not *working*, and a list that draws it as
+        running contradicts its own screen, which says idle.
+        """
+        return {sid for sid, state in self._states.items() if state.running or state.pending is not None}
 
     def store_occupants(self) -> dict[Path, set[str]]:
         """Which sessions this process holds open in each snapshot store, by the store's own directory.
@@ -1467,7 +1521,15 @@ class SessionManager:
             # of that is none of this run's business — but the files are: a revert of the turn that
             # just ended restores the snapshot taken after it, so that snapshot has to exist before
             # anything is allowed to change the workspace again.
-            await state.settled.wait()
+            try:
+                async with asyncio.timeout(self.config.ops.settle_wait_seconds):
+                    await state.settled.wait()
+            except TimeoutError:
+                # Bounded because this is held under ``state.submit_lock``: a snapshot that never
+                # returns would otherwise wedge every later message behind a session the app draws
+                # as idle, with nothing anywhere saying why. The turn starts; the cost is that an
+                # undo of the previous one may restore a tree a turn older, and the log says so.
+                logger.warning("session %s: the previous turn was still being written down after %.0f s; starting the next run anyway", session_id, self.config.ops.settle_wait_seconds)
             # A new run starts: hooks may decorate the message (a fired reminder rides along); their
             # side effects are committed only once the run exists, so a refused start loses nothing.
             for hook in self.prompt_hooks:
@@ -1961,8 +2023,15 @@ class SessionManager:
             # ``_drive`` has ended and the session reads as idle. A run-finished callback that starts
             # the next run — the voice concierge answering, a leader collecting a subagent — would
             # otherwise be told the run is over while this one is still technically going.
-            await self._announce_settled(state, run_id, status, housekeeping=status != "interrupted")
+            # An interrupted run is not a settled one: it is parked. Its snapshot stays where it is,
+            # ``resume_unfinished()`` drives it on after the restart, and nothing is announced —
+            # saying "the run ended" would put every front back to idle on a turn that is about to
+            # continue. The run-finished callbacks do not run for it either, and that is the change
+            # this made: they used to run for every status. They hand a finished answer on (a leader
+            # collecting a subagent, a schedule learning its run ended), and this answer is not
+            # finished; the resumed run announces itself when it really is.
             if status != "interrupted":
+                await self._announce_settled(state, run_id, status, housekeeping=True)
                 state.settled.clear()
                 state.housekeeping = asyncio.create_task(self._settle_run(state, run_id, status), name=f"settle:{run_id}")
                 state.housekeeping.add_done_callback(_log_task_failure)
@@ -2106,6 +2175,8 @@ class SessionManager:
         queue and an operator message arriving at the same moment must become one run, not two driving
         one history. A message that got there first is already running — it took the queue with it.
         """
+        if self.shutting_down:
+            return  # the queue is in the store; the next start reads it rather than opening a run into a shutdown
         async with state.submit_lock:
             if state.running:
                 return

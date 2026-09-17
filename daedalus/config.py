@@ -962,6 +962,13 @@ class OpsConfig(BaseModel):
     provider_retry_base_seconds: float = Field(default=30.0, ge=1)
     """The wait before the first of those attempts; it doubles each time up to ``provider_retry_max_seconds``."""
     provider_retry_max_seconds: float = Field(default=600.0, ge=1)
+    settle_wait_seconds: float = Field(default=180.0, ge=1)
+    """How long anything that rewrites a session waits for the last turn's snapshot before it gives
+    up and says so. A snapshot is a commit into the workspace; a network mount can make it slow, but
+    a wait with no bound is a session wedged with nothing on the screen to say why."""
+    shutdown_grace_seconds: float = Field(default=20.0, ge=0)
+    """How long a shutdown gives the housekeeping of a run that has just ended — the snapshot and the
+    handover to the other fronts — before it is cancelled. 0 cancels at once, which loses them."""
 
 
 class HeartbeatConfig(BaseModel):
