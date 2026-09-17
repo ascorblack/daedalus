@@ -3,6 +3,7 @@ import { Skeleton } from "../components";
 import { absTime, clock, dayLabel, int, planName, tokens, untilShort, usd } from "../format";
 import { PageHeader, screenTitle } from "../shell";
 import { useQuery } from "../store";
+import { plural, t } from "../i18n";
 
 type Daily = { day: string; provider_id: string; model: string; calls: number; input_tokens: number; output_tokens: number; cache_read_tokens: number; reasoning_tokens: number; cost_usd: number | null; unmetered: number };
 type Recent = {
@@ -28,25 +29,26 @@ type UsageData = { daily: Daily[]; recent: Recent[]; sessions: BySession[]; subs
 type Balance = { balances: Record<string, number | null>; thresholds: number[] };
 
 const SUB_LABEL: Record<string, string> = { codex: "Codex · ChatGPT", claude: "Claude", opencode: "OpenCode Go", grok: "SuperGrok" };
-const PURPOSE_LABEL: Record<string, string> = { stream: "turn", structured: "compaction", text: "text" };
+const PURPOSES = ["stream", "structured", "text"];
+const purposeWord = (p: string) => (PURPOSES.includes(p) ? t(`usage.purpose.${p}`) : p);
 
 function level(used: number): string {
   return used >= 85 ? "bad" : used >= 60 ? "attn" : "";
 }
 
 function fmtMs(ms: number): string {
-  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`;
+  return ms < 1000 ? `${ms} ms` : t("fmt.dur.s", { n: (ms / 1000).toFixed(ms < 10000 ? 1 : 0) });
 }
 
 /** One quota window: label · bar · what is left · when it resets. */
 function QuotaLine({ w }: { w: SubWindow }) {
   const used = Math.min(100, Math.max(0, w.used_percent));
   return (
-    <div className="quota-line" title={w.resets_at ? `resets ${absTime(typeof w.resets_at === "number" ? w.resets_at * 1000 : w.resets_at)}` : undefined}>
+    <div className="quota-line" title={w.resets_at ? t("usage.resetsat", { when: absTime(typeof w.resets_at === "number" ? w.resets_at * 1000 : w.resets_at) }) : undefined}>
       <span className="quota-name">{w.name}</span>
       <div className={`bar ${level(used)}`} style={{ ["--v" as string]: used }}><i /></div>
-      <b className="num">{Math.round(100 - used)}% left</b>
-      <span className="sub num">{w.resets_at ? `resets ${untilShort(typeof w.resets_at === "number" ? w.resets_at * 1000 : w.resets_at)}` : ""}</span>
+      <b className="num">{Math.round(100 - used)}{t("usage.left")}</b>
+      <span className="sub num">{w.resets_at ? t("usage.resetsat", { when: untilShort(typeof w.resets_at === "number" ? w.resets_at * 1000 : w.resets_at) }) : ""}</span>
     </div>
   );
 }
@@ -79,51 +81,51 @@ export function UsageScreen({ onOpen }: { onOpen?: (id: string) => void }) {
 
   return (
     <>
-      <PageHeader title={screenTitle("usage")} subtitle={`last ${days} days`}>
+      <PageHeader title={screenTitle("usage")} subtitle={t("usage.range", { n: days })}>
         <div className="chips">
           {([7, 14, 30] as const).map((d) => (
-            <button key={d} className="chip select" aria-pressed={days === d} onClick={() => setDays(d)}>{d} days</button>
+            <button key={d} className="chip select" aria-pressed={days === d} onClick={() => setDays(d)}>{t("usage.days", { n: d })}</button>
           ))}
         </div>
       </PageHeader>
       <div className="screen wide usage">
         {loading && !error && <Skeleton rows={4} />}
-        {error && !usage && <div className="empty"><b>Could not load the usage</b><div>{error}</div><button className="btn" onClick={refresh}>Retry</button></div>}
+        {error && !usage && <div className="empty"><b>{t("usage.error")}</b><div>{error}</div><button className="btn" onClick={refresh}>{t("common.retry")}</button></div>}
         {usage && (
           <>
             <div className="kpi-grid">
               <div className="kpi">
-                <div className="label">Metered today</div>
+                <div className="label">{t("usage.metered")}</div>
                 <div className="value">{usd(todayCost)}</div>
-                <div className="sub">{int(sum(todayRows, "calls"))} calls{sum(todayRows, "unmetered") > 0 ? ` · ${int(sum(todayRows, "unmetered"))} on subscriptions` : ""}</div>
+                <div className="sub">{plural("usage.calls", sum(todayRows, "calls"))}{sum(todayRows, "unmetered") > 0 ? t("usage.onsubs", { n: int(sum(todayRows, "unmetered")) }) : ""}</div>
               </div>
               {hottest && (
                 <div className="kpi">
-                  <div className="label">Tightest quota</div>
-                  <div className="value">{Math.round(100 - Math.min(100, hottest.used))}<small>% left</small></div>
-                  <div className="sub">{hottest.name}{hottest.resets ? ` · resets ${untilShort(typeof hottest.resets === "number" ? hottest.resets * 1000 : hottest.resets)}` : ""}</div>
+                  <div className="label">{t("usage.tightest")}</div>
+                  <div className="value">{Math.round(100 - Math.min(100, hottest.used))}<small>{t("usage.left")}</small></div>
+                  <div className="sub">{hottest.name}{hottest.resets ? t("usage.resets", { t: untilShort(typeof hottest.resets === "number" ? hottest.resets * 1000 : hottest.resets) }) : ""}</div>
                   <div className={`bar ${level(hottest.used)}`} style={{ ["--v" as string]: Math.min(100, hottest.used) }}><i /></div>
                 </div>
               )}
               <div className="kpi">
-                <div className="label">Tokens today</div>
+                <div className="label">{t("usage.tokens")}</div>
                 <div className="value">{tokens(todayIn + sum(todayRows, "output_tokens"))}</div>
-                <div className="sub">{todayIn ? `${Math.round((100 * todayCached) / todayIn)}% from cache` : "no input yet"}{sum(todayRows, "reasoning_tokens") ? ` · ${tokens(sum(todayRows, "reasoning_tokens"))} reasoning` : ""}</div>
+                <div className="sub">{todayIn ? t("usage.cache", { n: Math.round((100 * todayCached) / todayIn) }) : t("usage.noinput")}{sum(todayRows, "reasoning_tokens") ? t("usage.reasoning", { n: tokens(sum(todayRows, "reasoning_tokens")) }) : ""}</div>
               </div>
             </div>
 
             {usage.subscriptions && Object.keys(usage.subscriptions).length > 0 && (
               <>
-                <div className="section-title">Subscriptions</div>
+                <div className="section-title">{t("usage.subs")}</div>
                 <div className="usage-cards">
                   {Object.entries(usage.subscriptions).map(([name, s]) => (
                     <div key={name} className="card">
                       <div className="title-row">
                         <span className="title">{SUB_LABEL[name] ?? name}</span>
                         {s.plan && <span className="chip">{planName(s.plan)}</span>}
-                        {s.limit_reached && <span className="chip bad">limit reached</span>}
+                        {s.limit_reached && <span className="chip bad">{t("usage.limitreached")}</span>}
                       </div>
-                      {!s.logged_in && <div className="sub">{name === "opencode" ? "no OPENCODE_API_KEY in the key proxy" : "not logged in on the host"}</div>}
+                      {!s.logged_in && <div className="sub">{t(name === "opencode" ? "usage.nokey" : "usage.notloggedin")}</div>}
                       {s.error && <div className="sub" style={{ color: "var(--bad)" }}>{s.error}</div>}
                       {(s.windows ?? []).map((w) => <QuotaLine key={w.name} w={w} />)}
                       {(s.products ?? []).filter((p) => p.used_percent !== undefined && p.used_percent !== null).map((p) => <QuotaLine key={p.product} w={{ name: p.product, used_percent: p.used_percent ?? 0 }} />)}
@@ -135,35 +137,35 @@ export function UsageScreen({ onOpen }: { onOpen?: (id: string) => void }) {
 
             {balance.data && Object.keys(balance.data.balances).length > 0 && (
               <>
-                <div className="section-title">Balances</div>
+                <div className="section-title">{t("usage.balances")}</div>
                 <div className="card">
                   {Object.entries(balance.data.balances).map(([p, b]) => (
                     <div key={p} className="kv">
                       <span>{p}</span>
-                      <b>{b === null ? "unavailable" : usd(b)}</b>
+                      <b>{b === null ? t("usage.unavailable") : usd(b)}</b>
                     </div>
                   ))}
-                  <div className="sub">alerts below {balance.data.thresholds.map((t) => usd(t)).join(", ")}</div>
+                  <div className="sub">{t("usage.alerts", { list: balance.data.thresholds.map((v) => usd(v)).join(", ") })}</div>
                 </div>
               </>
             )}
 
             {usage.sessions.length > 0 && (
               <>
-                <div className="section-title">By session</div>
+                <div className="section-title">{t("usage.bysession")}</div>
                 <div className="card">
                   {usage.sessions.map((s, i) => (
                     <div key={i} className="usage-row" style={{ gridTemplateColumns: "1fr auto", cursor: s.session_id && onOpen ? "pointer" : "default" }} onClick={() => s.session_id && onOpen?.(s.session_id)}>
                       <div className="what">
-                        <div className="l1"><span className="name">{s.title ?? (s.session_id ? s.session_id : "outside sessions")}</span></div>
+                        <div className="l1"><span className="name">{s.title ?? (s.session_id ? s.session_id : t("usage.outside"))}</span></div>
                         <div className="l2">
-                          <span>{int(s.calls)} calls</span>
-                          <span>{tokens(s.input_tokens)} in · {tokens(s.output_tokens)} out</span>
+                          <span>{plural("usage.calls", s.calls)}</span>
+                          <span>{t("usage.inout", { in: tokens(s.input_tokens), out: tokens(s.output_tokens) })}</span>
                         </div>
                       </div>
                       <div className="cost">
                         {usd(s.cost_usd)}
-                        {s.unmetered > 0 && <div className="sub">{int(s.unmetered)} on subscriptions</div>}
+                        {s.unmetered > 0 && <div className="sub">{t("usage.onsubs", { n: int(s.unmetered) }).replace(/^ · /, "")}</div>}
                       </div>
                     </div>
                   ))}
@@ -171,18 +173,18 @@ export function UsageScreen({ onOpen }: { onOpen?: (id: string) => void }) {
               </>
             )}
 
-            <div className="section-title">By day and model</div>
+            <div className="section-title">{t("usage.byday")}</div>
             <div className="card tablecard">
               <table>
                 <thead>
                   <tr>
-                    <th>day</th>
-                    <th>model</th>
-                    <th className="num">calls</th>
-                    <th className="num">in</th>
-                    <th className="num">out</th>
-                    <th className="num">cached</th>
-                    <th className="num">usd</th>
+                    <th>{t("usage.col.day")}</th>
+                    <th>{t("usage.col.model")}</th>
+                    <th className="num">{t("usage.col.calls")}</th>
+                    <th className="num">{t("usage.col.in")}</th>
+                    <th className="num">{t("usage.col.out")}</th>
+                    <th className="num">{t("usage.col.cached")}</th>
+                    <th className="num">{t("usage.col.usd")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -209,10 +211,10 @@ export function UsageScreen({ onOpen }: { onOpen?: (id: string) => void }) {
               </table>
             </div>
 
-            <div className="section-title">Recent calls</div>
+            <div className="section-title">{t("usage.recent")}</div>
             <div className="chips">
               {["all", ...providers].map((p) => (
-                <button key={p} className="chip select" aria-pressed={provider === p} onClick={() => setProvider(p)}>{p}</button>
+                <button key={p} className="chip select" aria-pressed={provider === p} onClick={() => setProvider(p)}>{p === "all" ? t("common.all") : p}</button>
               ))}
             </div>
             <div className="card">
@@ -226,14 +228,14 @@ export function UsageScreen({ onOpen }: { onOpen?: (id: string) => void }) {
                     </div>
                     <div className="what">
                       <div className="l1">
-                        <span className={`badge ${r.purpose}`}>{PURPOSE_LABEL[r.purpose] ?? r.purpose}</span>
+                        <span className={`badge ${r.purpose}`}>{purposeWord(r.purpose)}</span>
                         <span className="name">{r.session_title ?? (r.session_id ? r.session_id : "—")}</span>
                       </div>
                       <div className="l2">
                         <span>{r.provider_id}/{r.model}</span>
                         <span>
-                          {tokens(r.input_tokens)} in · {tokens(r.output_tokens)} out{r.cache_read_tokens ? ` · ${tokens(r.cache_read_tokens)} cached` : ""}
-                          {r.reasoning_tokens ? ` · ${tokens(r.reasoning_tokens)} reasoning` : ""}
+                          {t("usage.inout", { in: tokens(r.input_tokens), out: tokens(r.output_tokens) })}{r.cache_read_tokens ? t("usage.cached", { n: tokens(r.cache_read_tokens) }) : ""}
+                          {r.reasoning_tokens ? t("usage.reasoning", { n: tokens(r.reasoning_tokens) }) : ""}
                         </span>
                       </div>
                     </div>
@@ -246,8 +248,8 @@ export function UsageScreen({ onOpen }: { onOpen?: (id: string) => void }) {
                   {open === i && <pre className="usage-raw">{JSON.stringify(r.raw, null, 2)}</pre>}
                 </div>
               ))}
-              {recent.length === 0 && <div className="empty">No calls yet.</div>}
-              {recent.length > 30 && !showAllCalls && <button className="btn small ghost" onClick={() => setShowAllCalls(true)}>Show {Math.min(200, recent.length) - 30} more</button>}
+              {recent.length === 0 && <div className="empty">{t("usage.nocalls")}</div>}
+              {recent.length > 30 && !showAllCalls && <button className="btn small ghost" onClick={() => setShowAllCalls(true)}>{t("usage.showmore", { n: Math.min(200, recent.length) - 30 })}</button>}
             </div>
           </>
         )}
