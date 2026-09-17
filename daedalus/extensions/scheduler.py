@@ -64,6 +64,18 @@ class Scheduler:
     def _inbox(self):  # type: ignore[no-untyped-def]
         return self.app.extensions.get("inbox")
 
+    async def _project_of(self, session_id: str | None):  # type: ignore[no-untyped-def]
+        """The project the session that owns a schedule works in, or None.
+
+        A task created from a project session fires in that project: same folder, same wall. It is
+        read at both ends — when the schedule is stored and when it fires — rather than copied into
+        the row, so a project the operator moves afterwards moves its tasks with it.
+        """
+        manager = self.app.manager
+        if manager is None or not session_id:
+            return None
+        return await manager.project_of(session_id)
+
     async def _post(self, kind: str, title: str, body: str = "", **kw: Any) -> None:
         inbox = self._inbox()
         if inbox is not None:
@@ -133,12 +145,18 @@ class Scheduler:
             raise ValueError("a lazy reminder needs the session it belongs to")
         workspace = self.root / f"sched-{schedule_id}"
         copied: list[str] = []
+        project = await self._project_of(target_session or created_by_session)
         if kind == "agent" and run_in == "self":
             manager = self.app.manager
             owner = await manager.get_state(target_session or created_by_session or "") if manager is not None else None
             if owner is None:
                 raise ValueError("the session this task should run in does not exist")
             workspace = owner.workspace
+            copied = [str(Path(f)) for f in files or [] if Path(f).is_file()]
+        elif kind == "agent" and project is not None:
+            # The files are already in the folder the task will run in; copying them into a directory
+            # of the task's own would take the operator's files out of the project they chose.
+            workspace = project.root
             copied = [str(Path(f)) for f in files or [] if Path(f).is_file()]
         elif kind == "agent":
             (workspace / "inbox").mkdir(parents=True, exist_ok=True)
@@ -399,7 +417,15 @@ class Scheduler:
                     self._delivering.pop(row["session_id"], None)
                     await manager.submit(row["session_id"], prompt, as_answer=False, origin="reminder")
                 else:
-                    await self.run_task_session(f"[reminder] {row['text'][:40]}", prompt, self.root / f"lazy-{row['id']}", {"lazy_note_id": row["id"], "unattended": True}, origin="reminder")
+                    note_project = await self._project_of(row["session_id"])
+                    await self.run_task_session(
+                        f"[reminder] {row['text'][:40]}",
+                        prompt,
+                        self.root / f"lazy-{row['id']}",
+                        {"lazy_note_id": row["id"], "unattended": True},
+                        origin="reminder",
+                        project_id=note_project.id if note_project is not None and note_project.reachable else None,
+                    )
             except Exception as exc:  # noqa: BLE001
                 attempts = int(row["promote_attempts"] or 0) + 1
                 await self.app.db.execute("UPDATE lazy_notes SET promote_attempts = ? WHERE id = ?", (attempts, row["id"]))
@@ -435,13 +461,19 @@ class Scheduler:
             except RuntimeError:
                 pass
 
-    async def run_task_session(self, title: str, prompt: str, workspace: Path, metadata: dict[str, Any], *, preset: str | None = None, origin: str = "schedule") -> Any:
-        """Create the session (and topic) an unattended task runs in, and start it."""
+    async def run_task_session(self, title: str, prompt: str, workspace: Path, metadata: dict[str, Any], *, preset: str | None = None, origin: str = "schedule", project_id: str | None = None) -> Any:
+        """Create the session (and topic) an unattended task runs in, and start it.
+
+        With a project the folder comes from it, and so does the wall: a task raised out of a project
+        session must not be the way a fresh uncontained session appears in the operator's folder.
+        """
         manager = self.app.manager
         assert manager is not None
-        (workspace / "inbox").mkdir(parents=True, exist_ok=True)
-        metadata = {**metadata, "workspace": str(workspace)}
-        state = await self.app.create_session(title, metadata=metadata, workspace=workspace)
+        if project_id:
+            state = await self.app.create_session(title, metadata=metadata, project_id=project_id)
+        else:
+            (workspace / "inbox").mkdir(parents=True, exist_ok=True)
+            state = await self.app.create_session(title, metadata={**metadata, "workspace": str(workspace)}, workspace=workspace)
         if preset:
             await manager.set_model(state.session.id, preset=preset)
         await manager.submit(state.session.id, prompt, [], as_answer=False, origin=origin)
@@ -455,25 +487,33 @@ class Scheduler:
             fired = await self._fire_in_own_session(schedule)
             if fired is not None:
                 return fired
-        workspace = Path(schedule["workspace"])
+        project = await self._project_of(schedule.get("target_session") or schedule.get("created_by_session"))
+        if project is not None and not project.reachable:
+            raise RuntimeError(f"the folder of the project {project.name} ({project.root}) is not reachable; the task cannot run in it")
+        workspace = project.root if project is not None else Path(schedule["workspace"])
         (workspace / "inbox").mkdir(parents=True, exist_ok=True)
         title = f"[cron] {schedule['name']}"
-        metadata: dict[str, Any] = {"workspace": str(workspace), "schedule_id": schedule["id"], "unattended": True}
+        project_id = project.id if project is not None else None
+        # A task in a project takes its directory from the project, and naming it in the metadata as
+        # well would be a second source for one answer — the one the project is there to settle.
+        metadata: dict[str, Any] = {"schedule_id": schedule["id"], "unattended": True}
+        if project is None:
+            metadata["workspace"] = str(workspace)
         if schedule.get("model"):
             metadata["model"] = schedule["model"]
         per_task = self.app.config.scheduler.topic_mode == "per_task"
         if front is not None and per_task and schedule.get("topic_thread_id") and self.app.config.telegram.forum_chat_id:
-            state = await manager.create_session(title, workspace=workspace, metadata=metadata)
+            state = await manager.create_session(title, workspace=workspace, metadata=metadata, project_id=project_id)
             await front.bind_topic(self.app.config.telegram.forum_chat_id, int(schedule["topic_thread_id"]), state.session.id, title)
         elif front is not None:
-            state, binding = await front.create_session_topic(title, metadata=metadata)
+            state, binding = await front.create_session_topic(title, metadata=metadata, project_id=project_id)
             if state.workspace != workspace:
                 state.workspace = workspace
                 manager.register_services(state)
             if per_task:
                 await self.app.db.execute("UPDATE schedules SET topic_thread_id = ? WHERE id = ?", (binding.thread_id, schedule["id"]))
         else:
-            state = await self.app.create_session(title, metadata=metadata, workspace=workspace)
+            state = await self.app.create_session(title, metadata=metadata, workspace=workspace, project_id=project_id)
         prompt = schedule["prompt"]
         files = json.loads(schedule.get("files") or "[]")
         if files:
