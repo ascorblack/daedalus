@@ -3,9 +3,10 @@
 A model is half a gigabyte over a link that may not survive it, so a download here is resumable: the
 archive lands in a part file, an interrupted one is continued with a range request rather than begun
 again, and the operator can stop one mid-flight. What arrives is checked before it is believed — the
-published size always, the sha256 where the catalog has one, and in every case the unpacked directory
-against what its kind actually needs to load. Only then does it become installed; a download that
-fails any of those leaves nothing behind but a line in the log.
+published size always, the sha256 for all but the two archives that have none, the pinned file list
+for those two, and in every case the unpacked directory against what its kind actually needs to load.
+Only then does it become installed; a download that fails any of those leaves nothing behind but a
+line in the log.
 
 Progress is a stream of events rather than a number to poll, because the Mini App shows a bar and the
 bar should move. :meth:`Downloads.watch` hands out a queue that the API turns into SSE.
@@ -41,6 +42,19 @@ CHUNK = 1 << 20
 PROGRESS_INTERVAL = 0.4
 """How often a running download reports itself. A bar does not need more, and a queue should not get it."""
 
+MAX_CONCURRENT = 1
+"""Models are fetched one at a time. Two in parallel share a link that neither finishes faster on, and
+the picker's twelve Download buttons make an accidental click-through of several of them easy."""
+
+DISK_HEADROOM = 256 << 20
+"""Left free after the archive and the unpacked tree, which coexist until the archive is deleted. This
+runs on small machines whose state volume also holds the database and the snapshots."""
+
+ALLOWED_HOSTS = ("github.com", "githubusercontent.com")
+"""Where a download from the zoo may end up after redirects. A GitHub release redirects once to a
+signed asset host on ``githubusercontent.com``; anything else means the chain was steered, and for an
+archive with no digest the chain is a large part of what says these are the right bytes."""
+
 MANIFEST = "installed.json"
 
 
@@ -54,7 +68,9 @@ class Progress:
 
     id: str
     state: str
-    """``downloading``, ``verifying``, ``unpacking``, ``installed``, ``failed`` or ``cancelled``."""
+    """``queued``, ``downloading``, ``verifying``, ``unpacking``, ``installed``, ``failed``,
+    ``cancelled`` or ``deleted`` — the last published by :meth:`Downloads.delete` so the picker can
+    drop the card's progress without re-fetching the whole view."""
     done_bytes: int = 0
     total_bytes: int = 0
     error: str = ""
@@ -131,15 +147,35 @@ class Downloads:
                     total += path.stat().st_size
         return total
 
-    def delete(self, model_id: str) -> bool:
-        """Remove an installed model. Answers whether there was anything to remove."""
+    async def delete(self, model_id: str) -> bool:
+        """Remove an installed model and everything it left behind. Answers whether there was anything.
+
+        The id goes through the catalog first, so nothing that is not a model name can ever reach the
+        ``rmtree`` below — the directory is built by joining, and a joined ``..`` climbs out of the
+        models tree. Over HTTP the router does not currently let one through, but the router is not
+        what this should be relying on.
+
+        A download in flight is stopped and waited for before anything is removed. Otherwise the task
+        carries on, writes its manifest record over ours and unpacks the model back into place: a
+        deleted model that returns by itself, which is worse than one that would not delete.
+        """
+        model = get(model_id)
+        self.cancel(model.id)
+        task = self._running.get(model.id)
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         records = self.manifest()
-        directory = self.directory(model_id)
+        directory = self.directory(model.id)
         existed = directory.is_dir()
         shutil.rmtree(directory, ignore_errors=True)
-        if records.pop(model_id, None) is not None or existed:
+        # The part file and any interrupted staging tree are counted by ``disk_usage`` and are not
+        # reachable from the picker, so leaving them would show the operator bytes nothing can free.
+        (self.parts / model.archive).unlink(missing_ok=True)
+        shutil.rmtree(self.parts / f"{model.id}.staging", ignore_errors=True)
+        if records.pop(model.id, None) is not None or existed:
             self._write_manifest(records)
-            self._publish(Progress(id=model_id, state="deleted"))
+            self._publish(Progress(id=model.id, state="deleted"))
             return True
         return False
 
@@ -177,6 +213,11 @@ class Downloads:
         model = get(model_id)
         if model_id in self._running and not self._running[model_id].done():
             return self._progress.get(model_id, Progress(id=model_id, state="downloading"))
+        running = [mid for mid, task in self._running.items() if not task.done()]
+        if len(running) >= MAX_CONCURRENT:
+            state = Progress(id=model_id, state="queued", total_bytes=model.size_bytes, error=f"{running[0]} is downloading")
+            self._publish(state)
+            return state
         if self.is_installed(model_id):
             state = Progress(id=model_id, state="installed", done_bytes=model.size_bytes, total_bytes=model.size_bytes)
             self._publish(state)
@@ -188,6 +229,7 @@ class Downloads:
 
     def cancel(self, model_id: str) -> bool:
         """Stop a download in flight. The part file stays, so starting again resumes where it stopped."""
+        model_id = get(model_id).id
         task = self._running.get(model_id)
         if task is None or task.done():
             return False
@@ -205,6 +247,7 @@ class Downloads:
 
     async def _run(self, model: SpeechModel, client: httpx.AsyncClient | None, url: str) -> None:
         try:
+            await asyncio.to_thread(self._check_room, model)
             archive = await self._fetch(model, client, url)
             self._publish(Progress(id=model.id, state="verifying", done_bytes=model.size_bytes, total_bytes=model.size_bytes))
             await asyncio.to_thread(verify, archive, model)
@@ -244,6 +287,9 @@ class Downloads:
         last = 0.0
         try:
             async with client.stream("GET", url, headers=headers) as response:
+                landed = (response.url.host or "").lower()
+                if not _host_allowed(str(url), landed):
+                    raise DownloadError(f"the download was redirected to {landed}, which is not where it started")
                 if have and response.status_code == 200:
                     # The host ignored the range and is sending the whole file: take it from the top.
                     have = 0
@@ -266,6 +312,20 @@ class Downloads:
             if owns:
                 await client.aclose()
         return target
+
+    def _check_room(self, model: SpeechModel) -> None:
+        """Refuse before the first byte where the disk cannot hold the result. Blocking; cheap."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            free = shutil.disk_usage(self.root).free
+        except OSError:  # pragma: no cover - a disk that cannot be measured is not a reason to refuse
+            return
+        needed = model.size_bytes + model.unpacked_bytes + DISK_HEADROOM
+        if free < needed:
+            raise DownloadError(
+                f"{model.label} needs {needed >> 20} MB free while the model directory is on a disk with "
+                f"{free >> 20} MB — the archive and the unpacked model are both on it until the last step"
+            )
 
     def _unpack(self, archive: Path, model: SpeechModel) -> int:
         """Unpack into place and answer with the bytes it took. Blocking; runs on a worker thread.
@@ -291,8 +351,24 @@ class Downloads:
             source.rename(directory)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+        check_contents(directory, model)
         _check_loadable(directory, model)
         return sum(p.stat().st_size for p in directory.rglob("*") if p.is_file())
+
+
+def _host_allowed(start: str, landed: str) -> bool:
+    """Whether a redirect chain that began at ``start`` may end at ``landed``.
+
+    A download from the zoo may cross only onto GitHub's own signed asset host — that is the one hop a
+    release asset makes, and anything further is a chain somebody else is steering. A download from
+    anywhere else (a mirror, a test) may not change host at all. Nothing here trusts the redirect to
+    be harmless because the bytes are checked afterwards: for the two archives with no published
+    digest, where the bytes came from is a real part of the answer.
+    """
+    begun = (httpx.URL(start).host or "").lower()
+    if any(begun == allowed or begun.endswith("." + allowed) for allowed in ALLOWED_HOSTS):
+        return any(landed == allowed or landed.endswith("." + allowed) for allowed in ALLOWED_HOSTS)
+    return landed == begun
 
 
 def _safe_member(name: str) -> bool:
@@ -314,10 +390,11 @@ def sha256_of(path: Path) -> str:
 def verify(archive: Path, model: SpeechModel) -> None:
     """Refuse an archive that is not what the catalog describes.
 
-    Size is checked always; the digest only where the catalog has one, because the model zoo publishes
-    no checksum file and half the entries were never hashed here. That is the honest position: a model
-    without a digest is verified by its length and by unpacking into something the engine can load,
-    which is weaker than a hash and much better than nothing.
+    Size is checked always, and the digest wherever there is one — which, since GitHub began reporting
+    a ``digest`` per release asset, is every entry but two. Those two are checked by their size and by
+    the pinned file list :func:`check_contents` compares after unpacking. That is weaker than a hash
+    and the picker says so on the card; it is not nothing, because a substitution then has to match a
+    byte count and a file list at once rather than only be padded to a length.
     """
     size = archive.stat().st_size
     if size != model.size_bytes:
@@ -326,6 +403,24 @@ def verify(archive: Path, model: SpeechModel) -> None:
         actual = sha256_of(archive)
         if actual != model.sha256:
             raise DownloadError(f"the download's checksum is {actual[:16]}…, not the published one")
+
+
+def check_contents(directory: Path, model: SpeechModel) -> None:
+    """The unpacked tree holds exactly the files the catalog pinned, for an archive with no digest.
+
+    Nothing to do where ``contents`` is empty: there is a digest in that case and it is a stronger
+    statement than this one. The comparison is exact in both directions — a missing file is a short
+    download, an extra one is not the archive the catalog was written against.
+    """
+    if not model.contents:
+        return
+    found = sorted(str(p.relative_to(directory)).replace("\\", "/") for p in directory.rglob("*") if p.is_file())
+    expected = sorted(model.contents)
+    if found != expected:
+        missing = [n for n in expected if n not in found]
+        extra = [n for n in found if n not in expected]
+        detail = f"missing {', '.join(missing[:3])}" if missing else f"unexpected {', '.join(extra[:3])}"
+        raise DownloadError(f"the archive does not hold the files the catalog pinned for {model.id}: {detail}")
 
 
 def _check_loadable(directory: Path, model: SpeechModel) -> None:
@@ -359,7 +454,7 @@ def view(downloads: Downloads, *, selected: str = "") -> dict[str, Any]:
         entry["installed"] = record is not None
         entry["installed_bytes"] = record.disk_bytes if record else 0
         entry["selected"] = model.id == selected
-        entry["verified"] = bool(model.sha256)
+        entry["verified"] = model.verified
         if progress is not None and progress.state in ("downloading", "verifying", "unpacking", "failed"):
             entry["progress"] = {"state": progress.state, "fraction": progress.fraction, "error": progress.error}
         entries.append(entry)
@@ -372,4 +467,16 @@ def view(downloads: Downloads, *, selected: str = "") -> dict[str, Any]:
     }
 
 
-__all__ = ["MANIFEST", "DownloadError", "Downloads", "Installed", "Progress", "sha256_of", "verify", "view"]
+__all__ = [
+    "ALLOWED_HOSTS",
+    "MANIFEST",
+    "MAX_CONCURRENT",
+    "DownloadError",
+    "Downloads",
+    "Installed",
+    "Progress",
+    "check_contents",
+    "sha256_of",
+    "verify",
+    "view",
+]

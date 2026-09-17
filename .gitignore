@@ -22,6 +22,12 @@ build/
 node_modules/
 miniapp/dist/
 
+# launcher builds — `go build` in place and what build.sh cross-compiles
+desktop/desktop
+desktop/daedalus-desktop
+desktop/*.exe
+desktop/dist/
+
 # editors / os
 .DS_Store
 .idea/

@@ -759,8 +759,9 @@ func (n *Native) SupervisorReachable() bool {
 }
 
 // InstallExtra fetches one of the optional pieces: node, for the four skills that shell out to npx
-// and for rebuilding the Mini App, or the headless browser the browser skills drive. Neither is part
-// of a first run, because an installation that never uses them should never pay for them.
+// and for rebuilding the Mini App, the headless browser the browser skills drive, or the engine that
+// recognises speech on this machine. None of the three is part of a first run, because an
+// installation that never uses them should never pay for them.
 func (n *Native) InstallExtra(ctx context.Context, name string) error {
 	switch name {
 	case "node":
@@ -781,8 +782,10 @@ func (n *Native) InstallExtra(ctx context.Context, name string) error {
 			return fmt.Errorf("the browser could not be installed: %s", strings.TrimSpace(out))
 		}
 		return nil
+	case "speech":
+		return n.InstallSpeech(ctx)
 	default:
-		return fmt.Errorf("no such runtime extra: %s (node, browser)", name)
+		return fmt.Errorf("no such runtime extra: %s (node, browser, speech)", name)
 	}
 }
 

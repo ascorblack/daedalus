@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 SAMPLE_RATE = 16_000
 """What the models want. Anything else is resampled on the way in."""
 
+MIN_RATE = 8_000
+MAX_RATE = 48_000
+"""The band a declared capture rate must fall in. A browser gives 16 000, 44 100 or 48 000; the wide
+ends are there for a telephone codec and for nothing else. See :func:`clamp_rate` for why a bound
+matters more here than the values do."""
+
 CHUNK_SECONDS = 0.1
 """How much audio a streaming decode step is given. Smaller is not faster — it is only more overhead."""
 
@@ -50,6 +56,13 @@ SILENCE_RMS = 380
 
 MIN_UTTERANCE_SECONDS = 0.3
 """Shorter than this is a cough, not a sentence, and is not sent to the model."""
+
+MAX_BUFFER_BYTES = 2 * 2 * 60 * SAMPLE_RATE
+"""A hard ceiling on what one batch session holds: a minute of samples at twice the models' rate.
+
+Expressed in bytes rather than seconds on purpose. Every other limit here divides by the declared
+sample rate, and the rate comes from the browser, so a rate that is wrong or hostile makes all of them
+unreachable at once. This one cannot be moved by anything the client says."""
 
 
 class SpeechError(RuntimeError):
@@ -74,7 +87,11 @@ def _pick(directory: Path, *stems: str) -> Path:
     An archive ships either a single precision or both; where both are there the int8 one is what the
     catalog's size and speed numbers describe, so it is what gets loaded.
     """
-    found = [p for p in sorted(directory.glob("*.onnx")) if any(stem in p.name for stem in stems)]
+    files = sorted(directory.glob("*.onnx"))
+    # Exact stem first: "cached_decode" is a substring of "uncached_decode", and the two are different
+    # graphs in the same directory. Substring is the fallback for the families that prefix the file
+    # name with the model's own ("small-encoder.int8.onnx"), where nothing matches exactly.
+    found = [p for p in files if p.name.split(".")[0] in stems] or [p for p in files if any(stem in p.name for stem in stems)]
     if not found:
         raise SpeechError(f"{directory.name} has no {stems[0]} model file — the download is incomplete")
     quantised = [p for p in found if ".int8." in p.name or ".quant." in p.name]
@@ -205,7 +222,7 @@ class StreamSession:
         self._streaming = engine.model.streaming
         self._stream = engine.recognizer.create_stream() if self._streaming else None
         self._buffer = bytearray()
-        self._rate = SAMPLE_RATE
+        self._rate = 0
         self._quiet = 0.0
         self._spoken = 0.0
         self._said = ""
@@ -214,10 +231,12 @@ class StreamSession:
         """Push one chunk in and get back what can be said about the talking so far.
 
         The rate is carried rather than converted: sherpa resamples on the way in, and resampling
-        twice is only a worse copy of the audio. It is fixed for the life of a session, because a
-        stream that changed rate mid-sentence would have to be re-opened anyway.
+        twice is only a worse copy of the audio. It is fixed at the first chunk and a later chunk that
+        declares a different one is fed at the first — a stream that changed rate mid-sentence would
+        have to be re-opened anyway, and quietly relabelling the audio is how a model ends up hearing
+        a sentence at three times its speed.
         """
-        self._rate = sample_rate
+        self._rate = self._rate or clamp_rate(sample_rate)
         return await asyncio.to_thread(self._feed, pcm16)
 
     async def finish(self) -> Partial:
@@ -254,15 +273,33 @@ class StreamSession:
         if loud or self._spoken:
             self._buffer += audio
         held = len(self._buffer) / 2 / self._rate
-        if self._spoken >= MIN_UTTERANCE_SECONDS and (self._quiet >= BATCH_SILENCE_SECONDS or held >= BATCH_MAX_SECONDS):
+        long_enough = self._spoken >= MIN_UTTERANCE_SECONDS
+        if long_enough and (self._quiet >= BATCH_SILENCE_SECONDS or held >= BATCH_MAX_SECONDS):
+            return Partial(text=self._decode_buffer(), final=True)
+        if not long_enough and (held >= BATCH_MAX_SECONDS or len(self._buffer) >= MAX_BUFFER_BYTES):
+            # A cough opened the buffer and no sentence followed it. Accumulation is gated on
+            # ``_spoken``, and ``_spoken`` cannot grow through silence, so without this the session
+            # buffers every quiet chunk for as long as the page keeps feeding it and never emits
+            # another final: the operator talks and nothing reaches the agent. Throw the blip away
+            # and be an idle session again.
+            self._reset()
+            return Partial(text="")
+        if len(self._buffer) >= MAX_BUFFER_BYTES:
+            # Real speech, but more of it than a batch model should be holding. Decode what there is
+            # rather than grow: the ceiling is in bytes so that no declared sample rate can lift it.
             return Partial(text=self._decode_buffer(), final=True)
         # There is nothing honest to show between utterances: a batch model has no words until it has
         # run, and inventing an ellipsis here would make the page look like it heard something.
         return Partial(text=self._said if self._quiet else "")
 
-    def _decode_buffer(self) -> str:
-        audio, self._buffer = bytes(self._buffer), bytearray()
+    def _reset(self) -> None:
+        """Forget what is held without decoding it."""
+        self._buffer = bytearray()
         self._quiet = self._spoken = 0.0
+
+    def _decode_buffer(self) -> str:
+        audio = bytes(self._buffer)
+        self._reset()
         self._said = self._engine.decode(audio, self._rate)
         return self._said
 
@@ -341,17 +378,20 @@ class EngineCache:
         self._engine: Engine | None = None
         self._key: tuple[str, int, str] | None = None
         self._lock = asyncio.Lock()
+        self._fields = threading.Lock()
 
     async def get(self, model: SpeechModel, directory: Path, *, threads: int, language: str) -> Engine:
         key = (model.id, threads, language)
         async with self._lock:
-            if self._engine is not None and self._key == key:
-                return self._engine
-            self._engine = None
-            self._key = None
+            with self._fields:
+                if self._engine is not None and self._key == key:
+                    return self._engine
+                self._engine = None
+                self._key = None
             logger.warning("loading local speech model %s (%d threads)", model.id, threads)
             engine = await asyncio.to_thread(Engine, model, directory, threads=threads, language=language)
-            self._engine, self._key = engine, key
+            with self._fields:
+                self._engine, self._key = engine, key
             return engine
 
     def loaded(self) -> str:
@@ -359,13 +399,33 @@ class EngineCache:
         return self._engine.model.id if self._engine is not None else ""
 
     def drop(self) -> None:
-        """Let go of the model — the operator deleted it or chose another."""
-        self._engine = None
-        self._key = None
+        """Let go of the model — the operator deleted it or chose another.
+
+        Synchronous, because it is called from ``save_config`` and from the delete endpoint, neither
+        of which should have to be async for this. The fields are therefore guarded by a threading
+        lock as well as the async one: ``get`` holds both while it loads, so a drop arriving during a
+        load waits rather than clearing the reference the loader is about to write.
+        """
+        with self._fields:
+            self._engine = None
+            self._key = None
 
 
 CACHE = EngineCache()
 """Process-wide, because the model is."""
+
+
+def clamp_rate(sample_rate: int) -> int:
+    """A capture rate the engine may be told about, or a refusal.
+
+    The browser negotiates its own rate and sends it; sherpa resamples whatever it is given, so any
+    real rate is fine. What is not fine is an arbitrary number: the batch endpointer divides by it to
+    decide when an utterance ended, so a rate of a billion makes every duration nearly zero and the
+    session never flushes. Eight to forty-eight kilohertz covers every capture device there is.
+    """
+    if not MIN_RATE <= sample_rate <= MAX_RATE:
+        raise SpeechError(f"{sample_rate} Hz is not a capture rate this can use ({MIN_RATE}-{MAX_RATE})")
+    return sample_rate
 
 
 __all__ = [
@@ -373,12 +433,16 @@ __all__ = [
     "BATCH_SILENCE_SECONDS",
     "CACHE",
     "CHUNK_SECONDS",
+    "MAX_BUFFER_BYTES",
+    "MAX_RATE",
+    "MIN_RATE",
     "SAMPLE_RATE",
     "Engine",
     "EngineCache",
     "Partial",
     "SpeechError",
     "StreamSession",
+    "clamp_rate",
     "require_sherpa",
     "resolve",
     "rms",

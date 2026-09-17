@@ -122,19 +122,55 @@ class LocalSpeech:
     # -- what the page and the doctor show ----------------------------------------------------
 
     def state(self) -> dict[str, object]:
-        """One line about local recognition, for the voice page's recogniser chip and ``/api/stt``."""
+        """One line about local recognition, for the voice page's recogniser chip and ``/api/stt``.
+
+        ``installed`` and ``active`` are different questions and the page needs both. The archive can
+        be on the disk while the wheel that reads it is not — a native installation whose
+        ``uv sync --extra speech`` failed is exactly that — and ``active`` is what the voice page uses
+        to put the local model in front of the browser's own recogniser. Answering it on the archive
+        alone takes a working browser recogniser away and replaces it with a stream that 503s.
+        """
         model = self.selected()
         installed = model is not None and self.downloads.is_installed(model.id)
         return {
             "model": model.id if model else "",
             "label": model.label if model else "",
             "installed": installed,
-            "active": installed,
+            "active": installed and engine_present(),
+            "engine_installed": engine_present(),
             "streaming": bool(model and model.streaming),
             "language": self.settings.local_language,
             "loaded": CACHE.loaded(),
             "decoders": decoders(),
         }
+
+
+_engine_present: bool | None = None
+
+
+def engine_present() -> bool:
+    """Whether the wheel that runs a model is importable here.
+
+    Cached, because ``/api/voice`` is polled and an import probe on every poll is not free. Nothing
+    invalidates it deliberately: installing the extra into a running process does not make it
+    importable anyway — the installer restarts — and ``forget_engine`` exists for the tests that
+    install a stub.
+    """
+    global _engine_present
+    if _engine_present is None:
+        try:
+            import sherpa_onnx  # noqa: F401  # Lazy: the engine is an optional extra, and this asks whether it is here
+        except ImportError:
+            _engine_present = False
+        else:
+            _engine_present = True
+    return _engine_present
+
+
+def forget_engine() -> None:
+    """Ask the import question again next time."""
+    global _engine_present
+    _engine_present = None
 
 
 def converter_present() -> bool:
@@ -271,6 +307,8 @@ __all__ = [
     "LocalSpeech",
     "converter_present",
     "decode_file",
+    "engine_present",
+    "forget_engine",
     "recogniser_available",
     "transcribe_recording",
 ]

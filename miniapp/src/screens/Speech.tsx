@@ -33,6 +33,7 @@ export type SpeechModel = {
   installed_bytes: number;
   selected: boolean;
   verified: boolean;
+  detects_language: boolean;
   progress?: { state: string; fraction: number; error: string };
 };
 
@@ -184,6 +185,12 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
     return true;
   });
   const installedCount = view.models.filter((m) => m.installed).length;
+  // One model is fetched at a time — half a gigabyte twice over a link that carries neither faster is
+  // not a thing to offer, and twelve Download buttons make it easy to ask for by accident. The other
+  // cards say so instead of starting a second and being queued.
+  const busyElsewhere = view.models.some((m) => m.progress && ["downloading", "verifying", "unpacking"].includes(m.progress.state));
+  // Whisper is told its language at load time, so "auto" is English for it and not a detection.
+  const autoDetects = view.models.find((m) => m.id === view.selected)?.detects_language ?? true;
 
   return (
     <div className="card">
@@ -229,6 +236,7 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
         {shown.map((m) => {
           const progress = m.progress;
           const downloading = progress && ["downloading", "verifying", "unpacking"].includes(progress.state);
+          const queued = progress?.state === "queued";
           const recommended = language ? m.recommended_for.includes(language) : m.recommended_for.length > 0;
           return (
             <div key={m.id} className={`stt-card ${m.selected ? "using" : ""}`}>
@@ -242,7 +250,11 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
               <div className="stt-facts sub faint">
                 <span><Languages model={m} /></span>
                 <span>{size(m.size_bytes)} download · {size(m.disk_bytes)} on disk · ~{m.memory_mb} MB in memory</span>
-                <span>{m.licence}{m.verified ? " · checksum published" : ""}</span>
+                <span>
+                  {m.licence}
+                  {m.verified ? " · checksum published" : " · no published checksum — size and file list only"}
+                  {m.detects_language ? "" : " · transcribes as English unless a language is chosen"}
+                </span>
               </div>
               <div className="stt-bars">
                 <Bar label="Accuracy" value={m.accuracy} />
@@ -259,6 +271,7 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
                 </div>
               )}
               {progress?.state === "failed" && <div className="sub attn">{progress.error || "the download failed"}</div>}
+              {queued && <div className="sub faint">Waiting — models are fetched one at a time.</div>}
               <div className="btnrow">
                 {downloading ? (
                   <button className="btn small" onClick={() => void act(m.id, "cancel")}>Stop</button>
@@ -272,7 +285,11 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
                     <button className="btn small danger" disabled={busy === m.id} onClick={() => void act(m.id, "delete")}>Delete</button>
                   </>
                 ) : (
-                  <button className="btn small primary" disabled={busy === m.id} onClick={() => void act(m.id, "download")}>
+                  <button
+                    className="btn small primary"
+                    disabled={busy === m.id || (busyElsewhere && !queued)}
+                    onClick={() => void act(m.id, "download")}
+                  >
                     <Icon name="download" size={14} /> Download {size(m.size_bytes)}
                   </button>
                 )}
@@ -288,7 +305,7 @@ export function SpeechModels({ toast }: { toast: (t: string) => void }) {
           <div>
             <label className="field">Language</label>
             <select className="field" value={view.language} onChange={(e) => void api.post<SpeechView>("/api/stt/select", { language: e.target.value }).then(setView).catch((x) => setProblem(errorText(x)))}>
-              <option value="auto">auto — the model decides</option>
+              <option value="auto">{autoDetects ? "auto — the model decides" : "auto — English for this model"}</option>
               {view.languages.map((code) => (
                 <option key={code} value={code}>{name(code)}</option>
               ))}

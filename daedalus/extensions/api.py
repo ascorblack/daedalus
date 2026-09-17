@@ -47,7 +47,7 @@ from daedalus.security import redact
 from daedalus.speech import catalog as speech_catalog
 from daedalus.speech import models as speech_models
 from daedalus.speech import service as speech_service
-from daedalus.speech.engine import SpeechError
+from daedalus.speech.engine import SAMPLE_RATE, SpeechError, clamp_rate
 from daedalus.speech.service import recogniser_available, transcribe_recording
 from daedalus.stores import pairing, passkeys
 from daedalus.stores.projects import ProjectError, ProjectSettings, normalise_root
@@ -79,6 +79,7 @@ SESSION_TTL = 30 * 24 * 3600
 VOICE_AUDIO_MAX = 25 << 20
 """One spoken utterance, not a recording session: anything larger is a mistake, not speech."""
 VOICE_SAY_MAX_CHARS = 4000
+"""One utterance in words. Dictation runs long, a pasted document is not speech: past this it is refused."""
 
 LISTEN_CHUNK_MAX = 2 << 20
 """Largest PCM chunk one POST may carry — about a minute of 16 kHz mono. A page sends a fifth of a
@@ -89,7 +90,11 @@ LISTEN_IDLE_SECONDS = 120.0
 
 LISTEN_MAX_STREAMS = 4
 """More open streams than this means a page that never closes them; the oldest idle one goes."""
-"""One utterance in words. Dictation runs long, a pasted document is not speech: past this it is refused."""
+
+ENGINE_INSTALL_TIMEOUT = 600.0
+"""How long the speech engine's install may take before it is killed. A resolution against a slow
+index is minutes; anything past this is hung, and it is holding a worker while it hangs."""
+
 VOICE_TTS_MAX_CHARS = 2000
 """One sentence to read aloud. The page only ever sends what ``split_sentences`` cut, and the speech
 endpoint is usually metered by the character, so an unbounded body is somebody else's bill."""
@@ -1469,9 +1474,15 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     # appear while the sentence is being said.
 
     listening: dict[str, dict[str, Any]] = {}
-    """Open streams by id. Small, short-lived, and pruned on every new one."""
+    """Open streams by id. Small, short-lived, and pruned on every call that touches one."""
 
     def _prune_streams() -> None:
+        """Let go of what nobody is feeding. Called on every listen request, not only on a new one.
+
+        Reaping only when a new stream arrives is not a timeout: a page that opens four streams and
+        is then closed leaves four decoders resident until somebody else starts listening, which on a
+        single-operator installation may be never.
+        """
         now = time.monotonic()
         stale = [sid for sid, entry in listening.items() if now - entry["seen"] > LISTEN_IDLE_SECONDS]
         while len(listening) - len(stale) > LISTEN_MAX_STREAMS:
@@ -1486,18 +1497,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         view = speech_models.view(app.speech.downloads, selected=app.config.stt.local_model)
         view["language"] = app.config.stt.local_language
         view["threads"] = app.config.stt.local_threads
-        view["engine_installed"] = _speech_engine_present()
+        view["engine_installed"] = speech_service.engine_present()
         view["decoders"] = speech_service.decoders()
         view["recommended"] = {code: model.id for code in ("en", "ru") if (model := speech_catalog.recommended(code))}
         return view
 
-    def _speech_engine_present() -> bool:
-        """Whether the wheel that runs a model is installed. A model can be downloaded without it."""
-        try:
-            import sherpa_onnx  # noqa: F401  # Lazy: the engine is an optional extra, and this asks whether it is here
-        except ImportError:
-            return False
-        return True
+    engine_install = asyncio.Lock()
+    """One install of the speech engine at a time; the second caller waits rather than racing."""
 
     @api.post("/api/stt/engine")
     async def stt_install_engine(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -1509,21 +1515,41 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         environment. ``--inexact`` is what keeps that from removing whatever else was installed into
         it (the browser extra, typically).
         """
-        if _speech_engine_present():
+        if speech_service.engine_present():
             return {"installed": True, "message": "the speech engine is already installed"}
         if not settings.native:
             raise HTTPException(409, "the runtime image carries the speech engine; this one was built without it")
         uv = shutil.which("uv")
         if uv is None:
             raise HTTPException(503, "uv is not on the PATH, so the speech engine cannot be installed from here")
-        process = await asyncio.create_subprocess_exec(
-            uv, "sync", "--frozen", "--inexact", "--extra", "speech",
-            cwd=str(settings.bot_repo_dir),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        )
-        out, _unused = await process.communicate()
-        if process.returncode:
-            raise HTTPException(502, f"the speech engine could not be installed: {out.decode(errors='replace').strip()[-400:]}")
+        # The picker calls this by itself before the first download, so two tabs or one impatient
+        # double-click is the ordinary case rather than the adversarial one — and two `uv sync` runs
+        # into the same virtualenv at once is how it ends up with a half-written site-packages.
+        async with engine_install:
+            if speech_service.engine_present():
+                return {"installed": True, "message": "the speech engine is already installed"}
+            process = await asyncio.create_subprocess_exec(
+                uv, "sync", "--frozen", "--inexact", "--extra", "speech",
+                cwd=str(settings.bot_repo_dir),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                out, _unused = await asyncio.wait_for(process.communicate(), timeout=ENGINE_INSTALL_TIMEOUT)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                raise HTTPException(504, "installing the speech engine took too long and was stopped") from None
+            if process.returncode:
+                tail = out.decode(errors="replace").strip()[-400:]
+                # The engine ships wheels and no sdist, so a platform without a prebuilt wheel fails
+                # at resolution rather than building. That is not a broken installation and the
+                # operator should not go looking for one.
+                raise HTTPException(502, (
+                    f"the speech engine could not be installed: {tail}\n\n"
+                    "If this says no matching distribution, this platform has no prebuilt wheel for the "
+                    "engine: local recognition is not available here, and a transcription endpoint is."
+                ))
+        speech_service.forget_engine()
         logger.warning("the local speech engine was installed on demand")
         return {"installed": True, "message": "the speech engine is installed; the model can be downloaded now"}
 
@@ -1539,12 +1565,18 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/stt/models/{model_id}/cancel")
     async def stt_cancel(model_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Stop a download. What has arrived is kept, so starting again continues from there."""
-        return {"cancelled": app.speech.downloads.cancel(model_id)}
+        try:
+            return {"cancelled": app.speech.downloads.cancel(model_id)}
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
 
     @api.delete("/api/stt/models/{model_id}")
     async def stt_delete(model_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Remove an installed model, and unselect it if it was the one in use."""
-        removed = app.speech.downloads.delete(model_id)
+        try:
+            removed = await app.speech.downloads.delete(model_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
         if app.config.stt.local_model == model_id:
             await app.save_config(app.config.model_copy(update={"stt": app.config.stt.model_copy(update={"local_model": ""})}))
         app.speech.forget()
@@ -1590,15 +1622,45 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    @api.post("/api/voice/listen/open")
+    async def voice_listen_open(rate: int = SAMPLE_RATE, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Open a stream and get back the id every chunk of it must carry.
+
+        The id is minted here rather than invented by the page. It is the only thing separating two
+        listening sessions, and a page that picks its own with ``Math.random()`` can collide with
+        another and interleave two people's audio into one transcript.
+
+        The rate is the one the browser's own graph settled on, which is not always the one it was
+        asked for: Safari and a number of Android webviews hand back the hardware's 44 100 or 48 000
+        instead. It is declared once, here, because a stream that changed rate mid-sentence would have
+        to be re-opened anyway — and because feeding 48 kHz samples to a model told they are 16 kHz
+        makes it hear the sentence at three times its speed and answer with noise.
+        """
+        if not app.speech.available():
+            raise HTTPException(409, "no local speech model is installed and selected (Settings → Voice)")
+        _prune_streams()
+        try:
+            clamp_rate(rate)
+            session = await app.speech.session()
+        except SpeechError as exc:
+            raise HTTPException(400 if "capture rate" in str(exc) else 503, str(exc)) from exc
+        stream = secrets.token_urlsafe(16)
+        listening[stream] = {"session": session, "seen": time.monotonic(), "rate": rate, "seq": 0}
+        return {"stream": stream, "rate": rate}
+
     @api.post("/api/voice/listen")
-    async def voice_listen(request: Request, stream: str, final: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """One chunk of 16 kHz mono PCM from the page, answered with the words heard so far.
+    async def voice_listen(request: Request, stream: str, seq: int, final: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """One chunk of mono PCM from the page, answered with the words heard so far.
 
         POSTed chunks rather than a socket: the app authenticates with a header that a browser cannot
         put on a WebSocket, and inside Telegram there is no cookie to fall back on either. A fifth of
         a second per request is well within what the loop and the model can keep up with — decoding
         runs tens of times faster than real time — and it makes the transport the same one every other
         call already uses.
+
+        ``seq`` counts from one and must not skip. HTTP promises nothing about the order separate
+        POSTs arrive in; the page serialises them, but a retry or a proxy that reorders would otherwise
+        corrupt a transcript with nothing anywhere able to notice.
 
         A ``final`` answer is an utterance: the page hands it to the concierge exactly as it hands one
         the browser recognised itself.
@@ -1608,17 +1670,17 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         chunk = await request.body()
         if len(chunk) > LISTEN_CHUNK_MAX:
             raise HTTPException(413, f"a chunk may be up to {LISTEN_CHUNK_MAX >> 20} MB of samples")
+        _prune_streams()
         entry = listening.get(stream)
         if entry is None:
-            _prune_streams()
-            try:
-                entry = {"session": await app.speech.session(), "seen": time.monotonic()}
-            except SpeechError as exc:
-                raise HTTPException(503, str(exc)) from exc
-            listening[stream] = entry
+            raise HTTPException(404, "this listening stream is not open; open one at /api/voice/listen/open")
+        if seq != entry["seq"] + 1:
+            listening.pop(stream, None)
+            raise HTTPException(409, f"chunk {seq} arrived where {entry['seq'] + 1} was expected; the stream is closed")
+        entry["seq"] = seq
         entry["seen"] = time.monotonic()
         try:
-            partial = await entry["session"].feed(chunk) if chunk else None
+            partial = await entry["session"].feed(chunk, entry["rate"]) if chunk else None
             if final:
                 partial = await entry["session"].finish()
                 listening.pop(stream, None)
@@ -1631,7 +1693,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.post("/api/voice/listen/close")
     async def voice_listen_close(stream: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """The page stopped listening; let go of the stream without decoding what is left."""
+        """The page stopped listening; let go of the stream without decoding what is left.
+
+        For abandoning a stream, not for ending one: a page that wants the words it has not been given
+        yet sends its last chunk with ``final=true``, which decodes the tail and pops the entry itself.
+        """
         return {"closed": listening.pop(stream, None) is not None}
 
     @api.post("/api/sessions/{session_id}/answer")

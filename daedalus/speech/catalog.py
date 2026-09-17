@@ -8,11 +8,13 @@ inside the unpacked directory by their shape. A zoo that renames ``encoder.onnx`
 ``encoder.int8.onnx`` in a later build then costs nothing, where a hard-coded file list would have
 turned into a model that downloads and refuses to load.
 
-``sha256`` is filled in for the archives that were downloaded and hashed while this was written. The
-zoo publishes no checksum file of its own, so an entry without one is verified by its size and by the
-unpacked directory containing what its kind needs — see ``models.verify``. Sizes are the compressed
-archive; ``unpacked_bytes`` is what the disk actually gives up, and ``memory_mb`` is roughly what the
-loaded model costs in RAM.
+``sha256`` is the archive's digest. Most of it comes from GitHub, which reports a ``digest`` for every
+release asset uploaded since mid-2025 and which covers all but two of the entries below; the rest was
+hashed here, and where both exist they agree. Two archives predate the field and have none — see
+``contents``, which pins their file list so that size alone is not the whole of the check — and
+``SpeechModel.verified`` says which is which, so the picker can tell the operator plainly rather than
+implying every download is checksummed. Sizes are the compressed archive; ``unpacked_bytes`` is what
+the disk actually gives up, and ``memory_mb`` is roughly what the loaded model costs in RAM.
 
 Scores are the same two 0-100 bars the operator sees: ``accuracy`` is how well it is expected to hear,
 ``speed`` how much faster than real time it runs on an ordinary CPU. They are editorial — read them as
@@ -66,7 +68,13 @@ class SpeechModel:
     note: str
     """One line of UI copy: what this model is for, in the operator's terms."""
     sha256: str = ""
-    """Empty where the zoo publishes no hash and the archive was not hashed here; see the module docstring."""
+    """Empty where neither GitHub nor a hashing run here produced one; see the module docstring."""
+    contents: tuple[str, ...] = ()
+    """Every regular file the archive holds, relative to its one top-level directory, sorted.
+
+    Pinned only for the entries with no digest, where it is what stands in for one: a substituted
+    archive would have to match the published byte count *and* carry exactly this file list, which a
+    padded swap does not. Empty means the digest carries the check instead; see ``models.verify``."""
     recommended_for: tuple[str, ...] = ()
     """Languages this is the suggested choice for. Drives the "recommended" badge, which is per language:
     the best English model and the best Russian one are different models, and a single flag cannot say so."""
@@ -78,6 +86,21 @@ class SpeechModel:
     @property
     def streaming(self) -> bool:
         return self.kind in STREAMING_KINDS
+
+    @property
+    def verified(self) -> bool:
+        """Whether a published digest stands behind this archive. False means size and file list only."""
+        return bool(self.sha256)
+
+    @property
+    def detects_language(self) -> bool:
+        """Whether asking this model for "auto" actually lets it decide.
+
+        Whisper does not: sherpa's wrapper wants a language at load time and detecting one costs a
+        pass over audio that is usually a single sentence, so an unset language becomes English. The
+        picker reads this to say so on the card rather than offering a choice the model ignores.
+        """
+        return self.kind != "whisper"
 
     @property
     def url(self) -> str:
@@ -145,6 +168,7 @@ MODELS: tuple[SpeechModel, ...] = (
         speed=79,
         note="Fast and accurate live English. The best English there is that still runs on a CPU.",
         recommended_for=("en",),
+        sha256="dd2c2698f102eafbf0ee54bdfd7cd842ec00fa6cf2475cbbb048887f794ff52e",
     ),
     SpeechModel(
         id="moonshine-base-en",
@@ -159,6 +183,11 @@ MODELS: tuple[SpeechModel, ...] = (
         accuracy=80,
         speed=99,
         note="English, whole utterances at a time. Very quick, and small enough for a modest machine.",
+        contents=(
+            "LICENSE", "README.md", "cached_decode.int8.onnx", "encode.int8.onnx",
+            "preprocess.onnx", "test_wavs/0.wav", "test_wavs/1.wav", "test_wavs/8k.wav",
+            "test_wavs/trans.txt", "tokens.txt", "uncached_decode.int8.onnx",
+        ),
     ),
     SpeechModel(
         id="moonshine-tiny-en",
@@ -206,6 +235,7 @@ MODELS: tuple[SpeechModel, ...] = (
         accuracy=76,
         speed=92,
         note="Ten European languages including Russian, in a hundred megabytes. A good compromise.",
+        sha256="06072bad277f0f4c29cc866d7c62b0e47936da39afafeae453faa925025ccad6",
     ),
     # -- Russian ------------------------------------------------------------------------------
     SpeechModel(
@@ -237,6 +267,7 @@ MODELS: tuple[SpeechModel, ...] = (
         accuracy=83,
         speed=95,
         note="Russian as it is spoken — words appear while the sentence is still going.",
+        sha256="b9c907450e99a6e5049e279bf18368a17db0bdc5e63b7fa978943138debbe3ae",
     ),
     SpeechModel(
         id="zipformer-ru-small",
@@ -268,6 +299,11 @@ MODELS: tuple[SpeechModel, ...] = (
         accuracy=80,
         speed=78,
         note="Ninety-nine languages, good Russian, and slower than everything above it.",
+        contents=(
+            "small-decoder.int8.onnx", "small-decoder.onnx", "small-encoder.int8.onnx",
+            "small-encoder.onnx", "small-tokens.txt", "test_wavs/0.wav", "test_wavs/1.wav",
+            "test_wavs/8k.wav", "test_wavs/trans.txt",
+        ),
     ),
     SpeechModel(
         id="whisper-tiny",
@@ -354,6 +390,8 @@ def as_json(model: SpeechModel) -> dict[str, object]:
         "note": model.note,
         "url": model.url,
         "recommended_for": list(model.recommended_for),
+        "verified": model.verified,
+        "detects_language": model.detects_language,
     }
 
 

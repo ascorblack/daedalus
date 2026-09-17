@@ -45,6 +45,29 @@ def test_every_entry_is_complete_and_unique() -> None:
         assert not model.sha256 or len(model.sha256) == 64, model.id
 
 
+def test_only_the_two_archives_without_a_published_digest_lack_one() -> None:
+    """GitHub reports a digest per release asset, and all but two of the catalog's assets predate it.
+
+    The two that do not carry one say so — ``verified`` is what the picker shows — and are pinned by
+    their file list instead, which a substituted archive padded to the published byte count fails.
+    """
+    hashless = sorted(m.id for m in catalog.MODELS if not m.verified)
+    assert hashless == ["moonshine-base-en", "whisper-small"]
+    for model in catalog.MODELS:
+        assert model.verified != bool(model.contents), f"{model.id}: one check or the other, not both or neither"
+        if model.contents:
+            assert len(model.contents) == len(set(model.contents)) and all("/" not in n or ".." not in n for n in model.contents)
+            assert any(n.endswith(".onnx") for n in model.contents) and any("tokens" in n for n in model.contents)
+
+
+def test_whisper_is_the_only_kind_that_cannot_detect_its_own_language() -> None:
+    """``auto`` pins Whisper to English, so the picker must not offer it as a detection."""
+    assert not catalog.get("whisper-small").detects_language
+    assert not catalog.get("whisper-tiny").detects_language
+    assert catalog.get("gigaam-ru").detects_language and catalog.get("sense-voice").detects_language
+    assert catalog.as_json(catalog.get("whisper-small"))["detects_language"] is False
+
+
 def test_every_kind_is_one_the_engine_can_build() -> None:
     known = {"transducer", "nemo_transducer", "whisper", "moonshine", "sense_voice", "ctc", "t_one_ctc"}
     assert {m.kind for m in catalog.MODELS} <= known
@@ -199,6 +222,82 @@ async def test_a_batch_model_decodes_a_speaker_who_never_pauses() -> None:
     session = batch_session()
     answers = [await session.feed(tone(0.5)) for _ in range(int(BATCH_MAX_SECONDS / 0.5) + 2)]
     assert any(a.final for a in answers), "an unbroken monologue must still be transcribed"
+
+
+async def test_a_blip_followed_by_silence_does_not_wedge_the_session() -> None:
+    """The failure this guards: one loud chunk opens the buffer, and then nothing can ever close it.
+
+    Accumulation starts at the first loud chunk, but the flush is behind ``MIN_UTTERANCE_SECONDS``,
+    which silence cannot grow — so a cough followed by quiet buffered every later chunk forever and
+    the session stopped emitting finals. A real sentence afterwards never reached the agent.
+    """
+    from daedalus.speech.engine import BATCH_MAX_SECONDS
+
+    session = batch_session()
+    await session.feed(tone(0.1))
+    for _ in range(int(BATCH_MAX_SECONDS / 0.5) + 2):
+        await session.feed(quiet(0.5))
+    assert not session._buffer, "the blip was thrown away rather than held against a flush that cannot come"
+    assert not session._engine.decodes, "and nothing was sent to the model, because nothing was said"
+
+    # The session is usable again: a sentence now produces a final, which is the half that matters.
+    for _ in range(10):
+        await session.feed(tone(0.1))
+    finals = [await session.feed(quiet(0.1)) for _ in range(12)]
+    assert any(f.final and f.text == "hello there" for f in finals)
+
+
+async def test_a_batch_session_holds_a_bounded_number_of_bytes() -> None:
+    """The ceiling is in bytes, so a client that declares a wrong rate cannot lift it."""
+    from daedalus.speech.engine import MAX_BUFFER_BYTES
+
+    session = batch_session()
+    await session.feed(tone(0.1), 48_000)
+    for _ in range(400):
+        await session.feed(tone(0.5), 48_000)
+        assert len(session._buffer) <= MAX_BUFFER_BYTES
+
+
+async def test_the_rate_is_fixed_at_the_first_chunk_and_bounded() -> None:
+    from daedalus.speech.engine import SpeechError, clamp_rate
+
+    session = batch_session()
+    await session.feed(tone(0.1, rate=48_000), 48_000)
+    assert session._rate == 48_000
+    # A later chunk claiming another rate does not relabel the audio already held.
+    await session.feed(tone(0.1, rate=48_000), 8_000)
+    assert session._rate == 48_000
+
+    for bad in (0, 1, 10**9, -16_000):
+        with pytest.raises(SpeechError):
+            clamp_rate(bad)
+    assert clamp_rate(44_100) == 44_100
+
+
+async def test_the_declared_rate_reaches_the_model() -> None:
+    """A 48 kHz stream is decoded as 48 kHz. Telling the model 16 kHz is how it hears speech at 3x."""
+    session = batch_session()
+    rates: list[int] = []
+    session._engine.decode = lambda pcm, rate=SAMPLE_RATE: rates.append(rate) or "hello there"  # type: ignore[assignment]
+    for _ in range(10):
+        await session.feed(tone(0.1, rate=48_000), 48_000)
+    for _ in range(12):
+        await session.feed(quiet(0.1, 48_000), 48_000)
+    assert rates and set(rates) == {48_000}
+
+
+def test_a_moonshine_archive_does_not_load_the_uncached_graph_as_the_cached_one(tmp_path: Path) -> None:
+    """`cached_decode` is a substring of `uncached_decode`; the two are different graphs."""
+    from daedalus.speech.engine import resolve
+
+    directory = tmp_path / "moonshine"
+    directory.mkdir()
+    for name in ("preprocess.onnx", "encode.int8.onnx", "cached_decode.int8.onnx", "uncached_decode.int8.onnx"):
+        (directory / name).write_bytes(b"x")
+    (directory / "tokens.txt").write_bytes(b"<blk> 0\n")
+    files = resolve(directory, "moonshine")
+    assert files["cached_decoder"].name == "cached_decode.int8.onnx"
+    assert files["uncached_decoder"].name == "uncached_decode.int8.onnx"
 
 
 async def test_finishing_flushes_what_is_held() -> None:
@@ -385,10 +484,13 @@ async def test_a_cancelled_download_keeps_what_arrived(tmp_path: Path, zoo: str)
             await asyncio.sleep(0.02)
             if downloads.progress()[model.id].state == "cancelled":
                 break
+        assert downloads.progress()[model.id].state == "cancelled" and not downloads.is_installed(model.id)
+        assert not downloads.cancel(model.id), "cancelling what is not running says so rather than pretending"
+        with pytest.raises(KeyError):
+            downloads.cancel("../../../etc")
     finally:
         catalog.BY_ID.pop(model.id, None)
-    assert downloads.progress()[model.id].state == "cancelled" and not downloads.is_installed(model.id)
-    assert not downloads.cancel(model.id), "cancelling what is not running says so rather than pretending"
+
 
 
 async def test_progress_reaches_a_watcher_and_a_full_queue_does_not_stall_the_download(tmp_path: Path, zoo: str) -> None:
@@ -420,8 +522,108 @@ def test_deleting_a_model_frees_the_disk_and_forgets_it(tmp_path: Path) -> None:
     downloads._write_manifest({"whisper-tiny": __import__("daedalus.speech.models", fromlist=["Installed"]).Installed(
         id="whisper-tiny", archive="a.tar.bz2", sha256="", disk_bytes=1024)})
     assert downloads.is_installed("whisper-tiny")
-    assert downloads.delete("whisper-tiny") and not downloads.is_installed("whisper-tiny")
-    assert not downloads.delete("whisper-tiny")
+    assert asyncio.run(downloads.delete("whisper-tiny")) and not downloads.is_installed("whisper-tiny")
+    assert not asyncio.run(downloads.delete("whisper-tiny"))
+
+
+def test_deleting_a_model_refuses_an_id_that_is_not_one(tmp_path: Path) -> None:
+    """``delete`` joins the id to the models root and rmtrees it; a climbing id must not get that far."""
+    downloads = Downloads(tmp_path / "stt")
+    victim = tmp_path / "IMPORTANT"
+    victim.mkdir(parents=True)
+    with pytest.raises(KeyError, match="no speech model"):
+        asyncio.run(downloads.delete("../../IMPORTANT"))
+    assert victim.is_dir()
+
+
+async def test_deleting_a_model_mid_download_stops_it_and_reclaims_the_part_file(tmp_path: Path, zoo: str) -> None:
+    """The task carried on after a delete, re-wrote the manifest and unpacked the model back."""
+    Zoo.payload = make_archive("x", MODEL_FILES)
+    Zoo.hold = 0.05
+    model = fake_entry(Zoo.payload)
+    downloads = Downloads(tmp_path / "stt")
+    catalog.BY_ID[model.id] = model
+    try:
+        downloads.start(model.id, url=zoo)
+        await asyncio.sleep(0.1)
+        await downloads.delete(model.id)
+        await asyncio.sleep(0.3)
+        assert not downloads.is_installed(model.id), "a deleted model must not come back from its own download"
+        assert not downloads.directory(model.id).is_dir()
+        assert not (downloads.parts / model.archive).exists(), "the part file is not reachable from any UI"
+    finally:
+        catalog.BY_ID.pop(model.id, None)
+        await downloads.close()
+
+
+async def test_only_one_model_is_fetched_at_a_time(tmp_path: Path, zoo: str) -> None:
+    Zoo.payload = make_archive("x", MODEL_FILES)
+    Zoo.hold = 0.2
+    from dataclasses import replace as _replace
+
+    first = fake_entry(Zoo.payload)
+    downloads = Downloads(tmp_path / "stt")
+    catalog.BY_ID[first.id] = first
+    other = _replace(first, id="test-model-2")
+    catalog.BY_ID[other.id] = other
+    try:
+        assert downloads.start(first.id, url=zoo).state == "downloading"
+        assert downloads.start(other.id, url=zoo).state == "queued"
+        assert "test-model" in downloads.progress()[other.id].error
+    finally:
+        catalog.BY_ID.pop(first.id, None)
+        catalog.BY_ID.pop(other.id, None)
+        await downloads.close()
+
+
+def test_a_download_is_refused_where_the_disk_could_not_hold_it(tmp_path: Path) -> None:
+    from daedalus.speech.models import DISK_HEADROOM
+
+    downloads = Downloads(tmp_path / "stt")
+    huge = fake_entry(b"x" * 16)
+    from dataclasses import replace as _replace
+
+    huge = _replace(huge, size_bytes=1 << 50, unpacked_bytes=1 << 50)
+    with pytest.raises(DownloadError, match="free"):
+        downloads._check_room(huge)
+    assert DISK_HEADROOM > 0
+    downloads._check_room(fake_entry(b"x" * 16))  # a model that fits raises nothing
+
+
+def test_an_archive_with_no_digest_is_pinned_by_its_file_list(tmp_path: Path) -> None:
+    from dataclasses import replace as _replace
+
+    from daedalus.speech.models import check_contents
+
+    directory = tmp_path / "m"
+    directory.mkdir()
+    for name in MODEL_FILES:
+        (directory / name).write_bytes(b"x")
+    model = _replace(fake_entry(b"x"), contents=tuple(sorted(MODEL_FILES)))
+    check_contents(directory, model)
+
+    (directory / "extra.onnx").write_bytes(b"x")
+    with pytest.raises(DownloadError, match="unexpected extra.onnx"):
+        check_contents(directory, model)
+    (directory / "extra.onnx").unlink()
+    (directory / "tokens.txt").unlink()
+    with pytest.raises(DownloadError, match="missing tokens.txt"):
+        check_contents(directory, model)
+    # An entry that has a digest is checked by it instead, and this says nothing.
+    check_contents(directory, fake_entry(b"x", digest="a" * 64))
+
+
+def test_a_redirect_off_the_zoo_is_refused_and_one_onto_the_asset_host_is_not() -> None:
+    from daedalus.speech.models import _host_allowed
+
+    zoo_url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/x.tar.bz2"
+    assert _host_allowed(zoo_url, "release-assets.githubusercontent.com")
+    assert _host_allowed(zoo_url, "github.com")
+    assert not _host_allowed(zoo_url, "githubusercontent.com.example.invalid")
+    assert not _host_allowed(zoo_url, "elsewhere.invalid")
+    # A download that did not begin at GitHub may not change host at all.
+    assert _host_allowed("http://127.0.0.1:9/x", "127.0.0.1")
+    assert not _host_allowed("http://127.0.0.1:9/x", "elsewhere.invalid")
 
 
 def test_a_manifest_entry_whose_files_are_gone_is_not_installed(tmp_path: Path) -> None:
@@ -548,6 +750,9 @@ HEAD = {"X-Daedalus-Token": "tok"}
 def test_the_picker_is_served_with_everything_the_page_needs(client: TestClient) -> None:
     body = client.get("/api/stt", headers=HEAD).json()
     assert len(body["models"]) == len(catalog.MODELS)
+    whisper = next(m for m in body["models"] if m["id"] == "whisper-small")
+    assert whisper["verified"] is False and whisper["detects_language"] is False
+    assert next(m for m in body["models"] if m["id"] == "parakeet-unified-en")["verified"] is True
     assert body["selected"] == "" and body["language"] == "auto" and body["threads"] == 2
     assert set(body["decoders"]) == {"opus", "any"} and "en" in body["recommended"]
     assert body["recommended"]["ru"] == "gigaam-ru"
@@ -571,14 +776,16 @@ def test_the_language_and_the_threads_are_saved_on_their_own(client: TestClient)
 
 
 def test_the_stream_refuses_when_no_model_is_selected(client: TestClient) -> None:
-    refused = client.post("/api/voice/listen?stream=abc", content=b"\x00\x00", headers=HEAD)
+    refused = client.post("/api/voice/listen/open", headers=HEAD)
+    assert refused.status_code == 409 and "no local speech model" in refused.json()["detail"]
+    refused = client.post("/api/voice/listen?stream=abc&seq=1", content=b"\x00\x00", headers=HEAD)
     assert refused.status_code == 409 and "no local speech model" in refused.json()["detail"]
 
 
 def test_a_chunk_larger_than_the_limit_is_refused(client: TestClient, tmp_path: Path) -> None:
     _install_fake_model(client.app_state)  # type: ignore[attr-defined]
     huge = b"\x00" * (3 << 20)
-    assert client.post("/api/voice/listen?stream=abc", content=huge, headers=HEAD).status_code == 413
+    assert client.post("/api/voice/listen?stream=abc&seq=1", content=huge, headers=HEAD).status_code == 413
 
 
 def _install_fake_model(app: FakeApp) -> None:
@@ -600,6 +807,38 @@ def test_a_selected_model_is_what_the_voice_page_and_the_site_are_told(client: T
     # No endpoint is configured at all, and the microphone must still be offered.
     assert asr["configured"] is True and asr["local"]["active"] is True
     assert asr["local"]["label"] == "GigaAM v3 Russian" and asr["local"]["streaming"] is False
+
+
+def test_a_downloaded_model_with_no_engine_is_installed_but_not_active(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A native installation whose `uv sync --extra speech` failed has the archive and not the wheel.
+
+    Calling that active takes the browser's own recogniser away from the voice page and replaces it
+    with a stream that answers 503 to every chunk — a downgrade from what the operator had before
+    they picked a model. ``installed`` stays true so the picker can still say what is missing.
+    """
+    from daedalus.speech import service as speech_service
+
+    app = client.app_state  # type: ignore[attr-defined]
+    _install_fake_model(app)
+    monkeypatch.setattr(speech_service, "_engine_present", False)
+    local = client.get("/api/asr", headers=HEAD).json()["local"]
+    assert local["installed"] is True and local["active"] is False and local["engine_installed"] is False
+    # ``available`` stays archive-based on purpose: a local model that fails must not be replaced by a
+    # paid endpoint behind the operator's back. What ``active`` decides is narrower — whether the page
+    # puts the local model in front of the browser's own recogniser — and that needs the wheel.
+    assert app.speech.available() is True
+
+
+def test_the_engine_probe_is_asked_once_and_can_be_asked_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daedalus.speech import service as speech_service
+
+    monkeypatch.setattr(speech_service, "_engine_present", None)
+    first = speech_service.engine_present()
+    assert speech_service._engine_present is first
+    monkeypatch.setattr(speech_service, "_engine_present", not first)
+    assert speech_service.engine_present() is (not first), "the answer is cached, not re-imported per poll"
+    speech_service.forget_engine()
+    assert speech_service._engine_present is None and speech_service.engine_present() is first
 
 
 def test_an_id_that_left_the_catalog_is_treated_as_no_choice(tmp_path: Path) -> None:
@@ -696,11 +935,13 @@ class ScriptedSession:
         self.words = list(words)
         self.fed = 0
         self.chunks = 0
+        self.rates: list[int] = []
         ScriptedSession.opened += 1
 
     async def feed(self, pcm16: bytes, sample_rate: int = SAMPLE_RATE) -> Partial:
         self.fed += len(pcm16)
         self.chunks += 1
+        self.rates.append(sample_rate)
         # Every third chunk ends an utterance, which is roughly how an endpoint detector behaves.
         if self.words and self.chunks % 3 == 0:
             return Partial(text=self.words.pop(0), final=True)
@@ -731,9 +972,22 @@ def pcm_chunk(seconds: float = 0.2) -> bytes:
     return tone(seconds)
 
 
+def open_stream(client: TestClient, rate: int = 16000) -> str:
+    """The id the server minted. The page no longer invents one; see /api/voice/listen/open."""
+    response = client.post(f"/api/voice/listen/open?rate={rate}", headers=HEAD)
+    assert response.status_code == 200, response.text
+    return str(response.json()["stream"])
+
+
+def feed(client: TestClient, stream: str, seq: int, body: bytes = b"", final: bool = False) -> dict[str, Any]:
+    url = f"/api/voice/listen?stream={stream}&seq={seq}" + ("&final=true" if final else "")
+    return dict(client.post(url, content=body, headers=HEAD).json())
+
+
 def test_one_stream_id_keeps_one_decoder_across_chunks(listening: Any) -> None:
     client, sessions = listening
-    answers = [client.post("/api/voice/listen?stream=s1", content=pcm_chunk(), headers=HEAD).json() for _ in range(3)]
+    stream = open_stream(client)
+    answers = [feed(client, stream, n, pcm_chunk()) for n in (1, 2, 3)]
     assert ScriptedSession.opened == 1, "each chunk must not open a new decoder"
     assert [a["final"] for a in answers] == [False, False, True]
     assert answers[-1]["text"] == "раз два три"
@@ -742,26 +996,30 @@ def test_one_stream_id_keeps_one_decoder_across_chunks(listening: Any) -> None:
 
 def test_two_pages_listening_at_once_do_not_share_a_decoder(listening: Any) -> None:
     client, _ = listening
-    client.post("/api/voice/listen?stream=a", content=pcm_chunk(), headers=HEAD)
-    client.post("/api/voice/listen?stream=b", content=pcm_chunk(), headers=HEAD)
+    a, b = open_stream(client), open_stream(client)
+    assert a != b, "the server mints the id; two pages cannot collide on one"
+    feed(client, a, 1, pcm_chunk())
+    feed(client, b, 1, pcm_chunk())
     assert ScriptedSession.opened == 2
 
 
 def test_the_final_chunk_flushes_and_lets_go_of_the_stream(listening: Any) -> None:
     client, _ = listening
-    client.post("/api/voice/listen?stream=s1", content=pcm_chunk(), headers=HEAD)
-    body = client.post("/api/voice/listen?stream=s1&final=true", content=b"", headers=HEAD).json()
+    stream = open_stream(client)
+    feed(client, stream, 1, pcm_chunk())
+    body = feed(client, stream, 2, b"", final=True)
     assert body["final"] and body["text"] == "раз два три" and ScriptedSession.closed == 1
-    # The id is free again, so the next utterance opens a fresh decoder rather than a stale one.
-    client.post("/api/voice/listen?stream=s1", content=pcm_chunk(), headers=HEAD)
-    assert ScriptedSession.opened == 2
+    # The stream is gone with it: a chunk on the same id afterwards is a 404, not a fresh decoder.
+    assert client.post(f"/api/voice/listen?stream={stream}&seq=3", content=pcm_chunk(), headers=HEAD).status_code == 404
+    assert ScriptedSession.opened == 1
 
 
 def test_closing_a_stream_decodes_nothing_and_is_idempotent(listening: Any) -> None:
     client, _ = listening
-    client.post("/api/voice/listen?stream=s1", content=pcm_chunk(), headers=HEAD)
-    assert client.post("/api/voice/listen/close?stream=s1", headers=HEAD).json() == {"closed": True}
-    assert client.post("/api/voice/listen/close?stream=s1", headers=HEAD).json() == {"closed": False}
+    stream = open_stream(client)
+    feed(client, stream, 1, pcm_chunk())
+    assert client.post(f"/api/voice/listen/close?stream={stream}", headers=HEAD).json() == {"closed": True}
+    assert client.post(f"/api/voice/listen/close?stream={stream}", headers=HEAD).json() == {"closed": False}
     assert ScriptedSession.closed == 0, "closing is letting go, not finishing: nothing is decoded"
 
 
@@ -769,16 +1027,70 @@ def test_a_page_that_never_closes_its_streams_does_not_accumulate_them(listening
     from daedalus.extensions.api import LISTEN_MAX_STREAMS
 
     client, _ = listening
-    for n in range(LISTEN_MAX_STREAMS + 3):
-        client.post(f"/api/voice/listen?stream=s{n}", content=pcm_chunk(), headers=HEAD)
-    # Opening one more prunes the oldest; what matters is that the count is bounded, not which went.
+    streams = [open_stream(client) for _ in range(LISTEN_MAX_STREAMS + 3)]
     assert ScriptedSession.opened == LISTEN_MAX_STREAMS + 3
+    # What is bounded is how many are held, not how many were opened: the oldest are pruned, and the
+    # earliest ids no longer resolve.
+    gone = sum(1 for s in streams if client.post(f"/api/voice/listen?stream={s}&seq=1", content=pcm_chunk(), headers=HEAD).status_code == 404)
+    assert gone == 3
 
 
 def test_an_empty_chunk_is_a_keepalive_and_not_an_utterance(listening: Any) -> None:
     client, _ = listening
-    body = client.post("/api/voice/listen?stream=s1", content=b"", headers=HEAD).json()
-    assert body == {"text": "", "final": False}
+    assert feed(client, open_stream(client), 1) == {"text": "", "final": False}
+
+
+def test_the_rate_the_browser_negotiated_is_what_the_model_is_told(listening: Any) -> None:
+    """The whole of H2 in one assertion: 48 kHz capture must not be decoded as 16 kHz.
+
+    `new AudioContext({sampleRate})` is a request, and Safari and several Android webviews answer it
+    with the hardware's own rate. The page reads it back and declares it here; sherpa resamples, which
+    it cannot do if it was never told.
+    """
+    client, sessions = listening
+    stream = open_stream(client, rate=48_000)
+    feed(client, stream, 1, pcm_chunk())
+    assert sessions[0].rates == [48_000]
+
+    other = open_stream(client, rate=16_000)
+    feed(client, other, 1, pcm_chunk())
+    assert sessions[1].rates == [16_000]
+
+
+def test_a_rate_outside_any_capture_device_is_refused_before_a_decoder_is_opened(listening: Any) -> None:
+    """The batch endpointer divides by the declared rate; an absurd one makes it never flush."""
+    client, _ = listening
+    for bad in (0, 10**9, 100):
+        refused = client.post(f"/api/voice/listen/open?rate={bad}", headers=HEAD)
+        assert refused.status_code == 400, bad
+    assert ScriptedSession.opened == 0
+
+
+def test_a_chunk_out_of_order_closes_the_stream_rather_than_corrupting_the_transcript(listening: Any) -> None:
+    client, _ = listening
+    stream = open_stream(client)
+    feed(client, stream, 1, pcm_chunk())
+    out_of_order = client.post(f"/api/voice/listen?stream={stream}&seq=3", content=pcm_chunk(), headers=HEAD)
+    assert out_of_order.status_code == 409 and "expected" in out_of_order.json()["detail"]
+    # And the stream is gone, so the page cannot carry on feeding a decoder with a hole in it.
+    assert client.post(f"/api/voice/listen?stream={stream}&seq=2", content=pcm_chunk(), headers=HEAD).status_code == 404
+
+
+def test_a_stream_id_the_server_did_not_mint_is_not_a_stream(listening: Any) -> None:
+    client, _ = listening
+    assert client.post("/api/voice/listen?stream=s1&seq=1", content=pcm_chunk(), headers=HEAD).status_code == 404
+    assert ScriptedSession.opened == 0, "a client-chosen id must not open a decoder"
+
+
+def test_an_abandoned_stream_is_reaped_on_the_next_call_not_on_the_next_open(listening: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from daedalus.extensions import api as api_module
+
+    client, _ = listening
+    stream = open_stream(client)
+    feed(client, stream, 1, pcm_chunk())
+    monkeypatch.setattr(api_module, "LISTEN_IDLE_SECONDS", 0.0)
+    # No new stream is opened; the next chunk on the abandoned one is enough to prune it.
+    assert client.post(f"/api/voice/listen?stream={stream}&seq=2", content=pcm_chunk(), headers=HEAD).status_code == 404
 
 
 # -- the engine on a real model, where one has been fetched -----------------------------------------
