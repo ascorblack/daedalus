@@ -183,7 +183,19 @@ class LocalTts:
         voice = self.selected()
         installed = voice is not None and self.downloads.is_installed(voice.id)
         engine = engine_present()
-        loading = self._state if installed and engine else ("idle" if voice is None else "error")
+        error = self._error
+        if voice is None and self.settings.local_voice:
+            # A configured id the catalog no longer has. Nothing local speaks, but "idle" would say
+            # the operator never chose one, which is the opposite of what happened.
+            phase = "error"
+            error = f"{self.settings.local_voice} is not in the catalog any more; choose a voice again"
+        elif voice is None:
+            phase = "idle"
+        elif installed and engine:
+            phase = self._state
+        else:
+            phase = "error"
+            error = error or ("the speech engine is not installed" if installed else f"{voice.label} was never downloaded")
         return {
             "voice": voice.id if voice else "",
             "label": voice.label if voice else "",
@@ -194,8 +206,8 @@ class LocalTts:
             "installed": installed,
             "active": installed and engine,
             "engine_installed": engine,
-            "state": loading,
-            "error": self._error,
+            "state": phase,
+            "error": error,
             "loaded": CACHE.loaded(),
             "encoder": encoder_present(),
         }
