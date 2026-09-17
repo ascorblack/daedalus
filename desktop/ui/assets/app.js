@@ -45,6 +45,9 @@ async function switchLang(lang) {
   for (const field of document.querySelectorAll("input[name]")) {
     typed.set(name(field), field.type === "checkbox" ? field.checked : field.value);
   }
+  // What was open and which provider was showing are part of where the operator was, too.
+  const opened = [...document.querySelectorAll("details")].map((one) => one.open);
+  const provider = document.querySelector('.seg button[aria-pressed="true"]')?.dataset.provider;
   const answer = await fetch(location.pathname + location.search, { headers: { "Accept-Language": lang } });
   const fresh = new DOMParser().parseFromString(await answer.text(), "text/html");
   document.querySelector("main").replaceWith(fresh.querySelector("main"));
@@ -61,7 +64,8 @@ async function switchLang(lang) {
     if (field.type === "checkbox") field.checked = typed.get(key);
     else if (field.type !== "radio") field.value = typed.get(key);
   }
-  if (page === "setup") setupPanels();
+  document.querySelectorAll("details").forEach((one, i) => (one.open = opened[i] ?? false));
+  if (page === "setup") setupPanels(provider);
 }
 
 document.addEventListener("click", (event) => {
@@ -74,16 +78,19 @@ document.addEventListener("click", (event) => {
 // One provider key is asked for at a time. All three fields are in the form and all three are
 // posted: an untouched field carries what is already on file, and the launcher reads an empty one
 // as "leave it alone", so showing one panel changes nothing about what is written.
-function setupPanels() {
+function showProvider(name) {
   document.querySelectorAll(".seg button[data-provider]").forEach((button) => {
-    button.addEventListener("click", () => {
-      document.querySelectorAll(".seg button[data-provider]").forEach((other) => {
-        const chosen = other === button;
-        other.setAttribute("aria-pressed", String(chosen));
-        document.querySelector(`[data-panel="${other.dataset.provider}"]`).hidden = !chosen;
-      });
-    });
+    const chosen = button.dataset.provider === name;
+    button.setAttribute("aria-pressed", String(chosen));
+    document.querySelector(`[data-panel="${button.dataset.provider}"]`).hidden = !chosen;
   });
+}
+
+function setupPanels(provider) {
+  document.querySelectorAll(".seg button[data-provider]").forEach((button) => {
+    button.addEventListener("click", () => showProvider(button.dataset.provider));
+  });
+  if (provider) showProvider(provider);
   // The language the form was filled in is the language the installation keeps.
   const field = el("lang-field");
   if (field) field.value = document.body.dataset.lang;

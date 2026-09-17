@@ -24,6 +24,9 @@
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 * { box-sizing: border-box; }
+/* Several things on these pages are hidden while they have nothing to say, and half of them are
+   flex rows: without this the layout would win over the attribute and they would all be visible. */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
   margin: 0;
@@ -78,7 +81,7 @@ code {
 
 /* ---- page frames ------------------------------------------------------------------------- */
 .page { width: 100%; padding: clamp(28px, 4vw, 56px) clamp(16px, 4vw, 56px) 72px; }
-.page > .inner { width: 100%; max-width: 1560px; margin: 0 auto; }
+.page > .inner { width: 100%; max-width: 1800px; margin: 0 auto; }
 .hero { margin-bottom: clamp(24px, 3vw, 36px); }
 .hero h1 { font-size: clamp(26px, 2.6vw, 38px); }
 .hero p { color: var(--muted); margin-top: 8px; font-size: clamp(14px, 1.1vw, 16px); }
@@ -138,8 +141,8 @@ code {
 .mode:active { transform: scale(0.995); }
 .mode input { position: absolute; opacity: 0; pointer-events: none; }
 .mode .icon { color: var(--muted); transition: color 160ms var(--ease); }
-.mode .name { font-weight: 600; }
-.mode .line { color: var(--muted); font-size: 13px; margin-top: 3px; }
+.mode .name { display: block; font-weight: 600; }
+.mode .line { display: block; color: var(--muted); font-size: 13px; margin-top: 3px; }
 .mode:has(input:checked) { background: var(--s3); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
 .mode:has(input:checked) .icon { color: var(--accent); }
 .mode:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -275,9 +278,12 @@ button[disabled] { opacity: 0.45; cursor: default; transform: none; }
   transform: rotate(45deg);
   animation: tick 240ms var(--ease);
 }
+/* The launcher's own commentary, which is the machine talking rather than the page: it is shown as
+   such — one faint monospace line — and is the one thing here that is not translated, because it is
+   the same words that go to the terminal and into the log. */
 .live {
-  color: var(--muted);
-  font-size: 13px;
+  color: var(--faint);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   margin-top: 18px;
   min-height: 20px;
   overflow: hidden;

@@ -77,9 +77,11 @@ live in. The executable is not signed, so SmartScreen warns once: *More info →
    `git` running inside the agent's own image in Docker mode, and with the runtime's own git in
    native mode. Each checkout is a real local history with
    no remote — an update is the next commit on top of it.
-3. A page opens at `http://127.0.0.1:8770` — in the launcher's own window where there is one — and
-   asks for a model provider key, optionally the Telegram values, and a daily spending cap. Telegram
-   is optional — without it you use the app in that window.
+3. A page opens at `http://127.0.0.1:8770` — in the launcher's own window where there is one — with
+   the whole of the setup on it: how it runs, one model provider key, and a daily spending cap that
+   already has a figure in it. Telegram is behind a disclosure and stays optional — without it you
+   use the app in that window. The page is in English or Russian; the switch is in its corner and
+   the choice is remembered.
 4. **Docker:** the image is pulled (or built, if there is no published image for your platform),
    the stack comes up, and the same window moves to the app. One image, two containers from it: the
    agent, and the key proxy that holds the provider keys.
@@ -103,6 +105,33 @@ start.
 
 Starting the launcher a second time against the same folder does not start a second one. It brings
 the first to the front, hands it the link it was opened with if it was opened with one, and exits.
+
+## The pages
+
+The launcher serves three pages of its own, on the loopback address and nowhere else.
+
+- **The questions** (`/setup`) — three cards: how it runs, a provider key, a day's spending. What is
+  not a question is behind a disclosure: the difference between the two modes, what happens if you
+  skip the key, and the four Telegram values. An empty field means *leave what is there alone*, so
+  opening this page again to change one value cannot blank the others; emptying one on purpose is
+  the tick under it.
+- **The wait** (`/progress`) — where a start has got to: the steps of the mode you are in, ticked off
+  as they pass, and one line of the launcher's own commentary under them. The bar is indeterminate
+  until something knows a size and determinate once it does — the runtime archives are pinned, so
+  their sizes are known before the first byte is fetched. A failure becomes one calm card with the
+  button that tries again.
+- **The status** (`/status`) — what is running, the buttons the command line has, and the log behind
+  a summary.
+
+Both languages are complete: every line of every page is in a table in `i18n.go`, and a key in one
+language and not the other fails a test rather than leaving an English sentence in a Russian page.
+The choice is written to `data/lang` beside `data/mode`, so the next start opens in it. The one thing
+not translated is the launcher's own running commentary — the line under the steps and the log — and
+it is shown as what it is: the same words that go to the terminal.
+
+Pictures of all three, in both languages, at a window's width and a phone's, are in
+`docs/screenshots/launcher-*.png`; `tests/browser/launcher_shots.py` renders them against an
+invented installation.
 
 ## The folder
 
@@ -263,6 +292,19 @@ window on Linux, you have the source: install `libgtk-3-dev` and `libwebkit2gtk-
 `go build` without `-tags nowebview` — and then that binary needs those libraries wherever it runs.
 
 Whatever is showing it, closing it leaves the stack running.
+
+### The menu bar, and the keyboard
+
+On macOS the launcher installs the ordinary application, Edit and Window menus when it makes its
+window. This is not decoration. A Mac application without a menu bar has no Edit menu, and without
+an Edit menu ⌘C, ⌘V, ⌘X, ⌘A and ⌘Z do nothing anywhere in it: the key equivalent on a menu item is
+what sends `copy:` and the rest down the responder chain, and with no item carrying it the
+keystroke is never dispatched. It looks as though the window is eating the shortcuts. It is not:
+nothing is delivering them. The menus carry the standard selectors and nothing of our own, and the
+web view — which is the first responder — does the work. ⌘Q quits, ⌘W closes, ⌘M minimises.
+
+Windows needs none of it: WebView2 hosts the same edit commands Edge does and handles Ctrl+C,
+Ctrl+V, Ctrl+X, Ctrl+A and Ctrl+Z inside the page itself.
 
 ### Links
 
