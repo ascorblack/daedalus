@@ -432,7 +432,13 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       if (event === "message_start") {
         // The queue the last run left behind starts the next one without anybody pressing send:
         // the chip says so as the first token arrives, not at the next read.
-        setDetail((prev) => (prev && prev.status === "idle" ? { ...prev, status: "running" } : prev));
+        // A run that starts also clears the last one's failure: it is being answered, not explained.
+        setDetail((prev) => (prev ? { ...prev, status: prev.status === "idle" ? "running" : prev.status, error: "" } : prev));
+      } else if (event === "error") {
+        // What went wrong, kept where the reply cannot bury it. A provider that refused every request
+        // still lets the model write a closing message, and that message reads like an answer.
+        const message = String(p.message ?? "");
+        if (message) setDetail((prev) => (prev ? { ...prev, error: message } : prev));
       } else if (event === "message_stop") {
         // The streamed copy is dropped only once the written one is on the screen, so the answer
         // never blinks out and back in. The cursor does not wait for that read — `liveAfter` has
@@ -453,7 +459,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       } else if (event === "run_settled") {
         // The run is over as the host knows it. The chip flips on this event, not on the read it
         // triggers: the read says the same thing a round trip later.
-        setDetail((prev) => (prev ? { ...prev, status: p.status === "awaiting" ? "waiting" : "idle", housekeeping: !!p.housekeeping } : prev));
+        setDetail((prev) => (prev ? { ...prev, status: p.status === "awaiting" ? "waiting" : p.status === "failed" ? "failed" : "idle", housekeeping: !!p.housekeeping } : prev));
         refreshSoon("tail");
       } else if (event === "compaction_completed") refreshSoon("tail");
       else if (event === "state_changed" || event === "tool_call_pending") refreshSoon("state");
@@ -1128,6 +1134,15 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
             </button>
           )}
           {compacting && <CompactionBar c={compacting} />}
+          {/* The last run ended on something that was not the work: a provider that refused every
+              request, a cap, a crash. The model may have written a closing message on the way out and
+              that message reads like an answer, so the reason stands here in its own right until the
+              next run starts. */}
+          {!busy && !!detail?.error && (
+            <div className="runerror" role="status">
+              <Icon name="question" size={14} /> <span>{detail.error}</span>
+            </div>
+          )}
           {(busy || saving) && <LiveBar status={status} saving={saving} base={tail} live={live} workspace={detail?.workspace} atBottom={atBottom} onJump={jumpToBottom} />}
           <div className="composer">
             {pending.length > 0 && (

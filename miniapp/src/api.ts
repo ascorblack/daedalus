@@ -226,6 +226,9 @@ export type SessionDetail = {
   status: string;
   /** The run is over and its answer is written; what the session is still saving behind it is not a run. */
   housekeeping?: boolean;
+  /** Why the last run ended in an error, in the words the host was given — a provider's own refusal, typically.
+   *  Present until the next run starts: the reply the model managed to write is not the only trace of a failure. */
+  error?: string;
   compacting?: Compacting | null;
   run_id: string | null;
   workspace: string;
