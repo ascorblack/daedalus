@@ -509,11 +509,9 @@ class Scheduler:
         """
         manager = self.app.manager
         assert manager is not None
-        if project_id:
-            state = await self.app.create_session(title, metadata=metadata, project_id=project_id)
-        else:
-            (workspace / "inbox").mkdir(parents=True, exist_ok=True)
-            state = await self.app.create_session(title, metadata={**metadata, "workspace": str(workspace)}, workspace=workspace)
+        if project_id is None:
+            project_id = (await manager.projects.adopt_directory(title, workspace)).id
+        state = await self.app.create_session(title, metadata=metadata, project_id=project_id)
         if preset:
             await manager.set_model(state.session.id, preset=preset)
         await manager.submit(state.session.id, prompt, [], as_answer=False, origin=origin)
@@ -533,12 +531,10 @@ class Scheduler:
         workspace = project.root if project is not None else Path(schedule["workspace"])
         (workspace / "inbox").mkdir(parents=True, exist_ok=True)
         title = f"[cron] {schedule['name']}"
-        project_id = project.id if project is not None else None
-        # A task in a project takes its directory from the project, and naming it in the metadata as
-        # well would be a second source for one answer — the one the project is there to settle.
-        metadata: dict[str, Any] = {"schedule_id": schedule["id"], "unattended": True}
         if project is None:
-            metadata["workspace"] = str(workspace)
+            project = await manager.projects.adopt_directory(schedule["name"], workspace)
+        project_id = project.id
+        metadata: dict[str, Any] = {"schedule_id": schedule["id"], "unattended": True}
         if schedule.get("model"):
             metadata["model"] = schedule["model"]
         per_task = self.app.config.scheduler.topic_mode == "per_task"
@@ -547,9 +543,6 @@ class Scheduler:
             await front.bind_topic(self.app.config.telegram.forum_chat_id, int(schedule["topic_thread_id"]), state.session.id, title)
         elif front is not None:
             state, binding = await front.create_session_topic(title, metadata=metadata, project_id=project_id)
-            if state.workspace != workspace:
-                state.workspace = workspace
-                manager.register_services(state)
             if per_task:
                 await self.app.db.execute("UPDATE schedules SET topic_thread_id = ? WHERE id = ?", (binding.thread_id, schedule["id"]))
         else:
@@ -563,7 +556,7 @@ class Scheduler:
         prompt += (
             "\n\nThis is an unattended scheduled run: no operator is watching. If the check finds nothing that needs "
             "attention, call StaySilent instead of writing that there is nothing new. When finished, write SUMMARY.md "
-            "in the workspace root describing what was done and anything the next run should know."
+            "in the project directory describing what was done and anything the next run should know."
         )
         run_id = await manager.submit(state.session.id, prompt, [], as_answer=False, origin="schedule")
         await self._mark_in_flight(schedule["id"], state.session.id, run_id)

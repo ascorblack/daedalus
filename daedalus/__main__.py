@@ -40,7 +40,7 @@ async def cmd_check(args: argparse.Namespace) -> int:
 
     settings = _settings(args)
     config = RuntimeConfig.load(settings.config_path)
-    db = Database(settings.db_path)
+    db = Database(settings.db_path, workspaces_dir=settings.workspaces_dir)
     await db.open()
     try:
         manager = SessionManager(settings, config, db=db)
@@ -78,7 +78,7 @@ async def cmd_doctor(args: argparse.Namespace) -> int:
 
     settings = _settings(args)
     config = RuntimeConfig.load(settings.config_path)
-    db = Database(settings.db_path)
+    db = Database(settings.db_path, workspaces_dir=settings.workspaces_dir)
     await db.open()
     try:
         manager = SessionManager(settings, config, db=db)
@@ -135,7 +135,7 @@ async def cmd_auth(args: argparse.Namespace) -> int:
     from daedalus.stores.database import Database  # Lazy: each subcommand imports only what it runs
 
     settings = _settings(args)
-    db = Database(settings.db_path)
+    db = Database(settings.db_path, workspaces_dir=settings.workspaces_dir)
     await db.open()
     try:
         base = settings.miniapp_public_url or f"http://127.0.0.1:{settings.api_port}"
@@ -174,7 +174,7 @@ async def cmd_db(args: argparse.Namespace) -> int:
     from daedalus.stores.database import Database  # Lazy: each subcommand imports only what it runs
 
     settings = _settings(args)
-    db = Database(settings.db_path)
+    db = Database(settings.db_path, workspaces_dir=settings.workspaces_dir)
     await db.open()
     try:
         started = time.monotonic()

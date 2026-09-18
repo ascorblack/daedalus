@@ -96,7 +96,7 @@ class BenchRunner:
         self.preset = preset
         self.out_dir = out_dir
         self.tools_off = tools_off if tools_off is not None else list(DEFAULT_TOOLS_OFF)
-        self.db = Database(settings.db_path)
+        self.db = Database(settings.db_path, workspaces_dir=settings.workspaces_dir)
         self.manager: SessionManager | None = None
         self._done: dict[str, asyncio.Event] = {}
         self._status: dict[str, str] = {}

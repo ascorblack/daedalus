@@ -204,8 +204,8 @@ async def test_each_agent_sees_its_own_board_and_the_operator_pool(app: Any) -> 
     agent neither lists, reads nor claims it. A task the operator posts without an addressee is on
     every board. The work-in-progress limit counts what one family holds, not the whole installation."""
     board = Board(app)
-    await app.db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata) VALUES (?, ?, ?, ?, ?, ?)", ("lead", "daedalus", "lead", "t", "t", "{}"))
-    await app.db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata) VALUES (?, ?, ?, ?, ?, ?)", ("helper", "daedalus", "[sub] h", "t", "t", '{"subagent_of": "lead"}'))
+    await app.manager.create_session("lead", session_id="lead")
+    await app.manager.create_session("[sub] h", session_id="helper", metadata={"subagent_of": "lead"})
     mine = await board.add(title="fix the duplicate message", session_id="lead")
     theirs = await board.add(title="post on the forum", session_id="other")
     pool = await board.add(title="anyone: rotate the logs")

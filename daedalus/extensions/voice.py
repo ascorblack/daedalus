@@ -384,9 +384,12 @@ class Voice:
         """
         manager = self.app.manager
         assert manager is not None
-        if await manager.project_of(session_id) is not None:
+        current = await manager.project_of(session_id)
+        if current is not None and current.settings.system == PROJECT_KIND:
             return
         await manager.attach_project(session_id, await self.project())
+        if current is not None and not current.settings.system and not await manager.projects.sessions_of(current.id):
+            await manager.projects.delete(current.id)
 
     async def _point_at(self, session_id: str) -> str:
         """Put the configured preset on the session, or take the override off when none is configured.
@@ -592,7 +595,7 @@ class Voice:
             name,
             metadata={"voice_parent": voice_id, "brief": body},
             project_id=project.id,
-            own_workspace=own,
+            own_directory=own,
         )
         await manager.submit(state.session.id, body, as_answer=False, origin="voice")
         await self.emit("status", {"state": "delegating", "title": name})

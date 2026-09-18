@@ -13,6 +13,7 @@ from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import ToolResult
 from protocore.tools.decorator import tool
 
+from daedalus.host.services import PathOutsideProject
 from daedalus.tools._common import FRAME_CHARS, clip, error, ok, output_limit, refuse_protected, services_for
 from daedalus.tools.shell import shell_environment
 
@@ -21,6 +22,18 @@ _MAX_LINE_CHARS = 2000
 #: does not carry one; a compiled object, an archive or an image carries one
 #: early, and 8 KiB is past every plausible text header.
 _BINARY_SNIFF_CHARS = 8192
+
+
+def _resolve_path(context: ToolContext, services: Any, path: str | None, action: str) -> tuple[Path | None, ToolResult | None]:
+    candidate = Path(path or ".").expanduser()
+    if not candidate.is_absolute():
+        candidate = services.workspace_dir / candidate
+    if refusal := refuse_protected(context, services, candidate, action):
+        return None, refusal
+    try:
+        return services.resolve(path), None
+    except PathOutsideProject as exc:
+        return None, error(context, str(exc))
 
 
 def _line_allowance(text: str, lines: int, budget: int) -> int:
@@ -48,9 +61,10 @@ async def read_file(
 ) -> ToolResult:
     services = services_for(context)
     fs = services.fs
-    target = services.resolve(path)
-    if refusal := refuse_protected(context, services, target, "read"):
+    target, refusal = _resolve_path(context, services, path, "read")
+    if refusal is not None:
         return refusal
+    assert target is not None
     if not await fs.exists(target):
         return error(context, f"no such file: {target}")
     if await fs.is_dir(target):
@@ -108,9 +122,10 @@ def _binary_refusal(target: Path, size: int) -> str:
 )
 async def write_file(context: ToolContext, path: str, content: str) -> ToolResult:
     services = services_for(context)
-    target = services.resolve(path)
-    if refusal := refuse_protected(context, services, target, "written"):
+    target, refusal = _resolve_path(context, services, path, "written")
+    if refusal is not None:
         return refusal
+    assert target is not None
     try:
         await services.fs.write_text(target, content)
     except OSError as exc:
@@ -131,9 +146,10 @@ async def edit_file(
     context: ToolContext, path: str, old_string: str, new_string: str, replace_all: bool = False
 ) -> ToolResult:
     services = services_for(context)
-    target = services.resolve(path)
-    if refusal := refuse_protected(context, services, target, "edited"):
+    target, refusal = _resolve_path(context, services, path, "edited")
+    if refusal is not None:
         return refusal
+    assert target is not None
     fs = services.fs
     if not await fs.is_file(target):
         return error(context, f"no such file: {target}")
@@ -248,9 +264,10 @@ def apply_edit(text: str, old: str, new: str, *, replace_all: bool = False) -> t
 )
 async def multi_edit(context: ToolContext, path: str, edits: list[dict[str, Any]]) -> ToolResult:
     services = services_for(context)
-    target = services.resolve(path)
-    if refusal := refuse_protected(context, services, target, "edited"):
+    target, refusal = _resolve_path(context, services, path, "edited")
+    if refusal is not None:
         return refusal
+    assert target is not None
     fs = services.fs
     if not await fs.is_file(target):
         return error(context, f"no such file: {target}")
@@ -323,9 +340,10 @@ async def find_files(
     context: ToolContext, pattern: str = "**/*", path: str | None = None, limit: int = 500
 ) -> ToolResult:
     services = services_for(context)
-    root = services.resolve(path)
-    if refusal := refuse_protected(context, services, root, "listed"):
+    root, refusal = _resolve_path(context, services, path, "listed")
+    if refusal is not None:
         return refusal
+    assert root is not None
     if not await services.fs.is_dir(root):
         return error(context, f"not a directory: {root}")
     matches = await services.fs.find(root, pattern, limit)
@@ -348,9 +366,10 @@ async def search_files(
     limit: int = 200,
 ) -> ToolResult:
     services = services_for(context)
-    root = services.resolve(path)
-    if refusal := refuse_protected(context, services, root, "searched"):
+    root, refusal = _resolve_path(context, services, path, "searched")
+    if refusal is not None:
         return refusal
+    assert root is not None
     code, text, err = await services.fs.search(root, pattern, glob=glob, case_insensitive=case_insensitive, limit=limit)
     if code == 1:
         return ok(context, "(no matches)", count=0)

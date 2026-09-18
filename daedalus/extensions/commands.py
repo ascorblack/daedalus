@@ -38,7 +38,7 @@ class CommandSpec:
 
 COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("compact", "[focus]", "replace this session's history with a summary", confirm=True),
-    CommandSpec("clear", "", "start over with an empty history; the workspace, brief and settings stay", confirm=True),
+    CommandSpec("clear", "", "start over with an empty history; project files, brief and settings stay", confirm=True),
     CommandSpec("stop", "", "stop the current run"),
     CommandSpec("model", "[preset | provider/model | default]", "the model for this session (no argument: list)"),
     CommandSpec("thinking", "on|off|low|medium|high", "thinking for this session"),
@@ -51,7 +51,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("status", "", "what is running", scope="global"),
     CommandSpec("sessions", "", "every session", scope="global"),
     CommandSpec("new", "<title>", "a new session with its own topic", scope="global"),
-    CommandSpec("delete", "<id>", "delete a session with its workspace", scope="global", confirm=True),
+    CommandSpec("delete", "<id>", "delete a session; shared project files stay", scope="global", confirm=True),
     CommandSpec("cleanup", "[confirm]", "delete every session whose topic is closed", scope="global", confirm=True),
     CommandSpec("inbox", "[all|clear]", "the inbox", scope="global"),
     CommandSpec("board", "[all]", "the task board", scope="global"),
@@ -145,7 +145,7 @@ async def run_command(app: Application, session_id: str, line: str) -> str:  # n
         if state.running:
             return "Stop the run first."
         result = await manager.clear_history(session_id)
-        return f"🧹 History cleared: {result['dropped']} message(s) left the working history. The workspace, the brief and the session's settings stay; the transcript keeps the old turns."
+        return f"🧹 History cleared: {result['dropped']} message(s) left the working history. The project files, the brief and the session's settings stay; the transcript keeps the old turns."
     if name == "stop":
         return "Stopping…" if await manager.stop(session_id) else "Nothing is running in this session."
 
@@ -247,17 +247,17 @@ async def run_command(app: Application, session_id: str, line: str) -> str:  # n
         if front is not None:
             await front.forget_session(target)  # while its topic row is still there to be read
         removed = await manager.delete_session(target)
-        return f"Session {target} deleted with its workspace." if removed else "no such session"
+        return f"Session {target} deleted. Shared project files were kept." if removed else "no such session"
     if name == "cleanup":
         closed = await manager.closed_topic_sessions()
         if not closed:
             return "No sessions with closed topics."
         if args.lower() != "confirm":
-            return "Sessions whose topics are closed:\n" + "\n".join(f"- {s['title']} ({s['session_id']})" for s in closed) + "\n\n/cleanup confirm deletes them with their workspaces."
+            return "Sessions whose topics are closed:\n" + "\n".join(f"- {s['title']} ({s['session_id']})" for s in closed) + "\n\n/cleanup confirm deletes the sessions; shared project files stay."
         removed = 0
         for s in closed:
             removed += int(await manager.delete_session(s["session_id"]))
-        return f"Deleted {removed} session(s) with their workspaces."
+        return f"Deleted {removed} session(s). Shared project files were kept."
     if name == "sessions":
         sessions = await manager.list_sessions(limit=SESSION_LIST_LIMIT)
         if not sessions:

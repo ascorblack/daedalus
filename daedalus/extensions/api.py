@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from protocore.contracts.memory import MemoryScope
 from protocore.contracts.types import ToolResultBlock, ToolUseBlock
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -75,7 +75,7 @@ from daedalus.speech.tts_engine import MAX_SPEED, MIN_SPEED, TtsError
 from daedalus.speech.tts_service import MEDIA_TYPE_HEADER, SEQUENCE_TYPE
 from daedalus.speech.tts_service import frame as speech_frame
 from daedalus.stores import pairing, passkeys
-from daedalus.stores.projects import ProjectError, ProjectSettings, normalise_root
+from daedalus.stores.projects import ProjectError, ProjectSettings
 from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
@@ -257,15 +257,15 @@ class SpaFiles(StaticFiles):
 
 class ProjectBody(BaseModel):
     name: str
-    root: str
-    """The absolute path of the folder, as the operator gave it. It need not exist here: in a container
-    it becomes reachable once the launcher mounts it, and until then the row is what the launcher reads."""
+    root: str | None = None
+    """An existing folder selected as the optional second step; omitted creates one automatically."""
     snapshots: bool = False
 
 
 class ProjectPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str | None = None
-    root: str | None = None
     snapshots: bool | None = None
 
 
@@ -274,8 +274,8 @@ class NewSessionBody(BaseModel):
     prompt: str | None = None
     project_id: str | None = None
     """The project to work in: its folder becomes the session's workspace and the limit of its reach."""
-    workspace: str | None = None
-    """A workspace directory name to work in (another session's id or a named workspace); empty = a directory of its own."""
+    own_directory: bool = False
+    """Work in a private child of the project rather than its shared root."""
     tools_off: list[str] = Field(default_factory=list)
     """Tools this session does not get (by name); everything else stays on."""
     preset: str | None = None
@@ -285,11 +285,10 @@ class NewSessionBody(BaseModel):
 
 
 class MoveSessionBody(BaseModel):
-    project_id: str | None = None
-    """The project to move the session into; ``null`` takes it out of every project."""
-    use_project_folder: bool = False
-    """Work in the project's own folder from now on. Left false, the session keeps the directory it
-    already has: its files stay where they are and are not shared with the rest of the project."""
+    project_id: str
+    """The project to move the session into."""
+    own_directory: bool = False
+    """Use a private child inside the destination project rather than its shared root."""
 
 
 class ToolsOffBody(BaseModel):
@@ -310,10 +309,6 @@ class MemoryPatch(BaseModel):
 
 class MemoryDeleteBody(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=500)
-
-
-class WorkspaceBody(BaseModel):
-    name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class ShareBody(BaseModel):
@@ -1136,28 +1131,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/projects")
     async def create_project(body: ProjectBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:
-            project = await manager.projects.create(body.name, body.root, settings=ProjectSettings(snapshots=body.snapshots))
+            project = await manager.projects.create(body.name, body.root, settings=ProjectSettings(snapshots=True if body.root is None else body.snapshots))
         except ProjectError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {**project.view(), "sessions": []}
-
-    async def _busy_in(project_id: str) -> list[dict[str, str]]:
-        """The agents of this project with a turn in flight.
-
-        Moving a root or forgetting a project re-points the workspace of every loaded session of it.
-        Doing that mid-turn means the agent's next tool call resolves into a different directory from
-        the one its earlier reads and its snapshot refer to, so it is refused while a run is up — the
-        same rule ``revert`` and ``fork`` already keep.
-        """
-        busy = manager.busy_sessions()
-        return [s for s in await manager.projects.sessions_of(project_id) if s["id"] in busy]
-
-    def _refuse_busy(project: Any, busy: list[dict[str, str]], what: str) -> None:
-        if not busy:
-            return
-        names = ", ".join(s["title"] or s["id"] for s in busy)
-        one = len(busy) == 1
-        raise HTTPException(409, f"{len(busy)} agent{'' if one else 's'} {'is' if one else 'are'} working in {project.name} right now ({names}); {what} would move the folder under {'it' if one else 'them'} mid-turn — stop {'it' if one else 'them'} first")
 
     @api.patch("/api/projects/{project_id}")
     async def patch_project(project_id: str, body: ProjectPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -1166,42 +1143,30 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such project")
         settings_patch = None if body.snapshots is None else ProjectSettings(snapshots=body.snapshots)
         try:
-            moving = body.root is not None and normalise_root(body.root) != current.root
+            project = await manager.projects.update(project_id, name=body.name, settings=settings_patch)
         except ProjectError as exc:
             raise HTTPException(400, str(exc)) from exc
-        if moving:
-            _refuse_busy(current, await _busy_in(project_id), "moving it")
-        try:
-            project = await manager.projects.update(project_id, name=body.name, root=body.root, settings=settings_patch)
-        except ProjectError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        # The sessions this process already holds keep their own copy of the project: without this, a
-        # folder moved in the app would reach only the sessions opened after the change.
+        # Loaded sessions keep their own immutable project value, so refresh their editable label
+        # and snapshot setting after the row changes.
         await manager.reload_project(project, project_id)
         return {**project.view(), "sessions": await manager.projects.sessions_of(project.id)}
 
     @api.delete("/api/projects/{project_id}")
-    async def delete_project(project_id: str, detach: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """Forget a project. Not one file of it is deleted — the folder is the operator's.
-
-        A project with sessions in it is refused unless ``detach=1`` says what should happen to them:
-        they keep their history and go back to a directory of their own, which is empty. Saying that
-        out loud is the point of the refusal.
-        """
+    async def delete_project(project_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Forget an empty project. Files are never deleted."""
         project = await manager.projects.get(project_id)
         if project is None:
             raise HTTPException(404, "no such project")
         sessions = await manager.projects.sessions_of(project_id)
-        _refuse_busy(project, await _busy_in(project_id), "removing it")
-        if sessions and not detach:
+        if sessions:
             one = len(sessions) == 1
-            raise HTTPException(409, f"{len(sessions)} agent{'' if one else 's'} {'works' if one else 'work'} in {project.name}; removing it leaves them without its files (pass detach=1 to do it anyway)")
+            raise HTTPException(409, f"{len(sessions)} agent{'' if one else 's'} {'works' if one else 'work'} in {project.name}; move or remove {'it' if one else 'them'} first")
         try:
             await manager.projects.delete(project_id)
         except ProjectError as exc:
             raise HTTPException(409, str(exc)) from exc
         await manager.reload_project(None, project_id)
-        return {"ok": True, "detached": [s["id"] for s in sessions]}
+        return {"ok": True}
 
     # -- sessions -------------------------------------------------------------------
 
@@ -1222,13 +1187,14 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         for row in rows:
             # The directory the session works in, for the tooltip on its row and the chip that says
             # it has one of its own. The list groups by project now, not by workspace.
-            workspace = Path(str(row["metadata"].get("workspace"))) if row["metadata"].get("workspace") else manager.workspace_for(row["id"])
+            project = next((p for p in projects if p.id == row["project_id"]), None)
+            workspace = manager.workspace_of(row["id"], row["metadata"], project)
             row["workspace"] = workspace.name
             row["workspace_path"] = str(workspace)
             """The whole path, for the tooltip on a row: a folder named by its last segment alone says
             nothing about which folder it is, and the list no longer groups by it."""
-            row["workspace_own"] = workspace == manager.workspace_for(row["id"]) or bool(row["metadata"].get("own_workspace"))
-            row["project"] = names.get(row.get("project_id") or "")
+            row["workspace_own"] = bool(row["metadata"].get("directory"))
+            row["project"] = names[row["project_id"]]
             overrides = overrides_by_id.get(row["id"], {})
             if overrides.get("preset") and overrides["preset"] in app.config.presets:
                 row["model"] = app.config.presets[overrides["preset"]].display(overrides["preset"])
@@ -1240,26 +1206,22 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         counts = await manager.projects.summary(active)
         empty = {"total": 0, "active": 0, "loops": 0, "last_message_at": ""}
         folders = [{**p.view(), **counts.get(p.id, empty)} for p in projects]
-        return {"sessions": rows, "projects": folders, "free": counts.get("", empty)}
+        return {"sessions": rows, "projects": folders}
 
     @api.post("/api/sessions")
     async def new_session(body: NewSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         metadata: dict[str, Any] = {"tools_off": sorted(set(body.tools_off))} if body.tools_off else {}
-        if body.project_id and body.workspace:
-            raise HTTPException(400, "a session works in a project or in a workspace directory, not both")
         if body.project_id:
             project = await manager.projects.get(body.project_id)
             if project is None:
                 raise HTTPException(404, "no such project")
             if not project.reachable:
                 raise HTTPException(409, f"the folder of {project.name} ({project.root}) is not reachable from here yet; mount it and restart before starting an agent in it")
-        if body.workspace:
-            directory = _workspace_dir(body.workspace)
-            if not directory.is_dir():
-                raise HTTPException(404, f"no workspace named {body.workspace!r}")
-            metadata["workspace"] = str(directory)
         try:
-            state = await app.create_session(body.title, metadata=metadata or None, project_id=body.project_id or None)
+            create_args: dict[str, Any] = {"metadata": metadata or None, "project_id": body.project_id or None}
+            if body.own_directory:
+                create_args["own_directory"] = True
+            state = await app.create_session(body.title, **create_args)
         except TelegramBusy as exc:
             raise HTTPException(429, f"Telegram asks to wait {exc.retry_after}s before creating another topic (session {exc.session_id} exists without a topic)") from exc
         except TelegramRefused as exc:
@@ -1311,6 +1273,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         state = await manager.get_state(session_id)
         if state is None:
             raise HTTPException(404, "no such session")
+        if state.project is None:
+            raise HTTPException(500, "session has no project")
         tail = max(1, min(tail, MAX_TRANSCRIPT_PAGE))
         messages = await manager.transcript_page(session_id, tail=tail, before=before)
         oldest, _newest = await manager.sessions.transcript_bounds(session_id)
@@ -1341,8 +1305,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "run_id": state.run_id,
             "workspace": str(state.workspace),
             "workspace_name": state.workspace.name,
-            "workspace_own": state.workspace == manager.workspace_for(session_id),
-            "project": state.project.view() if state.project is not None else None,
+            "workspace_own": bool(state.metadata.get("directory")),
+            "project": state.project.view(),
             # Subagents share their leader's workspace by design; they are listed under Subagents (and the leader under
             # "leader:"), so the workspace list shows only the sessions that were attached to it.
             "workspace_sessions": [u for u in await manager.workspace_users(state.workspace) if u["id"] != session_id and u["id"] not in {c["session_id"] for c in subagents} and u["id"] != state.metadata.get("subagent_of")],
@@ -2388,15 +2352,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such session")
         if session_id in manager.busy_sessions():
             raise HTTPException(409, f"{state.session.title or session_id} is working; moving it now would change the folder under it mid-turn — stop it first")
-        project = None
-        if body.project_id:
-            project = await manager.projects.get(body.project_id)
-            if project is None:
-                raise HTTPException(404, "no such project")
-            if body.use_project_folder and not project.reachable:
-                raise HTTPException(409, f"the folder of {project.name} ({project.root}) is not reachable from here yet; mount it and restart")
-        moved = await manager.attach_project(session_id, project, own_workspace=bool(project is not None and not body.use_project_folder))
-        return {"id": session_id, "project_id": project.id if project else None, "project": project.name if project else None, "workspace": str(moved.workspace)}
+        project = await manager.projects.get(body.project_id)
+        if project is None:
+            raise HTTPException(404, "no such project")
+        if not project.reachable:
+            raise HTTPException(409, f"the folder of {project.name} ({project.root}) is not reachable from here yet; mount it and restart")
+        moved = await manager.attach_project(session_id, project, own_directory=body.own_directory)
+        return {"id": session_id, "project_id": project.id, "project": project.name, "workspace": str(moved.workspace)}
 
     @api.get("/api/sessions/{session_id}/checkpoints")
     async def session_checkpoints(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2429,6 +2391,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 title,
                 metadata={"forked_from": {"session_id": session_id, "seq": body.seq}},
                 project_id=source.project.id if source.project is not None else None,
+                own_directory=bool(source.metadata.get("directory")),
             )
         except TelegramBusy as exc:
             raise HTTPException(429, str(exc)) from exc
@@ -3147,105 +3110,90 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             names.append(target.name)
         return names
 
-    # -- workspaces: directories sessions work in; several sessions may share one ----------
+    # -- project directory picker ---------------------------------------------------
 
-    def _workspace_dir(name: str) -> Path:
-        root = settings.workspaces_dir.resolve()
-        target = (root / name).resolve()
-        if target.parent != root or not name or name.startswith("."):
-            raise HTTPException(400, "a workspace is a directory right under the workspaces root")
-        return target
+    DIRECTORY_PICKER_MAX_ENTRIES = 250
+    DIRECTORY_PICKER_BUDGET_SECONDS = 0.25
 
-    def _dir_stats(path: Path) -> tuple[int, int, float]:
-        files = size = 0
-        newest = 0.0
-        try:
-            for f in path.rglob("*"):
-                if f.is_file():
-                    stat = f.stat()
-                    files += 1
-                    size += stat.st_size
-                    newest = max(newest, stat.st_mtime)
-        except OSError:
-            pass
-        return files, size, newest
-
-    @api.get("/api/workspaces")
-    async def list_workspaces(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
-        """Every workspace directory with the sessions that work in it; a directory nobody uses is a spare."""
-        root = settings.workspaces_dir
-        users: dict[str, list[dict[str, str]]] = {}
-        for row in await app.db.fetchall("SELECT id, title, metadata FROM sessions"):
+    def _picker_roots(project_roots: list[Path]) -> list[Path]:
+        candidates = [Path.home(), settings.workspaces_dir, settings.state_dir.parent, *project_roots]
+        roots: list[Path] = []
+        for candidate in candidates:
             try:
-                named = json.loads(row["metadata"] or "{}").get("workspace")
-            except (ValueError, AttributeError):
-                named = None
-            path = Path(str(named)) if named else manager.workspace_for(row["id"])
-            users.setdefault(str(path.resolve()), []).append({"id": row["id"], "title": row["title"]})
-        scheduled = {str(Path(r["workspace"]).resolve()): r["name"] for r in await app.db.fetchall("SELECT name, workspace FROM schedules") if r["workspace"]}
-        # A project's folder is not a workspace, even where it sits under the workspaces root: the
-        # Voice project's does, and listing it here would offer to delete the concierge's own folder.
-        project_roots = {str(p.root.resolve()) for p in await manager.projects.list()}
-        out = []
-        if root.is_dir():
-            for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
-                if not entry.is_dir() or entry.name.startswith(".") or str(entry.resolve()) in project_roots:
+                real = candidate.resolve()
+            except OSError:
+                continue
+            if real in roots or sealed_root(str(real), [str(p) for p in manager.protected_paths()]) is not None:
+                continue
+            if real.is_dir() and os.access(real, os.R_OK):
+                roots.append(real)
+        return roots
+
+    def _picker_path(raw_root: str, raw_path: str, offered: list[Path]) -> tuple[Path, Path]:
+        if ".." in Path(raw_path).parts:
+            raise HTTPException(400, "parent traversal is not allowed")
+        root = Path(raw_root).expanduser().resolve() if raw_root else (offered[0] if offered else None)
+        if root is None or root not in offered:
+            raise HTTPException(403, "that browser root is not offered")
+        candidate = Path(raw_path).expanduser()
+        target = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+        if target != root and root not in target.parents:
+            raise HTTPException(403, "that directory escapes the browser root")
+        if sealed_root(str(target), [str(p) for p in manager.protected_paths()]) is not None:
+            raise HTTPException(403, "that directory belongs to the installation")
+        if not target.is_dir():
+            raise HTTPException(404, "no such directory")
+        return root, target
+
+    @api.get("/api/project-directories")
+    async def project_directories(root: str = "", path: str = "", _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """List one safe, bounded directory level for the project folder picker."""
+        known_projects = await manager.projects.list()
+        offered = _picker_roots([project.root for project in known_projects if project.reachable])
+        project_ids = {str(project.root.resolve()): project.id for project in known_projects if project.root.exists()}
+        if not root and not path:
+            return {
+                "roots": [{"name": p.name or str(p), "path": str(p), "readable": True, "writable": os.access(p, os.W_OK), "project_id": project_ids.get(str(p))} for p in offered],
+                "docker": not settings.native,
+            }
+        anchor, target = _picker_path(root, path, offered)
+        entries: list[dict[str, Any]] = []
+        truncated = False
+        deadline = time.monotonic() + DIRECTORY_PICKER_BUDGET_SECONDS
+        children = []
+        try:
+            with os.scandir(target) as scanner:
+                for child in scanner:
+                    if len(children) >= DIRECTORY_PICKER_MAX_ENTRIES or time.monotonic() >= deadline:
+                        truncated = True
+                        break
+                    children.append(child)
+        except OSError as exc:
+            raise HTTPException(403, f"that directory cannot be read: {exc.strerror or 'permission denied'}") from exc
+        for child in sorted(children, key=lambda entry: entry.name.lower()):
+            try:
+                if child.is_symlink() or not child.is_dir(follow_symlinks=False):
                     continue
-                files, size, newest = await asyncio.to_thread(_dir_stats, entry)
-                sessions = users.get(str(entry.resolve()), [])
-                schedule = scheduled.get(str(entry.resolve()))
-                kind = "schedule" if schedule else "heartbeat" if entry.name == "heartbeat" else "session" if any(u["id"] == entry.name for u in sessions) else "named"
-                out.append({"name": entry.name, "path": str(entry), "sessions": sessions, "files": files, "size": size, "mtime": newest or entry.stat().st_mtime, "own_session": kind == "session", "kind": kind, "schedule": schedule})
-        out.sort(key=lambda w: (-len(w["sessions"]), -(w["mtime"] or 0)))
-        return out
-
-    @api.post("/api/workspaces")
-    async def create_workspace(body: WorkspaceBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        directory = _workspace_dir(body.name)
-        if directory.exists():
-            raise HTTPException(409, f"a workspace named {body.name!r} exists")
-        (directory / "inbox").mkdir(parents=True)
-        return {"name": directory.name, "path": str(directory)}
-
-    @api.delete("/api/workspaces/{name}")
-    async def delete_workspace(name: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        directory = _workspace_dir(name)
-        if not directory.is_dir():
-            raise HTTPException(404, "no such workspace")
-        users = await manager.workspace_users(directory)
-        if users:
-            raise HTTPException(409, f"{len(users)} session(s) work in it: {', '.join(u['title'] for u in users)[:200]}")
-        for row in await app.db.fetchall("SELECT name, workspace FROM schedules"):
-            if row["workspace"] and Path(row["workspace"]).resolve() == directory:
-                raise HTTPException(409, f"the scheduled task {row['name']!r} runs in it")
-        if directory.name == "heartbeat":
-            raise HTTPException(409, "the heartbeat runs in it")
-        await asyncio.to_thread(shutil.rmtree, directory, True)
-        return {"deleted": True}
-
-    @api.get("/api/workspaces/{name}/files")
-    async def workspace_files(name: str, path: str = "", _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        directory = _workspace_dir(name)
-        if not directory.is_dir():
-            raise HTTPException(404, "no such workspace")
-        return _read_path(directory, path)
-
-    @api.get("/api/workspaces/{name}/download")
-    async def workspace_download(name: str, path: str, _: dict[str, Any] = Depends(auth)) -> FileResponse:
-        directory = _workspace_dir(name)
-        if not directory.is_dir():
-            raise HTTPException(404, "no such workspace")
-        return _file_response(directory, path)
-
-    @api.post("/api/workspaces/{name}/upload")
-    async def workspace_upload(name: str, path: str = Form(""), files: list[UploadFile] = File(default=[]), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """Put files into a workspace (under ``path`` when given) without sending anything to an agent."""
-        directory = _workspace_dir(name)
-        if not directory.is_dir():
-            raise HTTPException(404, "no such workspace")
-        if not files:
-            raise HTTPException(400, "no files")
-        return {"files": await _store_uploads(directory, files, path)}
+                real = Path(child.path).resolve()
+                if anchor not in real.parents or sealed_root(str(real), [str(p) for p in manager.protected_paths()]) is not None:
+                    continue
+                entries.append({
+                    "name": child.name,
+                    "path": str(real),
+                    "readable": os.access(real, os.R_OK),
+                    "writable": os.access(real, os.W_OK),
+                    "project_id": project_ids.get(str(real)),
+                })
+            except OSError:
+                entries.append({"name": child.name, "path": str(target / child.name), "readable": False, "writable": False, "project_id": None})
+        parents = []
+        current = target
+        while True:
+            parents.append({"name": current.name or str(current), "path": str(current)})
+            if current == anchor:
+                break
+            current = current.parent
+        return {"root": str(anchor), "path": str(target), "parents": list(reversed(parents)), "entries": entries, "truncated": truncated}
 
     @api.post("/api/sessions/{session_id}/files/upload")
     async def session_files_upload(session_id: str, path: str = Form(""), files: list[UploadFile] = File(default=[]), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

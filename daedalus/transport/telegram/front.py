@@ -49,21 +49,21 @@ from daedalus.transport.telegram.voice import TranscriptionError, voice_note_tex
 logger = logging.getLogger(__name__)
 
 HELP_TOPICS = """<b>Daedalus</b>
-Each forum topic is one agent session with its own workspace. Write in a topic to talk to that session; files you send land in its workspace.
+Each forum topic is one agent session in a project. Write in a topic to talk to that session; files you send land in its working directory.
 
 /bind — (in a supergroup with topics) make it the session hub
 /new &lt;title&gt; — new session (new topic)
-/stop — stop the current run · /close — close this topic (asks whether to delete the agent and its workspace)
+/stop — stop the current run · /close — close this topic (asks whether to delete the agent)
 /sessions · /status — what exists, what is running
 """
 
 HELP_PRIVATE = """<b>Daedalus</b>
-Every session lives in this chat, which is a window onto one of them at a time. Write here and the current session hears you; files you send land in its workspace. When another session speaks — a scheduled report, a loop agent, a question — its name is the line above its words, and an answer goes back to it.
+Every session lives in this chat, which is a window onto one of them at a time. Write here and the current session hears you; files you send land in its project directory. When another session speaks — a scheduled report, a loop agent, a question — its name is the line above its words, and an answer goes back to it.
 
 /sessions · /status — the sessions, numbered; what is running
 /use &lt;n|title&gt; — write to that session from now on
 /new &lt;title&gt; — new session, and write to it
-/stop — stop the current run · /close — put the current session away (asks whether to delete the agent and its workspace)
+/stop — stop the current run · /close — put the current session away (asks whether to delete the agent)
 /bind — (in a supergroup with topics) give every session a topic of its own instead
 """
 
@@ -608,14 +608,14 @@ class TelegramFront:
         await self._release_current(session_id)
 
     async def create_session_topic(
-        self, title: str, *, metadata: dict[str, Any] | None = None, chat_id: int | None = None, topic: bool = True, project_id: str | None = None, own_workspace: bool = False
+        self, title: str, *, metadata: dict[str, Any] | None = None, chat_id: int | None = None, topic: bool = True, project_id: str | None = None, own_directory: bool = False
     ) -> tuple[SessionState, TopicBinding]:
         """Create a session and, in topics mode, its topic.
 
         In private mode there is no topic and nothing to bind: the session is reachable from
         /sessions, /use and the Mini App, and speaks in the private chat under its own name.
         """
-        state = await self.manager.create_session(title, metadata=metadata, project_id=project_id, own_workspace=own_workspace)
+        state = await self.manager.create_session(title, metadata=metadata, project_id=project_id, own_directory=own_directory)
         if self.private_mode():
             return state, TopicBinding(self.settings.owner_user_id, 0, state.session.id, title)
         forum = (chat_id or self.config.telegram.forum_chat_id) if topic else 0
@@ -626,7 +626,7 @@ class TelegramFront:
             await tg_call(
                 self.bot.send_message,
                 forum,
-                f"Session {state.session.id} — {title}\nworkspace: {state.workspace}",
+                f"Session {state.session.id} — {title}\nproject directory: {state.workspace}",
                 message_thread_id=binding.thread_id,
                 flood_chat=forum,
             )
@@ -905,7 +905,7 @@ class TelegramFront:
         )
         await message.answer(
             "Compact the history? The agent keeps only a model-written summary; the full transcript is saved "
-            "in the workspace as .history-<time>.jsonl." + (f"\nFocus: {focus}" if focus else ""),
+            "in the project files as .history-<time>.jsonl." + (f"\nFocus: {focus}" if focus else ""),
             reply_markup=keyboard,
         )
 
@@ -922,11 +922,11 @@ class TelegramFront:
             return
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text=f"🧹 Drop {count} messages, keep the workspace", callback_data=f"hc:{state.session.id}:go")],
+                [InlineKeyboardButton(text=f"🧹 Drop {count} messages, keep project files", callback_data=f"hc:{state.session.id}:go")],
                 [InlineKeyboardButton(text="Cancel", callback_data=f"hc:{state.session.id}:cancel")],
             ]
         )
-        await message.answer("Start over with an empty history? The workspace, the brief and the session's settings stay; the transcript keeps the old turns.", reply_markup=keyboard)
+        await message.answer("Start over with an empty history? The project files, the brief and the session's settings stay; the transcript keeps the old turns.", reply_markup=keyboard)
 
     async def _on_clear_decision(self, query: CallbackQuery, data: list[str]) -> None:
         if len(data) != 3:
@@ -947,7 +947,7 @@ class TelegramFront:
             return
         await query.answer("cleared")
         if query.message is not None:
-            await query.message.edit_text(f"🧹 History cleared: {result['dropped']} message(s) dropped. The workspace and the settings stay.", reply_markup=None)
+            await query.message.edit_text(f"🧹 History cleared: {result['dropped']} message(s) dropped. The project files and settings stay.", reply_markup=None)
 
     async def _on_compact_decision(self, query: CallbackQuery, data: list[str]) -> None:
         if len(data) != 3:
@@ -997,7 +997,7 @@ class TelegramFront:
         keep = "📦 Put it away, keep the agent" if self.private_mode() else "📦 Close the topic, keep the agent"
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="🗑 Close and delete the agent + workspace", callback_data=f"cl:{session_id}:delete")],
+                [InlineKeyboardButton(text="🗑 Close and delete the agent", callback_data=f"cl:{session_id}:delete")],
                 [InlineKeyboardButton(text=keep, callback_data=f"cl:{session_id}:keep")],
                 [InlineKeyboardButton(text="Cancel", callback_data=f"cl:{session_id}:cancel")],
             ]
@@ -1005,7 +1005,7 @@ class TelegramFront:
         await tg_call(
             self.bot.send_message,
             chat_id,
-            f"Close session '{title}' ({session_id})? Its workspace holds {size / 1_048_576:.1f} MB.",
+            f"Close session '{title}' ({session_id})? Its working directory holds {size / 1_048_576:.1f} MB; shared project files are kept.",
             message_thread_id=thread_id,
             reply_markup=keyboard,
         )
@@ -1068,7 +1068,7 @@ class TelegramFront:
             if query.message is not None:
                 where = "/sessions, /use, Mini App" if self.private_mode() else "/sessions, Mini App"
                 what = "Put away" if self.private_mode() else "Topic closed"
-                await query.message.edit_text(f"{what}; session {session_id} and its workspace are kept ({where}).", reply_markup=None)
+                await query.message.edit_text(f"{what}; session {session_id} and its project files are kept ({where}).", reply_markup=None)
             return
         if binding is not None:
             await self._close_topic(binding)
@@ -1076,7 +1076,7 @@ class TelegramFront:
         removed = await self.manager.delete_session(session_id, delete_workspace=True)
         await query.answer("deleted" if removed else "already gone")
         if query.message is not None:
-            await query.message.edit_text(f"Session {session_id} deleted with its workspace.", reply_markup=None)
+            await query.message.edit_text(f"Session {session_id} deleted. Shared project files were kept.", reply_markup=None)
         if binding is not None and binding.thread_id:
             try:
                 await self.bot.delete_forum_topic(binding.chat_id, binding.thread_id)
@@ -1118,7 +1118,7 @@ class TelegramFront:
         orphans = await self.manager.closed_topic_sessions()
         swept = await self.manager.sweep_orphan_workspaces()
         if not orphans:
-            await message.answer("No sessions with closed topics." + (f" Removed {len(swept)} orphan workspace folder(s)." if swept else ""))
+            await message.answer("No sessions with closed topics." + (f" Removed {len(swept)} unused managed folder(s)." if swept else ""))
             return
         total = sum(o["bytes"] for o in orphans) / 1_048_576
         lines = [f"• {o['title']} ({o['session_id']}) {o['bytes'] / 1_048_576:.1f} MB" for o in orphans[:30]]
@@ -1147,7 +1147,7 @@ class TelegramFront:
                     pass
         await query.answer(f"deleted {removed}")
         if query.message is not None:
-            await query.message.edit_text(f"Deleted {removed} session(s) with their workspaces.", reply_markup=None)
+            await query.message.edit_text(f"Deleted {removed} session(s). Shared project files were kept.", reply_markup=None)
 
     async def cmd_sessions(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):

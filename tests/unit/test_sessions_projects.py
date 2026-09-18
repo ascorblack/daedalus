@@ -2,8 +2,8 @@
 
 Three things are pinned here. The Voice project — the installation's own folder, made the first
 time the concierge needs one, owning the voice session and the agents it delegates, and refusing to
-be moved or removed. The listing the Agents screen is built on: a page of rows, the folders beside
-them with counts that are not limited to the page, and a free bucket for everything with no project.
+be removed. The listing the Agents screen is built on: a page of rows and project folders beside
+them with counts that are not limited to the page. Every session belongs to one of those projects.
 And the two decisions ``Delegate`` gained: which folder a new agent works in, and whose project it
 belongs to — with the refusals that keep a hallucinated project id from becoming an agent somewhere
 the operator never asked for.
@@ -38,8 +38,8 @@ HEADERS = {"X-Daedalus-Token": "tok"}
 
 
 def _app(settings: Settings, config: RuntimeConfig, db: Database, manager: SessionManager) -> Any:
-    async def create_session(title: str, *, metadata: dict[str, Any] | None = None, project_id: str | None = None, workspace: Path | None = None, own_workspace: bool = False) -> Any:
-        return await manager.create_session(title, metadata=metadata, project_id=project_id, workspace=workspace, own_workspace=own_workspace)
+    async def create_session(title: str, *, metadata: dict[str, Any] | None = None, project_id: str | None = None, workspace: Path | None = None, own_directory: bool = False) -> Any:
+        return await manager.create_session(title, metadata=metadata, project_id=project_id, workspace=workspace, own_directory=own_directory)
 
     return SimpleNamespace(settings=settings, config=config, db=db, manager=manager, front=None, extensions={}, guard=None, create_session=create_session)
 
@@ -64,8 +64,6 @@ async def test_a_system_project_is_made_once_and_refuses_to_be_moved_or_removed(
     assert (await store.ensure_system(PROJECT_KIND, name="Voice", root=root)).id == made.id
     assert len(await store.list()) == 1
     assert (await store.system(PROJECT_KIND)).id == made.id
-    with pytest.raises(ProjectError, match="cannot be moved"):
-        await store.update(made.id, root=str(tmp_path / "elsewhere"))
     with pytest.raises(ProjectError, match="cannot be removed"):
         await store.delete(made.id)
     # What the operator may still change: its name, and whether it snapshots.
@@ -97,8 +95,8 @@ async def test_the_duplicate_system_projects_an_installation_already_has_are_mer
     """The repair for an installation that ran the racing code: one folder, and nobody's agents lost."""
     path = tmp_path / "old.sqlite"
     raw = sqlite3.connect(path)
-    raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version(version) VALUES (?);".replace("?", str(len(MIGRATIONS) - 1)))
-    for script in MIGRATIONS[: len(MIGRATIONS) - 1]:
+    raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version(version) VALUES (?);".replace("?", str(len(MIGRATIONS) - 2)))
+    for script in MIGRATIONS[: len(MIGRATIONS) - 2]:
         raw.executescript(script)
     for n, name in enumerate(("Voice", "Voice", "Voice")):
         raw.execute(
@@ -135,8 +133,8 @@ async def test_unreadable_project_settings_do_not_prevent_migration(tmp_path: Pa
     path = tmp_path / "old.sqlite"
     with sqlite3.connect(path) as raw:
         raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL);")
-        raw.execute("INSERT INTO schema_version VALUES (?)", (len(MIGRATIONS) - 1,))
-        for script in MIGRATIONS[:-1]:
+        raw.execute("INSERT INTO schema_version VALUES (?)", (len(MIGRATIONS) - 2,))
+        for script in MIGRATIONS[:-2]:
             raw.executescript(script)
         raw.execute(
             "INSERT INTO projects(id, name, root, created_at, settings) VALUES ('p', 'Bakery', ?, '', ?)",
@@ -175,29 +173,25 @@ async def test_the_counts_beside_the_folders_are_of_the_table_and_not_of_a_page(
     project = await store.create("Bakery", str(root))
     loop = '{"loop": {"status": "active"}}'
     for n in range(3):
-        await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata) VALUES (?, 't', ?, '', ?, ?)", (f"p{n}", f"in it {n}", f"2026-09-0{n + 1}", loop if n == 0 else "{}"))
-        await store.attach(f"p{n}", project.id)
-    await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata) VALUES ('free1', 't', 'alone', '', '2026-09-09', '{}')")
+        await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata, project_id) VALUES (?, 't', ?, '', ?, ?, ?)", (f"p{n}", f"in it {n}", f"2026-09-0{n + 1}", loop if n == 0 else "{}", project.id))
 
     counts = await store.summary(active={"p1"})
     assert counts[project.id] == {"total": 3, "active": 1, "loops": 1, "last_message_at": "2026-09-03"}
-    assert counts[""] == {"total": 1, "active": 0, "loops": 0, "last_message_at": "2026-09-09"}
+    assert "" not in counts
 
     # A subagent and a fork are drawn inside the row they belong to, so the header over the folder
     # must not count them: it used to say "3 agents" over a list of two.
     for sid, metadata in (("p3", '{"subagent_of": "p0"}'), ("p4", '{"forked_from": {"session_id": "p0"}}')):
-        await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata) VALUES (?, 't', ?, '', '2026-09-04', ?)", (sid, sid, metadata))
-        await store.attach(sid, project.id)
+        await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata, project_id) VALUES (?, 't', ?, '', '2026-09-04', ?, ?)", (sid, sid, metadata, project.id))
     # …and one whose leader is gone hangs under nothing, so it is counted, which is what the screen does.
-    await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata) VALUES ('p5', 't', 'orphan', '', '2026-09-05', '{\"subagent_of\": \"vanished\"}')")
-    await store.attach("p5", project.id)
+    await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata, project_id) VALUES ('p5', 't', 'orphan', '', '2026-09-05', '{\"subagent_of\": \"vanished\"}', ?)", (project.id,))
     assert (await store.summary())[project.id]["total"] == 4
 
 
 # -- the listing the screen is built on ------------------------------------------------------
 
 
-async def test_the_listing_answers_the_rows_the_folders_and_the_free_bucket(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+async def test_the_listing_answers_rows_and_project_folders(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
     manager = SessionManager(settings, config, db=db)
     await manager.start()
     app = _app(settings, config, db, manager)
@@ -208,23 +202,20 @@ async def test_the_listing_answers_the_rows_the_folders_and_the_free_bucket(sett
         async with _client(app) as client:
             project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "root": str(root)})).json()
             await client.post("/api/sessions", headers=HEADERS, json={"title": "Menu", "project_id": project["id"]})
-            free = (await client.post("/api/sessions", headers=HEADERS, json={"title": "Alone"})).json()["id"]
+            automatic = (await client.post("/api/sessions", headers=HEADERS, json={"title": "Alone"})).json()["id"]
             # The Voice project does not exist until something needs it.
-            assert [p["system"] for p in (await client.get("/api/sessions", headers=HEADERS)).json()["projects"]] == [""]
+            assert [p["system"] for p in (await client.get("/api/sessions", headers=HEADERS)).json()["projects"]] == ["", ""]
 
             voice_id = await voice.session_id()
             listing = (await client.get("/api/sessions", headers=HEADERS)).json()
             folders = {p["name"]: p for p in listing["projects"]}
             assert folders["Voice"]["system"] == PROJECT_KIND and folders["Voice"]["total"] == 1
             assert folders["Bakery"]["total"] == 1 and folders["Bakery"]["system"] == ""
-            assert listing["free"]["total"] == 1
+            assert "free" not in listing
             rows = {r["id"]: r for r in listing["sessions"]}
             assert rows[voice_id]["project_id"] == folders["Voice"]["id"]
-            assert rows[free]["project_id"] is None and rows[free]["workspace_own"] is True
-            # The whole path is in the row, because the list no longer groups by the folder's name.
-            assert rows[free]["workspace_path"] == str(manager.workspace_for(free))
-            # And the concierge's own folder is not offered as a workspace to attach an agent to.
-            assert PROJECT_DIR not in {w["name"] for w in (await client.get("/api/workspaces", headers=HEADERS)).json()}
+            assert rows[automatic]["project_id"] and rows[automatic]["workspace_own"] is False
+            assert (await client.get("/api/workspaces", headers=HEADERS)).status_code == 404
     finally:
         await manager.close()
 
@@ -239,44 +230,32 @@ async def test_a_session_moves_between_projects_without_a_file_moving(settings: 
         async with _client(app) as client:
             project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "root": str(root)})).json()
             sid = (await client.post("/api/sessions", headers=HEADERS, json={"title": "Alone"})).json()["id"]
-            own = manager.workspace_for(sid)
+            original = manager.live_state(sid)
+            assert original is not None
+            own = original.workspace
             (own / "notes.md").write_text("mine", encoding="utf-8")
 
-            # Into the project, keeping its own directory: listed there, sharing none of its files.
+            # Into the project root by default. The old project's files stay where they were.
             moved = (await client.post(f"/api/sessions/{sid}/project", headers=HEADERS, json={"project_id": project["id"]})).json()
-            assert moved["project"] == "Bakery" and moved["workspace"] == str(own)
+            assert moved["project"] == "Bakery" and moved["workspace"] == str(root)
             state = manager.live_state(sid)
-            assert state is not None and state.project is not None and state.workspace == own
-            assert state.services is not None and state.services.project_root == own
+            assert state is not None and state.project is not None and state.workspace == root
+            assert state.services is not None and state.services.project_root == root
             assert (own / "notes.md").read_text(encoding="utf-8") == "mine"
 
-            # And then into the project's own folder, which is where the rest of it works.
-            shared = (await client.post(f"/api/sessions/{sid}/project", headers=HEADERS, json={"project_id": project["id"], "use_project_folder": True})).json()
-            assert shared["workspace"] == str(root)
-            assert manager.live_state(sid).workspace == root  # type: ignore[union-attr]
+            private = (await client.post(f"/api/sessions/{sid}/project", headers=HEADERS, json={"project_id": project["id"], "own_directory": True})).json()
+            assert Path(private["workspace"]).parent.parent == root
+            assert manager.live_state(sid).workspace == Path(private["workspace"])  # type: ignore[union-attr]
             assert (own / "notes.md").exists(), "moving a session must not move its files"
 
-            # Out again: still the folder it was working in a moment ago, because nothing on disk
-            # moved. Sending it back to the directory it had before the project would leave
-            # everything it wrote in the project's folder behind, unreachable to it.
-            out = (await client.post(f"/api/sessions/{sid}/project", headers=HEADERS, json={"project_id": None})).json()
-            assert out["project_id"] is None and out["workspace"] == str(root)
-            assert manager.live_state(sid).services.project_root is None  # type: ignore[union-attr]
-            assert (await client.get("/api/sessions", headers=HEADERS)).json()["free"]["total"] == 1
+            assert (await client.post(f"/api/sessions/{sid}/project", headers=HEADERS, json={"project_id": None})).status_code == 422
 
             assert (await client.post(f"/api/sessions/{sid}/project", headers=HEADERS, json={"project_id": "nope"})).status_code == 404
     finally:
         await manager.close()
 
 
-async def test_keeping_its_own_directory_keeps_the_one_it_is_working_in(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
-    """A move with the folder checkbox off must not strand what the agent has written.
-
-    The sheet says "its files stay where they are". They only do if the move re-points the project
-    and nothing else: a session that had taken a project's folder has no directory of its own left
-    in its metadata, so falling back to the default handed it a fresh empty one and left its work in
-    a folder it could no longer reach.
-    """
+async def test_moving_to_an_own_directory_places_it_inside_the_destination(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
     manager = SessionManager(settings, config, db=db)
     await manager.start()
     app = _app(settings, config, db, manager)
@@ -292,13 +271,13 @@ async def test_keeping_its_own_directory_keeps_the_one_it_is_working_in(settings
             assert manager.live_state(sid).workspace == bakery  # type: ignore[union-attr]
             (bakery / "note.txt").write_text("the recipe", encoding="utf-8")
 
-            moved = (await client.post(f"/api/sessions/{sid}/project", headers=HEADERS, json={"project_id": second["id"], "use_project_folder": False})).json()
+            moved = (await client.post(f"/api/sessions/{sid}/project", headers=HEADERS, json={"project_id": second["id"], "own_directory": True})).json()
             assert moved["project"] == "Garage"
-            assert moved["workspace"] == str(bakery), "the same folder, not a fresh empty one"
+            assert Path(moved["workspace"]).parent.parent == garage
             state = manager.live_state(sid)
-            assert state is not None and state.workspace == bakery
-            assert (state.workspace / "note.txt").read_text(encoding="utf-8") == "the recipe"
-            assert state.services is not None and state.services.project_root == bakery, "walled at the folder it works in"
+            assert state is not None and state.workspace == Path(moved["workspace"])
+            assert (bakery / "note.txt").read_text(encoding="utf-8") == "the recipe"
+            assert state.services is not None and state.services.project_root == state.workspace
     finally:
         await manager.close()
 
@@ -343,18 +322,15 @@ async def test_a_delegated_agent_shares_the_concierges_folder_unless_it_asks_for
         assert result["workspace"] == "shared" and result["project"] == "Voice"
         assert manager.live_state(result["session_id"]).workspace == project.root  # type: ignore[union-attr]
     # Two agents on one errand see the same files; a third one sees none of them.
-    assert manager.live_state(mine["session_id"]).workspace == manager.workspace_for(mine["session_id"])  # type: ignore[union-attr]
+    assert manager.live_state(mine["session_id"]).workspace.parent.parent == project.root  # type: ignore[union-attr]
     assert mine["workspace"] == "own"
     own_state = manager.live_state(mine["session_id"])
     assert own_state is not None and own_state.project is not None and own_state.project.id == project.id
     # Listed under Voice, and walled at its own directory rather than at the shared one.
     assert own_state.services is not None and own_state.services.project_root == own_state.workspace
-    # The wall holds both ways. Nested inside the shared folder it did not: a shared agent is walled
-    # at the folder that *contains* every private directory, so it could read all of them.
+    # Both choices are contained: the shared agent by the project, the private one by its child.
     shared_state = manager.live_state(shared["session_id"])
-    assert shared_state is not None and shared_state.workspace not in own_state.workspace.parents
-    assert own_state.workspace not in shared_state.workspace.parents
-    assert not shared_state.services.contains(own_state.workspace / "private.txt")  # type: ignore[union-attr]
+    assert shared_state is not None and shared_state.workspace in own_state.workspace.parents
     assert not own_state.services.contains(shared_state.workspace / "shared.txt")
     assert {s["id"] for s in await manager.projects.sessions_of(project.id)} >= {shared["session_id"], mine["session_id"]}
 
@@ -402,7 +378,7 @@ async def test_a_voice_session_from_before_the_project_existed_is_taken_into_it(
     voice = Voice(voice_app)
     legacy = await manager.create_session("Voice", metadata={"voice": True})
     await voice_app.db.kv_set("voice_session", legacy.session.id)
-    assert legacy.project is None
+    assert legacy.project is not None and not legacy.project.settings.system
 
     assert await voice.session_id() == legacy.session.id
     state = manager.live_state(legacy.session.id)

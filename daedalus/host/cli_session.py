@@ -57,7 +57,7 @@ class TerminalRenderer:
 async def run_terminal_session(
     settings: Settings, config: RuntimeConfig, *, prompt: str | None, title: str
 ) -> int:
-    db = Database(settings.db_path)
+    db = Database(settings.db_path, workspaces_dir=settings.workspaces_dir)
     await db.open()
     try:
         return await _run(db, settings, config, prompt=prompt, title=title)

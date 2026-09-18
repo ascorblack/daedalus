@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -523,6 +524,97 @@ MIGRATIONS: list[str] = [
 ]
 
 
+def _project_unification(workspaces_dir: Path) -> str:
+    """Build the migration that turns every existing working directory into a project."""
+    base = str(Path(os.path.normpath(workspaces_dir.expanduser()))).replace("'", "''")
+    return f"""
+    INSERT INTO projects(id, name, root, created_at, settings, system)
+    SELECT 'project-' || substr(min(id), 1, 12), 'Voice',
+           (SELECT CASE
+              WHEN json_valid(v.metadata) AND json_type(v.metadata, '$.workspace') = 'text'
+                AND trim(json_extract(v.metadata, '$.workspace')) != ''
+              THEN rtrim(json_extract(v.metadata, '$.workspace'), '/')
+              ELSE '{base}/' || v.id
+            END
+            FROM sessions v
+            WHERE v.project_id IS NULL AND json_valid(v.metadata) AND json_extract(v.metadata, '$.voice') = 1
+            ORDER BY v.created_at, v.id LIMIT 1),
+           min(created_at),
+           '{{"snapshots":false,"system":"voice"}}', 'voice'
+    FROM sessions
+    WHERE project_id IS NULL AND json_valid(metadata) AND json_extract(metadata, '$.voice') = 1
+    HAVING count(*) > 0 AND NOT EXISTS (SELECT 1 FROM projects WHERE system = 'voice');
+    UPDATE sessions SET project_id = (SELECT id FROM projects WHERE system = 'voice')
+    WHERE project_id IS NULL AND json_valid(metadata) AND json_extract(metadata, '$.voice') = 1;
+
+    CREATE TEMP TABLE session_directories AS
+    SELECT s.id,
+           CASE
+             WHEN json_valid(s.metadata) AND json_type(s.metadata, '$.workspace') = 'text'
+               AND trim(json_extract(s.metadata, '$.workspace')) != ''
+             THEN rtrim(json_extract(s.metadata, '$.workspace'), '/')
+             ELSE '{base}/' || s.id
+           END AS directory
+    FROM sessions s
+    WHERE s.project_id IS NULL;
+
+    CREATE TEMP TABLE session_project_roots AS
+    SELECT d.id, d.directory,
+           COALESCE(
+             (SELECT p.root FROM projects p
+              WHERE d.directory = p.root OR d.directory LIKE replace(replace(p.root, '%', '\\%'), '_', '\\_') || '/%' ESCAPE '\\'
+              ORDER BY length(p.root), p.root LIMIT 1),
+             (SELECT p.directory FROM session_directories p
+              WHERE d.directory = p.directory OR d.directory LIKE replace(replace(p.directory, '%', '\\%'), '_', '\\_') || '/%' ESCAPE '\\'
+              ORDER BY length(p.directory), p.directory LIMIT 1),
+             d.directory
+           ) AS root
+    FROM session_directories d;
+
+    INSERT INTO projects(id, name, root, created_at, settings, system)
+    SELECT 'project-' || substr(min(s.id), 1, 12),
+           COALESCE(NULLIF(trim((SELECT s2.title FROM sessions s2 JOIN session_project_roots r2 ON r2.id = s2.id
+                                WHERE r2.root = r.root ORDER BY s2.created_at, s2.id LIMIT 1)), ''), 'Project'),
+           r.root, min(s.created_at), '{{"snapshots":true,"system":""}}', ''
+    FROM session_project_roots r JOIN sessions s ON s.id = r.id
+    WHERE NOT EXISTS (SELECT 1 FROM projects p WHERE p.root = r.root)
+    GROUP BY r.root;
+
+    UPDATE sessions
+    SET project_id = (SELECT p.id FROM session_project_roots r JOIN projects p ON p.root = r.root WHERE r.id = sessions.id),
+        metadata = CASE
+          WHEN (SELECT directory FROM session_project_roots WHERE id = sessions.id) =
+               (SELECT root FROM session_project_roots WHERE id = sessions.id)
+          THEN json_remove(metadata, '$.workspace', '$.own_workspace')
+          ELSE json_set(json_remove(metadata, '$.workspace', '$.own_workspace'), '$.directory',
+               substr((SELECT directory FROM session_project_roots WHERE id = sessions.id),
+                      length((SELECT root FROM session_project_roots WHERE id = sessions.id)) + 2))
+        END
+    WHERE project_id IS NULL;
+
+    DROP TABLE session_project_roots;
+    DROP TABLE session_directories;
+
+    CREATE TABLE sessions_unified (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        last_message_at TEXT NOT NULL,
+        metadata TEXT NOT NULL DEFAULT '{{}}',
+        project_id TEXT NOT NULL REFERENCES projects(id)
+    );
+    INSERT INTO sessions_unified SELECT id, tenant_id, title, created_at, last_message_at, metadata, project_id FROM sessions;
+    DROP TABLE sessions;
+    ALTER TABLE sessions_unified RENAME TO sessions;
+    CREATE INDEX sessions_by_project ON sessions(project_id);
+    CREATE UNIQUE INDEX projects_root ON projects(root);
+    """
+
+
+MIGRATIONS.append("-- generated from the configured project directory")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""
@@ -537,8 +629,9 @@ large freelist is spread over passes rather than holding the lock for all of it 
 class Database:
     """A single shared aiosqlite connection guarded by a lock."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, workspaces_dir: Path | None = None) -> None:
         self.path = path
+        self.workspaces_dir = workspaces_dir or path.parent / "workspaces"
         self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
         self._warned_about_freelist = False
@@ -629,18 +722,21 @@ class Database:
         await self.conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
         row = await (await self.conn.execute("SELECT version FROM schema_version")).fetchone()
         current = int(row["version"]) if row else 0
-        if current > len(MIGRATIONS):
+        known_schema = len(MIGRATIONS)
+        if current > known_schema:
             # A database written by a newer build. Opening it anyway works and fails later, at the
             # first write that touches a table the old code remembers differently — which is inside
             # the transaction that appends a message, so the bot runs, answers, and quietly stops
             # keeping any transcript at all.
             raise RuntimeError(
-                f"the database is at schema {current} and this build knows {len(MIGRATIONS)}: it was written by a newer version of Daedalus. "
+                f"the database is at schema {current} and this build knows {known_schema}: it was written by a newer version of Daedalus. "
                 "Run the newer version, or restore the database from before the downgrade."
             )
         for index, script in enumerate(MIGRATIONS, start=1):
             if index <= current:
                 continue
+            if index == 29:
+                script = _project_unification(self.workspaces_dir)
             # The version is written inside the migration's own transaction. Written after it, a
             # process killed in between would leave the schema at N and the version at N-1, and the
             # next start would run migration N again — on an ALTER TABLE, which is not idempotent,

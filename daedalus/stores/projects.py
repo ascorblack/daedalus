@@ -1,14 +1,4 @@
-"""Projects: a folder the operator adds, and the sessions that work inside it.
-
-A session without a project keeps the directory of its own under the workspaces root — that is
-what every session had before projects existed and what a session created without one still gets.
-A session *with* a project works in the project's root: that root is its workspace, the only place
-its file tools may reach, and the writable set the sandbox gives it.
-
-The root is stored as the operator typed it, absolute, and is not required to exist: in a container
-a folder becomes reachable only once it is bind-mounted, and a row the API refuses to keep is a row
-the launcher cannot mount. Reachability is reported, not enforced.
-"""
+"""Projects: the folder and grouping every session belongs to."""
 
 from __future__ import annotations
 
@@ -34,19 +24,16 @@ class ProjectError(ValueError):
 class ProjectSettings:
     """What the operator decides per project.
 
-    ``snapshots`` is off by default and that is deliberate. A per-session workspace holds what one
-    agent made and is snapshotted before every turn; a project root is somebody's repository, and
-    committing a hundred thousand files into ``.checkpoints`` twice a turn costs more than the undo
-    is worth. Switched on, a project snapshots exactly as a workspace does, ``ops.checkpoint_max_gb``
-    included.
+    ``snapshots`` is off by default for a folder the operator points at: it may be a large existing
+    repository, and committing a hundred thousand files into ``.checkpoints`` twice a turn costs
+    more than the undo is worth. Automatically created projects opt in because they begin empty.
     """
 
     snapshots: bool = False
     system: str = ""
     """Non-empty on a project the installation made for itself rather than the operator: ``"voice"``
     is the folder the concierge and the agents it delegates to work in. A system project keeps its
-    name and its snapshot switch editable and refuses the two things that would break the feature
-    behind it — being moved to another folder, and being removed."""
+    name and snapshot switch editable but cannot be removed."""
 
     @classmethod
     def load(cls, raw: Any) -> ProjectSettings:
@@ -144,7 +131,7 @@ def normalise_root(raw: str) -> Path:
 class ProjectStore:
     """The projects table, and the one column on ``sessions`` that points into it."""
 
-    def __init__(self, db: Database, *, reserved: Iterable[Path] = (), home: Path | None = None) -> None:
+    def __init__(self, db: Database, *, managed_root: Path | None = None, reserved: Iterable[Path] = (), home: Path | None = None) -> None:
         self._db = db
         self._write = asyncio.Lock()
         """Held across the whole of a read-check-insert. Both ways of making a project look the table
@@ -157,6 +144,7 @@ class ProjectStore:
         """The operator's home folder, refused as a whole and allowed one folder in: every project
         lives inside it, and taking the whole of it is what switches off the rule that asks before a
         path in the home folder is touched."""
+        self._managed_root = Path(os.path.normpath(managed_root.expanduser())) if managed_root is not None else None
 
     @property
     def roots(self) -> tuple[Path, ...]:
@@ -178,18 +166,48 @@ class ProjectStore:
         row = await self._db.fetchone("SELECT * FROM projects WHERE id = ?", (project_id,))
         return _row(row) if row is not None else None
 
-    async def create(self, name: str, root: str, *, settings: ProjectSettings | None = None) -> Project:
+    async def create(self, name: str, root: str | None = None, *, settings: ProjectSettings | None = None, project_id: str | None = None) -> Project:
         label = (name or "").strip()
         if not label:
             raise ProjectError("a project needs a name")
-        path = normalise_root(root)
-        self._refuse_reserved(path)
+        project_id = project_id or uuid.uuid4().hex[:12]
+        if root is None:
+            if self._managed_root is None:
+                raise ProjectError("automatic project folders are not configured")
+            path = self._managed_root / project_id
+        else:
+            path = normalise_root(root)
+            self._refuse_reserved(path)
         async with self._write:
             await self._refuse_overlap(path)
-            project = Project(id=uuid.uuid4().hex[:12], name=label, root=path, created_at=datetime.now(UTC), settings=settings or ProjectSettings())
+            if root is None:
+                path.mkdir(parents=True, exist_ok=False)
+                (path / "inbox").mkdir()
+            project = Project(id=project_id, name=label, root=path, created_at=datetime.now(UTC), settings=settings or ProjectSettings())
             await self._insert(project)
             await self.list()
         return project
+
+    async def for_root(self, root: Path) -> Project | None:
+        target = Path(os.path.normpath(root.expanduser()))
+        return next((project for project in await self.list() if project.root == target), None)
+
+    async def adopt_directory(self, name: str, root: Path) -> Project:
+        """Make an internal working directory a project, or return the project already owning it."""
+        existing = await self.for_root(root)
+        if existing is not None:
+            return existing
+        label = (name or "").strip() or root.name or "Project"
+        path = Path(os.path.normpath(root.expanduser()))
+        async with self._write:
+            existing = await self.for_root(path)
+            if existing is not None:
+                return existing
+            await self._refuse_overlap(path)
+            project = Project(id=uuid.uuid4().hex[:12], name=label, root=path, created_at=datetime.now(UTC), settings=ProjectSettings(snapshots=True))
+            await self._insert(project)
+            await self.list()
+            return project
 
     async def _insert(self, project: Project) -> None:
         """One row, with the system flag written to its own column as well as into the settings blob.
@@ -213,11 +231,8 @@ class ProjectStore:
     async def ensure_system(self, kind: str, *, name: str, root: Path) -> Project:
         """The installation's own project of this kind, made the first time something needs it.
 
-        Its folder is ours, not the operator's: it sits under the workspaces root, which
-        :meth:`_refuse_reserved` forbids an operator project precisely because it belongs to the
-        installation. So the reserved check is skipped here and nowhere else, and the overlap check
-        is kept — an operator project that already contains this folder would make containment mean
-        two things at once, whoever created which first.
+        Its folder sits under the managed projects root. The overlap check is kept — another project
+        that already contains this folder would make containment mean two things at once.
 
         One per kind, and the database says so: the check and the insert are held under one lock, and
         a partial unique index over the ``system`` column is what makes the invariant survive a lost
@@ -229,6 +244,8 @@ class ProjectStore:
                 return existing
             path = Path(os.path.normpath(Path(root).expanduser()))
             await self._refuse_overlap(path)
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "inbox").mkdir(exist_ok=True)
             project = Project(id=uuid.uuid4().hex[:12], name=name, root=path, created_at=datetime.now(UTC), settings=ProjectSettings(system=kind))
             try:
                 await self._insert(project)
@@ -273,7 +290,7 @@ class ProjectStore:
         for row, metadata in parsed:
             if _nested_under(row["id"], metadata, known):
                 continue
-            bucket = out.setdefault(row["project_id"] or "", {"total": 0, "active": 0, "loops": 0, "last_message_at": ""})
+            bucket = out.setdefault(str(row["project_id"]), {"total": 0, "active": 0, "loops": 0, "last_message_at": ""})
             bucket["total"] += 1
             if row["id"] in working:
                 bucket["active"] += 1
@@ -285,19 +302,14 @@ class ProjectStore:
                 bucket["last_message_at"] = last
         return out
 
-    async def update(self, project_id: str, *, name: str | None = None, root: str | None = None, settings: ProjectSettings | None = None) -> Project:
+    async def update(self, project_id: str, *, name: str | None = None, settings: ProjectSettings | None = None) -> Project:
         project = await self.get(project_id)
         if project is None:
             raise KeyError(project_id)
         label = project.name if name is None else (name or "").strip()
         if not label:
             raise ProjectError("a project needs a name")
-        path = project.root if root is None else normalise_root(root)
-        if path != project.root:
-            if project.settings.system:
-                raise ProjectError(f"{project.name} is the installation's own folder and cannot be moved")
-            self._refuse_reserved(path)
-            await self._refuse_overlap(path, ignore=project_id)
+        path = project.root
         merged = project.settings if settings is None else settings
         if merged.system != project.settings.system:
             # The flag is what makes the two refusals above stick; nothing outside this module sets it.
@@ -310,11 +322,12 @@ class ProjectStore:
         return Project(id=project.id, name=label, root=path, created_at=project.created_at, settings=merged)
 
     async def delete(self, project_id: str) -> None:
-        """Forget the project. Nothing on disk is touched: the folder is the operator's, not ours."""
+        """Forget an empty project. Nothing on disk is touched."""
         project = await self.get(project_id)
         if project is not None and project.settings.system:
             raise ProjectError(f"{project.name} is the installation's own project and cannot be removed")
-        await self._db.execute("UPDATE sessions SET project_id = NULL WHERE project_id = ?", (project_id,))
+        if await self.sessions_of(project_id):
+            raise ProjectError(f"{project.name if project else 'this project'} still has sessions")
         await self._db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         await self.list()
 
@@ -324,15 +337,20 @@ class ProjectStore:
         A project root is inside the wall as well as outside it: every path under it is reachable to
         the agents of that project, and it is in the policy's open roots, which is what makes the
         home-folder question stop being asked for anything under it. So the state directory, the
-        secrets, the workspaces root and the two checkouts are refused in both directions — as the
-        root, above it and below it — and the home folder is refused as a whole while any folder
-        inside it stays the ordinary case.
+        secrets and the two checkouts are refused in both directions — as the root, above it and
+        below it. The managed projects root is refused as a whole but its children are exactly where
+        automatic and adopted projects belong. The home folder is refused as a whole while any
+        folder inside it stays the ordinary case.
         """
         if self._home is not None and path == self._home:
             raise ProjectError(f"{path} is your home folder; a project is a folder inside it, not the whole of it")
         for reserved in self._reserved:
             if path == reserved:
                 raise ProjectError(f"{path} belongs to the installation itself and cannot be a project")
+            if self._managed_root is not None and reserved == self._managed_root:
+                if path in reserved.parents:
+                    raise ProjectError(f"{path} contains {reserved}, which belongs to the installation itself")
+                continue
             if reserved in path.parents:
                 raise ProjectError(f"{path} is inside {reserved}, which belongs to the installation itself")
             if path in reserved.parents:
@@ -361,7 +379,7 @@ class ProjectStore:
         pid = row["project_id"] if row is not None else None
         return await self.get(pid) if pid else None
 
-    async def attach(self, session_id: str, project_id: str | None) -> None:
+    async def attach(self, session_id: str, project_id: str) -> None:
         await self._db.execute("UPDATE sessions SET project_id = ? WHERE id = ?", (project_id, session_id))
 
     async def sessions_of(self, project_id: str) -> list[dict[str, str]]:
@@ -370,7 +388,7 @@ class ProjectStore:
 
     async def by_session(self) -> dict[str, str]:
         """``{session_id: project_id}`` for every session that has one, in one query."""
-        rows = await self._db.fetchall("SELECT id, project_id FROM sessions WHERE project_id IS NOT NULL")
+        rows = await self._db.fetchall("SELECT id, project_id FROM sessions")
         return {r["id"]: r["project_id"] for r in rows}
 
 
