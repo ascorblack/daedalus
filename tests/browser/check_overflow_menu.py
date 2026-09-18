@@ -101,6 +101,7 @@ def press(page: Page, selector_text: str) -> None:
 def open_menu(page: Page) -> None:
     page.locator(".service-row").first.locator("button[aria-haspopup='menu']").click()
     page.wait_for_selector(".menu[role='menu']", timeout=5000)
+    page.locator(".menu[role='menu']").evaluate("async menu => { await Promise.all(menu.getAnimations().map(animation => animation.finished)); }")
 
 
 def fresh(page: Page) -> None:
