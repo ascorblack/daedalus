@@ -35,9 +35,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "nav.settings": { en: "Settings", ru: "Настройки" },
   "nav.more": { en: "More", ru: "Ещё" },
 
-  // The rail's own chrome. A destination translated under an English heading is the half-and-half
-  // the rest of this file exists to avoid, so the group names, the two buttons and the project
-  // chip are here even though what they lead to is still English.
+  // The shell's own chrome: the menu's group names, the sidebar's buttons and the project chip.
   "nav.group.work": { en: "Work", ru: "Работа" },
   "nav.group.autonomy": { en: "Autonomy", ru: "Самостоятельность" },
   "nav.group.knowledge": { en: "Knowledge", ru: "Знания" },
@@ -53,9 +51,11 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "shell.search.goto": { en: "Go to {name}", ru: "Перейти: {name}" },
   "shell.search.newagent": { en: "New agent", ru: "Новый агент" },
   "shell.search.workin": { en: "Work in {name}", ru: "Работать в «{name}»" },
-  "shell.collapse": { en: "Collapse", ru: "Свернуть" },
-  "shell.collapse.title": { en: "Collapse the rail", ru: "Свернуть панель" },
-  "shell.expand.title": { en: "Expand the rail", ru: "Развернуть панель" },
+  "shell.sidebar.label": { en: "Sessions", ru: "Сессии" },
+  "shell.sidebar.collapse": { en: "Fold the sidebar (Ctrl/⌘ \\)", ru: "Свернуть боковую панель (Ctrl/⌘ \\)" },
+  "shell.sidebar.expand": { en: "Unfold the sidebar (Ctrl/⌘ \\)", ru: "Развернуть боковую панель (Ctrl/⌘ \\)" },
+  "nav.menu": { en: "Menu", ru: "Меню" },
+  "nav.menu.title": { en: "Menu (Ctrl/⌘ ⇧ M)", ru: "Меню (Ctrl/⌘ ⇧ M)" },
   "shell.back": { en: "Back", ru: "Назад" },
   "shell.waiting": { en: "{n} waiting", ru: "{n} ждут вас" },
 
@@ -1448,8 +1448,6 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "session.leader": { en: "open the leader session", ru: "открыть сессию ведущего" },
   "session.leader.word": { en: "leader", ru: "ведущий" },
   "session.reconnecting": { en: "reconnecting…", ru: "переподключаемся…" },
-  "session.list": { en: "Sessions list", ru: "Список сессий" },
-  "session.list.title": { en: "Sessions list beside the conversation", ru: "Список сессий рядом с перепиской" },
   "session.panel": { en: "Session panel", ru: "Панель сессии" },
   "session.panel.title": { en: "Session panel (usage, loop, cron, services)", ru: "Панель сессии: расход, цикл, расписания, сервисы" },
   "session.files": { en: "Workspace files", ru: "Файлы рабочей папки" },

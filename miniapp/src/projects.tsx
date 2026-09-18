@@ -1,6 +1,6 @@
 // Projects: a folder the operator adds, and the agents that work inside it. The switcher lives in
-// the shell (the rail on a desktop, the Agents header on a phone) because a project is a lens over
-// every list of agents, not a destination of its own.
+// the shell (the sidebar on a desktop, the Agents header on a phone) because a project is a lens
+// over every list of agents, not a destination of its own.
 
 import { useCallback, useEffect, useState } from "react";
 import { api, Project } from "./api";
@@ -44,14 +44,14 @@ function afterChange(): void {
   invalidate("/api/sessions");
 }
 
-/** The control that says which project is in view and opens the list: rail, header or palette. */
+/** The control that says which project is in view and opens the list: sidebar, header or palette. */
 export function ProjectChip({ projects, current, onOpen, collapsed }: { projects: Project[]; current: string; onOpen: () => void; collapsed?: boolean }) {
   const active = projects.find((p) => p.id === current);
   const label = active ? active.name : projects.length ? t("shell.projects.all") : t("shell.projects.add");
   return (
     <button className="project-chip" onClick={onOpen} title={active ? active.root : t("shell.projects")} aria-haspopup="dialog">
       <Icon name="folder" size={16} />
-      <span className="rail-text truncate">{collapsed ? "" : label}</span>
+      {!collapsed && <span className="sidebar-text truncate">{label}</span>}
       {!collapsed && active && !active.reachable && <span className="badge attn" title={t("project.notmounted.here")}>{t("project.notmounted")}</span>}
       {!collapsed && <span className="chev">›</span>}
     </button>

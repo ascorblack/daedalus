@@ -6,7 +6,11 @@ import type { AuthConfig } from "./screens/Login";
 import type { OnboardingState } from "./screens/AddModel";
 import * as passkeys from "./passkeys";
 import { back, migrateLegacyLocation, navigate, pathFor, recallScroll, rememberScroll, sessionPath, useRoute } from "./router";
-import { Counts, MoreSheet, Palette, PaletteItem, Rail, TabBar, go, screenTitle, useMedia, useShortcuts } from "./shell";
+import { Counts, MoreSheet, Palette, PaletteItem, TabBar, go, screenTitle, useMedia, useShortcuts } from "./shell";
+import { Sidebar, useSidebar } from "./sidebar";
+import { NavMenu } from "./navmenu";
+import { shortcutFor } from "./navigation";
+import { readSidebar, rememberSidebar, usePaneWidth } from "./layout";
 import { Capabilities, SelfDevMode, visibleScreens } from "./capabilities";
 import { ProjectSwitcher, rememberProject, storedProject, useProjects } from "./projects";
 import { ChangeStrip } from "./change";
@@ -93,24 +97,6 @@ export function App() {
   const route = useRoute();
   const wide = useWide();
   const [picking, setPicking] = useState(false);
-  const veryWide = useMedia("(min-width: 1440px)");
-  const [listOpen, setListOpen] = useState(() => {
-    try {
-      return localStorage.getItem("daedalus.sessionList") !== "0";
-    } catch {
-      return true;
-    }
-  });
-  const toggleList = () => {
-    setListOpen((v) => {
-      try {
-        localStorage.setItem("daedalus.sessionList", v ? "0" : "1");
-      } catch {
-        /* private mode */
-      }
-      return !v;
-    });
-  };
   const [more, setMore] = useState(false);
   const [palette, setPalette] = useState(false);
   // Which project the operator is looking at ("" is all of them). A lens over every list of agents
@@ -121,23 +107,12 @@ export function App() {
     rememberProject(id);
     setProject(id);
   }, []);
-  const [railCollapsed, setRailCollapsed] = useState(() => {
-    try {
-      return localStorage.getItem("daedalus.rail") === "collapsed";
-    } catch {
-      return false;
-    }
-  });
-  const toggleRail = () => {
-    setRailCollapsed((v) => {
-      try {
-        localStorage.setItem("daedalus.rail", v ? "open" : "collapsed");
-      } catch {
-        /* private mode */
-      }
-      return !v;
-    });
-  };
+  // The sidebar: a column of sessions, or a strip. Beside the Agents screen — which is the same list,
+  // whole — it is always the strip, so the list is never drawn twice.
+  const [sidebarCollapsed, toggleSidebar] = useSidebar(readSidebar, rememberSidebar);
+  const [sidebarWidth, setSidebarWidth] = usePaneWidth("sidebar", 272, 232, 360);
+  const [menu, setMenu] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
   const openPalette = useCallback(() => setPalette(true), []);
   const offline = useOffline();
   useEffect(prefetchSession, []);
@@ -170,6 +145,19 @@ export function App() {
   const proposals = useQuery<{ status: string }[]>(authed && selfdev !== "off" ? "/api/proposals" : null, { pollMs: 60000, staleMs: 30000 });
   const counts: Counts = { inbox: inbox.data?.unread ?? 0, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
   useShortcuts(openPalette, selfdev);
+  // Two more on a desktop: the menu and the sidebar, both with a modifier so a text field never eats them.
+  useEffect(() => {
+    if (!wide) return;
+    const onKey = (e: KeyboardEvent) => {
+      const which = shortcutFor(e);
+      if (!which) return;
+      e.preventDefault();
+      if (which === "menu") setMenu((m) => !m);
+      else toggleSidebar();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [wide, toggleSidebar]);
 
   useEffect(() => {
     if (authed !== null) return;
@@ -304,6 +292,7 @@ export function App() {
 
   useEffect(() => {
     setMore(false);
+    setMenu(false);
   }, [route.screen, route.session]);
 
   // Stable, so the Agents list can skip a folder that did not change between two polls: a new
@@ -360,18 +349,10 @@ export function App() {
       </div>
     );
   } else if (sessionId) {
-    const showList = veryWide && listOpen;
     content = (
-      <div className="with-list">
-        {showList && (
-          <div className="session-list-pane">
-            <SessionsScreen onOpen={open} toast={showToast} current={sessionId} compact project={project} projects={projectList} />
-          </div>
-        )}
-        <ErrorBoundary key={sessionId}>
-          <SessionScreen id={sessionId} onBack={closeSession} onOpen={open} toast={showToast} onSplit={wide ? () => setPicking(true) : undefined} listOpen={showList} onToggleList={veryWide ? toggleList : undefined} />
-        </ErrorBoundary>
-      </div>
+      <ErrorBoundary key={sessionId}>
+        <SessionScreen id={sessionId} onBack={closeSession} onOpen={open} toast={showToast} onSplit={wide ? () => setPicking(true) : undefined} />
+      </ErrorBoundary>
     );
   } else {
     content = (
@@ -399,9 +380,32 @@ export function App() {
     );
   }
 
+  const listRoute = route.screen === "agents" && !sessionId;
+  const strip = sidebarCollapsed || listRoute;
   return (
-    <div className={`app ${railCollapsed ? "rail-collapsed" : ""}`}>
-      {wide && <Rail screen={route.screen} counts={counts} selfdev={selfdev} collapsed={railCollapsed} onToggle={toggleRail} onPalette={openPalette} projects={projectList} project={project} onProjects={() => setSwitching(true)} />}
+    <div className="app" style={wide ? { ["--sidebar-w" as string]: `${strip ? 48 : sidebarWidth}px` } : undefined}>
+      {wide && (
+        <Sidebar
+          screen={route.screen}
+          session={sessionId}
+          counts={counts}
+          selfdev={selfdev}
+          collapsed={strip}
+          onToggle={listRoute ? undefined : toggleSidebar}
+          width={sidebarWidth}
+          onWidth={setSidebarWidth}
+          onPalette={openPalette}
+          projects={projectList}
+          project={project}
+          onProjects={() => setSwitching(true)}
+          onOpen={open}
+          toast={showToast}
+          menuOpen={menu}
+          onMenu={() => setMenu((m) => !m)}
+          menuButton={menuButton}
+        />
+      )}
+      {wide && menu && <NavMenu screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMenu(false)} opener={menuButton.current} />}
       <div ref={main} className={`main ${sessionId ? "chat-open" : ""}`}>
         {offline && <div className="offline-strip" role="status">{t("app.offline")}</div>}
         <ChangeStrip caps={caps} />

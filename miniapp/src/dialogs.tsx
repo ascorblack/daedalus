@@ -9,9 +9,14 @@ import { t } from "./i18n";
 
 // ── sheet ────────────────────────────────────────────────────────────────────────────────
 
-/** The layers open right now, top last: Escape goes to the top one only. */
+/** The layers open right now, top last: Escape goes to the top one only.
+
+    The key is read in the capture phase. Every layer is drawn through `Overlay`, whose root stops
+    events so a click in a sheet never reaches the row that opened it — and that stop happens at
+    the portal's container, before the document's bubble phase. A listener there never heard the
+    key at all; capture runs first. */
 const layers: symbol[] = [];
-function useLayer(onEscape: () => void) {
+export function useLayer(onEscape: () => void) {
   const cb = useRef(onEscape);
   cb.current = onEscape;
   useEffect(() => {
@@ -23,9 +28,9 @@ function useLayer(onEscape: () => void) {
         cb.current();
       }
     };
-    document.addEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, { capture: true });
     return () => {
-      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keydown", onKey, { capture: true });
       const i = layers.indexOf(me);
       if (i >= 0) layers.splice(i, 1);
     };

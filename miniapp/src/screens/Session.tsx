@@ -10,6 +10,7 @@ import { Icon, IconName } from "../icons";
 import { AuthImg, FilePreview, PreviewSource, canPreview, fileGlyph, previewKind, sessionBase } from "../preview";
 import { Activity, LiveStore, SummaryItem, ToolItem, Turn, applyLive, buildTurns, createLiveStore, isOlderPage, liveAfter, liveBase, prepend, reconcile } from "../turns";
 import { MoveSessionSheet } from "../projects";
+import { PaneHandle, readLayout, usePaneWidth, writeLayout } from "../layout";
 import { navigate, pathFor } from "../router";
 import { Windowed } from "../virtual";
 import { DICT, plural, t } from "../i18n";
@@ -41,12 +42,9 @@ export type SessionScreenProps = {
   pane?: "left" | "right";
   /** Open another session beside this one; absent when the screen cannot split. */
   onSplit?: () => void;
-  /** The sessions list beside the conversation (wide screens): whether it shows, and the switch. */
-  listOpen?: boolean;
-  onToggleList?: () => void;
 };
 
-export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOpen, onToggleList }: SessionScreenProps) {
+export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: SessionScreenProps) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   // The streaming turn's state is not React state: a token must repaint the turn it belongs to,
   // not the screen. The components that show it subscribe; everything else never hears about it.
@@ -900,11 +898,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
           </div>
         </div>
         <div className="head-actions">
-          {onToggleList && (
-            <button className={`iconbtn wide-only ${listOpen ? "on" : ""}`} onClick={onToggleList} aria-label={t("session.list")} title={t("session.list.title")}>
-              <Icon name="board" />
-            </button>
-          )}
           <button className={`iconbtn wide-only ${asideOpen ? "on" : ""}`} onClick={() => setAsideOpen((v) => !v)} aria-label={t("session.panel")} title={t("session.panel.title")}>
             <Icon name="columns" />
           </button>
@@ -1430,82 +1423,7 @@ function LoopPanel({ sessionId, loop, onChange, toast }: { sessionId: string; lo
   );
 }
 
-// ── side panels: widths, usage, cron, attachments ─────────────────────────────────────────
-
-function readLayout(key: string): string | null {
-  try {
-    return localStorage.getItem(`daedalus.session.${key}`);
-  } catch {
-    return null;
-  }
-}
-
-function writeLayout(key: string, value: string): void {
-  try {
-    localStorage.setItem(`daedalus.session.${key}`, value);
-  } catch {
-    /* private mode: the layout lasts for the visit */
-  }
-}
-
-/** A pane width the operator dragged, remembered per browser. */
-function usePaneWidth(key: string, initial: number, min: number, max: number): [number, (w: number) => void] {
-  const storageKey = `daedalus.width.${key}`;
-  const [width, setWidth] = useState(() => {
-    try {
-      const v = Number(localStorage.getItem(storageKey));
-      return v >= min && v <= max ? v : initial;
-    } catch {
-      return initial;
-    }
-  });
-  const set = useCallback(
-    (w: number) => {
-      const clamped = Math.round(Math.min(max, Math.max(min, w)));
-      setWidth(clamped);
-      try {
-        localStorage.setItem(storageKey, String(clamped));
-      } catch {
-        /* private mode */
-      }
-    },
-    [storageKey, min, max],
-  );
-  return [width, set];
-}
-
-/** The strip between two panes: drag it to resize (pointer events, so mouse and touch alike). */
-function PaneHandle({ side, onDrag }: { side: "left" | "right"; onDrag: (dx: number) => void }) {
-  const last = useRef<number | null>(null);
-  return (
-    <div
-      className={`pane-handle wide-only ${side}`}
-      role="separator"
-      aria-orientation="vertical"
-      aria-label={t("session.resize")}
-      onPointerDown={(e) => {
-        last.current = e.clientX;
-        (e.target as HTMLElement).setPointerCapture(e.pointerId);
-        document.body.classList.add("resizing");
-      }}
-      onPointerMove={(e) => {
-        if (last.current === null) return;
-        const dx = e.clientX - last.current;
-        last.current = e.clientX;
-        if (dx) onDrag(dx);
-      }}
-      onPointerUp={(e) => {
-        last.current = null;
-        (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-        document.body.classList.remove("resizing");
-      }}
-      onPointerCancel={() => {
-        last.current = null;
-        document.body.classList.remove("resizing");
-      }}
-    />
-  );
-}
+// ── side panels: usage, cron, attachments ─────────────────────────────────────────────────
 
 const SUBSCRIPTION_LABEL: Record<string, string> = { codex: "Codex · ChatGPT", claude: "Claude · Max", grok: "Grok · SuperGrok" };
 

@@ -1,11 +1,10 @@
 // The application shell: a page header with the screen's name and its actions, four tabs and a
-// More sheet on a phone, a rail with grouped destinations on a desktop.
+// More sheet on a phone, the command palette and the keyboard. On a desktop the sessions are the
+// left column (sidebar.tsx) and the destinations are a menu over the content (navmenu.tsx).
 
 import { useEffect, useState, type ReactNode } from "react";
 import { Icon, IconName } from "./icons";
 import { Sheet } from "./dialogs";
-import { Project } from "./api";
-import { ProjectChip } from "./projects";
 import { Screen, navigate, pathFor } from "./router";
 import { SelfDevMode, screenTag, visibleScreens } from "./capabilities";
 import { t } from "./i18n";
@@ -17,7 +16,7 @@ function tagFor(s: Screen, selfdev: SelfDevMode): string {
   return screenTag(s, selfdev, BETA);
 }
 
-const ICONS: Record<Screen, IconName> = { agents: "bots", voice: "mic", inbox: "inbox", board: "board", changes: "changes", schedules: "clock", services: "globe", memory: "bulb", usage: "chart", health: "check", settings: "settings" };
+export const ICONS: Record<Screen, IconName> = { agents: "bots", voice: "mic", inbox: "inbox", board: "board", changes: "changes", schedules: "clock", services: "globe", memory: "bulb", usage: "chart", health: "check", settings: "settings" };
 
 /** A destination's name, in the reader's language. The components below re-render with it because
  *  the shell's own `useLang` does; nothing here holds a translated string of its own. */
@@ -26,19 +25,11 @@ export function screenTitle(s: Screen): string {
 }
 
 const PRIMARY: Screen[] = ["agents", "inbox", "board"];
-// A group is named by a key, not by a word: the heading sits directly above destinations that are
-// translated, and one English word there is what makes a rail read as broken rather than partial.
-const GROUPS: { key: string; items: Screen[] }[] = [
-  { key: "work", items: ["agents", "voice", "inbox", "board"] },
-  { key: "autonomy", items: ["changes", "schedules", "services"] },
-  { key: "knowledge", items: ["memory"] },
-  { key: "observe", items: ["usage", "health"] },
-];
 /** Screens that carry a beta tag beside their name: new, usable, not yet finished. */
 const BETA: Screen[] = ["voice"];
 const MORE: Screen[] = ["voice", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
 
-function countFor(s: Screen, counts: Counts): number {
+export function countFor(s: Screen, counts: Counts): number {
   if (s === "inbox") return counts.inbox ?? 0;
   if (s === "changes") return counts.changes ?? 0;
   if (s === "services") return counts.services ?? 0;
@@ -125,50 +116,6 @@ export function MoreSheet({ screen, counts, selfdev, onClose }: { screen: Screen
         <LangPicker />
       </div>
     </Sheet>
-  );
-}
-
-export function Rail({ screen, counts, selfdev, collapsed, onToggle, onPalette, projects, project, onProjects }: { screen: Screen; counts: Counts; selfdev: SelfDevMode; collapsed: boolean; onToggle: () => void; onPalette: () => void; projects: Project[]; project: string; onProjects: () => void }) {
-  const item = (s: Screen) => {
-    const n = countFor(s, counts);
-    const tag = tagFor(s, selfdev);
-    return (
-      <a key={s} href={pathFor(s)} className={`rail-item ${screen === s ? "active" : ""}`} aria-current={screen === s ? "page" : undefined} onClick={(e) => go(e, pathFor(s))} title={collapsed ? screenTitle(s) : undefined}>
-        <Icon name={ICONS[s]} size={18} />
-        <span className="rail-text">{screenTitle(s)}</span>
-        {tag && <span className="rail-text beta-tag">{t(tag)}</span>}
-        {n > 0 && <span className={`count ${s === "services" ? "ok" : s === "changes" ? "attn" : ""}`}>{n}</span>}
-      </a>
-    );
-  };
-  return (
-    <nav className={`rail ${collapsed ? "collapsed" : ""}`} aria-label={t("shell.nav.primary")}>
-      <a className="brand" href={pathFor("agents")} onClick={(e) => go(e, pathFor("agents"))} title="Daedalus">
-        <img src="/app/icons/icon-192.png" alt="" width={26} height={26} />
-        <span className="rail-text">Daedalus</span>
-      </a>
-      <ProjectChip projects={projects} current={project} onOpen={onProjects} collapsed={collapsed} />
-      <button className="rail-item search" onClick={onPalette} title={t("shell.search.title")}>
-        <Icon name="search" size={18} />
-        <span className="rail-text">{t("shell.search")}</span>
-        <kbd className="rail-text">⌘K</kbd>
-      </button>
-      {GROUPS.map((g) => visibleScreens(g.items, selfdev)).map((items, i) =>
-        items.length === 0 ? null : (
-          <div key={GROUPS[i].key} className="rail-group">
-            <div className="rail-label">{t(`nav.group.${GROUPS[i].key}`)}</div>
-            {items.map(item)}
-          </div>
-        ),
-      )}
-      <div className="rail-group bottom">
-        {item("settings")}
-        <button className="rail-item collapse" onClick={onToggle} title={t(collapsed ? "shell.expand.title" : "shell.collapse.title")} aria-label={t(collapsed ? "shell.expand.title" : "shell.collapse.title")} aria-expanded={!collapsed}>
-          <Icon name={collapsed ? "columns" : "back"} size={18} />
-          <span className="rail-text">{t("shell.collapse")}</span>
-        </button>
-      </div>
-    </nav>
   );
 }
 
