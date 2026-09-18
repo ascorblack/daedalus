@@ -204,6 +204,15 @@ class FakeLauncher:
         launcher older than jobs, which the app still has to be able to wait on."""
         self.job_states: dict[str, dict[str, str]] = {}
         self.last_job = ""
+        self.polls = 0
+        """How many times the app has asked this launcher how it is getting on. Tests wait on this
+        rather than on a duration: the hand-over is then ordered by the code under test, and a host
+        busy enough to spend a sleep before the poll it was meant to cover cannot change the
+        outcome."""
+        self.finish_after = 0
+        """Poll number at which the work finishes, from inside the poll itself. 0 never finishes on
+        its own. This is what models the launcher that was already done before anybody looked."""
+        self.finish_error = ""
         self.conflict = ""
         """Non-empty: this launcher is already doing something else and refuses what it is asked."""
         outer = self
@@ -226,6 +235,10 @@ class FakeLauncher:
                 self.wfile.write(body)
 
             def do_GET(self) -> None:  # noqa: N802
+                if self.path.startswith("/api/jobs/") or self.path == "/api/status":
+                    outer.polls += 1
+                    if outer.finish_after and outer.polls >= outer.finish_after:
+                        outer.finish(error=outer.finish_error)
                 if self.path.startswith("/api/jobs/"):
                     job = outer.job_states.get(self.path.removeprefix("/api/jobs/"))
                     return self._json(200, job) if job else self._json(404, {"error": "no such job"})
@@ -294,6 +307,20 @@ class FakeLauncher:
     def close(self) -> None:
         self.server.shutdown()
         self.server.server_close()
+
+
+async def polled(launcher: FakeLauncher, times: int = 1) -> None:
+    """Hold until the app has actually asked the launcher how it is getting on, ``times`` more times.
+
+    The thing every one of these tests needs to order is "the install is under way and has looked at
+    the launcher at least once"; a sleep says that only on a host that is not busy, and the poll
+    interval these tests patch down to ten milliseconds is a window a loaded host can spend several
+    of before the sleep returns. The bound is long enough that nothing but a hang can reach it.
+    """
+    target = launcher.polls + times
+    async with asyncio.timeout(60):
+        while launcher.polls < target:
+            await asyncio.sleep(0.001)
 
 
 @pytest.fixture
@@ -391,7 +418,7 @@ async def test_one_install_at_a_time_and_the_second_is_told_what_is_running(
     installer = Installer(settings)
     browser = components.Status(components.BROWSER, "missing", "not here", installable=True, how="launcher")
     installer.start(browser)
-    await asyncio.sleep(0.05)
+    await polled(launcher)
     with pytest.raises(Busy) as raised:
         installer.start(speech)
     assert raised.value.component_id == components.BROWSER
@@ -430,7 +457,7 @@ async def test_progress_reaches_a_watcher_and_a_finished_launcher_install_asks_f
     node = components.Status(components.NODE, "missing", "not here", installable=True, how="launcher")
     async with installer.watch() as queue:
         installer.start(node)
-        await asyncio.sleep(0.1)
+        await polled(launcher, 2)  # it has been seen busy at least once
         launcher.finish()  # the launcher put the work down
         await installer.wait(components.NODE)
         frames = []
@@ -451,7 +478,7 @@ async def test_what_the_launcher_failed_at_becomes_the_reason_the_install_failed
     installer = Installer(settings)
     browser = components.Status(components.BROWSER, "missing", "not here", installable=True, how="launcher")
     installer.start(browser)
-    await asyncio.sleep(0.1)
+    await polled(launcher, 2)  # it has been seen busy at least once
     launcher.finish(error="the download did not verify")
     await installer.wait(components.BROWSER)
     frame = installer.progress_of(components.BROWSER) or {}
@@ -473,9 +500,8 @@ async def test_an_install_the_launcher_finished_between_two_polls_is_not_a_timeo
     launcher.write_file(settings.state_dir)
     installer = Installer(settings)
     node = components.Status(components.NODE, "missing", "not here", installable=True, how="launcher")
+    launcher.finish_after = 1  # over before anybody looked: the first poll finds it already done
     installer.start(node)
-    await asyncio.sleep(0.05)
-    launcher.finish()  # done, and busy was never set
     await installer.wait(components.NODE)
     frame = installer.progress_of(components.NODE) or {}
     assert frame["state"] == "installed", f"a finished install was read as something else: {frame}"

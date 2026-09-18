@@ -137,6 +137,50 @@ async def test_the_configured_model_answering_again_takes_the_note_away(settings
     await manager.close()
 
 
+class ToolThenRefusingProvider(ScriptedProvider):
+    """Answers the first request with a tool call, then refuses everything after it, as a rate limit.
+
+    This is the shape of the run the whole feature exists for: the configured model writes a turn,
+    and only the *next* request is the one the chain has to step down from.
+    """
+
+    def __init__(self, endpoint_id: str = "primary") -> None:
+        super().__init__([{"tool": "Exec", "args": {"command": "echo hello"}}])
+        self.endpoint = type("_Endpoint", (), {"id": endpoint_id})()
+        self.calls = 0
+
+    async def stream_with_tools(self, request: LLMRequest) -> AsyncIterator[ProviderDelta]:
+        self.calls += 1
+        if self.calls == 1:
+            async for delta in super().stream_with_tools(request):
+                yield delta
+            return
+        raise LLMRateLimitError("primary: rate limited")
+
+
+async def test_a_turn_written_before_the_demotion_keeps_the_model_that_wrote_it(settings: Settings, db: Database) -> None:
+    """The turn the configured model produced must not be re-attributed to the model that replaced it.
+
+    Transcript rows are written once and never revisited, so a turn stamped with whoever is answering
+    at *write* time is misattributed for ever — and a persist is fire-and-forget, so the write of one
+    round routinely lands after the next round has already stepped the chain down.
+    """
+    primary = ToolThenRefusingProvider("primary")
+    standby = _named(ScriptedProvider([{"text": "the standby finished it"}]), "standby")
+    manager = await _manager_with_chain(settings, db, [(primary, "m-a"), (standby, "m-b")])
+    state = await manager.create_session("t")
+    waiter = asyncio.create_task(_wait_finished(manager))
+    await manager.submit(state.session.id, "hello")
+    assert (await waiter)[0][2] == "completed"
+
+    history = await manager.sessions.list_transcript(state.session.id)
+    stamps = [m.metadata.get(MODEL_METADATA_KEY) for m in history if m.role.value == "assistant"]
+    assert len(stamps) == 2, f"a tool round and an answer: {[m.role.value for m in history]}"
+    assert stamps[0] == {"provider": "primary", "model": "m-a", "configured": "m-a"}, "the tool call was m-a's work"
+    assert stamps[1]["model"] == "m-b" and stamps[1]["fallback"] == {"from": "m-a", "to": "m-b", "reason": "rate_limit"}
+    await manager.close()
+
+
 async def test_telegram_puts_one_line_under_an_answer_a_fallback_wrote(tmp_path: Path) -> None:
     outbox = FakeOutbox()
     view = RunView(run_id="r1", model="opus-5")

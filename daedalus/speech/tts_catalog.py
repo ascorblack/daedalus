@@ -65,7 +65,7 @@ SAMPLES: dict[str, str] = {
     "uk": "Привіт! Ось як звучить цей голос. Сьогодні 17 вересня, і на тебе чекають 3 справи.",
     "zh": "你好，这就是这个声音。今天是九月十七日，还有三件事在等着你。",
 }
-"""What a card plays when the operator asks to hear a voice, in the voice's own language.
+"""What a card plays when the operator asks to hear a voice, in the language it is being heard for.
 
 Each one carries a digit and a date on purpose. Piper phonemises through espeak-ng, which expands
 numbers in the language it is speaking, and the whole question an operator has about a synthesiser is
@@ -101,7 +101,8 @@ class TtsVoice:
     entry is the espeak-ng data each archive carries its own copy of, which is also why nothing extra
     has to be installed for one to speak."""
     memory_mb: int
-    """Roughly what the loaded voice adds to the process."""
+    """Roughly what the loaded voice adds to the process, in use — the model plus the runtime's own
+    arenas, which are allocated on the first sentences and then stop growing, not the weights alone."""
     sample_rate: int
     """What it synthesises at. The audio is sent on at this rate rather than resampled: a browser plays
     any of these, and resampling a synthesiser's own output is only a worse copy of it."""
@@ -157,7 +158,16 @@ class TtsVoice:
         it means the first sentence of an answer is heard later than it was written."""
         return self.rtf < 1.0
 
-    def sample(self) -> str:
+    def sample(self, language: str = "") -> str:
+        """The phrase to read. ``language`` is what the listener is picking a voice *for*.
+
+        A voice that speaks thirty-one languages is filed under one of them, and reading its sample
+        in that one told an operator filtering for Polish nothing they asked: they pressed Play on a
+        voice the picker had correctly offered them and heard Russian. Asked for a language this
+        voice does not speak, or for none, it reads its own.
+        """
+        if language and self.speaks(language) and (asked := SAMPLES.get(language.split("-")[0].lower())):
+            return asked
         return SAMPLES.get(self.language, FALLBACK_SAMPLE)
 
     def speaks(self, language: str) -> bool:
@@ -354,7 +364,9 @@ VOICES: tuple[TtsVoice, ...] = (
         gender="mixed",
         size_bytes=319_625_534,
         unpacked_bytes=369_315_617,
-        memory_mb=320,
+        # Measured on the float build this archive became: 413 MB to load and 617 MB once it has
+        # said a few sentences, at which point it stops growing. The 320 here was the int8 build's.
+        memory_mb=620,
         sample_rate=24_000,
         licence="Apache-2.0",
         quality=92,

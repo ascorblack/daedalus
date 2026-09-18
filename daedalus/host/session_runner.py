@@ -78,6 +78,15 @@ PROVIDER_OUTAGE_KINDS = frozenset({"llm_provider_error", "llm_timeout", "llm_str
 RECOVERY_REASONS = frozenset({"transient_llm_error_retry", "model_fallback_triggered", "soft_stop_notified", "llm_context_window_exceeded", "context_window_recovered", "reasoning_length_cut_retry", "continue_prompt_injected", "max_output_token_recovery"})
 """The state changes worth a log line: each is a round the run had to recover from, and the log is where the reason survives."""
 MODEL_METADATA_KEY = "daedalus.model"
+
+BACKGROUND_SHUTDOWN_SECONDS = 5.0
+"""How long a shutdown waits for a cancelled background task — the price refresh, the index
+backfill — before leaving it. Neither owes anything to disk; what they can owe is a socket."""
+
+MODEL_STAMPS_KEPT = 512
+"""How many un-persisted turn stamps a session holds at once. A run writes its rounds as they finish,
+so the map is normally one or two entries deep; the cap is only there so a store that is refusing
+every write cannot turn it into a leak."""
 """Message metadata naming what produced an assistant turn: provider, model, the configured model, and the fallback if it was one."""
 FALLBACK_REASONS = {
     "llm_rate_limit": "rate_limit",
@@ -212,6 +221,11 @@ class SessionState:
     """``provider:model`` that actually answered last, as the core reported it at the message it started."""
     model_change_reason: str = ""
     """Why the next change of model happened, taken from the core's own account of the demotion; empty means nobody said."""
+    model_stamps: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Which model produced each assistant turn, recorded the moment the turn ended and keyed by its
+    transcript key. Persists are fire-and-forget, so a turn is very often written after the chain has
+    already stepped down; reading the model at write time therefore names whoever is answering *now*.
+    An entry is taken out of the map when the turn it describes is stamped."""
     run_history_start: int = 0
     """Length of the working history when the current run began: what this run added starts here."""
     checkpoint_capped: bool = False
@@ -425,7 +439,14 @@ class SessionManager:
         for task in (getattr(self, "_backfill_task", None), getattr(self, "_price_task", None)):
             if task is not None and not task.done():
                 task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                # Bounded, because a cancelled task is not a finished one: the price refresh is
+                # inside an HTTP client when it is cancelled, and closing a connection whose peer has
+                # gone waits for a FIN that never arrives. Neither of these owes anything to disk, so
+                # a shutdown that gives up on one loses nothing and a shutdown that waits for one
+                # stops the process from ever exiting.
+                with suppress(TimeoutError):
+                    async with asyncio.timeout(BACKGROUND_SHUTDOWN_SECONDS):
+                        await asyncio.gather(task, return_exceptions=True)
         await self.mcp.close()
         await self.providers.aclose()
 
@@ -580,8 +601,10 @@ class SessionManager:
         * a project — the project's folder, which is why moving the project moves every session in
           it and there is no second copy of the path to fall out of step;
         * a project and ``own_workspace`` — a directory of the session's own, named in the metadata.
-          It is listed under the project and it does not share the project's files: that is what the
-          concierge asks for when it hands an agent work that has nothing to do with the rest.
+          It is listed under the project and it does not share the project's files, in either
+          direction: the directory is outside the project's folder, so no session walled at that
+          folder can reach into it. That is what the concierge asks for when it hands an agent work
+          that has nothing to do with the rest.
         """
         named = metadata.get("workspace")
         if project is not None:
@@ -612,10 +635,13 @@ class SessionManager:
         # which is why the project is the stored link and the directory is derived from it.
         meta = dict(metadata or {})
         if project is not None and own_workspace:
-            # A directory of its own inside the project's folder: it is the project's agent — it is
-            # listed there and it is removed with it — and its files are nobody else's.
+            # Listed in the project, working in a directory of its own under the workspaces root —
+            # outside the project's folder, not a subdirectory of it. Nested, containment ran only
+            # one way: the agents walled at the project's folder *contain* every private directory
+            # in it, so "its files are nobody else's" was true of the agent and false of everybody
+            # else. Outside, neither folder contains the other and the wall holds both ways.
             meta["own_workspace"] = True
-            meta["workspace"] = str(project.root / sid)
+            meta["workspace"] = str(self.workspace_for(sid))
         workspace = self.workspace_of(sid, meta, project) if (project is not None or not workspace) else workspace
         _ensure_inbox(workspace, project)
         session = Session(id=sid, tenant_id=TENANT, title=title, metadata=dict(meta))
@@ -1417,21 +1443,34 @@ class SessionManager:
         """Move a session into a project, or out of every project, and point it at the right folder.
 
         The directory follows the link: into a project it is the project's folder unless the caller
-        keeps the session's own one, and out of a project it is whatever the metadata named — which,
-        for a session that was never anywhere else, is the directory of its own it started with. The
-        files are not moved and not copied; where the session works changes, what is on disk does not.
+        keeps the session's own one, in which case it is the folder the session is working in *now*.
+        The files are not moved and not copied; where the session works changes, what is on disk does
+        not — and "keeps its own directory" therefore has to mean the same directory, not a fresh
+        empty one. Taking the default would have stranded everything a session had written in the
+        folder it was in, because a session that once took a project's folder has no directory of
+        its own in its metadata to go back to.
         """
         state = await self.get_state(session_id)
         if state is None:
             raise KeyError(session_id)
         metadata = dict(state.session.metadata)
-        if project is not None and own_workspace:
+        current = state.workspace
+        if project is not None and not own_workspace:
+            metadata.pop("own_workspace", None)
+            metadata.pop("workspace", None)
+        elif project is not None:
+            # ``workspace_of`` reads the directory out of the metadata for a project session that
+            # keeps its own, so it is written there as a concrete path — the one it is in now.
             metadata["own_workspace"] = True
-            metadata.setdefault("workspace", str(self.workspace_of(session_id, metadata, None)))
+            metadata["workspace"] = str(current)
         else:
             metadata.pop("own_workspace", None)
-            if project is not None:
+            if current == self.workspace_for(session_id):
+                # The directory it would be given anyway: naming it would only pin a path that is
+                # derived from the workspaces root and moves with it.
                 metadata.pop("workspace", None)
+            else:
+                metadata["workspace"] = str(current)
         await self.sessions.update_metadata(session_id, metadata)
         await self.projects.attach(session_id, project.id if project is not None else None)
         state.session.metadata.clear()  # the Session model is frozen; its dict is the thing that is kept
@@ -1883,6 +1922,7 @@ class SessionManager:
         state.configured_model = self._rung_label(rungs[0][0], rungs[0][1])
         state.effective_model = ""
         state.model_change_reason = ""
+        state.model_stamps.clear()
         engine = build_engine(
             deps=deps,
             config=self.config,
@@ -2054,18 +2094,29 @@ class SessionManager:
         and stamping that with the model answering now would put today's fallback on every answer
         the session ever gave.
 
+        The stamp itself is not read here: it was taken at ``message_stop``, while the model that
+        wrote the turn was still the one answering. A persist is a fire-and-forget task, so round *n*
+        is very often written after round *n+1* has already stepped the chain down — reading
+        ``effective_model`` at write time is what made a turn the configured model produced claim the
+        fallback wrote it, permanently, since transcript rows are written once.
+
         The metadata dict is annotated in place. It is the same dict the core's own history holds,
         and that is the point: the working copy and the transcript copy say the same thing, and
         neither is a message the model is ever shown.
         """
-        if not state.effective_model:
+        if not state.model_stamps:
             return
-        record = self._model_record(state)
         known = set(previous_keys)
         for message in messages:
             if message.role is not MessageRole.assistant:
                 continue
-            if MODEL_METADATA_KEY in message.metadata or self.sessions.transcript_key(message) in known:
+            key = self.sessions.transcript_key(message)
+            if MODEL_METADATA_KEY in message.metadata or key in known:
+                continue
+            record = state.model_stamps.pop(key, None)
+            if record is None:
+                # Nobody watched this turn end — a history the host did not stream, a turn the core
+                # wrote itself. An unstamped turn says nothing; a guessed one says something false.
                 continue
             message.metadata[MODEL_METADATA_KEY] = record
 
@@ -2505,6 +2556,27 @@ class SessionManager:
             },
         )
 
+    def _record_model_stamp(self, state: SessionState) -> None:
+        """Name the model on the assistant turn that has just ended, while it is still the one answering.
+
+        The turn is already in the working history by ``message_stop`` — the tool result of a tool
+        round lands before it — so the last assistant message there is the one that stopped. The
+        record is kept against that message's transcript key until the persist of its round picks it
+        up; the map is capped so a session whose turns are never written cannot grow it without end.
+        """
+        engine = state.engine
+        if engine is None or not state.effective_model:
+            return
+        message = next((m for m in reversed(list(engine.history)) if m.role is MessageRole.assistant), None)
+        if message is None:
+            return
+        key = self.sessions.transcript_key(message)
+        if key in state.model_stamps:
+            return
+        state.model_stamps[key] = self._model_record(state)
+        while len(state.model_stamps) > MODEL_STAMPS_KEPT:
+            state.model_stamps.pop(next(iter(state.model_stamps)))
+
     async def _dispatch_event(self, state: SessionState, event: TurnEvent) -> None:
         change = self._model_change(state, event)
         if change is not None:
@@ -2537,6 +2609,7 @@ class SessionManager:
             except Exception:  # noqa: BLE001
                 logger.exception("event sink failed")
         if event.type is EventType.MESSAGE_STOP:
+            self._record_model_stamp(state)
             await self._enforce_caps(state, event.run_id)
 
     def _time_tool(self, state: SessionState, event: TurnEvent) -> None:

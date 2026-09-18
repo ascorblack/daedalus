@@ -92,7 +92,7 @@ class LocalTts:
     """
 
     def __init__(self, state_dir: Path, config: RuntimeConfig) -> None:
-        self.downloads = Downloads(state_dir / "models" / "tts", lookup=catalog.get, resolver=check_voice)
+        self.downloads = Downloads(state_dir / "models" / "tts", lookup=catalog.get, resolver=check_voice, installed=self._installed)
         self.config = config
         self._speaking = 0
         """Bumped by :meth:`interrupt`. Everything being synthesised stops at its next sentence."""
@@ -212,8 +212,12 @@ class LocalTts:
         if not spoke:
             raise TtsError("there was nothing to say")
 
-    async def sample(self, voice_id: str) -> tuple[bytes, str]:
-        """One short phrase in a voice's own language, so it can be heard before it is chosen.
+    async def sample(self, voice_id: str, language: str = "") -> tuple[bytes, str]:
+        """One short phrase, so a voice can be heard before it is chosen.
+
+        ``language`` is what the picker is being filtered by — the language the operator is choosing
+        a voice *for*, which for a voice that speaks thirty-one of them is not the one it is filed
+        under. A voice that does not speak it reads its own.
 
         Loads the voice being sampled, which means sampling a second voice drops the first — that is
         the same single-resident rule everything else here follows, and hearing two voices at once is
@@ -224,7 +228,7 @@ class LocalTts:
             raise TtsError(f"{voice.label} is not downloaded yet")
         engine = await CACHE.get(voice, self.downloads.directory(voice.id), threads=self.settings.local_threads)
         speaker = self.speaker() if voice.id == self.settings.local_voice else ""
-        pcm, rate = await engine.speak(voice.sample(), speaker=speaker, speed=self.speed())
+        pcm, rate = await engine.speak(voice.sample(language), speaker=speaker, speed=self.speed())
         if not pcm:
             raise TtsError(f"{voice.label} produced no audio for its own sample")
         clip = await encode(pcm, rate)
@@ -243,6 +247,17 @@ class LocalTts:
         if chosen is None or chosen.id == after:
             return
         self.warm()
+
+    def _installed(self, voice_id: str) -> None:
+        """A voice has just finished downloading: if it is the chosen one, the cache starts again.
+
+        A load that failed — on a short archive, on a disk that filled — is not retried while the
+        cache still holds that failure for the same voice, and only forgetting it clears that. The
+        delete endpoint forgets; downloading again did not, so a voice re-fetched after a bad first
+        install stayed "error" until the operator re-selected it.
+        """
+        if voice_id == self.settings.local_voice:
+            self.forget()
 
     def forget(self) -> None:
         """Drop the loaded voice: the choice changed, or the files were deleted underneath it."""

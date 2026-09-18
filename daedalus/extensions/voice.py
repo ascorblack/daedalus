@@ -583,7 +583,10 @@ class Voice:
             if not project.reachable:
                 raise ValueError(f"the folder of {project.name} ({project.root}) is not reachable from here; it has to be mounted first")
         else:
-            project = await self.project()
+            # Under the same lock the session takes: the concierge is told to fan several errands
+            # out at once, and each of them wants the Voice project the first time anything does.
+            async with self._lock:
+                project = await self.project()
             own = workspace == "own"
         state = await self.app.create_session(
             name,

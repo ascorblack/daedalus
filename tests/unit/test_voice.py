@@ -34,6 +34,7 @@ from daedalus.speech.service import LocalSpeech
 from daedalus.speech.tts_service import LocalTts
 from daedalus.stores.database import Database
 from tests.support.models import DEFAULT_PRESET, FALLBACK_PRESET, VISION_PRESET, model_config, presets
+from tests.support.waiting import SETTLE
 
 
 @pytest.fixture
@@ -366,7 +367,9 @@ async def test_neither_thinking_nor_a_tool_result_nor_a_finished_turn_is_progres
 async def test_progress_is_coalesced_in_a_window_and_capped_to_one_per_agent(app: Any) -> None:
     manager: SessionManager = app.manager
     voice = Voice(app)
-    _fast(manager, window=0.05, gap=0.3)
+    # A window wide enough that a loaded host cannot close it between the two narrations below:
+    # what is under test is what the window decides, not whether two calls fit inside it.
+    _fast(manager, window=1.0, gap=0.3)
     submitted = _capture(manager)
     child = (await voice.delegate(title="Parser", task="fix the parser"))["session_id"]
 
@@ -490,7 +493,7 @@ async def test_progress_does_not_interrupt_the_concierges_own_turn(app: Any) -> 
 
     async with voice.listen():
         # The operator is being answered: an interim that arrives now would steer that very turn.
-        concierge.task = asyncio.create_task(asyncio.wait_for(answering, timeout=5))
+        concierge.task = asyncio.create_task(asyncio.wait_for(answering, timeout=SETTLE))
         await _narrate(voice, child, "run-1", "Found the problem in the lexer.")
         await voice.drain_progress()
         assert _progress_reports(submitted) == []
@@ -843,11 +846,12 @@ async def test_a_report_held_past_the_grace_is_dropped_rather_than_spoken_late(a
     voice = Voice(app)
     submitted = _capture(manager)
     await voice.session_id()
-    monkeypatch.setattr(voice_module, "PENDING_GRACE_SECONDS", 0.05)
     await voice.report(report_block(kind="final", title="a", session_id="s-a", state="finished", body="the digest is out"))
     assert voice.held
 
-    await asyncio.sleep(0.1)
+    # No grace at all: everything already stored is older than the cutoff. The clock is moved rather
+    # than waited out — a sleep only makes the test slow, and says nothing the cutoff does not.
+    monkeypatch.setattr(voice_module, "PENDING_GRACE_SECONDS", 0.0)
     assert not voice.held, "a report older than the grace is still offered to the page that connects"
     async with voice.listen():
         pass

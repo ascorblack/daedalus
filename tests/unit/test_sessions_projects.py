@@ -16,6 +16,7 @@ model call.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,8 +29,9 @@ from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions.api import build_app
 from daedalus.extensions.voice import PROJECT_DIR, PROJECT_KIND, Voice
 from daedalus.host.session_runner import SessionManager
-from daedalus.stores.database import Database
+from daedalus.stores.database import MIGRATIONS, Database
 from daedalus.stores.projects import ProjectError, ProjectStore
+from tests.support.waiting import until
 from tests.unit.test_session_runner import ScriptedProvider, _manager, _wait_finished
 
 HEADERS = {"X-Daedalus-Token": "tok"}
@@ -71,6 +73,63 @@ async def test_a_system_project_is_made_once_and_refuses_to_be_moved_or_removed(
     assert renamed.name == "Voice agents" and renamed.settings.system == PROJECT_KIND
 
 
+async def test_several_callers_asking_at_once_make_one_system_project(db: Database, tmp_path: Path) -> None:
+    """The concierge is told to fan errands out in parallel, and each of them wants the folder.
+
+    ``ensure_system`` reads the table and then inserts, with awaits in between; nothing used to
+    serialise that, so a fresh installation asked twice at once grew two "Voice" folders — and a
+    system project cannot be deleted, so there was no way to tidy that up from the app.
+    """
+    store = ProjectStore(db, reserved=[tmp_path / "state"], home=tmp_path)
+    root = tmp_path / "state" / "workspaces" / PROJECT_DIR
+    made = await asyncio.gather(*[store.ensure_system(PROJECT_KIND, name="Voice", root=root) for _ in range(8)])
+    assert len({p.id for p in made}) == 1, "one folder, whoever won the race"
+    assert [p.settings.system for p in await store.list()] == [PROJECT_KIND]
+    # …and the table refuses a second one even if the code above ever stops checking.
+    with pytest.raises(sqlite3.IntegrityError):
+        await db.execute(
+            "INSERT INTO projects(id, name, root, created_at, settings, system) VALUES ('x', 'Voice', ?, '', '{}', ?)",
+            (str(root / "other"), PROJECT_KIND),
+        )
+
+
+async def test_the_duplicate_system_projects_an_installation_already_has_are_merged(tmp_path: Path) -> None:
+    """The repair for an installation that ran the racing code: one folder, and nobody's agents lost."""
+    path = tmp_path / "old.sqlite"
+    raw = sqlite3.connect(path)
+    raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version(version) VALUES (?);".replace("?", str(len(MIGRATIONS) - 1)))
+    for script in MIGRATIONS[: len(MIGRATIONS) - 1]:
+        raw.executescript(script)
+    for n, name in enumerate(("Voice", "Voice", "Voice")):
+        raw.execute(
+            "INSERT INTO projects(id, name, root, created_at, settings) VALUES (?, ?, ?, ?, ?)",
+            (f"v{n}", name, str(tmp_path / f"voice{n}"), f"2026-09-0{n + 1}T00:00:00+00:00", '{"snapshots": false, "system": "voice"}'),
+        )
+        raw.execute(
+            "INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata, project_id) VALUES (?, 't', ?, '', '', '{}', ?)",
+            (f"s{n}", f"agent {n}", f"v{n}"),
+        )
+    raw.execute(
+        "INSERT INTO projects(id, name, root, created_at, settings) VALUES ('p0', 'Bakery', ?, '2026-09-01T00:00:00+00:00', '{}')",
+        (str(tmp_path / "bakery"),),
+    )
+    raw.commit()
+    raw.close()
+
+    db = Database(path)
+    await db.open()
+    try:
+        store = ProjectStore(db)
+        projects = await store.list()
+        assert [p.name for p in projects] == ["Bakery", "Voice"], "one Voice folder is left, and the operator's is untouched"
+        voice = next(p for p in projects if p.settings.system == PROJECT_KIND)
+        assert voice.id == "v0", "the oldest is the one that is kept"
+        rows = await db.fetchall("SELECT id, project_id FROM sessions ORDER BY id")
+        assert {r["id"]: r["project_id"] for r in rows} == {"s0": "v0", "s1": "v0", "s2": "v0"}, "every agent is still listed under Voice"
+    finally:
+        await db.close()
+
+
 async def test_the_counts_beside_the_folders_are_of_the_table_and_not_of_a_page(db: Database, tmp_path: Path) -> None:
     store = ProjectStore(db)
     root = tmp_path / "bakery"
@@ -85,6 +144,16 @@ async def test_the_counts_beside_the_folders_are_of_the_table_and_not_of_a_page(
     counts = await store.summary(active={"p1"})
     assert counts[project.id] == {"total": 3, "active": 1, "loops": 1, "last_message_at": "2026-09-03"}
     assert counts[""] == {"total": 1, "active": 0, "loops": 0, "last_message_at": "2026-09-09"}
+
+    # A subagent and a fork are drawn inside the row they belong to, so the header over the folder
+    # must not count them: it used to say "3 agents" over a list of two.
+    for sid, metadata in (("p3", '{"subagent_of": "p0"}'), ("p4", '{"forked_from": {"session_id": "p0"}}')):
+        await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata) VALUES (?, 't', ?, '', '2026-09-04', ?)", (sid, sid, metadata))
+        await store.attach(sid, project.id)
+    # …and one whose leader is gone hangs under nothing, so it is counted, which is what the screen does.
+    await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata) VALUES ('p5', 't', 'orphan', '', '2026-09-05', '{\"subagent_of\": \"vanished\"}')")
+    await store.attach("p5", project.id)
+    assert (await store.summary())[project.id]["total"] == 4
 
 
 # -- the listing the screen is built on ------------------------------------------------------
@@ -149,13 +218,49 @@ async def test_a_session_moves_between_projects_without_a_file_moving(settings: 
             assert manager.live_state(sid).workspace == root  # type: ignore[union-attr]
             assert (own / "notes.md").exists(), "moving a session must not move its files"
 
-            # Out again: a directory of its own, and the project says it has no agents.
+            # Out again: still the folder it was working in a moment ago, because nothing on disk
+            # moved. Sending it back to the directory it had before the project would leave
+            # everything it wrote in the project's folder behind, unreachable to it.
             out = (await client.post(f"/api/sessions/{sid}/project", headers=HEADERS, json={"project_id": None})).json()
-            assert out["project_id"] is None and out["workspace"] == str(own)
+            assert out["project_id"] is None and out["workspace"] == str(root)
             assert manager.live_state(sid).services.project_root is None  # type: ignore[union-attr]
             assert (await client.get("/api/sessions", headers=HEADERS)).json()["free"]["total"] == 1
 
             assert (await client.post(f"/api/sessions/{sid}/project", headers=HEADERS, json={"project_id": "nope"})).status_code == 404
+    finally:
+        await manager.close()
+
+
+async def test_keeping_its_own_directory_keeps_the_one_it_is_working_in(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    """A move with the folder checkbox off must not strand what the agent has written.
+
+    The sheet says "its files stay where they are". They only do if the move re-points the project
+    and nothing else: a session that had taken a project's folder has no directory of its own left
+    in its metadata, so falling back to the default handed it a fresh empty one and left its work in
+    a folder it could no longer reach.
+    """
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    app = _app(settings, config, db, manager)
+    bakery = tmp_path / "bakery"
+    garage = tmp_path / "garage"
+    bakery.mkdir()
+    garage.mkdir()
+    try:
+        async with _client(app) as client:
+            first = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "root": str(bakery)})).json()
+            second = (await client.post("/api/projects", headers=HEADERS, json={"name": "Garage", "root": str(garage)})).json()
+            sid = (await client.post("/api/sessions", headers=HEADERS, json={"title": "Baker", "project_id": first["id"]})).json()["id"]
+            assert manager.live_state(sid).workspace == bakery  # type: ignore[union-attr]
+            (bakery / "note.txt").write_text("the recipe", encoding="utf-8")
+
+            moved = (await client.post(f"/api/sessions/{sid}/project", headers=HEADERS, json={"project_id": second["id"], "use_project_folder": False})).json()
+            assert moved["project"] == "Garage"
+            assert moved["workspace"] == str(bakery), "the same folder, not a fresh empty one"
+            state = manager.live_state(sid)
+            assert state is not None and state.workspace == bakery
+            assert (state.workspace / "note.txt").read_text(encoding="utf-8") == "the recipe"
+            assert state.services is not None and state.services.project_root == bakery, "walled at the folder it works in"
     finally:
         await manager.close()
 
@@ -200,12 +305,19 @@ async def test_a_delegated_agent_shares_the_concierges_folder_unless_it_asks_for
         assert result["workspace"] == "shared" and result["project"] == "Voice"
         assert manager.live_state(result["session_id"]).workspace == project.root  # type: ignore[union-attr]
     # Two agents on one errand see the same files; a third one sees none of them.
-    assert manager.live_state(mine["session_id"]).workspace == project.root / mine["session_id"]  # type: ignore[union-attr]
+    assert manager.live_state(mine["session_id"]).workspace == manager.workspace_for(mine["session_id"])  # type: ignore[union-attr]
     assert mine["workspace"] == "own"
     own_state = manager.live_state(mine["session_id"])
     assert own_state is not None and own_state.project is not None and own_state.project.id == project.id
     # Listed under Voice, and walled at its own directory rather than at the shared one.
     assert own_state.services is not None and own_state.services.project_root == own_state.workspace
+    # The wall holds both ways. Nested inside the shared folder it did not: a shared agent is walled
+    # at the folder that *contains* every private directory, so it could read all of them.
+    shared_state = manager.live_state(shared["session_id"])
+    assert shared_state is not None and shared_state.workspace not in own_state.workspace.parents
+    assert own_state.workspace not in shared_state.workspace.parents
+    assert not shared_state.services.contains(own_state.workspace / "private.txt")  # type: ignore[union-attr]
+    assert not own_state.services.contains(shared_state.workspace / "shared.txt")
     assert {s["id"] for s in await manager.projects.sessions_of(project.id)} >= {shared["session_id"], mine["session_id"]}
 
 
@@ -280,11 +392,8 @@ async def test_what_the_concierge_says_to_a_running_agent_reaches_its_next_model
         started = await voice.delegate(title="Invoices", task="read the invoices")
         agent = started["session_id"]
         waiter = asyncio.create_task(_wait_finished(manager))
-        for _ in range(200):
-            if manager.live_state(agent) is not None and manager.live_state(agent).running:  # type: ignore[union-attr]
-                break
-            await asyncio.sleep(0.01)
-        assert manager.live_state(agent).running, "the delegated agent never started running"  # type: ignore[union-attr]
+        state = manager.live_state(agent)
+        await until(lambda: state is not None and state.running, "the delegated agent started running")
 
         relayed = await voice.delegate(title="", task="the old ones as well, please", session_id=agent)
         assert relayed["steered"] is True and relayed["answered"] is False

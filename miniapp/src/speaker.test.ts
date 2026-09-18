@@ -303,6 +303,31 @@ describe("a second answer while the first is still being read", () => {
     expect(unspoken).toEqual(["A sentence the run wrote as it was stopped."]);
   });
 
+  it("does not let a sentence from two answers back take the live one over", async () => {
+    // One slot held only the most recently superseded answer, so with A -> B -> C a late sentence
+    // of A was not recognised as abandoned: it opened its own turn, which stopped C and read A out.
+    vi.useFakeTimers();
+    const fake = install({});
+    const unspoken: string[] = [];
+    const speaker = createSpeaker({ engine: () => "here", lang: "en-US", onSpeaking: () => undefined, onUnspoken: (t) => unspoken.push(t) });
+    speaker.say("The first answer.", "run-1");
+    await settle(10);
+    speaker.say("The second answer.", "run-2");
+    await settle(10);
+    speaker.say("The third answer.", "run-3");
+    await settle(10);
+    expect(fake.spoken).toEqual(["The first answer.", "The second answer.", "The third answer."]);
+
+    speaker.say("A straggling sentence of the first answer.", "run-1");
+    await settle(200);
+    expect(fake.spoken).toEqual(["The first answer.", "The second answer.", "The third answer."]);
+    expect(unspoken).toEqual(["A straggling sentence of the first answer."]);
+    // The live answer is still the live answer: it goes on being read.
+    speaker.say("Still the third answer.", "run-3");
+    await settle(200);
+    expect(fake.spoken).toContain("Still the third answer.");
+  });
+
   it("is moved on by the run starting, before that run has written a word", async () => {
     vi.useFakeTimers();
     const fake = install({ ends: 0 });

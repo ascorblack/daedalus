@@ -573,7 +573,7 @@ Piper's "high" quality — says so on its own card. Numbers, dates and Latin wor
 sentence are read properly: each Piper archive carries its own copy of espeak-ng's data, so nothing
 has to be installed for it.
 
-The recommended Russian voice is **Supertonic 3**: a hundred and forty megabytes that reads
+The recommended Russian voice is **Supertonic 3**: a hundred and twenty-three megabytes that reads
 thirty-one languages, renders at forty-four kilohertz — twice the rate of the rest — offers ten voices
 inside one download, and is still quicker than any Piper voice here. A Russian answer going to it has
 its stress marked first, from a small dictionary of the words an assistant says every day, because

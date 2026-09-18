@@ -101,12 +101,15 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
     return () => controller.abort();
   }, [load]);
 
-  async function sample(id: string) {
+  async function sample(id: string, asked: string) {
     player.current?.pause();
     setProblem("");
     setPlaying(id);
     try {
-      const response = await fetch(`/api/tts/voices/${encodeURIComponent(id)}/sample`, { method: "POST", headers: api.authHeaders() });
+      // The language the picker is filtered by goes with it: a voice that speaks thirty-one of them
+      // is filed under one, and playing its own would answer a question the listener did not ask.
+      const query = asked ? `?language=${encodeURIComponent(asked)}` : "";
+      const response = await fetch(`/api/tts/voices/${encodeURIComponent(id)}/sample${query}`, { method: "POST", headers: api.authHeaders() });
       if (!response.ok) throw new Error(await response.text());
       const url = URL.createObjectURL(await response.blob());
       const audio = new Audio(url);
@@ -270,7 +273,7 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
                   <button className="btn small" onClick={() => void act(m.id, "cancel")}>{t("tts.cancel")}</button>
                 ) : m.installed ? (
                   <>
-                    <button className="btn small" disabled={playing === m.id} onClick={() => void sample(m.id)}>
+                    <button className="btn small" disabled={playing === m.id} onClick={() => void sample(m.id, language)}>
                       <Icon name="mic" size={14} /> {playing === m.id ? t("tts.playing") : t("tts.play")}
                     </button>
                     {m.selected ? (

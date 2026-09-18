@@ -1144,7 +1144,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         default_label = default[1].display(default[0]) if default else NO_MODEL_LABEL
         overrides_by_id = await manager.live.load_models([row["id"] for row in rows])
         for row in rows:
-            # The directory the session works in, so the list can group sessions by workspace.
+            # The directory the session works in, for the tooltip on its row and the chip that says
+            # it has one of its own. The list groups by project now, not by workspace.
             workspace = Path(str(row["metadata"].get("workspace"))) if row["metadata"].get("workspace") else manager.workspace_for(row["id"])
             row["workspace"] = workspace.name
             row["workspace_path"] = str(workspace)
@@ -1846,10 +1847,15 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return {**_tts_view(), "load": app.tts.warm()}
 
     @api.post("/api/tts/voices/{voice_id}/sample")
-    async def tts_sample(voice_id: str, _: dict[str, Any] = Depends(auth)) -> Response:
-        """A short phrase in this voice, in its own language, so it can be heard before it is chosen."""
+    async def tts_sample(voice_id: str, language: str = "", _: dict[str, Any] = Depends(auth)) -> Response:
+        """A short phrase in this voice, so it can be heard before it is chosen.
+
+        ``language`` is what the picker is filtered by: a voice that speaks thirty-one languages is
+        filed under one of them, and reading its sample in that one answered a question the operator
+        filtering for another language had not asked.
+        """
         try:
-            clip, media_type = await app.tts.sample(voice_id)
+            clip, media_type = await app.tts.sample(voice_id, language)
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
         except TtsError as exc:
@@ -2297,8 +2303,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
         Nothing on disk moves. Into a project the session either starts working in the project's
         folder — where it sees the rest of the project's files, and they see what it writes — or
-        keeps the directory it already has, listed under the project and sharing none of it. Out of
-        a project it goes back to a directory of its own, which is empty unless it had one before.
+        keeps the directory it already has: the same one, listed under the new project and sharing
+        none of it. Out of a project it keeps that directory too. Nothing a session has written is
+        ever left behind by a move.
         """
         state = await manager.get_state(session_id)
         if state is None:

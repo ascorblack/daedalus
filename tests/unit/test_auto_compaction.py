@@ -233,7 +233,10 @@ async def test_a_run_cannot_start_while_the_history_is_being_rewritten(settings:
     manager._start_run_locked = fake_start  # type: ignore[method-assign]
     async with state.lock:  # what _compact_locked holds while it rewrites the history
         task = asyncio.create_task(manager._start_run(state, None))
-        await asyncio.sleep(0.05)
+        # Three turns of the loop: enough for the task to be scheduled and to reach the lock, and
+        # not a duration — what holds it is the lock, which no amount of elapsed time opens.
+        for _ in range(3):
+            await asyncio.sleep(0)
         assert started == [] and not task.done()
     assert await task == "run-id" and started == ["run"]
     await manager.close()

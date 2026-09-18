@@ -12,8 +12,10 @@ the launcher cannot mount. Reachability is reported, not enforced.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import sqlite3
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -95,6 +97,21 @@ def _row(row: Any) -> Project:
     )
 
 
+def _nested_under(session_id: str, metadata: dict[str, Any], known: set[str]) -> bool:
+    """Whether the Agents screen draws this session inside another row rather than as one of its own.
+
+    The same rule the screen nests by, and it has to stay the same rule or the count over a folder
+    stops describing the list under it: a subagent hangs under its leader, a fork under the session
+    it was taken from, and one whose leader or origin no longer exists hangs under nothing.
+    """
+    leader = metadata.get("subagent_of")
+    if isinstance(leader, str) and leader in known:
+        return True
+    forked = metadata.get("forked_from")
+    origin = forked.get("session_id") if isinstance(forked, dict) else None
+    return isinstance(origin, str) and origin != session_id and origin in known
+
+
 PSEUDO_FILESYSTEMS = (Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"))
 """Kernel interfaces the operating system mounts, not folders with work in them. A project rooted on
 one of them would list a running machine's processes and devices as if they were files to edit."""
@@ -129,6 +146,10 @@ class ProjectStore:
 
     def __init__(self, db: Database, *, reserved: Iterable[Path] = (), home: Path | None = None) -> None:
         self._db = db
+        self._write = asyncio.Lock()
+        """Held across the whole of a read-check-insert. Both ways of making a project look the table
+        up and then write to it, with awaits in between; nothing else serialised them, so two callers
+        that asked at the same moment each saw a table without the row the other was about to add."""
         self._roots: tuple[Path, ...] = ()
         self._reserved = tuple(dict.fromkeys(Path(os.path.normpath(Path(p).expanduser())) for p in reserved))
         """This installation's own directories. A project may not be one, contain one or sit inside one."""
@@ -163,14 +184,31 @@ class ProjectStore:
             raise ProjectError("a project needs a name")
         path = normalise_root(root)
         self._refuse_reserved(path)
-        await self._refuse_overlap(path)
-        project = Project(id=uuid.uuid4().hex[:12], name=label, root=path, created_at=datetime.now(UTC), settings=settings or ProjectSettings())
-        await self._db.execute(
-            "INSERT INTO projects(id, name, root, created_at, settings) VALUES (?, ?, ?, ?, ?)",
-            (project.id, project.name, str(project.root), project.created_at.isoformat(), json.dumps(project.settings.dump())),
-        )
-        await self.list()
+        async with self._write:
+            await self._refuse_overlap(path)
+            project = Project(id=uuid.uuid4().hex[:12], name=label, root=path, created_at=datetime.now(UTC), settings=settings or ProjectSettings())
+            await self._insert(project)
+            await self.list()
         return project
+
+    async def _insert(self, project: Project) -> None:
+        """One row, with the system flag written to its own column as well as into the settings blob.
+
+        The column exists for the partial unique index over it: the flag is what makes a project the
+        installation's own, and an invariant a query enforces holds even when the code that was
+        meant to check it lost a race.
+        """
+        await self._db.execute(
+            "INSERT INTO projects(id, name, root, created_at, settings, system) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                project.id,
+                project.name,
+                str(project.root),
+                project.created_at.isoformat(),
+                json.dumps(project.settings.dump()),
+                project.settings.system,
+            ),
+        )
 
     async def ensure_system(self, kind: str, *, name: str, root: Path) -> Project:
         """The installation's own project of this kind, made the first time something needs it.
@@ -180,18 +218,29 @@ class ProjectStore:
         installation. So the reserved check is skipped here and nowhere else, and the overlap check
         is kept — an operator project that already contains this folder would make containment mean
         two things at once, whoever created which first.
+
+        One per kind, and the database says so: the check and the insert are held under one lock, and
+        a partial unique index over the ``system`` column is what makes the invariant survive a lost
+        race rather than turn into a second undeletable folder.
         """
-        for existing in await self.list():
-            if existing.settings.system == kind:
+        async with self._write:
+            existing = await self.system(kind)
+            if existing is not None:
                 return existing
-        path = Path(os.path.normpath(Path(root).expanduser()))
-        await self._refuse_overlap(path)
-        project = Project(id=uuid.uuid4().hex[:12], name=name, root=path, created_at=datetime.now(UTC), settings=ProjectSettings(system=kind))
-        await self._db.execute(
-            "INSERT INTO projects(id, name, root, created_at, settings) VALUES (?, ?, ?, ?, ?)",
-            (project.id, project.name, str(project.root), project.created_at.isoformat(), json.dumps(project.settings.dump())),
-        )
-        await self.list()
+            path = Path(os.path.normpath(Path(root).expanduser()))
+            await self._refuse_overlap(path)
+            project = Project(id=uuid.uuid4().hex[:12], name=name, root=path, created_at=datetime.now(UTC), settings=ProjectSettings(system=kind))
+            try:
+                await self._insert(project)
+            except sqlite3.IntegrityError:
+                # The unique index refused a second project of this kind. Somebody else made it —
+                # from another process against the same file, which is the one race the lock above
+                # cannot see. Read theirs rather than raising at a caller that only asked for it.
+                made = await self.system(kind)
+                if made is None:
+                    raise
+                return made
+            await self.list()
         return project
 
     async def system(self, kind: str) -> Project | None:
@@ -204,20 +253,31 @@ class ProjectStore:
         One query over the sessions table and no transcript read at all: the counts are right for an
         installation with more sessions than any one page of the list shows, which is the whole
         reason they are not counted from the rows the app was sent.
+
+        A session the screen draws *inside* another row is not counted: a subagent is listed under
+        its leader and a fork under the session it was taken from, so counting them made a folder
+        header say "3 agents" over a body that listed two. Whose leader or origin is gone is nobody's
+        child and is counted, which is exactly the rule the screen nests by.
         """
         working = set(active)
         out: dict[str, dict[str, Any]] = {}
         rows = await self._db.fetchall("SELECT id, project_id, last_message_at, metadata FROM sessions")
+        parsed: list[tuple[Any, dict[str, Any]]] = []
         for row in rows:
-            bucket = out.setdefault(row["project_id"] or "", {"total": 0, "active": 0, "loops": 0, "last_message_at": ""})
-            bucket["total"] += 1
-            if row["id"] in working:
-                bucket["active"] += 1
             try:
                 metadata = json.loads(row["metadata"] or "{}")
             except (TypeError, ValueError):
                 metadata = {}
-            loop = metadata.get("loop") if isinstance(metadata, dict) else None
+            parsed.append((row, metadata if isinstance(metadata, dict) else {}))
+        known = {row["id"] for row, _ in parsed}
+        for row, metadata in parsed:
+            if _nested_under(row["id"], metadata, known):
+                continue
+            bucket = out.setdefault(row["project_id"] or "", {"total": 0, "active": 0, "loops": 0, "last_message_at": ""})
+            bucket["total"] += 1
+            if row["id"] in working:
+                bucket["active"] += 1
+            loop = metadata.get("loop")
             if isinstance(loop, dict) and loop.get("status") == "active":
                 bucket["loops"] += 1
             last = str(row["last_message_at"] or "")
@@ -243,8 +303,8 @@ class ProjectStore:
             # The flag is what makes the two refusals above stick; nothing outside this module sets it.
             merged = ProjectSettings(snapshots=merged.snapshots, system=project.settings.system)
         await self._db.execute(
-            "UPDATE projects SET name = ?, root = ?, settings = ? WHERE id = ?",
-            (label, str(path), json.dumps(merged.dump()), project_id),
+            "UPDATE projects SET name = ?, root = ?, settings = ?, system = ? WHERE id = ?",
+            (label, str(path), json.dumps(merged.dump()), merged.system, project_id),
         )
         await self.list()
         return Project(id=project.id, name=label, root=path, created_at=project.created_at, settings=merged)

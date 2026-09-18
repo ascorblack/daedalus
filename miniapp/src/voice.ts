@@ -426,6 +426,12 @@ function createSpeechLevel(audio: HTMLAudioElement, opts: { onLevel?: (level: nu
 }
 
 /** What a local voice answers with: a run of length-prefixed clips, one per sentence. */
+const TURNS_REMEMBERED = 32;
+/** How many finished answers are remembered as abandoned. Enough that no sentence of an answer still
+ *  being fetched can outlive the memory of it, and small enough that a whole conversation is not
+ *  kept: a run's clips are fetched within seconds of its sentences, and thirty-two answers is many
+ *  minutes of talking. */
+
 const SEQUENCE_TYPE = "application/x-speech-sequence";
 const LENGTH_BYTES = 4;
 
@@ -482,8 +488,13 @@ export function createSpeaker(opts: {
   let turn = "";
   /** Whether an answer is under way at all, which is not the same as its name being non-empty. */
   let started = false;
-  /** The answer that was stopped. A sentence of it arriving afterwards is shown, never read. */
-  let abandoned = "";
+  /** Every answer that was stopped. A sentence of one of them arriving afterwards is shown, never
+   *  read. A set and not one name: with three answers in quick succession a single slot holds only
+   *  the most recent, so a late sentence of the one before it was not recognised as abandoned — it
+   *  opened its own turn, which stopped the answer that was live and read the stale one out, the
+   *  exact failure this machinery exists to prevent. Bounded, oldest first, because a long
+   *  conversation is a long list of finished turns. */
+  const abandoned = new Set<string>();
   /** When this answer's first sentence was handed over, and whether its first sound has been reported.
    *  Negative until the first sentence arrives: a clock can legitimately read zero. */
   let turnBegan = -1;
@@ -777,7 +788,10 @@ export function createSpeaker(opts: {
    */
   const halt = (mark = false) => {
     generation += 1;
-    if (started && turn) abandoned = turn;
+    if (started && turn) {
+      abandoned.add(turn);
+      while (abandoned.size > TURNS_REMEMBERED) abandoned.delete(abandoned.values().next().value as string);
+    }
     started = false;
     if (mark) for (const text of queue) opts.onUnspoken?.(text);
     queue = [];
@@ -826,7 +840,7 @@ export function createSpeaker(opts: {
       const body = text.trim();
       if (!body) return;
       const id = next ?? turn;
-      if (id && id === abandoned) {
+      if (id && abandoned.has(id)) {
         // A sentence of an answer that was stopped — the operator talked over it, or asked something
         // else. It is on the screen and it is marked there; reading it out now would be the very
         // backlog this turn machinery exists to prevent.

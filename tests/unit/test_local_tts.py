@@ -35,6 +35,7 @@ from daedalus.speech.tts_engine import (
     CACHE,
     MAX_TEXT_CHARS,
     OUTPUT_GAIN,
+    SUPERTONIC_GRAPHS,
     TtsCache,
     TtsEngine,
     TtsError,
@@ -52,6 +53,7 @@ from daedalus.speech.tts_service import (
     check_voice,
     encode,
 )
+from tests.support.waiting import SETTLE, until
 
 # -- the catalog ------------------------------------------------------------------------------
 
@@ -526,6 +528,41 @@ def test_the_words_an_assistant_says_every_day_are_stressed_where_they_belong() 
         assert ru_stress.mark(plain) == marked, plain
 
 
+def test_the_words_the_table_used_to_get_wrong_are_written_out_here() -> None:
+    """Hand-checked, one line each, because a wrong entry is worse than no entry.
+
+    The module exists so a Russian voice does not sound foreign, and a table that puts the acute on
+    the wrong vowel *forces* the mistake on a model that would often have got it right on its own.
+    """
+    for plain, marked in (
+        ("август", "а" + ACUTE + "вгуст"),
+        ("именно", "и" + ACUTE + "менно"),
+        ("файлы", "фа" + ACUTE + "йлы"),
+        ("падали", "па" + ACUTE + "дали"),
+        ("пару", "па" + ACUTE + "ру"),
+        ("просто", "про" + ACUTE + "сто"),
+    ):
+        assert ru_stress.mark(plain) == marked, plain
+    # And the ones that are two words in writing, which the table may not decide between: «начал»
+    # is also the genitive plural of «начало», «простой» an adjective and a noun, «пары» a pair and
+    # a steam, «начало» a beginning and a verb.
+    for ambiguous in ("начал", "начало", "простой", "пары"):
+        assert ru_stress.mark(ambiguous) == ambiguous, ambiguous
+        assert ambiguous not in ru_stress.TABLE
+
+
+def test_every_entry_in_the_table_is_read_back_the_way_it_was_written() -> None:
+    """The table is a list to read, so the only thing holding its shape is that it is read back."""
+    for entry in ru_stress.WORDS.split():
+        plain = entry.replace(ru_stress.MARK, "")
+        if plain in ru_stress.HOMOGRAPHS:
+            continue
+        at = entry.find(ru_stress.MARK)
+        assert 0 <= at < len(plain), entry
+        assert plain[at] in ru_stress.VOWELS, f"{entry}: the mark is not in front of a vowel"
+        assert ru_stress.mark(plain) == plain[: at + 1] + ACUTE + plain[at + 1 :], entry
+
+
 def test_a_capital_letter_and_a_sentence_around_it_survive_the_marking() -> None:
     said = ru_stress.mark("Привет! Я проверил тесты, осталось 3 задачи.")
     assert said.startswith("Приве" + ACUTE + "т!")
@@ -811,17 +848,21 @@ async def test_a_voice_dropped_while_it_was_loading_does_not_become_resident(
     lay_out(tmp_path, {"ru_RU-test-medium.onnx": b"M", "tokens.txt": b"t", **ESPEAK})
     cache = TtsCache()
     started = threading.Event()
+    dropped = threading.Event()
 
     class Slow(TtsEngine):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            # Held open by the test rather than by a sleep: the whole point is that the drop lands
+            # in the middle of the load, and a duration says "in the middle" only on an idle host.
             started.set()
-            time.sleep(0.2)
+            dropped.wait(SETTLE)
             super().__init__(*args, **kwargs)
 
     monkeypatch.setattr("daedalus.speech.tts_engine.TtsEngine", Slow)
     loading = asyncio.create_task(cache.get(catalog.get("ru-irina"), tmp_path, threads=2))
-    await asyncio.to_thread(started.wait, 2)
+    await asyncio.to_thread(started.wait, SETTLE)
     cache.drop()
+    dropped.set()
     engine = await loading
     assert engine is not None, "the caller that asked for the voice was left with nothing"
     assert cache.loaded() == "", "the drop was overwritten by the load it arrived in the middle of"
@@ -965,6 +1006,58 @@ def test_a_sample_is_the_voices_own_language_through_the_real_engine(client: Tes
     assert answer.status_code == 200 and answer.headers["content-type"].startswith("audio/wav")
     assert answer.content.startswith(b"RIFF") and len(answer.content) > 44
     assert FakeTts.calls and "Привет" in FakeTts.calls[0][0]
+
+
+def test_a_multilingual_voice_samples_in_the_language_it_is_being_picked_for(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Filter the picker to Polish, press Play on a voice that reads Polish, hear Polish.
+
+    A multilingual voice is filed under one language and used to read its sample in that one, so an
+    operator narrowing the list to Polish pressed Play on the voice the picker had correctly offered
+    them and heard Russian.
+    """
+    app = client.app_state  # type: ignore[attr-defined]
+    voice = catalog.get("multi-supertonic")
+    lay_out(app.tts.downloads.directory(voice.id), {
+        **{f"{stem}.onnx": b"M" for stem in SUPERTONIC_GRAPHS},
+        "tts.json": b"{}", "unicode_indexer.bin": b"i", "voice.bin": b"v",
+    })
+    manifest = app.tts.downloads.manifest()
+    manifest[voice.id] = Installed(id=voice.id, archive=voice.archive, sha256=voice.sha256, disk_bytes=4096)
+    app.tts.downloads._write_manifest(manifest)
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", FakeSherpa)
+    monkeypatch.setattr("daedalus.speech.tts_service.encoder_present", lambda: False)
+    # The Russian sample goes through the stress dictionary on its way, so it is matched on a word
+    # the dictionary does not touch rather than on its first one.
+    for language, expected in (("pl", "Cześć"), ("uk", "Привіт"), ("", "Вот как звучит")):
+        FakeTts.calls = []
+        app.tts.forget()
+        query = f"?language={language}" if language else ""
+        answer = client.post(f"/api/tts/voices/multi-supertonic/sample{query}", headers=HEAD)
+        assert answer.status_code == 200, answer.text
+        assert FakeTts.calls and expected in FakeTts.calls[0][0], (language, FakeTts.calls[0][0][:30])
+    # A language it does not read is not one it can be auditioned in: it reads its own.
+    FakeTts.calls = []
+    app.tts.forget()
+    assert client.post("/api/tts/voices/multi-supertonic/sample?language=zh", headers=HEAD).status_code == 200
+    assert "Вот как звучит" in FakeTts.calls[0][0]
+
+
+def test_downloading_the_chosen_voice_again_clears_a_load_that_failed(client: TestClient) -> None:
+    """A voice whose first load failed stays failed until something forgets it — a re-download does.
+
+    ``warm`` declines while the cache holds an error for the same voice, and only ``forget``/``drop``
+    clears it. Delete called forget; the download path did not, so a voice re-fetched after a short
+    archive stayed "error" until the operator re-selected it.
+    """
+    app = client.app_state  # type: ignore[attr-defined]
+    app.config.voice.tts.local_voice = "ru-irina"
+    forgotten: list[str] = []
+    original = app.tts.forget
+    app.tts.forget = lambda: (forgotten.append("ru-irina"), original())[1]  # type: ignore[method-assign]
+    app.tts.downloads.installed("ru-irina")
+    assert forgotten == ["ru-irina"], "the chosen voice arriving must clear whatever was held for it"
+    app.tts.downloads.installed("ru-dmitri")
+    assert forgotten == ["ru-irina"], "another voice arriving is nothing to do with the one in use"
 
 
 # -- the precedence -------------------------------------------------------------------------------
@@ -1113,11 +1206,7 @@ async def test_hearing_another_voice_puts_the_chosen_one_back(
     app = ready_to_speak(client, monkeypatch)
     pretend_installed(app, "ru-irina")
     assert client.post("/api/tts/voices/ru-irina/sample", headers=HEAD).status_code == 200
-    for _ in range(50):
-        if CACHE.loaded() == "ru-dmitri":
-            break
-        await asyncio.sleep(0.02)
-    assert CACHE.loaded() == "ru-dmitri", "the chosen voice was left evicted by a sample of another"
+    await until(lambda: CACHE.loaded() == "ru-dmitri", "the chosen voice was put back after the sample")
 
 
 def test_the_barge_in_endpoint_stops_the_run_and_the_reading(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

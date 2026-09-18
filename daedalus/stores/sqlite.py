@@ -389,7 +389,18 @@ class SqliteSessionStore(ISessionStore):
             )
         else:
             rows = await self._db.fetchall(f"SELECT seq, view, view_key, message FROM transcript WHERE {where} ORDER BY seq", tuple(params))
-        current = self._view.key()
+        out, stale = await asyncio.to_thread(self._views_of, rows, self._view.key())
+        if stale:
+            await self._db.executemany("UPDATE transcript SET view = ?, view_key = ? WHERE seq = ?", stale)
+        return out
+
+    def _views_of(self, rows: Sequence[Any], current: str) -> tuple[list[dict[str, Any]], list[tuple[str, str, int]]]:
+        """Read the stored views, and build the ones that are stale. Off the loop, because of the second.
+
+        A page whose builder has moved on is parsed and rebuilt message by message, which on a page
+        of six hundred turns is a sixth of a second of straight Python — long enough, on the loop, to
+        stall every stream the installation is serving while somebody scrolls back.
+        """
         out: list[dict[str, Any]] = []
         stale: list[tuple[str, str, int]] = []
         for row in rows:
@@ -398,13 +409,11 @@ class SqliteSessionStore(ISessionStore):
                 view = json.loads(row["view"])
             else:
                 message = Message.model_validate_json(row["message"])
-                view = self._view.build(message)
+                view = self._view.build(message) if self._view is not None else {}
                 stale.append((json.dumps(view, default=str, ensure_ascii=False), current, seq))
             view["seq"] = seq
             out.append(view)
-        if stale:
-            await self._db.executemany("UPDATE transcript SET view = ?, view_key = ? WHERE seq = ?", stale)
-        return out
+        return out, stale
 
     def _view_only_fallback(self, message: Message) -> dict[str, Any]:
         """A store built without a view builder still answers, with the message itself."""

@@ -215,7 +215,9 @@ def test_pathological_intent_patterns_are_bounded_and_refused() -> None:
 
     started = time.monotonic()
     assert search_bounded("(a+)+$", "a" * 40 + "b", seconds=0.5) is None
-    assert time.monotonic() - started < 3.0
+    # Twenty times the bound it was given: what is being told apart is "it stopped" from "it is
+    # still backtracking", which without the bound is minutes and not a tenth of a second.
+    assert time.monotonic() - started < 10.0
     assert search_bounded(r"build\s+failed", "the BUILD failed", seconds=1.0) is True
     assert search_bounded("(", "x", seconds=1.0) is None
     assert _NESTED_QUANTIFIER.search("(a+)+$") and _NESTED_QUANTIFIER.search(r"(\w*)*x") and not _NESTED_QUANTIFIER.search(r"build\s+failed|(foo)+")
@@ -249,7 +251,9 @@ def test_flatten_payload_stays_linear_on_wide_dicts() -> None:
 
     started = time.monotonic()
     text = flatten_payload({f"k{i}": "v" for i in range(200_000)})
-    assert time.monotonic() - started < 2.0 and len(text) <= 2100
+    # Linear against quadratic, which on two hundred thousand keys is minutes: a generous bound
+    # answers that question and a tight one only measures how busy the host is.
+    assert time.monotonic() - started < 10.0 and len(text) <= 2100
 
 
 def test_mode_limits_are_bounded_and_zero_means_nothing() -> None:
