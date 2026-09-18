@@ -6,7 +6,7 @@
 // arriving re-renders one turn instead of six hundred. And the live turn is merged separately, so
 // the history is not rebuilt to show a word.
 
-import type { MessageView } from "./api";
+import type { MessageView, ModelFallback } from "./api";
 
 export type LiveTool = { id: string; name: string; args: string; result?: string; error?: boolean };
 /**
@@ -15,8 +15,8 @@ export type LiveTool = { id: string; name: string; args: string; result?: string
  * but nothing about the turn is live any more — no cursor under it, no dots over it — however long
  * the session takes to report itself idle afterwards.
  */
-export type LiveState = { text: string; thinking: string; tools: LiveTool[]; startedAt: number | null; ended: boolean };
-export const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null, ended: false };
+export type LiveState = { text: string; thinking: string; tools: LiveTool[]; startedAt: number | null; ended: boolean; model: string; fallback: ModelFallback | null };
+export const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null, ended: false, model: "", fallback: null };
 
 export type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean; length?: number; clipped?: boolean };
 export type NoteItem = { kind: "note"; text: string };
@@ -37,6 +37,9 @@ export type Turn = {
   sig: string;
   /** The tool calls already shown here, so a streamed one is not shown a second time. */
   toolIds: string[];
+  /** The model that wrote this turn's answer, and what it stood in for when it was not the configured one. */
+  model?: string;
+  fallback?: ModelFallback | null;
 };
 
 /** The trailing retrieval headline ⟦…⟧ is for the transcript index, not for the reader; a half-streamed one is cut too. */
@@ -109,7 +112,11 @@ export function buildTurns(messages: MessageView[], previous: readonly Turn[] = 
     if (m.role === "system") return;
     if (!current) current = open(`a${m.seq ?? i}`, at);
     current.endedAt = at;
-    mark(`m${m.seq ?? i}:${m.text.length}:${m.thinking.length}`);
+    // The turn is named by the model of its latest assistant message: a turn that began on one model
+    // and finished on another is answered by the one that finished it, which is the one the reader read.
+    current.model = m.model || current.model;
+    current.fallback = m.fallback ?? null;
+    mark(`m${m.seq ?? i}:${m.text.length}:${m.thinking.length}:${m.model ?? ""}:${m.fallback?.reason ?? ""}`);
     if (current.answer) {
       // Text that turned out not to be final becomes a note.
       current.activity.push({ kind: "note", text: current.answer });
@@ -172,6 +179,10 @@ export function applyLive(base: Turn | null, live: LiveState, now: number): Turn
     t.activity.push({ kind: "tool", id: lt.id, name: lt.name, args: parseArgs(lt.args), result: lt.result, error: lt.error, running, length: lt.result?.length, clipped: false });
   }
   if (live.text) t.answer = stripHeadline(live.text);
+  if (live.model) {
+    t.model = live.model;
+    t.fallback = live.fallback;
+  }
   t.endedAt = now;
   return t;
 }
@@ -258,6 +269,9 @@ export function isOlderPage(older: readonly MessageView[], oldestKnown: number |
  */
 export function liveAfter(state: LiveState, event: string, p: Record<string, any>): LiveState {
   if (event === "message_start") return { ...state, text: "", thinking: "", ended: false, startedAt: state.startedAt ?? Date.now() };
+  // Which model is speaking, said before the message it belongs to. `fallback: false` is the run coming
+  // back to the model it was configured with, and it takes the note away rather than leaving it standing.
+  if (event === "model_changed") return { ...state, model: String(p.to ?? p.model_name ?? ""), fallback: p.fallback ? { from: String(p.configured ?? p.from ?? ""), to: String(p.to ?? ""), reason: String(p.reason ?? "") } : null };
   if (event === "content_block_delta") {
     const d = p.delta ?? {};
     if (d.type === "text_delta") return { ...state, text: state.text + (d.text ?? "") };

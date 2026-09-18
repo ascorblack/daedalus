@@ -331,6 +331,18 @@ async def _sse_lines(response: httpx.Response) -> Any:
         yield line
 
 
+def served_headers(upstream: str, model: str) -> dict[str, str]:
+    """Which upstream, and which model name, this response was really produced against.
+
+    The proxy routes by the name in the path and never substitutes one upstream or model for
+    another — but the two subscription upstreams do not return an OpenAI-shaped body, so their
+    chunks are rebuilt here with the *requested* model written into them. Read back by a caller,
+    that field can only ever say what the caller already asked for. These headers say what the
+    proxy actually sent, so the difference is visible if one ever appears.
+    """
+    return {"x-keyproxy-upstream": upstream, **({"x-keyproxy-model": model} if model else {})}
+
+
 async def handle_claude(request: web.Request, rest: str) -> web.StreamResponse:
     """Anthropic Messages behind the Claude Code login, presented as chat completions."""
     client: httpx.AsyncClient = request.app["client"]
@@ -371,10 +383,11 @@ async def handle_claude(request: web.Request, rest: str) -> web.StreamResponse:
             payload_err = {"error": {"message": raw[:400], "type": "upstream_error"}}
         return web.json_response(payload_err, status=response.status_code)
     chunks = messages_events_to_chunks(_sse_lines(response), model=model, names=names)
+    served = served_headers("claude", str(payload.get("model") or model))
     try:
         if not stream:
-            return web.json_response(await collect_completion(chunks, model=model))
-        out = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+            return web.json_response(await collect_completion(chunks, model=model), headers=served)
+        out = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache", **served})
         await out.prepare(request)
         async for chunk in chunks:
             await out.write(chunk.encode("utf-8"))
@@ -410,7 +423,8 @@ async def handle_codex(request: web.Request, rest: str) -> web.StreamResponse:
         return web.json_response({"error": {"message": "body must be JSON", "type": "invalid_request_error"}}, status=400)
     model = str(body.get("model") or "")
     stream = bool(body.get("stream", False))
-    upstream = client.build_request("POST", CODEX_BASE + "/codex/responses", json=chat_to_responses(body), headers={**headers, "accept": "text/event-stream", "content-type": "application/json"})
+    sent = chat_to_responses(body)
+    upstream = client.build_request("POST", CODEX_BASE + "/codex/responses", json=sent, headers={**headers, "accept": "text/event-stream", "content-type": "application/json"})
     try:
         response = await client.send(upstream, stream=True)
     except httpx.HTTPError as exc:
@@ -424,10 +438,11 @@ async def handle_codex(request: web.Request, rest: str) -> web.StreamResponse:
             payload = {"error": {"message": raw[:400], "type": "upstream_error"}}
         return web.json_response(payload, status=response.status_code)
     chunks = responses_events_to_chunks(_sse_lines(response), model=model)
+    served = served_headers("codex", str(sent.get("model") or model))
     try:
         if not stream:
-            return web.json_response(await collect_completion(chunks, model=model))
-        out = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+            return web.json_response(await collect_completion(chunks, model=model), headers=served)
+        out = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache", **served})
         await out.prepare(request)
         async for chunk in chunks:
             await out.write(chunk.encode("utf-8"))
@@ -581,6 +596,7 @@ async def handle(request: web.Request) -> web.StreamResponse:
     for k, v in response.headers.items():
         if k.lower() not in DROP_RESPONSE_HEADERS:
             out.headers[k] = v
+    out.headers.update(served_headers(name, request_model))
     await out.prepare(request)
     try:
         # aiter_bytes() decodes gzip/br on the way through; aiter_raw() would hand the client compressed bytes with the header gone.

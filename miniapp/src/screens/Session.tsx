@@ -1,6 +1,6 @@
 import { Component, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { api, AsrStatus, LoopView, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
+import { api, AsrStatus, LoopView, ModelFallback, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
 import { Dot, ServiceRow, Status, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, statusWord, timeAgo } from "../components";
 import { OverflowMenu, Sheet, confirmDialog, Overlay } from "../dialogs";
 import { absDate, clock, commandPreview, duration, plainPreview, shortDateTime, untilShort } from "../format";
@@ -10,8 +10,9 @@ import { Icon, IconName } from "../icons";
 import { AuthImg, FilePreview, PreviewSource, canPreview, fileGlyph, previewKind, sessionBase } from "../preview";
 import { Activity, LiveStore, SummaryItem, ToolItem, Turn, applyLive, buildTurns, createLiveStore, isOlderPage, liveAfter, liveBase, prepend, reconcile } from "../turns";
 import { MoveSessionSheet } from "../projects";
+import { navigate, pathFor } from "../router";
 import { Windowed } from "../virtual";
-import { plural, t } from "../i18n";
+import { DICT, plural, t } from "../i18n";
 
 /**
  * Markdown parsed once per text. `cacheKey` names a message that will never change again, so its
@@ -437,6 +438,18 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
         // never blinks out and back in. The cursor does not wait for that read — `liveAfter` has
         // already ended the turn — and so the read being slow costs nothing anybody can see.
         void refresh("tail").then(() => live.update((s) => ({ ...s, text: "", thinking: "" })));
+      } else if (event === "model_changed") {
+        // The header must not wait for the next read to stop naming a model that is not answering:
+        // a fallback is at its most confusing in the seconds right after it happens.
+        setDetail((prev) =>
+          prev
+            ? {
+                ...prev,
+                effective_model: String(p.to ?? ""),
+                fallback: p.fallback ? { from: String(p.configured ?? p.from ?? ""), to: String(p.to ?? ""), reason: String(p.reason ?? "") } : null,
+              }
+            : prev,
+        );
       } else if (event === "run_settled") {
         // The run is over as the host knows it. The chip flips on this event, not on the read it
         // triggers: the read says the same thing a round trip later.
@@ -857,8 +870,14 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
           <div className="sub meta">
             {(busy || status === "failed") && <Dot status={status} />}
             {(busy || status === "failed") && <span className={`word ${status}`}>{statusWord(status)}</span>}
-            <button className="chip model" onClick={openPicker} title={t("session.model.for")}>
-              <Icon name="model" /> {shortModel(detail?.model, 22)}
+            {/* While another model holds the run the chip says so, and says what it stands in for. It goes
+                back to the plain label by itself: the note is the difference between two names, not a flag
+                anybody has to clear. */}
+            <button className={`chip model ${detail?.fallback ? "attn" : ""}`} onClick={openPicker} title={detail?.fallback ? t("session.model.fallback.turn", { to: detail.fallback.to, from: detail.fallback.from }) : t("session.model.for")}>
+              <Icon name="model" />{" "}
+              {detail?.fallback
+                ? t("session.model.fallback", { to: shortModel(detail.fallback.to, 14), from: shortModel(detail.fallback.from, 14) })
+                : shortModel(detail?.model, 22)}
             </button>
             {ctxPct !== null && ctxPct >= 60 && (
               <button className={`chip ctx ${ctxPct >= 90 ? "bad" : "attn"}`} onClick={() => setInfo("context")} title={t("session.ctx.title", { used: fmtInt(detail!.context!.tokens), window: fmtInt(detail!.context!.window) })}>
@@ -1687,6 +1706,34 @@ function stepCount(items: Activity[]): number {
   return items.filter((a) => a.kind === "tool").length;
 }
 
+/**
+ * The one line that says this answer is not the configured model's.
+ *
+ * It sits above the answer rather than under it, because it changes how the answer is read and the
+ * reader has to have it before the text. Folded, it is the two names; opened, the reason the run
+ * moved and the way to the calls themselves, which the Usage screen already lists per model.
+ */
+function FallbackChip({ fallback }: { fallback: ModelFallback }) {
+  const [open, setOpen] = useState(false);
+  const reason = DICT[`session.model.reason.${fallback.reason}`] ? t(`session.model.reason.${fallback.reason}`) : fallback.reason;
+  return (
+    <div className="fallback-note">
+      <button className="chip attn" onClick={() => setOpen((o) => !o)}>
+        <Icon name="model" size={14} /> {t("session.model.fallback.turn", { to: fallback.to, from: fallback.from })}
+        <span className={`chev ${open ? "down" : ""}`}>›</span>
+      </button>
+      {open && (
+        <div className="sub">
+          {t("session.model.fallback.why", { from: fallback.from, to: fallback.to, reason })}{" "}
+          <a href={pathFor("usage")} onClick={(e) => { e.preventDefault(); navigate(pathFor("usage")); }}>
+            {t("session.model.fallback.calls")}
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork", seq: number) => void }) {
   const { id: sessionId, revertable } = useContext(SessionContext);
   const [open, setOpen] = useDisclosed(`${sessionId}:turn:${turn.key}`, live);
@@ -1747,6 +1794,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
           {live && !turn.answer && turn.pendingTools === 0 && turn.activity.length > 0 && <div className="working">{t("session.working")}</div>}
         </div>
       )}
+      {turn.fallback && (turn.answer || live) && <FallbackChip fallback={turn.fallback} />}
       {turn.answer && <Md className={`answer ${live ? "streaming" : ""}`} text={turn.answer} cacheKey={live ? undefined : `a${turn.key}`} />}
       {turn.answer && !live && <MessageActions text={turn.answer} />}
       <SentFiles items={turn.activity} />

@@ -49,6 +49,19 @@ Notable changes, newest first. The repository's `main` is the released version.
   renders at nearly twice the cost of the three-hundred-and-fifty-megabyte float one it was supposed
   to accelerate, so the catalog now fetches the float build: the best-sounding English here stops
   being the one voice too slow to keep up with a person talking.
+- **Which model actually answered is visible.** A run does not always finish on the model it was
+  started with: when an endpoint refuses on quota or stops speaking, the provider chain steps down
+  and the rest of the run is written by whatever is next on the list. Nothing anywhere said so — the
+  header went on naming the configured model, the answer carried no mark, and the only trace was a
+  row in the usage table nobody reads mid-conversation. Now every assistant turn records the model
+  and provider that produced it, a run says on its event stream when the model answering changes and
+  why, the session header reads "via <model> (fallback from <configured>)" for as long as the
+  stand-in holds and goes back by itself when the configured model answers again, the turn a
+  stand-in wrote carries a line above the answer that opens into the reason, and Telegram appends
+  the same fact in one line under the delivered reply. The key proxy, which never reroutes a call
+  but does rebuild the two subscription upstreams' replies around the requested model name, now
+  names the upstream and the model it really sent in response headers, so a substitution there would
+  be visible rather than invisible by construction.
 
 ## 2026-09-17
 

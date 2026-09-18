@@ -31,7 +31,7 @@ from daedalus.host import prompts
 from daedalus.host.prompts import split_headline
 from daedalus.security import redact
 
-VIEW_VERSION = 2
+VIEW_VERSION = 3
 """Bumped whenever the shape below changes; stored views from an older version are recomputed. It
 covers this file only — what the redactor masks is covered by the key, by value and by shape, so a
 new secret format does not depend on anyone remembering this number."""
@@ -97,6 +97,11 @@ def message_view(message: Message) -> dict[str, Any]:
         body, headline = split_headline(body)
         body = redact.redact(body)
     archived = message.metadata.get("daedalus.archived") if isinstance(message.metadata, dict) else None
+    # Who really answered. Absent on every turn written before the host started recording it, and on
+    # every turn that is not the model's — so the app shows the note where there is one and nothing
+    # where there is not, rather than claiming the configured model for an answer it cannot vouch for.
+    produced = message.metadata.get("daedalus.model") if isinstance(message.metadata, dict) else None
+    produced = produced if isinstance(produced, dict) else {}
     return {
         "role": message.role.value,
         "summary": is_summary,
@@ -111,6 +116,9 @@ def message_view(message: Message) -> dict[str, Any]:
         "tool_calls": tool_calls,
         "tool_results": tool_results,
         "created_at": message.created_at.isoformat(),
+        "model": str(produced.get("model") or ""),
+        "provider": str(produced.get("provider") or ""),
+        "fallback": produced.get("fallback") if isinstance(produced.get("fallback"), dict) else None,
     }
 
 
