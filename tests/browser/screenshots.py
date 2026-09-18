@@ -738,8 +738,8 @@ PHONE = {"width": 390, "height": 844}
 # The handful of words these helpers click on, in the language the run is in. Everything else is
 # picked by class or by data, which no translation moves.
 WORDS = {
-    "en": {"steps": "8 steps", "files": "Workspace files", "workspaces": "Workspaces", "access": "Access"},
-    "ru": {"steps": "8 шагов", "files": "Файлы рабочей папки", "workspaces": "Рабочие папки", "access": "Доступ"},
+    "en": {"steps": "8 steps", "panel": "Panel", "workspaces": "Workspaces", "access": "Access"},
+    "ru": {"steps": "8 шагов", "panel": "Панель", "workspaces": "Рабочие папки", "access": "Доступ"},
 }
 
 
@@ -768,14 +768,25 @@ def expand_steps(page: Page) -> None:
     page.wait_for_timeout(400)
 
 
-def open_files_and_preview(page: Page) -> None:
-    page.evaluate("() => { localStorage.setItem('daedalus.sidebar', 'collapsed'); localStorage.setItem('daedalus.session.aside', '0'); }")
-    page.reload()
-    page.wait_for_selector(".chat-scroll .timeline", timeout=15000)
-    page.locator(f"button[aria-label='{word('files')}']").click()
-    page.wait_for_selector(".side-pane", timeout=5000)
-    page.locator(".side-pane .title", has_text="NOTES.md").click()
-    page.wait_for_selector(".preview-backdrop .markdown, .preview-backdrop .md, .preview-backdrop", timeout=5000)
+def open_panel_files(page: Page) -> None:
+    """The panel on its Files tab: the workspace browser beside the conversation."""
+    page.locator(".panel-tab[data-tab='files']").click()
+    page.wait_for_selector(".panel-files .filerow", timeout=5000)
+
+
+def open_panel_preview(page: Page) -> None:
+    """A file opened from Files: the panel switches to Preview, with the breadcrumb and the history buttons."""
+    open_panel_files(page)
+    page.locator(".panel-files .filerow .title", has_text="NOTES.md").click()
+    page.wait_for_selector(".panel-body.tab-preview .preview-doc", timeout=5000)
+
+
+def open_phone_panel(page: Page) -> None:
+    """On a phone the same tabs come up as a full sheet, from the panel button in the header."""
+    page.locator(f".chat-head button[aria-label='{word('panel')}']").click()
+    page.wait_for_selector(".panel-sheet .panel-tab", timeout=5000)
+    page.locator(".panel-sheet .panel-tab[data-tab='files']").click()
+    page.wait_for_selector(".panel-sheet .filerow", timeout=5000)
 
 
 def open_share(page: Page) -> None:
@@ -966,15 +977,17 @@ def run() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch(executable_path=CHROMIUM)
         desk = browser.new_context(viewport=DESK, device_scale_factor=2, color_scheme="dark")
-        desk.add_init_script("try { localStorage.setItem('daedalus.session.aside', '1'); localStorage.setItem('daedalus.session.view', 'chat'); localStorage.setItem('agents.groupBy', 'workspace'); } catch (e) {}")
+        desk.add_init_script("try { localStorage.setItem('daedalus.session.panel', 'details'); localStorage.setItem('agents.groupBy', 'workspace'); } catch (e) {}")
         page = desk.new_page()
         page.route("**/api/**", stub)
         shot(page, "bots", "agents")
         shot(page, "session", f"agents/{S1}", wait=".chat-scroll .timeline", before=expand_steps, settle=300)
+        shot(page, "session-panel-files", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_panel_files, settle=800)
+        shot(page, "session-panel-preview", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_panel_preview, settle=1200)
         shot(page, "session-menu", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_menu, settle=500)
+        # The fold is remembered: every desktop picture from here on has the sidebar as the strip.
         shot(page, "session-folded", f"agents/{S1}", wait=".chat-scroll .timeline", before=fold_sidebar, settle=500)
         shot(page, "dual", f"agents/{S1}?with={S2}", wait=".chat-scroll .timeline", settle=1500)
-        shot(page, "files-preview", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_files_and_preview, settle=1200)
         shot(page, "session-share", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_share, settle=800)
         shot(page, "workspaces", "agents", before=open_workspaces)
         desk.add_init_script("try { localStorage.setItem('agents.groupBy', 'project'); } catch (e) {}")
@@ -1009,6 +1022,7 @@ def run() -> int:
         page.route("**/api/**", stub)
         shot(page, "phone-bots", "agents")
         shot(page, "phone-session", f"agents/{S1}", wait=".chat-scroll .timeline", before=expand_steps, settle=300)
+        shot(page, "phone-session-panel", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_phone_panel, settle=600)
         shot(page, "phone-voice", "voice")
         shot(page, "phone-memory", "memory")
         shot(page, "phone-more", "agents", before=open_more)

@@ -53,6 +53,11 @@ READ = """
     left: box(one('.sidebar', '.rail')),
     list: box(one('.session-list-pane')),
     aside: box(one('.session-aside')),
+    panel: box(one('.panel')),
+    panelTabs: box(one('.panel-tabs')),
+    headStatus: box(one('.chat-head .head-status')),
+    headModel: box(one('.chat-head .head-model')),
+    subMeta: box(one('.chat-head .sub.meta')),
     chat: box(one('.chat')),
     head: box(one('.chat-head')),
     timeline: box(one('.timeline')),
@@ -93,7 +98,7 @@ def expand_steps(page: Page) -> None:
 
 def measure_session(browser, width: int, height: int, mobile: bool) -> dict:  # type: ignore[no-untyped-def]
     context = browser.new_context(viewport={"width": width, "height": height}, color_scheme="dark", is_mobile=mobile, has_touch=mobile)
-    context.add_init_script(OPEN_FOLDERS + " try { localStorage.setItem('daedalus.session.aside', '1'); localStorage.setItem('daedalus.session.view', 'chat'); } catch (e) {}")
+    context.add_init_script(OPEN_FOLDERS + " try { localStorage.setItem('daedalus.session.panel', 'details'); } catch (e) {}")
     page = open_page(context, f"agents/{S1}", ".chat-scroll .timeline")
     expand_steps(page)
     out = page.evaluate(READ)
@@ -174,8 +179,24 @@ def judge(m: dict) -> list[str]:
             problems.append(f"{m['vw']}: a two-line row is {h}px")
     if m["avatar"] and m["avatar"]["w"] > 24:
         problems.append(f"{m['vw']}: an avatar in a row is {m['avatar']['w']}px")
-    if m["head"] and m["head"]["h"] > 56:
+    if m["head"] and m["head"]["h"] > 48:
         problems.append(f"{m['vw']}: the chat header is {m['head']['h']}px")
+    if m["subMeta"]:
+        problems.append(f"{m['vw']}: the header still has its second row of chips")
+    if m["chips"]:
+        problems.append(f"{m['vw']}: {len(m['chips'])} chip(s) are still in the header")
+    if not phone:
+        if not m["panel"]:
+            problems.append(f"{m['vw']}: the panel is not open beside the conversation")
+        else:
+            if m["panel"]["w"] < 360 or m["panel"]["w"] > 0.65 * m["vw"]:
+                problems.append(f"{m['vw']}: the panel is {m['panel']['w']}px, outside 360..65%")
+            if not m["panelTabs"] or m["panelTabs"]["h"] != 40:
+                problems.append(f"{m['vw']}: the panel's tab row is {m['panelTabs']}, not 40")
+        if not m["headModel"] or m["headModel"]["h"] > 32:
+            problems.append(f"{m['vw']}: the model label is {m['headModel']}")
+    elif m["panel"]:
+        problems.append(f"{m['vw']}: a phone shows the panel as a column")
     for h in m["act"]:
         if h > 28:
             problems.append(f"{m['vw']}: a step row is {h}px")
@@ -183,9 +204,6 @@ def judge(m: dict) -> list[str]:
     for b in m["iconbtn"]:
         if b["w"] != want or b["h"] != want:
             problems.append(f"{m['vw']}: an icon button is {b['w']}×{b['h']}, not {want}")
-    for c in m["chips"]:
-        if c["h"] > 22:
-            problems.append(f"{m['vw']}: a header chip is {c['h']}px")
     if m["answerFs"] != (16 if phone else 15):
         problems.append(f"{m['vw']}: the answer is {m['answerFs']}px")
     if m["timeline"]:
@@ -193,8 +211,10 @@ def judge(m: dict) -> list[str]:
             problems.append(f"{m['vw']}: the timeline is {m['timeline']['w']}px, over the 920 stripe")
         if m["vw"] == 2560 and m["timeline"]["w"] != 920:
             problems.append(f"2560: the timeline is {m['timeline']['w']}px, not the 920 stripe")
-        if m["vw"] == 1440 and m["timeline"]["w"] < 800:
-            problems.append(f"1440: the timeline is {m['timeline']['w']}px, still narrower than 800")
+        # Beside the 42 % panel a 1440 window keeps a 677 px conversation column (the plan's own
+        # figure): the timeline inside it is that minus the gutters.
+        if m["vw"] == 1440 and m["timeline"]["w"] < 600:
+            problems.append(f"1440: the timeline is {m['timeline']['w']}px beside the panel, narrower than 600")
     return problems
 
 

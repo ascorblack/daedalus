@@ -137,8 +137,10 @@ def run() -> int:
             page.wait_for_selector(".msg.user", timeout=15000)
             page.wait_for_timeout(400)
 
-            header = page.locator(".meta .chip.model").first.inner_text()
-            print(f"{name}: header chip = {header!r}")
+            # The model is a label at the right of the header; on a phone it is hidden from the row and
+            # read from the button's own text, which is what the composer will carry later.
+            header = page.locator(".chat-head .head-model").first.evaluate("(el) => el.textContent")
+            print(f"{name}: header label = {header!r}")
             if STANDBY.split("-")[-1] not in header:
                 problems.append(f"{name}: the header does not name the model that is answering ({header!r})")
             if "opus" not in header:
