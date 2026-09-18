@@ -2,9 +2,15 @@
 // of words. The app once grew to 15 px body text, 44 px round buttons and 64 px session rows one
 // rule at a time, each of them reasonable on its own; this is what stops the next one.
 //
-// Three claims. Every size comes from the scale in :root. Nothing outside the answer, the headings
-// and the prose is drawn above 14 px. Rows and controls take their height from the row and control
-// tokens, so a phone gets its 44 px from one media rule and not from forty.
+// Four claims. Every size comes from the scale in :root. Nothing outside the answer, the headings
+// and the prose is drawn above 14 px, in whatever unit it is written. No box that is not a surface
+// of its own is given a height a row or a control would not have. Rows and controls take their
+// height from the row and control tokens, so a phone gets its 44 px from one media rule and not
+// from forty.
+//
+// The three functions below are the guard; the claims run them over the real stylesheet, and the
+// last describe runs them over a sheet of planted regressions, because a guard that is never shown
+// a failure is a guard nobody has checked.
 
 /// <reference types="vite/client" />
 import { describe, expect, it } from "vitest";
@@ -14,8 +20,8 @@ type Rule = { selector: string; media: string; body: string };
 
 /** Every rule with the media query it sits in; comments stripped first, and one space after every colon
  *  in a declaration, so the two spacing styles the file is written in read as one. */
-function rules(): Rule[] {
-  const text = css.replace(/\/\*[\s\S]*?\*\//g, "");
+function rules(source: string): Rule[] {
+  const text = source.replace(/\/\*[\s\S]*?\*\//g, "");
   const out: Rule[] = [];
   const media: string[] = [];
   let i = 0;
@@ -49,21 +55,136 @@ function rules(): Rule[] {
 
 const TOKENS: Record<string, number> = { "--fs-11": 11, "--fs-12": 12, "--fs-13": 13, "--fs-14": 14, "--fs-15": 15, "--fs-16": 16, "--fs-18": 18, "--fs-mono": 12.5, "--fs-prose": 15 };
 
-/** The pixels a font-size value stands for, or null when it is relative (em, %) and inherits its scale. */
+/** The document never re-sizes its root, so a rem is the browser's own step and an em is the 14 px body. */
+const ROOT_PX = 16;
+const BODY_PX = 14;
+
+/** The pixels a font-size stands for: null only where the rule states no size of its own, and
+ *  Infinity — a finding, quoted back with its value — where the unit cannot be read at all. A size
+ *  the guard does not understand is the one that gets through it. */
 function pixels(value: string): number | null {
   const v = value.trim();
+  if (v === "inherit" || v === "unset" || v === "initial" || v === "revert") return null;
   const token = /^var\((--fs-[a-z0-9]+)\)/.exec(v);
   if (token) return TOKENS[token[1]] ?? Number.POSITIVE_INFINITY;
   const clamp = /^clamp\(\s*([\d.]+)px/.exec(v);
   if (clamp) return Number(clamp[1]);
-  const px = /^([\d.]+)px/.exec(v);
-  return px ? Number(px[1]) : null;
+  const px = /^(\d*\.?\d+)px/.exec(v);
+  if (px) return Number(px[1]);
+  const rem = /^(\d*\.?\d+)rem/.exec(v);
+  if (rem) return Number(rem[1]) * ROOT_PX;
+  const em = /^(\d*\.?\d+)em/.exec(v);
+  if (em) return Number(em[1]) * BODY_PX;
+  const percent = /^(\d*\.?\d+)%/.exec(v);
+  if (percent) return (Number(percent[1]) / 100) * BODY_PX;
+  return Number.POSITIVE_INFINITY;
+}
+
+/** The selectors a rule really applies to. A rule heads a list, and an allowed selector in that list
+ *  says nothing about the ones beside it. */
+function selectors(rule: Rule): string[] {
+  return rule.selector.split(",").map((part) => part.replace(/\s+/g, " ").trim()).filter(Boolean);
+}
+
+/** Whether one selector is the allowed one, a descendant of it, or something under it — anchored at a
+ *  boundary either way, so `.probe-grouped-huge` is not covered by `.answer` and `.h1nt` is not by `h1`. */
+function covered(selector: string, allowed: string[]): boolean {
+  return allowed.some((sel) => {
+    if (sel.endsWith("-")) return selector.split(/[\s>+~]+/).some((compound) => compound.startsWith(sel));
+    if (selector === sel) return true;
+    if (selector.endsWith(` ${sel}`)) return true;
+    return selector.startsWith(sel) && /[\s>+~.:[]/.test(selector.slice(sel.length, sel.length + 1));
+  });
 }
 
 /** Where text is allowed to be larger than the UI: running prose, headings, numbers meant to be read from across a room, and glyphs. */
 const LARGE_ALLOWED = [".answer", ".summary-body", ".preview-doc", ".composer-box textarea", "h1", "h2", "h3", ".kpi .value", ".empty b", ".stat b", ".step-head b", ".dropzone", ".attachment-glyph", ".btn.big", ".chev", ".voice-", ".orb", ".onboard-head", ".login"];
 
-const all = rules();
+/** Surfaces that are meant to be large: a screen, a dialog, a stage, an empty state, a bar that holds
+ *  rows rather than being one. Everything else is a row, a control or an avatar, and is held to the tokens. */
+const BOX_ALLOWED = [
+  ".screen", ".sheet", ".dialog", ".gate", ".login", ".login-widget", ".empty", ".empty.calm", ".sidebar .empty", ".toast",
+  ".chat-scroll", ".chat-head", ".composer", ".composer-box", ".pagehead", ".panel-body", ".panel-tabs", ".panel-toolbar",
+  ".tabbar", ".thought", ".attachment-open", ".attachment.image .attachment-open", ".img-loading", ".preview-body",
+  ".workspaces .sheet .files", ".kanban-col", ".kanban-empty", ".voice-", ".addmodel", ".addmodel-foot", ".more-item",
+];
+
+/** The height a box is given outright, in px, or 0 where it is a token, a calc or a proportion. */
+const BOX_LIMIT = 40;
+
+/** Top and bottom padding of a shorthand, in px; a component that is not a plain length counts as its first literal. */
+function verticalPadding(value: string): number {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const ch of value.trim()) {
+    if (ch === "(") depth += 1;
+    if (ch === ")") depth -= 1;
+    if (/\s/.test(ch) && depth === 0) {
+      if (current) parts.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current) parts.push(current);
+  const px = (part: string) => Number(/(\d*\.?\d+)px/.exec(part)?.[1] ?? 0);
+  if (parts.length === 0) return 0;
+  if (parts.length < 3) return px(parts[0]) * 2;
+  return px(parts[0]) + px(parts[2]);
+}
+
+function oversizeFonts(all: Rule[]): string[] {
+  const large: string[] = [];
+  for (const r of all) {
+    // A text field on a touch screen is 16 px on purpose: the alternative is Safari zooming the page.
+    if (r.media.includes("hover: none")) continue;
+    for (const m of r.body.matchAll(/(?:^|;)\s*font(?:-size)?\s*:\s*([^;]+)/g)) {
+      const size = pixels(m[1]);
+      if (size === null || size <= 14) continue;
+      for (const selector of selectors(r)) {
+        if (covered(selector, LARGE_ALLOWED)) continue;
+        large.push(`${selector} { font-size: ${m[1].trim()} }`);
+      }
+    }
+  }
+  return large;
+}
+
+function numericFonts(all: Rule[]): string[] {
+  // A size written as a number is a size the scale cannot move. Two are allowed: the phone's
+  // 16 px field, and the 10 px beta tag, which sits below the scale on purpose.
+  const numeric: string[] = [];
+  for (const r of all) {
+    if (r.media.includes("hover: none")) continue;
+    for (const m of r.body.matchAll(/(?:^|;)\s*font-size\s*:\s*([\d.]+px)/g)) {
+      if (m[1] === "10px") continue;
+      for (const selector of selectors(r)) {
+        if (covered(selector, LARGE_ALLOWED)) continue;
+        numeric.push(`${selector} { font-size: ${m[1]} }`);
+      }
+    }
+  }
+  return numeric;
+}
+
+function oversizeBoxes(all: Rule[]): string[] {
+  const fat: string[] = [];
+  for (const r of all) {
+    for (const m of r.body.matchAll(/(?:^|;)\s*(height|min-height|padding)\s*:\s*([^;]+)/g)) {
+      const value = m[2].trim();
+      const box = m[1] === "padding" ? verticalPadding(value) : Number(/^(\d*\.?\d+)px\s*$/.exec(value)?.[1] ?? 0);
+      if (box < BOX_LIMIT) continue;
+      for (const selector of selectors(r)) {
+        if (covered(selector, BOX_ALLOWED)) continue;
+        fat.push(`${selector} { ${m[1]}: ${value} }`);
+      }
+    }
+  }
+  return fat;
+}
+
+const all = rules(css);
 
 describe("the scale", () => {
   it("is declared once, in :root", () => {
@@ -88,32 +209,17 @@ describe("the scale", () => {
 
 describe("every size", () => {
   it("is at or under 14 px outside prose, headings and glyphs", () => {
-    const large: string[] = [];
-    for (const r of all) {
-      // A text field on a touch screen is 16 px on purpose: the alternative is Safari zooming the page.
-      if (r.media.includes("hover: none")) continue;
-      for (const m of r.body.matchAll(/(?:^|;)\s*font(?:-size)?\s*:\s*([^;]+)/g)) {
-        const size = pixels(m[1]);
-        if (size === null || size <= 14) continue;
-        if (LARGE_ALLOWED.some((sel) => r.selector.includes(sel))) continue;
-        large.push(`${r.selector} { font-size: ${m[1].trim()} }`);
-      }
-    }
-    expect(large).toEqual([]);
+    expect(oversizeFonts(all)).toEqual([]);
   });
 
   it("names a step of the scale rather than a number", () => {
-    // A size written as a number is a size the scale cannot move. Two are allowed: the phone's
-    // 16 px field, and the 10 px beta tag, which sits below the scale on purpose.
-    const numeric: string[] = [];
-    for (const r of all) {
-      if (r.media.includes("hover: none") || LARGE_ALLOWED.some((sel) => r.selector.includes(sel))) continue;
-      for (const m of r.body.matchAll(/(?:^|;)\s*font-size\s*:\s*([\d.]+px)/g)) {
-        if (m[1] === "10px") continue;
-        numeric.push(`${r.selector} { font-size: ${m[1]} }`);
-      }
-    }
-    expect(numeric).toEqual([]);
+    expect(numericFonts(all)).toEqual([]);
+  });
+});
+
+describe("every box", () => {
+  it("is a row's height, a control's height, or a surface that says it is one", () => {
+    expect(oversizeBoxes(all)).toEqual([]);
   });
 });
 
@@ -138,5 +244,37 @@ describe("rows and controls", () => {
     const wide = all.filter((r) => r.media.includes("min-width: 1024px")).map((r) => `${r.selector}{${r.body}}`).join("\n");
     expect(wide).toMatch(/\.timeline, \.composer-box\{[^}]*var\(--chat-w\)/);
     expect(wide).toMatch(/\.answer[^{]*\{[^}]*max-width: var\(--reading-w\)/);
+  });
+});
+
+describe("the guard itself", () => {
+  // Five regressions of exactly the kind this file exists to stop. Each of them once passed.
+  const planted = rules(`
+    .probe-rem { font-size: 1.75rem; }
+    .probe-em { font-size: 2em; }
+    .answer, .probe-grouped-huge { font-size: 28px; }
+    .probe-fat-row { min-height: 64px; padding: 20px; }
+    .probe-fat-btn { height: 48px; width: 48px; }
+  `);
+
+  it("reads a size written in rem or em", () => {
+    expect(oversizeFonts(planted)).toContain(".probe-rem { font-size: 1.75rem }");
+    expect(oversizeFonts(planted)).toContain(".probe-em { font-size: 2em }");
+  });
+
+  it("does not let a selector ride into a group behind an allowed one", () => {
+    expect(oversizeFonts(planted)).toContain(".probe-grouped-huge { font-size: 28px }");
+    expect(oversizeFonts(planted)).not.toContain(".answer { font-size: 28px }");
+    expect(numericFonts(planted)).toContain(".probe-grouped-huge { font-size: 28px }");
+  });
+
+  it("sees a row and a control that grew a box of their own", () => {
+    expect(oversizeBoxes(planted)).toContain(".probe-fat-row { min-height: 64px }");
+    expect(oversizeBoxes(planted)).toContain(".probe-fat-row { padding: 20px }");
+    expect(oversizeBoxes(planted)).toContain(".probe-fat-btn { height: 48px }");
+  });
+
+  it("reads a size it does not understand as a finding rather than as nothing", () => {
+    expect(oversizeFonts(rules(".probe-odd { font-size: 3vmax; }"))).toEqual([".probe-odd { font-size: 3vmax }"]);
   });
 });
