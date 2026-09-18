@@ -99,8 +99,10 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
 
       <Section id="usage" label={t("session.usage")} aside={fmtUsd(detail.usage.usd)}>
         <div className="dt-row sub">
-          <span title={t("session.usage.in")}>{fmtTok(detail.usage.i)}↑</span>
-          <span title={t("session.usage.out")}>{fmtTok(detail.usage.o)}↓</span>
+          {/* The arrow says which way the tokens went, and an arrow is neither translatable nor
+              announced: the label carries the word and the glyph stays decoration. */}
+          <span title={t("session.usage.in")} aria-label={`${fmtTok(detail.usage.i)} ${t("session.usage.in")}`}>{fmtTok(detail.usage.i)}<span aria-hidden>↑</span></span>
+          <span title={t("session.usage.out")} aria-label={`${fmtTok(detail.usage.o)} ${t("session.usage.out")}`}>{fmtTok(detail.usage.o)}<span aria-hidden>↓</span></span>
           {!!detail.usage.ch && <span title={t("session.usage.cache")}>{t("panel.usage.cache", { n: fmtTok(detail.usage.ch) })}</span>}
           <span className="dt-sep">·</span>
           <span>{plural("usage.calls", detail.usage.c ?? 0)}</span>
