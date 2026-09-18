@@ -33,6 +33,7 @@ from protocore.contracts.types import Message, MessageRole, StopReason, TextBloc
 
 from daedalus import __version__
 from daedalus.providers.dsml import DsmlGuard
+from daedalus.providers.llamacpp import tools_to_llamacpp_wire
 from daedalus.providers.pricing import ModelPricing
 from daedalus.providers.wire import messages_to_wire, parse_json_arguments, tools_to_wire
 
@@ -358,7 +359,7 @@ class OpenAICompatibleProvider(ILLMProvider):
         if stream:
             body["stream_options"] = {"include_usage": True}
         if request.tools:
-            body["tools"] = tools_to_wire(request.tools)
+            body["tools"] = tools_to_llamacpp_wire(request.tools) if self.endpoint.kind == "llamacpp" else tools_to_wire(request.tools)
             forced = extra.get("forced_tool_choice")
             if forced:
                 body["tool_choice"] = {"type": "function", "function": {"name": forced}}

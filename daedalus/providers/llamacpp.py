@@ -7,11 +7,20 @@ sleep state, while llama.cpp publishes those facts at ``/props`` beside its ``/v
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+from protocore.contracts.types import ToolDefinition
+
+from daedalus.providers.wire import tools_to_wire
+
+logger = logging.getLogger(__name__)
+
+_GBNF_REPETITION_LIMIT = 2000
+"""llama.cpp's grammar parser rejects ``char{0,2000}`` at its own repetition boundary."""
 
 
 @dataclass(slots=True)
@@ -31,6 +40,66 @@ class LlamaCppDiscovery:
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _compatible_schema(value: Any, path: str = "parameters") -> tuple[Any, list[str]]:
+    """Return a JSON-schema copy which llama.cpp can turn into a tool-call grammar.
+
+    The server's nested-string converter emits ``char{0,2000}`` for ``maxLength: 2000``.
+    Its GBNF parser rejects that exact repetition count while treating larger counts as unbounded.
+    Omitting the bound therefore preserves every value the real tool accepts and leaves final
+    argument validation to the unchanged registry definition.
+    """
+    if isinstance(value, list):
+        out: list[Any] = []
+        changed: list[str] = []
+        for index, item in enumerate(value):
+            rewritten, paths = _compatible_schema(item, f"{path}[{index}]")
+            out.append(rewritten)
+            changed.extend(paths)
+        return out, changed
+    if not isinstance(value, dict):
+        return value, []
+    out_dict: dict[str, Any] = {}
+    changed = []
+    for key, item in value.items():
+        if key == "maxLength" and not isinstance(item, bool) and item == _GBNF_REPETITION_LIMIT:
+            changed.append(path + ".maxLength")
+            continue
+        if key == "properties" and isinstance(item, dict):
+            properties: dict[str, Any] = {}
+            for name, schema in item.items():
+                rewritten, paths = _compatible_schema(schema, f"{path}.{name}")
+                properties[name] = rewritten
+                changed.extend(paths)
+            out_dict[key] = properties
+            continue
+        rewritten, paths = _compatible_schema(item, f"{path}.{key}")
+        out_dict[key] = rewritten
+        changed.extend(paths)
+    return out_dict, changed
+
+
+def tools_to_llamacpp_wire(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
+    """Serialize tools independently and apply only llama.cpp grammar compatibility rewrites.
+
+    One schema which cannot be serialized must not make every other tool disappear. Such a tool is
+    omitted with its name in the log; callers still receive the rest of the registry surface.
+    """
+    wire: list[dict[str, Any]] = []
+    for tool in tools:
+        name = str(getattr(tool, "name", "") or "<unnamed>")
+        try:
+            entry = tools_to_wire([tool])[0]
+            schema = entry["function"]["parameters"]
+            entry["function"]["parameters"], changed = _compatible_schema(schema)
+        except Exception as exc:  # noqa: BLE001 - isolate one foreign schema from the whole surface
+            logger.warning("llama.cpp omitted tool %s: schema cannot be translated (%s)", name, exc)
+            continue
+        if changed:
+            logger.info("llama.cpp adjusted tool schema for %s: omitted %s", name, ", ".join(changed))
+        wire.append(entry)
+    return wire
 
 
 def _roots(base_url: str) -> tuple[str, str]:
@@ -209,4 +278,4 @@ def describe_discovery(result: LlamaCppDiscovery) -> str:
     return ", ".join(facts)
 
 
-__all__ = ["LlamaCppDiscovery", "describe_discovery", "discover_llamacpp"]
+__all__ = ["LlamaCppDiscovery", "describe_discovery", "discover_llamacpp", "tools_to_llamacpp_wire"]

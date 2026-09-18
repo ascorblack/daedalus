@@ -9,16 +9,20 @@ import pytest
 from fastapi.testclient import TestClient
 from protocore.contracts.llm import LLMRateLimitError, LLMRequest, ProviderDeltaKind
 from protocore.contracts.types import Message, MessageRole, TextBlock, ToolDefinition, ToolParameterSchema
+from protocore.tools.ask_user import AskUserTool
+from protocore.tools.memory import build_memory_tools
 
 from daedalus import doctor
 from daedalus.config import ModelPresetConfig, ProviderConfig, RuntimeConfig, Settings
 from daedalus.extensions import api as api_module
 from daedalus.extensions.api import build_app
 from daedalus.host.session_runner import SessionManager
-from daedalus.providers.llamacpp import LlamaCppDiscovery, discover_llamacpp
+from daedalus.providers.llamacpp import LlamaCppDiscovery, discover_llamacpp, tools_to_llamacpp_wire
 from daedalus.providers.openai_compat import OpenAICompatibleProvider, ProviderEndpoint, UsageRecord
 from daedalus.providers.pricing import ModelPricing
 from daedalus.providers.registry import ProviderRegistry
+from daedalus.providers.wire import tools_to_wire
+from daedalus.tools import discover_tools
 
 
 def _client(handler: Any) -> httpx.AsyncClient:
@@ -111,6 +115,69 @@ def _request() -> LLMRequest:
         tools=[ToolDefinition(name="weather", description="Read weather", parameters=ToolParameterSchema(properties={"city": {"type": "string"}}, required=["city"]))],
         extra={"enable_thinking": True, "reasoning_effort": "high"},
     )
+
+
+def test_llamacpp_removes_the_rejected_nested_max_length_boundary() -> None:
+    tool = ToolDefinition(
+        name="ask",
+        description="Ask a question",
+        parameters=ToolParameterSchema(
+            properties={
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string", "maxLength": 2000},
+                            "short": {"type": "string", "maxLength": 1999},
+                            "larger": {"type": "string", "maxLength": 2001},
+                        },
+                        "required": ["question"],
+                    },
+                }
+            },
+            required=["questions"],
+        ),
+    )
+    before = tools_to_wire([tool])[0]
+    after = tools_to_llamacpp_wire([tool])[0]
+    nested = after["function"]["parameters"]["properties"]["questions"]["items"]
+    assert "maxLength" not in nested["properties"]["question"]
+    assert nested["properties"]["short"]["maxLength"] == 1999
+    assert nested["properties"]["larger"]["maxLength"] == 2001
+    assert before["function"]["parameters"]["properties"]["questions"]["items"]["properties"]["question"]["maxLength"] == 2000
+
+
+def test_llamacpp_translation_preserves_every_registry_tool_and_required_argument() -> None:
+    definitions = [tool.definition for tool in discover_tools()]
+    definitions += [tool.definition for tool in build_memory_tools(object())]
+    definitions.append(AskUserTool().definition)
+    before = tools_to_wire(definitions)
+    after = tools_to_llamacpp_wire(definitions)
+    expected = {
+        entry["function"]["name"]: entry["function"]["parameters"].get("required", [])
+        for entry in before
+    }
+    actual = {
+        entry["function"]["name"]: entry["function"]["parameters"].get("required", [])
+        for entry in after
+    }
+    assert actual == expected
+    question = next(entry for entry in after if entry["function"]["name"] == "AskUser")
+    nested = question["function"]["parameters"]["properties"]["questions"]["items"]
+    assert nested["required"] == ["question"]
+    assert "maxLength" not in nested["properties"]["question"]
+
+
+def test_llamacpp_omits_only_an_untranslatable_tool_and_logs_its_name(caplog: pytest.LogCaptureFixture) -> None:
+    broken = SimpleNamespace(
+        name="BrokenTool",
+        description="broken",
+        parameters=SimpleNamespace(model_dump=lambda **kwargs: (_ for _ in ()).throw(ValueError("bad schema"))),
+    )
+    good = ToolDefinition(name="GoodTool", description="good", parameters=ToolParameterSchema(properties={}, required=[]))
+    assert [entry["function"]["name"] for entry in tools_to_llamacpp_wire([broken, good])] == ["GoodTool"]  # type: ignore[list-item]
+    assert "llama.cpp omitted tool BrokenTool" in caplog.text
 
 
 def _provider(handler: Any, sink: Any = None) -> tuple[OpenAICompatibleProvider, dict[str, Any]]:
