@@ -3,7 +3,7 @@
 // On a desktop it is a column of the chat grid; on a phone the same tabs in a full-height sheet.
 // The state is a value (panel.ts); this file draws it and wires the pointer and the keys.
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Sheet, useLayer } from "./dialogs";
 import { Icon } from "./icons";
 import {
@@ -60,15 +60,18 @@ export type PanelHostProps = {
   onDrag?: (dx: number) => void;
 };
 
-/** What the panel keeps for itself: a reload counter for the viewer, and the phone-width toggle. */
-type Local = { gen: number; reload: () => void; narrow: boolean; toggleNarrow: () => void };
+/** What the panel keeps for itself: a reload counter for the viewer, the phone-width toggle, and the
+ *  prefix its tabs and its body name each other by — two panels are open at once on a wide screen,
+ *  and an id that is not this panel's own would point a reader's screen reader at the other one. */
+type Local = { gen: number; reload: () => void; narrow: boolean; toggleNarrow: () => void; ids: string };
 type HostProps = PanelHostProps & { local: Local };
 
 export function Panel(props: PanelHostProps) {
   const { state, sheet } = props;
   const [gen, setGen] = useState(0);
   const [narrow, setNarrow] = useState(false);
-  const local: Local = { gen, reload: () => setGen((g) => g + 1), narrow, toggleNarrow: () => setNarrow((n) => !n) };
+  const ids = useId();
+  const local: Local = { gen, reload: () => setGen((g) => g + 1), narrow, toggleNarrow: () => setNarrow((n) => !n), ids };
   if (state.tab === null) return null;
   if (sheet) {
     return (
@@ -111,7 +114,7 @@ function Column(props: HostProps) {
 
 const TAB_ICON: Record<PanelTab, "settings" | "folder" | "eye" | "terminal"> = { details: "settings", files: "folder", preview: "eye", jobs: "terminal" };
 
-function Tabs({ state, onTab, onClose, onExpand, badges, inSheet }: HostProps & { inSheet?: boolean }) {
+function Tabs({ state, onTab, onClose, onExpand, badges, inSheet, local }: HostProps & { inSheet?: boolean }) {
   const strip = useRef<HTMLDivElement>(null);
   const onKey = (e: React.KeyboardEvent) => {
     const i = PANEL_TABS.indexOf(state.tab!);
@@ -128,7 +131,7 @@ function Tabs({ state, onTab, onClose, onExpand, badges, inSheet }: HostProps & 
         {PANEL_TABS.map((tab) => {
           const n = badges?.[tab] ?? 0;
           return (
-            <button key={tab} role="tab" data-tab={tab} className={`panel-tab ${state.tab === tab ? "on" : ""}`} aria-selected={state.tab === tab} tabIndex={state.tab === tab ? 0 : -1} onClick={() => onTab(tab)}>
+            <button key={tab} role="tab" id={`${local.ids}-tab-${tab}`} aria-controls={`${local.ids}-body`} data-tab={tab} className={`panel-tab ${state.tab === tab ? "on" : ""}`} aria-selected={state.tab === tab} tabIndex={state.tab === tab ? 0 : -1} onClick={() => onTab(tab)}>
               <Icon name={TAB_ICON[tab]} size={14} />
               <span>{t(`panel.tab.${tab}`)}</span>
               {n > 0 && <span className="count">{n}</span>}
@@ -185,7 +188,7 @@ function Body(props: HostProps) {
   const { state, local } = props;
   const entry = currentEntry(state);
   return (
-    <div className={`panel-body tab-${state.tab}`}>
+    <div className={`panel-body tab-${state.tab}`} id={`${local.ids}-body`} role="tabpanel" aria-labelledby={`${local.ids}-tab-${state.tab}`} tabIndex={-1}>
       {state.tab === "details" && props.details}
       {/* The explorer with a tree and a search mounts here; until then, the workspace browser. */}
       {state.tab === "files" && <div className="panel-files">{props.files}</div>}
