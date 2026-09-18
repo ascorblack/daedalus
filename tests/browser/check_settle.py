@@ -134,7 +134,7 @@ class Stub(BaseHTTPRequestHandler):
             if raw == f"/api/sessions/{SESSION}":
                 return self._send(json.dumps(self._detail()).encode(), "application/json")
             if raw == "/api/sessions":
-                return self._send(json.dumps([{"id": SESSION, "title": "A session", "status": "running", "created_at": "2026-09-13T12:00:00+00:00", "last_message_at": "2026-09-13T12:00:05+00:00", "run_id": "r1"}]).encode(), "application/json")
+                return self._send(json.dumps({"sessions": [{"id": SESSION, "title": "A session", "status": "running", "created_at": "2026-09-13T12:00:00+00:00", "last_message_at": "2026-09-13T12:00:05+00:00", "run_id": "r1"}], "projects": [], "free": {"total": 1, "active": 0, "loops": 0, "last_message_at": ""}}).encode(), "application/json")
             if raw == "/api/auth/me":
                 return self._send(json.dumps({"user_id": 1, "via": "token"}).encode(), "application/json")
             if raw in GATES:

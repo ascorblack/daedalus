@@ -155,6 +155,8 @@ export type SessionSummary = {
   model?: string;
   /** The name of the directory the session works in, and whether that directory is its own. */
   workspace?: string;
+  /** The whole path of it, for the row's tooltip: the list groups by project now, not by folder. */
+  workspace_path?: string;
   workspace_own?: boolean;
   /** The project this agent works in, where it works in one: the id it is grouped by and the name shown. */
   project_id?: string | null;
@@ -269,7 +271,9 @@ export type Project = {
   /** The folder, as the operator gave it. Shown, never edited in place: moving a project is a deliberate act. */
   root: string;
   created_at: string;
-  settings: { snapshots: boolean };
+  settings: { snapshots: boolean; system?: string };
+  /** Non-empty on a project the installation made for itself: "voice" is the concierge's. It cannot be moved or removed. */
+  system?: string;
   /** Whether the bot can reach the folder from where it runs. False in Docker until the folder is mounted. */
   reachable: boolean;
   writable: boolean;
@@ -278,6 +282,17 @@ export type Project = {
 
 /** A project as a session names it: everything but the list of agents, which a session view has no use for. */
 export type ProjectRef = Omit<Project, "sessions">;
+
+/** A project in the agents listing: the project, and how many agents are in it — counted over the
+ *  whole table, not over the page of rows beside it. */
+export type ProjectFolder = ProjectRef & { total: number; active: number; loops: number; last_message_at: string };
+
+/** What GET /api/sessions answers: a page of agents, the folders they are in, and the free bucket. */
+export type SessionList = {
+  sessions: SessionSummary[];
+  projects: ProjectFolder[];
+  free: { total: number; active: number; loops: number; last_message_at: string };
+};
 
 export type Workspace = { name: string; path: string; sessions: { id: string; title: string }[]; files: number; size: number; mtime: number; own_session: boolean; kind: "session" | "schedule" | "heartbeat" | "named"; schedule: string | null };
 

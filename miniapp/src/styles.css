@@ -878,6 +878,42 @@ body.resizing iframe { pointer-events: none; }
 
 /* ── entity rows: the roster, and every other list of things with a title and a state ─────── */
 .erow-group { margin-bottom: 6px; }
+
+/* Folders on the Agents screen: a project, or the bucket of agents that work alone.
+   Dark elevation, so a folder reads as a surface laid ON the page rather than a hole cut into it:
+   the header is one step lighter than the ground, the open body one step lighter again, and the
+   seams are hairlines. Nothing here is darker than what is behind it. */
+/* The list is as wide as the window. A folder is a full-width band with its counts on the right, so
+   centring it in a column would leave a wide screen mostly gutter and push the counts into the middle. */
+.agents-screen { width: 100%; }
+.folder { margin-bottom: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-1); overflow: hidden; }
+.folder.open { background: var(--surface-1); border-color: var(--line-strong); }
+.folder-head { display: flex; align-items: center; gap: 10px; width: 100%; padding: 11px 12px; background: var(--surface-2); border: 0; color: var(--fg); font: inherit; font-size: 14px; text-align: left; cursor: pointer; transition: background .15s; }
+.folder-head:hover { background: var(--surface-3); }
+.folder.open .folder-head { border-bottom: 1px solid var(--line); }
+.folder-head .chev { display: inline-block; color: var(--fg-3); transition: transform .15s; }
+.folder-head .chev.down { transform: rotate(90deg); }
+.folder-head .ic { color: var(--fg-2); flex: none; }
+/* The concierge's own folder: its mic carries the accent, so it is never read as one of the operator's. */
+.folder.system .folder-head .ic { color: var(--accent); }
+.folder-name { font-weight: 600; min-width: 0; }
+.folder-live { display: inline-flex; flex: none; }
+.folder-counts { margin-left: auto; flex: none; font-size: 12.5px; }
+.folder-time { flex: none; font-size: 12.5px; }
+.folder-root { padding: 8px 12px 0; }
+.folder-empty { padding: 10px 12px; }
+.folder.open > .erow { margin: 8px 10px; }
+.folder.open > .erow:first-of-type { margin-top: 10px; }
+/* A fork keeps its step in from the session it was taken from, inside a folder as outside one. */
+.folder.open > .erow.fork { margin-left: 32px; }
+.chip.tiny { padding: 2px 8px; font-size: 11px; min-height: 0; flex: none; }
+@media (max-width: 520px) {
+  /* At 390 px the counts and the time would push the name out; the name is what the folder is. */
+  .folder-head { flex-wrap: wrap; row-gap: 2px; }
+  .folder-counts { margin-left: 26px; }
+  .folder-time { margin-left: auto; }
+  .folder-name { flex: 1 1 auto; }
+}
 .erow.fork { margin-left: 22px; border-left: 2px solid var(--line-strong); }
 .erow { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: start; padding: 11px 12px; margin-bottom: 8px; background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius); cursor: pointer; transition: background .15s; }
 .erow:hover { background: var(--surface-2); }

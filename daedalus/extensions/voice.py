@@ -52,6 +52,12 @@ SESSION_KEY = "voice_session"
 """Where the id of the operator's standing voice session is remembered between restarts."""
 
 TITLE = "Voice"
+PROJECT_KIND = "voice"
+"""The system project the concierge and everything it delegates live in. One folder, one place in the
+Agents list, and a boundary the concierge's agents cannot walk out of — which the operator's own
+sessions, scattered across their own directories, never had a reason to be inside."""
+PROJECT_DIR = "voice"
+"""The folder, under the workspaces root: the installation's, not the operator's."""
 ANSWER_CLIP = 4000
 """How much of an agent's answer AgentResult returns; a spoken summary needs no more."""
 LIST_CLIP = 300
@@ -348,15 +354,39 @@ class Voice:
             known = self._id or str(await self.app.db.kv_get(SESSION_KEY) or "")
             if known and await manager.get_state(known) is not None:
                 self._id = known
+                await self.adopt(known)
                 return known
             self._id = ""
             if not create:
                 return ""
-            state = await self.app.create_session(TITLE, metadata={"voice": True})
+            project = await self.project()
+            state = await self.app.create_session(TITLE, metadata={"voice": True}, project_id=project.id)
             await self.app.db.kv_set(SESSION_KEY, state.session.id)
             self._id = state.session.id
             await self._point_at(state.session.id)
             return state.session.id
+
+    async def project(self) -> Any:
+        """The Voice project, made the first time the concierge needs one.
+
+        Lazily, and not at install: an installation whose operator never opens the voice page has no
+        business growing a folder and a row in the Agents list for a feature it does not use.
+        """
+        manager = self.app.manager
+        assert manager is not None
+        return await manager.projects.ensure_system(PROJECT_KIND, name=TITLE, root=manager.settings.workspaces_dir / PROJECT_DIR)
+
+    async def adopt(self, session_id: str) -> None:
+        """Put a voice session made before the Voice project existed into it.
+
+        The concierge has no file tools, so nothing of its own moves; what changes is that it is
+        listed where its agents are instead of among the operator's own sessions.
+        """
+        manager = self.app.manager
+        assert manager is not None
+        if await manager.project_of(session_id) is not None:
+            return
+        await manager.attach_project(session_id, await self.project())
 
     async def _point_at(self, session_id: str) -> str:
         """Put the configured preset on the session, or take the override off when none is configured.
@@ -507,14 +537,29 @@ class Voice:
             raise KeyError(session_id)
         return state
 
-    async def delegate(self, *, title: str, task: str, session_id: str | None = None) -> dict[str, Any]:
-        """Hand work to an agent: a new session for it, or another instruction to one already working."""
+    async def delegate(self, *, title: str, task: str, session_id: str | None = None, workspace: str = "shared", project_id: str | None = None) -> dict[str, Any]:
+        """Hand work to an agent: a new session for it, or another instruction to one already working.
+
+        Where the new agent works is the second decision, and the concierge makes it out loud:
+
+        * ``workspace="shared"`` — the Voice project's folder, which every agent the concierge
+          started shares. Several agents on one errand hand each other files by putting them there.
+        * ``workspace="own"`` — a directory of its own inside the Voice project: still listed under
+          Voice, and its files are nobody else's. An errand with nothing to do with the rest.
+        * ``project_id`` — one of the operator's projects, for "in the bakery project, …". The agent
+          works in that project's folder, which is what makes it an agent of that project rather
+          than one of the concierge's that happens to have been pointed at it.
+        """
         manager = self.app.manager
         assert manager is not None
         body = task.strip()
         if not body:
             raise ValueError("an agent needs a task; write what is to be done")
+        if workspace not in ("shared", "own"):
+            raise ValueError(f"workspace is 'shared' or 'own', not {workspace!r}")
         voice_id = await self.session_id()
+        if session_id and (project_id or workspace != "shared"):
+            raise ValueError("an agent that is already running works where it was started; leave workspace and project_id out when you steer one")
         if session_id:
             state = await self.own_agent(session_id, voice_id)
             # An agent stopped on a question is answered, not queued behind it: the operator is on the
@@ -525,18 +570,31 @@ class Voice:
             await self.emit("agents", {"agents": await self.agents()})
             return {"session_id": session_id, "title": state.session.title, "steered": True, "answered": answering}
         name = title.strip() or body[:40]
-        # The concierge hands work to an agent of its own; where the concierge itself works in a
-        # project, so does the agent it makes, or the boundary would end at the microphone.
-        parent_project = await manager.project_of(voice_id)
+        # The concierge hands work to an agent of its own. By default that is the Voice project, so
+        # an agent started by talking is listed where the talking happened and not in the middle of
+        # the operator's own sessions; a named project is the operator asking for one of theirs.
+        own = False
+        if project_id:
+            project = await manager.projects.get(project_id)
+            if project is None:
+                raise ValueError(f"no project has the id {project_id!r}; Projects lists the ones there are")
+            if workspace == "own":
+                raise ValueError(f"an agent in {project.name} works in the project's own folder; leave workspace out when you name a project")
+            if not project.reachable:
+                raise ValueError(f"the folder of {project.name} ({project.root}) is not reachable from here; it has to be mounted first")
+        else:
+            project = await self.project()
+            own = workspace == "own"
         state = await self.app.create_session(
             name,
             metadata={"voice_parent": voice_id, "brief": body},
-            project_id=parent_project.id if parent_project is not None else None,
+            project_id=project.id,
+            own_workspace=own,
         )
         await manager.submit(state.session.id, body, as_answer=False, origin="voice")
         await self.emit("status", {"state": "delegating", "title": name})
         await self.emit("agents", {"agents": await self.agents()})
-        return {"session_id": state.session.id, "title": name, "steered": False, "answered": False}
+        return {"session_id": state.session.id, "title": name, "steered": False, "answered": False, "project": project.name, "workspace": "own" if own else "shared"}
 
     async def agents(self) -> list[dict[str, Any]]:
         """What the concierge has running, newest first: title, status, when it last spoke, its last words."""
@@ -565,6 +623,22 @@ class Voice:
             if len(out) >= MAX_AGENTS:
                 break
         return out
+
+    async def project_list(self) -> list[dict[str, Any]]:
+        """The operator's projects, for an agent the operator asked to be started in one of them.
+
+        The Voice project is left out on purpose: it is where an agent goes when no project is
+        named, so offering it as a choice would only invite the concierge to name it back.
+        """
+        manager = self.app.manager
+        if manager is None:
+            return []
+        counts = await manager.projects.summary()
+        return [
+            {"id": p.id, "name": p.name, "root": str(p.root), "reachable": p.reachable, "agents": counts.get(p.id, {}).get("total", 0)}
+            for p in await manager.projects.list()
+            if not p.settings.system
+        ]
 
     async def result(self, session_id: str) -> dict[str, Any]:
         manager = self.app.manager
@@ -996,6 +1070,8 @@ class Voice:
     async def service(self, op: str, **kwargs: Any) -> Any:
         if op == "delegate":
             return await self.delegate(**kwargs)
+        if op == "projects":
+            return await self.project_list()
         if op == "agents":
             return await self.agents()
         if op == "result":

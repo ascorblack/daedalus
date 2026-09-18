@@ -608,14 +608,14 @@ class TelegramFront:
         await self._release_current(session_id)
 
     async def create_session_topic(
-        self, title: str, *, metadata: dict[str, Any] | None = None, chat_id: int | None = None, topic: bool = True, project_id: str | None = None
+        self, title: str, *, metadata: dict[str, Any] | None = None, chat_id: int | None = None, topic: bool = True, project_id: str | None = None, own_workspace: bool = False
     ) -> tuple[SessionState, TopicBinding]:
         """Create a session and, in topics mode, its topic.
 
         In private mode there is no topic and nothing to bind: the session is reachable from
         /sessions, /use and the Mini App, and speaks in the private chat under its own name.
         """
-        state = await self.manager.create_session(title, metadata=metadata, project_id=project_id)
+        state = await self.manager.create_session(title, metadata=metadata, project_id=project_id, own_workspace=own_workspace)
         if self.private_mode():
             return state, TopicBinding(self.settings.owner_user_id, 0, state.session.id, title)
         forum = (chat_id or self.config.telegram.forum_chat_id) if topic else 0

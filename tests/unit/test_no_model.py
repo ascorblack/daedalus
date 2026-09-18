@@ -130,7 +130,7 @@ async def api_session_list(i: Install) -> str:
     response = await i.client.get("/api/sessions", headers=H)
     assert response.status_code == 200, response.text
     # A list has nowhere to put a sentence: it says "no model" where a model name would go.
-    assert response.json()[0]["model"] == "no model"
+    assert response.json()["sessions"][0]["model"] == "no model"
     return NO_MODEL_MESSAGE
 
 

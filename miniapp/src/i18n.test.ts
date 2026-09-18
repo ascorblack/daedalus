@@ -134,7 +134,6 @@ describe("the keys the code asks for", () => {
       ["status.", ["idle", "running", "waiting", "compacting", "failed", "done", "paused", "stopped", "pending", "merged", "approved", "rejected", "closed", "dead"]],
       ["fmt.dow.", ["0", "1", "2", "3", "4", "5", "6"]],
       ["fmt.dur.", ["s", "m", "h", "d"]],
-      ["agents.group.", ["waiting", "working", "loop", "idle", "own", "noproject", "project", "workspace"]],
       ["board.col.", ["todo", "doing", "review", "blocked", "done", "dropped"]],
       ["sched.kind.", ["agent", "message", "lazy"]],
       ["sched.group.", ["upcoming", "paused", "done"]],

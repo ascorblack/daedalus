@@ -133,7 +133,7 @@ async def test_workspace_api_create_list_upload_attach_delete(client: httpx.Asyn
     assert detail["workspace_name"] == "shared-lab" and detail["workspace_own"] is False
     # The list names each session's workspace, so the Mini App can group agents by it.
     own = (await client.post("/api/sessions", json={"title": "alone"}, headers=H)).json()["id"]
-    listed = {row["id"]: row for row in (await client.get("/api/sessions", headers=H)).json()}
+    listed = {row["id"]: row for row in (await client.get("/api/sessions", headers=H)).json()["sessions"]}
     assert listed[sid]["workspace"] == "shared-lab" and listed[sid]["workspace_own"] is False
     assert listed[own]["workspace"] == own and listed[own]["workspace_own"] is True
     assert (await client.delete(f"/api/sessions/{own}", headers=H)).json() == {"deleted": True}

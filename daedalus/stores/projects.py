@@ -40,14 +40,19 @@ class ProjectSettings:
     """
 
     snapshots: bool = False
+    system: str = ""
+    """Non-empty on a project the installation made for itself rather than the operator: ``"voice"``
+    is the folder the concierge and the agents it delegates to work in. A system project keeps its
+    name and its snapshot switch editable and refuses the two things that would break the feature
+    behind it — being moved to another folder, and being removed."""
 
     @classmethod
     def load(cls, raw: Any) -> ProjectSettings:
         data = raw if isinstance(raw, dict) else {}
-        return cls(snapshots=bool(data.get("snapshots", False)))
+        return cls(snapshots=bool(data.get("snapshots", False)), system=str(data.get("system") or ""))
 
     def dump(self) -> dict[str, Any]:
-        return {"snapshots": self.snapshots}
+        return {"snapshots": self.snapshots, "system": self.system}
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +75,7 @@ class Project:
             "root": str(self.root),
             "created_at": self.created_at.isoformat(),
             "settings": self.settings.dump(),
+            "system": self.settings.system,
             "reachable": self.reachable,
             "writable": self.reachable and os.access(self.root, os.W_OK),
         }
@@ -166,6 +172,59 @@ class ProjectStore:
         await self.list()
         return project
 
+    async def ensure_system(self, kind: str, *, name: str, root: Path) -> Project:
+        """The installation's own project of this kind, made the first time something needs it.
+
+        Its folder is ours, not the operator's: it sits under the workspaces root, which
+        :meth:`_refuse_reserved` forbids an operator project precisely because it belongs to the
+        installation. So the reserved check is skipped here and nowhere else, and the overlap check
+        is kept — an operator project that already contains this folder would make containment mean
+        two things at once, whoever created which first.
+        """
+        for existing in await self.list():
+            if existing.settings.system == kind:
+                return existing
+        path = Path(os.path.normpath(Path(root).expanduser()))
+        await self._refuse_overlap(path)
+        project = Project(id=uuid.uuid4().hex[:12], name=name, root=path, created_at=datetime.now(UTC), settings=ProjectSettings(system=kind))
+        await self._db.execute(
+            "INSERT INTO projects(id, name, root, created_at, settings) VALUES (?, ?, ?, ?, ?)",
+            (project.id, project.name, str(project.root), project.created_at.isoformat(), json.dumps(project.settings.dump())),
+        )
+        await self.list()
+        return project
+
+    async def system(self, kind: str) -> Project | None:
+        """The installation's project of this kind if it has been made; ``None`` before it is needed."""
+        return next((p for p in await self.list() if p.settings.system == kind), None)
+
+    async def summary(self, active: Iterable[str] = ()) -> dict[str, dict[str, Any]]:
+        """Per project — and under ``""`` the sessions with no project — how many, how busy, how recently.
+
+        One query over the sessions table and no transcript read at all: the counts are right for an
+        installation with more sessions than any one page of the list shows, which is the whole
+        reason they are not counted from the rows the app was sent.
+        """
+        working = set(active)
+        out: dict[str, dict[str, Any]] = {}
+        rows = await self._db.fetchall("SELECT id, project_id, last_message_at, metadata FROM sessions")
+        for row in rows:
+            bucket = out.setdefault(row["project_id"] or "", {"total": 0, "active": 0, "loops": 0, "last_message_at": ""})
+            bucket["total"] += 1
+            if row["id"] in working:
+                bucket["active"] += 1
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except (TypeError, ValueError):
+                metadata = {}
+            loop = metadata.get("loop") if isinstance(metadata, dict) else None
+            if isinstance(loop, dict) and loop.get("status") == "active":
+                bucket["loops"] += 1
+            last = str(row["last_message_at"] or "")
+            if last > bucket["last_message_at"]:
+                bucket["last_message_at"] = last
+        return out
+
     async def update(self, project_id: str, *, name: str | None = None, root: str | None = None, settings: ProjectSettings | None = None) -> Project:
         project = await self.get(project_id)
         if project is None:
@@ -175,9 +234,14 @@ class ProjectStore:
             raise ProjectError("a project needs a name")
         path = project.root if root is None else normalise_root(root)
         if path != project.root:
+            if project.settings.system:
+                raise ProjectError(f"{project.name} is the installation's own folder and cannot be moved")
             self._refuse_reserved(path)
             await self._refuse_overlap(path, ignore=project_id)
         merged = project.settings if settings is None else settings
+        if merged.system != project.settings.system:
+            # The flag is what makes the two refusals above stick; nothing outside this module sets it.
+            merged = ProjectSettings(snapshots=merged.snapshots, system=project.settings.system)
         await self._db.execute(
             "UPDATE projects SET name = ?, root = ?, settings = ? WHERE id = ?",
             (label, str(path), json.dumps(merged.dump()), project_id),
@@ -187,6 +251,9 @@ class ProjectStore:
 
     async def delete(self, project_id: str) -> None:
         """Forget the project. Nothing on disk is touched: the folder is the operator's, not ours."""
+        project = await self.get(project_id)
+        if project is not None and project.settings.system:
+            raise ProjectError(f"{project.name} is the installation's own project and cannot be removed")
         await self._db.execute("UPDATE sessions SET project_id = NULL WHERE project_id = ?", (project_id,))
         await self._db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         await self.list()

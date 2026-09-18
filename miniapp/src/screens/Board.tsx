@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, SessionSummary } from "../api";
+import { api, SessionList, SessionSummary } from "../api";
 import { Skeleton, copyText } from "../components";
 import { OverflowMenu, Sheet } from "../dialogs";
 import { absTime, relTime } from "../format";
@@ -267,7 +267,8 @@ function TaskSheet({ t, owner, board, onClose, onMove, onCheck, onRemove, onOpen
 function NewTaskSheet({ onClose, onCreated, toast }: { onClose: () => void; onCreated: () => void; toast: (t: string) => void }) {
   const [form, setForm] = useState({ title: "", acceptance: "", checklist: "", priority: 3, session_id: "" });
   const [busy, setBusy] = useState(false);
-  const { data: sessions } = useQuery<SessionSummary[]>("/api/sessions", { staleMs: 15000 });
+  const { data: listing } = useQuery<SessionList>("/api/sessions", { staleMs: 15000 });
+  const sessions = listing?.sessions;
   const agents = (sessions ?? []).filter((s) => !s.title.startsWith("[sub]"));
   async function create() {
     setBusy(true);

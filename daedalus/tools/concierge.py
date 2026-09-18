@@ -29,15 +29,20 @@ def _hook(context: ToolContext):  # type: ignore[no-untyped-def]
         "starting a second one for the same job — and it is also how you answer an agent that reported "
         "it is waiting for the operator: ask the operator, then send their words to that session id. "
         "Several things asked at once are several calls, one per "
-        "task, so they run in parallel. Say out loud that you are setting it up; do not wait silently."
+        "task, so they run in parallel. Say out loud that you are setting it up; do not wait silently. "
+        "workspace says where a new agent works: 'shared' (the default) is the folder every agent you "
+        "started shares, so they can hand each other files and carry on each other's work; 'own' is a "
+        "directory of that agent's own, for an errand that has nothing to do with the rest. "
+        "project_id starts the agent inside one of the operator's projects instead — use it only when "
+        "the operator named the project ('in the bakery project, ...'); call Projects for the ids."
     ),
 )
-async def delegate(context: ToolContext, title: str, task: str, session_id: str | None = None) -> ToolResult:
+async def delegate(context: ToolContext, title: str, task: str, session_id: str | None = None, workspace: str = "shared", project_id: str | None = None) -> ToolResult:
     hook = _hook(context)
     if hook is None:
         return error(context, "delegation is not available here")
     try:
-        result = await hook("delegate", title=title, task=task, session_id=session_id)
+        result = await hook("delegate", title=title, task=task, session_id=session_id, workspace=workspace, project_id=project_id)
     except KeyError:
         return error(context, f"no agent of yours has the id {session_id!r}; call Agents to see them")
     except ValueError as exc:
@@ -46,7 +51,8 @@ async def delegate(context: ToolContext, title: str, task: str, session_id: str 
         return ok(context, f"your answer reached agent {result['title']!r} ({result['session_id']}), which was waiting for it and is working again", session_id=result["session_id"])
     if result["steered"]:
         return ok(context, f"the instruction reached agent {result['title']!r} ({result['session_id']}), which is already working", session_id=result["session_id"])
-    return ok(context, f"agent {result['title']!r} started as session {result['session_id']}; it reports here when it finishes", session_id=result["session_id"])
+    where = f"in {result['project']}" + (", in a directory of its own" if result["workspace"] == "own" else ", in the folder your agents share")
+    return ok(context, f"agent {result['title']!r} started as session {result['session_id']} {where}; it reports here when it finishes", session_id=result["session_id"])
 
 
 @tool(
@@ -114,6 +120,28 @@ async def stop_agent(context: ToolContext, session_id: str) -> ToolResult:
     return ok(context, "it is stopping" if stopped else "it was not running")
 
 
-TOOLS = [delegate, agents, agent_result, stop_agent]
+@tool(
+    name="Projects",
+    description=(
+        "The operator's projects — a name, a folder and how many agents work in each — and the id to "
+        "pass to Delegate as project_id. Call it when the operator names a project ('in the bakery "
+        "project, ...'); without one, an agent you start works in your own shared folder and needs none."
+    ),
+)
+async def projects(context: ToolContext) -> ToolResult:
+    hook = _hook(context)
+    if hook is None:
+        return error(context, "the project list is not available here")
+    rows = await hook("projects")
+    if not rows:
+        return ok(context, "the operator has no projects; an agent you start works in your own folder")
+    lines = [
+        f"- {r['name']} ({r['id']}): {r['agents']} agent(s)" + ("" if r["reachable"] else ", folder not reachable — an agent cannot be started in it")
+        for r in rows
+    ]
+    return ok(context, "\n".join(lines))
+
+
+TOOLS = [delegate, agents, agent_result, stop_agent, projects]
 
 __all__ = ["TOOLS"]

@@ -869,11 +869,11 @@ DEFAULT_MODES: dict[str, ModeConfig] = {
 }
 
 
-VOICE_TOOLS = ["Delegate", "Agents", "AgentResult", "StopAgent", "WebSearch"]
+VOICE_TOOLS = ["Delegate", "Agents", "AgentResult", "StopAgent", "Projects", "WebSearch"]
 """Everything the concierge may call: hand work to an agent, look at the agents, stop one, and answer a
 quick factual question itself. Nothing that reads, writes or runs anything — that is what the agents are for."""
 
-VOICE_ONLY_TOOLS = ["Delegate", "Agents", "AgentResult", "StopAgent"]
+VOICE_ONLY_TOOLS = ["Delegate", "Agents", "AgentResult", "StopAgent", "Projects"]
 """The tools that exist for the concierge alone; every other session is blocked from them (it has SpawnAgent)."""
 
 
