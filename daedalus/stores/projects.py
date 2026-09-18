@@ -97,6 +97,21 @@ def _row(row: Any) -> Project:
     )
 
 
+def _nested_under(session_id: str, metadata: dict[str, Any], known: set[str]) -> bool:
+    """Whether the Agents screen draws this session inside another row rather than as one of its own.
+
+    The same rule the screen nests by, and it has to stay the same rule or the count over a folder
+    stops describing the list under it: a subagent hangs under its leader, a fork under the session
+    it was taken from, and one whose leader or origin no longer exists hangs under nothing.
+    """
+    leader = metadata.get("subagent_of")
+    if isinstance(leader, str) and leader in known:
+        return True
+    forked = metadata.get("forked_from")
+    origin = forked.get("session_id") if isinstance(forked, dict) else None
+    return isinstance(origin, str) and origin != session_id and origin in known
+
+
 PSEUDO_FILESYSTEMS = (Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"))
 """Kernel interfaces the operating system mounts, not folders with work in them. A project rooted on
 one of them would list a running machine's processes and devices as if they were files to edit."""
@@ -238,20 +253,31 @@ class ProjectStore:
         One query over the sessions table and no transcript read at all: the counts are right for an
         installation with more sessions than any one page of the list shows, which is the whole
         reason they are not counted from the rows the app was sent.
+
+        A session the screen draws *inside* another row is not counted: a subagent is listed under
+        its leader and a fork under the session it was taken from, so counting them made a folder
+        header say "3 agents" over a body that listed two. Whose leader or origin is gone is nobody's
+        child and is counted, which is exactly the rule the screen nests by.
         """
         working = set(active)
         out: dict[str, dict[str, Any]] = {}
         rows = await self._db.fetchall("SELECT id, project_id, last_message_at, metadata FROM sessions")
+        parsed: list[tuple[Any, dict[str, Any]]] = []
         for row in rows:
-            bucket = out.setdefault(row["project_id"] or "", {"total": 0, "active": 0, "loops": 0, "last_message_at": ""})
-            bucket["total"] += 1
-            if row["id"] in working:
-                bucket["active"] += 1
             try:
                 metadata = json.loads(row["metadata"] or "{}")
             except (TypeError, ValueError):
                 metadata = {}
-            loop = metadata.get("loop") if isinstance(metadata, dict) else None
+            parsed.append((row, metadata if isinstance(metadata, dict) else {}))
+        known = {row["id"] for row, _ in parsed}
+        for row, metadata in parsed:
+            if _nested_under(row["id"], metadata, known):
+                continue
+            bucket = out.setdefault(row["project_id"] or "", {"total": 0, "active": 0, "loops": 0, "last_message_at": ""})
+            bucket["total"] += 1
+            if row["id"] in working:
+                bucket["active"] += 1
+            loop = metadata.get("loop")
             if isinstance(loop, dict) and loop.get("status") == "active":
                 bucket["loops"] += 1
             last = str(row["last_message_at"] or "")
