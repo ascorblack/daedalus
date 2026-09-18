@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from pathlib import Path
 from typing import Any
 
+import pytest
 from aiogram.filters import CommandObject
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
 from daedalus.transport.telegram.front import RUN_REACTIONS, TelegramFront, _cost_words, flooded, note_flood
 from daedalus.transport.telegram.render import RunRenderer, RunView
+from tests.support.waiting import grows_to
 from tests.unit.test_front import OWNER, _message, front  # noqa: F401 — the fixture is reused here
 from tests.unit.test_telegram_render import FakeOutbox
 
@@ -95,7 +96,11 @@ def test_cost_words_distinguish_unknown_from_zero() -> None:
     assert _cost_words(1.5, 2) == " · $1.5000 (+2 unmetered calls)"
 
 
-async def test_stale_message_is_acknowledged_not_executed(front: TelegramFront) -> None:
+async def test_stale_message_is_acknowledged_not_executed(front: TelegramFront, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The notice is deliberately delayed so a burst of stale messages is acknowledged once. The
+    # delay is patched down and then waited *on*, rather than slept through: three seconds of real
+    # sleep is three seconds a loaded host can overrun, and it tests the clock, not the coalescing.
+    monkeypatch.setattr("daedalus.transport.telegram.front.STALE_NOTICE_DELAY_SECONDS", 0.05)
     replies: list[str] = []
 
     async def reply(text: str, **_: Any) -> None:
@@ -109,14 +114,14 @@ async def test_stale_message_is_acknowledged_not_executed(front: TelegramFront) 
     object.__setattr__(second, "date", second.date.replace(year=2020))
     object.__setattr__(second, "reply", reply)
     await front.on_message(second)
-    await asyncio.sleep(3.3)
+    await grows_to(replies, 1, "the one notice for the stale burst")
     assert front.submitted == []  # type: ignore[attr-defined]
     assert replies == [replies[0]] and replies[0].startswith("⏳ Ignored: 2 messages")
 
 
 async def test_unknown_command_goes_to_the_agent(front: TelegramFront) -> None:
     await front.on_message(_message("/standup what did we do yesterday"))
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 1, "the command reached the manager")  # type: ignore[attr-defined]
     assert front.submitted[0][1] == "/standup what did we do yesterday"  # type: ignore[attr-defined]
 
 
@@ -132,13 +137,13 @@ async def test_sticker_and_reply_context_become_text(front: TelegramFront) -> No
     }
     msg = type(msg).model_validate(data)
     await front.on_message(msg)
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 1, "the reply reached the manager")  # type: ignore[attr-defined]
     assert front.submitted[0][1] == '[replying to the agent: "I would refactor the parser first."]\n\ndo this instead'  # type: ignore[attr-defined]
     sticker = _message(None)
     data = sticker.model_dump()
     data["sticker"] = {"file_id": "s", "file_unique_id": "su", "type": "regular", "width": 1, "height": 1, "is_animated": False, "is_video": False, "emoji": "😂", "set_name": "Pack"}
     await front.on_message(type(sticker).model_validate(data))
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 2, "the sticker reached the manager")  # type: ignore[attr-defined]
     assert front.submitted[1][1] == "[sticker 😂 from set Pack]"  # type: ignore[attr-defined]
 
 
@@ -155,12 +160,15 @@ async def test_oversize_file_is_refused_before_download(front: TelegramFront) ->
     msg = type(msg).model_validate(data)
     object.__setattr__(msg, "reply", reply)
     await front.on_message(msg)
-    await asyncio.sleep(0.05)
+    await grows_to(replies, 1, "the refusal reached the operator")
     assert front.submitted == []  # type: ignore[attr-defined]
     assert "file refused" in replies[0]
 
 
-async def test_reactions_and_topic_status_follow_the_run(front: TelegramFront) -> None:
+async def test_reactions_and_topic_status_follow_the_run(front: TelegramFront, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The rename is debounced so a burst of status changes is one rename. Patched down and waited
+    # on, for the same reason as the stale notice above.
+    monkeypatch.setattr("daedalus.transport.telegram.front.TOPIC_RENAME_DEBOUNCE_SECONDS", 0.05)
     reactions: list[tuple[int, int, list[Any]]] = []
     renames: list[tuple[int, int, str]] = []
 
@@ -179,13 +187,14 @@ async def test_reactions_and_topic_status_follow_the_run(front: TelegramFront) -
     binding = await front.binding_for_topic(-100, 10)
     assert binding is not None
     await front.on_message(_message("go", chat_type="supergroup", chat_id=-100, thread=10))
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 1, "the message reached the manager")  # type: ignore[attr-defined]
+    await grows_to(reactions, 1, "the message was reacted to")
     assert reactions[0][2][0].emoji == RUN_REACTIONS["received"]
     assert front._topic_name(binding.session_id, "job") == "🟢 job"
     await front._on_finished(binding.session_id, "nope", "completed")
     assert reactions[-1][2][0].emoji == RUN_REACTIONS["completed"]
     assert front._topic_name(binding.session_id, "job") == "🏁 job"
-    await asyncio.sleep(2.2)
+    await grows_to(renames, 1, "the topic was renamed after the debounce")
     assert renames[-1] == (-100, 10, "🏁 job")
 
 

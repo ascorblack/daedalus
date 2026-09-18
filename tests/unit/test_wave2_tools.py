@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,6 +13,7 @@ from daedalus.config import DEFAULT_MODES, VOICE_ONLY_TOOLS, LimitsConfig, Runti
 from daedalus.host.services import SessionServices, locator
 from daedalus.providers.openai_compat import apply_cache_control
 from daedalus.tools.files import EditMiss, apply_edit, nearest_window
+from tests.support.waiting import until_await
 
 
 def test_apply_edit_matches_exactly_then_loosely_and_keeps_the_file_indentation() -> None:
@@ -60,7 +60,14 @@ async def test_background_jobs_start_report_and_die(tmp_path: Path) -> None:
         started = await exec_command().invoke(ctx, {"command": "for i in 1 2 3; do echo tick $i; sleep 0.2; done; sleep 30", "background": True})
         assert not started.is_error and "running" in started.content
         job_id = str(started.metadata["job_id"])
-        await asyncio.sleep(1.6)
+
+        async def ticked() -> bool:
+            return "tick 3" in (await job_output().invoke(ctx, {"job_id": job_id, "tail_lines": 2})).content
+
+        # The job's own output is what says it got there, rather than a length of time that is only
+        # long enough on an idle host: three ticks two tenths apart is a second and a half of sleep
+        # the scheduler does not owe anybody.
+        await until_await(ticked, "the background job wrote its third tick")
         out = await job_output().invoke(ctx, {"job_id": job_id, "tail_lines": 2})
         assert "tick 3" in out.content and out.metadata["running"] is True
         listing = await job_list().invoke(ctx, {})

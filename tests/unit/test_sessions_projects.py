@@ -31,6 +31,7 @@ from daedalus.extensions.voice import PROJECT_DIR, PROJECT_KIND, Voice
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import MIGRATIONS, Database
 from daedalus.stores.projects import ProjectError, ProjectStore
+from tests.support.waiting import until
 from tests.unit.test_session_runner import ScriptedProvider, _manager, _wait_finished
 
 HEADERS = {"X-Daedalus-Token": "tok"}
@@ -391,11 +392,8 @@ async def test_what_the_concierge_says_to_a_running_agent_reaches_its_next_model
         started = await voice.delegate(title="Invoices", task="read the invoices")
         agent = started["session_id"]
         waiter = asyncio.create_task(_wait_finished(manager))
-        for _ in range(200):
-            if manager.live_state(agent) is not None and manager.live_state(agent).running:  # type: ignore[union-attr]
-                break
-            await asyncio.sleep(0.01)
-        assert manager.live_state(agent).running, "the delegated agent never started running"  # type: ignore[union-attr]
+        state = manager.live_state(agent)
+        await until(lambda: state is not None and state.running, "the delegated agent started running")
 
         relayed = await voice.delegate(title="", task="the old ones as well, please", session_id=agent)
         assert relayed["steered"] is True and relayed["answered"] is False

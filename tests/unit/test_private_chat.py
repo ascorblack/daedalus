@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any
 
@@ -13,6 +12,7 @@ from aiogram.methods import CreateForumTopic
 from aiogram.types import CallbackQuery, Message
 
 from daedalus.transport.telegram.front import SESSION_HEADER, TelegramFront
+from tests.support.waiting import grows_to
 from tests.unit.test_front import OWNER, RecordingBot, _message, front  # noqa: F401 — the fixture is reused here
 
 
@@ -90,7 +90,7 @@ async def test_new_creates_a_session_without_a_topic_and_writes_to_it(front: Tel
     assert state is not None and state.session.title == "research"
     assert await front.binding_for_session(current) is None
     await front.on_message(_message("go"))
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 1, "the message reached the manager")  # type: ignore[attr-defined]
     assert front.submitted == [(current, "go", [])]  # type: ignore[attr-defined]
 
 
@@ -105,7 +105,7 @@ async def test_use_switches_the_chat_by_number_and_by_title(front: TelegramFront
     await front.cmd_use(_said(_message("/use alph"), replies), _command("use", "alph"))
     assert await front.current_session_id() == alpha and replies[-1].startswith("Writing to 'alpha'")
     await front.on_message(_message("for alpha"))
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 1, "the message reached the manager")  # type: ignore[attr-defined]
     assert front.submitted[-1] == (alpha, "for alpha", [])  # type: ignore[attr-defined]
 
     listed = await front.manager.list_sessions(limit=50)
@@ -113,7 +113,7 @@ async def test_use_switches_the_chat_by_number_and_by_title(front: TelegramFront
     await front.cmd_use(_said(_message(f"/use {number}"), replies), _command("use", str(number)))
     assert await front.current_session_id() == beta
     await front.on_message(_message("for beta"))
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 2, "the second message reached the manager")  # type: ignore[attr-defined]
     assert front.submitted[-1] == (beta, "for beta", [])  # type: ignore[attr-defined]
 
 
@@ -161,8 +161,7 @@ async def test_a_typed_answer_reaches_the_session_that_asked(front: TelegramFron
     assert prompt["text"] == "▸ background\n\nType your answer:"  # the prompt says whose question it is, like the card above it
 
     await front.on_message(_reply_to("the release one", prompt["id"], prompt["text"]))
-    await asyncio.sleep(0.05)
-    assert front.answered  # type: ignore[attr-defined]
+    await grows_to(front.answered, 1, "the answer reached the manager")  # type: ignore[attr-defined]
     session_id, answers = front.answered[-1]  # type: ignore[attr-defined]
     assert session_id == other.session.id and answers[0]["custom"].endswith("the release one")
     assert front.submitted == []  # type: ignore[attr-defined] — the answer is not a message to the current session
@@ -189,7 +188,7 @@ async def test_closing_the_current_session_frees_the_chat(front: TelegramFront) 
     await front.on_callback(_callback(f"cl:{chosen}:keep", card))
     assert await front.current_session_id() == ""
     await front.on_message(_message("hello again"))
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 1, "the message reached the manager")  # type: ignore[attr-defined]
     assert front.submitted[-1][0] != chosen  # type: ignore[attr-defined] — a fresh session takes the chat
 
 
@@ -248,5 +247,5 @@ async def test_deleting_the_current_session_frees_the_private_chat(front: Telegr
     assert await front.manager.delete_session(doomed) is True
     assert await front.current_session_id() == ""
     await front.on_message(_message("hello again"))
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 1, "the message reached the manager")  # type: ignore[attr-defined]
     assert front.submitted[-1][0] != doomed  # type: ignore[attr-defined]

@@ -28,6 +28,7 @@ from daedalus.speech.engine import SAMPLE_RATE, Partial, SpeechError, resolve, r
 from daedalus.speech.models import DownloadError, Downloads, sha256_of, verify, view
 from daedalus.speech.service import LocalSpeech, decode_file, is_ogg
 from daedalus.speech.tts_service import LocalTts
+from tests.support.waiting import SETTLE, until
 
 # -- the catalog ------------------------------------------------------------------------------
 
@@ -441,10 +442,7 @@ async def test_a_half_finished_download_resumes_rather_than_starting_again(tmp_p
     catalog.BY_ID[model.id] = model
     try:
         downloads.start(model.id, url=zoo)
-        for _ in range(400):
-            await asyncio.sleep(0.02)
-            if downloads.progress()[model.id].state in ("installed", "failed"):
-                break
+        await until(lambda: downloads.progress()[model.id].state in ("installed", "failed"), "the download ended")
     finally:
         catalog.BY_ID.pop(model.id, None)
     assert downloads.progress()[model.id].state == "installed"
@@ -460,10 +458,7 @@ async def test_a_part_file_longer_than_the_model_is_thrown_away(tmp_path: Path, 
     catalog.BY_ID[model.id] = model
     try:
         downloads.start(model.id, url=zoo)
-        for _ in range(400):
-            await asyncio.sleep(0.02)
-            if downloads.progress()[model.id].state in ("installed", "failed"):
-                break
+        await until(lambda: downloads.progress()[model.id].state in ("installed", "failed"), "the download ended")
     finally:
         catalog.BY_ID.pop(model.id, None)
     assert downloads.progress()[model.id].state == "installed" and Zoo.served == ["whole"]
@@ -480,12 +475,11 @@ async def test_a_cancelled_download_keeps_what_arrived(tmp_path: Path, zoo: str)
     catalog.BY_ID[model.id] = model
     try:
         downloads.start(model.id, url=zoo)
-        await asyncio.sleep(0.15)
+        # Cancel it once the request is actually in flight and the host is holding the rest back —
+        # which is the state cancelling means anything in, and the thing to wait for.
+        await until(lambda: bool(Zoo.served), "the download host was asked for the archive")
         assert downloads.cancel(model.id)
-        for _ in range(100):
-            await asyncio.sleep(0.02)
-            if downloads.progress()[model.id].state == "cancelled":
-                break
+        await until(lambda: downloads.progress()[model.id].state == "cancelled", "the download reported itself cancelled")
         assert downloads.progress()[model.id].state == "cancelled" and not downloads.is_installed(model.id)
         assert not downloads.cancel(model.id), "cancelling what is not running says so rather than pretending"
         with pytest.raises(KeyError):
@@ -504,12 +498,13 @@ async def test_progress_reaches_a_watcher_and_a_full_queue_does_not_stall_the_do
     try:
         async with downloads.watch() as queue:
             downloads.start(model.id, url=zoo)
-            for _ in range(400):
-                await asyncio.sleep(0.02)
+
+            def drained() -> bool:
                 while not queue.empty():
                     seen.append(queue.get_nowait().state)
-                if "installed" in seen or "failed" in seen:
-                    break
+                return "installed" in seen or "failed" in seen
+
+            await until(drained, "the download reported itself finished on the watcher")
     finally:
         catalog.BY_ID.pop(model.id, None)
     assert "installed" in seen and seen[0] == "downloading"
@@ -541,15 +536,19 @@ def test_deleting_a_model_refuses_an_id_that_is_not_one(tmp_path: Path) -> None:
 async def test_deleting_a_model_mid_download_stops_it_and_reclaims_the_part_file(tmp_path: Path, zoo: str) -> None:
     """The task carried on after a delete, re-wrote the manifest and unpacked the model back."""
     Zoo.payload = make_archive("x", MODEL_FILES)
-    Zoo.hold = 0.05
+    # The host sends the first bytes and then holds the rest: the download is certainly still in
+    # flight when the delete lands, which is the whole of what this covers. A short delay instead
+    # would be a race the test loses on a busy host, by finishing the download first.
+    Zoo.stall_after = 64
+    Zoo.hold = 10.0
     model = fake_entry(Zoo.payload)
     downloads = Downloads(tmp_path / "stt")
     catalog.BY_ID[model.id] = model
     try:
         downloads.start(model.id, url=zoo)
-        await asyncio.sleep(0.1)
+        await until(lambda: bool(Zoo.served), "the download host was asked for the archive")
         await downloads.delete(model.id)
-        await asyncio.sleep(0.3)
+        await until(lambda: model.id not in downloads._running, "the download task let go")
         assert not downloads.is_installed(model.id), "a deleted model must not come back from its own download"
         assert not downloads.directory(model.id).is_dir()
         assert not (downloads.parts / model.archive).exists(), "the part file is not reachable from any UI"
@@ -1286,7 +1285,7 @@ async def test_the_engine_publishes_every_step_of_a_load_to_a_watcher(tmp_path: 
     async with CACHE.watch() as queue:
         app.speech.warm()
         while len(seen) < 2:
-            seen.append(await asyncio.wait_for(queue.get(), timeout=5))
+            seen.append(await asyncio.wait_for(queue.get(), timeout=SETTLE))
     assert [frame["state"] for frame in seen] == ["loading", "ready"]
     assert seen[1]["model"] == "gigaam-ru" and seen[1]["error"] == ""
     assert app.speech.load_state()["state"] == "ready"

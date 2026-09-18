@@ -14,6 +14,7 @@ import importlib.util
 import json
 import socket
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from daedalus import supervisor_client
 from daedalus.config import RuntimeConfig, Settings, keyproxy_base, native_mode, sandbox_never_writable
 from daedalus.host.policy import CONTAINER_CHECKOUTS, Policy
 from daedalus.tools import shell as shell_tool
+from tests.support.waiting import SETTLE
 
 LAUNCHER = Path(__file__).resolve().parents[2] / "launcher" / "supervisor.py"
 
@@ -219,19 +221,20 @@ async def test_the_supervisor_listens_on_a_port_where_there_are_no_unix_sockets(
     instance = supervisor.Supervisor()
     server = asyncio.create_task(instance.serve_socket())
     try:
-        for _ in range(100):
+        deadline = time.monotonic() + SETTLE
+        while True:
             try:
                 reader, writer = await asyncio.open_connection("127.0.0.1", port)
                 break
             except OSError:
+                if time.monotonic() > deadline:
+                    pytest.fail("the supervisor never opened its port")
                 await asyncio.sleep(0.02)
-        else:
-            pytest.fail("the supervisor never opened its port")
         # A port has no owner: this connection could be any process of any user on the machine, and
         # without the secret it is told so rather than being served a restart.
         writer.write(json.dumps({"op": "status"}).encode() + b"\n")
         await writer.drain()
-        refused = json.loads(await asyncio.wait_for(reader.readline(), timeout=10))
+        refused = json.loads(await asyncio.wait_for(reader.readline(), timeout=SETTLE))
         writer.close()
         assert refused["ok"] is False
         assert "secret" in refused["error"]
@@ -242,13 +245,13 @@ async def test_the_supervisor_listens_on_a_port_where_there_are_no_unix_sockets(
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
         writer.write(json.dumps({"op": "status", "token": token}).encode() + b"\n")
         await writer.drain()
-        answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=10))
+        answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=SETTLE))
         writer.close()
         assert answer["ok"] is True
         assert "selfdev_mode" in answer["result"]
         # And the client above reaches it through exactly the address Settings hands out, reading the
         # same file to open the same channel.
-        result = await supervisor_client.call(f"tcp://127.0.0.1:{port}", "status", token_path=token_path, timeout=10)
+        result = await supervisor_client.call(f"tcp://127.0.0.1:{port}", "status", token_path=token_path, timeout=SETTLE)
         assert "child_running" in result
     finally:
         server.cancel()

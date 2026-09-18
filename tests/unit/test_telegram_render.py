@@ -7,6 +7,7 @@ from protocore.runtime.events.types import EventType
 
 from daedalus.transport.telegram.markdown import markdown_to_html, split_message
 from daedalus.transport.telegram.render import RunRenderer, RunView, flatten_evidence
+from tests.support.waiting import grows_to
 
 
 class FakeOutbox:
@@ -92,16 +93,14 @@ def test_markdown_to_html_basics() -> None:
 
 
 async def test_streaming_sends_drafts_then_the_final_message(tmp_path: Path) -> None:
-    import asyncio
-
     outbox = FakeOutbox()
     outbox.drafts = []
     renderer = RunRenderer(outbox, RunView(run_id="r1", model="m"), edit_interval=0.0, streaming=True, draft_interval=0.01)
     await renderer.handle(_evt(EventType.MESSAGE_START))
     await renderer.handle(_evt(EventType.CONTENT_BLOCK_DELTA, delta={"type": "text_delta", "text": "Hello, "}))
-    await asyncio.sleep(0.05)
+    await grows_to(outbox.drafts, 1, "the first draft went out")
     await renderer.handle(_evt(EventType.CONTENT_BLOCK_DELTA, delta={"type": "text_delta", "text": "world"}))
-    await asyncio.sleep(0.05)
+    await grows_to(outbox.drafts, 2, "the second draft went out")
     await renderer.handle(_evt(EventType.MESSAGE_STOP, stop_reason="end_turn"))
     await renderer.finish("completed", workspace=tmp_path)
     assert [t for _, t in outbox.drafts] == ["Hello,", "Hello, world", ""]  # the empty draft clears the preview
@@ -118,8 +117,9 @@ async def test_streaming_disables_itself_when_drafts_are_refused(tmp_path: Path)
     renderer = RunRenderer(outbox, RunView(run_id="r1", model="m"), edit_interval=0.0, streaming=True, draft_interval=0.01)
     await renderer.handle(_evt(EventType.MESSAGE_START))
     await renderer.handle(_evt(EventType.CONTENT_BLOCK_DELTA, delta={"type": "text_delta", "text": "x"}))
-    await asyncio.sleep(0.05)
+    await grows_to(outbox.drafts, 1, "the refused draft was attempted")
     await renderer.handle(_evt(EventType.CONTENT_BLOCK_DELTA, delta={"type": "text_delta", "text": "y"}))
+    # Nothing to wait for after a refusal: what is asserted is that no second draft is ever tried.
     await asyncio.sleep(0.05)
     assert len(outbox.drafts) == 1 and renderer.streaming is False
 

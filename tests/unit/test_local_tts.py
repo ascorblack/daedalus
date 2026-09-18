@@ -53,6 +53,7 @@ from daedalus.speech.tts_service import (
     check_voice,
     encode,
 )
+from tests.support.waiting import SETTLE, until
 
 # -- the catalog ------------------------------------------------------------------------------
 
@@ -847,17 +848,21 @@ async def test_a_voice_dropped_while_it_was_loading_does_not_become_resident(
     lay_out(tmp_path, {"ru_RU-test-medium.onnx": b"M", "tokens.txt": b"t", **ESPEAK})
     cache = TtsCache()
     started = threading.Event()
+    dropped = threading.Event()
 
     class Slow(TtsEngine):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            # Held open by the test rather than by a sleep: the whole point is that the drop lands
+            # in the middle of the load, and a duration says "in the middle" only on an idle host.
             started.set()
-            time.sleep(0.2)
+            dropped.wait(SETTLE)
             super().__init__(*args, **kwargs)
 
     monkeypatch.setattr("daedalus.speech.tts_engine.TtsEngine", Slow)
     loading = asyncio.create_task(cache.get(catalog.get("ru-irina"), tmp_path, threads=2))
-    await asyncio.to_thread(started.wait, 2)
+    await asyncio.to_thread(started.wait, SETTLE)
     cache.drop()
+    dropped.set()
     engine = await loading
     assert engine is not None, "the caller that asked for the voice was left with nothing"
     assert cache.loaded() == "", "the drop was overwritten by the load it arrived in the middle of"
@@ -1201,11 +1206,7 @@ async def test_hearing_another_voice_puts_the_chosen_one_back(
     app = ready_to_speak(client, monkeypatch)
     pretend_installed(app, "ru-irina")
     assert client.post("/api/tts/voices/ru-irina/sample", headers=HEAD).status_code == 200
-    for _ in range(50):
-        if CACHE.loaded() == "ru-dmitri":
-            break
-        await asyncio.sleep(0.02)
-    assert CACHE.loaded() == "ru-dmitri", "the chosen voice was left evicted by a sample of another"
+    await until(lambda: CACHE.loaded() == "ru-dmitri", "the chosen voice was put back after the sample")
 
 
 def test_the_barge_in_endpoint_stops_the_run_and_the_reading(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

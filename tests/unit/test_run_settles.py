@@ -16,6 +16,7 @@ from protocore.runtime.events.types import EventType
 
 from daedalus.config import Settings
 from daedalus.stores.database import Database
+from tests.support.waiting import until
 from tests.unit.test_session_runner import ScriptedProvider, _manager
 
 SLOW = 2.0
@@ -62,16 +63,16 @@ async def test_the_run_reports_itself_over_before_the_housekeeping_runs(settings
 
     manager.checkpoint = slow_snapshot  # type: ignore[method-assign]
     await manager.submit(state.session.id, "hello")
-    while not events:
-        await asyncio.sleep(0.005)
-    # The first announcement comes with the final token, not with the work that follows it.
-    assert (at[0] - stopped[-1]) < 0.1, f"the run took {at[0] - stopped[-1]:.3f}s to say it was over"
+    await until(lambda: bool(events), "the run announced itself settled")
+    # The first announcement comes with the final token, not with the work that follows it. The
+    # bound is half the housekeeping and not a tight one: what is being told apart is "immediately"
+    # from "after two seconds of snapshotting", and a tighter bound only measures the host.
+    assert (at[0] - stopped[-1]) < SLOW / 2, f"the run took {at[0] - stopped[-1]:.3f}s to say it was over"
     assert not state.running, "the session still reads as running after it announced the end of the run"
     assert events[0].payload["housekeeping"] is True and events[0].payload["status"] == "completed"
     # …and the second one when there is nothing left to save.
     await asyncio.wait_for(snapshot_took.wait(), timeout=30)
-    while len(events) < 2:
-        await asyncio.sleep(0.01)
+    await until(lambda: len(events) >= 2, "the second settled event arrived")
     assert events[1].payload["housekeeping"] is False
     await manager.close()
 
@@ -108,8 +109,7 @@ async def test_the_next_run_waits_for_the_history_and_the_snapshot(settings: Set
     manager.on_finished(slow_callback)
     events, _ = await _settled_at(manager, state.session.id)
     await manager.submit(state.session.id, "one")
-    while not events:
-        await asyncio.sleep(0.005)
+    await until(lambda: bool(events), "the first run announced itself settled")
     assert not state.running
     started = time.perf_counter()
     await manager.submit(state.session.id, "two")
@@ -128,13 +128,15 @@ async def test_a_queued_message_still_starts_the_next_run(settings: Settings, db
     state = await manager.create_session("t")
     manager.config.compaction.auto_ratio = 0.0
     await manager.submit(state.session.id, "start")
-    await asyncio.sleep(0.2)
-    assert state.running
+    # The message is queued while the run is under way, which is the case this covers — so the test
+    # waits for the run to be under way rather than for a length of time a loaded host can spend
+    # before it has even started.
+    await until(lambda: state.running, "the first run started")
     await manager.live.save_queues(state.session.id, [{"kind": "follow_up", "text": "and then this"}], [])
-    for _ in range(600):
-        await asyncio.sleep(0.05)
-        if not state.running and state.housekeeping is not None and state.housekeeping.done():
-            break
+    await until(
+        lambda: not state.running and state.housekeeping is not None and state.housekeeping.done(),
+        "the run settled and its housekeeping finished",
+    )
     history = await manager.sessions.list_messages(state.session.id, "daedalus", limit=100)
     texts = [b.text for m in history for b in m.content_blocks if getattr(b, "text", "")]
     assert any("and then this" in t for t in texts), "the queued message never started a run"
@@ -231,11 +233,7 @@ async def test_a_shutdown_mid_run_announces_nothing(settings: Settings, db: Data
 
     manager.on_finished(on_finished)
     await manager.submit(state.session.id, "start")
-    for _ in range(200):
-        await asyncio.sleep(0.02)
-        if state.running:
-            break
-    assert state.running
+    await until(lambda: state.running, "the run started")
     await manager.close()
     assert events == [], f"a parked run announced itself as settled: {[e.payload for e in events]}"
     assert finished == [], f"a parked run handed its unfinished answer on: {finished}"

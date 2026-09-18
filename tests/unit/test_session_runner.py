@@ -19,6 +19,7 @@ from daedalus.extensions.api import message_view
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from tests.support.models import model_config
+from tests.support.waiting import SETTLE, until, until_await
 
 
 class ScriptedProvider(ILLMProvider):
@@ -126,8 +127,7 @@ async def test_follow_up_is_queued_while_running_and_placed_next_step(settings: 
     state = await manager.create_session("t")
     waiter = asyncio.create_task(_wait_finished(manager))
     await manager.submit(state.session.id, "start")
-    await asyncio.sleep(0.3)
-    assert state.running
+    await until(lambda: state.running, "the first run started")
     await manager.submit(state.session.id, "and also this")
     queued = await manager.live.load(state.session.id)
     assert queued["steer"] and queued["steer"][0]["text"] == "and also this"
@@ -142,8 +142,9 @@ async def test_shutdown_keeps_snapshot_and_resume_continues(settings: Settings, 
     manager = await _manager(settings, db, provider)
     state = await manager.create_session("t")
     await manager.submit(state.session.id, "long job")
-    await asyncio.sleep(0.5)
-    assert state.running
+    # Far enough in that the turn's snapshot is on disk: that is what the shutdown has to preserve,
+    # and "running" is true before it, so waiting on that would race the write rather than order it.
+    await until_await(manager.events.unfinished_snapshots, "the turn's snapshot was written")
     await manager.close()  # simulates the process going down mid-tool
     assert await db.fetchone("SELECT count(*) c FROM snapshots") is not None
     unfinished = await manager.events.unfinished_snapshots()
@@ -340,7 +341,7 @@ async def test_compact_refuses_while_running(settings: Settings, db: Database) -
     provider = ScriptedProvider([{"text": "hi"}])
     manager = await _manager(settings, db, provider)
     state = await manager.create_session("busy")
-    state.task = asyncio.create_task(asyncio.sleep(5))
+    state.task = asyncio.create_task(asyncio.sleep(SETTLE))
     with pytest.raises(RuntimeError):
         await manager.compact(state.session.id)
     state.task.cancel()
@@ -351,7 +352,7 @@ async def test_steer_sent_while_running_lands_in_the_transcript(settings: Settin
     provider = ScriptedProvider([{"text": "hi"}])
     manager = await _manager(settings, db, provider)
     state = await manager.create_session("busy")
-    state.task = asyncio.create_task(asyncio.sleep(5))
+    state.task = asyncio.create_task(asyncio.sleep(SETTLE))
     await manager.submit(state.session.id, "change of plan")
     texts = [m.content_blocks[0].text for m in await manager.sessions.list_transcript(state.session.id)]  # type: ignore[union-attr]
     assert texts == ["change of plan"]
@@ -365,7 +366,7 @@ async def test_a_steer_the_core_placed_is_not_shown_twice_while_the_run_lasts(se
     provider = ScriptedProvider([{"text": "hi"}])
     manager = await _manager(settings, db, provider)
     state = await manager.create_session("busy")
-    state.task = asyncio.create_task(asyncio.sleep(5))
+    state.task = asyncio.create_task(asyncio.sleep(SETTLE))
     await manager.submit(state.session.id, "change of plan")
     # What the core does with a placed queue item: a plain user message, no host metadata, new timestamp.
     state.engine = SimpleNamespace(history=[Message(role=MessageRole.user, content_blocks=[TextBlock(text="change of plan")])])  # type: ignore[assignment]

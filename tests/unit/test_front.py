@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +15,7 @@ from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.transport.telegram.front import TelegramFront
+from tests.support.waiting import grows_to
 
 OWNER = 1
 
@@ -101,7 +101,7 @@ async def front(settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatc
 
 async def test_private_message_creates_the_first_session_and_submits(front: TelegramFront) -> None:
     await front.on_message(_message("hello agent"))
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 1, "the message reached the manager")  # type: ignore[attr-defined]
     assert front.submitted == [(front.submitted[0][0], "hello agent", [])]  # type: ignore[attr-defined]
     session_id = front.submitted[0][0]  # type: ignore[attr-defined]
     assert await front.current_session_id() == session_id  # with no group bound the chat is the window onto it
@@ -112,22 +112,29 @@ async def test_private_message_creates_the_first_session_and_submits(front: Tele
 async def test_private_message_uses_the_bound_direct_topic_in_topics_mode(front: TelegramFront) -> None:
     front.config.telegram.forum_chat_id = -100
     await front.on_message(_message("hello agent"))
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 1, "the message reached the manager")  # type: ignore[attr-defined]
     binding = await front.binding_for_topic(OWNER, 0)
     assert binding is not None and binding.title == "direct"
     assert front.submitted[0][0] == binding.session_id  # type: ignore[attr-defined]
 
 
 async def test_non_owner_is_ignored(front: TelegramFront) -> None:
+    # The only one of these with nothing to wait on: what is asserted is that nothing happens. A
+    # sleep here can mask a failure on a loaded host but cannot invent one, which is the right way
+    # round — and the owner's message after it proves the pipeline was running the whole time.
     await front.on_message(_message("hi", user=999))
-    await asyncio.sleep(0.05)
-    assert front.submitted == []  # type: ignore[attr-defined]
+    await front.on_message(_message("but this one is mine"))
+    await grows_to(front.submitted, 1, "the owner's message reached the manager")  # type: ignore[attr-defined]
+    assert [text for _, text, _ in front.submitted] == ["but this one is mine"]  # type: ignore[attr-defined]
 
 
 async def test_fragments_and_files_merge_into_one_submission(front: TelegramFront) -> None:
+    # A window wide enough that both messages are certainly inside it: the merge is what is being
+    # tested, and a ten-millisecond window on a loaded host can close between the two calls.
+    front.config.telegram.inbound_merge_window_seconds = 1.0
     await front.on_message(_message("part one"))
     await front.on_message(_message("part two", document=True))
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 1, "the merged message reached the manager")  # type: ignore[attr-defined]
     assert len(front.submitted) == 1  # type: ignore[attr-defined]
     _, text, files = front.submitted[0]  # type: ignore[attr-defined]
     assert text == "part one\npart two" and files == ["data.csv"]
@@ -140,7 +147,7 @@ async def test_new_in_forum_creates_topic_and_binding(front: TelegramFront) -> N
     binding = await front.binding_for_topic(-100, 10)
     assert binding is not None and binding.title == "research"
     await front.on_message(_message("go", chat_type="supergroup", chat_id=-100, thread=10))
-    await asyncio.sleep(0.05)
+    await grows_to(front.submitted, 1, "the message reached the manager")  # type: ignore[attr-defined]
     assert front.submitted[0][0] == binding.session_id  # type: ignore[attr-defined]
 
 
