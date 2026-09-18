@@ -159,20 +159,32 @@ def run() -> int:
         open_file("sample.xls", ".preview-grid")
         expect(page.locator(".preview-grid")).to_contain_text("Bread")
         open_file("site/index.html", ".html-frame")
-        frame = page.frame_locator(".html-frame")
-        expect(frame.get_by_role("heading", name="Bakery report")).to_be_visible()
+        def html_ready(heading):
+            # Navigation replaces the srcdoc iframe. Wait for that document and its load
+            # indicator before resolving a frame locator or clicking its links.
+            page.wait_for_function("""heading => {
+                const frame = document.querySelector('.html-frame');
+                return frame?.srcdoc.includes(heading) && !document.querySelector('.panel-body > .preview-progress');
+            }""", arg=heading)
+            frame = page.frame_locator(".html-frame")
+            expect(frame.get_by_role("heading", name=heading)).to_be_visible()
+            return frame
+
+        frame = html_ready("Bakery report")
         assert page.locator(".html-frame").get_attribute("sandbox") == "allow-scripts"
         isolated = page.locator(".html-frame").evaluate("e => { try { return !!e.contentWindow.document.body; } catch { return false; } }")
         assert not isolated, "the document can reach the app origin"
         frame.get_by_role("link", name="Next page").click()
-        expect(frame.get_by_role("heading", name="Second page")).to_be_visible()
+        frame = html_ready("Second page")
         page.get_by_role("button", name="Back", exact=True).click()
-        expect(frame.get_by_role("heading", name="Bakery report")).to_be_visible()
+        frame = html_ready("Bakery report")
         page.get_by_role("button", name="Forward", exact=True).click()
-        expect(frame.get_by_role("heading", name="Second page")).to_be_visible()
+        frame = html_ready("Second page")
         before = downloads.count("site/next.html")
+        previous_frame = page.locator(".html-frame").element_handle()
         page.get_by_role("button", name="Reload", exact=True).click()
-        expect(frame.get_by_role("heading", name="Second page")).to_be_visible()
+        page.wait_for_function("frame => !frame.isConnected", arg=previous_frame)
+        frame = html_ready("Second page")
         page.wait_for_function("document.querySelector('.panel-toolbar a[aria-label=\"Open in a new tab\"]').href.includes('next.html')")
         assert downloads.count("site/next.html") > before
         page.locator('.panel-toolbar button[aria-label="Phone width"]').click()
