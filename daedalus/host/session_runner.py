@@ -90,6 +90,12 @@ BRIEF_MAX_CHARS = 12_000
 """A spawned agent's brief lives in its system prompt; longer hand-overs belong in files."""
 WORKSPACE_NOTES_CHARS = 6000
 GRANT_TTL_SECONDS = 2 * 3600
+
+STEER_CARD_CHARS = 200
+"""How much of a queued steer travels with a change event. The app draws a card, not the message."""
+
+STEER_CARD_LIMIT = 20
+"""Cards one change event carries. Past this the count is the answer; nobody reads the twenty-first card."""
 """How long an approval key stays spendable: long enough for the agent to retry, short enough that a forgotten grant does not wait for a later call."""
 """How much of the workspace AGENTS.md rides along in the prompt; the rest is one Read away."""
 
@@ -262,6 +268,22 @@ def _ensure_inbox(workspace: Path, project: Project | None) -> None:
 # workspace of the session's own they are the whole of the directory. In a project they land in the
 # operator's repository, where they have no business showing up in `git status` or being swept into a
 # commit by `git add -A`.
+def _steer_cards(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The waiting steers as the composer draws them: a recognisable amount of each, and not all of them."""
+    cards: list[dict[str, Any]] = []
+    for item in items:
+        text = str(item.get("text") or "")
+        if not text.strip():
+            continue
+        if len(cards) >= STEER_CARD_LIMIT:
+            break
+        card: dict[str, Any] = {"id": str(item.get("id") or ""), "text": text[:STEER_CARD_CHARS], "queued_at": item.get("queued_at")}
+        if len(text) > STEER_CARD_CHARS:
+            card["truncated"] = True
+        cards.append(card)
+    return cards
+
+
 SESSION_ARTEFACTS = ("inbox/", ".exec/", ".jobs/", ".services/", ".checkpoints/")
 _EXCLUDE_MARKER = "# daedalus: what an agent working in this folder writes into it"
 
@@ -1576,13 +1598,13 @@ class SessionManager:
         back what it did not place. Between those two moments a running engine holds the only copy,
         so a listing taken exactly then can name an item the model is already reading; the change
         event that follows the write corrects it within the round.
+
+        Each item comes back as a card: enough text to recognise it, with ``truncated`` set when
+        there is more. Three long pasted messages otherwise travel whole to every open stream on
+        every later change of the queue.
         """
         queued = await self.live.load(session_id)
-        return [
-            {"id": str(item.get("id") or ""), "text": str(item.get("text") or ""), "queued_at": item.get("queued_at")}
-            for item in queued["steer"]
-            if str(item.get("text") or "").strip()
-        ]
+        return _steer_cards(queued["steer"])
 
     async def drop_queued_steer(self, session_id: str, item_id: str) -> bool:
         """Take one steer back before the run reads it; ``False`` when it is already gone.
@@ -1615,13 +1637,14 @@ class SessionManager:
     async def steer_changed(self, session_id: str, *, reason: str) -> None:
         """Tell the session's listeners that its steer queue is not what they last drew."""
         state = self._states.get(session_id)
-        queued = await self.queued_steers(session_id)
+        waiting = [item for item in (await self.live.load(session_id))["steer"] if str(item.get("text") or "").strip()]
         await self._notify_sinks(
             session_id,
             HostEvent(
                 type=HostEventType.STEER_CHANGED,
                 run_id=(state.run_id if state is not None else "") or "",
-                payload={"session_id": session_id, "reason": reason, "count": len(queued), "queued": queued},
+                # ``count`` is the whole queue; ``queued`` is the first cards' worth of it.
+                payload={"session_id": session_id, "reason": reason, "count": len(waiting), "queued": _steer_cards(waiting)},
             ),
         )
 

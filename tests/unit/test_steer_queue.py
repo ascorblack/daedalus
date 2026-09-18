@@ -12,7 +12,7 @@ from protocore.contracts.types import TextBlock
 
 from daedalus.config import Settings
 from daedalus.extensions.api import build_app
-from daedalus.host.session_runner import SessionManager
+from daedalus.host.session_runner import STEER_CARD_CHARS, STEER_CARD_LIMIT, SessionManager
 from daedalus.stores.database import Database
 from tests.support.models import model_config
 from tests.unit.test_session_runner import ScriptedProvider
@@ -202,4 +202,23 @@ async def test_a_withdrawn_steer_is_not_brought_back_by_a_reload_that_raced_it(s
 
     await engine.persist_live_control(engine)
     assert await manager.queued_steers(sid) == []
+    await manager.close()
+
+
+async def test_a_change_event_carries_cards_and_the_true_count(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([{"text": "idle"}])
+    manager = await _manager(settings, db, provider)
+    changes = _watch(manager)
+    state = await manager.create_session("chatty")
+    sid = state.session.id
+    for i in range(STEER_CARD_LIMIT + 5):
+        await manager.live.enqueue(sid, "steer", {"id": f"q_{i}", "text": "x" * (STEER_CARD_CHARS + 50), "queued_at": None})
+
+    cards = await manager.queued_steers(sid)
+    assert len(cards) == STEER_CARD_LIMIT
+    assert all(len(card["text"]) == STEER_CARD_CHARS and card["truncated"] for card in cards)
+
+    await manager.steer_changed(sid, reason="queued")
+    assert changes[-1]["count"] == STEER_CARD_LIMIT + 5 and len(changes[-1]["queued"]) == STEER_CARD_LIMIT
+    assert state.session.id == sid
     await manager.close()
