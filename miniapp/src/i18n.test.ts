@@ -18,6 +18,13 @@ function screens(): string[] {
   return [...found[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
 }
 
+/** A list of string literals a module exports, read out of its source for the same reason. */
+function listed(file: string, name: string): string[] {
+  const found = SOURCES[file].match(new RegExp(`export const ${name}[^=]*=\\s*\\[([^\\]]+)\\]`));
+  if (!found) throw new Error(`${name} is no longer declared in ${file} where this test looks`);
+  return [...found[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+}
+
 // Words that are the same in both languages: names, brands and the ids of tools and config fields.
 // Everything else being identical means a row was copied and never translated.
 const SAME_IN_BOTH = [
@@ -129,6 +136,11 @@ describe("the keys the code asks for", () => {
     const families: [string, string[]][] = [
       ["nav.", screens()],
       ["nav.group.", ["work", "autonomy", "knowledge", "observe"]],
+      // The panel names its tabs from the union that defines them, and the voice screen names the
+      // phase it is in from the reducer's own. A fifth tab or a seventh phase otherwise ships as a
+      // bare `[panel.tab.x]` with every test here green.
+      ["panel.tab.", listed("./panel.ts", "PANEL_TABS")],
+      ["voice.phase.", listed("./voice.ts", "VOICE_PHASES")],
       ["add.effort.", ["low", "medium", "high"]],
       ["lang.name.", [...LANGS]],
       ["status.", ["idle", "running", "waiting", "compacting", "failed", "done", "paused", "stopped", "pending", "merged", "approved", "rejected", "closed", "dead"]],

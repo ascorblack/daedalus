@@ -999,7 +999,11 @@ export function modelRow(state: { preset?: string; using?: string; presets?: Voi
 // value and one function, which is also the only way any of it can be tested without a browser.
 
 /** What the operator sees the page doing. Every one of these is drawn differently. */
-export type VoicePhase = "idle" | "loading" | "listening" | "thinking" | "delegating" | "speaking";
+/** The phases, as a list first: the screen names each of them through the dictionary, and a phase
+ *  that exists only in a type is a phase no test can check has a word. */
+export const VOICE_PHASES = ["idle", "loading", "listening", "thinking", "delegating", "speaking"] as const;
+
+export type VoicePhase = (typeof VOICE_PHASES)[number];
 
 /** Where the local recogniser's weights are, as `/api/voice` and the progress stream report them. */
 export type EngineState = { state: string; model: string; loadedInMs: number; error: string };
