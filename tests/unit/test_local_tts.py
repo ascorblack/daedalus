@@ -526,6 +526,41 @@ def test_the_words_an_assistant_says_every_day_are_stressed_where_they_belong() 
         assert ru_stress.mark(plain) == marked, plain
 
 
+def test_the_words_the_table_used_to_get_wrong_are_written_out_here() -> None:
+    """Hand-checked, one line each, because a wrong entry is worse than no entry.
+
+    The module exists so a Russian voice does not sound foreign, and a table that puts the acute on
+    the wrong vowel *forces* the mistake on a model that would often have got it right on its own.
+    """
+    for plain, marked in (
+        ("август", "а" + ACUTE + "вгуст"),
+        ("именно", "и" + ACUTE + "менно"),
+        ("файлы", "фа" + ACUTE + "йлы"),
+        ("падали", "па" + ACUTE + "дали"),
+        ("пару", "па" + ACUTE + "ру"),
+        ("просто", "про" + ACUTE + "сто"),
+    ):
+        assert ru_stress.mark(plain) == marked, plain
+    # And the ones that are two words in writing, which the table may not decide between: «начал»
+    # is also the genitive plural of «начало», «простой» an adjective and a noun, «пары» a pair and
+    # a steam, «начало» a beginning and a verb.
+    for ambiguous in ("начал", "начало", "простой", "пары"):
+        assert ru_stress.mark(ambiguous) == ambiguous, ambiguous
+        assert ambiguous not in ru_stress.TABLE
+
+
+def test_every_entry_in_the_table_is_read_back_the_way_it_was_written() -> None:
+    """The table is a list to read, so the only thing holding its shape is that it is read back."""
+    for entry in ru_stress.WORDS.split():
+        plain = entry.replace(ru_stress.MARK, "")
+        if plain in ru_stress.HOMOGRAPHS:
+            continue
+        at = entry.find(ru_stress.MARK)
+        assert 0 <= at < len(plain), entry
+        assert plain[at] in ru_stress.VOWELS, f"{entry}: the mark is not in front of a vowel"
+        assert ru_stress.mark(plain) == plain[: at + 1] + ACUTE + plain[at + 1 :], entry
+
+
 def test_a_capital_letter_and_a_sentence_around_it_survive_the_marking() -> None:
     said = ru_stress.mark("Привет! Я проверил тесты, осталось 3 задачи.")
     assert said.startswith("Приве" + ACUTE + "т!")
