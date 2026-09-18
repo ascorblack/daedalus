@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -120,3 +124,102 @@ async def test_a_search_on_a_session_that_is_not_there_is_a_404(client: httpx.As
     assert (await client.get("/api/sessions/nope/files/search", params={"q": "x"}, headers=H)).status_code == 404
     assert (await client.get("/api/sessions/nope/files/grep", params={"q": "x"}, headers=H)).status_code == 404
     assert (await client.get("/api/sessions/nope/files/search", params={"q": "x"})).status_code == 401
+
+
+def _silent_rg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Put a ripgrep on the path that finds nothing and takes ten seconds not to say so.
+
+    A real query that matches nothing writes no line at all, which is the case the budget has to
+    bound: the reader is blocked in the pipe and no deadline in the loop around it is ever read.
+    """
+    folder = tmp_path / "slow-bin"
+    folder.mkdir(parents=True, exist_ok=True)
+    script = folder / "rg"
+    script.write_text("#!/bin/sh\nsleep 10\n", encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ['PATH']}")
+    return script
+
+
+def _running(marker: Path) -> bool:
+    return subprocess.run(["pgrep", "-f", str(marker)], capture_output=True, check=False).returncode == 0
+
+
+async def test_a_search_that_finds_nothing_still_answers_within_its_budget(
+    client: httpx.AsyncClient, manager: SessionManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = await manager.create_session("silent")
+    sid = state.session.id
+    marker = _silent_rg(tmp_path, monkeypatch)
+
+    started = time.monotonic()
+    body = (await client.get(f"/api/sessions/{sid}/files/grep", params={"q": "nothing-matches-this"}, headers=H)).json()
+    elapsed = time.monotonic() - started
+    assert body["hits"] == [] and body["truncated"]
+    assert elapsed < api_module.FILE_GREP_BUDGET_SECONDS + 2.0, elapsed
+
+    # And the walk is not left running behind the answer.
+    for _ in range(50):
+        if not _running(marker):
+            break
+        await asyncio.sleep(0.05)
+    assert not _running(marker)
+
+
+async def test_a_name_search_is_bounded_by_the_same_watchdog(
+    client: httpx.AsyncClient, manager: SessionManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = await manager.create_session("silent-names")
+    sid = state.session.id
+    marker = _silent_rg(tmp_path, monkeypatch)
+
+    started = time.monotonic()
+    body = (await client.get(f"/api/sessions/{sid}/files/search", params={"q": "nothing"}, headers=H)).json()
+    elapsed = time.monotonic() - started
+    assert body["results"] == [] and body["engine"] == "rg"
+    assert elapsed < api_module.FILE_SEARCH_BUDGET_SECONDS + 2.0, elapsed
+    for _ in range(50):
+        if not _running(marker):
+            break
+        await asyncio.sleep(0.05)
+    assert not _running(marker)
+
+
+async def test_a_caller_that_goes_away_takes_its_ripgrep_with_it(
+    client: httpx.AsyncClient, manager: SessionManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A closed tab is a cancelled request, and the walk it started must not outlive it."""
+    state = await manager.create_session("abandoned")
+    sid = state.session.id
+    marker = _silent_rg(tmp_path, monkeypatch)
+    monkeypatch.setattr(api_module, "FILE_GREP_BUDGET_SECONDS", 30.0)
+
+    request = asyncio.ensure_future(client.get(f"/api/sessions/{sid}/files/grep", params={"q": "gone"}, headers=H))
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        if _running(marker):
+            break
+    assert _running(marker)
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+
+    for _ in range(60):
+        if not _running(marker):
+            break
+        await asyncio.sleep(0.05)
+    assert not _running(marker)
+
+
+async def test_the_searches_have_a_pool_of_their_own(tmp_path: Path) -> None:
+    """Their own threads, so a filter box over a large tree cannot take the process's with it."""
+    pool = api_module._search_pool()
+    assert pool is api_module._search_pool()
+    assert pool._max_workers == api_module.FILE_SEARCH_WORKERS
+
+
+async def test_a_path_with_a_colon_in_it_keeps_its_hits(client: httpx.AsyncClient, manager: SessionManager) -> None:
+    state = await manager.create_session("colons")
+    (state.workspace / "od:d name.txt").write_text("the needle\n", encoding="utf-8")
+    body = (await client.get(f"/api/sessions/{state.session.id}/files/grep", params={"q": "needle"}, headers=H)).json()
+    assert [(h["path"], h["line"]) for h in body["hits"]] == [("od:d name.txt", 1)]

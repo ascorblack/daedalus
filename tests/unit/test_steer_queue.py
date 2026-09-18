@@ -12,7 +12,7 @@ from protocore.contracts.types import TextBlock
 
 from daedalus.config import Settings
 from daedalus.extensions.api import build_app
-from daedalus.host.session_runner import SessionManager
+from daedalus.host.session_runner import STEER_CARD_CHARS, STEER_CARD_LIMIT, SessionManager
 from daedalus.stores.database import Database
 from tests.support.models import model_config
 from tests.unit.test_session_runner import ScriptedProvider
@@ -138,4 +138,87 @@ async def test_the_id_the_app_holds_is_the_id_the_store_wrote(settings: Settings
     assert [item["id"] for item in listed] == stored and len(stored) == 2
     assert await manager.drop_queued_steer(sid, stored[0])
     assert [item["id"] for item in await manager.queued_steers(sid)] == stored[1:]
+    await manager.close()
+
+
+async def test_a_steer_queued_after_the_round_read_the_queue_survives_the_round(settings: Settings, db: Database) -> None:
+    """The round writes back what it is holding, and what arrived behind its back is still waiting."""
+    provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "sleep 3"}}, {"text": "done"}])
+    manager = await _manager(settings, db, provider)
+    changes = _watch(manager)
+    state = await manager.create_session("racing")
+    sid = state.session.id
+    await manager.submit(sid, "start")
+    await asyncio.sleep(0.3)
+    engine = state.engine
+    assert engine is not None
+
+    # The round reads the queue — empty — and the operator's message lands after that read.
+    await engine.reload_live_control(engine)
+    await manager.submit(sid, "and while you are there", steer=True)
+    assert list(getattr(engine, "_steer_queue", [])) == []
+
+    await engine.persist_live_control(engine)
+    waiting = await manager.queued_steers(sid)
+    assert [item["text"] for item in waiting] == ["and while you are there"]
+    assert [c["reason"] for c in changes] == ["queued"]
+
+    # Now the round is handed it and places it: that, and only that, is consumed.
+    await engine.reload_live_control(engine)
+    assert [item["id"] for item in engine._steer_queue] == [waiting[0]["id"]]
+    engine._steer_queue = []
+    await engine.persist_live_control(engine)
+    assert await manager.queued_steers(sid) == []
+    assert [c["reason"] for c in changes] == ["queued", "consumed"]
+    await manager.close()
+
+
+async def test_a_withdrawn_steer_is_not_brought_back_by_a_reload_that_raced_it(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "sleep 3"}}, {"text": "done"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("withdrawn")
+    sid = state.session.id
+    await manager.submit(sid, "start")
+    await asyncio.sleep(0.3)
+    engine = state.engine
+    assert engine is not None
+    await engine.reload_live_control(engine)
+    await manager.submit(sid, "forget this", steer=True)
+    item_id = (await manager.queued_steers(sid))[0]["id"]
+
+    # The row as a reload that started before the withdrawal would be handed it.
+    stale = await manager.live.load(sid)
+    assert await manager.drop_queued_steer(sid, item_id)
+
+    original = manager.live.load
+
+    async def stale_once(session_id: str) -> Any:
+        manager.live.load = original  # type: ignore[method-assign]
+        return stale
+
+    manager.live.load = stale_once  # type: ignore[method-assign]
+    await engine.reload_live_control(engine)
+    assert list(getattr(engine, "_steer_queue", [])) == []
+
+    await engine.persist_live_control(engine)
+    assert await manager.queued_steers(sid) == []
+    await manager.close()
+
+
+async def test_a_change_event_carries_cards_and_the_true_count(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([{"text": "idle"}])
+    manager = await _manager(settings, db, provider)
+    changes = _watch(manager)
+    state = await manager.create_session("chatty")
+    sid = state.session.id
+    for i in range(STEER_CARD_LIMIT + 5):
+        await manager.live.enqueue(sid, "steer", {"id": f"q_{i}", "text": "x" * (STEER_CARD_CHARS + 50), "queued_at": None})
+
+    cards = await manager.queued_steers(sid)
+    assert len(cards) == STEER_CARD_LIMIT
+    assert all(len(card["text"]) == STEER_CARD_CHARS and card["truncated"] for card in cards)
+
+    await manager.steer_changed(sid, reason="queued")
+    assert changes[-1]["count"] == STEER_CARD_LIMIT + 5 and len(changes[-1]["queued"]) == STEER_CARD_LIMIT
+    assert state.session.id == sid
     await manager.close()

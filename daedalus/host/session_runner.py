@@ -99,6 +99,12 @@ BRIEF_MAX_CHARS = 12_000
 """A spawned agent's brief lives in its system prompt; longer hand-overs belong in files."""
 WORKSPACE_NOTES_CHARS = 6000
 GRANT_TTL_SECONDS = 2 * 3600
+
+STEER_CARD_CHARS = 200
+"""How much of a queued steer travels with a change event. The app draws a card, not the message."""
+
+STEER_CARD_LIMIT = 20
+"""Cards one change event carries. Past this the count is the answer; nobody reads the twenty-first card."""
 """How long an approval key stays spendable: long enough for the agent to retry, short enough that a forgotten grant does not wait for a later call."""
 """How much of the workspace AGENTS.md rides along in the prompt; the rest is one Read away."""
 
@@ -239,6 +245,16 @@ class SessionState:
     usage_floor_seq: int = 0
     """Usage rows up to here were recorded before the last history rewrite; reading one of them as
     the current prompt size is what made a compaction fire again on the very next turn."""
+    steer_seen: list[str] = field(default_factory=list)
+    """Ids of the steers the running engine was handed at its last reload, in order. What is written
+    back is judged against these: an id that was never handed over was enqueued mid-round and is
+    still waiting, and an id that was handed over and not returned is one the model has read."""
+    follow_up_seen: list[str] = field(default_factory=list)
+    """The same for the follow-up queue."""
+    steer_withdrawn: set[str] = field(default_factory=set)
+    """Ids taken back since that reload. A reload already waiting on the database returns the row as
+    it was before the removal, so it is filtered through this on the way into the engine; cleared at
+    the next persist, by which time the store and the engine agree."""
 
     @property
     def running(self) -> bool:
@@ -266,6 +282,22 @@ def _ensure_inbox(workspace: Path, project: Project | None) -> None:
 # workspace of the session's own they are the whole of the directory. In a project they land in the
 # operator's repository, where they have no business showing up in `git status` or being swept into a
 # commit by `git add -A`.
+def _steer_cards(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The waiting steers as the composer draws them: a recognisable amount of each, and not all of them."""
+    cards: list[dict[str, Any]] = []
+    for item in items:
+        text = str(item.get("text") or "")
+        if not text.strip():
+            continue
+        if len(cards) >= STEER_CARD_LIMIT:
+            break
+        card: dict[str, Any] = {"id": str(item.get("id") or ""), "text": text[:STEER_CARD_CHARS], "queued_at": item.get("queued_at")}
+        if len(text) > STEER_CARD_CHARS:
+            card["truncated"] = True
+        cards.append(card)
+    return cards
+
+
 SESSION_ARTEFACTS = ("inbox/", ".exec/", ".jobs/", ".services/", ".checkpoints/")
 _EXCLUDE_MARKER = "# daedalus: what an agent working in this folder writes into it"
 
@@ -1605,13 +1637,13 @@ class SessionManager:
         back what it did not place. Between those two moments a running engine holds the only copy,
         so a listing taken exactly then can name an item the model is already reading; the change
         event that follows the write corrects it within the round.
+
+        Each item comes back as a card: enough text to recognise it, with ``truncated`` set when
+        there is more. Three long pasted messages otherwise travel whole to every open stream on
+        every later change of the queue.
         """
         queued = await self.live.load(session_id)
-        return [
-            {"id": str(item.get("id") or ""), "text": str(item.get("text") or ""), "queued_at": item.get("queued_at")}
-            for item in queued["steer"]
-            if str(item.get("text") or "").strip()
-        ]
+        return _steer_cards(queued["steer"])
 
     async def drop_queued_steer(self, session_id: str, item_id: str) -> bool:
         """Take one steer back before the run reads it; ``False`` when it is already gone.
@@ -1632,6 +1664,11 @@ class SessionManager:
                 removed = True
         if await self.live.remove(session_id, "steer", item_id):
             removed = True
+        if removed and state is not None:
+            # A reload that was already waiting on the database when this ran will be handed the row
+            # as it stood before the removal. Remembering the id here is what stops that answer from
+            # putting the withdrawn message back into the engine's queue, where it is authoritative.
+            state.steer_withdrawn.add(item_id)
         if removed:
             await self.steer_changed(session_id, reason="withdrawn")
         return removed
@@ -1639,13 +1676,14 @@ class SessionManager:
     async def steer_changed(self, session_id: str, *, reason: str) -> None:
         """Tell the session's listeners that its steer queue is not what they last drew."""
         state = self._states.get(session_id)
-        queued = await self.queued_steers(session_id)
+        waiting = [item for item in (await self.live.load(session_id))["steer"] if str(item.get("text") or "").strip()]
         await self._notify_sinks(
             session_id,
             HostEvent(
                 type=HostEventType.STEER_CHANGED,
                 run_id=(state.run_id if state is not None else "") or "",
-                payload={"session_id": session_id, "reason": reason, "count": len(queued), "queued": queued},
+                # ``count`` is the whole queue; ``queued`` is the first cards' worth of it.
+                payload={"session_id": session_id, "reason": reason, "count": len(waiting), "queued": _steer_cards(waiting)},
             ),
         )
 
@@ -1954,16 +1992,30 @@ class SessionManager:
 
         async def reload_live_control(eng: QueryEngine) -> None:
             data = await self.live.load(session_id)
-            eng._steer_queue = list(data["steer"])  # type: ignore[attr-defined]
-            eng._follow_up_queue = list(data["follow_up"])  # type: ignore[attr-defined]
+            steer = [item for item in data["steer"] if str(item.get("id") or "") not in state.steer_withdrawn]
+            follow_up = list(data["follow_up"])
+            state.steer_seen = [str(item.get("id") or "") for item in steer]
+            state.follow_up_seen = [str(item.get("id") or "") for item in follow_up]
+            eng._steer_queue = steer  # type: ignore[attr-defined]
+            eng._follow_up_queue = follow_up  # type: ignore[attr-defined]
 
         async def persist_live_control(eng: QueryEngine) -> None:
             steer = list(getattr(eng, "_steer_queue", []) or [])
-            before = [str(item.get("id") or "") for item in (await self.live.load(session_id))["steer"]]
-            await self.live.save_queues(session_id, steer, list(getattr(eng, "_follow_up_queue", []) or []))
-            if before != [str(item.get("id") or "") for item in steer]:
-                # The round placed queued text into the history (or the operator withdrew some of it
-                # while the round ran): the cards the app draws above its composer are now stale.
+            follow_up = list(getattr(eng, "_follow_up_queue", []) or [])
+            # A merge, not a write: a steer that arrived after this round's reload is in the store
+            # and not in the engine's list, and writing that list over the column would destroy it
+            # while the app was being told the model had read it.
+            gone = await self.live.replace_seen(
+                session_id, steer, follow_up, seen_steer=state.steer_seen, seen_follow_up=state.follow_up_seen,
+            )
+            consumed = [item_id for item_id in gone if item_id not in state.steer_withdrawn]
+            state.steer_seen = [str(item.get("id") or "") for item in steer]
+            state.follow_up_seen = [str(item.get("id") or "") for item in follow_up]
+            state.steer_withdrawn.clear()
+            if consumed:
+                # The round placed queued text into the history, so the cards the app draws above its
+                # composer are stale. Only what this round was handed and did not hand back counts,
+                # and a withdrawal announced itself when it happened and is not this.
                 await self.steer_changed(session_id, reason="consumed")
 
         def start_persist(history: list[Message], fresh: list[Message] | None) -> None:
