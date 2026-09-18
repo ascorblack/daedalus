@@ -487,6 +487,15 @@ class SessionManager:
             return self.budget_flag.read_text(encoding="utf-8").strip()
         return None
 
+    def provider_costs_nothing(self, provider_id: str | None) -> bool:
+        """Whether dollar caps are irrelevant to this endpoint by definition."""
+        if not provider_id:
+            return False
+        try:
+            return self.providers.get(provider_id).endpoint.kind == "llamacpp"
+        except KeyError:
+            return False
+
     def add_sink(self, sink: EventSink) -> None:
         self._sinks.append(sink)
 
@@ -975,7 +984,8 @@ class SessionManager:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)  # no straggler may write the old history later
         exceeded = self.budget_exceeded()
-        if exceeded:
+        compact_provider, _compact_model = await self._compaction_rung(state)
+        if exceeded and not self.provider_costs_nothing(compact_provider.endpoint.id):
             raise RuntimeError(f"daily budget exceeded ({exceeded}); compaction is a paid call")
         full = list(state.engine.history) if state.engine is not None else list(
             await self.sessions.list_messages(session_id, TENANT, limit=10_000)
@@ -1018,7 +1028,7 @@ class SessionManager:
             except Exception:  # noqa: BLE001
                 logger.exception("event sink failed")
 
-    async def _compact_progressing(self, state: SessionState, history: list[Message], tail: list[Message], instructions: str, reason: str, *, own_task_ok: bool) -> str:
+    async def _compaction_rung(self, state: SessionState) -> tuple[Any, str]:
         session_id = state.session.id
         rungs, _ = self.resolve_model(await self.live.load(session_id))
         provider, model = rungs[0]  # the session's own model summarises its own history …
@@ -1027,6 +1037,11 @@ class SessionManager:
                 provider, model = self.providers.rungs_for(self.config, self.config.compaction.preset)[0]  # … unless a cheaper one is configured for it
             except Exception:  # noqa: BLE001 — an unusable compaction preset falls back to the session's model
                 logger.warning("compaction preset %r is not usable; summarising with the session's model", self.config.compaction.preset)
+        return provider, model
+
+    async def _compact_progressing(self, state: SessionState, history: list[Message], tail: list[Message], instructions: str, reason: str, *, own_task_ok: bool) -> str:
+        session_id = state.session.id
+        provider, model = await self._compaction_rung(state)
         language = self.config.answer_language if self.config.answer_language != "auto" else operator_language(history)
         observability = LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, run_id=state.run_id, call_purpose="compaction", call_category="compaction")
         summary = await self._summarise_history(provider, model, history, language=language, instructions=instructions, observability=observability, progress=lambda **f: self._compaction_progress(state, **f))
@@ -1727,16 +1742,16 @@ class SessionManager:
                     session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up", "daedalus.origin": origin})]
                 )
                 return state.run_id or ""
-            exceeded = self.budget_exceeded()
-            if exceeded and not state.running:
-                raise RuntimeError(f"daily budget exceeded ({exceeded}); runs resume tomorrow or after /budget reset")
+            provider_id: str | None = None
             if not state.running:
-                provider_id: str | None = None
                 try:
                     rungs, _ = self.resolve_model(await self.live.load(session_id))
                     provider_id = rungs[0][0].endpoint.id if rungs else None
                 except Exception:  # noqa: BLE001 — a model problem surfaces when the run starts, not here
                     provider_id = None
+                exceeded = self.budget_exceeded()
+                if exceeded and not self.provider_costs_nothing(provider_id):
+                    raise RuntimeError(f"daily budget exceeded ({exceeded}); runs resume tomorrow or after /budget reset")
                 breach = await self.cap_breach(state, provider_id)
                 if breach is not None:
                     raise RuntimeError(breach[1])
@@ -1922,6 +1937,18 @@ class SessionManager:
     async def _build_engine(self, state: SessionState, run_id: str) -> QueryEngine:
         overrides = await self.live.load(state.session.id)
         rungs, preset = self.resolve_model(overrides)
+        if rungs and self.provider_costs_nothing(rungs[0][0].endpoint.id):
+            # A local primary remains usable after a hosted-provider budget is exhausted. Paid
+            # fallbacks do not inherit that exemption: when any applicable dollar guard is already
+            # closed, keep only local rungs so a failed server cannot turn a free run into a charge.
+            paid_blocked = self.budget_exceeded() is not None
+            if not paid_blocked:
+                for provider, _model in rungs[1:]:
+                    if not self.provider_costs_nothing(provider.endpoint.id) and await self.cap_breach(state, provider.endpoint.id) is not None:
+                        paid_blocked = True
+                        break
+            if paid_blocked:
+                rungs = [(provider, model) for provider, model in rungs if self.provider_costs_nothing(provider.endpoint.id)]
         deps = EngineDeps(
             tool_registry=self.tools,
             event_stream=self.events,
@@ -3065,6 +3092,10 @@ class SessionManager:
         provider's total across every session (``limits.usd_total_per_provider``) and the grand
         total (``limits.usd_total``); the last two count from ``limits.total_since``.
         """
+        if self.provider_costs_nothing(provider_id):
+            # Dollar caps prevent another charge. A llama.cpp call is recorded at exactly zero, so
+            # refusing it would turn a hosted-provider balance into an unrelated local outage.
+            return None
         limits = self.config.limits
         since = limits.total_since or None
         session_cap = self.session_cap(state)
@@ -3127,10 +3158,8 @@ class SessionManager:
     async def resume_unfinished(self) -> list[str]:
         """Continue runs that were mid-flight when the process last stopped."""
         resumed: list[str] = []
-        if self.budget_exceeded():
-            logger.warning("budget exceeded; unfinished runs stay parked until the cap is lifted")
-            self.recovering = False
-            return resumed
+        parked: list[str] = []
+        exceeded = self.budget_exceeded()
         try:
             seen: set[str] = set()
             for entry in await self.events.unfinished_snapshots():  # newest first
@@ -3140,15 +3169,27 @@ class SessionManager:
                     await self.events.delete_snapshot(entry["run_id"])
                     continue
                 seen.add(session_id)
+                if exceeded:
+                    state = await self.get_state(session_id)
+                    try:
+                        rungs, _preset = self.resolve_model(await self.live.load(session_id))
+                        free = bool(rungs and self.provider_costs_nothing(rungs[0][0].endpoint.id))
+                    except Exception:  # noqa: BLE001 — the normal resume path records the unusable model
+                        free = False
+                    if state is not None and not free:
+                        parked.append(entry["run_id"])
+                        continue
                 await self._resume_one(entry, resumed)
-            await self._settle_stale_runs(resumed)
+            if parked:
+                logger.warning("budget exceeded; %d paid-provider unfinished run(s) stay parked until the cap is lifted", len(parked))
+            await self._settle_stale_runs(resumed, parked)
         finally:
             self.recovering = False
         return resumed
 
-    async def _settle_stale_runs(self, resumed: list[str]) -> None:
+    async def _settle_stale_runs(self, resumed: list[str], parked: list[str] | None = None) -> None:
         """A run row still 'running' that nobody drives is a leftover of the previous process: closed as cancelled."""
-        active = set(resumed) | self.running_run_ids()
+        active = set(resumed) | set(parked or ()) | self.running_run_ids()
         rows = await self.db.fetchall("SELECT id FROM runs WHERE status = ?", (RunStatus.running.value,))
         self.stale_runs = []
         for row in rows:

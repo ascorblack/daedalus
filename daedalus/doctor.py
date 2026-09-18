@@ -22,6 +22,7 @@ import httpx
 from daedalus import supervisor_client
 from daedalus.config import RuntimeConfig, Settings, keyproxy_base, keyproxy_configured, keyproxy_unresolved
 from daedalus.host import capabilities, components, launcher_bridge
+from daedalus.providers.llamacpp import describe_discovery, discover_llamacpp
 from daedalus.providers.pricing import pricing_table
 from daedalus.providers.registry import _is_vendor_host
 from daedalus.security.redact import redact as redact_text
@@ -123,13 +124,16 @@ async def _config(ctx: DoctorContext) -> list[Check]:
             env_key = {"deepseek": st.deepseek_api_key, "openrouter": st.openrouter_api_key, "vllm": st.vllm_api_key}.get(provider.kind, "")
             has_key = bool(provider.api_key or env_key)
             via_proxy = provider.kind in ("deepseek", "openrouter", "opencode") and not _is_vendor_host(provider.kind, provider.base_url)
-            out.append(Check("default provider key", has_key or via_proxy or provider.kind in ("vllm", "openai_compat"), "configured" if has_key else ("held by the key proxy" if via_proxy else "no API key (fine for a keyless self-hosted endpoint)"), "ok" if has_key or via_proxy else "warn", "set the key in Settings → Models → provider"))
-            try:
-                table = pricing_table(provider.kind, provider.pricing)
-                priced = any(preset.model.startswith(k) for k in table)
-                out.append(Check("pricing for the default model", priced, "known" if priced else f"no price for {preset.model}: its calls are recorded as unmetered and cannot count toward caps", "ok" if priced else "warn", "add a pricing entry for the provider in config.toml"))
-            except Exception as exc:  # noqa: BLE001 — a hand-edited price table is exactly what this check is for
-                out.append(Check("pricing for the default model", False, f"the pricing table for {preset.provider} does not parse: {type(exc).__name__}: {exc}", "fail", "fix [providers.*.pricing] in config.toml"))
+            out.append(Check("default provider key", has_key or via_proxy or provider.kind in ("vllm", "llamacpp", "openai_compat"), "configured" if has_key else ("held by the key proxy" if via_proxy else "no API key (fine for a keyless self-hosted endpoint)"), "ok" if has_key or via_proxy or provider.kind in ("vllm", "llamacpp", "openai_compat") else "warn", "set the key in Settings → Models → provider"))
+            if provider.kind == "llamacpp":
+                out.append(Check("pricing for the default model", True, "local llama.cpp inference is recorded at $0 and does not consume spending caps", "ok"))
+            else:
+                try:
+                    table = pricing_table(provider.kind, provider.pricing)
+                    priced = any(preset.model.startswith(k) for k in table)
+                    out.append(Check("pricing for the default model", priced, "known" if priced else f"no price for {preset.model}: its calls are recorded as unmetered and cannot count toward caps", "ok" if priced else "warn", "add a pricing entry for the provider in config.toml"))
+                except Exception as exc:  # noqa: BLE001 — a hand-edited price table is exactly what this check is for
+                    out.append(Check("pricing for the default model", False, f"the pricing table for {preset.provider} does not parse: {type(exc).__name__}: {exc}", "fail", "fix [providers.*.pricing] in config.toml"))
     vision = cfg.vision_preset()
     if cfg.has_model:
         out.append(Check("vision preset", vision is not None, f"{vision[0]}" if vision else "no image-capable preset: ImageView and photos in chat are unavailable", "ok" if vision else "warn", "mark a preset as accepting images"))
@@ -633,6 +637,14 @@ async def _providers(ctx: DoctorContext) -> list[Check]:
             return None
         key = provider.api_key or {"deepseek": st.deepseek_api_key, "openrouter": st.openrouter_api_key, "vllm": st.vllm_api_key}.get(provider.kind, "")
         shown = redact_text(base)  # a base_url with inline credentials must not reach the chat
+        if provider.kind == "llamacpp":
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+                discovered = await discover_llamacpp(base, key, client=client)
+            label = provider.name or pid
+            detail = describe_discovery(discovered)
+            if discovered.sleeping:
+                return Check(f"llama.cpp {label}", False, detail, "warn", "wait for the model to wake or finish loading")
+            return Check(f"llama.cpp {label}", discovered.reachable, detail, "ok" if discovered.reachable else "fail", "check the server and base_url in Settings → Models")
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.get(base.rstrip("/") + "/models", headers={"authorization": f"Bearer {key}"} if key else {})

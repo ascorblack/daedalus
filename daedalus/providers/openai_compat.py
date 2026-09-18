@@ -1,7 +1,7 @@
 """OpenAI-compatible ``ILLMProvider`` adapter.
 
 One adapter serves every configured endpoint (DeepSeek, OpenRouter, a self-hosted
-vLLM, any other ``chat/completions`` server). Vendor differences are confined to
+vLLM or llama.cpp, any other ``chat/completions`` server). Vendor differences are confined to
 :class:`ProviderEndpoint` flags: how thinking is switched on, which field carries
 the reasoning stream, and how usage is shaped.
 """
@@ -385,6 +385,12 @@ class OpenAICompatibleProvider(ILLMProvider):
         breakpoints = extra.get("cache_breakpoints")
         if breakpoints and self.endpoint.kind == "openrouter":
             apply_cache_control(body["messages"], breakpoints, index_map=wire_index)
+        if self.endpoint.kind == "llamacpp":
+            # llama.cpp owns one prompt cache per slot. Asking it to reuse the common prefix makes a
+            # continuing conversation behave like hosted providers' automatic prefix caches; this
+            # field is deliberately confined to llama.cpp because generic OpenAI servers may reject
+            # extension parameters they do not know.
+            body["cache_prompt"] = True
         return body
 
     def accepts_images(self, model: str) -> bool:
@@ -392,6 +398,11 @@ class OpenAICompatibleProvider(ILLMProvider):
 
     def _apply_thinking(self, body: dict[str, Any], *, thinking: bool, effort: str) -> None:
         kind = self.endpoint.kind
+        if kind == "llamacpp":
+            # Thinking is a property of the loaded model and its chat template. llama.cpp builds do
+            # not share a stable reasoning parameter dialect, so a preset's vendor-facing controls
+            # must not turn into fields the server can reject.
+            return
         if kind in DEEPSEEK_SHAPED:
             # OpenCode Go passes DeepSeek's fields through unchanged; its other models take the same shape.
             body["thinking"] = {"type": "enabled" if thinking else "disabled"}
@@ -424,6 +435,12 @@ class OpenAICompatibleProvider(ILLMProvider):
 
     def _raise_for_status(self, status: int, text: str) -> None:
         lowered = text.lower()
+        if self.endpoint.kind == "llamacpp" and status == 503:
+            # No free inference slot and a model which is still loading or waking both answer 503.
+            # Rate-limit errors are the core's retryable provider-busy condition, so the existing
+            # in-run retry and the host's longer outage recovery do the waiting instead of ending the
+            # operator's task.
+            raise LLMRateLimitError(f"{self.endpoint.id}: llama.cpp busy: {text[:300]}")
         if status == 429:
             raise LLMRateLimitError(f"{self.endpoint.id}: rate limited: {text[:300]}")
         if status in (400, 413, 422) and any(m in lowered for m in _CONTEXT_ERROR_MARKERS):
@@ -493,7 +510,12 @@ class OpenAICompatibleProvider(ILLMProvider):
     ) -> float | None:
         model = request.model
         cost: float | None = None
-        if raw.get("cost") is not None:
+        if self.endpoint.kind == "llamacpp":
+            # This is inference on the operator's own hardware, not a hosted token sale. Recording
+            # zero rather than an unknown price keeps the usage ledger complete while ensuring every
+            # spending cap treats the call as free.
+            cost = 0.0
+        elif raw.get("cost") is not None:
             cost = float(raw["cost"])
         else:
             pricing = self.endpoint.pricing_for(model)

@@ -26,6 +26,21 @@ export const BLANK: Preset = { provider: "", model: "", label: "", thinking: tru
 /** What the endpoint said about the model that was picked, and what the form was filled in with from it. */
 export type Picked = { preset: Preset; pricing: ModelEntry["pricing"] | null };
 
+/** Fill the editable form from one model entry returned by the provider lookup API. */
+export function prefilled(entry: ModelEntry, current: Preset): Preset {
+  return {
+    ...current,
+    model: entry.id,
+    label: entry.name && entry.name !== entry.id ? entry.name : current.label,
+    images: entry.images ?? current.images,
+    thinking: entry.reasoning ?? current.thinking,
+    // The history a run may hold is capped below a very large hosted window on purpose: every turn
+    // pays for the context it carries. llama.cpp windows at or below that cap are preserved exactly.
+    context_window: entry.context_length ? Math.min(entry.context_length, 400000) : current.context_window,
+    max_output_tokens: entry.max_output_tokens ? Math.min(entry.max_output_tokens, 64000) : current.max_output_tokens,
+  };
+}
+
 /** A model id turned into a preset id: the same rule the server accepts (letters, digits, . _ -). */
 export function presetIdFor(provider: string, model: string): string {
   const slug = model.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "");

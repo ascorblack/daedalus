@@ -15,7 +15,7 @@ import { Icon } from "../icons";
 import { t, useLang } from "../i18n";
 import { LangPicker } from "../components";
 import { errorText, numInput } from "../ui";
-import { BLANK, ModelEntry, Picked, presetIdFor, priceFor, retyped } from "../models";
+import { BLANK, ModelEntry, Picked, prefilled, presetIdFor, priceFor, retyped } from "../models";
 
 export type { ModelEntry, Picked } from "../models";
 export { presetIdFor } from "../models";
@@ -26,6 +26,7 @@ export type KeyKind = "api_key" | "cli_login" | "endpoint";
 export type ProviderCard = {
   id: string;
   kind: string;
+  name?: string;
   base_url: string;
   via_proxy: boolean;
   /** Whether a credential really exists. `null` only when nothing could answer — the proxy is down. */
@@ -45,17 +46,19 @@ export type OnboardingState = {
 
 /** Not a provider id: the provider ids the server accepts cannot contain a space. */
 const CUSTOM = "a new endpoint";
+const LLAMACPP = "a new llama.cpp endpoint";
 const KIND_NAMES: Record<string, string> = {
   deepseek: "DeepSeek",
   openrouter: "OpenRouter",
   opencode: "OpenCode Go",
   vllm: "vLLM",
+  llamacpp: "llama.cpp",
 };
 /** Endpoints named after the tool whose login they borrow: the kind says nothing, the id does. */
 const ID_NAMES: Record<string, string> = { codex: "Codex", grok: "Grok", claude: "Claude", openai: "OpenAI" };
 
-function providerName(id: string, kind: string): string {
-  return ID_NAMES[id] ?? KIND_NAMES[kind] ?? id;
+function providerName(id: string, kind: string, name = ""): string {
+  return name || ID_NAMES[id] || KIND_NAMES[kind] || id;
 }
 
 function money(usd: number): string {
@@ -114,7 +117,7 @@ function ProviderStep({ state, chosen, onPick }: { state: OnboardingState | null
           // `aria-disabled` says the same thing and keeps the card reachable.
           <button key={p.id} className={`pick ${chosen === p.id ? "on" : ""} ${blocked ? "blocked" : ""}`} aria-disabled={blocked} onClick={() => !blocked && onPick(p.id)} aria-pressed={chosen === p.id}>
             <span className="pick-top">
-              <b className="truncate">{providerName(p.id, p.kind)}</b>
+              <b className="truncate">{providerName(p.id, p.kind, p.name)}</b>
               <span className={`pill ${tone}`}>{pill}</span>
             </span>
             <span className="sub mono truncate">{p.base_url || t("add.noaddress")}</span>
@@ -122,6 +125,13 @@ function ProviderStep({ state, chosen, onPick }: { state: OnboardingState | null
           </button>
         );
       })}
+      <button className={`pick dashed ${chosen === LLAMACPP ? "on" : ""}`} onClick={() => onPick(LLAMACPP)} aria-pressed={chosen === LLAMACPP}>
+        <span className="pick-top">
+          <b>{t("add.llamacpp")}</b>
+          <span className="pill">{t("add.custom.new")}</span>
+        </span>
+        <span className="sub">{t("add.llamacpp.sub")}</span>
+      </button>
       <button className={`pick dashed ${chosen === CUSTOM ? "on" : ""}`} onClick={() => onPick(CUSTOM)} aria-pressed={chosen === CUSTOM}>
         <span className="pick-top">
           <b>{t("add.custom")}</b>
@@ -134,9 +144,9 @@ function ProviderStep({ state, chosen, onPick }: { state: OnboardingState | null
 }
 
 /** Step 1b: the address and key of an endpoint this installation does not know yet. */
-function CustomProvider({ busy, onCreate }: { busy: boolean; onCreate: (id: string, baseUrl: string, apiKey: string) => void }) {
+function CustomProvider({ kind, busy, onCreate }: { kind: "llamacpp" | "openai_compat"; busy: boolean; onCreate: (id: string, name: string, baseUrl: string, apiKey: string, kind: string) => void }) {
   const [id, setId] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
+  const [baseUrl, setBaseUrl] = useState(kind === "llamacpp" ? "http://127.0.0.1:8080/v1" : "");
   const [apiKey, setApiKey] = useState("");
   const clean = id.trim().replace(/[^A-Za-z0-9._-]+/g, "-");
   return (
@@ -147,14 +157,14 @@ function CustomProvider({ busy, onCreate }: { busy: boolean; onCreate: (id: stri
       </label>
       <label className="mfield wide">
         <span>{t("add.custom.url")}</span>
-        <input className="field mono" value={baseUrl} placeholder="http://localhost:9000/v1" onChange={(e) => setBaseUrl(e.target.value)} spellCheck={false} />
+        <input className="field mono" value={baseUrl} placeholder="http://&lt;host&gt;:&lt;port&gt;/v1" onChange={(e) => setBaseUrl(e.target.value)} spellCheck={false} />
       </label>
       <label className="mfield">
         <span>{t("add.custom.key")}</span>
         <input className="field" type="password" value={apiKey} placeholder="sk-…" onChange={(e) => setApiKey(e.target.value)} autoComplete="off" />
       </label>
       <div className="mfield end">
-        <button className="btn primary" disabled={busy || !clean || !baseUrl.trim()} onClick={() => onCreate(clean, baseUrl.trim(), apiKey)}>
+        <button className="btn primary" disabled={busy || !clean || !baseUrl.trim()} onClick={() => onCreate(clean, id.trim(), baseUrl.trim(), apiKey, kind)}>
           {busy ? t("add.custom.saving") : t("add.custom.save")}
         </button>
       </div>
@@ -253,8 +263,10 @@ export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: str
     setLookupError("");
     setEntries(null);
     try {
-      const r = await api.post<{ models: string[]; entries?: ModelEntry[] }>("/api/providers/lookup-models", { provider: id });
-      setEntries(r.entries ?? r.models.map((m) => ({ id: m })));
+      const r = await api.post<{ models: string[]; entries?: ModelEntry[]; discovery?: Record<string, unknown> }>("/api/providers/lookup-models", { provider: id });
+      const found = r.entries ?? r.models.map((m) => ({ id: m }));
+      setEntries(found);
+      if (r.discovery && found.length === 1) pickModel(found[0]);
     } catch (e) {
       setLookupError(errorText(e));
     } finally {
@@ -268,14 +280,14 @@ export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: str
     setLookupError("");
     setTyped("");
     setPricing(null);
-    setPreset({ ...BLANK, provider: id === CUSTOM ? "" : id });
-    if (id !== CUSTOM) void lookup(id);
+    setPreset({ ...BLANK, provider: id === CUSTOM || id === LLAMACPP ? "" : id });
+    if (id !== CUSTOM && id !== LLAMACPP) void lookup(id);
   }
 
-  async function createProvider(id: string, baseUrl: string, apiKey: string) {
+  async function createProvider(id: string, name: string, baseUrl: string, apiKey: string, kind: string) {
     setBusy(true);
     try {
-      await api.put<Settings>(`/api/providers/${encodeURIComponent(id)}`, { kind: "openai_compat", base_url: baseUrl, api_key: apiKey });
+      await api.put<Settings>(`/api/providers/${encodeURIComponent(id)}`, { kind, name, base_url: baseUrl, api_key: apiKey });
       setState(await api.get<OnboardingState>("/api/onboarding"));
       pickProvider(id);
     } catch (e) {
@@ -288,17 +300,7 @@ export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: str
   function pickModel(entry: ModelEntry) {
     setTyped(entry.id);
     setPricing(entry.pricing ?? null);
-    setPreset((p) => ({
-      ...p,
-      model: entry.id,
-      label: entry.name && entry.name !== entry.id ? entry.name : p.label,
-      images: entry.images ?? p.images,
-      thinking: entry.reasoning ?? p.thinking,
-      // The history a run may hold is capped below a very large window on purpose: every turn pays
-      // for the context it carries, and 400k of it rarely makes the answer better.
-      context_window: entry.context_length ? Math.min(entry.context_length, 400000) : p.context_window,
-      max_output_tokens: entry.max_output_tokens ? Math.min(entry.max_output_tokens, 64000) : p.max_output_tokens,
-    }));
+    setPreset((p) => prefilled(entry, p));
   }
 
   function typeModel(value: string) {
@@ -310,7 +312,7 @@ export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: str
   }
 
   const model = (typed.trim() || preset.model).trim();
-  const onEndpoint = !!provider && provider !== CUSTOM;
+  const onEndpoint = !!provider && provider !== CUSTOM && provider !== LLAMACPP;
   const ready = onEndpoint && !!model;
 
   async function save() {
@@ -338,7 +340,8 @@ export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: str
     <div className="addmodel">
       <Step n={1} title={t("add.step1")} sub={t("add.step1.sub")} active={!provider} done={!!provider}>
         <ProviderStep state={state} chosen={provider} onPick={pickProvider} />
-        {provider === CUSTOM && <CustomProvider busy={busy} onCreate={createProvider} />}
+        {provider === CUSTOM && <CustomProvider key={CUSTOM} kind="openai_compat" busy={busy} onCreate={createProvider} />}
+        {provider === LLAMACPP && <CustomProvider key={LLAMACPP} kind="llamacpp" busy={busy} onCreate={createProvider} />}
       </Step>
 
       <Step n={2} title={t("add.step2")} sub={t("add.step2.sub")} active={onEndpoint && !model} done={!!model}>

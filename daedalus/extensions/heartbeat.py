@@ -140,7 +140,15 @@ class Heartbeat:
         if self.last_run is not None and now - self.last_run < timedelta(minutes=cfg.interval_minutes):
             return False
         manager = self.app.manager
-        return manager is not None and manager.budget_exceeded() is None
+        if manager is None or manager.budget_exceeded() is None:
+            return manager is not None
+        try:
+            _preset_id, preset = self.app.config.preset(cfg.preset or None)
+        except Exception:  # noqa: BLE001 — submit reports an unusable preset in its normal path
+            return False
+        # The key proxy's daily flag protects paid upstreams. A heartbeat on the operator's own
+        # llama.cpp server cannot add to that bill and remains useful when hosted calls are paused.
+        return manager.provider_costs_nothing(preset.provider)
 
     async def tick(self) -> None:
         if self.due():

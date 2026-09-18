@@ -61,6 +61,7 @@ from daedalus.host.policy import sealed_root
 from daedalus.host.prompts import DEFAULT_RULES
 from daedalus.host.session_runner import TENANT, Attachment
 from daedalus.host.transcript_view import message_view
+from daedalus.providers.llamacpp import discover_llamacpp
 from daedalus.providers.openai_compat import UsageRecord
 from daedalus.security import redact
 from daedalus.speech import catalog as speech_catalog
@@ -494,6 +495,7 @@ class ProviderPatch(BaseModel):
     """Partial edit of one configured provider endpoint (see ``apply_provider_patch``)."""
 
     kind: str | None = None
+    name: str | None = None
     base_url: str | None = None
     api_key: str | None = None
     """Omitted = keep the stored key; "" or null = clear it; any other value = store it."""
@@ -3786,6 +3788,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return {
             "id": pid,
             "kind": pc.kind,
+            "name": pc.name,
             "base_url": pc.base_url,
             "via_proxy": via_proxy,
             "key_held": key_held,
@@ -3941,6 +3944,22 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             row = (keys or {}).get(keyproxy_upstream(base_url))
             if keys is not None and not (row and row["configured"]):
                 raise HTTPException(400, no_credential(str(row["kind"]) if row else "api_key", body.provider))
+        if body.provider and provider_config.kind == "llamacpp":
+            discovered = await discover_llamacpp(base_url, api_key)
+            if not discovered.reachable or not discovered.model_id:
+                raise HTTPException(502, discovered.reason or "llama.cpp did not identify a model")
+            entry: dict[str, Any] = {"id": discovered.model_id}
+            if discovered.context_window is not None:
+                entry["context_length"] = discovered.context_window
+            if discovered.images is not None:
+                entry["images"] = discovered.images
+                entry["input_modalities"] = ["text", "image"] if discovered.images else ["text"]
+            return {
+                "base_url": discovered.base_url,
+                "models": [discovered.model_id],
+                "entries": [entry],
+                "discovery": discovered.as_dict(),
+            }
         try:
             return await lookup_openai_models(base_url, api_key)
         except ValueError as exc:

@@ -18,6 +18,7 @@ from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.boot_guard import BootGuard
 from daedalus.host.component_install import Installer
 from daedalus.host.session_runner import SessionManager, SessionState
+from daedalus.providers.llamacpp import describe_discovery, discover_llamacpp
 from daedalus.speech.service import LocalSpeech
 from daedalus.speech.tts_service import LocalTts
 from daedalus.stores.database import Database
@@ -74,6 +75,7 @@ class Application:
         await self.db.open()
         self.manager = SessionManager(self.settings, self.config, db=self.db)
         await self.manager.start()
+        await self._log_llamacpp_startup()
         if self.settings.telegram_bot_token and not self.settings.owner_user_id:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is set without OWNER_USER_ID: the bot would not know whose messages to answer")
         if self.settings.telegram_bot_token:
@@ -112,6 +114,17 @@ class Application:
             resent = await self.front.redeliver_pending()
             if resent:
                 await self.front.notify(f"Re-sent {resent} answer(s) the previous process had not confirmed as delivered.", markdown=False)
+
+    async def _log_llamacpp_startup(self) -> None:
+        """Record what each configured local server says before the first run needs it."""
+
+        async def probe(provider_id: str, provider: Any) -> None:
+            result = await discover_llamacpp(provider.base_url, provider.api_key)
+            logger.info("llama.cpp provider %s: %s", provider.name or provider_id, describe_discovery(result))
+
+        await asyncio.gather(
+            *(probe(provider_id, provider) for provider_id, provider in self.config.providers.items() if provider.kind == "llamacpp")
+        )
 
     async def notify(self, text: str, *, markdown: bool = True, kind: str = "notice", severity: str = "info") -> None:
         """Say something to the operator: the chat when Telegram is configured, the inbox when it is not.

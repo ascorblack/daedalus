@@ -19,7 +19,7 @@ import { LangPicker } from "../components";
 import { useQuery } from "../store";
 import { Capabilities, componentsNeedAttention } from "../capabilities";
 
-const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "openai_compat"];
+const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "llamacpp", "openai_compat"];
 
 function RulesEditor({ rules, fallback, onSave }: { rules: string; fallback: string; onSave: (rules: string) => void }) {
   const [text, setText] = useState(rules || fallback);
@@ -204,15 +204,17 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
   onRemove: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [name, setName] = useState(p.name ?? "");
   const [baseUrl, setBaseUrl] = useState(p.base_url);
   const [keyDraft, setKeyDraft] = useState("");
   useEffect(() => setBaseUrl(p.base_url), [p.base_url]);
+  useEffect(() => setName(p.name ?? ""), [p.name]);
   useEffect(() => setKeyDraft(""), [p.api_key_set]);
   return (
     <div className={`mrow ${open ? "open" : ""}`}>
       <div className="mline noradio">
         <button className="mmain" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-          <span className="mtitle mono">{id}</span>
+          <span className="mtitle">{p.name || id}</span>
           <span className="mmeta">{p.kind} · {p.base_url || t("settings.provider.noaddress")}</span>
         </button>
         <div className="mtags">
@@ -227,6 +229,10 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
         <div className="mpanel">
           <div className="mfields">
             <label className="mfield">
+              <span>{t("settings.provider.name")}</span>
+              <input className="field" value={name} placeholder={id} onChange={(e) => setName(e.target.value)} onBlur={() => name.trim() !== (p.name ?? "") && onPatch(id, { name: name.trim() })} />
+            </label>
+            <label className="mfield">
               <span>{t("settings.provider.kind")}</span>
               <select className="field" value={p.kind} onChange={(e) => onPatch(id, { kind: e.target.value })}>
                 {kinds.map((k) => (
@@ -239,7 +245,7 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
               <input
                 className="field"
                 value={baseUrl}
-                placeholder="http://host:9000/v1"
+                placeholder="http://<host>:<port>/v1"
                 onChange={(e) => setBaseUrl(e.target.value)}
                 onBlur={() => baseUrl.trim() !== p.base_url && baseUrl.trim() && onPatch(id, { base_url: baseUrl.trim() })}
               />
@@ -327,7 +333,7 @@ function AddProviderRow({ kinds, onAdd, toast }: { kinds: string[]; onAdd: (id: 
         </label>
         <label className="mfield wide">
           <span>base_url</span>
-          <input className="field" value={baseUrl} placeholder="http://host:9000/v1" onChange={(e) => setBaseUrl(e.target.value)} />
+          <input className="field" value={baseUrl} placeholder="http://<host>:<port>/v1" onChange={(e) => setBaseUrl(e.target.value)} />
         </label>
       </div>
       <div className="btnrow">

@@ -114,7 +114,10 @@ class ProviderRegistry:
             api_key=api_key,
             timeout_seconds=pc.timeout_seconds,
             extra_headers=headers,
-            pricing={**self._fetched.get(pc.kind, {}), **pricing_table(pc.kind, pc.pricing)},
+            # A llama.cpp process runs the operator's own model. It has no billable token price, so
+            # neither a similarly named hosted model nor a stale hand-written price may make its
+            # calls consume a session, provider, total or daily spending cap.
+            pricing={} if pc.kind == "llamacpp" else {**self._fetched.get(pc.kind, {}), **pricing_table(pc.kind, pc.pricing)},
             temperature=pc.temperature,
         )
 

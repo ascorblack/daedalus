@@ -371,6 +371,7 @@ export type HeartbeatStatus = {
 
 export type ProviderConf = {
   kind: string;
+  name?: string;
   base_url: string;
   timeout_seconds: number;
   api_key?: string; // always "" from the API — stored keys are masked

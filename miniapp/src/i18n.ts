@@ -431,6 +431,8 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "add.noaddress": { en: "no address configured", ru: "адрес не задан" },
   "add.noaddress.hint": { en: "Give it an address in Settings → Models.", ru: "Укажите адрес в «Настройки → Модели»." },
 
+  "add.llamacpp": { en: "llama.cpp server", ru: "Сервер llama.cpp" },
+  "add.llamacpp.sub": { en: "One model on your own server; no key or token charge, with capabilities discovered automatically.", ru: "Одна модель на вашем сервере: без ключа и платы за токены, возможности определяются автоматически." },
   "add.custom": { en: "OpenAI-compatible endpoint", ru: "Совместимый с OpenAI адрес" },
   "add.custom.new": { en: "new", ru: "новый" },
   "add.custom.sub": { en: "Anything serving /v1/chat/completions: a local vLLM, a machine on the network, another vendor.", ru: "Всё, что отвечает на /v1/chat/completions: локальный vLLM, машина в сети, другой поставщик." },
@@ -1257,6 +1259,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "settings.models.menu.unreachable": { en: "could not reach the endpoint", ru: "адрес недоступен" },
   "settings.models.menu.none": { en: "no models", ru: "моделей нет" },
   "settings.provider.kind": { en: "Kind", ru: "Тип" },
+  "settings.provider.name": { en: "Display name (optional)", ru: "Название для показа (необязательно)" },
   "settings.provider.noaddress": { en: "no address", ru: "адрес не задан" },
   "settings.provider.ready": { en: "ready", ru: "готов" },
   "settings.provider.needs": { en: "needs URL or key", ru: "нужен адрес или ключ" },

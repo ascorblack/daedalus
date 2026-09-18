@@ -38,6 +38,12 @@ chain = []               # preset ids tried in order after the default one fails
 # model = "Qwen3.8"
 # thinking = false
 
+# [presets."llamacpp.local-model"]
+# provider = "llamacpp"
+# model = "local-model"       # discovered from the server; editable when the server cannot list it
+# thinking = false
+# context_window = 128000      # discovered from /props when that endpoint is exposed
+
 # A subscription endpoint (Claude Code, Codex, SuperGrok) is a generic openai_compat client
 # behind the key proxy; the preset looks like any other.
 # [presets."claude.sonnet-5"]
@@ -54,8 +60,9 @@ chain = []               # preset ids tried in order after the default one fails
 #   deepseek      -> falls back to DEEPSEEK_API_KEY
 #   openrouter    -> falls back to OPENROUTER_API_KEY, adds the referer headers OpenRouter wants
 #   vllm          -> falls back to VLLM_BASE_URL / VLLM_API_KEY (this is a plain vLLM server)
+#   llamacpp      -> a llama.cpp server; local calls are always recorded at zero cost
 #   openai_compat -> generic self-hosted endpoint
-# base_url is the OpenAI API root and usually ends in /v1 (e.g. http://192.0.2.10:9000/v1).
+# base_url is the OpenAI API root and usually ends in /v1 (e.g. http://<host>:<port>/v1).
 # A per-endpoint api_key set in this file wins over the environment key; leave it empty for
 # self-hosted endpoints that need no key. The Mini App (Settings -> Providers) edits these
 # entries live, lists a server's models from its /models endpoint, and never shows stored keys.
@@ -86,6 +93,17 @@ base_url = ""            # empty = use VLLM_BASE_URL from the environment
 timeout_seconds = 600.0
 
 [providers.vllm.pricing]
+
+# llama.cpp needs no key unless the server was started with one. Its /props endpoint supplies the
+# model id, context window, tool and image support, slot count, build and sleep state; with /props
+# hidden or absent, /v1/models still supplies the model id and any values it publishes, and the
+# preset values above remain editable.
+[providers.llamacpp]
+kind = "llamacpp"
+name = "Local llama.cpp"
+base_url = "http://127.0.0.1:8080/v1"
+api_key = ""
+timeout_seconds = 600.0
 
 # The agent's eyes: a preset with images = true answers questions about pictures, so the main
 # context never carries pixels. Empty = the first image-capable preset, if there is one.

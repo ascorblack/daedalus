@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Preset } from "./api";
-import { presetIdFor, priceFor, retyped } from "./models";
+import { BLANK, prefilled, presetIdFor, priceFor, retyped } from "./models";
 
 const OPUS: Preset = {
   provider: "openrouter",
@@ -54,5 +54,15 @@ describe("the price a model is recorded at", () => {
 describe("preset ids", () => {
   it("are the model id with what the server does not accept replaced", () => {
     expect(presetIdFor("openrouter", "z-ai/glm-5.3-flash")).toBe("openrouter.z-ai-glm-5.3-flash");
+  });
+});
+
+describe("the provider lookup prefill", () => {
+  it("fills llama.cpp's discovered model, context and image support while keeping them editable values", () => {
+    const out = prefilled({ id: "local-model", context_length: 128000, images: true }, { ...BLANK, provider: "local" });
+    expect(out.model).toBe("local-model");
+    expect(out.context_window).toBe(128000);
+    expect(out.images).toBe(true);
+    expect(out.provider).toBe("local");
   });
 });

@@ -156,8 +156,8 @@ ApprovalMode = Literal["manual", "auto"]
 ScheduleTopicMode = Literal["per_task", "per_run"]
 TelegramMode = Literal["topics", "private"]
 
-ProviderKind = Literal["deepseek", "openrouter", "opencode", "vllm", "openai_compat"]
-PROVIDER_KINDS: tuple[ProviderKind, ...] = ("deepseek", "openrouter", "opencode", "vllm", "openai_compat")
+ProviderKind = Literal["deepseek", "openrouter", "opencode", "vllm", "llamacpp", "openai_compat"]
+PROVIDER_KINDS: tuple[ProviderKind, ...] = ("deepseek", "openrouter", "opencode", "vllm", "llamacpp", "openai_compat")
 """``opencode`` is the OpenCode Go / Zen gateway: OpenAI-compatible, wants a stable session id per conversation in
 ``x-opencode-session`` for routing and prompt caching, and passes DeepSeek's thinking fields through as they are."""
 
@@ -397,6 +397,8 @@ class ProviderConfig(BaseModel):
     """One configured provider endpoint (all OpenAI-compatible)."""
 
     kind: ProviderKind = "openai_compat"
+    name: str = ""
+    """Optional display name for this endpoint; empty shows its configuration id."""
     base_url: str = ""
     api_key: str = ""
     """Optional key for this endpoint, stored in ``config.toml`` on the state volume
