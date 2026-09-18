@@ -32,7 +32,8 @@ def _hook(context: ToolContext):  # type: ignore[no-untyped-def]
         "task, so they run in parallel. Say out loud that you are setting it up; do not wait silently. "
         "workspace says where a new agent works: 'shared' (the default) is the folder every agent you "
         "started shares, so they can hand each other files and carry on each other's work; 'own' is a "
-        "directory of that agent's own, for an errand that has nothing to do with the rest. "
+        "directory of that agent's own, outside the shared folder and reachable by nobody else, for "
+        "an errand that has nothing to do with the rest. "
         "project_id starts the agent inside one of the operator's projects instead — use it only when "
         "the operator named the project ('in the bakery project, ...'); call Projects for the ids."
     ),
