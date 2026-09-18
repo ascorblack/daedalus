@@ -2272,8 +2272,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
         Nothing on disk moves. Into a project the session either starts working in the project's
         folder — where it sees the rest of the project's files, and they see what it writes — or
-        keeps the directory it already has, listed under the project and sharing none of it. Out of
-        a project it goes back to a directory of its own, which is empty unless it had one before.
+        keeps the directory it already has: the same one, listed under the new project and sharing
+        none of it. Out of a project it keeps that directory too. Nothing a session has written is
+        ever left behind by a move.
         """
         state = await manager.get_state(session_id)
         if state is None:

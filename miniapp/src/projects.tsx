@@ -228,8 +228,10 @@ export function ProjectSettingsSheet({ project, onClose, onRemoved, toast }: { p
 /** Move one agent into a project, between two, or out of every one.
  *
  * Nothing on disk moves, and the sheet says which of the two things that means: an agent that keeps
- * its own directory is listed in the project and shares none of its files, and one that takes the
- * project's folder sees the rest of the project's work from its next turn on.
+ * its own directory goes on working in the folder it is in and shares none of the project's files,
+ * and one that takes the project's folder sees the rest of the project's work from its next turn on.
+ * The installation's own folders are not offered as a destination — the concierge's Projects tool
+ * hides the Voice project for the same reason — unless the session is already in one.
  */
 export function MoveSessionSheet({ sessionId, current, onClose, onMoved, toast }: { sessionId: string; current: string; onClose: () => void; onMoved: () => void; toast: (t: string) => void }) {
   const projects = useProjects();
@@ -258,7 +260,7 @@ export function MoveSessionSheet({ sessionId, current, onClose, onMoved, toast }
       <label className="field" htmlFor="move-project">{t("move.where")}</label>
       <select id="move-project" className="field" value={target} onChange={(e) => setTarget(e.target.value)}>
         <option value="">{t("move.free")}</option>
-        {(projects.data ?? []).map((p) => (
+        {(projects.data ?? []).filter((p) => !p.system || p.id === current).map((p) => (
           <option key={p.id} value={p.id}>{p.name} · {p.root}</option>
         ))}
       </select>
@@ -269,7 +271,7 @@ export function MoveSessionSheet({ sessionId, current, onClose, onMoved, toast }
             <span>{t("move.usefolder")}</span>
             <span className="sub">{t("move.usefolder.hint", { root: chosen.root })}</span>
           </label>
-          <div className="sub attn">{useFolder ? t("move.warn.shared", { root: chosen.root }) : t("move.warn.separate")}</div>
+          <div className="sub attn">{useFolder ? t("move.warn.shared", { root: chosen.root }) : t("move.warn.separate", { root: chosen.root })}</div>
         </>
       )}
       {!target && <div className="sub">{t("move.free.hint")}</div>}

@@ -567,8 +567,10 @@ class SessionManager:
         * a project — the project's folder, which is why moving the project moves every session in
           it and there is no second copy of the path to fall out of step;
         * a project and ``own_workspace`` — a directory of the session's own, named in the metadata.
-          It is listed under the project and it does not share the project's files: that is what the
-          concierge asks for when it hands an agent work that has nothing to do with the rest.
+          It is listed under the project and it does not share the project's files, in either
+          direction: the directory is outside the project's folder, so no session walled at that
+          folder can reach into it. That is what the concierge asks for when it hands an agent work
+          that has nothing to do with the rest.
         """
         named = metadata.get("workspace")
         if project is not None:
@@ -599,10 +601,13 @@ class SessionManager:
         # which is why the project is the stored link and the directory is derived from it.
         meta = dict(metadata or {})
         if project is not None and own_workspace:
-            # A directory of its own inside the project's folder: it is the project's agent — it is
-            # listed there and it is removed with it — and its files are nobody else's.
+            # Listed in the project, working in a directory of its own under the workspaces root —
+            # outside the project's folder, not a subdirectory of it. Nested, containment ran only
+            # one way: the agents walled at the project's folder *contain* every private directory
+            # in it, so "its files are nobody else's" was true of the agent and false of everybody
+            # else. Outside, neither folder contains the other and the wall holds both ways.
             meta["own_workspace"] = True
-            meta["workspace"] = str(project.root / sid)
+            meta["workspace"] = str(self.workspace_for(sid))
         workspace = self.workspace_of(sid, meta, project) if (project is not None or not workspace) else workspace
         _ensure_inbox(workspace, project)
         session = Session(id=sid, tenant_id=TENANT, title=title, metadata=dict(meta))
@@ -1393,21 +1398,34 @@ class SessionManager:
         """Move a session into a project, or out of every project, and point it at the right folder.
 
         The directory follows the link: into a project it is the project's folder unless the caller
-        keeps the session's own one, and out of a project it is whatever the metadata named — which,
-        for a session that was never anywhere else, is the directory of its own it started with. The
-        files are not moved and not copied; where the session works changes, what is on disk does not.
+        keeps the session's own one, in which case it is the folder the session is working in *now*.
+        The files are not moved and not copied; where the session works changes, what is on disk does
+        not — and "keeps its own directory" therefore has to mean the same directory, not a fresh
+        empty one. Taking the default would have stranded everything a session had written in the
+        folder it was in, because a session that once took a project's folder has no directory of
+        its own in its metadata to go back to.
         """
         state = await self.get_state(session_id)
         if state is None:
             raise KeyError(session_id)
         metadata = dict(state.session.metadata)
-        if project is not None and own_workspace:
+        current = state.workspace
+        if project is not None and not own_workspace:
+            metadata.pop("own_workspace", None)
+            metadata.pop("workspace", None)
+        elif project is not None:
+            # ``workspace_of`` reads the directory out of the metadata for a project session that
+            # keeps its own, so it is written there as a concrete path — the one it is in now.
             metadata["own_workspace"] = True
-            metadata.setdefault("workspace", str(self.workspace_of(session_id, metadata, None)))
+            metadata["workspace"] = str(current)
         else:
             metadata.pop("own_workspace", None)
-            if project is not None:
+            if current == self.workspace_for(session_id):
+                # The directory it would be given anyway: naming it would only pin a path that is
+                # derived from the workspaces root and moves with it.
                 metadata.pop("workspace", None)
+            else:
+                metadata["workspace"] = str(current)
         await self.sessions.update_metadata(session_id, metadata)
         await self.projects.attach(session_id, project.id if project is not None else None)
         state.session.metadata.clear()  # the Session model is frozen; its dict is the thing that is kept
