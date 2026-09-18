@@ -529,6 +529,25 @@ class SessionManager:
     def workspace_for(self, session_id: str) -> Path:
         return self.settings.workspaces_dir / session_id
 
+    def workspace_of(self, session_id: str, metadata: dict[str, Any], project: Project | None) -> Path:
+        """Where a session works, from the two things that decide it: its project and its metadata.
+
+        The rule, in one place because three callers need the same answer (creation, loading, and a
+        project that moved):
+
+        * no project — the directory named in the metadata (a subagent in its leader's, a session
+          attached to a named workspace), or one of the session's own under the workspaces root;
+        * a project — the project's folder, which is why moving the project moves every session in
+          it and there is no second copy of the path to fall out of step;
+        * a project and ``own_workspace`` — a directory of the session's own, named in the metadata.
+          It is listed under the project and it does not share the project's files: that is what the
+          concierge asks for when it hands an agent work that has nothing to do with the rest.
+        """
+        named = metadata.get("workspace")
+        if project is not None:
+            return Path(str(named)) if metadata.get("own_workspace") and named else project.root
+        return Path(str(named)) if named else self.workspace_for(session_id)
+
     def locator_services(self, session_id: str) -> SessionServices | None:
         state = self._states.get(session_id)
         return state.services if state is not None else None
@@ -541,6 +560,7 @@ class SessionManager:
         workspace: Path | None = None,
         metadata: dict[str, Any] | None = None,
         project_id: str | None = None,
+        own_workspace: bool = False,
     ) -> SessionState:
         sid = session_id or uuid.uuid4().hex[:12]
         project = await self.projects.get(project_id) if project_id else None
@@ -550,14 +570,19 @@ class SessionManager:
         # operator attached to an existing workspace): the metadata names it, and get_state reads the same key.
         # A project overrides both: its root IS the workspace, and moving the project moves every session in it,
         # which is why the project is the stored link and the directory is derived from it.
-        named = (metadata or {}).get("workspace")
-        workspace = project.root if project is not None else (workspace or (Path(str(named)) if named else self.workspace_for(sid)))
+        meta = dict(metadata or {})
+        if project is not None and own_workspace:
+            # A directory of its own inside the project's folder: it is the project's agent — it is
+            # listed there and it is removed with it — and its files are nobody else's.
+            meta["own_workspace"] = True
+            meta["workspace"] = str(project.root / sid)
+        workspace = self.workspace_of(sid, meta, project) if (project is not None or not workspace) else workspace
         _ensure_inbox(workspace, project)
-        session = Session(id=sid, tenant_id=TENANT, title=title, metadata=dict(metadata or {}))
+        session = Session(id=sid, tenant_id=TENANT, title=title, metadata=dict(meta))
         await self.sessions.create(session)
         if project is not None:
             await self.projects.attach(sid, project.id)
-        state = SessionState(session=session, workspace=workspace, metadata=dict(metadata or {}), project=project)
+        state = SessionState(session=session, workspace=workspace, metadata=dict(meta), project=project)
         self._states[sid] = state
         self.register_services(state)
         return state
@@ -588,7 +613,7 @@ class SessionManager:
         except Exception:
             return None
         project = await self.projects.for_session(session_id)
-        workspace = project.root if project is not None else Path(session.metadata.get("workspace") or self.workspace_for(session_id))
+        workspace = self.workspace_of(session_id, dict(session.metadata), project)
         _ensure_inbox(workspace, project)
         state = SessionState(session=session, workspace=workspace, metadata=dict(session.metadata), project=project)
         self._states[session_id] = state
@@ -1299,6 +1324,11 @@ class SessionManager:
         sched = await self.db.fetchall("SELECT workspace FROM schedules")
         known_paths.update(Path(r["workspace"]).resolve() for r in sched)
         known_paths.add((self.settings.workspaces_dir / "heartbeat").resolve())
+        # A system project's folder lives under the workspaces root and is not a workspace nobody
+        # refers to: the concierge's agents work in it, and a sweep would take their files with it.
+        for project in await self.projects.list():
+            with suppress(OSError):
+                known_paths.add(project.root.resolve())
         out: list[Path] = []
         if not self.settings.workspaces_dir.exists():
             return out
@@ -1327,13 +1357,40 @@ class SessionManager:
             if state.project is None or state.project.id != project_id:
                 continue
             state.project = project
-            if project is not None:
-                state.workspace = project.root
-            else:
-                state.workspace = Path(state.session.metadata.get("workspace") or self.workspace_for(state.session.id))
+            state.workspace = self.workspace_of(state.session.id, dict(state.session.metadata), project)
             with suppress(OSError):
                 _ensure_inbox(state.workspace, project)
             self.register_services(state)
+
+    async def attach_project(self, session_id: str, project: Project | None, *, own_workspace: bool = False) -> SessionState:
+        """Move a session into a project, or out of every project, and point it at the right folder.
+
+        The directory follows the link: into a project it is the project's folder unless the caller
+        keeps the session's own one, and out of a project it is whatever the metadata named — which,
+        for a session that was never anywhere else, is the directory of its own it started with. The
+        files are not moved and not copied; where the session works changes, what is on disk does not.
+        """
+        state = await self.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        metadata = dict(state.session.metadata)
+        if project is not None and own_workspace:
+            metadata["own_workspace"] = True
+            metadata.setdefault("workspace", str(self.workspace_of(session_id, metadata, None)))
+        else:
+            metadata.pop("own_workspace", None)
+            if project is not None:
+                metadata.pop("workspace", None)
+        await self.sessions.update_metadata(session_id, metadata)
+        await self.projects.attach(session_id, project.id if project is not None else None)
+        state.session.metadata = metadata
+        state.metadata = dict(metadata)
+        state.project = project
+        state.workspace = self.workspace_of(session_id, metadata, project)
+        with suppress(OSError):
+            _ensure_inbox(state.workspace, project)
+        self.register_services(state)
+        return state
 
     @staticmethod
     def _settling(state: SessionState) -> bool:
@@ -1423,9 +1480,10 @@ class SessionManager:
             self_rollback=hooks.get("self_rollback"),
             progress=_bind(hooks.get("progress"), state.session.id),
             writable=[q for p in (state.session.metadata.get("worktrees") or []) if str(p).startswith("/") for q in worktree_writable_paths(Path(str(p)))],
-            # In a project, the root is both the workspace and the wall: the sandbox binds it writable
-            # (it is ``workspace_dir``) and ``resolve`` refuses everything outside it and the worktrees above.
-            project_root=state.project.root if state.project is not None else None,
+            # In a project, the workspace is also the wall: the sandbox binds it writable (it is
+            # ``workspace_dir``) and ``resolve`` refuses everything outside it and the worktrees above.
+            # For all but a session with a directory of its own that workspace IS the project's folder.
+            project_root=state.workspace if state.project is not None else None,
             extra={"skill_store": self.skills, "manager": self, "vision": _LiveVision(self), "jobs": self._jobs.setdefault(state.session.id, {})},
         )
         state.services = services

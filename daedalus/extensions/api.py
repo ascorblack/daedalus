@@ -272,6 +272,14 @@ class NewSessionBody(BaseModel):
     """Make it a loop agent: woken up for this instruction on an interval or when it says so."""
 
 
+class MoveSessionBody(BaseModel):
+    project_id: str | None = None
+    """The project to move the session into; ``null`` takes it out of every project."""
+    use_project_folder: bool = False
+    """Work in the project's own folder from now on. Left false, the session keeps the directory it
+    already has: its files stay where they are and are not shared with the rest of the project."""
+
+
 class ToolsOffBody(BaseModel):
     tools_off: list[str] = Field(default_factory=list)
 
@@ -1082,16 +1090,26 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if sessions and not detach:
             one = len(sessions) == 1
             raise HTTPException(409, f"{len(sessions)} agent{'' if one else 's'} {'works' if one else 'work'} in {project.name}; removing it leaves them without its files (pass detach=1 to do it anyway)")
-        await manager.projects.delete(project_id)
+        try:
+            await manager.projects.delete(project_id)
+        except ProjectError as exc:
+            raise HTTPException(409, str(exc)) from exc
         await manager.reload_project(None, project_id)
         return {"ok": True, "detached": [s["id"] for s in sessions]}
 
     # -- sessions -------------------------------------------------------------------
 
     @api.get("/api/sessions")
-    async def list_sessions(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+    async def list_sessions(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """One page of the agents, and the folders they are listed in.
+
+        The rows are a page (the newest 200); the per-project counts beside them are not — they come
+        from one aggregate over the sessions table, so a folder says how many agents are in it and
+        not how many of them fitted on this page. Nothing here reads a transcript.
+        """
         rows = await manager.list_sessions(limit=200)
-        names = {p.id: p.name for p in await manager.projects.list()}
+        projects = await manager.projects.list()
+        names = {p.id: p.name for p in projects}
         default = app.config.default_preset()
         default_label = default[1].display(default[0]) if default else NO_MODEL_LABEL
         overrides_by_id = await manager.live.load_models([row["id"] for row in rows])
@@ -1099,7 +1117,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             # The directory the session works in, so the list can group sessions by workspace.
             workspace = Path(str(row["metadata"].get("workspace"))) if row["metadata"].get("workspace") else manager.workspace_for(row["id"])
             row["workspace"] = workspace.name
-            row["workspace_own"] = workspace == manager.workspace_for(row["id"])
+            row["workspace_path"] = str(workspace)
+            """The whole path, for the tooltip on a row: a folder named by its last segment alone says
+            nothing about which folder it is, and the list no longer groups by it."""
+            row["workspace_own"] = workspace == manager.workspace_for(row["id"]) or bool(row["metadata"].get("own_workspace"))
             row["project"] = names.get(row.get("project_id") or "")
             overrides = overrides_by_id.get(row["id"], {})
             if overrides.get("preset") and overrides["preset"] in app.config.presets:
@@ -1108,7 +1129,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 row["model"] = f"{overrides['provider']}/{overrides['model_name']}"
             else:
                 row["model"] = default_label
-        return rows
+        active = manager.active_sessions()
+        counts = await manager.projects.summary(active)
+        empty = {"total": 0, "active": 0, "loops": 0, "last_message_at": ""}
+        folders = [{**p.view(), **counts.get(p.id, empty)} for p in projects]
+        return {"sessions": rows, "projects": folders, "free": counts.get("", empty)}
 
     @api.post("/api/sessions")
     async def new_session(body: NewSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2177,6 +2202,30 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         return {"id": session_id, "title": body.title.strip()[:128]}
 
+    @api.post("/api/sessions/{session_id}/project")
+    async def move_session(session_id: str, body: MoveSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Put a session in a project, take it out of one, or move it between two.
+
+        Nothing on disk moves. Into a project the session either starts working in the project's
+        folder — where it sees the rest of the project's files, and they see what it writes — or
+        keeps the directory it already has, listed under the project and sharing none of it. Out of
+        a project it goes back to a directory of its own, which is empty unless it had one before.
+        """
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        if session_id in manager.busy_sessions():
+            raise HTTPException(409, f"{state.session.title or session_id} is working; moving it now would change the folder under it mid-turn — stop it first")
+        project = None
+        if body.project_id:
+            project = await manager.projects.get(body.project_id)
+            if project is None:
+                raise HTTPException(404, "no such project")
+            if body.use_project_folder and not project.reachable:
+                raise HTTPException(409, f"the folder of {project.name} ({project.root}) is not reachable from here yet; mount it and restart")
+        moved = await manager.attach_project(session_id, project, own_workspace=bool(project is not None and not body.use_project_folder))
+        return {"id": session_id, "project_id": project.id if project else None, "project": project.name if project else None, "workspace": str(moved.workspace)}
+
     @api.get("/api/sessions/{session_id}/checkpoints")
     async def session_checkpoints(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """The workspace snapshots this session still has, and whether retention cut the list."""
@@ -2799,10 +2848,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             path = Path(str(named)) if named else manager.workspace_for(row["id"])
             users.setdefault(str(path.resolve()), []).append({"id": row["id"], "title": row["title"]})
         scheduled = {str(Path(r["workspace"]).resolve()): r["name"] for r in await app.db.fetchall("SELECT name, workspace FROM schedules") if r["workspace"]}
+        # A project's folder is not a workspace, even where it sits under the workspaces root: the
+        # Voice project's does, and listing it here would offer to delete the concierge's own folder.
+        project_roots = {str(p.root.resolve()) for p in await manager.projects.list()}
         out = []
         if root.is_dir():
             for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
-                if not entry.is_dir() or entry.name.startswith("."):
+                if not entry.is_dir() or entry.name.startswith(".") or str(entry.resolve()) in project_roots:
                     continue
                 files, size, newest = await asyncio.to_thread(_dir_stats, entry)
                 sessions = users.get(str(entry.resolve()), [])
