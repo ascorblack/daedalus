@@ -7,6 +7,7 @@ database between starts, and overlaid under the operator's own ``pricing`` entri
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -50,15 +51,28 @@ def table_from_entries(entries: dict[str, dict[str, Any]]) -> dict[str, ModelPri
 
 
 async def fetch_catalog(client: httpx.AsyncClient | None = None, *, timeout: float = 15.0) -> dict[str, Any]:
+    """The catalogue, or an error. Bounded end to end, closing the client included.
+
+    httpx's own timeout covers the request; it does not cover shutting the connection afterwards, and
+    a half-closed connection — the peer gone, the socket left in CLOSE-WAIT — is closed by waiting
+    for a FIN that never comes. This is a once-a-day price refresh running in the background of a
+    process that has an operator waiting on it, so nothing here may wait indefinitely for anything:
+    the whole of it is under one deadline, and a deadline reached is reported as the network failure
+    it is, through the same path a refused connection takes.
+    """
     own = client is None
-    client = client or httpx.AsyncClient(timeout=timeout)
+    client = client or httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=timeout, pool=timeout))
     try:
-        response = await client.get(MODELS_DEV_URL, headers={"accept": "application/json"})
-        response.raise_for_status()
-        data = response.json()
-    finally:
-        if own:
-            await client.aclose()
+        async with asyncio.timeout(timeout * 2):
+            try:
+                response = await client.get(MODELS_DEV_URL, headers={"accept": "application/json"})
+                response.raise_for_status()
+                data = response.json()
+            finally:
+                if own:
+                    await client.aclose()
+    except TimeoutError as exc:
+        raise httpx.ReadTimeout(f"models.dev did not answer within {timeout * 2:.0f}s") from exc
     if not isinstance(data, dict):
         raise ValueError("models.dev catalogue is not an object")
     return data

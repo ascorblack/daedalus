@@ -56,3 +56,68 @@ async def db(settings: Settings) -> Database:
     await database.open()
     yield database  # type: ignore[misc]
     await database.close()
+
+
+class NetworkBlocked(OSError):
+    """Raised in place of a connection the test suite is not allowed to make.
+
+    An ``OSError`` on purpose, and not something exotic: every client in this code base already has a
+    path for "the network did not answer", and that path is what a test on a machine with no route
+    out would take. Refusing the connection this way exercises it rather than bypassing it.
+    """
+
+
+BLOCKED: list[str] = []
+"""Every non-loopback address something tried to reach, in order, for when a test has to be found."""
+
+
+def _loopback(address: object) -> bool:
+    """Whether an address is this machine talking to itself, which the suite does constantly.
+
+    The launcher fake, the model host fake, the supervisor's TCP port and every ASGI client are real
+    sockets on 127.0.0.1 or a unix path, so the ban is on leaving the machine and not on sockets.
+    """
+    if not isinstance(address, tuple) or not address:
+        return True  # a unix socket, or something with no host in it at all
+    host = str(address[0] or "")
+    return host in ("", "::", "0.0.0.0") or host.startswith("127.") or host in ("localhost", "::1", "::ffff:127.0.0.1")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def no_network() -> object:
+    """The suite may not leave the machine, and an attempt is refused rather than waited out.
+
+    This is not tidiness. A real outbound call in a unit test is a test whose result depends on
+    somebody else's server: it fails when that server is down, it leaks the machine's address to it,
+    and — the reason this exists — it can hang. ``SessionManager.start`` refreshes model prices from
+    models.dev on its first tick, so *every* test that starts a manager opened an HTTPS connection;
+    when one of those was left half-closed the suite stopped dead, with the sockets in CLOSE-WAIT and
+    nothing on the terminal, for as long as anybody was willing to wait.
+
+    Patched at ``socket.socket.connect``, which is underneath httpx, aiohttp, asyncio's own
+    ``create_connection`` and the standard library alike, so there is no client left to forget.
+    """
+    import socket
+
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def guard(self: socket.socket, address: object) -> object:
+        if _loopback(address):
+            return real_connect(self, address)  # type: ignore[arg-type]
+        BLOCKED.append(str(address))
+        raise NetworkBlocked(f"the test suite may not open a connection to {address!r}")
+
+    def guard_ex(self: socket.socket, address: object) -> int:
+        if _loopback(address):
+            return real_connect_ex(self, address)  # type: ignore[arg-type]
+        BLOCKED.append(str(address))
+        raise NetworkBlocked(f"the test suite may not open a connection to {address!r}")
+
+    socket.socket.connect = guard  # type: ignore[method-assign]
+    socket.socket.connect_ex = guard_ex  # type: ignore[method-assign]
+    try:
+        yield None
+    finally:
+        socket.socket.connect = real_connect  # type: ignore[method-assign]
+        socket.socket.connect_ex = real_connect_ex  # type: ignore[method-assign]

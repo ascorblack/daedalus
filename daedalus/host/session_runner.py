@@ -78,6 +78,10 @@ RECOVERY_REASONS = frozenset({"transient_llm_error_retry", "model_fallback_trigg
 """The state changes worth a log line: each is a round the run had to recover from, and the log is where the reason survives."""
 MODEL_METADATA_KEY = "daedalus.model"
 
+BACKGROUND_SHUTDOWN_SECONDS = 5.0
+"""How long a shutdown waits for a cancelled background task — the price refresh, the index
+backfill — before leaving it. Neither owes anything to disk; what they can owe is a socket."""
+
 MODEL_STAMPS_KEPT = 512
 """How many un-persisted turn stamps a session holds at once. A run writes its rounds as they finish,
 so the map is normally one or two entries deep; the cap is only there so a store that is refusing
@@ -412,7 +416,14 @@ class SessionManager:
         for task in (getattr(self, "_backfill_task", None), getattr(self, "_price_task", None)):
             if task is not None and not task.done():
                 task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                # Bounded, because a cancelled task is not a finished one: the price refresh is
+                # inside an HTTP client when it is cancelled, and closing a connection whose peer has
+                # gone waits for a FIN that never arrives. Neither of these owes anything to disk, so
+                # a shutdown that gives up on one loses nothing and a shutdown that waits for one
+                # stops the process from ever exiting.
+                with suppress(TimeoutError):
+                    async with asyncio.timeout(BACKGROUND_SHUTDOWN_SECONDS):
+                        await asyncio.gather(task, return_exceptions=True)
         await self.mcp.close()
         await self.providers.aclose()
 
