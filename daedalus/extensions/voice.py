@@ -31,6 +31,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -126,6 +127,34 @@ SENTENCE_END = re.compile(r"(?<=[.!?…。！？])[\s\n]+|(?<=[.!?…])$|\n\n+")
 
 MIN_SAY_CHARS = 12
 """A fragment shorter than this waits for the next one: "Yes." alone is a worse utterance than "Yes. Here is why."."""
+
+TURN_CLOCKS = 8
+"""How many turns are timed at once. One is in flight and the rest are history the page may still ask
+for; a conversation that runs all evening does not grow a dictionary of every run it ever had."""
+
+
+@dataclass
+class TurnSpeech:
+    """How long one answer waited between the words existing and a sound coming out.
+
+    The number the operator actually feels is this one, not the model's latency and not the
+    synthesiser's: the answer is on the screen, and they are waiting to hear it. It is split because
+    the two halves have different cures — a voice that has to be built is fixed by warming it up, and
+    a synthesiser that renders slower than speech is fixed by choosing another voice.
+    """
+
+    turn: str = ""
+    said_at: float = 0.0
+    """Monotonic, when the first sentence of this turn was handed to the page."""
+    first_audio_ms: int = 0
+    """From that moment to the first clip being ready to play. Zero means nothing was spoken yet."""
+    clip_ms: int = 0
+    """What the request that produced the first clip spent on it, loading included."""
+    load_ms: int = 0
+    """How much of that was the voice being built rather than the sentence being spoken."""
+
+    def as_json(self) -> dict[str, object]:
+        return {"turn": self.turn, "first_audio_ms": self.first_audio_ms, "clip_ms": self.clip_ms, "load_ms": self.load_ms}
 
 
 def split_sentences(buffer: str) -> tuple[list[str], str]:
@@ -284,6 +313,10 @@ class Voice:
         waited out ``PENDING_GRACE_SECONDS`` is not spoken at all rather than spoken late."""
         self._drafts: dict[str, str] = {}
         """Per run: the part of the concierge's answer that has not been handed to speech yet."""
+        self._turns: dict[str, TurnSpeech] = {}
+        """Per recent run: when it was first handed to speech, and when it was first heard."""
+        self._last_turn: TurnSpeech | None = None
+        """The most recent run that actually produced a sound, for the page's diagnostic line."""
         self._id = ""
         """The voice session's id, held in memory: every event of every session passes through the sink, and
         a database read per event would make the whole installation pay for the voice page being installed."""
@@ -649,7 +682,7 @@ class Voice:
         run_id = str(getattr(event, "run_id", "") or "")
         if event.type is EventType.MESSAGE_START:
             self._drafts[run_id] = ""
-            await self.emit("status", {"state": "thinking"})
+            await self.emit("status", {"state": "thinking", "turn": run_id})
         elif event.type is EventType.CONTENT_BLOCK_DELTA:
             delta = event.payload.get("delta") or {}
             if delta.get("type") != "text_delta":
@@ -660,7 +693,7 @@ class Voice:
             for sentence in sentences:
                 spoken = speakable(sentence)
                 if spoken:
-                    await self.emit("say", {"text": spoken})
+                    await self.say_aloud(run_id, spoken)
         elif event.type is EventType.MESSAGE_STOP:
             await self._flush_draft(run_id)
         elif event.type is EventType.TOOL_USE_STOP and str(event.payload.get("tool_name") or "") == "Delegate":
@@ -842,10 +875,47 @@ class Voice:
         state = manager.live_state(session_id) if manager is not None else None
         return state is not None and state.metadata.get("voice_parent") == self._id
 
+    async def say_aloud(self, run_id: str, text: str) -> None:
+        """One sentence of this run, handed to the page to be read out.
+
+        Every spoken sentence carries the run it belongs to, and the page plays only the run it is on.
+        Without that, an answer whose synthesiser was still warming up came out behind the answer
+        after it: the clips of the first turn were still queued when the second turn's sentences
+        arrived, and the operator heard both, in the wrong order, long after asking.
+
+        The first sentence of a run also starts the clock the diagnostic line reads — the operator's
+        question is not "how long did the model take" but "how long between the words appearing and a
+        sound", and that is a measurement, not a guess.
+        """
+        if run_id not in self._turns:
+            self._turns[run_id] = TurnSpeech(turn=run_id, said_at=time.monotonic())
+            for stale in list(self._turns)[:-TURN_CLOCKS]:
+                del self._turns[stale]
+        await self.emit("say", {"text": text, "turn": run_id})
+
+    def first_audio(self, run_id: str, *, clip_ms: int, load_ms: int) -> None:
+        """The first sound of a run exists. Called by the endpoint that made it, once per run.
+
+        ``clip_ms`` is what this request spent producing that first clip and ``load_ms`` is how much
+        of it was the voice being built, so the line can say where the wait went rather than only how
+        long it was.
+        """
+        timing = self._turns.get(run_id)
+        if timing is None or timing.first_audio_ms:
+            return
+        timing.first_audio_ms = max(1, int((time.monotonic() - timing.said_at) * 1000))
+        timing.clip_ms = clip_ms
+        timing.load_ms = load_ms
+        self._last_turn = timing
+
+    def last_turn(self) -> dict[str, object]:
+        """How long the last answer waited between being written and being heard, for the page."""
+        return self._last_turn.as_json() if self._last_turn is not None else TurnSpeech().as_json()
+
     async def _flush_draft(self, run_id: str) -> None:
         tail = speakable(self._drafts.pop(run_id, ""))
         if tail:
-            await self.emit("say", {"text": tail})
+            await self.say_aloud(run_id, tail)
 
     async def _agent_asks(self, session_id: str, event: Any) -> None:
         manager = self.app.manager
@@ -875,8 +945,8 @@ class Voice:
             return
         if session_id == voice_id:
             await self._flush_draft(run_id)
-            await self.emit("done", {"status": status})
-            await self.emit("status", {"state": "idle"})
+            await self.emit("done", {"status": status, "turn": run_id})
+            await self.emit("status", {"state": "idle", "turn": run_id})
             await self.emit("agents", {"agents": await self.agents()})
             return
         manager = self.app.manager

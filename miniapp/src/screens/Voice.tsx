@@ -61,7 +61,12 @@ type VoiceState = {
     model?: string;
     /** Which of the three speaks, decided by the server and merely followed here, as with `stt`. */
     kind?: string;
+    /** Where a local voice is in its loading: `loading`, `ready`, `error` — `ready` for the other two. */
     state?: string;
+    loaded_in_ms?: number;
+    error?: string;
+    /** The last answer's wait between being written and being heard, as the server measured its half. */
+    last_turn?: { turn: string; first_audio_ms: number; clip_ms: number; load_ms: number };
   };
   stt?: {
     configured: boolean;
@@ -95,12 +100,16 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
   // The server produces the audio for both of the first two: a voice on this machine and a speech
   // endpoint both answer /api/voice/tts, and only the browser's own synthesiser does not.
   const serverTts = !!state?.tts?.configured;
+  // A voice that runs on this machine is not ready the moment it is chosen: it is a second or two of
+  // building a synthesiser, and the process warms it when it starts, when it is chosen and when this
+  // page is opened. Until it says ready, this page does not claim it can speak with it.
+  const ttsLoading = state?.tts?.kind === "local" && state?.tts?.state === "loading";
   // What the page calls that, which is a third thing: a voice running here is not the server's, and
   // the recognition half of this very page has said so about its own three for a unit already.
   const ttsKind = state?.tts?.kind ?? (serverTts ? "endpoint" : "browser");
   const spokenBy =
     ttsKind === "local"
-      ? t("voice.out.local", { voice: state?.tts?.voice || "" })
+      ? t(ttsLoading ? "voice.out.local.loading" : "voice.out.local", { voice: state?.tts?.voice || "" })
       : ttsKind === "endpoint"
         ? t("voice.out.server")
         : t("voice.out.browser");
@@ -137,9 +146,23 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
     });
   }, [state?.stt]);
 
+  // And the voice's own load, from the same reading. A local voice is built when the process starts,
+  // when it is chosen and when this page is opened; this is how the page knows which of those has
+  // already happened, and therefore whether the next answer is read in it or in the browser's voice.
+  useEffect(() => {
+    const tts = state?.tts;
+    if (!tts) return;
+    dispatch({
+      type: "voice",
+      engine: { state: String(tts.kind === "local" ? (tts.state ?? "ready") : "ready"), model: String(tts.voice ?? ""), loadedInMs: Number(tts.loaded_in_ms ?? 0), error: String(tts.error ?? "") },
+    });
+  }, [state?.tts]);
+
   // The stream handler is built once, on mount; what it needs of the live state it reads through a ref.
   const uiRef = useRef(ui);
   uiRef.current = ui;
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
 
   // The page is heard by its own microphone: a laptop or phone speaker plays the answer straight back
   // into the recogniser, which would barge in on it and then submit the machine's words as the
@@ -261,11 +284,24 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
       if (event === "partial") dispatch({ type: "partial", text: String(p.text ?? "") });
       else if (event === "say") {
         dispatch({ type: "say", text: String(p.text ?? "") });
-        speak(String(p.text ?? ""));
+        speak(String(p.text ?? ""), String(p.turn ?? ""));
       } else if (event === "agents") dispatch({ type: "agents", agents: (p.agents ?? []) as Agent[] });
       else if (event === "error") dispatch({ type: "problem", message: String(p.message ?? "the concierge stopped") });
-      else if (event === "done") dispatch({ type: "done" });
-      else if (event === "status") dispatch({ type: "status", state: String(p.state ?? "idle"), title: String(p.title ?? "") });
+      else if (event === "done") {
+        dispatch({ type: "done" });
+        // The server's half of the timing — how long the first clip took and how much of that was
+        // the voice being built — is on /api/voice, and it is only worth reading once an answer has
+        // actually been spoken.
+        void refreshRef.current();
+      }
+      else if (event === "status") {
+        // A run starting is the earliest the page knows the previous answer is over — earlier than
+        // its first sentence, which is the moment that used to arrive behind a queue of clips from
+        // the answer before it. So the speaker is moved on to the new answer here, and whatever was
+        // still waiting to be read out of the old one is marked rather than read late.
+        if (String(p.state ?? "") === "thinking" && p.turn) speaker.current?.beginTurn(String(p.turn));
+        dispatch({ type: "status", state: String(p.state ?? "idle"), title: String(p.title ?? "") });
+      }
     }
     return () => {
       stop = true;
@@ -313,35 +349,112 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
     return () => controller.abort();
   }, [state?.stt?.kind]);
 
+  // ── the voice loading into memory ────────────────────────────────────────────────────────
+  //
+  // The same shape as the model's stream above and for the same reason: the load starts when the
+  // page is opened and finishes a second or two later, and polling /api/voice for it would mean the
+  // page speaks the second answer in the browser's voice as well.
+  useEffect(() => {
+    if (state?.tts?.kind !== "local") return;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch("/api/tts/progress", { headers: api.authHeaders(), signal: controller.signal });
+        if (!response.body) return;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() ?? "";
+          for (const chunk of frames) {
+            const data = /^data: (.*)$/m.exec(chunk)?.[1];
+            if (!data) continue;
+            try {
+              const frame = JSON.parse(data) as { kind?: string; state?: string; voice?: string; loaded_in_ms?: number; error?: string };
+              if (frame?.kind !== "engine") continue;
+              dispatch({
+                type: "voice",
+                engine: { state: String(frame.state ?? "idle"), model: String(frame.voice ?? ""), loadedInMs: Number(frame.loaded_in_ms ?? 0), error: String(frame.error ?? "") },
+              });
+            } catch {
+              /* one malformed frame must not end the stream */
+            }
+          }
+        }
+      } catch {
+        /* the page navigated away, or the stream dropped */
+      }
+    })();
+    return () => controller.abort();
+  }, [state?.tts?.kind]);
+
   // ── speaking ─────────────────────────────────────────────────────────────────────────────
   //
   // The speaker is rebuilt when the page learns which of the three speaks, and that reading arrives
   // after the stream is already open: a sentence that lands in the gap used to be handed to a null
   // and dropped without a trace, which is one of the ways the first answer of a conversation was
   // never heard. It waits here instead, and is spoken by whichever speaker is built next.
-  const waiting = useRef<string[]>([]);
-  const speak = useCallback((text: string) => {
+  // A sentence that arrives before the page knows which of the three speaks waits here.
+  //
+  // The reading of /api/voice lands after the concierge's stream is already open, and which engine
+  // reads an answer is settled once, at its first sentence: a sentence handed over in that gap would
+  // commit the whole answer to the browser's own synthesiser on a machine that has a voice of its
+  // own. That is the first answer of every conversation, which is exactly the one that was reported
+  // as unspoken. So it waits — for the reading, not for a timer — and is spoken the moment the page
+  // knows what is speaking.
+  const waiting = useRef<[string, string][]>([]);
+  const ttsKnown = !!state?.tts;
+  const ttsKnownRef = useRef(ttsKnown);
+  ttsKnownRef.current = ttsKnown;
+  const speak = useCallback((text: string, turn: string) => {
     if (!text.trim()) return;
-    if (speaker.current) speaker.current.say(text);
-    else waiting.current.push(text);
+    if (speaker.current && ttsKnownRef.current) speaker.current.say(text, turn);
+    else waiting.current.push([text, turn]);
   }, []);
-  const onUnspoken = useCallback((text: string) => dispatch({ type: "unspoken", text }), []);
-  const onBlocked = useCallback((on: boolean) => dispatch({ type: "blocked", on }), []);
-  useEffect(() => {
-    speaker.current = createSpeaker({ server: serverTts, lang, onSpeaking, onLevel, onUnspoken, onBlocked });
+  const release = useCallback(() => {
+    if (!speaker.current || !ttsKnownRef.current) return;
     const held = waiting.current;
     waiting.current = [];
-    for (const text of held) speaker.current.say(text);
+    for (const [text, turn] of held) speaker.current.say(text, turn);
+  }, []);
+  useEffect(() => {
+    if (ttsKnown) release();
+  }, [ttsKnown, release]);
+  const onUnspoken = useCallback((text: string) => dispatch({ type: "unspoken", text }), []);
+  const onBlocked = useCallback((on: boolean) => dispatch({ type: "blocked", on }), []);
+  const onFirstAudio = useCallback((turn: string, ms: number) => dispatch({ type: "audio", turn, ms }), []);
+  // Which engine reads the next answer is asked of these refs at the start of each answer rather
+  // than being baked into the speaker: the speaker outlives every reading of /api/voice, and an
+  // answer that arrives while the chosen voice is still being built is read by the browser rather
+  // than waited for. One answer late in the wrong voice beats one answer in silence.
+  const ttsRef = useRef({ server: serverTts, loading: ttsLoading });
+  ttsRef.current = { server: serverTts, loading: ttsLoading };
+  const engine = useCallback((): "server" | "here" => {
+    const { server, loading } = ttsRef.current;
+    if (!server) return "here";
+    if (loading && "speechSynthesis" in window) return "here";
+    return "server";
+  }, []);
+  useEffect(() => {
+    speaker.current = createSpeaker({ engine, lang, onSpeaking, onLevel, onUnspoken, onBlocked, onFirstAudio });
+    release();
     return () => {
       speaker.current?.stop();
       speaker.current = null;
     };
-  }, [serverTts, lang, onSpeaking, onLevel, onUnspoken, onBlocked]);
+  }, [engine, lang, onSpeaking, onLevel, onUnspoken, onBlocked, onFirstAudio, release]);
 
   // ── what the operator says ───────────────────────────────────────────────────────────────
   const send = useCallback(async (text: string) => {
     const body = text.trim();
     if (!body) return;
+    // The previous answer is over the moment another question is asked. Anything of it still queued
+    // would otherwise be read out over the answer to this one.
+    speaker.current?.cancel();
     dispatch({ type: "asked", text: body });
     try {
       await api.post("/api/voice/say", { text: body });
@@ -381,7 +494,20 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
   const startMic = useCallback(async () => {
     speaker.current?.unlock();
     const handlers = {
-      onInterim: (text: string) => earsOpen() && dispatch({ type: "heard", text }),
+      onInterim: (text: string) => {
+        // Words while the answer is being read out are the operator talking over it, and this is the
+        // second chance to notice. A listener announces speech once, at the moment it first hears
+        // it, and if the page could not act on that one moment — it was a breath between two
+        // sentences, or inside the echo guard that keeps the page from interrupting itself — nothing
+        // would ever say it again and the operator could not interrupt for the rest of what they
+        // were saying. Every interim that arrives while the page is speaking is another chance to
+        // decide, and `shouldBargeIn` decides it the same way each time.
+        if (!earsOpen()) {
+          onSpeechStart();
+          return;
+        }
+        dispatch({ type: "heard", text });
+      },
       onFinal: (text: string) => earsOpen() && void send(text),
       onSpeechStart,
       onError: (message: string) => dispatch({ type: "problem", message }),
@@ -519,11 +645,15 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
                 ? t("voice.loading.model", { name: modelName || t("voice.phase.loading") })
                 : ui.engine.state === "error"
                   ? t("voice.loading.failed", { name: modelName, error: ui.engine.error })
-                  : !canTalk
-                    ? t("voice.tap.none")
-                    : ui.micOn
-                      ? t("voice.tap.stop")
-                      : t("voice.tap")}
+                  : ttsKind === "local" && ui.voice.state === "loading"
+                    ? t("voice.loading.voice")
+                    : ttsKind === "local" && ui.voice.state === "error"
+                      ? t("voice.loading.voice.failed", { error: ui.voice.error })
+                      : !canTalk
+                        ? t("voice.tap.none")
+                        : ui.micOn
+                          ? t("voice.tap.stop")
+                          : t("voice.tap")}
             </div>
 
             <div className="voice-captions" aria-live="polite">
@@ -541,6 +671,12 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
               </div>
               {ui.problem && <p className="voice-problem">{ui.problem}</p>}
             </div>
+
+            {/* Where the time went, for the one person who can do something about it. It is a
+                measurement of the last answer and nothing else: how long from the sentence being
+                written to a sound, and how much of that was the voice being built rather than
+                speaking. A warm voice makes the second number disappear, which is the point. */}
+            <SpokenTiming ms={ui.firstAudioMs} turn={state?.tts?.last_turn} />
 
             {/* There is no asking a browser whether it will make a sound; it is found out by handing
                 it a sentence and hearing nothing start. When that happens the page says so and offers
@@ -627,6 +763,30 @@ function PhaseChip({ ui }: { ui: VoiceUi }) {
       {word}
       {ui.delegating && `: ${ui.delegating}`}
     </span>
+  );
+}
+
+/**
+ * How long the last answer took to be heard, and where that time went.
+ *
+ * Small, quiet, and only ever a measurement. The page measures the half the operator feels — from
+ * the sentence arriving to a sound — and the server measures its own: what the request producing the
+ * first clip spent, and how much of that was the voice being built. Nothing is drawn before an
+ * answer has been spoken, because a diagnostic line full of zeroes reads as a fault.
+ */
+function SpokenTiming({ ms, turn }: { ms: number; turn?: { first_audio_ms: number; clip_ms: number; load_ms: number } }) {
+  const felt = ms || turn?.first_audio_ms || 0;
+  if (!felt) return null;
+  const seconds = (value: number) => (value / 1000).toFixed(1);
+  const parts: string[] = [];
+  if (turn?.load_ms) parts.push(t("voice.timing.load", { ms: seconds(turn.load_ms) }));
+  else if (turn?.clip_ms) parts.push(t("voice.timing.ready"));
+  if (turn?.clip_ms) parts.push(t("voice.timing.synth", { ms: seconds(Math.max(0, turn.clip_ms - (turn.load_ms || 0))) }));
+  return (
+    <div className="voice-timing sub" aria-live="off">
+      {t("voice.timing", { ms: seconds(felt) })}
+      {parts.length > 0 && ` · ${parts.join(" · ")}`}
+    </div>
   );
 }
 

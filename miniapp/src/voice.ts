@@ -250,8 +250,18 @@ export function shouldBargeIn(state: { speaking: boolean; playingForMs: number; 
 }
 
 export type Speaker = {
-  /** One sentence, spoken after everything already queued. */
-  say: (text: string) => void;
+  /**
+   * One sentence of one answer, spoken after everything already queued *for that answer*.
+   *
+   * The turn is the run the sentence belongs to, as the server named it. A sentence of a newer turn
+   * ends the older one where it stands rather than queueing behind it: what was still waiting is
+   * marked unspoken and what was playing is stopped. Without that rule a voice that took fifteen
+   * seconds to warm up read the previous answer and the current one back to back, both of them late,
+   * which is exactly what was reported.
+   */
+  say: (text: string, turn?: string) => void;
+  /** A new answer is coming. Ends the previous one now, before its first sentence exists. */
+  beginTurn: (turn: string) => void;
   /** Barge-in: drop what is queued and stop what is playing. */
   cancel: () => void;
   /** A browser that plays nothing a tap did not start: call this from a tap. */
@@ -354,15 +364,17 @@ export function voiceFor(voices: SpeechSynthesisVoice[], lang: string): SpeechSy
  * every engine. So that half is a cadence rather than a measurement, and it is written here as one
  * honestly: a slow wave with a faster one over it, which reads as speech without claiming to be it.
  */
-function createSpeechLevel(audio: HTMLAudioElement, opts: { server: boolean; onLevel?: (level: number) => void }): { start: () => void; stop: () => void } {
+function createSpeechLevel(audio: HTMLAudioElement, opts: { onLevel?: (level: number) => void }): { start: (measured: boolean) => void; stop: () => void } {
   let context: AudioContext | null = null;
   let analyser: AnalyserNode | null = null;
   let samples = new Float32Array(0);
   let frame = 0;
   let began = 0;
 
+  let measuring = false;
+
   const attach = () => {
-    if (analyser || !opts.server) return;
+    if (analyser) return;
     try {
       const Ctx = window.AudioContext ?? window.webkitAudioContext!;
       context = new Ctx();
@@ -380,7 +392,7 @@ function createSpeechLevel(audio: HTMLAudioElement, opts: { server: boolean; onL
   };
 
   const tick = () => {
-    if (analyser && samples.length) {
+    if (measuring && analyser && samples.length) {
       analyser.getFloatTimeDomainData(samples);
       let sum = 0;
       for (const v of samples) sum += v * v;
@@ -393,9 +405,14 @@ function createSpeechLevel(audio: HTMLAudioElement, opts: { server: boolean; onL
   };
 
   return {
-    start: () => {
+    // Whether there is anything to measure is decided per answer rather than once: a turn the
+    // browser's own synthesiser reads has no audio element in it at all, and the same page may read
+    // the next one from a clip off the server. A media element can be given to exactly one source
+    // node ever, so the node is made on the first answer that needs it and kept.
+    start: (measured: boolean) => {
+      measuring = measured;
       if (frame) return;
-      attach();
+      if (measured) attach();
       void context?.resume().catch(() => undefined);
       began = performance.now();
       frame = requestAnimationFrame(tick);
@@ -433,7 +450,16 @@ function joined(head: Uint8Array<ArrayBuffer>, tail: Uint8Array): Uint8Array<Arr
  * flight — which is aborted rather than read to the end, so the server stops synthesising too.
  */
 export function createSpeaker(opts: {
-  server: boolean;
+  /**
+   * Which engine reads the *next* answer: the server's audio, or this browser's own synthesiser.
+   *
+   * Asked once per answer rather than once per page, because the honest reply changes: a voice that
+   * runs on this machine takes a second or two to become a synthesiser, and an answer that arrives
+   * during that load has a choice between waiting for it and being read here. It is read here. The
+   * answer after it, with the voice built, is read in the voice the operator chose. Whichever it is,
+   * it holds for the whole of one answer — an answer that changes voice halfway is worse than either.
+   */
+  engine: () => "server" | "here";
   lang: string;
   onSpeaking: (on: boolean) => void;
   onLevel?: (level: number) => void;
@@ -441,6 +467,8 @@ export function createSpeaker(opts: {
   onUnspoken?: (text: string) => void;
   /** Whether the browser is refusing to make a sound until it is tapped. The page offers the tap. */
   onBlocked?: (blocked: boolean) => void;
+  /** How long this answer took between its first sentence arriving and its first sound. Once per answer. */
+  onFirstAudio?: (turn: string, ms: number) => void;
 }): Speaker {
   const audio = new Audio();
   audio.preload = "auto";
@@ -450,7 +478,27 @@ export function createSpeaker(opts: {
   let inflight: AbortController | null = null;
   /** Ends whatever `play` is waiting on, so cancelling never leaves the pump hanging on a clip. */
   let release: (() => void) | null = null;
+  /** The answer being read out. Everything queued belongs to it and nothing older is ever played. */
+  let turn = "";
+  /** Whether an answer is under way at all, which is not the same as its name being non-empty. */
+  let started = false;
+  /** The answer that was stopped. A sentence of it arriving afterwards is shown, never read. */
+  let abandoned = "";
+  /** When this answer's first sentence was handed over, and whether its first sound has been reported.
+   *  Negative until the first sentence arrives: a clock can legitimately read zero. */
+  let turnBegan = -1;
+  let heard = false;
+  /** Which engine this answer is being read by, fixed for its whole length once it is chosen. */
+  let here = false;
+  /** Whether that choice has been made for this answer yet. */
+  let chosen = false;
   const level = createSpeechLevel(audio, opts);
+  /** The first sound of this answer exists. What the operator feels is this number, so it is measured. */
+  const sounded = () => {
+    if (heard) return;
+    heard = true;
+    if (turnBegan >= 0) opts.onFirstAudio?.(turn, Math.round(performance.now() - turnBegan));
+  };
   const synth = (): Synthesiser | null => {
     try {
       return (window.speechSynthesis as unknown as Synthesiser) ?? null;
@@ -496,6 +544,7 @@ export function createSpeaker(opts: {
       audio.onerror = () => finish(false);
       audio.onplaying = () => {
         moved = Date.now();
+        sounded();
         opts.onBlocked?.(false);
       };
       audio.ontimeupdate = () => {
@@ -563,6 +612,7 @@ export function createSpeaker(opts: {
       release = () => finish(true);
       utterance.onstart = () => {
         started = true;
+        sounded();
         opts.onBlocked?.(false);
         clearTimeout(guard);
         guard = setTimeout(() => finish(false), speechBudgetMs(text)) as unknown as number;
@@ -605,12 +655,16 @@ export function createSpeaker(opts: {
   const speakThere = async (text: string, mine: number) => {
     const controller = new AbortController();
     inflight = controller;
+    const forTurn = turn;
     let response: Response;
     try {
       response = await fetch("/api/voice/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...api.authHeaders() },
-        body: JSON.stringify({ text }),
+        // The turn goes with the sentence so the server can time the wait the operator felt — from
+        // the words being written to a sound — against the answer that waited, rather than against
+        // whichever request happened to be last.
+        body: JSON.stringify({ text, turn: forTurn }),
         signal: controller.signal,
       });
     } catch {
@@ -678,26 +732,54 @@ export function createSpeaker(opts: {
     if (pumping) return;
     pumping = true;
     const mine = generation;
+    // Which engine reads this answer is settled at the moment it is about to be read, and then holds
+    // for the whole of it. Not earlier: the page learns which of the three speaks from a reading
+    // that lands after the concierge's stream is already open, and a choice made before that reading
+    // would send the first answer of every conversation to the browser's own synthesiser on a
+    // machine that has a voice of its own. Not later either: an answer that changes voice halfway
+    // through is worse than either voice.
+    if (!chosen) {
+      here = opts.engine() === "here";
+      chosen = true;
+    }
     opts.onSpeaking(true);
-    level.start();
+    level.start(!here);
     try {
       while (queue.length && mine === generation) {
         const text = queue.shift()!;
-        if (opts.server) await speakThere(text, mine);
-        else await speakHere(text, mine);
+        if (here) await speakHere(text, mine);
+        else await speakThere(text, mine);
       }
     } finally {
       pumping = false;
       if (mine === generation) {
         level.stop();
         opts.onSpeaking(false);
+      } else if (queue.length) {
+        // The answer changed while this pump was waiting on a sentence. It has just let go of the
+        // engine; the sentences of the new answer are already queued behind it and nothing else is
+        // going to pick them up, because `say` found a pump that had not finished yet.
+        void pump();
       }
     }
   };
 
-  /** Everything cancelling has to undo, in one place: `cancel` and `stop` differ only in what they say. */
-  const halt = () => {
+  /**
+   * Everything cancelling has to undo, in one place: `cancel`, `stop` and a new answer starting.
+   *
+   * `keep` decides what happens to the sentences still in the queue. A barge-in throws them away
+   * without a word — the operator is talking and does not want the rest — while an answer superseded
+   * by a newer one hands each of them to `onUnspoken`, so the page can mark what it showed and never
+   * said. Either way nothing of the old answer is played afterwards: the queue is emptied, the
+   * request fetching the rest of it is aborted (which is what stops the synthesiser at the far end),
+   * the clip in the player is stopped, and the generation moves so that anything already in flight
+   * finds itself out of date the moment it comes back.
+   */
+  const halt = (mark = false) => {
     generation += 1;
+    if (started && turn) abandoned = turn;
+    started = false;
+    if (mark) for (const text of queue) opts.onUnspoken?.(text);
     queue = [];
     inflight?.abort();
     inflight = null;
@@ -720,26 +802,67 @@ export function createSpeaker(opts: {
     opts.onSpeaking(false);
   };
 
+  /**
+   * Move to a new answer, ending the one before it wherever it had got to.
+   *
+   * This is the whole of the fix for hearing two answers at once. A local voice that is still
+   * loading, or one that renders slower than speech, leaves the first answer's clips queued and half
+   * fetched; the operator, hearing nothing, asks again; and the old clips arrive with the new ones
+   * behind them. A clip belongs to an answer, an answer is over when the next one starts, and a clip
+   * of an answer that is over is never played.
+   */
+  const begin = (next: string) => {
+    if (started && next === turn) return;
+    if (started) halt(true);
+    started = true;
+    turn = next;
+    turnBegan = -1;
+    heard = false;
+    chosen = false;
+  };
+
   return {
-    say: (text: string) => {
+    say: (text: string, next?: string) => {
       const body = text.trim();
       if (!body) return;
+      const id = next ?? turn;
+      if (id && id === abandoned) {
+        // A sentence of an answer that was stopped — the operator talked over it, or asked something
+        // else. It is on the screen and it is marked there; reading it out now would be the very
+        // backlog this turn machinery exists to prevent.
+        opts.onUnspoken?.(body);
+        return;
+      }
+      begin(id);
+      if (turnBegan < 0) turnBegan = performance.now();
       queue.push(body);
       void pump();
     },
-    cancel: halt,
+    beginTurn: (next: string) => begin(next),
+    cancel: () => halt(),
     unlock: () => {
-      // A muted play() inside the tap is what buys the element the right to play later, on iOS.
-      audio.muted = true;
-      void audio
-        .play()
-        .then(() => {
-          audio.pause();
-          audio.muted = false;
-        })
-        .catch(() => {
-          audio.muted = false;
-        });
+      // Nothing is primed while something is being said.
+      //
+      // Priming is for an engine that has never made a sound: a muted play() inside the tap is what
+      // buys the element the right to play later on iOS, and a silent utterance is what buys it from
+      // the synthesiser. Doing either to an engine that is already speaking is destructive — the
+      // element is *paused* by its own priming, and the synthesiser's queue is cancelled with the
+      // answer in it — and it is pointless, because an engine that is making a sound has already
+      // demonstrated the only thing the priming was for. The operator taps the microphone in the
+      // middle of an answer often; it is how they interrupt.
+      const playing = !audio.paused && !!(audio.currentSrc || audio.src);
+      if (!playing) {
+        audio.muted = true;
+        void audio
+          .play()
+          .then(() => {
+            audio.pause();
+            audio.muted = false;
+          })
+          .catch(() => {
+            audio.muted = false;
+          });
+      }
       // And the synthesiser is a second engine with a gesture rule of its own, which reading the
       // voice list does not satisfy. What does is speaking inside the tap — so a silent utterance
       // goes through here, and the queue is cleared first in case one from before the tap is still
@@ -747,6 +870,11 @@ export function createSpeaker(opts: {
       try {
         const engine = synth();
         if (!engine) return;
+        if (engine.speaking || engine.pending) {
+          // It is saying something. Cancelling to prime it would throw the answer away.
+          opts.onBlocked?.(false);
+          return;
+        }
         engine.cancel();
         engine.resume();
         void whenVoicesReady(engine, VOICES_WAIT_MS);
@@ -761,7 +889,7 @@ export function createSpeaker(opts: {
     },
     // Unmount goes through here, so the phase must come back down with it: a remount that starts in
     // "speaking" never leaves it, because nothing is playing to end.
-    stop: halt,
+    stop: () => halt(),
   };
 }
 
@@ -896,6 +1024,10 @@ export type VoiceUi = {
   problem: string;
   agents: AgentNews[];
   engine: EngineState;
+  /** Where the chosen local voice is in its loading, as `/api/voice` and `/api/tts/progress` report it. */
+  voice: EngineState;
+  /** How long the last answer took between its first sentence arriving and its first sound, in this page. */
+  firstAudioMs: number;
 };
 
 export type VoiceEvent =
@@ -912,6 +1044,8 @@ export type VoiceEvent =
   | { type: "blocked"; on: boolean }
   | { type: "barge" }
   | { type: "engine"; engine: Partial<EngineState> }
+  | { type: "voice"; engine: Partial<EngineState> }
+  | { type: "audio"; turn: string; ms: number }
   | { type: "problem"; message: string }
   | { type: "cleared" };
 
@@ -928,6 +1062,8 @@ export const IDLE_VOICE: VoiceUi = {
   problem: "",
   agents: [],
   engine: { state: "ready", model: "", loadedInMs: 0, error: "" },
+  voice: { state: "ready", model: "", loadedInMs: 0, error: "" },
+  firstAudioMs: 0,
 };
 
 /** Whether the microphone may be opened at all: a model still loading cannot hear anything. */
@@ -951,7 +1087,16 @@ export function voiceReducer(state: VoiceUi, event: VoiceEvent): VoiceUi {
   switch (event.type) {
     case "mic": {
       const next = { ...state, micOn: event.on, heard: event.on ? state.heard : "" };
-      if (event.on) return { ...next, problem: "", phase: resting(next) };
+      // Opening the microphone does not stop the concierge either. The page had it the other way
+      // round: a tap in the middle of an answer put the page in "listening" while the answer was
+      // still being read out, and nothing dispatched "speaking" again — so the chip and the orb said
+      // the page was listening for the whole of it, and the barge-in, which will not interrupt a page
+      // that is not speaking, could not happen at all. Whether the microphone is open and what the
+      // page is doing are two different facts, and only the second one is the phase.
+      if (event.on) {
+        const busy = state.phase === "speaking" || state.phase === "thinking" || state.phase === "delegating";
+        return { ...next, problem: "", phase: busy ? state.phase : resting(next) };
+      }
       // Stopping the microphone does not stop the concierge: an answer being written or spoken keeps
       // its phase, and only a page that was merely listening goes quiet.
       return { ...next, phase: state.phase === "listening" || state.phase === "loading" ? resting(next) : state.phase };
@@ -1007,6 +1152,15 @@ export function voiceReducer(state: VoiceUi, event: VoiceEvent): VoiceUi {
       // the sentences already said stay on the screen, because they were said — and the page goes
       // back to listening in the same breath rather than waiting for the speaker to report itself.
       return state.phase === "speaking" ? { ...state, partial: "", phase: resting(state) } : state;
+    case "voice":
+      // The synthesiser loading changes what the page says, not what it lets the operator do: the
+      // microphone is about recognition, and an answer that arrives while the voice is still being
+      // built is read by the browser rather than held back.
+      return { ...state, voice: { ...state.voice, ...event.engine } };
+    case "audio":
+      // What the operator felt, measured on the page that made them feel it: the moment the first
+      // sentence of this answer arrived, to the moment a sound came out of it.
+      return { ...state, firstAudioMs: event.ms };
     case "engine": {
       const engine = { ...state.engine, ...event.engine };
       const next = { ...state, engine };
@@ -1017,7 +1171,7 @@ export function voiceReducer(state: VoiceUi, event: VoiceEvent): VoiceUi {
     case "problem":
       return { ...state, problem: event.message, phase: resting(state) };
     case "cleared":
-      return { ...IDLE_VOICE, micOn: state.micOn, engine: state.engine, blocked: state.blocked, phase: resting(state) };
+      return { ...IDLE_VOICE, micOn: state.micOn, engine: state.engine, voice: state.voice, blocked: state.blocked, phase: resting(state) };
   }
 }
 

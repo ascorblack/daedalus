@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import array
 import asyncio
+import contextlib
 import logging
 import re
 import struct
 import threading
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -415,11 +417,42 @@ class TtsEngine:
                 yield chunk
 
 
+@dataclass
+class TtsLoadState:
+    """Where the resident voice is in its loading, as the page draws it.
+
+    The same four words the recognition side uses for its models, and deliberately so: ``idle`` is
+    nothing chosen or nothing loaded yet, ``loading`` is the synthesiser being built, ``ready`` is a
+    voice that will speak the next sentence immediately, and ``error`` is a load that failed with the
+    reason. The page needs the difference because the first answer after a restart waits seconds on a
+    cold voice and none at all on a warm one, and an answer written on the screen and not spoken for
+    fifteen seconds is indistinguishable from one that will never be spoken.
+    """
+
+    state: str = "idle"
+    voice: str = ""
+    loaded_in_ms: int = 0
+    error: str = ""
+
+    def as_json(self) -> dict[str, object]:
+        return {"state": self.state, "voice": self.voice, "loaded_in_ms": self.loaded_in_ms, "error": self.error}
+
+
 class TtsCache:
     """The one loaded voice, kept between sentences and swapped when the operator picks another.
 
     Loading is slow and happens under a lock, so two sentences arriving together load once and both
     wait. Choosing another voice drops the old one; there is never more than one resident.
+
+    Nothing here unloads a voice that has gone quiet. A Piper voice costs about thirty-five megabytes
+    of memory and a second and a half to build, and the operator who is going to say something else
+    is the operator who just said something: paying that load again to save the memory between two
+    utterances is the trade nobody wants. The voice is let go when it is replaced, deleted or
+    deselected, and at no other time.
+
+    Because loading is slow it is also *watchable*: :meth:`warm` starts it with no sentence behind it,
+    and every state it passes through is published to :meth:`watch`, so the page can say "loading the
+    voice" with something moving rather than leaving the operator looking at an answer nobody reads.
     """
 
     def __init__(self) -> None:
@@ -429,6 +462,9 @@ class TtsCache:
         self._fields = threading.Lock()
         self._generation = 0
         """Bumped by every :meth:`drop`. A load that finishes after one publishes nothing."""
+        self._state = TtsLoadState()
+        self._warming: asyncio.Task[Any] | None = None
+        self._watchers: list[asyncio.Queue[dict[str, object]]] = []
 
     async def get(self, voice: TtsVoice, directory: Path, *, threads: int) -> TtsEngine:
         key = (voice.id, threads)
@@ -440,7 +476,14 @@ class TtsCache:
                 self._key = None
                 mine = self._generation
             logger.warning("loading local voice %s (%d threads)", voice.id, threads)
-            engine = await asyncio.to_thread(TtsEngine, voice, directory, threads=threads)
+            self._publish(TtsLoadState(state="loading", voice=voice.id))
+            began = time.monotonic()
+            try:
+                engine = await asyncio.to_thread(TtsEngine, voice, directory, threads=threads)
+            except Exception as exc:
+                self._publish(TtsLoadState(state="error", voice=voice.id, error=str(exc)))
+                raise
+            took = int((time.monotonic() - began) * 1000)
             with self._fields:
                 if self._generation != mine:
                     # The voice was deleted or swapped while this was loading. The caller still gets
@@ -450,7 +493,41 @@ class TtsCache:
                     logger.warning("local voice %s finished loading after it was dropped; not keeping it", voice.id)
                     return engine
                 self._engine, self._key = engine, key
+            logger.warning("local voice %s loaded in %d ms", voice.id, took)
+            self._publish(TtsLoadState(state="ready", voice=voice.id, loaded_in_ms=took))
             return engine
+
+    def warm(self, voice: TtsVoice, directory: Path, *, threads: int) -> TtsLoadState:
+        """Start loading with nothing waiting on it, and answer with where that got to.
+
+        Called when a voice is chosen, when the process starts with one already configured, and when
+        the voice page is opened — the three moments the voice is about to be needed and the only ones
+        at which two seconds of loading cost nobody anything. Returns at once: a second call while the
+        first is still running is the same load, not another one.
+        """
+        if self._engine is not None and self._key is not None and self._key == (voice.id, threads):
+            return self.state()
+        if self._warming is not None and not self._warming.done():
+            return self.state()
+        if self._state.state == "error" and self._state.voice == voice.id:
+            # A load that failed fails the same way every time, and the voice page asks on every poll.
+            # The failure stands until something changes the selection, which drops the cache and with
+            # it this state.
+            return self.state()
+        self._publish(TtsLoadState(state="loading", voice=voice.id))
+
+        async def load() -> None:
+            try:
+                await self.get(voice, directory, threads=threads)
+            except Exception as exc:  # noqa: BLE001 - a warm-up failure is reported, never raised at a caller that did not ask
+                logger.warning("warming the local voice %s failed: %s", voice.id, exc)
+
+        self._warming = asyncio.ensure_future(load())
+        return self.state()
+
+    def state(self) -> TtsLoadState:
+        """Where the resident voice is. Cheap enough to answer on every poll of the voice page."""
+        return self._state
 
     def loaded(self) -> str:
         """The id of the resident voice, or empty. For the doctor line and the settings page."""
@@ -470,6 +547,44 @@ class TtsCache:
             self._generation += 1
             self._engine = None
             self._key = None
+        if self._warming is not None and not self._warming.done():
+            # A load in flight is a load of the voice that was just let go of. The thread building it
+            # cannot be stopped, and what it produces is discarded by the generation above; what must
+            # not survive is the *guard*, or the next warm-up — of the voice the operator has just
+            # chosen — would see a load already running and decline to start one, and the new voice
+            # would be built by the first answer after all.
+            self._warming.cancel()
+            self._warming = None
+        self._publish(TtsLoadState())
+
+    # -- watching a load ----------------------------------------------------------------------
+
+    def _publish(self, state: TtsLoadState) -> None:
+        # Only changes go out, for the same reason the recognition cache publishes only changes:
+        # `warm` says "loading" when it starts the task and `get` says it again when the load really
+        # begins, which is one fact twice, and a page that has to de-duplicate a stream for itself is
+        # a page that will de-duplicate it wrongly.
+        if (state.state, state.voice, state.loaded_in_ms, state.error) == (self._state.state, self._state.voice, self._state.loaded_in_ms, self._state.error):
+            return
+        self._state = state
+        for queue in list(self._watchers):
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(state.as_json())
+
+    @contextlib.asynccontextmanager
+    async def watch(self) -> AsyncIterator[dict[str, object]]:
+        """A queue of load states for as long as the caller holds it.
+
+        Bounded and dropping rather than blocking: a page that stopped reading must not be able to
+        hold up a load everything else is waiting on.
+        """
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=16)
+        self._watchers.append(queue)
+        try:
+            yield queue
+        finally:
+            with contextlib.suppress(ValueError):
+                self._watchers.remove(queue)
 
 
 CACHE = TtsCache()
@@ -482,6 +597,7 @@ __all__ = [
     "OPENING_CHARS",
     "Files",
     "TtsCache",
+    "TtsLoadState",
     "TtsEngine",
     "TtsError",
     "require_sherpa",

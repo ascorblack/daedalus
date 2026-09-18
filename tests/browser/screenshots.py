@@ -355,7 +355,11 @@ VOICE = {
     ],
     # A voice downloaded onto this machine, which is what the chip on the page is there to say: the
     # stub used to leave `kind` out, so every picture of the page called it "server voice" instead.
-    "tts": {"configured": True, "reason": "", "kind": "local", "voice": "Dmitri", "model": "vits-piper-ru_RU-dmitri", "state": "ready"},
+    "tts": {"configured": True, "reason": "", "kind": "local", "voice": "Dmitri", "model": "vits-piper-ru_RU-dmitri", "state": "ready",
+            "loaded_in_ms": 1480, "error": "",
+            # The last answer's wait between the words being written and a sound, as the server
+            # measured its half of it. The page draws it as one quiet diagnostic line.
+            "last_turn": {"turn": "run-1", "first_audio_ms": 720, "clip_ms": 640, "load_ms": 0}},
     # A model that runs on this machine, in memory and ready: the case the page is designed around.
     "stt": {
         "configured": True,
@@ -509,6 +513,12 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         over = getattr(stub, "voice_over", None) or {}
         load = {"kind": "engine", "state": over.get("state", VOICE["stt"]["state"]), "model": VOICE["stt"]["local"]["model"], "loaded_in_ms": over.get("loaded_in_ms", VOICE["stt"]["loaded_in_ms"]), "error": ""}
         return respond(route, f"data: {json.dumps(load)}\n\n", content_type="text/event-stream")
+    if rel == "/api/tts/progress":
+        # The voice page opens this to hear the voice finish being built; the picker opens it for the
+        # download bars. The same two-source shape the recognition stream has.
+        over = getattr(stub, "voice_tts", None) or {}
+        load = {"kind": "engine", "state": over.get("state", VOICE["tts"]["state"]), "voice": "ru-dmitri", "loaded_in_ms": over.get("loaded_in_ms", VOICE["tts"]["loaded_in_ms"]), "error": ""}
+        return respond(route, f"data: {json.dumps(load)}\n\n", content_type="text/event-stream")
     if rel == "/api/voice/stream":
         # The concierge's half of the conversation, canned: the page has no other way into its
         # thinking, delegating and speaking states, and those are three of the five worth a picture.
@@ -584,7 +594,13 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, [])
     if rel == "/api/voice":
         over = getattr(stub, "voice_over", None)
-        return respond(route, {**VOICE, "stt": {**VOICE["stt"], **over}} if over else VOICE)
+        spoken = getattr(stub, "voice_tts", None)
+        body = dict(VOICE)
+        if over:
+            body["stt"] = {**VOICE["stt"], **over}
+        if spoken:
+            body["tts"] = {**VOICE["tts"], **spoken}
+        return respond(route, body)
     if rel == "/api/tts":
         return respond(route, TTS)
     if rel == "/api/stt":
@@ -786,6 +802,10 @@ def sse(*frames: tuple[str, dict]) -> str:
 VOICE_STATES: dict[str, dict] = {
     "ready": {"over": {}, "frames": "", "mic": False, "ask": False},
     "loading": {"over": {"state": "loading", "loaded_in_ms": 0}, "frames": "", "mic": False, "ask": False},
+    # The other engine loading: the recogniser is ready and listening, and the voice the answer will
+    # be read in is still being built, which the page says rather than leaving the operator to find
+    # out by not hearing anything.
+    "warming": {"over": {}, "tts": {"state": "loading", "loaded_in_ms": 0}, "frames": "", "mic": False, "ask": False},
     "listening": {"over": {}, "frames": "", "mic": True, "ask": False},
     "thinking": {
         "over": {},
@@ -838,10 +858,12 @@ def talking(page: Page) -> None:
 def voice_shots(page: Page, prefix: str) -> None:
     for name, plan in VOICE_STATES.items():
         stub.voice_over = plan["over"]  # type: ignore[attr-defined]
+        stub.voice_tts = plan.get("tts")  # type: ignore[attr-defined]
         stub.voice_frames = plan["frames"]  # type: ignore[attr-defined]
         before = talking if plan["ask"] else listening if plan["mic"] else None
         shot(page, f"{prefix}{name}", "voice", settle=1000, before=before)
     stub.voice_over = None  # type: ignore[attr-defined]
+    stub.voice_tts = None  # type: ignore[attr-defined]
     stub.voice_frames = ""  # type: ignore[attr-defined]
 
 

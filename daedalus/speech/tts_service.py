@@ -96,13 +96,6 @@ class LocalTts:
         self.config = config
         self._speaking = 0
         """Bumped by :meth:`interrupt`. Everything being synthesised stops at its next sentence."""
-        self._rewarm: asyncio.Task[None] | None = None
-        """The reload after a sample took the resident slot; held so it is not garbage collected."""
-        self._state = "idle"
-        """``idle``, ``loading``, ``ready`` or ``error`` — what the page's chip says. Held here rather
-        than derived, because "the voice is loading" is a fact about this second and the cache can only
-        answer whether a load has already finished."""
-        self._error = ""
 
     # -- what is in use ---------------------------------------------------------------------
 
@@ -143,26 +136,32 @@ class LocalTts:
         voice = self.active()
         if voice is None:
             raise TtsError("no voice is installed and selected")
-        if CACHE.loaded() != voice.id:
-            self._state, self._error = "loading", ""
-        try:
-            engine = await CACHE.get(voice, self.downloads.directory(voice.id), threads=self.settings.local_threads)
-        except Exception as exc:
-            self._state, self._error = "error", str(exc)
-            raise
-        self._state, self._error = "ready", ""
-        return engine
+        return await CACHE.get(voice, self.downloads.directory(voice.id), threads=self.settings.local_threads)
 
-    async def warm(self) -> None:
-        """Load the voice now, so the first thing said is not also the first thing loaded.
+    def warm(self) -> dict[str, object]:
+        """Start loading the chosen voice now, and answer with where that got to.
 
-        Called when a voice is chosen. A failure is recorded and not raised: choosing a voice should
-        report what went wrong on the page, not fail the request that chose it.
+        A voice is a second or two of building a synthesiser, and until this existed that second or
+        two was paid by the first answer the operator asked for: the words were on the screen and
+        nothing was said for as long as the load took, and by the time it spoke the next answer was
+        already being written. So the load is started at the three moments it is free — when the voice
+        is chosen, when the process starts with one already configured, and when the voice page is
+        opened — and the page is told to wait rather than left to discover it.
+
+        Returns at once. Nothing is warmed where no voice is chosen, where it was never downloaded or
+        where there is no engine to read it with; the state says so and the page falls back to
+        whatever else can speak.
         """
-        try:
-            await self.engine()
-        except Exception as exc:  # noqa: BLE001 - the state carries the reason; the caller carries on
-            logger.warning("the local voice could not be loaded: %s", exc)
+        from daedalus.speech.service import engine_present  # Lazy: one import probe, cached, shared with recognition
+
+        voice = self.active()
+        if voice is None or not engine_present():
+            return CACHE.state().as_json()
+        return CACHE.warm(voice, self.downloads.directory(voice.id), threads=self.settings.local_threads).as_json()
+
+    def load_state(self) -> dict[str, object]:
+        """Where the resident voice is in its loading — ``idle``, ``loading``, ``ready`` or ``error``."""
+        return CACHE.state().as_json()
 
     async def speak(self, text: str) -> tuple[bytes, int]:
         """A piece of text as samples and their rate, in the chosen voice."""
@@ -243,14 +242,11 @@ class LocalTts:
         chosen = self.active()
         if chosen is None or chosen.id == after:
             return
-        if self._rewarm is not None and not self._rewarm.done():
-            return
-        self._rewarm = asyncio.create_task(self.warm())
+        self.warm()
 
     def forget(self) -> None:
         """Drop the loaded voice: the choice changed, or the files were deleted underneath it."""
         CACHE.drop()
-        self._state, self._error = "idle", ""
 
     # -- what the page and the doctor show ----------------------------------------------------
 
@@ -266,7 +262,8 @@ class LocalTts:
         voice = self.selected()
         installed = voice is not None and self.downloads.is_installed(voice.id)
         engine = engine_present()
-        error = self._error
+        load = CACHE.state()
+        error = load.error if load.voice == (voice.id if voice else "") else ""
         if voice is None and self.settings.local_voice:
             # A configured id the catalog no longer has. Nothing local speaks, but "idle" would say
             # the operator never chose one, which is the opposite of what happened.
@@ -275,7 +272,7 @@ class LocalTts:
         elif voice is None:
             phase = "idle"
         elif installed and engine:
-            phase = self._state
+            phase = load.state if load.voice == voice.id else "idle"
         else:
             phase = "error"
             error = error or ("the speech engine is not installed" if installed else f"{voice.label} was never downloaded")
@@ -291,6 +288,7 @@ class LocalTts:
             "engine_installed": engine,
             "state": phase,
             "error": error,
+            "loaded_in_ms": load.loaded_in_ms if load.voice == (voice.id if voice else "") else 0,
             "loaded": CACHE.loaded(),
             "encoder": encoder_present(),
         }

@@ -1150,6 +1150,12 @@ class FakeVoice:
             "listening": False,
         }
 
+    def first_audio(self, turn: str, *, clip_ms: int, load_ms: int) -> None:
+        """The API tells the extension when a turn was first heard; nothing here is timing anything."""
+
+    def last_turn(self) -> dict[str, Any]:
+        return {"turn": "", "first_audio_ms": 0, "clip_ms": 0, "load_ms": 0}
+
 
 class LoadedEngine:
     """A model that loads instantly, standing in for half a gigabyte of weights."""

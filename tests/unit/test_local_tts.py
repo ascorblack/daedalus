@@ -708,12 +708,14 @@ def test_choosing_a_voice_saves_it_and_warms_it(client: TestClient, monkeypatch:
     pretend_installed(app)
     warmed: list[int] = []
 
-    async def warm() -> None:
+    def warm() -> dict[str, object]:
         warmed.append(1)
+        return {"state": "loading", "voice": "ru-dmitri", "loaded_in_ms": 0, "error": ""}
 
     monkeypatch.setattr(app.tts, "warm", warm)
     body = client.post("/api/tts/select", json={"voice": "ru-dmitri"}, headers=HEAD).json()
     assert body["selected"] == "ru-dmitri" and warmed == [1], "the voice loads when it is chosen, not mid-answer"
+    assert body["load"]["state"] == "loading", "and the answer says the load has started, so the page can wait for it"
     assert app.config.voice.tts.local_voice == "ru-dmitri"
 
 
@@ -766,8 +768,9 @@ def test_a_sample_is_the_voices_own_language_through_the_real_engine(client: Tes
 # -- the precedence -------------------------------------------------------------------------------
 
 
-def with_voice_page(app: FakeApp, spoken_here: list[str]) -> None:
-    """The voice extension, reduced to the one thing the TTS endpoint asks of it."""
+def with_voice_page(app: FakeApp, spoken_here: list[str], timed: list[dict[str, Any]] | None = None) -> None:
+    """The voice extension, reduced to the two things the TTS endpoint asks of it."""
+    timed = [] if timed is None else timed
 
     class Extension:
         async def speech(self, text: str) -> tuple[Any, str]:
@@ -784,6 +787,12 @@ def with_voice_page(app: FakeApp, spoken_here: list[str]) -> None:
         async def state(self) -> dict[str, Any]:
             return {"enabled": True, "session_id": "", "model": "", "tts": {"configured": True, "reason": ""},
                     "stt": {"configured": False}, "agents": [], "listening": False}
+
+        def first_audio(self, turn: str, *, clip_ms: int, load_ms: int) -> None:
+            timed.append({"turn": turn, "clip_ms": clip_ms, "load_ms": load_ms})
+
+        def last_turn(self) -> dict[str, Any]:
+            return timed[-1] if timed else {"turn": "", "first_audio_ms": 0, "clip_ms": 0, "load_ms": 0}
 
     app.extensions["voice"] = Extension()
 
@@ -980,6 +989,125 @@ def test_the_page_is_told_which_of_the_three_is_speaking(client: TestClient) -> 
     assert body["tts"]["kind"] == "local" and body["tts"]["voice"] == "Dmitri (Russian)"
     assert body["tts"]["state"] in ("loading", "ready", "error")
     assert body["tts"]["local"]["installed"] is True
+
+
+# -- warming the voice ------------------------------------------------------------------------------
+#
+# A voice is a second or two of building a synthesiser, and until it was warmed that second or two was
+# paid by the first answer: the words were on the screen and nothing was said, and by the time the
+# voice spoke the operator had already asked again. Everything below is about paying it earlier.
+
+
+async def test_the_cache_reports_where_a_load_is_and_publishes_every_step(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", FakeSherpa)
+    FakeTts.made, FakeTts.calls = [], []
+    lay_out(tmp_path, {"v.onnx": b"M", "tokens.txt": b"t", **ESPEAK})
+    cache = TtsCache()
+    assert cache.state().as_json() == {"state": "idle", "voice": "", "loaded_in_ms": 0, "error": ""}
+    seen: list[dict[str, object]] = []
+    async with cache.watch() as queue:
+        await cache.get(catalog.get("ru-dmitri"), tmp_path, threads=2)
+        while not queue.empty():
+            seen.append(queue.get_nowait())
+    assert [frame["state"] for frame in seen] == ["loading", "ready"]
+    assert cache.state().state == "ready" and cache.state().voice == "ru-dmitri"
+    assert cache.loaded() == "ru-dmitri"
+    # The load was timed, and a second call is the same voice rather than a second load.
+    assert int(cache.state().loaded_in_ms) >= 0
+    made = len(FakeTts.made)
+    await cache.get(catalog.get("ru-dmitri"), tmp_path, threads=2)
+    assert len(FakeTts.made) == made, "a voice already in memory is not built again"
+    cache.drop()
+    assert cache.state().state == "idle" and cache.loaded() == ""
+
+
+async def ready_state(cache: TtsCache) -> Any:
+    """Wait for a load to finish by watching it, rather than by sleeping for a guessed while."""
+    async with cache.watch() as queue:
+        while cache.state().state == "loading":
+            await queue.get()
+    return cache.state()
+
+
+async def test_warming_returns_at_once_and_twice_is_one_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", FakeSherpa)
+    FakeTts.made, FakeTts.calls = [], []
+    lay_out(tmp_path, {"v.onnx": b"M", "tokens.txt": b"t", **ESPEAK})
+    cache = TtsCache()
+    voice = catalog.get("ru-dmitri")
+    first = cache.warm(voice, tmp_path, threads=2)
+    second = cache.warm(voice, tmp_path, threads=2)
+    assert first.state == "loading" and second.state == "loading", "warming answers before the voice is built"
+    assert (await ready_state(cache)).state == "ready"
+    assert len(FakeTts.made) == 1, "warming twice is one load, not two"
+    # And a third, with the voice already in memory, is not a load at all.
+    assert cache.warm(voice, tmp_path, threads=2).state == "ready"
+    assert len(FakeTts.made) == 1
+
+
+async def test_a_voice_that_will_not_load_says_so_once_and_is_not_retried_on_every_poll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tries: list[int] = []
+
+    class Broken:
+        def __init__(self, config: Any) -> None:
+            tries.append(1)
+            raise RuntimeError("this build of the wheel cannot read that model")
+
+    class BrokenSherpa(FakeSherpa):
+        OfflineTts = Broken
+
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", BrokenSherpa)
+    lay_out(tmp_path, {"v.onnx": b"M", "tokens.txt": b"t", **ESPEAK})
+    cache = TtsCache()
+    voice = catalog.get("ru-dmitri")
+    cache.warm(voice, tmp_path, threads=2)
+    state = await ready_state(cache)
+    assert state.state == "error" and "cannot read that model" in state.error
+    # The voice page asks on every poll, and a load that failed fails the same way every time.
+    cache.warm(voice, tmp_path, threads=2)
+    cache.warm(voice, tmp_path, threads=2)
+    assert tries == [1], "the failure stands until the selection changes; it is not retried per poll"
+
+
+def test_the_voice_page_and_the_picker_are_told_where_the_load_is(client: TestClient) -> None:
+    app = client.app_state  # type: ignore[attr-defined]
+    CACHE.drop()  # the cache is process-wide, because the voice it holds is
+    with_voice_page(app, [])
+    pretend_installed(app)
+    body = client.post("/api/tts/select", json={"voice": "ru-dmitri"}, headers=HEAD).json()
+    assert body["load"]["state"] in ("loading", "ready", "error")
+    picker = client.get("/api/tts", headers=HEAD).json()
+    assert set(picker["load"]) == {"state", "voice", "loaded_in_ms", "error"}
+    page = client.get("/api/voice", headers=HEAD).json()
+    assert page["tts"]["kind"] == "local"
+    assert page["tts"]["state"] in ("loading", "ready", "error")
+    assert "loaded_in_ms" in page["tts"] and "last_turn" in page["tts"]
+
+
+def test_the_warm_route_loads_the_voice_without_anything_waiting_to_be_spoken(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = client.app_state  # type: ignore[attr-defined]
+    CACHE.drop()
+    pretend_installed(app)
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", FakeSherpa)
+    FakeTts.made = []
+    client.post("/api/tts/select", json={"voice": "ru-dmitri"}, headers=HEAD)
+    answer = client.post("/api/tts/engine/warm", headers=HEAD)
+    assert answer.status_code == 200
+    assert set(answer.json()) == {"state", "voice", "loaded_in_ms", "error"}
+    # The route answers before the voice is built — that is the whole point of it — so the load is
+    # given the event loop by asking again rather than by sleeping for a guessed while.
+    for _ in range(50):
+        if client.post("/api/tts/engine/warm", headers=HEAD).json()["state"] != "loading":
+            break
+    assert CACHE.loaded() == "ru-dmitri", "the voice is in memory before the first answer asks for it"
+    app.tts.forget()
+
+
+def test_nothing_is_warmed_where_no_voice_was_ever_chosen(tmp_path: Path) -> None:
+    CACHE.drop()
+    local = LocalTts(tmp_path, RuntimeConfig())
+    assert local.warm() == {"state": "idle", "voice": "", "loaded_in_ms": 0, "error": ""}
+    assert local.load_state()["state"] == "idle"
 
 
 def test_a_voice_the_catalog_no_longer_has_is_ignored_rather_than_crashing(tmp_path: Path) -> None:

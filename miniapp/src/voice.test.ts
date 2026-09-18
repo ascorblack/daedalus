@@ -66,6 +66,39 @@ describe("the page's state machine", () => {
     expect(ready.engine.loadedInMs).toBe(5400);
   });
 
+  it("keeps the concierge's phase when the microphone is opened mid-answer", () => {
+    // The page used to answer the tap with "listening" while an answer was being read out, and
+    // nothing said "speaking" again afterwards — so the chip lied for the whole answer and the
+    // barge-in, which will not interrupt a page that is not speaking, could not happen at all.
+    const answering = run([{ type: "asked", text: "go on" }, { type: "speaking", on: true }]);
+    const tapped = voiceReducer(answering, { type: "mic", on: true });
+    expect(tapped.phase).toBe("speaking");
+    expect(tapped.micOn).toBe(true);
+    expect(voiceReducer(tapped, { type: "speaking", on: false }).phase).toBe("listening");
+    // A tap with nothing being said still opens the microphone and says so.
+    expect(run([{ type: "mic", on: true }]).phase).toBe("listening");
+  });
+
+  it("does not hold the microphone shut for a voice that is loading, but does say so", () => {
+    // The two engines are loaded for two different reasons and only one of them is about hearing.
+    // A synthesiser that is still being built means the next answer is read by the browser, which is
+    // a line on the page; it is not a reason to refuse to listen.
+    const loading = run([{ type: "voice", engine: { state: "loading", model: "ru-dmitri" } }, { type: "mic", on: true }]);
+    expect(loading.voice.state).toBe("loading");
+    expect(micReady(loading)).toBe(true);
+    expect(loading.phase).toBe("listening");
+    const ready = voiceReducer(loading, { type: "voice", engine: { state: "ready", loadedInMs: 1480 } });
+    expect(ready.voice.loadedInMs).toBe(1480);
+    expect(ready.phase).toBe("listening");
+  });
+
+  it("keeps the last answer's wait between the words and the sound", () => {
+    const heard = run([{ type: "asked", text: "read me the board" }, { type: "say", text: "Eleven went out." }, { type: "audio", turn: "run-1", ms: 2400 }]);
+    expect(heard.firstAudioMs).toBe(2400);
+    // A newer answer replaces the number rather than adding to it: the line is about the last one.
+    expect(voiceReducer(heard, { type: "audio", turn: "run-2", ms: 480 }).firstAudioMs).toBe(480);
+  });
+
   it("collects the answer a sentence at a time and clears it when the next thing is said", () => {
     const answered = run([
       { type: "asked", text: "how did the invoices go?" },

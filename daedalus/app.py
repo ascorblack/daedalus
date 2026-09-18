@@ -79,6 +79,10 @@ class Application:
         if self.settings.telegram_bot_token:
             self.front = TelegramFront(self.settings, self.config, self.manager, save_config=self.save_config, speech=self.speech)
         await self._install_extensions()
+        # The voice the operator chose is built now rather than by the first answer they ask for.
+        # It costs a second or two of a start that is already doing several, and it is the difference
+        # between an answer that is read out as it is written and one that is read out after it.
+        self.tts.warm()
         await self._report_startup()
         if self.guard.skip_recovery:
             note = (

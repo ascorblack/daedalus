@@ -2,6 +2,37 @@
 
 Notable changes, newest first. The repository's `main` is the released version.
 
+## 2026-09-18
+
+- **The voice is built before it is needed, and an answer is never read out over the one before
+  it.** The first answer of a session used to arrive on the screen and be read aloud about fifteen
+  seconds later, and when the next answer came the page played both, one after the other. A voice
+  that runs on this machine takes a second or two to become a synthesiser, and that second or two
+  was being paid by the first thing the operator asked to hear — with the clips of that first answer
+  still queued when the second one began. The voice is now loaded at the three moments it costs
+  nothing: when the process starts with one configured, when it is chosen, and when the voice page
+  is opened. `GET /api/voice` says where that load is and how long it took, `POST /api/tts/engine/warm`
+  starts it explicitly, and `/api/tts/progress` carries it as it happens, so the page can say
+  "loading the voice" rather than going quiet. Nothing unloads a voice that has gone silent: the
+  operator about to say something else is the operator who just said something.
+- **Every spoken sentence belongs to an answer, and only the newest answer is heard.** The sentences
+  the server writes now name the run they came from, and the page plays only the run it is on: when
+  a new answer starts — the operator speaks, interrupts, or the concierge begins writing again —
+  what was queued for the old one is dropped, the request fetching the rest of it is aborted, and
+  the sentences that were never said are marked on the screen as written rather than spoken.
+- **An answer that arrives while the voice is still loading is read by the browser, for that answer
+  only.** The next one, with the voice built, is read in the voice that was chosen. The page never
+  waits in silence for a synthesiser, and it says which of the two is reading.
+- **The voice page shows where the time went.** One quiet line under the answer: how long from the
+  words being written to the first sound, how much of that was the voice being built, and how much
+  was it speaking. In Russian and English, like the rest of the page.
+- **Two things the microphone did wrong mid-answer.** Tapping it while an answer was being read put
+  the page into "listening" although it was still speaking — so the chip was wrong for the whole
+  answer and barging in, which only interrupts a page that is speaking, could not happen at all. And
+  the tap primed the audio it was already playing, which paused the answer for six seconds, and
+  cancelled the synthesiser's queue with the answer in it. Neither happens now, and a listener that
+  keeps hearing words while the page speaks gets another chance to interrupt rather than one.
+
 ## 2026-09-17
 
 - **The optional pieces are listed, and installed from the app.** Settings → Components is every

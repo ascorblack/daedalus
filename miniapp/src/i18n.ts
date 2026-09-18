@@ -78,6 +78,9 @@ export const DICT: Record<string, Record<Lang, string>> = {
   // it is the same mistake the recognition line stopped making when a model could run on this
   // machine. It is named, because which voice is reading matters to whoever chose it.
   "voice.out.local": { en: "{voice}, on this machine", ru: "{voice}, на этой машине" },
+  // The same chip while the synthesiser is still being built: the page does not claim it can speak
+  // in a voice that is not there yet.
+  "voice.out.local.loading": { en: "{voice}, loading", ru: "{voice}, загружается" },
   "voice.tap": { en: "Tap to talk.", ru: "Нажмите и говорите." },
   // The browser will not make a sound until something on the page is tapped, and there is no way to
   // ask it whether that is the case — it is inferred from an utterance that started no audio. So the
@@ -90,6 +93,17 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "voice.tap.none": { en: "This browser cannot listen; type below instead.", ru: "Этот браузер не слышит — напишите ниже." },
   "voice.loading.model": { en: "Loading {name}… the first time takes a moment.", ru: "Загружаю {name}… в первый раз это занимает время." },
   "voice.loading.failed": { en: "{name} would not load: {error}", ru: "{name} не загрузилась: {error}" },
+  // The voice is a second engine with a load of its own, and it is loaded ahead of the first answer.
+  // While it is not there the browser reads the answer, which is worth saying: the operator who
+  // chose a voice and hears a different one is owed the reason.
+  "voice.loading.voice": { en: "Loading the voice… this answer will be read by the browser.", ru: "Загружаю голос… этот ответ прочитает браузер." },
+  "voice.loading.voice.failed": { en: "The voice would not load: {error}", ru: "Голос не загрузился: {error}" },
+  // The diagnostic line. Two numbers, because they have different cures: the whole wait between the
+  // answer appearing and a sound, and how much of it was the voice being built rather than speaking.
+  "voice.timing": { en: "First sound after {ms} s", ru: "Первый звук через {ms} с" },
+  "voice.timing.load": { en: "voice load {ms} s", ru: "загрузка голоса {ms} с" },
+  "voice.timing.synth": { en: "synthesis {ms} s", ru: "синтез {ms} с" },
+  "voice.timing.ready": { en: "the voice is loaded", ru: "голос уже загружен" },
   "voice.mic.start": { en: "Start listening", ru: "Начать слушать" },
   "voice.mic.stop": { en: "Stop listening", ru: "Перестать слушать" },
   "voice.compose": { en: "…or type an utterance", ru: "…или напишите" },

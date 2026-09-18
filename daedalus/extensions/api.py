@@ -63,6 +63,7 @@ from daedalus.speech import tts_catalog
 from daedalus.speech.engine import CACHE as ENGINE_CACHE
 from daedalus.speech.engine import SAMPLE_RATE, SpeechError, clamp_rate
 from daedalus.speech.service import recogniser_available, transcribe_recording
+from daedalus.speech.tts_engine import CACHE as VOICE_CACHE
 from daedalus.speech.tts_engine import MAX_SPEED, MIN_SPEED, TtsError
 from daedalus.speech.tts_service import MEDIA_TYPE_HEADER, SEQUENCE_TYPE
 from daedalus.speech.tts_service import frame as speech_frame
@@ -219,6 +220,10 @@ class VoiceSayBody(BaseModel):
 
 class VoiceSpeakBody(BaseModel):
     text: str
+    turn: str = ""
+    """Which answer this sentence belongs to, as the ``say`` event named it. The page sends it back so
+    the wait between the words and the sound can be attributed to the turn that waited; a request
+    without one is still spoken, it is simply not timed."""
 
 
 class VoiceModelBody(BaseModel):
@@ -1463,10 +1468,24 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         # Which of the three actually speaks, said once here so the page does not have to work it out
         # from three flags. The order is the same one `voice_tts` enforces below.
         if spoken["active"]:
-            tts.update(configured=True, reason="", kind="local", voice=spoken["label"], state=spoken["state"])
+            # Opening the page is the third free moment to build the synthesiser — the operator is
+            # looking at the orb and has not said anything yet. What comes back is where that load
+            # is, and until it says ready the page speaks the first answer in the browser's own voice
+            # rather than holding it back.
+            load = app.tts.warm()
+            tts.update(
+                configured=True, reason="", kind="local", voice=spoken["label"],
+                state=load["state"] if load["state"] != "idle" else spoken["state"],
+                loaded_in_ms=load["loaded_in_ms"], error=load["error"],
+            )
         else:
+            # Nothing is built anywhere else: an endpoint and the browser's own synthesiser both
+            # speak the moment they are asked, so the page never draws a wait for them.
             tts["kind"] = "endpoint" if tts.get("configured") else "browser"
             tts["state"] = "error" if spoken["voice"] and not spoken["active"] else "ready"
+            tts["loaded_in_ms"] = 0
+            tts["error"] = spoken["error"] if spoken["voice"] and not spoken["active"] else ""
+        tts["last_turn"] = extension.last_turn()
         state["tts"] = tts
         local = app.speech.state()
         stt = dict(state.get("stt") or {})
@@ -1627,6 +1646,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         # failure hidden behind a fallback is a failure nobody fixes.
         if app.tts.available():
             clips = app.tts.clips(body.text.strip())
+            # Where the wait goes, measured rather than guessed: how long this request took to have
+            # something playable, and how much of that was the voice being built. A warm voice makes
+            # the second number zero, which is the whole point of warming it.
+            began = time.monotonic()
+            cold = app.tts.load_state()["state"] != "ready"
             try:
                 first, media_type = await anext(clips)
             except StopAsyncIteration as exc:
@@ -1638,6 +1662,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 # outcome this endpoint promised never to have.
                 await clips.aclose()
                 raise HTTPException(503, f"the local voice could not speak this: {exc}") from exc
+
+            clip_ms = int((time.monotonic() - began) * 1000)
+            extension.first_audio(body.turn, clip_ms=clip_ms, load_ms=int(app.tts.load_state()["loaded_in_ms"]) if cold else 0)
 
             async def spoken() -> AsyncIterator[bytes]:
                 try:
@@ -1656,12 +1683,15 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             return StreamingResponse(spoken(), media_type=SEQUENCE_TYPE, headers={MEDIA_TYPE_HEADER: media_type})
         if not tts_configured(app.config.voice.tts):
             raise HTTPException(404, "nothing here speaks; the browser says this one itself")
+        began = time.monotonic()
         try:
             chunks, media_type = await extension.speech(body.text.strip())
         except RuntimeError as exc:
             raise HTTPException(502, str(exc)) from exc
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"the speech endpoint could not be reached: {type(exc).__name__}") from exc
+        # An endpoint has nothing to load, so the whole of its wait is the request itself.
+        extension.first_audio(body.turn, clip_ms=int((time.monotonic() - began) * 1000), load_ms=0)
         return StreamingResponse(chunks, media_type=media_type)
 
     # -- local speech synthesis --------------------------------------------------------------
@@ -1683,12 +1713,22 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         view["engine_installed"] = speech_service.engine_present()
         view["recommended"] = {code: found.id for code in tts_catalog.languages() if (found := tts_catalog.recommended(code))}
         view["state"] = app.tts.state()
+        view["load"] = app.tts.load_state()
         return view
 
     @api.get("/api/tts")
     async def tts_voices(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """The picker: every voice, what is installed, what is downloading, and what it all costs."""
         return _tts_view()
+
+    @api.post("/api/tts/engine/warm")
+    async def tts_warm(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Build the chosen voice now, so the first answer does not pay for it.
+
+        Answers at once with where the load is — ``idle``, ``loading``, ``ready`` or ``error`` — and
+        the rest arrives on ``/api/tts/progress`` as it happens. Calling it twice is one load.
+        """
+        return app.tts.warm()
 
     @api.post("/api/tts/voices/{voice_id}/download")
     async def tts_download(voice_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -1746,9 +1786,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             voice_config = app.config.voice
             await app.save_config(app.config.model_copy(update={"voice": voice_config.model_copy(
                 update={"tts": voice_config.tts.model_copy(update=patch)})}))
-        if app.tts.available():
-            await app.tts.warm()
-        return _tts_view()
+        # The answer carries the load this call started rather than a reading taken before it: the
+        # page draws "loading the voice" off the same response that chose the voice, and a view built
+        # a moment earlier would tell it the voice is idle.
+        return {**_tts_view(), "load": app.tts.warm()}
 
     @api.post("/api/tts/voices/{voice_id}/sample")
     async def tts_sample(voice_id: str, _: dict[str, Any] = Depends(auth)) -> Response:
@@ -1766,19 +1807,38 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         """Download progress as it happens, so the bar moves rather than being polled at."""
 
         async def gen():  # type: ignore[no-untyped-def]
-            async with app.tts.downloads.watch() as queue:
+            # Two things move on this stream and ``kind`` tells them apart, exactly as on the
+            # recognition side: a download, which the picker draws as a bar on one card, and the
+            # voice being built, which the voice page draws as the reason it is not speaking yet.
+            async with app.tts.downloads.watch() as queue, VOICE_CACHE.watch() as loads:
                 for current in app.tts.downloads.progress().values():
-                    yield f"data: {json.dumps({'id': current.id, 'state': current.state, 'fraction': current.fraction, 'error': current.error})}\n\n"
-                while True:
-                    if await request.is_disconnected():
-                        return
-                    try:
-                        update = await asyncio.wait_for(queue.get(), timeout=15)
-                    except TimeoutError:
-                        yield ": keepalive\n\n"
-                        continue
-                    body = {"id": update.id, "state": update.state, "fraction": update.fraction, "error": update.error}
-                    yield f"data: {json.dumps(body)}\n\n"
+                    yield f"data: {json.dumps({'kind': 'download', 'id': current.id, 'state': current.state, 'fraction': current.fraction, 'error': current.error})}\n\n"
+                yield f"data: {json.dumps({'kind': 'engine', **app.tts.load_state()})}\n\n"
+                downloading = asyncio.ensure_future(queue.get())
+                loading = asyncio.ensure_future(loads.get())
+                try:
+                    while True:
+                        if await request.is_disconnected():
+                            return
+                        # Both waits stay alive across the loop and only the one that finished is
+                        # started again: cancelling a queue.get() that has already taken an item off
+                        # the queue is how an update disappears.
+                        done, _pending = await asyncio.wait({downloading, loading}, timeout=15, return_when=asyncio.FIRST_COMPLETED)
+                        if not done:
+                            yield ": keepalive\n\n"
+                            continue
+                        if downloading in done:
+                            update = downloading.result()
+                            downloading = asyncio.ensure_future(queue.get())
+                            body = {"kind": "download", "id": update.id, "state": update.state, "fraction": update.fraction, "error": update.error}
+                            yield f"data: {json.dumps(body)}\n\n"
+                        if loading in done:
+                            load = loading.result()
+                            loading = asyncio.ensure_future(loads.get())
+                            yield f"data: {json.dumps({'kind': 'engine', **load})}\n\n"
+                finally:
+                    downloading.cancel()
+                    loading.cancel()
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 

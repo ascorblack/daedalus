@@ -773,6 +773,56 @@ async def test_a_sentence_is_spoken_while_the_concierge_is_still_writing_the_nex
         assert [payload["text"] for name, payload in await _drain(voice) if name == "say"] == ["Shall I redo them"]
 
 
+async def test_every_spoken_sentence_names_the_answer_it_belongs_to(app: Any) -> None:
+    """A sentence carries its run, and the page plays only the run it is on.
+
+    Without it the page cannot tell the answer being written now from the one before it, which is how
+    a voice that took a while to load ended up reading both answers, one after the other, long after
+    either was asked for. The run starting says so too, which is the earliest the page can know the
+    previous answer is over — earlier than the first sentence of the new one.
+    """
+    voice = Voice(app)
+    session_id = await voice.session_id()
+    async with voice.listen():
+        await voice.on_event(session_id, SimpleNamespace(type=EventType.MESSAGE_START, run_id="run-1", payload={}))
+        await _writes(voice, session_id, "run-1", "Eleven invoices went out. ")
+        frames = await _drain(voice)
+        assert [(name, payload.get("turn")) for name, payload in frames if name in ("status", "say")] == [
+            ("status", "run-1"),
+            ("say", "run-1"),
+        ]
+
+        await voice.on_event(session_id, SimpleNamespace(type=EventType.MESSAGE_START, run_id="run-2", payload={}))
+        await _writes(voice, session_id, "run-2", "Two came back with the wrong VAT line. ")
+        frames = await _drain(voice)
+        assert [payload.get("turn") for name, payload in frames if name == "say"] == ["run-2"]
+        assert [payload.get("turn") for name, payload in frames if name == "status"] == ["run-2"]
+
+
+async def test_the_wait_between_the_words_and_the_sound_is_measured_per_answer(app: Any) -> None:
+    """How long the answer took to be heard, which is the number the operator actually feels.
+
+    The first sentence of a run starts the clock; the endpoint that produces the first clip stops it
+    and says how much of the wait was the voice being built rather than speaking.
+    """
+    voice = Voice(app)
+    session_id = await voice.session_id()
+    assert voice.last_turn() == {"turn": "", "first_audio_ms": 0, "clip_ms": 0, "load_ms": 0}
+    async with voice.listen():
+        await voice.on_event(session_id, SimpleNamespace(type=EventType.MESSAGE_START, run_id="run-1", payload={}))
+        await _writes(voice, session_id, "run-1", "Eleven invoices went out. ")
+        voice.first_audio("run-1", clip_ms=1900, load_ms=1480)
+        assert voice.last_turn()["turn"] == "run-1"
+        assert voice.last_turn()["clip_ms"] == 1900 and voice.last_turn()["load_ms"] == 1480
+        assert voice.last_turn()["first_audio_ms"] > 0
+        # Only the first sound of an answer is timed; the sentences after it are not waits at all.
+        voice.first_audio("run-1", clip_ms=40, load_ms=0)
+        assert voice.last_turn()["clip_ms"] == 1900
+        # A request naming no answer, or one nothing was ever said for, times nothing.
+        voice.first_audio("", clip_ms=50, load_ms=0)
+        assert voice.last_turn()["turn"] == "run-1"
+
+
 async def test_nothing_is_said_to_an_empty_room_and_nothing_is_replayed_to_the_next_one(app: Any) -> None:
     """A sentence written while no page is connected is dropped where it was written.
 

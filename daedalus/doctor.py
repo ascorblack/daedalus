@@ -215,6 +215,25 @@ def _local_speech(ctx: DoctorContext) -> Check:
     return Check("local speech", True, f"{model.label} active ({'streaming' if model.streaming else 'whole utterances'}){_load_note()}", "ok")
 
 
+def _voice_load_note() -> str:
+    """What the chosen voice cost to build, where this process has already paid it.
+
+    The same number as ``_load_note`` above and for the same reason: a voice that takes two seconds
+    to become a synthesiser spends those two seconds on the first answer unless something loads it
+    first, and the only way to know whether something did is to print it.
+    """
+    from daedalus.speech.tts_engine import CACHE  # Lazy: the doctor must load without the speech extra
+
+    state = CACHE.state()
+    if state.state == "ready" and state.loaded_in_ms:
+        return f"; loaded in {state.loaded_in_ms / 1000:.1f} s"
+    if state.state == "loading":
+        return "; loading now"
+    if state.state == "error":
+        return f"; the last load failed: {state.error[:120]}"
+    return "; not loaded yet — it is loaded when the app starts and when the voice page opens"
+
+
 def _load_note() -> str:
     """What the weights cost to get into memory, where this process has already paid it.
 
@@ -267,9 +286,9 @@ def _local_voice(ctx: DoctorContext) -> Check:
         return Check("local voice", False, f"{voice.label} is downloaded but the speech engine is not installed", "fail", fix)
     if not voice.keeps_up:
         return Check("local voice", True,
-                     f"{voice.label} active; it renders slower than speech ({voice.rtf:.2f}x), so answers begin a beat late",
+                     f"{voice.label} active; it renders slower than speech ({voice.rtf:.2f}x), so answers begin a beat late{_voice_load_note()}",
                      "warn", "pick a faster voice in Settings → Voice if the delay is noticeable")
-    return Check("local voice", True, f"{voice.label} active ({voice.language}, {voice.sample_rate // 1000} kHz)", "ok")
+    return Check("local voice", True, f"{voice.label} active ({voice.language}, {voice.sample_rate // 1000} kHz){_voice_load_note()}", "ok")
 
 
 async def _telegram(ctx: DoctorContext) -> list[Check]:
