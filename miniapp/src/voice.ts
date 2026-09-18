@@ -1001,6 +1001,23 @@ export function modelRow(state: { preset?: string; using?: string; presets?: Voi
 /** What the operator sees the page doing. Every one of these is drawn differently. */
 export type VoicePhase = "idle" | "loading" | "listening" | "thinking" | "delegating" | "speaking";
 
+/**
+ * What is in the middle of the page: the orb, the concierge's own transcript, or an agent's.
+ *
+ * This is a fact about the conversation, not about a component, which is why it is in the reducer
+ * with the rest of them. The voice session does not notice it at all — the recogniser, the speaker
+ * and the stream are the same three objects whichever of these is drawn — and that is the whole
+ * point of keeping it here rather than in the component that swaps the views.
+ */
+export type VoiceCenter = { view: "orb" } | { view: "transcript" } | { view: "agent"; id: string; title: string };
+
+/** The session whose transcript the middle of the page is showing, or "" for the orb. */
+export function centerSession(center: VoiceCenter, voiceSessionId: string): string {
+  if (center.view === "agent") return center.id;
+  if (center.view === "transcript") return voiceSessionId;
+  return "";
+}
+
 /** Where the local recogniser's weights are, as `/api/voice` and the progress stream report them. */
 export type EngineState = { state: string; model: string; loadedInMs: number; error: string };
 
@@ -1028,6 +1045,8 @@ export type VoiceUi = {
   voice: EngineState;
   /** How long the last answer took between its first sentence arriving and its first sound, in this page. */
   firstAudioMs: number;
+  /** What is drawn in the middle of the page. Changing it changes nothing about the voice session. */
+  center: VoiceCenter;
 };
 
 export type VoiceEvent =
@@ -1047,6 +1066,7 @@ export type VoiceEvent =
   | { type: "voice"; engine: Partial<EngineState> }
   | { type: "audio"; turn: string; ms: number }
   | { type: "problem"; message: string }
+  | { type: "center"; center: VoiceCenter }
   | { type: "cleared" };
 
 export const IDLE_VOICE: VoiceUi = {
@@ -1064,6 +1084,7 @@ export const IDLE_VOICE: VoiceUi = {
   engine: { state: "ready", model: "", loadedInMs: 0, error: "" },
   voice: { state: "ready", model: "", loadedInMs: 0, error: "" },
   firstAudioMs: 0,
+  center: { view: "orb" },
 };
 
 /** Whether the microphone may be opened at all: a model still loading cannot hear anything. */
@@ -1170,7 +1191,17 @@ export function voiceReducer(state: VoiceUi, event: VoiceEvent): VoiceUi {
     }
     case "problem":
       return { ...state, problem: event.message, phase: resting(state) };
+    case "center": {
+      // Swapping what is in the middle of the page is the one event here that changes nothing else.
+      // Not the phase, not the microphone, not a caption: the operator is reading while the same
+      // conversation goes on being had, and the page must not so much as blink at it.
+      const now = state.center;
+      const next = event.center;
+      const same = now.view === next.view && (now.view !== "agent" || next.view !== "agent" || now.id === next.id);
+      return same ? state : { ...state, center: next };
+    }
     case "cleared":
+      // A new conversation has no transcript to read, so the page comes back to the orb with it.
       return { ...IDLE_VOICE, micOn: state.micOn, engine: state.engine, voice: state.voice, blocked: state.blocked, phase: resting(state) };
   }
 }

@@ -253,3 +253,62 @@ describe("modelRow", () => {
     expect(empty).toEqual({ value: "", choices: [], warn: "", fallback: "", addFast: true });
   });
 });
+
+// ── what is in the middle of the page ──────────────────────────────────────────────────────
+//
+// The view is in the reducer because it is a fact about the conversation, not about a component, and
+// because the one thing that must be true of it is a statement about everything else: changing it
+// changes nothing. A test that reads the whole state before and after is the only one that says so.
+
+const { centerSession } = await import("./voice");
+
+describe("the view state", () => {
+  const busy: VoiceUi = {
+    ...IDLE_VOICE,
+    phase: "speaking",
+    micOn: true,
+    asked: "how did the invoice run go?",
+    heard: "read me the second",
+    spoken: ["All eleven went out."],
+    partial: "and two came",
+    agents: [],
+  };
+
+  it("starts on the orb", () => {
+    expect(IDLE_VOICE.center).toEqual({ view: "orb" });
+  });
+
+  it("changes nothing but itself", () => {
+    const read = voiceReducer(busy, { type: "center", center: { view: "transcript" } });
+    expect(read.center).toEqual({ view: "transcript" });
+    expect({ ...read, center: busy.center }).toEqual(busy);
+  });
+
+  it("goes to an agent and back without disturbing the answer being spoken", () => {
+    const agent = voiceReducer(busy, { type: "center", center: { view: "agent", id: "s-1", title: "Invoice run" } });
+    const back = voiceReducer(agent, { type: "center", center: { view: "orb" } });
+    expect(agent.center).toEqual({ view: "agent", id: "s-1", title: "Invoice run" });
+    expect(back.phase).toBe("speaking");
+    expect(back.spoken).toEqual(busy.spoken);
+    expect(back.heard).toBe(busy.heard);
+  });
+
+  it("is the same state when the view asked for is the one already drawn", () => {
+    const read = voiceReducer(busy, { type: "center", center: { view: "transcript" } });
+    expect(voiceReducer(read, { type: "center", center: { view: "transcript" } })).toBe(read);
+    const agent = voiceReducer(busy, { type: "center", center: { view: "agent", id: "s-1", title: "Invoice run" } });
+    expect(voiceReducer(agent, { type: "center", center: { view: "agent", id: "s-1", title: "Invoice run" } })).toBe(agent);
+    expect(voiceReducer(agent, { type: "center", center: { view: "agent", id: "s-2", title: "Support inbox" } })).not.toBe(agent);
+  });
+
+  it("comes back to the orb for a new conversation, which has no transcript to read", () => {
+    const read = voiceReducer(busy, { type: "center", center: { view: "agent", id: "s-1", title: "Invoice run" } });
+    expect(voiceReducer(read, { type: "cleared" }).center).toEqual({ view: "orb" });
+  });
+
+  it("names the session whose transcript is being read, and none for the orb", () => {
+    expect(centerSession({ view: "orb" }, "voice-1")).toBe("");
+    expect(centerSession({ view: "transcript" }, "voice-1")).toBe("voice-1");
+    expect(centerSession({ view: "agent", id: "s-1", title: "Invoice run" }, "voice-1")).toBe("s-1");
+  });
+});

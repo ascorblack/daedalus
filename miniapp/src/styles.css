@@ -1273,6 +1273,81 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 /* What an agent said on the way, as opposed to what it answered: the live line is the one the
    operator is waiting on, so it reads as the foreground and the finished answer stays muted. */
 .voice-agent-live { color: var(--fg); }
+
+/* ── the middle of the page, and what else can be in it ──────────────────────────────────── */
+/* The owner's ask, in one sentence: open the transcript without ending the conversation. So the
+   centre column is an area rather than a card — the orb is one thing that can be drawn in it and a
+   session's transcript is another — and the microphone leaves the middle for a small control in the
+   corner that says the same six states in the same six colours. Nothing here reaches the voice
+   session: it is in voicesession.ts, and it does not know this file exists. */
+.voice-centre { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.voice-centre-view { display: flex; flex-direction: column; flex: 1; min-height: 0; animation: voice-swap .2s ease-out both; }
+.voice-centre-view > * { flex: 1; min-height: 0; }
+@keyframes voice-swap { from { opacity: 0; } to { opacity: 1; } }
+
+/* The transcript, in the room the orb was using. The card is the frame; the session view inside it
+   takes the height it is given, which is what it has always done in a pane. */
+.voice-read { display: flex; flex-direction: column; overflow: hidden; padding: 0; min-height: min(72vh, 660px); }
+.voice-read-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* The session brings its own head — a back arrow, the title, the model — and directly under the
+   breadcrumb that says the same thing it is one row of chrome too many. Hidden rather than made
+   optional in Session.tsx: display:none takes it out of the tab order as well as out of the page. */
+.voice-read .chat-head { display: none; }
+/* Two composers a centimetre apart, both sending to the concierge, is a question the operator should
+   not have to answer: the concierge is spoken to, or typed to in the field this page has always had.
+   An agent's transcript keeps its own composer, which is the reason for opening it. */
+.voice-read.own .composer { display: none; }
+.voice-read-wait { padding: 20px; }
+.voice-crumbs { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--surface-1); }
+.voice-crumb { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; color: var(--fg-2); }
+.voice-crumb b { color: var(--fg); font-weight: 600; }
+.voice-crumb > span { color: var(--fg-3); }
+.voice-crumb .link { background: none; border: 0; padding: 0; color: var(--fg-2); font: inherit; cursor: pointer; }
+.voice-crumb .link:hover { color: var(--fg); }
+.voice-crumbs .btn { margin-left: auto; }
+/* The captions and the field, under the concierge's own transcript: what is being said out loud now
+   belongs with what was said before it, not on another screen. */
+/* The side padding is not decoration: the microphone floats in the bottom right corner of this same
+   area, and a composer centred in the whole width puts its send button under the pill. The room the
+   control takes is given to it, on both sides, so the field stays centred and stays clear. */
+.voice-read-foot { flex: none; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 190px calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: var(--surface-1); }
+.voice-read-foot .voice-captions { max-height: 22vh; overflow-y: auto; }
+.voice-read-foot .voice-said { font-size: 16px; }
+.voice-read-foot .voice-compose { margin-top: 0; opacity: 1; }
+
+/* The microphone while the orb is not on the screen. Bottom right of the reading area on a wide
+   window, bottom centre and above the tab bar on a phone, and the same four painted layers at a
+   fifth of the size: the state has to be readable from the corner of the eye here too. */
+.voice-mic-float {
+  position: absolute; right: 18px; bottom: 18px; z-index: 6; display: flex; align-items: center; gap: 10px;
+  min-height: 52px; padding: 8px 18px 8px 10px; border-radius: 999px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--orb-color) 34%, var(--line-strong));
+  background: color-mix(in srgb, var(--orb-color) 10%, var(--surface-3)); color: var(--fg);
+  box-shadow: var(--shadow-pop); animation: rise .18s ease-out;
+  --orb-color: var(--fg-3); --orb-scale: 1; --orb-glow: .3; --orb-spin: 8s;
+}
+.voice-mic-float.phase-idle { --orb-color: var(--fg-3); }
+.voice-mic-float.phase-loading { --orb-color: var(--warn); }
+.voice-mic-float.phase-listening { --orb-color: var(--accent); }
+.voice-mic-float.phase-thinking, .voice-mic-float.phase-delegating { --orb-color: var(--info); }
+.voice-mic-float.phase-speaking { --orb-color: var(--ok); }
+.voice-mic-float:disabled { cursor: default; opacity: .55; }
+.voice-mic-float .orb-halo, .voice-mic-float .orb-shell, .voice-mic-float .orb-sweep, .voice-mic-float .orb-ring, .voice-mic-float .orb-glyph {
+  position: absolute; left: 10px; top: 50%; width: 36px; height: 36px; margin-top: -18px; border-radius: 50%; inset-inline-end: auto;
+}
+/* The miniature of the orb's own motion: the same custom property the animation frame writes, on a
+   node a fifth of the size. The halo and the sweep are scaled down with it rather than blurred flat. */
+.voice-mic-float .orb-shell { transform: scale(var(--orb-scale)); transition: transform .09s linear; }
+.voice-mic-float .orb-halo { left: 2px; width: 52px; height: 52px; margin-top: -26px; filter: blur(9px); }
+.voice-mic-float .orb-sweep { filter: blur(5px); }
+.voice-mic-float.on .orb-ring { animation: orb-ripple 2.4s cubic-bezier(.25, .7, .35, 1) infinite; }
+.voice-mic-float .orb-glyph { display: grid; place-items: center; }
+.voice-mic-word { margin-left: 44px; font-size: 13px; font-weight: 600; color: color-mix(in srgb, var(--orb-color) 60%, var(--fg)); white-space: nowrap; }
+
+/* The agent whose transcript is open: the panel is a set of destinations now, and one of them is
+   where the reader already is. */
+.voice-agent.open { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 10%, var(--surface-2)); }
+
 @keyframes panel-slide { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
 
 @media (max-width: 900px) {
@@ -1287,6 +1362,31 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
   .voice-hint { font-size: 12.5px; }
   .voice-compose { margin-top: 12px; opacity: 1; }
   .voice-agents { animation-name: panel-rise; }
+  /* Reading fills the screen on a phone, literally: the page stops scrolling and the transcript takes
+     every pixel between the header and the tab bar, so it is read at the size a transcript is read at
+     and not through a letterbox. The panel has nowhere to stand beside it, so it becomes a sheet that
+     rises over it from a key in the breadcrumb; and the microphone goes to the bottom centre, over
+     both, where a thumb already is. */
+  .main:has(.voice-grid.reading) { overflow: hidden; }
+  .screen.voice:has(.voice-grid.reading) { display: flex; flex-direction: column; min-height: 0; padding: 6px 8px calc(66px + env(safe-area-inset-bottom)); }
+  .voice-grid.reading { flex: 1; min-height: 0; gap: 8px; }
+  .voice-grid.reading .voice-centre { min-height: 0; }
+  .voice-read { height: 100%; min-height: 0; border-radius: 12px; }
+  .voice-grid.reading .voice-agents {
+    position: fixed; left: 0; right: 0; bottom: calc(64px + env(safe-area-inset-bottom)); z-index: 32;
+    max-height: 62dvh; overflow-y: auto; animation: none;
+    padding: 12px 12px 16px; border-radius: 18px 18px 0 0;
+    background: var(--surface-1); border-top: 1px solid var(--line-strong); box-shadow: var(--shadow-pop);
+    transform: translateY(calc(100% + 64px + env(safe-area-inset-bottom))); transition: transform .2s cubic-bezier(.2, .7, .3, 1);
+  }
+  .voice-grid.reading.panel-open .voice-agents { transform: none; }
+  /* The strip the microphone stands in. A floating control over the field somebody is typing into is
+     a control in the way; the field gives up the last few centimetres instead, and the pill sits in
+     them. Both composers do it — the voice field under the concierge's transcript, and an agent's
+     own — because the microphone is in the same place over both. */
+  .voice-read-foot { padding-inline: 12px; padding-bottom: 58px; }
+  .voice-read .composer { padding-bottom: 58px; }
+  .voice-mic-float { position: fixed; left: 50%; right: auto; translate: -50% 0; bottom: calc(70px + env(safe-area-inset-bottom)); z-index: 33; }
 }
 @keyframes panel-rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
 /* The global rule at the top of this file takes every animation and transition away for a reader who
@@ -1300,6 +1400,13 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
   .orb-halo { opacity: .3 !important; }
   .orb-sweep { opacity: .18 !important; }
   .voice-stage::before { opacity: .5 !important; }
+  /* The cross-fade between the orb and a transcript is a transition like any other, and a reader who
+     asked for less motion gets the swap without it. The floating microphone's miniature is pinned
+     the same way the orb above it is, and for the same reason: the six states are still six colours
+     and six words. */
+  .voice-centre-view { animation: none !important; }
+  .voice-agents { transition: none !important; }
+  .voice-mic-float .orb-shell { transform: none !important; }
 }
 
 /* ── add a model: the first-run flow and the same three steps from Settings ───────────────── */
