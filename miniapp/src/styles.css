@@ -1146,13 +1146,6 @@ body.resizing iframe { pointer-events: none; }
   .memory-actions { flex-direction: column; }
 }
 
-/* ── workspaces ────────────────────────────────────────────────────────────────────────── */
-.ws-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
-.ws-row:first-of-type { border-top: 0; }
-.ws-name { font-weight: 600; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; overflow-wrap: anywhere; }
-.ws-meta { overflow-wrap: anywhere; }
-.workspaces .sheet .files { min-height: 200px; }
-
 /* ── settings: models and clients as rows that expand ─────────────────────────────────── */
 .mlist { margin-top: 8px; border-top: 1px solid var(--line); }
 .mrow { border-bottom: 1px solid var(--line); padding: 4px 0; }

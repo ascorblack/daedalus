@@ -44,6 +44,7 @@ DETAIL = {
     "workspace_name": "ws",
     "workspace_own": True,
     "workspace_sessions": [],
+    "project": {"id": "p", "name": "Project", "root": "/workspace", "settings": {"snapshots": True}},
     "pending": None,
     "model": "some-model",
     "mode": "",
@@ -102,7 +103,7 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     elif "unread" in url:
         body = json.dumps({"unread": 0})
     elif url.rstrip("/").endswith("/api/sessions"):
-        body = json.dumps({"sessions": [{"id": SESSION, "title": "A session", "status": "idle", "created_at": "2026-09-13T12:00:00+00:00", "last_message_at": "2026-09-13T12:00:05+00:00", "run_id": None}], "projects": [], "free": {"total": 1, "active": 0, "loops": 0, "last_message_at": ""}})
+        body = json.dumps({"sessions": [], "projects": []})
     else:
         # As in every other harness here: the shared gates first, then a report of what was missed.
         rel = url.split("?", 1)[0]

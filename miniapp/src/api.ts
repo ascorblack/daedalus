@@ -158,9 +158,9 @@ export type SessionSummary = {
   /** The whole path of it, for the row's tooltip: the list groups by project now, not by folder. */
   workspace_path?: string;
   workspace_own?: boolean;
-  /** The project this agent works in, where it works in one: the id it is grouped by and the name shown. */
-  project_id?: string | null;
-  project?: string | null;
+  /** The project this agent works in: the id it is grouped by and the name shown. */
+  project_id: string;
+  project: string;
   metadata?: { subagent_of?: string; subagent_name?: string; loop?: LoopView; forked_from?: { session_id: string; seq: number }; [k: string]: unknown };
 };
 
@@ -232,8 +232,8 @@ export type SessionDetail = {
   workspace_name?: string;
   workspace_own?: boolean;
   workspace_sessions?: { id: string; title: string }[];
-  /** The project this session works in, where it works in one: its root is the whole of the agent's reach. */
-  project?: ProjectRef | null;
+  /** The project this session belongs to. */
+  project: ProjectRef;
   pending: { questions: Question[] } | null;
   model: string;
   provider?: string;
@@ -300,14 +300,11 @@ export type ProjectRef = Omit<Project, "sessions">;
  *  whole table, not over the page of rows beside it. */
 export type ProjectFolder = ProjectRef & { total: number; active: number; loops: number; last_message_at: string };
 
-/** What GET /api/sessions answers: a page of agents, the folders they are in, and the free bucket. */
+/** What GET /api/sessions answers: a page of agents and the project folders they are in. */
 export type SessionList = {
   sessions: SessionSummary[];
   projects: ProjectFolder[];
-  free: { total: number; active: number; loops: number; last_message_at: string };
 };
-
-export type Workspace = { name: string; path: string; sessions: { id: string; title: string }[]; files: number; size: number; mtime: number; own_session: boolean; kind: "session" | "schedule" | "heartbeat" | "named"; schedule: string | null };
 
 export type AsrStatus = { configured: boolean; reason: string; provider: string; model: string; max_seconds: number; autosend: boolean };
 

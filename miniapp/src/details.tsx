@@ -147,8 +147,8 @@ export function SessionDetails({ ids, id, detail, busy, modes, schedules, provid
         )}
         <div className="dt-row sub">
           <span className="dt-key">{t("session.project")}</span>
-          <span className="grow truncate" title={detail.project ? detail.project.root : detail.workspace}>
-            {detail.project ? t("session.project.inside", { name: detail.project.name }) : t("session.project.none")}
+          <span className="grow truncate" title={detail.project.root}>
+            {t("session.project.inside", { name: detail.project.name })}
           </span>
           <button className="linkbtn" onClick={on.move}>{t("session.project.move")}</button>
         </div>

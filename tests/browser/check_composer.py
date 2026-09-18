@@ -64,6 +64,7 @@ class Host:
         return {
             "id": SESSION, "title": "A session", "status": self.status, "run_id": "r1" if self.status == "running" else None, "workspace": "/workspace",
             "workspace_name": "ws", "workspace_own": True, "workspace_sessions": [], "pending": self.pending, "model": "Claude Opus 5", "provider": "claude",
+            "project": {"id": "p", "name": "Project", "root": "/workspace", "settings": {"snapshots": True}},
             "configured_model": CONFIGURED, "effective_model": STANDBY if self.fallback else CONFIGURED, "fallback": self.fallback, "mode": "", "brief": "",
             "tools_off": [], "loop": None, "services": [], "subagents": [], "usage": {}, "context": {"tokens": 42000, "window": 200000, "messages": 38, "summaries": 1, "operator_turns": 6},
             "messages": self.messages,
@@ -125,7 +126,7 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     elif rel == "/api/settings":
         body = {"model": {"preset": "opus"}, "presets": PRESETS}
     elif rel == "/api/sessions":
-        body = {"sessions": [{"id": SESSION, "title": "A session", "status": HOST.status, "created_at": "2026-09-18T12:00:00+00:00", "last_message_at": "2026-09-18T12:00:04+00:00", "run_id": None}], "projects": [], "free": {"total": 1, "active": 0, "loops": 0, "last_message_at": ""}}
+        body = {"sessions": [], "projects": []}
     elif rel.startswith("/api/usage/provider/"):
         body = {"provider": "claude", "today": {"calls": 4}, "subscription": None, "balance": None}
     elif rel in GATES:

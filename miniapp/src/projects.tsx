@@ -1,4 +1,4 @@
-// Projects: a folder the operator adds, and the agents that work inside it. The switcher lives in
+// Projects: a named home for agents and their files. The switcher lives in
 // the shell (the sidebar on a desktop, the Agents header on a phone) because a project is a lens
 // over every list of agents, not a destination of its own.
 
@@ -32,11 +32,6 @@ export function rememberProject(id: string): void {
 
 export function useProjects() {
   return useQuery<Project[]>("/api/projects", { staleMs: 15000 });
-}
-
-/** Whether this page is running in the desktop window, which can open a real folder chooser. */
-export function canPickFolder(): boolean {
-  return typeof window.daedalus?.pickFolder === "function";
 }
 
 function afterChange(): void {
@@ -99,32 +94,22 @@ export function ProjectSwitcher({ projects, current, onPick, onClose, toast }: {
   );
 }
 
-/** Name and folder. In the desktop window the folder comes from the platform's chooser; elsewhere it is typed. */
+type DirectoryEntry = { name: string; path: string; readable: boolean; writable: boolean; project_id?: string | null };
+type DirectoryListing = { roots?: DirectoryEntry[]; docker?: boolean; root?: string; path?: string; parents?: { name: string; path: string }[]; entries?: DirectoryEntry[]; truncated?: boolean };
+
+/** A name is enough. Choosing an existing folder is the optional second step. */
 export function AddProjectSheet({ onClose, onAdded, toast }: { onClose: () => void; onAdded: (p: Project) => void; toast: (t: string) => void }) {
   const [name, setName] = useState("");
   const [root, setRoot] = useState("");
-  const [snapshots, setSnapshots] = useState(false);
+  const [choosing, setChoosing] = useState(false);
   const [busy, setBusy] = useState(false);
-  const browse = useCallback(async () => {
-    try {
-      const picked = await window.daedalus?.pickFolder?.();
-      if (!picked) return; // cancelled
-      setRoot(picked);
-      // The folder's own name is what the operator calls it nine times in ten; they can still type over it.
-      if (!name.trim()) setName(picked.replace(/[/\\]+$/, "").split(/[/\\]/).pop() || "");
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }, [name, toast]);
-  // The server answers 400 on a path that is not absolute, but it answers it into a toast; the
-  // mistake belongs beside the field it was made in.
   const typed = root.trim();
   const rootProblem = typed && !(typed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(typed)) ? t("project.root.problem") : "";
   async function add() {
-    if (!name.trim() || !typed || rootProblem || busy) return;
+    if (!name.trim() || rootProblem || busy) return;
     setBusy(true);
     try {
-      const created = await api.post<Project>("/api/projects", { name: name.trim(), root: root.trim(), snapshots });
+      const created = await api.post<Project>("/api/projects", { name: name.trim(), root: typed || undefined });
       afterChange();
       toast(t(created.reachable ? "project.added" : "project.added.unmounted", { name: created.name }));
       onAdded(created);
@@ -138,22 +123,38 @@ export function AddProjectSheet({ onClose, onAdded, toast }: { onClose: () => vo
     <Sheet title={t("shell.projects.add")} onClose={onClose} size="narrow">
       <label className="field" htmlFor="project-name">{t("common.name")}</label>
       <input id="project-name" className="field" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder={t("project.name.placeholder")} />
-      <label className="field" htmlFor="project-root">{t("project.folder")}</label>
-      <div className="composer-row" style={{ marginTop: 0 }}>
-        <input id="project-root" className="field mono" value={root} onChange={(e) => setRoot(e.target.value)} placeholder="/home/you/projects/bakery" onKeyDown={(e) => e.key === "Enter" && add()} />
-        {canPickFolder() && <button className="btn" onClick={browse} title={t("project.browse.title")}><Icon name="folder" size={15} /> {t("project.browse")}</button>}
-      </div>
-      <div className={rootProblem ? "sub attn" : "sub"}>{rootProblem || t("project.root.hint")}</div>
-      <label className="toggle-row">
-        <input type="checkbox" checked={snapshots} onChange={(e) => setSnapshots(e.target.checked)} />
-        <span>{t("project.snapshots")}</span>
-        <span className="sub">{t("project.snapshots.hint.add")}</span>
-      </label>
+      <button className="disclosure" type="button" onClick={() => setChoosing((value) => !value)} aria-expanded={choosing}><span className={`chev ${choosing ? "down" : ""}`}>›</span> {t("project.existing")}</button>
+      {choosing ? <DirectoryPicker value={root} onChange={setRoot} toast={toast} /> : <div className="sub">{t("project.automatic.hint")}</div>}
+      {rootProblem && <div className="sub attn">{rootProblem}</div>}
       <div className="sheet-foot">
         <button className="btn ghost" onClick={onClose}>{t("common.cancel")}</button>
-        <button className="btn primary" onClick={add} disabled={busy || !name.trim() || !typed || !!rootProblem}>{t("common.add")}</button>
+        <button className="btn primary" onClick={add} disabled={busy || !name.trim() || !!rootProblem}>{t("common.add")}</button>
       </div>
     </Sheet>
+  );
+}
+
+function DirectoryPicker({ value, onChange, toast }: { value: string; onChange: (path: string) => void; toast: (text: string) => void }) {
+  const [listing, setListing] = useState<DirectoryListing | null>(null);
+  const [root, setRoot] = useState("");
+  const load = useCallback(async (nextRoot: string, path: string) => {
+    try {
+      const result = await api.get<DirectoryListing>(`/api/project-directories?root=${encodeURIComponent(nextRoot)}&path=${encodeURIComponent(path)}`);
+      setListing(result);
+      if (result.path) onChange(result.path);
+    } catch (e) { toast(errorText(e)); }
+  }, [onChange, toast]);
+  useEffect(() => { api.get<DirectoryListing>("/api/project-directories").then(setListing).catch((e) => toast(errorText(e))); }, [toast]);
+  return (
+    <div className="directory-picker">
+      <label className="field" htmlFor="project-root">{t("project.folder")}</label>
+      <input id="project-root" className="field mono" value={value} onChange={(e) => onChange(e.target.value)} placeholder={t("project.path.placeholder")} />
+      {listing?.roots && <div className="directory-roots">{listing.roots.map((entry) => <button key={entry.path} className="btn ghost" onClick={() => { setRoot(entry.path); void load(entry.path, entry.path); }}><Icon name="folder" size={14} /> {entry.name}</button>)}</div>}
+      {listing?.parents && <div className="directory-crumbs">{listing.parents.map((entry) => <button key={entry.path} className="linkbtn mono" onClick={() => void load(root, entry.path)}>{entry.name}</button>)}</div>}
+      {listing?.entries?.map((entry) => <button key={entry.path} className="menu-item" disabled={!entry.readable} onClick={() => void load(root, entry.path)}><Icon name="folder" size={15} /><span className="grow truncate">{entry.name}</span>{entry.project_id && <span className="badge">{t("project.already")}</span>}{!entry.writable && <span className="badge attn">{t("project.readonly.short")}</span>}</button>)}
+      {listing?.truncated && <div className="sub attn">{t("project.browser.truncated")}</div>}
+      {listing?.docker && <div className="sub">{t("project.browser.mount")}</div>}
+    </div>
   );
 }
 
@@ -191,7 +192,7 @@ export function ProjectSettingsSheet({ project, onClose, onRemoved, toast }: { p
         : t("project.remove.empty");
     if (!(await confirmAsync(t("project.remove.title", { name: project.name }), { body, action: t("common.remove") }))) return;
     try {
-      await api.delete(`/api/projects/${encodeURIComponent(project.id)}?detach=1`);
+      await api.delete(`/api/projects/${encodeURIComponent(project.id)}`);
       afterChange();
       toast(t("project.removed", { name: project.name }));
       onRemoved();
@@ -225,28 +226,27 @@ export function ProjectSettingsSheet({ project, onClose, onRemoved, toast }: { p
   );
 }
 
-/** Move one agent into a project, between two, or out of every one.
+/** Move one agent into a project or between two projects.
  *
- * Nothing on disk moves, and the sheet says which of the two things that means: an agent that keeps
- * its own directory goes on working in the folder it is in and shares none of the project's files,
- * and one that takes the project's folder sees the rest of the project's work from its next turn on.
+ * Nothing on disk moves. A private choice creates a child in the destination project; the shared
+ * choice uses its root. Files in the old directory stay where they were.
  * The installation's own folders are not offered as a destination — the concierge's Projects tool
  * hides the Voice project for the same reason — unless the session is already in one.
  */
-export function MoveSessionSheet({ sessionId, current, onClose, onMoved, toast }: { sessionId: string; current: string; onClose: () => void; onMoved: () => void; toast: (t: string) => void }) {
+export function MoveSessionSheet({ sessionId, current, currentOwn, onClose, onMoved, toast }: { sessionId: string; current: string; currentOwn: boolean; onClose: () => void; onMoved: () => void; toast: (t: string) => void }) {
   const projects = useProjects();
   const [target, setTarget] = useState(current);
-  const [useFolder, setUseFolder] = useState(false);
+  const [ownDirectory, setOwnDirectory] = useState(currentOwn);
   const [busy, setBusy] = useState(false);
   const chosen = (projects.data ?? []).find((p) => p.id === target);
   async function move() {
     if (busy) return;
     setBusy(true);
     try {
-      await api.post(`/api/sessions/${encodeURIComponent(sessionId)}/project`, { project_id: target || null, use_project_folder: !!target && useFolder });
+      await api.post(`/api/sessions/${encodeURIComponent(sessionId)}/project`, { project_id: target, own_directory: ownDirectory });
       afterChange();
       invalidate(`/api/sessions/${sessionId}`);
-      toast(t(target ? "move.done" : "move.done.free", { name: chosen?.name ?? "" }));
+      toast(t("move.done", { name: chosen?.name ?? "" }));
       onMoved();
       onClose();
     } catch (e) {
@@ -258,8 +258,8 @@ export function MoveSessionSheet({ sessionId, current, onClose, onMoved, toast }
   return (
     <Sheet title={t("move.title")} onClose={onClose} size="narrow">
       <label className="field" htmlFor="move-project">{t("move.where")}</label>
-      <select id="move-project" className="field" value={target} onChange={(e) => setTarget(e.target.value)}>
-        <option value="">{t("move.free")}</option>
+      <select id="move-project" className="field" value={target} onChange={(e) => { setTarget(e.target.value); setOwnDirectory(false); }}>
+        <option value="" disabled>{t("move.choose")}</option>
         {(projects.data ?? []).filter((p) => !p.system || p.id === current).map((p) => (
           <option key={p.id} value={p.id}>{p.name} · {p.root}</option>
         ))}
@@ -267,17 +267,16 @@ export function MoveSessionSheet({ sessionId, current, onClose, onMoved, toast }
       {chosen && (
         <>
           <label className="toggle-row">
-            <input type="checkbox" checked={useFolder} onChange={(e) => setUseFolder(e.target.checked)} disabled={!chosen.reachable} />
-            <span>{t("move.usefolder")}</span>
-            <span className="sub">{t("move.usefolder.hint", { root: chosen.root })}</span>
+            <input type="checkbox" checked={ownDirectory} onChange={(e) => setOwnDirectory(e.target.checked)} disabled={!chosen.reachable} />
+            <span>{t("move.owndirectory")}</span>
+            <span className="sub">{t("move.owndirectory.hint", { root: chosen.root })}</span>
           </label>
-          <div className="sub attn">{useFolder ? t("move.warn.shared", { root: chosen.root }) : t("move.warn.separate", { root: chosen.root })}</div>
+          <div className="sub attn">{ownDirectory ? t("move.warn.separate", { root: chosen.root }) : t("move.warn.shared", { root: chosen.root })}</div>
         </>
       )}
-      {!target && <div className="sub">{t("move.free.hint")}</div>}
       <div className="sheet-foot">
         <button className="btn ghost" onClick={onClose}>{t("common.cancel")}</button>
-        <button className="btn primary" onClick={move} disabled={busy || target === current}>{t("move.action")}</button>
+        <button className="btn primary" onClick={move} disabled={busy || !target || (target === current && ownDirectory === currentOwn)}>{t("move.action")}</button>
       </div>
     </Sheet>
   );

@@ -124,6 +124,7 @@ def detail(messages: int, tail: int, before: int | None) -> dict:
         "workspace_name": "bakery",
         "workspace_own": True,
         "workspace_sessions": [],
+        "project": {"id": "p", "name": "Project", "root": "/workspace", "settings": {"snapshots": True}},
         "pending": None,
         "model": "Claude Opus 5",
         "provider": "claude",

@@ -32,7 +32,7 @@ CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
 ASSERT = os.environ.get("ASSERT", "1") != "0"
 MEASURE = os.environ.get("MEASURE", "")
 
-OPEN_FOLDERS = "try { " + " ".join(f"localStorage.setItem('daedalus.folder.{k}', '1');" for k in [p["id"] for p in PROJECTS] + ["\u0000free"]) + " } catch (e) {}"
+OPEN_FOLDERS = "try { " + " ".join(f"localStorage.setItem('daedalus.folder.{k}', '1');" for k in [p["id"] for p in PROJECTS]) + " } catch (e) {}"
 
 # One reading of the page: rectangles and computed sizes of the parts the redesign is measured by.
 # Every selector has a fallback to the name the same part had before, so the script reads both builds.
