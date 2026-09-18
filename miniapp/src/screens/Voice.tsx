@@ -6,13 +6,20 @@
 // Under it are the words: what was asked, what is being heard, and the reply a sentence at a time.
 // Beside it are the agents the concierge started, each one a tap away from its own session.
 //
+// The middle of the page is a view, though, and the conversation is not. Reading the transcript of
+// what has been said — the concierge's, or any agent's — swaps what is drawn there and touches
+// nothing else: the microphone stays open, the answer goes on being read out, the stream is not
+// reconnected and not a word of what was being recognised is lost. That is why none of those things
+// is in this file any more. They are in `voicesession.ts`, which outlives every view here, and this
+// component subscribes to it the way it would to any other store.
+//
 // The motion is not decoration. There is no other signal on this page: the microphone is open or it
 // is not, the model is loaded or it is loading, the answer is being written or being read out, and a
 // person who is talking rather than reading has to know which from the corner of their eye. Where the
 // reader asked for less of it — `prefers-reduced-motion` — the colours and the words still say all
 // four, and the global rule in styles.css takes the animation away.
 
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "../api";
 import { StatusLabel, timeAgo } from "../components";
 import { t, useLang } from "../i18n";
@@ -21,28 +28,17 @@ import { pathFor, sessionPath } from "../router";
 import { PageHeader, go, screenTitle } from "../shell";
 import { useQuery } from "../store";
 import { errorText, haptic } from "../ui";
-import { createLocalListener, localListenSupported } from "../stt";
+import { localListenSupported } from "../stt";
 import { SpeechRuntimeNotice } from "./Components";
-import { sttFrame } from "../sttview";
-import type { AgentNews, Listener, Speaker, VoicePreset, VoiceUi } from "../voice";
-import {
-  IDLE_VOICE,
-  agentNote,
-  createMeter,
-  createRecognition,
-  createRecorder,
-  createSpeaker,
-  micReady,
-  modelRow,
-  orbVisual,
-  recognitionSupported,
-  recorderSupported,
-  sendUtterance,
-  shouldBargeIn,
-  smoothLevel,
-  voiceLang,
-  voiceReducer,
-} from "../voice";
+import type { AgentNews, VoiceCenter, VoicePreset, VoiceUi } from "../voice";
+import { agentNote, micReady, modelRow, orbVisual, recognitionSupported, recorderSupported, smoothLevel } from "../voice";
+import { holdVoiceSession, voiceSession } from "../voicesession";
+
+// The session view is most of the app's weight — the timeline, the markdown, the windowing, the
+// composer — and the voice page is a page that has to be on the screen before the first sentence of
+// an answer arrives. Loaded when a transcript is first opened, which is the first moment it is worth
+// anything, and never on the way to the orb.
+const SessionScreen = lazy(() => import("./Session").then((m) => ({ default: m.SessionScreen })));
 
 type Agent = AgentNews;
 type VoiceState = {
@@ -84,19 +80,18 @@ type VoiceState = {
   listening: boolean;
 };
 
-/** How long after the last spoken word the microphone stays deaf: a speaker's tail reaches it late. */
-const ECHO_TAIL_MS = 400;
-
-
 export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; toast: (t: string) => void }) {
   const { data: state, refresh } = useQuery<VoiceState>("/api/voice", { staleMs: 10000, pollMs: 60000 });
-  const [ui, dispatch] = useReducer(voiceReducer, IDLE_VOICE);
+  // The conversation. Not built here and not torn down here: this component is one of the things
+  // that can be drawn over it, and it holds the session only for as long as it is on the screen.
+  const session = useMemo(() => voiceSession(), []);
+  useEffect(() => holdVoiceSession(), []);
+  const ui = useSyncExternalStore(session.subscribe, session.state);
   const [typed, setTyped] = useState("");
+  // Whether the agents are showing on a phone, where a transcript takes the whole screen and they
+  // have nowhere to stand beside it. On a wide window the panel is always there and this is unused.
+  const [panel, setPanel] = useState(false);
   useLang();
-  const speaker = useRef<Speaker | null>(null);
-  const listener = useRef<Listener | null>(null);
-  const meter = useRef<ReturnType<typeof createMeter> | null>(null);
-  const lang = useMemo(() => voiceLang(), []);
   // The server produces the audio for both of the first two: a voice on this machine and a speech
   // endpoint both answer /api/voice/tts, and only the browser's own synthesiser does not.
   const serverTts = !!state?.tts?.configured;
@@ -130,71 +125,101 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
         ? t("voice.recogniser.server")
         : "";
 
+  // What the session needs of this reading, handed over rather than read: which engine reads the
+  // next answer, and which of the three listeners to build when the microphone is next opened.
   useEffect(() => {
-    dispatch({ type: "agents", agents: state?.agents ?? [] });
-  }, [state?.agents]);
+    if (!state) return;
+    session.reading({
+      known: !!state.tts,
+      serverTts: !!state.tts?.configured,
+      ttsLoading: state.tts?.kind === "local" && state.tts?.state === "loading",
+      localStt: !!state.stt?.local?.active,
+    });
+  }, [session, state]);
 
-  // The engine's own state comes from the same place the recogniser choice does, so a page opened
+  // The server's half of the timing — how long the first clip took and how much of that was the
+  // voice being built — is on /api/voice, and it is only worth reading once an answer has been said.
+  useEffect(() => session.onAnswered(() => void refresh()), [session, refresh]);
+
+  useEffect(() => {
+    session.dispatch({ type: "agents", agents: state?.agents ?? [] });
+  }, [session, state?.agents]);
+
+  // The engines' own state comes from the same place the recogniser choice does, so a page opened
   // while the weights are still loading starts in "loading" rather than in "ready" with a microphone
-  // that hears nothing.
+  // that hears nothing — and the two progress streams, which say when that finishes, are opened once
+  // for the session rather than once per view.
   useEffect(() => {
     const stt = state?.stt;
     if (!stt) return;
-    dispatch({
+    session.dispatch({
       type: "engine",
       engine: { state: String(stt.state ?? "ready"), model: stt.local?.model ?? "", loadedInMs: Number(stt.loaded_in_ms ?? 0), error: String(stt.error ?? "") },
     });
-  }, [state?.stt]);
-
-  // And the voice's own load, from the same reading. A local voice is built when the process starts,
-  // when it is chosen and when this page is opened; this is how the page knows which of those has
-  // already happened, and therefore whether the next answer is read in it or in the browser's voice.
+  }, [session, state?.stt]);
   useEffect(() => {
     const tts = state?.tts;
     if (!tts) return;
-    dispatch({
+    session.dispatch({
       type: "voice",
       engine: { state: String(tts.kind === "local" ? (tts.state ?? "ready") : "ready"), model: String(tts.voice ?? ""), loadedInMs: Number(tts.loaded_in_ms ?? 0), error: String(tts.error ?? "") },
     });
-  }, [state?.tts]);
+  }, [session, state?.tts]);
+  useEffect(() => {
+    session.watchEngines(state?.stt?.kind === "local", state?.tts?.kind === "local");
+  }, [session, state?.stt?.kind, state?.tts?.kind]);
 
-  // The stream handler is built once, on mount; what it needs of the live state it reads through a ref.
-  const uiRef = useRef(ui);
-  uiRef.current = ui;
-  const refreshRef = useRef(refresh);
-  refreshRef.current = refresh;
+  // ── what is in the middle ────────────────────────────────────────────────────────────────
+  const center = ui.center;
+  const reading = center.view !== "orb";
+  const setCenter = useCallback((next: VoiceCenter) => session.dispatch({ type: "center", center: next }), [session]);
+  const backToVoice = useCallback(() => setCenter({ view: "orb" }), [setCenter]);
+  const openTranscript = useCallback(() => {
+    if (!state?.session_id) return;
+    setCenter({ view: "transcript" });
+  }, [setCenter, state?.session_id]);
+  const toggleTranscript = useCallback(() => {
+    if (reading) backToVoice();
+    else openTranscript();
+  }, [backToVoice, openTranscript, reading]);
 
-  // The page is heard by its own microphone: a laptop or phone speaker plays the answer straight back
-  // into the recogniser, which would barge in on it and then submit the machine's words as the
-  // operator's next utterance. While anything is playing — the server's audio or the browser's own
-  // synthesiser — the listener keeps running and everything it hears is dropped.
-  const speakingRef = useRef(false);
-  const deafUntil = useRef(0);
-  const speakingSince = useRef(0);
-  const earsOpen = useCallback(() => !speakingRef.current && Date.now() >= deafUntil.current, []);
-  const onSpeaking = useCallback((on: boolean) => {
-    speakingRef.current = on;
-    if (on) speakingSince.current = Date.now();
-    else deafUntil.current = Date.now() + ECHO_TAIL_MS;
-    dispatch({ type: "speaking", on });
-  }, []);
+  // One key for the thing the owner asked to reach without stopping the conversation, and Escape to
+  // come back. Read from the physical key rather than the character it produces, so the shortcut is
+  // the same key on a Russian layout as on an English one.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const typing = !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if (typing) return;
+      if (e.code === "KeyT") {
+        e.preventDefault();
+        toggleTranscript();
+      } else if (e.key === "Escape" && reading) {
+        e.preventDefault();
+        backToVoice();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [backToVoice, reading, toggleTranscript]);
 
   // ── the orb's level ──────────────────────────────────────────────────────────────────────
   //
   // Sixty values a second is not React's business: each one would be a render of a page that has a
-  // list on it. The raw level lands in a ref, one animation frame smooths it and writes three custom
-  // properties onto the orb, and the component re-renders only when the phase changes.
+  // list on it. The level lives in the session, one animation frame smooths it and writes three
+  // custom properties onto whichever control is on the screen — the orb, or the small floating one
+  // that replaces it while a transcript is being read — and the component re-renders only when the
+  // phase changes.
   const orb = useRef<HTMLButtonElement | null>(null);
-  const rawLevel = useRef(0);
-  const onLevel = useCallback((level: number) => {
-    rawLevel.current = level;
-  }, []);
   //
   // The loop runs only while there is somebody to see it. A reader who asked for less motion gets the
   // properties written once and the loop never started — the stylesheet pins how the orb looks for
   // them, but the sixty writes a second behind that were still happening and cost more than the
-  // drawing did. A hidden tab is the same case: the page is still mounted, still connected, still
-  // being spoken to, and nothing about that needs an animation frame.
+  // drawing did. A hidden tab is the same case, and so is a hidden orb: the conversation goes on
+  // behind a transcript, and nothing about that needs an animation frame at all.
+  const uiRef = useRef(ui);
+  uiRef.current = ui;
   useEffect(() => {
     const still = window.matchMedia("(prefers-reduced-motion: reduce)");
     let frame = 0;
@@ -213,13 +238,15 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
       node.style.setProperty("--orb-spin", `${visual.spin.toFixed(2)}s`);
     };
     const paint = () => {
-      shown = smoothLevel(shown, rawLevel.current);
+      shown = smoothLevel(shown, session.level());
       write();
       frame = requestAnimationFrame(paint);
     };
     const settle = () => {
       if (frame) cancelAnimationFrame(frame);
       frame = 0;
+      // A control swapped for another one is a different node with no properties written on it yet.
+      last = "";
       if (still.matches || document.hidden) {
         // Written once so the custom properties have values at all: the stylesheet reads them even
         // where it overrides what they do.
@@ -237,336 +264,25 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
       document.removeEventListener("visibilitychange", settle);
       still.removeEventListener("change", settle);
     };
-  }, []);
+  }, [session, reading]);
 
-  // ── the concierge's half of the conversation ────────────────────────────────────────────
-  useEffect(() => {
-    let stop = false;
-    const controller = new AbortController();
-    void (async () => {
-      let backoff = 1000;
-      while (!stop) {
-        try {
-          const response = await fetch("/api/voice/stream", { headers: api.authHeaders(), signal: controller.signal });
-          // One bodiless answer from a proxy is a dropped connection, not the end of the page: fall
-          // through to the backoff below rather than leaving the loop for good.
-          if (!response.body) throw new Error("no stream");
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          backoff = 1000;
-          while (!stop) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const frames = buffer.split("\n\n");
-            buffer = frames.pop() ?? "";
-            for (const frame of frames) {
-              const event = /^event: (.*)$/m.exec(frame)?.[1];
-              const data = /^data: (.*)$/m.exec(frame)?.[1];
-              if (!event || !data) continue;
-              try {
-                handle(event, JSON.parse(data));
-              } catch {
-                /* one malformed frame must not end the stream */
-              }
-            }
-          }
-        } catch {
-          /* aborted or dropped: reconnect below */
-        }
-        if (stop) return;
-        await new Promise((r) => setTimeout(r, backoff));
-        backoff = Math.min(backoff * 2, 15000);
-      }
-    })();
-    function handle(event: string, p: Record<string, any>) {
-      if (event === "partial") dispatch({ type: "partial", text: String(p.text ?? "") });
-      else if (event === "say") {
-        dispatch({ type: "say", text: String(p.text ?? "") });
-        speak(String(p.text ?? ""), String(p.turn ?? ""));
-      } else if (event === "agents") dispatch({ type: "agents", agents: (p.agents ?? []) as Agent[] });
-      else if (event === "error") dispatch({ type: "problem", message: String(p.message ?? "the concierge stopped") });
-      else if (event === "done") {
-        dispatch({ type: "done" });
-        // The server's half of the timing — how long the first clip took and how much of that was
-        // the voice being built — is on /api/voice, and it is only worth reading once an answer has
-        // actually been spoken.
-        void refreshRef.current();
-      }
-      else if (event === "status") {
-        // A run starting is the earliest the page knows the previous answer is over — earlier than
-        // its first sentence, which is the moment that used to arrive behind a queue of clips from
-        // the answer before it. So the speaker is moved on to the new answer here, and whatever was
-        // still waiting to be read out of the old one is marked rather than read late.
-        if (String(p.state ?? "") === "thinking" && p.turn) speaker.current?.beginTurn(String(p.turn));
-        dispatch({ type: "status", state: String(p.state ?? "idle"), title: String(p.title ?? "") });
-      }
-    }
-    return () => {
-      stop = true;
-      controller.abort();
-    };
-  }, []);
-
-  // ── the model loading into memory ────────────────────────────────────────────────────────
-  //
-  // Opening this page starts the load (the server does it when it answers /api/voice); this is how
-  // the page hears about it finishing without polling for it.
-  useEffect(() => {
-    if (state?.stt?.kind !== "local") return;
-    const controller = new AbortController();
-    void (async () => {
-      try {
-        const response = await fetch("/api/stt/progress", { headers: api.authHeaders(), signal: controller.signal });
-        if (!response.body) return;
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) return;
-          buffer += decoder.decode(value, { stream: true });
-          const frames = buffer.split("\n\n");
-          buffer = frames.pop() ?? "";
-          for (const chunk of frames) {
-            const data = /^data: (.*)$/m.exec(chunk)?.[1];
-            if (!data) continue;
-            try {
-              const frame = sttFrame(JSON.parse(data));
-              if (frame?.kind === "engine") {
-                dispatch({ type: "engine", engine: { state: frame.load.state, model: frame.load.model, loadedInMs: frame.load.loaded_in_ms, error: frame.load.error } });
-              }
-            } catch {
-              /* one malformed frame must not end the stream */
-            }
-          }
-        }
-      } catch {
-        /* the page navigated away, or the stream dropped */
-      }
-    })();
-    return () => controller.abort();
-  }, [state?.stt?.kind]);
-
-  // ── the voice loading into memory ────────────────────────────────────────────────────────
-  //
-  // The same shape as the model's stream above and for the same reason: the load starts when the
-  // page is opened and finishes a second or two later, and polling /api/voice for it would mean the
-  // page speaks the second answer in the browser's voice as well.
-  useEffect(() => {
-    if (state?.tts?.kind !== "local") return;
-    const controller = new AbortController();
-    void (async () => {
-      try {
-        const response = await fetch("/api/tts/progress", { headers: api.authHeaders(), signal: controller.signal });
-        if (!response.body) return;
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) return;
-          buffer += decoder.decode(value, { stream: true });
-          const frames = buffer.split("\n\n");
-          buffer = frames.pop() ?? "";
-          for (const chunk of frames) {
-            const data = /^data: (.*)$/m.exec(chunk)?.[1];
-            if (!data) continue;
-            try {
-              const frame = JSON.parse(data) as { kind?: string; state?: string; voice?: string; loaded_in_ms?: number; error?: string };
-              if (frame?.kind !== "engine") continue;
-              dispatch({
-                type: "voice",
-                engine: { state: String(frame.state ?? "idle"), model: String(frame.voice ?? ""), loadedInMs: Number(frame.loaded_in_ms ?? 0), error: String(frame.error ?? "") },
-              });
-            } catch {
-              /* one malformed frame must not end the stream */
-            }
-          }
-        }
-      } catch {
-        /* the page navigated away, or the stream dropped */
-      }
-    })();
-    return () => controller.abort();
-  }, [state?.tts?.kind]);
-
-  // ── speaking ─────────────────────────────────────────────────────────────────────────────
-  //
-  // The speaker is rebuilt when the page learns which of the three speaks, and that reading arrives
-  // after the stream is already open: a sentence that lands in the gap used to be handed to a null
-  // and dropped without a trace, which is one of the ways the first answer of a conversation was
-  // never heard. It waits here instead, and is spoken by whichever speaker is built next.
-  // A sentence that arrives before the page knows which of the three speaks waits here.
-  //
-  // The reading of /api/voice lands after the concierge's stream is already open, and which engine
-  // reads an answer is settled once, at its first sentence: a sentence handed over in that gap would
-  // commit the whole answer to the browser's own synthesiser on a machine that has a voice of its
-  // own. That is the first answer of every conversation, which is exactly the one that was reported
-  // as unspoken. So it waits — for the reading, not for a timer — and is spoken the moment the page
-  // knows what is speaking.
-  const waiting = useRef<[string, string][]>([]);
-  const ttsKnown = !!state?.tts;
-  const ttsKnownRef = useRef(ttsKnown);
-  ttsKnownRef.current = ttsKnown;
-  const speak = useCallback((text: string, turn: string) => {
-    if (!text.trim()) return;
-    if (speaker.current && ttsKnownRef.current) speaker.current.say(text, turn);
-    else waiting.current.push([text, turn]);
-  }, []);
-  const release = useCallback(() => {
-    if (!speaker.current || !ttsKnownRef.current) return;
-    const held = waiting.current;
-    waiting.current = [];
-    for (const [text, turn] of held) speaker.current.say(text, turn);
-  }, []);
-  useEffect(() => {
-    if (ttsKnown) release();
-  }, [ttsKnown, release]);
-  const onUnspoken = useCallback((text: string) => dispatch({ type: "unspoken", text }), []);
-  const onBlocked = useCallback((on: boolean) => dispatch({ type: "blocked", on }), []);
-  const onFirstAudio = useCallback((turn: string, ms: number) => dispatch({ type: "audio", turn, ms }), []);
-  // Which engine reads the next answer is asked of these refs at the start of each answer rather
-  // than being baked into the speaker: the speaker outlives every reading of /api/voice, and an
-  // answer that arrives while the chosen voice is still being built is read by the browser rather
-  // than waited for. One answer late in the wrong voice beats one answer in silence.
-  const ttsRef = useRef({ server: serverTts, loading: ttsLoading });
-  ttsRef.current = { server: serverTts, loading: ttsLoading };
-  const engine = useCallback((): "server" | "here" => {
-    const { server, loading } = ttsRef.current;
-    if (!server) return "here";
-    if (loading && "speechSynthesis" in window) return "here";
-    return "server";
-  }, []);
-  useEffect(() => {
-    speaker.current = createSpeaker({ engine, lang, onSpeaking, onLevel, onUnspoken, onBlocked, onFirstAudio });
-    release();
-    return () => {
-      speaker.current?.stop();
-      speaker.current = null;
-    };
-  }, [engine, lang, onSpeaking, onLevel, onUnspoken, onBlocked, onFirstAudio, release]);
-
-  // ── what the operator says ───────────────────────────────────────────────────────────────
-  const send = useCallback(async (text: string) => {
-    const body = text.trim();
-    if (!body) return;
-    // The previous answer is over the moment another question is asked. Anything of it still queued
-    // would otherwise be read out over the answer to this one.
-    speaker.current?.cancel();
-    dispatch({ type: "asked", text: body });
-    try {
-      await api.post("/api/voice/say", { text: body });
-    } catch (e) {
-      dispatch({ type: "problem", message: errorText(e) });
-    }
-  }, []);
-
-  const bargeIn = useCallback(() => {
-    // Three things stop, and all three have to: the clip that is playing, the request fetching the
-    // rest of the answer (`cancel` aborts it, which is what stops the synthesiser at the far end),
-    // and the run that is producing the sentences.
-    speaker.current?.cancel();
-    dispatch({ type: "barge" });
-    // The tail the speaker leaves behind is for its own echo. The operator is talking *now*, and
-    // deafening the page for four hundred milliseconds would drop the start of what they said.
-    deafUntil.current = 0;
-    void api.post("/api/voice/interrupt", {}).catch(() => undefined);
-  }, []);
-
-  /** Somebody started talking. `shouldBargeIn` decides whose voice that is; this acts on the answer. */
-  const onSpeechStart = useCallback(
-    (level?: number) => {
-      // The browser's own recognition reports that somebody started talking and never says how
-      // loudly, and a listener with no measurement at all is believed — that is its own voice
-      // activity detector talking. But on that path the page *does* measure, through the meter it
-      // opened for the orb, and not using that reading meant the page's own speaker barging in on
-      // itself four hundred milliseconds into every answer.
-      const heard = level ?? (meter.current ? rawLevel.current : undefined);
-      if (!shouldBargeIn({ speaking: speakingRef.current, playingForMs: Date.now() - speakingSince.current, level: heard })) return;
-      haptic("light");
-      bargeIn();
+  const send = useCallback(
+    (text: string) => {
+      void session.send(text);
     },
-    [bargeIn],
+    [session],
   );
-
-  const startMic = useCallback(async () => {
-    speaker.current?.unlock();
-    const handlers = {
-      onInterim: (text: string) => {
-        // Words while the answer is being read out are the operator talking over it, and this is the
-        // second chance to notice. A listener announces speech once, at the moment it first hears
-        // it, and if the page could not act on that one moment — it was a breath between two
-        // sentences, or inside the echo guard that keeps the page from interrupting itself — nothing
-        // would ever say it again and the operator could not interrupt for the rest of what they
-        // were saying. Every interim that arrives while the page is speaking is another chance to
-        // decide, and `shouldBargeIn` decides it the same way each time.
-        if (!earsOpen()) {
-          onSpeechStart();
-          return;
-        }
-        dispatch({ type: "heard", text });
-      },
-      onFinal: (text: string) => earsOpen() && void send(text),
-      onSpeechStart,
-      onError: (message: string) => dispatch({ type: "problem", message }),
-      onLevel,
-    };
-    const l = localStt
-      ? createLocalListener(handlers)
-      : canRecognise
-        ? createRecognition(lang, handlers)
-        : createRecorder({
-            ...handlers,
-            onUtterance: async (blob) => {
-              if (!earsOpen()) return;
-              try {
-                const text = await sendUtterance(blob);
-                if (text.trim()) dispatch({ type: "asked", text: text.trim() });
-              } catch (e) {
-                dispatch({ type: "problem", message: errorText(e) });
-              }
-            },
-          });
-    listener.current = l;
-    await l.start();
-    // The browser's own recognition hands over words and no audio at all, so on that path the level
-    // the orb reacts to comes from a second, read-only tap on the microphone.
-    if (l.kind === "recognition") {
-      meter.current = createMeter(onLevel);
-      void meter.current.start();
-    }
-    dispatch({ type: "mic", on: true });
-    haptic("medium");
-  }, [canRecognise, earsOpen, lang, localStt, onLevel, onSpeechStart, send]);
-
-  const stopMic = useCallback(() => {
-    listener.current?.stop();
-    listener.current = null;
-    meter.current?.stop();
-    meter.current = null;
-    rawLevel.current = 0;
-    dispatch({ type: "mic", on: false });
-  }, []);
-
-  useEffect(
-    () => () => {
-      listener.current?.stop();
-      meter.current?.stop();
-    },
-    [],
-  );
+  const toggleMic = useCallback(() => {
+    if (ui.micOn) session.stopMic();
+    else void session.startMic();
+  }, [session, ui.micOn]);
 
   async function newConversation() {
-    stopMic();
-    speaker.current?.cancel();
-    dispatch({ type: "cleared" });
     try {
-      await api.post("/api/voice/new", {});
+      await session.clear();
       await refresh();
     } catch (e) {
-      dispatch({ type: "problem", message: errorText(e) });
+      session.dispatch({ type: "problem", message: errorText(e) });
     }
   }
 
@@ -589,6 +305,36 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
   // Only the one question the page can act on: an installation with no model quick enough to hold a
   // conversation is told where to get one, rather than left to wonder why every answer is late.
   const model = modelRow(state);
+  const hint = !ready
+    ? t("voice.loading.model", { name: modelName || t("voice.phase.loading") })
+    : ui.engine.state === "error"
+      ? t("voice.loading.failed", { name: modelName, error: ui.engine.error })
+      : ttsKind === "local" && ui.voice.state === "loading"
+        ? t("voice.loading.voice")
+        : ttsKind === "local" && ui.voice.state === "error"
+          ? t("voice.loading.voice.failed", { error: ui.voice.error })
+          : !canTalk
+            ? t("voice.tap.none")
+            : ui.micOn
+              ? t("voice.tap.stop")
+              : t("voice.tap");
+  const composer = (
+    <form
+      className="voice-compose"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const text = typed;
+        setTyped("");
+        send(text);
+      }}
+    >
+      <input className="field" placeholder={t("voice.compose")} value={typed} onChange={(e) => setTyped(e.target.value)} aria-label={t("voice.compose.label")} />
+      <button className="btn ghost" type="submit" disabled={!typed.trim()} aria-label={t("voice.compose.label")}>
+        <Icon name="send" size={16} />
+      </button>
+    </form>
+  );
+  const agentTitle = center.view === "agent" ? center.title : "";
   return (
     <>
       <PageHeader
@@ -597,9 +343,9 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
         actions={
           <>
             {state?.session_id && (
-              <a className="btn ghost small" href={sessionPath(state.session_id)} onClick={(e) => go(e, sessionPath(state.session_id))}>
-                {t("voice.transcript")}
-              </a>
+              <button className={`btn ghost small${reading ? " on" : ""}`} onClick={toggleTranscript} aria-pressed={reading} title={t("voice.transcript.key")}>
+                {t(reading ? "voice.transcript.back" : "voice.transcript")}
+              </button>
             )}
             <button className="btn small" onClick={() => void newConversation()}>
               {t("voice.new")}
@@ -608,119 +354,162 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
         }
       />
       <div className="screen wide voice">
-        <div className="voice-grid">
-          <section className={`voice-stage card phase-${ui.phase}`}>
-            <div className="voice-chips">
-              <PhaseChip ui={ui} />
-              <span className="chip quiet">{spokenBy}</span>
+        <div className={`voice-grid${reading ? " reading" : ""}${panel ? " panel-open" : ""}`}>
+          {/* One area, two things that can be in it. The key is what makes the swap a cross-fade
+              rather than a cut — a fresh node for the arriving view — and it is the only thing about
+              this change that the conversation behind it can see at all. */}
+          <div className={`voice-centre phase-${ui.phase}`}>
+            <div className="voice-centre-view" key={center.view === "agent" ? `agent-${center.id}` : center.view}>
+              {center.view === "orb" ? (
+                <section className={`voice-stage card phase-${ui.phase}`}>
+                  <div className="voice-chips">
+                    <PhaseChip ui={ui} />
+                    <span className="chip quiet">{spokenBy}</span>
+                  </div>
+
+                  {/* The page where the absence is felt: the chip above says "the browser's own" and
+                      this says what would change that, with the size on the button. It renders
+                      nothing once the runtime is installed. */}
+                  <SpeechRuntimeNotice toast={toast} onInstalled={refresh} />
+
+                  <div className="voice-orb-wrap">
+                    <button
+                      ref={orb}
+                      className={`voice-orb ${ui.micOn ? "on" : ""}`}
+                      onClick={toggleMic}
+                      disabled={!canTalk || !ready}
+                      aria-pressed={ui.micOn}
+                      aria-label={ui.micOn ? t("voice.mic.stop") : t("voice.mic.start")}
+                    >
+                      <span className="orb-halo" aria-hidden />
+                      <span className="orb-shell" aria-hidden />
+                      <span className="orb-sweep" aria-hidden />
+                      <span className="orb-ring" aria-hidden />
+                      <span className="orb-ring two" aria-hidden />
+                      <span className="orb-glyph" aria-hidden>
+                        <Icon name="mic" size={36} />
+                      </span>
+                    </button>
+                  </div>
+
+                  <div className="voice-hint sub">{hint}</div>
+
+                  <Captions ui={ui} />
+
+                  {/* Where the time went, for the one person who can do something about it. It is a
+                      measurement of the last answer and nothing else: how long from the sentence
+                      being written to a sound, and how much of that was the voice being built rather
+                      than speaking. A warm voice makes the second number disappear, which is the
+                      point. */}
+                  <SpokenTiming ms={ui.firstAudioMs} turn={state?.tts?.last_turn} />
+
+                  {/* There is no asking a browser whether it will make a sound; it is found out by
+                      handing it a sentence and hearing nothing start. When that happens the page
+                      says so and offers the one thing that fixes it, which is a tap — the same tap
+                      the microphone needs. */}
+                  {ui.blocked && (
+                    <div className="voice-blocked">
+                      <span>{t("voice.sound.blocked")}</span>
+                      <button
+                        className="btn small"
+                        onClick={() => {
+                          session.unlock();
+                          session.dispatch({ type: "blocked", on: false });
+                          haptic("light");
+                        }}
+                      >
+                        {t("voice.sound.enable")}
+                      </button>
+                    </div>
+                  )}
+
+                  {composer}
+                  <div className="sub voice-why">{canTalk ? t("voice.listening.with", { what: recogniser }) : t("voice.recogniser.none")}</div>
+                  {model.addFast && (
+                    <div className="sub voice-why">
+                      {t("voice.card.model.none")}{" "}
+                      <a href={pathFor("settings", "models")} onClick={(e) => go(e, pathFor("settings", "models"))}>
+                        {t("voice.card.model.add")}
+                      </a>
+                    </div>
+                  )}
+                </section>
+              ) : (
+                <section className={`card voice-read${center.view === "transcript" ? " own" : ""}`}>
+                  <div className="voice-crumbs">
+                    <button className="iconbtn" onClick={backToVoice} aria-label={t("voice.transcript.back")} title={t("voice.transcript.back")}>
+                      <Icon name="back" />
+                    </button>
+                    <nav className="voice-crumb" aria-label={t("voice.crumb.label")}>
+                      <button className="link" onClick={backToVoice}>
+                        {screenTitle("voice")}
+                      </button>
+                      <span aria-hidden>›</span>
+                      <b className="truncate">{center.view === "agent" ? agentTitle : t("voice.crumb.own")}</b>
+                    </nav>
+                    <button className="btn ghost small phone-only voice-panel-key" onClick={() => setPanel((v) => !v)} aria-pressed={panel}>
+                      {t("voice.agents")}
+                      {agents.length ? ` · ${agents.length}` : ""}
+                    </button>
+                    {center.view === "agent" && (
+                      <a
+                        className="btn ghost small wide-only"
+                        href={sessionPath(center.id)}
+                        onClick={(e) => {
+                          // The agent's own full page is still one tap away, and taking it leaves
+                          // the voice page — which ends the conversation, as leaving always has.
+                          e.preventDefault();
+                          onOpen(center.id);
+                        }}
+                      >
+                        {t("voice.agent.open")}
+                      </a>
+                    )}
+                  </div>
+                  <div className="voice-read-body">
+                    <Suspense fallback={<div className="sub voice-read-wait">{t("common.loading")}</div>}>
+                      <SessionScreen id={center.view === "agent" ? center.id : state?.session_id || ""} onBack={backToVoice} onOpen={onOpen} toast={toast} />
+                    </Suspense>
+                  </div>
+                  {/* The concierge's own transcript has no composer of its own here: what is said to
+                      the concierge is said out loud, or typed into the field the voice page has
+                      always had, and two composers a centimetre apart that send to the same session
+                      is a question the operator should not have to answer. An agent's transcript
+                      keeps its own, because typing to an agent is the reason for opening it. */}
+                  {center.view === "transcript" && (
+                    <div className="voice-read-foot">
+                      <Captions ui={ui} />
+                      {composer}
+                    </div>
+                  )}
+                </section>
+              )}
             </div>
 
-            {/* The page where the absence is felt: the chip above says "the browser's own" and this
-                says what would change that, with the size on the button. It renders nothing once the
-                runtime is installed. */}
-            <SpeechRuntimeNotice toast={toast} onInstalled={refresh} />
-
-            <div className="voice-orb-wrap">
+            {/* The microphone, while the orb is not on the screen: bottom right on a wide window and
+                bottom centre on a phone, the same six states in the same six colours, and a
+                miniature of the same motion driven by the same three properties. */}
+            {reading && (
               <button
                 ref={orb}
-                className={`voice-orb ${ui.micOn ? "on" : ""}`}
-                onClick={() => (ui.micOn ? stopMic() : void startMic())}
+                className={`voice-mic-float phase-${ui.phase} ${ui.micOn ? "on" : ""}`}
+                onClick={toggleMic}
                 disabled={!canTalk || !ready}
                 aria-pressed={ui.micOn}
                 aria-label={ui.micOn ? t("voice.mic.stop") : t("voice.mic.start")}
+                title={t(`voice.phase.${ui.phase}`)}
               >
                 <span className="orb-halo" aria-hidden />
                 <span className="orb-shell" aria-hidden />
                 <span className="orb-sweep" aria-hidden />
                 <span className="orb-ring" aria-hidden />
-                <span className="orb-ring two" aria-hidden />
                 <span className="orb-glyph" aria-hidden>
-                  <Icon name="mic" size={36} />
+                  <Icon name="mic" size={20} />
                 </span>
+                <span className="voice-mic-word">{t(`voice.phase.${ui.phase}`)}</span>
               </button>
-            </div>
-
-            <div className="voice-hint sub">
-              {!ready
-                ? t("voice.loading.model", { name: modelName || t("voice.phase.loading") })
-                : ui.engine.state === "error"
-                  ? t("voice.loading.failed", { name: modelName, error: ui.engine.error })
-                  : ttsKind === "local" && ui.voice.state === "loading"
-                    ? t("voice.loading.voice")
-                    : ttsKind === "local" && ui.voice.state === "error"
-                      ? t("voice.loading.voice.failed", { error: ui.voice.error })
-                      : !canTalk
-                        ? t("voice.tap.none")
-                        : ui.micOn
-                          ? t("voice.tap.stop")
-                          : t("voice.tap")}
-            </div>
-
-            <div className="voice-captions" aria-live="polite">
-              {ui.asked && <p className="voice-asked">{ui.asked}</p>}
-              {ui.heard && <p className="voice-heard">{ui.heard}</p>}
-              <div className="voice-said">
-                {ui.spoken.map((sentence, i) => (
-                  <span className={`voice-sentence${ui.unspoken.includes(sentence) ? " unspoken" : ""}`} key={`${i}-${sentence.slice(0, 12)}`}>
-                    {sentence}
-                    {ui.unspoken.includes(sentence) && <i className="voice-unspoken">{t("voice.unspoken")}</i>}{" "}
-                  </span>
-                ))}
-                {!ui.spoken.length && ui.partial && <span className="voice-sentence writing">{ui.partial}</span>}
-                {!ui.spoken.length && !ui.partial && <span className="voice-waiting" aria-hidden />}
-              </div>
-              {ui.problem && <p className="voice-problem">{ui.problem}</p>}
-            </div>
-
-            {/* Where the time went, for the one person who can do something about it. It is a
-                measurement of the last answer and nothing else: how long from the sentence being
-                written to a sound, and how much of that was the voice being built rather than
-                speaking. A warm voice makes the second number disappear, which is the point. */}
-            <SpokenTiming ms={ui.firstAudioMs} turn={state?.tts?.last_turn} />
-
-            {/* There is no asking a browser whether it will make a sound; it is found out by handing
-                it a sentence and hearing nothing start. When that happens the page says so and offers
-                the one thing that fixes it, which is a tap — the same tap the microphone needs. */}
-            {ui.blocked && (
-              <div className="voice-blocked">
-                <span>{t("voice.sound.blocked")}</span>
-                <button
-                  className="btn small"
-                  onClick={() => {
-                    speaker.current?.unlock();
-                    dispatch({ type: "blocked", on: false });
-                    haptic("light");
-                  }}
-                >
-                  {t("voice.sound.enable")}
-                </button>
-              </div>
             )}
-
-            <form
-              className="voice-compose"
-              onSubmit={(e) => {
-                e.preventDefault();
-                const text = typed;
-                setTyped("");
-                void send(text);
-              }}
-            >
-              <input className="field" placeholder={t("voice.compose")} value={typed} onChange={(e) => setTyped(e.target.value)} aria-label={t("voice.compose.label")} />
-              <button className="btn ghost" type="submit" disabled={!typed.trim()} aria-label={t("voice.compose.label")}>
-                <Icon name="send" size={16} />
-              </button>
-            </form>
-            <div className="sub voice-why">{canTalk ? t("voice.listening.with", { what: recogniser }) : t("voice.recogniser.none")}</div>
-            {model.addFast && (
-              <div className="sub voice-why">
-                {t("voice.card.model.none")}{" "}
-                <a href={pathFor("settings", "models")} onClick={(e) => go(e, pathFor("settings", "models"))}>
-                  {t("voice.card.model.add")}
-                </a>
-              </div>
-            )}
-          </section>
+          </div>
 
           <aside className="voice-agents">
             <h2 className="voice-agents-head">
@@ -730,8 +519,17 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
             {agents.length === 0 && <div className="sub voice-agents-empty">{t("voice.agents.empty")}</div>}
             {agents.map((a) => {
               const note = agentNote(a);
+              const open = center.view === "agent" && center.id === a.session_id;
               return (
-                <button key={a.session_id} className="card row pressable voice-agent" onClick={() => onOpen(a.session_id)}>
+                <button
+                  key={a.session_id}
+                  className={`card row pressable voice-agent${open ? " open" : ""}`}
+                  aria-pressed={open}
+                  onClick={() => {
+                    setPanel(false);
+                    setCenter(open ? { view: "orb" } : { view: "agent", id: a.session_id, title: a.title });
+                  }}
+                >
                   <div className="grow">
                     <div className="voice-agent-top">
                       <b className="truncate">{a.title}</b>
@@ -747,6 +545,27 @@ export function VoiceScreen({ onOpen, toast }: { onOpen: (id: string) => void; t
         </div>
       </div>
     </>
+  );
+}
+
+/** What was asked, what is being heard, and the answer a sentence at a time. */
+function Captions({ ui }: { ui: VoiceUi }) {
+  return (
+    <div className="voice-captions" aria-live="polite">
+      {ui.asked && <p className="voice-asked">{ui.asked}</p>}
+      {ui.heard && <p className="voice-heard">{ui.heard}</p>}
+      <div className="voice-said">
+        {ui.spoken.map((sentence, i) => (
+          <span className={`voice-sentence${ui.unspoken.includes(sentence) ? " unspoken" : ""}`} key={`${i}-${sentence.slice(0, 12)}`}>
+            {sentence}
+            {ui.unspoken.includes(sentence) && <i className="voice-unspoken">{t("voice.unspoken")}</i>}{" "}
+          </span>
+        ))}
+        {!ui.spoken.length && ui.partial && <span className="voice-sentence writing">{ui.partial}</span>}
+        {!ui.spoken.length && !ui.partial && <span className="voice-waiting" aria-hidden />}
+      </div>
+      {ui.problem && <p className="voice-problem">{ui.problem}</p>}
+    </div>
   );
 }
 

@@ -4,6 +4,21 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-18
 
+- **The transcript opens without ending the voice conversation.** Pressing **Transcript** (or `T`)
+  puts the conversation's own transcript where the orb was, and tapping an agent in the panel puts
+  that agent's transcript there instead — with a breadcrumb saying which, its own composer so the
+  operator can type to it, and the panel still beside it. Nothing is interrupted by any of that: the
+  answer goes on being read out, the microphone stays open, a half-recognised utterance is not lost
+  and the concierge's stream is not reopened. The microphone becomes a small floating control —
+  bottom right on a wide window, bottom centre on a phone — that shows the same six states in the
+  same six colours with a miniature of the orb's own motion, and barge-in and tap-to-talk work from
+  it. **Back to voice** brings the orb back over a 200 ms cross-fade.
+- **The voice session is no longer owned by the page that draws it.** The recogniser, the speaker
+  and its queue, the event stream and the two engine-load watchers live in one object outside the
+  component tree, held while the page is open and let go when it is left. That is what makes the
+  paragraph above true rather than merely intended: changing what is on the screen builds nothing
+  and tears nothing down. On a phone the transcript takes the whole screen and the agents panel
+  becomes a sheet that rises over it.
 - **The voice is built before it is needed, and an answer is never read out over the one before
   it.** The first answer of a session used to arrive on the screen and be read aloud about fifteen
   seconds later, and when the next answer came the page played both, one after the other. A voice

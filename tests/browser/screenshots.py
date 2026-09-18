@@ -887,6 +887,31 @@ def talking(page: Page) -> None:
     page.locator(".voice-compose button[type=submit]").click()
 
 
+def reading(page: Page) -> None:
+    """Ask something, then open the transcript of this very conversation while it is being answered.
+
+    The button is found by its place rather than by its word: the page is photographed in two
+    languages and the first action in the header is the transcript in both of them.
+    """
+    talking(page)
+    page.wait_for_timeout(900)
+    page.locator(".pagehead-actions .btn.ghost").first.click()
+    page.wait_for_selector(".voice-read .chat-scroll", timeout=15000)
+
+
+def reading_agent(page: Page) -> None:
+    """The same, for one of the agents the concierge started: its transcript, the conversation kept."""
+    talking(page)
+    page.wait_for_timeout(900)
+    page.locator(".voice-agent").first.click()
+    page.wait_for_selector(".voice-read .chat-scroll", timeout=15000)
+
+
+# The two views that are not a state of the orb but a change of what is in the middle of the page.
+# Both are taken mid-answer, because the whole point of them is that the answer is still being read.
+VOICE_VIEWS = {"transcript": reading, "agent": reading_agent}
+
+
 def voice_shots(page: Page, prefix: str) -> None:
     for name, plan in VOICE_STATES.items():
         stub.voice_over = plan["over"]  # type: ignore[attr-defined]
@@ -894,6 +919,11 @@ def voice_shots(page: Page, prefix: str) -> None:
         stub.voice_frames = plan["frames"]  # type: ignore[attr-defined]
         before = talking if plan["ask"] else listening if plan["mic"] else None
         shot(page, f"{prefix}{name}", "voice", settle=1000, before=before)
+    stub.voice_over = {}  # type: ignore[attr-defined]
+    stub.voice_tts = None  # type: ignore[attr-defined]
+    stub.voice_frames = VOICE_STATES["speaking"]["frames"]  # type: ignore[attr-defined]
+    for name, before in VOICE_VIEWS.items():
+        shot(page, f"{prefix}{name}", "voice", settle=1200, before=before)
     stub.voice_over = None  # type: ignore[attr-defined]
     stub.voice_tts = None  # type: ignore[attr-defined]
     stub.voice_frames = ""  # type: ignore[attr-defined]
