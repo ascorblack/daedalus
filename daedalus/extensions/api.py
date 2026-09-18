@@ -14,9 +14,12 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
+import threading
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -769,6 +772,79 @@ FILE_GREP_MAX_FILESIZE = "1M"
 
 FILE_GREP_MAX_COLUMNS = 300
 """How much of a matching line comes back. A minified bundle is one line and nobody wants all of it."""
+
+FILE_SEARCH_WORKERS = 4
+"""Threads the two searches share. Their own pool, because a filter box typed into over a large tree
+would otherwise park one of the process's general-purpose threads per key press."""
+
+FILE_SEARCH_WATCH_TICK_SECONDS = 0.02
+"""How often the watchdog over a search subprocess looks at its budget and at the caller's flag."""
+
+
+_search_threads: ThreadPoolExecutor | None = None
+
+
+def _search_pool() -> ThreadPoolExecutor:
+    """The searches' own small pool, made on first use.
+
+    Nothing else runs on it: a search that overruns can only ever queue behind another search, never
+    behind — or in front of — the rest of the process's blocking work.
+    """
+    global _search_threads
+    if _search_threads is None:
+        _search_threads = ThreadPoolExecutor(max_workers=FILE_SEARCH_WORKERS, thread_name_prefix="file-search")
+    return _search_threads
+
+
+def _end_search(process: subprocess.Popen[str]) -> None:
+    """End a search's ripgrep, and anything it started, at once.
+
+    The pipe the reader waits on is held open by every process that inherited it, so killing only
+    the one that was started can leave the read blocked on a child of it. The searches give their
+    subprocess a session of its own precisely so that the whole of it can be ended here.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
+    process.kill()
+
+
+def _kill_after(process: subprocess.Popen[str], budget: float, cancel: threading.Event | None) -> Callable[[], None]:
+    """Kill ``process`` once ``budget`` is spent or ``cancel`` is raised; the returned call ends the watch.
+
+    A search that matches nothing writes no line at all, so the reader blocks in the pipe and no
+    deadline inside the loop around it is ever reached. The bound has to sit on the process rather
+    than on the loop: killing it ends the read by EOF, and the loop's own truncation logic then runs
+    exactly as it does when a bound on results or entries is the one that was hit.
+    """
+    done = threading.Event()
+
+    def watch() -> None:
+        end = time.monotonic() + budget
+        while not done.wait(FILE_SEARCH_WATCH_TICK_SECONDS):
+            if time.monotonic() >= end or (cancel is not None and cancel.is_set()):
+                _end_search(process)
+                return
+
+    threading.Thread(target=watch, name="file-search-watchdog", daemon=True).start()
+    return done.set
+
+
+async def _run_search(work: Callable[..., Any], *args: Any) -> Any:
+    """Run one blocking search on the searches' own pool and stop it when the caller gives up.
+
+    A thread cannot be cancelled, but it can be told: the flag handed to the search ends its walk at
+    the next entry and kills its ripgrep within a tick, so a browser that moved on does not leave a
+    tree walk running behind it.
+    """
+    cancel = threading.Event()
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(_search_pool(), work, *args, cancel)
+    except asyncio.CancelledError:
+        cancel.set()
+        raise
 
 
 _TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -2893,14 +2969,22 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             for name in sorted(names):
                 yield name if str(base) == "." else f"{base}/{name}"
 
-    def _rg_lines(args: list[str], root: Path) -> Iterator[str]:
-        """Run ripgrep in ``root`` and hand back its output a line at a time.
+    def _rg_lines(args: list[str], root: Path, budget: float, cancel: threading.Event | None = None) -> Iterator[str]:
+        """Run ripgrep in ``root`` and hand back its output a line at a time, for at most ``budget`` seconds.
 
-        The caller stops at its own bound, so the process must not be left to finish a walk nobody
-        is reading: closing the generator kills it and drains the pipe, which is why every caller
-        wraps this in ``closing``.
+        The budget is enforced on the process, not between the lines it writes: a query with no
+        matches writes nothing, and a reader waiting on that pipe consults no deadline of its own.
+        The watchdog kills ripgrep when the budget is spent or when ``cancel`` is raised, the read
+        ends by EOF, and the caller sees a short answer instead of a walk of the whole tree.
+
+        The caller also stops at its own bounds, so the process must not be left to finish a walk
+        nobody is reading: closing the generator kills it and drains the pipe, which is why every
+        caller wraps this in ``closing``.
         """
-        process = subprocess.Popen(args, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace")
+        process = subprocess.Popen(
+            args, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace", start_new_session=True
+        )
+        stop_watch = _kill_after(process, budget, cancel)
         try:
             assert process.stdout is not None
             for line in process.stdout:
@@ -2908,21 +2992,22 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 if stripped:
                     yield stripped
         finally:
-            process.kill()
+            stop_watch()
+            _end_search(process)
             if process.stdout is not None:
                 process.stdout.close()
             process.wait()
 
-    def _rg_file_list(root: Path) -> Iterator[str] | None:
+    def _rg_file_list(root: Path, budget: float, cancel: threading.Event | None) -> Iterator[str] | None:
         """Ripgrep's own file list, which already honours .gitignore — ``None`` where ripgrep is not installed."""
         if shutil.which("rg") is None:
             return None
         args = ["rg", "--files", "--no-messages"]
         for name in sorted(FILE_SEARCH_SKIP):
             args += ["--glob", f"!{name}"]
-        return _rg_lines(args, root)
+        return _rg_lines(args, root, budget, cancel)
 
-    def _search_names(root: Path, query: str, limit: int) -> tuple[list[dict[str, Any]], bool, str]:
+    def _search_names(root: Path, query: str, limit: int, cancel: threading.Event | None = None) -> tuple[list[dict[str, Any]], bool, str]:
         """Files and folders under ``root`` whose name matches ``query``: (results, truncated, engine).
 
         Bounded three ways at once — entries visited, results collected, and wall-clock — because
@@ -2958,13 +3043,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 return
             results.append({"path": rel, "kind": kind, "size": stat.st_size, "mtime": stat.st_mtime})
 
-        lister = _rg_file_list(root)
+        lister = _rg_file_list(root, FILE_SEARCH_BUDGET_SECONDS, cancel)
         truncated = False
         visited = 0
         with closing(lister if lister is not None else _walk_files(root)) as walker:
             for rel in walker:
                 visited += 1
-                if visited > FILE_SEARCH_MAX_ENTRIES or time.monotonic() > deadline:
+                if visited > FILE_SEARCH_MAX_ENTRIES or time.monotonic() > deadline or (cancel is not None and cancel.is_set()):
                     truncated = True
                     break
                 parts = rel.split("/")
@@ -2977,9 +3062,14 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 if len(results) >= limit:
                     truncated = True
                     break
+        if time.monotonic() > deadline or (cancel is not None and cancel.is_set()):
+            # The watchdog can end the read before one line has arrived, so the loop above may never
+            # have looked at the clock. A search that ran out of time answers with what it has and
+            # says so, whether the budget went between two hits or inside one silent walk.
+            truncated = True
         return results[:limit], truncated, "rg" if lister is not None else "walk"
 
-    def _search_content(root: Path, query: str, limit: int) -> tuple[list[dict[str, Any]], bool]:
+    def _search_content(root: Path, query: str, limit: int, cancel: threading.Event | None = None) -> tuple[list[dict[str, Any]], bool]:
         """Lines under ``root`` containing ``query``, as (hits, truncated).
 
         The query is matched literally, not as a pattern: the box it comes from is a search field,
@@ -2991,26 +3081,34 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         args = [
             "rg", "--line-number", "--no-heading", "--color", "never", "--no-messages",
             "--fixed-strings", "--smart-case", "--max-filesize", FILE_GREP_MAX_FILESIZE,
-            "--max-columns", str(FILE_GREP_MAX_COLUMNS),
+            "--max-columns", str(FILE_GREP_MAX_COLUMNS), "--max-columns-preview", "--null",
         ]
         for name in sorted(FILE_SEARCH_SKIP):
             args += ["--glob", f"!{name}"]
         args += ["--", query]
         hits: list[dict[str, Any]] = []
         truncated = False
-        with closing(_rg_lines(args, root)) as lines:
+        with closing(_rg_lines(args, root, FILE_GREP_BUDGET_SECONDS, cancel)) as lines:
             for line in lines:
-                if time.monotonic() > deadline:
+                if time.monotonic() > deadline or (cancel is not None and cancel.is_set()):
                     truncated = True
                     break
-                rel, _, rest = line.partition(":")
+                # ``--null`` ends the path with a NUL rather than a colon, so a file whose own name
+                # carries one is still read exactly; the line number is what follows, up to the
+                # first colon after it.
+                rel, sep, rest = line.partition("\0")
                 number, _, text = rest.partition(":")
-                if not rel or not number.isdigit() or _contained(root, rel) is None:
+                if not sep or not rel or not number.isdigit() or _contained(root, rel) is None:
                     continue
                 hits.append({"path": rel, "line": int(number), "text": text[:FILE_GREP_MAX_COLUMNS]})
                 if len(hits) >= limit:
                     truncated = True
                     break
+        if time.monotonic() > deadline or (cancel is not None and cancel.is_set()):
+            # The watchdog can end the read before one line has arrived, so the loop above may never
+            # have looked at the clock. A search that ran out of time answers with what it has and
+            # says so, whether the budget went between two hits or inside one silent walk.
+            truncated = True
         return hits, truncated
 
     def _file_response(root: Path, path: str) -> FileResponse:
@@ -3175,7 +3273,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if not query:
             return {"query": "", "results": [], "truncated": False, "engine": "none"}
         wanted = max(1, min(int(limit), FILE_SEARCH_MAX_RESULTS))
-        results, truncated, engine = await asyncio.to_thread(_search_names, state.workspace, query, wanted)
+        results, truncated, engine = await _run_search(_search_names, state.workspace, query, wanted)
         return {"query": query, "results": results, "truncated": truncated, "engine": engine}
 
     @api.get("/api/sessions/{session_id}/files/grep")
@@ -3195,7 +3293,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if not query:
             return {"query": "", "hits": [], "truncated": False}
         wanted = max(1, min(int(limit), FILE_SEARCH_MAX_RESULTS))
-        hits, truncated = await asyncio.to_thread(_search_content, state.workspace, query, wanted)
+        hits, truncated = await _run_search(_search_content, state.workspace, query, wanted)
         return {"query": query, "hits": hits, "truncated": truncated}
 
     @api.get("/api/sessions/{session_id}/download")
