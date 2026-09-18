@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import os
 import sys
-from urllib.parse import parse_qs, urlsplit
-
-from playwright.sync_api import expect, sync_playwright
+from urllib.parse import urlsplit
 
 from api_stub import DEFAULT_APP, expect_app
+from playwright.sync_api import expect, sync_playwright
 from screenshots import S1, UNHANDLED, respond, stub
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)

@@ -25,14 +25,14 @@ import os
 import struct
 import sys
 import zlib
-from urllib.parse import parse_qs, urlsplit
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import Page, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app, FILE_TEXT, file_entries, file_search  # noqa: E402
+from api_stub import DEFAULT_APP, FILE_TEXT, GATES, Unhandled, expect_app, file_entries, file_search  # noqa: E402
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
 # The app is bilingual, and so is this set: LANG_UI=ru opens every page with ?lang=ru and the words

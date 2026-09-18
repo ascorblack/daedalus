@@ -4,15 +4,13 @@ from __future__ import annotations
 import base64
 import io
 import os
-import struct
 import sys
 import zipfile
 from urllib.parse import parse_qs, quote, urlsplit
 
-from playwright.sync_api import expect, sync_playwright
-
 from api_stub import DEFAULT_APP, FILE_TEXT, expect_app
-from screenshots import S1, SILENCE, UNHANDLED, respond, stub, detail
+from playwright.sync_api import expect, sync_playwright
+from screenshots import S1, SILENCE, UNHANDLED, detail, respond, stub
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
