@@ -231,6 +231,10 @@ class SessionState:
     still waiting, and an id that was handed over and not returned is one the model has read."""
     follow_up_seen: list[str] = field(default_factory=list)
     """The same for the follow-up queue."""
+    steer_withdrawn: set[str] = field(default_factory=set)
+    """Ids taken back since that reload. A reload already waiting on the database returns the row as
+    it was before the removal, so it is filtered through this on the way into the engine; cleared at
+    the next persist, by which time the store and the engine agree."""
 
     @property
     def running(self) -> bool:
@@ -1599,6 +1603,11 @@ class SessionManager:
                 removed = True
         if await self.live.remove(session_id, "steer", item_id):
             removed = True
+        if removed and state is not None:
+            # A reload that was already waiting on the database when this ran will be handed the row
+            # as it stood before the removal. Remembering the id here is what stops that answer from
+            # putting the withdrawn message back into the engine's queue, where it is authoritative.
+            state.steer_withdrawn.add(item_id)
         if removed:
             await self.steer_changed(session_id, reason="withdrawn")
         return removed
@@ -1920,7 +1929,7 @@ class SessionManager:
 
         async def reload_live_control(eng: QueryEngine) -> None:
             data = await self.live.load(session_id)
-            steer = list(data["steer"])
+            steer = [item for item in data["steer"] if str(item.get("id") or "") not in state.steer_withdrawn]
             follow_up = list(data["follow_up"])
             state.steer_seen = [str(item.get("id") or "") for item in steer]
             state.follow_up_seen = [str(item.get("id") or "") for item in follow_up]
@@ -1933,14 +1942,17 @@ class SessionManager:
             # A merge, not a write: a steer that arrived after this round's reload is in the store
             # and not in the engine's list, and writing that list over the column would destroy it
             # while the app was being told the model had read it.
-            consumed = await self.live.replace_seen(
+            gone = await self.live.replace_seen(
                 session_id, steer, follow_up, seen_steer=state.steer_seen, seen_follow_up=state.follow_up_seen,
             )
+            consumed = [item_id for item_id in gone if item_id not in state.steer_withdrawn]
             state.steer_seen = [str(item.get("id") or "") for item in steer]
             state.follow_up_seen = [str(item.get("id") or "") for item in follow_up]
+            state.steer_withdrawn.clear()
             if consumed:
                 # The round placed queued text into the history, so the cards the app draws above its
-                # composer are stale. Only what this round was handed and did not hand back counts.
+                # composer are stale. Only what this round was handed and did not hand back counts,
+                # and a withdrawal announced itself when it happened and is not this.
                 await self.steer_changed(session_id, reason="consumed")
 
         def start_persist(history: list[Message], fresh: list[Message] | None) -> None:

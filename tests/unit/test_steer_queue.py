@@ -171,3 +171,35 @@ async def test_a_steer_queued_after_the_round_read_the_queue_survives_the_round(
     assert await manager.queued_steers(sid) == []
     assert [c["reason"] for c in changes] == ["queued", "consumed"]
     await manager.close()
+
+
+async def test_a_withdrawn_steer_is_not_brought_back_by_a_reload_that_raced_it(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "sleep 3"}}, {"text": "done"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("withdrawn")
+    sid = state.session.id
+    await manager.submit(sid, "start")
+    await asyncio.sleep(0.3)
+    engine = state.engine
+    assert engine is not None
+    await engine.reload_live_control(engine)
+    await manager.submit(sid, "forget this", steer=True)
+    item_id = (await manager.queued_steers(sid))[0]["id"]
+
+    # The row as a reload that started before the withdrawal would be handed it.
+    stale = await manager.live.load(sid)
+    assert await manager.drop_queued_steer(sid, item_id)
+
+    original = manager.live.load
+
+    async def stale_once(session_id: str) -> Any:
+        manager.live.load = original  # type: ignore[method-assign]
+        return stale
+
+    manager.live.load = stale_once  # type: ignore[method-assign]
+    await engine.reload_live_control(engine)
+    assert list(getattr(engine, "_steer_queue", [])) == []
+
+    await engine.persist_live_control(engine)
+    assert await manager.queued_steers(sid) == []
+    await manager.close()
