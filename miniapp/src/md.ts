@@ -109,9 +109,15 @@ function renderTable(lines: string[]): string {
   return `<div class="tablewrap"><table><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
 }
 
+// The copy control is a glyph, not the word: it sits in the head of every block and the word was
+// the loudest thing in it. Two drawings, and the button's state says which one shows.
+const COPY_GLYPH = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 9h11v11H9zM15 9V4H4v11h5"/></svg>';
+const DONE_GLYPH = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5 9-11"/></svg>';
+
 export function codeBlock(code: string, lang = ""): string {
   const label = lang || "text";
-  return `<div class="codecard"><div class="codehead"><span>${escape(label)}</span><button class="copy" data-copy="1" type="button">copy</button></div><pre><code>${escape(code)}</code></pre></div>`;
+  const copy = escape(t("common.copy"));
+  return `<div class="codecard"><div class="codehead"><span>${escape(label)}</span><button class="copy" data-copy="1" type="button" aria-label="${copy}" title="${copy}"><span class="glyph-copy">${COPY_GLYPH}</span><span class="glyph-done">${DONE_GLYPH}</span></button></div><pre><code>${escape(code)}</code></pre></div>`;
 }
 
 const LIST_RE = /^\s*(?:[-*+]|\d+[.)])\s+/;
@@ -244,8 +250,12 @@ if (typeof document !== "undefined") {
     const code = button.closest(".codecard")?.querySelector("code")?.textContent ?? "";
     navigator.clipboard?.writeText(code).then(
       () => {
-        button.textContent = "copied";
-        setTimeout(() => (button.textContent = "copy"), 1200);
+        button.dataset.state = "done";
+        button.setAttribute("aria-label", t("common.copied"));
+        setTimeout(() => {
+          delete button.dataset.state;
+          button.setAttribute("aria-label", t("common.copy"));
+        }, 1200);
       },
       () => undefined,
     );

@@ -8,7 +8,7 @@
 
 import type { MessageView, ModelFallback } from "./api";
 
-export type LiveTool = { id: string; name: string; args: string; result?: string; error?: boolean };
+export type LiveTool = { id: string; name: string; args: string; result?: string; error?: boolean; startedAt?: number; endedAt?: number };
 /**
  * `ended` is the model's own full stop: the last `message_stop` of the run said `end_turn`, so the
  * answer on the screen is the whole answer. The text stays until the written copy takes its place,
@@ -18,7 +18,7 @@ export type LiveTool = { id: string; name: string; args: string; result?: string
 export type LiveState = { text: string; thinking: string; tools: LiveTool[]; startedAt: number | null; ended: boolean; model: string; fallback: ModelFallback | null };
 export const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null, ended: false, model: "", fallback: null };
 
-export type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean; length?: number; clipped?: boolean };
+export type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean; length?: number; clipped?: boolean; /** How long the step took, when both ends of it are known. */ ms?: number };
 export type NoteItem = { kind: "note"; text: string };
 export type ThinkItem = { kind: "thinking"; text: string };
 export type SummaryItem = { kind: "summary"; text: string; reason: string };
@@ -27,6 +27,9 @@ export type Activity = ToolItem | NoteItem | ThinkItem | SummaryItem;
 export type Turn = {
   key: string;
   user?: MessageView;
+  /** The user message was not the operator's own words: a loop's wake-up, a schedule's prompt, a
+   *  reminder. Drawn as a folded system note, never as a bubble. */
+  note?: SystemNote;
   summary?: MessageView;
   activity: Activity[];
   answer: string;
@@ -69,8 +72,8 @@ export function parseArgs(raw: string): Record<string, unknown> {
  * very same object, which is what keeps the view from reconciling the whole history.
  */
 export function buildTurns(messages: MessageView[], previous: readonly Turn[] = []): Turn[] {
-  const results = new Map<string, { content: string; is_error: boolean; length?: number; clipped?: boolean }>();
-  for (const m of messages) for (const r of m.tool_results) results.set(r.id, r);
+  const results = new Map<string, { content: string; is_error: boolean; length?: number; clipped?: boolean; at: number }>();
+  for (const m of messages) for (const r of m.tool_results) results.set(r.id, { ...r, at: Date.parse(m.created_at) || 0 });
   const turns: Turn[] = [];
   const sigs: string[][] = [];
   let current: Turn | null = null;
@@ -106,6 +109,8 @@ export function buildTurns(messages: MessageView[], previous: readonly Turn[] = 
     if (m.role === "user") {
       current = open(`u${m.seq ?? i}`, at);
       current.user = m;
+      const note = systemNote(m);
+      if (note) current.note = note;
       mark(`${m.text.length}:${m.origin ?? ""}`);
       return;
     }
@@ -130,7 +135,8 @@ export function buildTurns(messages: MessageView[], previous: readonly Turn[] = 
       const running = r === undefined;
       if (running) current.pendingTools++;
       current.toolIds.push(c.id);
-      current.activity.push({ kind: "tool", id: c.id, name: c.name, args: c.arguments, result: r?.content, error: r?.is_error, running, length: r?.length, clipped: r?.clipped });
+      const ms = r && at && r.at >= at ? r.at - at : undefined;
+      current.activity.push({ kind: "tool", id: c.id, name: c.name, args: c.arguments, result: r?.content, error: r?.is_error, running, length: r?.length, clipped: r?.clipped, ms });
       mark(`t${c.id}:${r ? `${r.content.length}${r.is_error ? "!" : ""}` : "-"}`);
     }
   });
@@ -162,7 +168,8 @@ export function applyLive(base: Turn | null, live: LiveState, now: number): Turn
       if (!lt || lt.result === undefined) return a;
       t.pendingTools--;
       // The stream carries the whole result, so what came over it is never cut short.
-      return { ...a, result: lt.result, error: lt.error, running: false, length: lt.result.length, clipped: false };
+      const ms = lt.startedAt && lt.endedAt ? lt.endedAt - lt.startedAt : a.ms;
+      return { ...a, result: lt.result, error: lt.error, running: false, length: lt.result.length, clipped: false, ms };
     });
   }
   const fresh = live.tools.filter((lt) => !t.toolIds.includes(lt.id));
@@ -176,7 +183,7 @@ export function applyLive(base: Turn | null, live: LiveState, now: number): Turn
   for (const lt of fresh) {
     const running = lt.result === undefined;
     if (running) t.pendingTools++;
-    t.activity.push({ kind: "tool", id: lt.id, name: lt.name, args: parseArgs(lt.args), result: lt.result, error: lt.error, running, length: lt.result?.length, clipped: false });
+    t.activity.push({ kind: "tool", id: lt.id, name: lt.name, args: parseArgs(lt.args), result: lt.result, error: lt.error, running, length: lt.result?.length, clipped: false, ms: lt.startedAt && lt.endedAt ? lt.endedAt - lt.startedAt : undefined });
   }
   if (live.text) t.answer = stripHeadline(live.text);
   if (live.model) {
@@ -185,6 +192,108 @@ export function applyLive(base: Turn | null, live: LiveState, now: number): Turn
   }
   t.endedAt = now;
   return t;
+}
+
+// ── what a turn is made of, read for the reader ───────────────────────────────────────────
+
+/** A user message that is not the operator's own words, and what it is instead. */
+export type SystemNote = {
+  /** Who wrote it: the loop, a schedule, a reminder, the core, or a source named by its prefix. */
+  kind: "loop" | "schedule" | "reminder" | "intent" | "core" | "heartbeat" | "context" | "other";
+  origin: string;
+  /** For a loop wake-up: the run number and the cadence, read off the host's own header line. */
+  iteration?: number;
+  total?: number;
+  cadence?: string;
+  /** The standing instruction, without the host's framing around it. */
+  body: string;
+};
+
+const LOOP_HEAD_RE = /^\s*\[Loop iteration (\d+)(?: of (\d+))?\s*[—-]\s*([^.\]]+)[^\]]*\]/;
+const LOOP_BODY_RE = /<loop_instruction>\s*([\s\S]*?)\s*<\/loop_instruction>/;
+const CONTEXT_RE = /<(turn_context|heartbeat)>\s*([\s\S]*?)\s*<\/\1>/;
+
+/**
+ * Whether a user message is a system note, and which. The host's own marker (`origin`) decides
+ * where it exists; the text's shape is the fallback for a transcript written before the marker was.
+ * A message a person sent through another channel (`inbound:<source>`) is not a note: it is a
+ * message, and stays a card with its source on it.
+ */
+export function systemNote(m: Pick<MessageView, "role" | "text" | "origin" | "internal">): SystemNote | null {
+  if (m.role !== "user" || m.internal) return null;
+  const origin = m.origin ?? "";
+  const text = m.text ?? "";
+  const loop = LOOP_HEAD_RE.exec(text);
+  if (origin === "loop" || loop || text.includes("<loop_instruction>")) {
+    const body = LOOP_BODY_RE.exec(text)?.[1] ?? text.replace(LOOP_HEAD_RE, "").trim();
+    return { kind: "loop", origin: origin || "loop", iteration: loop ? Number(loop[1]) : undefined, total: loop?.[2] ? Number(loop[2]) : undefined, cadence: loop?.[3]?.trim(), body };
+  }
+  const ctx = CONTEXT_RE.exec(text);
+  if (ctx) return { kind: ctx[1] === "heartbeat" ? "heartbeat" : "context", origin: origin || ctx[1], body: ctx[2] };
+  if (!origin || origin === "operator" || origin.startsWith("inbound")) return null;
+  const kind = origin === "schedule" || origin === "reminder" || origin === "intent" || origin === "core" || origin === "heartbeat" ? origin : "other";
+  return { kind, origin, body: text };
+}
+
+/** The families a run's steps fall into, most frequent first, as the folded line names them. */
+export type FamilyCount = { family: string; n: number };
+
+/** Which family a tool belongs to for the folded summary: the search tools share one, everything else is itself. */
+export function familyOf(name: string): string {
+  if (name === "Find" || name === "Search" || name === "WebSearch" || name === "HistorySearch") return "search";
+  return name;
+}
+
+/**
+ * The steps of a turn counted by family, most frequent first and, at a tie, in the order they
+ * happened. `cap` families are named; whatever is left is one number ("and 4 more").
+ */
+export function familyCounts(items: readonly Activity[], cap = 3): { named: FamilyCount[]; more: number } {
+  const counts = new Map<string, number>();
+  for (const a of items) {
+    if (a.kind !== "tool") continue;
+    const f = familyOf(a.name);
+    counts.set(f, (counts.get(f) ?? 0) + 1);
+  }
+  const all = [...counts.entries()].map(([family, n]) => ({ family, n }));
+  all.sort((a, b) => b.n - a.n);
+  const named = all.slice(0, cap);
+  const more = all.slice(cap).reduce((sum, f) => sum + f.n, 0);
+  return { named, more };
+}
+
+/** A file the agent produced in a turn: written into the workspace, or handed over. */
+export type Artifact = {
+  /** The tool call that made it, which is what the card is keyed and served by. */
+  callId: string;
+  path: string;
+  name: string;
+  how: "wrote" | "sent";
+  caption: string;
+  /** The size as the tool's answer reported it, when it did. */
+  size: string | null;
+};
+
+const SIZE_RE = /\(([\d.,]+\s?[KMG]?B)\)/i;
+
+/**
+ * The files a turn produced, once each: every settled `Write` and `SendFile`, the last mention of
+ * a path winning, so a file written twice in one turn is one card.
+ */
+export function producedFiles(items: readonly Activity[]): Artifact[] {
+  const out = new Map<string, Artifact>();
+  for (const a of items) {
+    if (a.kind !== "tool" || a.running || a.error) continue;
+    if (a.name !== "Write" && a.name !== "SendFile") continue;
+    const path = typeof a.args.path === "string" ? a.args.path : "";
+    if (!path) continue;
+    const name = path.split("/").filter(Boolean).pop() ?? path;
+    const caption = typeof a.args.caption === "string" ? a.args.caption : "";
+    const size = SIZE_RE.exec(a.result ?? "")?.[1] ?? null;
+    out.delete(path);
+    out.set(path, { callId: a.id, path, name, how: a.name === "Write" ? "wrote" : "sent", caption, size });
+  }
+  return [...out.values()];
 }
 
 // ── reconciling what the API says with what the screen already holds ──────────────────────
@@ -278,9 +387,9 @@ export function liveAfter(state: LiveState, event: string, p: Record<string, any
     if (d.type === "thinking_delta") return { ...state, thinking: state.thinking + (d.text ?? "") };
     return state;
   }
-  if (event === "tool_use_start") return { ...state, tools: [...state.tools, { id: p.tool_call_id, name: p.tool_name, args: "" }] };
+  if (event === "tool_use_start") return { ...state, tools: [...state.tools, { id: p.tool_call_id, name: p.tool_name, args: "", startedAt: Date.now() }] };
   if (event === "tool_use_stop") return { ...state, tools: state.tools.map((t) => (t.id === p.tool_call_id ? { ...t, args: JSON.stringify(p.final_input ?? {}) } : t)) };
-  if (event === "tool_result") return { ...state, tools: state.tools.map((t) => (t.id === p.tool_call_id ? { ...t, result: String(p.content ?? p.output ?? ""), error: !!p.is_error } : t)) };
+  if (event === "tool_result") return { ...state, tools: state.tools.map((t) => (t.id === p.tool_call_id ? { ...t, result: String(p.content ?? p.output ?? ""), error: !!p.is_error, endedAt: Date.now() } : t)) };
   // A message that ended to make a tool call is not the end of the turn: the run goes on.
   if (event === "message_stop" && (p.stop_reason === "end_turn" || p.stop_reason === "max_tokens")) return { ...state, ended: true };
   return state;
