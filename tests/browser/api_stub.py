@@ -97,3 +97,44 @@ def expect_app(base: str) -> None:
 
 
 __all__ = ["DEFAULT_APP", "DEFAULT_PORT", "GATES", "Unhandled", "expect_app"]
+
+# Small documents with deliberately different structures make the explorer and preview checks
+# exercise parsing, navigation and media decoding without reading anybody's real workspace.
+FILE_TEXT = {
+    "src/main.py": "# A small example\nfrom pathlib import Path\n\ndef greeting(name):\n    return f'Hello {name}'\n\nprint(greeting('reader'))\n",
+    "src/helper.ts": "export const count: number = 42;\n",
+    "data/menu.json": '{"items":[{"name":"Bread","price":3}]}',
+    "data/sample.json": '{"title":"Example","items":[{"name":"Bread","price":3}],"ready":true}',
+    "data/sample.csv": 'name,price,note\nBread,3,"fresh, daily"\nTea,2,hot\n',
+    "data/sample.tsv": "name\tprice\nBread\t3\nTea\t2\n",
+    "site/index.html": """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{margin:0;padding:32px;color:#e8eaf3;background:#111421;font:14px/1.6 system-ui}h1{font-size:28px;margin:0 0 8px}p{color:#aab2cb}.status{display:inline-block;color:#65d8a3;border:1px solid #315a50;border-radius:24px;padding:6px 14px}.facts{display:flex;gap:12px;margin:28px 0}.facts article{flex:1;padding:16px;background:#1a1f31;border:1px solid #2b3044;border-radius:12px}.facts b{display:block;font-size:24px}.facts span{color:#aab2cb;font-size:12px}section{padding:20px;background:#1a1f31;border:1px solid #2b3044;border-radius:12px;margin:20px 0}h2{font-size:18px;margin:0 0 14px}table{width:100%;border-collapse:collapse}td{border-bottom:1px solid #2b3044;padding:10px 0}a{color:#b0beff;margin-right:16px}@media(max-width:420px){body{padding:20px}.facts{flex-wrap:wrap}}
+</style></head><body><h1>Bakery report</h1><p>The seasonal menu, checked on a phone.</p><div class="status">All checks passed</div><div class="facts"><article><b>27</b><span>Menu items</span></article><article><b>41</b><span>Links checked</span></article><article><b>46 KB</b><span>Hero image</span></article></div><section><h2>What changed</h2><p>Seasonal items now come first. Prices read from the same sheet as the shop menu. The hero image loads quickly on a small screen.</p></section><section id="details"><h2>Details section</h2><table><tr><td>Mobile performance</td><td>98 / 100</td></tr><tr><td>Broken links</td><td>0</td></tr><tr><td>Price mismatches</td><td>0</td></tr></table></section><a href="next.html">Next page</a><a href="#details">Details</a></body></html>""",
+    "site/next.html": '<!doctype html><html><body><h1>Second page</h1><a href="index.html">First page</a></body></html>',
+    "change.diff": "diff --git a/menu.py b/menu.py\n--- a/menu.py\n+++ b/menu.py\n@@ -1,2 +1,2 @@\n-old = 1\n+new = 2\n keep = True\n",
+    "change.patch": "--- a/menu.py\n+++ b/menu.py\n@@ -1 +1 @@\n-old = 1\n+new = 2\n",
+}
+
+
+def file_entries(path: str) -> list[dict]:
+    """One level only, the same contract as the directory browse route."""
+    prefix = f"{path}/" if path else ""
+    entries = {}
+    for name, body in FILE_TEXT.items():
+        if not name.startswith(prefix):
+            continue
+        child = name[len(prefix):].split("/", 1)[0]
+        entries[child] = {"name": child, "dir": "/" in name[len(prefix):], "size": len(body), "mtime": 0}
+    return list(entries.values())
+
+
+def file_search(path: str, query: str, limit: int = 200) -> dict | None:
+    """Both bounded search routes, shared by screenshots and behaviour checks."""
+    import fnmatch
+    if path.endswith("/files/search"):
+        names = [name for name in FILE_TEXT if query.lower() in name.rsplit("/", 1)[-1].lower() or fnmatch.fnmatch(name.lower(), query.lower()) or fnmatch.fnmatch(name.rsplit("/", 1)[-1].lower(), query.lower())]
+        return {"query": query, "results": [{"path": name, "kind": "file", "size": len(FILE_TEXT[name]), "mtime": 0} for name in names[:limit]], "truncated": len(names) > limit, "engine": "walk"}
+    if path.endswith("/files/grep"):
+        hits = [{"path": name, "line": i, "text": line} for name, body in FILE_TEXT.items() for i, line in enumerate(body.splitlines(), 1) if query.lower() in line.lower()]
+        return {"query": query, "hits": hits[:limit], "truncated": len(hits) > limit}
+    return None
