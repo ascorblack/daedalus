@@ -38,6 +38,7 @@ CONFIGURED = "claude-opus-5"
 STANDBY = "deepseek-flash"
 
 PRESETS = {
+    "local.model": {"provider": "local", "model": "local-model", "label": "Local model", "thinking": False, "reasoning_effort": "", "images": True, "context_window": 128000, "max_output_tokens": 16384},
     "opus": {"provider": "claude", "model": CONFIGURED, "label": "Claude Opus 5", "thinking": True, "reasoning_effort": "high", "images": True, "context_window": 200000, "max_output_tokens": 32000},
     "flash": {"provider": "deepseek", "model": STANDBY, "label": "DeepSeek Flash", "thinking": False, "reasoning_effort": "", "images": False, "context_window": 128000, "max_output_tokens": 16384},
 }
@@ -52,6 +53,7 @@ class Host:
 
     def __init__(self) -> None:
         self.status = "idle"
+        self.error = ""
         self.queue: list[dict] = []
         self.posted: list[tuple[str, str, dict | None]] = []
         self.pending: dict | None = None
@@ -62,7 +64,7 @@ class Host:
 
     def detail(self) -> dict:
         return {
-            "id": SESSION, "title": "A session", "status": self.status, "run_id": "r1" if self.status == "running" else None, "workspace": "/workspace",
+            "id": SESSION, "title": "A session", "status": self.status, "error": self.error, "run_id": "r1" if self.status == "running" else None, "workspace": "/workspace",
             "workspace_name": "ws", "workspace_own": True, "workspace_sessions": [], "pending": self.pending, "model": "Claude Opus 5", "provider": "claude",
             "project": {"id": "p", "name": "Project", "root": "/workspace", "settings": {"snapshots": True}},
             "configured_model": CONFIGURED, "effective_model": STANDBY if self.fallback else CONFIGURED, "fallback": self.fallback, "mode": "", "brief": "",
@@ -319,6 +321,15 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
         problems.append(f"the presets carry no fast/thinking marker ({kinds})")
     if not page.locator(".model-list .model-row.on", has_text="Claude Opus 5").count():
         problems.append("the current model is not marked in the list")
+    local = page.locator(".model-list .model-row", has_text="Local model")
+    if not local.locator('[title="128,000 token context"]').count() or "128k" not in local.inner_text():
+        problems.append("the local preset lost its discovered context window")
+    local.click()
+    page.wait_for_timeout(200)
+    if posts("/model")[-1][2] != {"preset": "local.model"}:
+        problems.append("the local model was not chosen as a preset")
+    page.locator(".composer .model-select").click()
+    page.wait_for_selector(".model-list")
     page.locator(".model-list .model-row", has_text="DeepSeek Flash").click()
     page.wait_for_timeout(400)
     picked = posts("/model")
@@ -378,12 +389,50 @@ def phone(browser) -> list[str]:  # type: ignore[no-untyped-def]
     return problems
 
 
+def failure_bar(browser) -> list[str]:  # type: ignore[no-untyped-def]
+    problems: list[str] = []
+    HOST.status = "failed"
+    HOST.error = "HTTP 400: failed to parse grammar"
+    context = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
+    context.add_init_script(r"""(() => {
+      const original = window.fetch;
+      window.fetch = (url, options) => {
+        if (String(url).includes('/stream')) {
+          return Promise.resolve(new Response(new ReadableStream({start(controller) {
+            window.emitRunEvent = (event, payload) => controller.enqueue(new TextEncoder().encode(
+              'event: ' + event + '\n' + 'data: ' + JSON.stringify(payload) + '\n\n'));
+          }}), {headers: {'Content-Type': 'text/event-stream'}}));
+        }
+        return original(url, options);
+      };
+    })();""")
+    page = open_page(context, phone=True)
+    page.wait_for_selector(".runerror")
+    if HOST.error not in page.locator(".runerror").inner_text():
+        problems.append("the session response's provider error was not drawn")
+    bounds = page.locator(".runerror").bounding_box()
+    composer = page.locator(".composer").bounding_box()
+    if not bounds or not composer or bounds["y"] + bounds["height"] > composer["y"] + 1:
+        problems.append("the failure bar is not above the redesigned composer")
+    page.evaluate("window.emitRunEvent('error', {message: 'provider refused again'})")
+    page.wait_for_function("document.querySelector('.runerror')?.textContent.includes('provider refused again')")
+    HOST.status = "running"
+    HOST.error = ""
+    page.evaluate("window.emitRunEvent('message_start', {})")
+    page.wait_for_selector(".runerror", state="detached")
+    page.wait_for_selector(".composer .roundbtn.primary[data-action='stop']")
+    HOST.status = "idle"
+    context.close()
+    return problems
+
+
 def run() -> int:
     problems: list[str] = []
     with sync_playwright() as p:
         browser = p.chromium.launch(executable_path=CHROMIUM)
         problems += desktop(browser)
         problems += phone(browser)
+        problems += failure_bar(browser)
         browser.close()
     print("problems:", problems or "none")
     return 1 if problems else 0

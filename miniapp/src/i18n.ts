@@ -733,6 +733,8 @@ export const DICT: Record<string, Record<Lang, string>> = {
     ru: "Папка и всё, что в ней есть, останутся как были; забудется только сам проект.",
   },
   "project.removed": { en: "{name} removed", ru: "{name}: проект убран" },
+  "composer.model.context": { en: "{n} token context", ru: "Контекст: {n} токенов" },
+  "session.runerror": { en: "Run failed", ru: "Ошибка запуска" },
   "session.model.none": { en: "model", ru: "модель" },
 
   // ── the agents screen ──────────────────────────────────────────────────────────────────

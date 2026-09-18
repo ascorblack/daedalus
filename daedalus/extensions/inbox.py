@@ -91,7 +91,10 @@ class Inbox:
             if state is not None and (state.session.metadata.get("unattended") or state.session.metadata.get("heartbeat")):
                 return  # the scheduler / heartbeat post their own, richer entry
             title = state.session.title if state else session_id
-            await self.post("run_failed", f"Run failed in '{title}'", "The run ended with an error; see the session for details.", severity="error", session_id=session_id, run_id=run_id)
+            # The error's own words, not a pointer to them: a provider that refused every request
+            # says why, and an entry that only says "see the session" hides the one useful sentence.
+            body = (state.last_error_message.strip() if state else "") or "The run ended with an error; see the session for details."
+            await self.post("run_failed", f"Run failed in '{title}'", body[:500], severity="error", session_id=session_id, run_id=run_id)
 
 
 def format_entries(entries: list[dict[str, Any]]) -> str:

@@ -38,6 +38,7 @@ from protocore.runtime.events.types import EventType
 from protocore.runtime.live_control import new_queued_prompt
 from protocore.runtime.loop_state import LoopState
 from protocore.runtime.query_engine import QueryEngine
+from protocore.runtime.soft_stop import CAUSE_PROVIDER_ERROR
 from protocore.tests_support.adapters import InMemoryToolRegistry
 from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
@@ -174,6 +175,14 @@ class SessionState:
     """Who started the current run (``operator``, ``schedule``, ``reminder``, ``subagent:…``): StaySilent and the reply routing read it."""
     last_error_kind: str = ""
     """The kind of the error that ended the current run, from the core's ERROR event (``llm_context_window_exceeded`` …)."""
+    last_error_message: str = ""
+    """The text of that error, masked, as the fronts were shown it: what the inbox entry quotes."""
+    soft_stop_cause: str = ""
+    """Which bound wound the current run down, from the core's ``soft_stop_notified`` state change; empty when none did."""
+    soft_stop_detail: str = ""
+    """What that bound said in its own words — the upstream's error text for a provider failure. The operator is shown this,
+    not an inference from the reply: a run the provider refused ends with the model writing a closing message, and without
+    this the message is the only trace of a failure that produced nothing."""
     overflow_streak: int = 0
     """Consecutive runs that overflowed the context window; recovery stops after a few so a hopeless history cannot loop."""
     outage_streak: int = 0
@@ -2228,6 +2237,9 @@ class SessionManager:
             raise RuntimeError("a run is already active in this session")
         state.run_active_since = time.monotonic()
         state.last_error_kind = ""
+        state.last_error_message = ""
+        state.soft_stop_cause = ""
+        state.soft_stop_detail = ""
         if message is not None:
             state.run_origin = str(message.metadata.get("daedalus.origin") or "operator")
         if message is not None and not continue_turn:
@@ -2290,6 +2302,8 @@ class SessionManager:
                 status = "failed"
             elif engine.state is LoopState.CANCELLED:
                 status = "cancelled"
+            elif await self._report_provider_refusal(state, run_id):
+                status = "failed"
         except asyncio.CancelledError:
             status = "interrupted" if self.shutting_down else "cancelled"
             raise
@@ -2338,6 +2352,35 @@ class SessionManager:
                 state.settled.clear()
                 state.housekeeping = asyncio.create_task(self._settle_run(state, run_id, status), name=f"settle:{run_id}")
                 state.housekeeping.add_done_callback(_log_task_failure)
+
+    PROVIDER_REFUSED_NOTE = "⚠️ the model provider refused this run's requests, so it was closed early — {detail}"
+    """What the operator is shown when a run ends on the provider rather than on its work. It quotes the provider."""
+
+    async def _report_provider_refusal(self, state: SessionState, run_id: str) -> bool:
+        """A run the provider refused ends as an error, whatever the model wrote on the way out.
+
+        The core winds such a run down: the tools go, the model is told the endpoint failed, and it
+        writes a closing message. That message is an answer to nobody's question — the work did not
+        happen — and if it is the only thing the operator sees, a provider outage reads as a polite
+        non-answer and the session looks like it finished. So the failure is put on the wire as an
+        error and the run is recorded as one: the app draws the error state, the Telegram front adds
+        the line, the inbox gets the entry, and the outage recovery drives the turn again once the
+        endpoint is back — the same path a run that failed outright already takes.
+
+        Nothing is claimed without the provider's own words: a wind-down with no detail behind it is
+        some other kind of stop and is left alone.
+        """
+        if state.soft_stop_cause != CAUSE_PROVIDER_ERROR or not state.soft_stop_detail:
+            return False
+        await self._dispatch_event(
+            state,
+            TurnEvent(
+                type=EventType.ERROR,
+                run_id=run_id,
+                payload={"kind": "llm_provider_error", "message": self.PROVIDER_REFUSED_NOTE.format(detail=state.soft_stop_detail)},
+            ),
+        )
+        return True
 
     async def _announce_settled(self, state: SessionState, run_id: str, status: str, *, housekeeping: bool) -> None:
         """Say on the wire that the run is over — once when the answer is written down, once when the rest is.
@@ -2698,8 +2741,12 @@ class SessionManager:
         elif event.type is EventType.ERROR and isinstance(p.get("message"), str):
             p["message"] = self.redactor.redact(p["message"])
             state.last_error_kind = str(p.get("kind") or state.last_error_kind)
+            state.last_error_message = p["message"]
             logger.warning("run error in session %s (%s): %s", getattr(getattr(state, "session", None), "id", "?"), p.get("kind") or "-", p["message"][:500])
         elif event.type is EventType.STATE_CHANGED and p.get("reason") in RECOVERY_REASONS:
+            if p.get("reason") == "soft_stop_notified":
+                state.soft_stop_cause = str(p.get("soft_stop_cause") or "")
+                state.soft_stop_detail = self.redactor.redact(str(p.get("soft_stop_detail") or ""))
             detail = {k: v for k, v in p.items() if k not in ("from", "to", "reason")}
             logger.warning("run recovery in session %s: %s %s", getattr(getattr(state, "session", None), "id", "?"), p.get("reason"), self.redactor.redact(json.dumps(detail, ensure_ascii=False, default=str)[:400]))
 

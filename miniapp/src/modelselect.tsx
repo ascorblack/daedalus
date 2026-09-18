@@ -9,7 +9,7 @@ import { Popover, Sheet } from "./dialogs";
 import { Icon } from "./icons";
 import { shortModel } from "./format";
 import { readCustomModel, rememberCustomModel } from "./composer";
-import { DICT, t } from "./i18n";
+import { DICT, num, t } from "./i18n";
 
 export type ModelChoice = { clear: true } | { preset: string } | { provider: string; model: string } | { model: string };
 
@@ -126,6 +126,7 @@ function ModelList({ cat, failed, model, fallback, onPick }: { cat: Catalogue | 
               <span className="truncate">{p.label || p.model}</span>
               <span className="sub truncate">{p.provider}/{p.model}</span>
             </span>
+            {p.context_window > 0 && <span className="sub" title={t("composer.model.context", { n: num(p.context_window) })}>{num(p.context_window / 1000)}k</span>}
             {current && <Icon name="check" size={16} />}
           </button>
         );

@@ -477,7 +477,12 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
       if (event === "message_start") {
         // The queue the last run left behind starts the next one without anybody pressing send:
         // the chip says so as the first token arrives, not at the next read.
-        setDetail((prev) => (prev && prev.status === "idle" ? { ...prev, status: "running" } : prev));
+        // A run that starts also clears the last one's failure: it is being answered, not explained.
+        setDetail((prev) => (prev ? { ...prev, status: (prev.status === "idle" || prev.status === "failed") ? "running" : prev.status, error: "" } : prev));
+      } else if (event === "error") {
+        // Keep the provider's reason even when it failed before producing any reply.
+        const message = String(p.message ?? "");
+        if (message) setDetail((prev) => (prev ? { ...prev, error: message } : prev));
       } else if (event === "message_stop") {
         // The streamed copy is dropped only once the written one is on the screen, so the answer
         // never blinks out and back in. The cursor does not wait for that read — `liveAfter` has
@@ -499,7 +504,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
         setFilesGeneration((n) => n + 1);
         // The run is over as the host knows it. The chip flips on this event, not on the read it
         // triggers: the read says the same thing a round trip later.
-        setDetail((prev) => (prev ? { ...prev, status: p.status === "awaiting" ? "waiting" : "idle", housekeeping: !!p.housekeeping } : prev));
+        setDetail((prev) => (prev ? { ...prev, status: p.status === "awaiting" ? "waiting" : p.status === "failed" ? "failed" : "idle", housekeeping: !!p.housekeeping } : prev));
         refreshSoon("tail");
       } else if (event === "steer_changed") {
         steerRoute.current = "ok";
@@ -953,6 +958,11 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             <button className="jump-down" onClick={jumpToBottom} aria-label={t("session.jump.label")} title={t("session.jump")}>
               <Icon name="down" size={18} />
             </button>
+          )}
+          {!busy && !!detail?.error && (
+            <div className="runerror" role="status" aria-label={t("session.runerror")}>
+              <Icon name="question" size={14} /><span><b>{t("session.runerror")}: </b>{detail.error}</span>
+            </div>
           )}
           <Composer
             ref={composer}

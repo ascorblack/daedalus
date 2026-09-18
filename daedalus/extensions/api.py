@@ -1283,7 +1283,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         first_seq = next((v["seq"] for v in messages if isinstance(v.get("seq"), int)), 0)
         # Compacting first: a compaction between runs happens on a task of its own, and a session
         # reported as running while it summarises is a run the app draws that nobody started.
-        status = "compacting" if state.compacting else "running" if state.running else "waiting" if state.pending else "idle"
+        # A run that ended on an error is not an idle session: the reply the model managed to write
+        # on the way out — a provider that refused every request still gets one — reads like an
+        # answer, and without this the failure has no other trace on the screen. The kind is cleared
+        # when the next run starts, so this describes the last run and only until there is another.
+        status = "compacting" if state.compacting else "running" if state.running else "waiting" if state.pending else "failed" if state.last_error_kind else "idle"
         usage = await app.db.fetchone(
             "SELECT count(*) c, sum(input_tokens) i, sum(output_tokens) o, sum(cache_read_tokens) ch, sum(cost_usd) usd FROM usage_events WHERE session_id = ?",
             (session_id,),
@@ -1303,6 +1307,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             # (the snapshot, the delivery to the other fronts, the learning record) is not the run,
             # and a front that draws it draws it as "saving", not as "running".
             "housekeeping": state.housekeeping is not None and not state.housekeeping.done(),
+            "error": state.last_error_message if state.last_error_kind else "",
             "compacting": state.compacting,
             "run_id": state.run_id,
             "workspace": str(state.workspace),
@@ -2916,7 +2921,12 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
             if child.name in {".git", "__pycache__", "node_modules", ".venv"}:
                 continue
-            stat = child.stat()
+            if _contained(root, str(child.relative_to(root.resolve()))) is None:
+                continue
+            try:
+                stat = child.stat()
+            except OSError:
+                continue
             entries.append({"name": child.name, "dir": child.is_dir(), "size": stat.st_size, "mtime": stat.st_mtime})
         return {"path": path, "kind": "dir", "entries": entries}
 
