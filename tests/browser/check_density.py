@@ -56,7 +56,8 @@ READ = """
     panel: box(one('.panel')),
     panelTabs: box(one('.panel-tabs')),
     headStatus: box(one('.chat-head .head-status')),
-    headModel: box(one('.chat-head .head-model')),
+    headModel: box(one('.composer .model-select')),
+    composerRow: box(one('.composer-row')),
     subMeta: box(one('.chat-head .sub.meta')),
     chat: box(one('.chat')),
     head: box(one('.chat-head')),
@@ -193,10 +194,16 @@ def judge(m: dict) -> list[str]:
                 problems.append(f"{m['vw']}: the panel is {m['panel']['w']}px, outside 360..65%")
             if not m["panelTabs"] or m["panelTabs"]["h"] != 40:
                 problems.append(f"{m['vw']}: the panel's tab row is {m['panelTabs']}, not 40")
-        if not m["headModel"] or m["headModel"]["h"] > 32:
-            problems.append(f"{m['vw']}: the model label is {m['headModel']}")
     elif m["panel"]:
         problems.append(f"{m['vw']}: a phone shows the panel as a column")
+    # The model selector is in the composer at every width, on one 32 px line at most.
+    if not m["headModel"]:
+        problems.append(f"{m['vw']}: the composer has no model selector")
+    elif m["headModel"]["h"] > 32:
+        problems.append(f"{m['vw']}: the model selector in the composer is {m['headModel']}")
+    # One row at rest: the pill is the 46 px the plan draws, give or take a hairline.
+    if m["composerBox"] and m["composerBox"]["h"] > 52:
+        problems.append(f"{m['vw']}: the composer pill is {m['composerBox']['h']}px at rest")
     for h in m["act"]:
         if h > 28:
             problems.append(f"{m['vw']}: a step row is {h}px")

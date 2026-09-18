@@ -104,8 +104,12 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return route.fulfill(status=200, content_type="text/event-stream", body="event: hello\ndata: {}\n\n")
     if "auth/me" in url:
         body = json.dumps({"user_id": 1, "via": "token"})
+    elif f"/api/sessions/{SESSION}/steer" in url:
+        body = "[]"
     elif f"/api/sessions/{SESSION}" in url and "/events" not in url and "/stream" not in url:
         body = json.dumps(DETAIL)
+    elif url.split("?", 1)[0].endswith("/api/settings"):
+        body = json.dumps({"model": {"preset": "opus"}, "presets": {"opus": {"provider": "claude", "model": CONFIGURED, "label": "Claude Opus 5", "thinking": True}, "flash": {"provider": "deepseek", "model": STANDBY, "label": "DeepSeek Flash", "thinking": False}}})
     elif "unread" in url:
         body = json.dumps({"unread": 0})
     elif "/api/usage/provider/" in url:
@@ -137,14 +141,26 @@ def run() -> int:
             page.wait_for_selector(".msg.user", timeout=15000)
             page.wait_for_timeout(400)
 
-            # The model is a label at the right of the header; on a phone it is hidden from the row and
-            # read from the button's own text, which is what the composer will carry later.
-            header = page.locator(".chat-head .head-model").first.evaluate("(el) => el.textContent")
-            print(f"{name}: header label = {header!r}")
+            # The model is the selector inside the composer, on a phone and on a desk alike; while a
+            # stand-in answers, its label names both models and the button is marked.
+            selector = page.locator(".composer .model-select").first
+            header = selector.evaluate("(el) => el.textContent")
+            print(f"{name}: composer selector = {header!r}")
             if STANDBY.split("-")[-1] not in header:
-                problems.append(f"{name}: the header does not name the model that is answering ({header!r})")
+                problems.append(f"{name}: the selector does not name the model that is answering ({header!r})")
             if "opus" not in header:
-                problems.append(f"{name}: the header does not say what it stands in for ({header!r})")
+                problems.append(f"{name}: the selector does not say what it stands in for ({header!r})")
+            if not selector.evaluate("(el) => el.classList.contains('attn')"):
+                problems.append(f"{name}: the selector is not marked as standing in")
+            selector.click()
+            page.wait_for_selector(".model-list", timeout=5000)
+            restore = page.locator(".model-list .model-row.restore")
+            if not restore.count():
+                problems.append(f"{name}: the open list does not offer the way back to the configured model")
+            elif CONFIGURED.split("-")[-1] not in restore.first.inner_text():
+                problems.append(f"{name}: the way back does not name the configured model ({restore.first.inner_text()!r})")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(200)
 
             notes = page.locator(".fallback-note")
             print(f"{name}: {notes.count()} turn(s) marked")

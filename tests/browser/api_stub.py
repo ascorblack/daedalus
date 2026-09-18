@@ -53,6 +53,8 @@ GATES: dict[str, object] = {
     "/api/sessions": {"sessions": [], "projects": [], "free": {"total": 0, "active": 0, "loops": 0, "last_message_at": ""}},
     # The shell asks which projects there are before it draws the rail.
     "/api/projects": [],
+    # The composer offers the voice page only where the installation has one; a harness has none.
+    "/api/voice": {"enabled": False},
 }
 
 

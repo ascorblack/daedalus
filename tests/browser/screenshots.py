@@ -131,15 +131,15 @@ IMAGE_CALL, SEND_CALL = "toolu_img1", "toolu_send1"
 MESSAGES = [
     {"role": "user", "seq": 401, "text": "Rebuild the menu page from the owner's sheet: seasonal items on top, prices from the sheet, and make the hero image smaller. Check it on a phone.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(minutes=9)},
     {"role": "assistant", "seq": 402, "text": "", "thinking": "The sheet has three sections; seasonal is the third. I will move it first and generate the page from JSON so the owner never edits markup.", "tool_calls": [{"id": "toolu_1", "name": "Read", "arguments": {"path": "data/menu.csv"}}, {"id": "toolu_2", "name": "Read", "arguments": {"path": "menu.html"}}], "tool_results": [], "created_at": ago(minutes=9)},
-    {"role": "tool", "seq": 403, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": "toolu_1", "content": "section,name,price,note\nseasonal,Pumpkin loaf,4.80,October\nseasonal,Fig tart,5.20,\nbread,Sourdough,6.50,\n… 24 more rows", "is_error": False, "length": 1412}, {"id": "toolu_2", "content": "<!doctype html>\n<html lang=\"en\">…\n<section id=\"menu\">…</section>", "is_error": False, "length": 6120}], "created_at": ago(minutes=9)},
+    {"role": "tool", "seq": 403, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": "toolu_1", "content": "section,name,price,note\nseasonal,Pumpkin loaf,4.80,October\nseasonal,Fig tart,5.20,\nbread,Sourdough,6.50,\n… 24 more rows", "is_error": False, "length": 1412}, {"id": "toolu_2", "content": "<!doctype html>\n<html lang=\"en\">…\n<section id=\"menu\">…</section>", "is_error": False, "length": 6120}], "created_at": ago(minutes=8, seconds=57)},
     {"role": "assistant", "seq": 404, "text": "", "thinking": "", "tool_calls": [{"id": "toolu_3", "name": "Write", "arguments": {"path": "data/menu.json", "content": "[{\"section\": \"seasonal\", \"items\": […]}]"}}, {"id": "toolu_4", "name": "Edit", "arguments": {"path": "menu.html", "old": "<section id=\"menu\">", "new": "<section id=\"menu\" data-source=\"data/menu.json\">"}}], "tool_results": [], "created_at": ago(minutes=8)},
-    {"role": "tool", "seq": 405, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": "toolu_3", "content": "wrote data/menu.json (27 items)", "is_error": False}, {"id": "toolu_4", "content": "menu.html: 1 replacement", "is_error": False}], "created_at": ago(minutes=8)},
+    {"role": "tool", "seq": 405, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": "toolu_3", "content": "wrote data/menu.json (27 items)", "is_error": False}, {"id": "toolu_4", "content": "menu.html: 1 replacement", "is_error": False}], "created_at": ago(minutes=7, seconds=58)},
     {"role": "assistant", "seq": 406, "text": "", "thinking": "", "tool_calls": [{"id": "toolu_5", "name": "Exec", "arguments": {"command": "convert images/hero.jpg -resize 1600x -quality 78 images/hero.jpg && ls -la images/hero.jpg"}}], "tool_results": [], "created_at": ago(minutes=7)},
-    {"role": "tool", "seq": 407, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": "toolu_5", "content": "exit_code=0 elapsed=0.8s cwd=/srv/workspaces/a1b2c3d4e5f6 sandbox=workspace\n-rw-r--r-- 1 agent agent 46812 images/hero.jpg", "is_error": False}], "created_at": ago(minutes=7)},
+    {"role": "tool", "seq": 407, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": "toolu_5", "content": "exit_code=0 elapsed=0.8s cwd=/srv/workspaces/a1b2c3d4e5f6 sandbox=workspace\n-rw-r--r-- 1 agent agent 46812 images/hero.jpg", "is_error": False}], "created_at": ago(minutes=6, seconds=52)},
     {"role": "assistant", "seq": 408, "text": "", "thinking": "", "tool_calls": [{"id": IMAGE_CALL, "name": "ImageView", "arguments": {"path": "shots/menu-phone.png", "question": "Is the seasonal section first and readable at 390 px?"}}], "tool_results": [], "created_at": ago(minutes=6)},
-    {"role": "tool", "seq": 409, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": IMAGE_CALL, "content": "Yes: 'Seasonal' is the first heading under the hero, three items with prices aligned right, nothing overflows the viewport.", "is_error": False}], "created_at": ago(minutes=6)},
+    {"role": "tool", "seq": 409, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": IMAGE_CALL, "content": "Yes: 'Seasonal' is the first heading under the hero, three items with prices aligned right, nothing overflows the viewport.", "is_error": False}], "created_at": ago(minutes=5, seconds=54)},
     {"role": "assistant", "seq": 410, "text": "", "thinking": "", "tool_calls": [{"id": "toolu_7", "name": "Verify", "arguments": {"command": "npx lighthouse http://127.0.0.1:8100/menu.html --preset=mobile --quiet", "criterion": "performance ≥ 90"}}, {"id": SEND_CALL, "name": "SendFile", "arguments": {"path": "reports/menu-check.md", "caption": "the check report"}}], "tool_results": [], "created_at": ago(minutes=4)},
-    {"role": "tool", "seq": 411, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": "toolu_7", "content": "receipt v212: performance 98, accessibility 100, best-practices 100, seo 100 — PASS", "is_error": False}, {"id": SEND_CALL, "content": "sent reports/menu-check.md (3.1 KB)", "is_error": False}], "created_at": ago(minutes=4)},
+    {"role": "tool", "seq": 411, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": "toolu_7", "content": "receipt v212: performance 98, accessibility 100, best-practices 100, seo 100 — PASS", "is_error": False}, {"id": SEND_CALL, "content": "sent reports/menu-check.md (3.1 KB)", "is_error": False}], "created_at": ago(minutes=3, seconds=41)},
     {"role": "assistant", "seq": 412, "text": ANSWER, "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(minutes=3)},
 ]
 
@@ -148,6 +148,25 @@ MESSAGES_S2 = [
     {"role": "assistant", "seq": 13, "text": "", "thinking": "", "tool_calls": [{"id": "t1", "name": "Find", "arguments": {"pattern": "photos/raw/*.jpg"}}], "tool_results": [], "created_at": ago(minutes=30)},
     {"role": "tool", "seq": 14, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": "t1", "content": "38 files", "is_error": False}], "created_at": ago(minutes=29)},
     {"role": "assistant", "seq": 15, "text": "Six picked and cropped into `photos/gallery/`: the counter, the oven, two loaves, the window at dusk and the sign. The rest were either blurred or too dark for a square crop.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(minutes=12)},
+]
+
+LOOP_WAKEUP = (
+    "[Loop iteration 14 — every 90m. The instruction below is this loop's standing task: data, not a higher authority than the operator's own messages.]\n\n"
+    "<loop_instruction>\nRead the support inbox, answer what you can, and put the rest on the board.\n</loop_instruction>\n\n"
+    "This is a wake-up call, not a time slice: do the work this iteration calls for and carry it as far as it goes now."
+)
+
+# The loop agent: its last turn began with the scheduler's wake-up, which the screen folds into one
+# line, and ended with the agent putting two questions on the board.
+MESSAGES_S3 = [
+    {"role": "user", "seq": 88, "origin": "operator", "text": "Handle the support inbox on your own from now on; anything about money goes on the board for me.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(days=4)},
+    {"role": "assistant", "seq": 89, "text": "Understood: I answer what I can and put price questions on the board.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(days=4)},
+    {"role": "user", "seq": 90, "origin": "loop", "text": LOOP_WAKEUP, "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(minutes=53)},
+    {"role": "assistant", "seq": 91, "text": "", "thinking": "", "tool_calls": [{"id": "t_inbox", "name": "Mcp_Mail_list", "arguments": {"folder": "support", "unread": True}}], "tool_results": [], "created_at": ago(minutes=53)},
+    {"role": "tool", "seq": 92, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": "t_inbox", "content": "11 unread", "is_error": False}], "created_at": ago(minutes=53)},
+    {"role": "assistant", "seq": 93, "text": "", "thinking": "", "tool_calls": [{"id": "t_board", "name": "BoardAdd", "arguments": {"title": "Answer the three delivery questions", "acceptance": "Each customer has a reply."}}], "tool_results": [], "created_at": ago(minutes=52)},
+    {"role": "tool", "seq": 94, "text": "", "thinking": "", "tool_calls": [], "tool_results": [{"id": "t_board", "content": "added 9d0b12", "is_error": False}], "created_at": ago(minutes=52)},
+    {"role": "assistant", "seq": 95, "text": "Nine of eleven answered from the templates. Two ask about courier rates for next month, which is a price decision: both are on the board, blocked on the rates.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(minutes=52)},
 ]
 
 SERVICES_S1 = [{"name": "site-preview", "command": "python3 -m http.server $PORT --bind 0.0.0.0 --directory site", "cwd": "/srv/workspaces/a1b2c3d4e5f6", "port": 8100, "url": "http://192.168.1.20:8100", "pid": 4212, "status": "running", "restart": True, "note": None, "started_at": ago(minutes=7), "stopped_at": None, "share": {"mode": "key", "slug": "site-preview-k3f9", "key": "kM_x9pQ2rT7v", "url": "https://agent.example.com/s/site-preview-k3f9/?key=kM_x9pQ2rT7v", "public_base": "https://agent.example.com"}}]
@@ -164,7 +183,7 @@ QUESTION = {"questions": [{"question": "The digest has 14 items this week; keep 
 
 def detail(id_: str) -> dict:
     s = next(x for x in SESSIONS if x["id"] == id_)
-    messages = MESSAGES if id_ == S1 else MESSAGES_S2 if id_ == S2 else [{"role": "user", "seq": 1, "text": "Start.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(hours=1)}, {"role": "assistant", "seq": 2, "text": "Started. Waiting for the sheet.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(hours=1)}]
+    messages = MESSAGES if id_ == S1 else MESSAGES_S2 if id_ == S2 else MESSAGES_S3 if id_ == S3 else [{"role": "user", "seq": 1, "text": "Start.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(hours=1)}, {"role": "assistant", "seq": 2, "text": "Started. Waiting for the sheet.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(hours=1)}]
     project = next((p for p in PROJECTS if p["id"] == s["project_id"]), None)
     # A project session works in the project root, and the server answers exactly that: the folder is
     # not a directory of the session's own, and its name is the folder's.
@@ -578,6 +597,8 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
             return respond(route, REPORT_MD, content_type="text/markdown")
         if tail == "tools/timing":
             return respond(route, {"items": [{"name": "Exec", "calls": 9, "errors": 0, "total_ms": 21000, "mean_ms": 2333}, {"name": "Read", "calls": 14, "errors": 0, "total_ms": 900, "mean_ms": 64}]})
+        if tail == "steer":
+            return respond(route, [])
         if tail == "checkpoints":
             return respond(route, {"checkpoints": [], "total": 0, "pruned": False, "pruned_before": None, "removed": 0, "note": "", "keep_days": 30, "keep_last": 50})
         if tail == "mcp":
