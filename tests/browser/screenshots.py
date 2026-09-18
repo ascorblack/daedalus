@@ -25,13 +25,14 @@ import os
 import struct
 import sys
 import zlib
+from urllib.parse import parse_qs, urlsplit
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from playwright.sync_api import Page, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app  # noqa: E402
+from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app, FILE_TEXT, file_entries, file_search  # noqa: E402
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
 # The app is bilingual, and so is this set: LANG_UI=ru opens every page with ?lang=ru and the words
@@ -545,6 +546,10 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     url = request.url
     path = url.split("?", 1)[0]
     rel = path[path.index("/api/") :]
+    params = parse_qs(urlsplit(url).query)
+    search = file_search(rel, params.get("q", [""])[0])
+    if search is not None:
+        return respond(route, search)
     if rel == "/api/providers/lookup-models":
         return respond(route, {"base_url": "http://keyproxy:3200/openrouter/v1", "models": [e["id"] for e in CATALOGUE], "entries": CATALOGUE})
     if rel == "/api/voice/tts":
@@ -586,10 +591,11 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         if tail == "":
             return respond(route, detail(sid))
         if tail == "files":
-            return respond(route, {"path": "", "kind": "dir", "entries": FILES[""]})
+            return respond(route, {"path": params.get("path", [""])[0], "kind": "dir", "entries": FILES[""] + [{"name": "src", "dir": True, "size": 0, "mtime": 0}, {"name": ".env", "dir": False, "size": 24, "mtime": 0}, {"name": "node_modules", "dir": True, "size": 0, "mtime": 0}] if not params.get("path", [""])[0] else file_entries(params["path"][0])})
         if tail == "download":
-            q = url.split("?", 1)[1] if "?" in url else ""
-            p = [kv.split("=", 1)[1] for kv in q.split("&") if kv.startswith("path=")][0].replace("%2F", "/")
+            p = params.get("path", [""])[0]
+            if p in FILE_TEXT:
+                return respond(route, FILE_TEXT[p], content_type="text/plain")
             if p.endswith(".png"):
                 return respond(route, PHONE_PNG, content_type="image/png")
             return respond(route, NOTES_MD if "NOTES" in p else REPORT_MD, content_type="text/markdown")
@@ -629,7 +635,7 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     if rel == "/api/workspaces":
         return respond(route, WORKSPACES)
     if rel.startswith("/api/workspaces/"):
-        return respond(route, {"path": "", "kind": "dir", "entries": FILES[""]})
+        return respond(route, {"path": params.get("path", [""])[0], "kind": "dir", "entries": FILES[""] + [{"name": "src", "dir": True, "size": 0, "mtime": 0}, {"name": ".env", "dir": False, "size": 24, "mtime": 0}, {"name": "node_modules", "dir": True, "size": 0, "mtime": 0}] if not params.get("path", [""])[0] else file_entries(params["path"][0])})
     if rel == "/api/settings":
         return respond(route, SETTINGS)
     if rel == "/api/onboarding":
@@ -1023,6 +1029,56 @@ def agents_shots() -> int:
     return out or UNHANDLED.report()
 
 
+def workspace_shots(page: Page) -> None:
+    """The tree and rich documents, all from the small file fixtures shared with the checks."""
+    from urllib.parse import quote
+    for name, path, selector in [
+        ("session-preview-code", "src/main.py", ".source-view"),
+        ("session-preview-html", "site/index.html", ".html-frame"),
+        ("session-preview-json", "data/sample.json", ".json-tree"),
+        ("session-preview-diff", "change.diff", ".diff-view"),
+    ]:
+        shot(page, name, f"agents/{S1}?panel=preview&path={quote(path)}", wait=selector, settle=500)
+
+    def open_code_tree(p: Page) -> None:
+        p.locator('.explorer-tree [data-path="src"]').click()
+        p.locator('.explorer-tree [data-path="data"]').click()
+        p.locator('.explorer-tree [data-path="src/main.py"] .title').click()
+        p.wait_for_selector(".panel-body.split .source-view")
+
+    page.set_viewport_size({"width": 2560, "height": 1400})
+    shot(page, "session-explorer-wide", f"agents/{S1}?panel=files", wait=".explorer-tree [data-path='src']", before=open_code_tree)
+    page.set_viewport_size(DESK)
+
+
+def run_workspace() -> int:
+    """Retake the conversation and file surfaces without changing unrelated screenshots."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        desk = browser.new_context(viewport=DESK, device_scale_factor=2, color_scheme="dark")
+        desk.add_init_script("try { localStorage.setItem('daedalus.session.panel', 'details'); localStorage.setItem('agents.groupBy', 'workspace'); } catch (e) {}")
+        page = desk.new_page()
+        page.route("**/api/**", stub)
+        shot(page, "session", f"agents/{S1}", wait=".chat-scroll .timeline", before=expand_steps, settle=300)
+        shot(page, "session-panel-files", f"agents/{S1}", before=open_panel_files)
+        shot(page, "session-panel-preview", f"agents/{S1}", before=open_panel_preview)
+        workspace_shots(page)
+        shot(page, "session-menu", f"agents/{S1}", before=open_menu)
+        shot(page, "session-folded", f"agents/{S1}", before=fold_sidebar)
+        shot(page, "dual", f"agents/{S1}?with={S2}", settle=1500)
+        shot(page, "session-share", f"agents/{S1}", before=open_share)
+        desk.close()
+        phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
+        page = phone.new_page()
+        page.route("**/api/**", stub)
+        shot(page, "phone-session", f"agents/{S1}", wait=".chat-scroll .timeline", before=expand_steps)
+        shot(page, "phone-session-panel", f"agents/{S1}", before=open_phone_panel)
+        phone.close()
+        browser.close()
+    return UNHANDLED.report()
+
+
 def run() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
@@ -1035,6 +1091,7 @@ def run() -> int:
         shot(page, "session", f"agents/{S1}", wait=".chat-scroll .timeline", before=expand_steps, settle=300)
         shot(page, "session-panel-files", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_panel_files, settle=800)
         shot(page, "session-panel-preview", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_panel_preview, settle=1200)
+        workspace_shots(page)
         shot(page, "session-menu", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_menu, settle=500)
         # The fold is remembered: every desktop picture from here on has the sidebar as the strip.
         shot(page, "session-folded", f"agents/{S1}", wait=".chat-scroll .timeline", before=fold_sidebar, settle=500)
@@ -1089,4 +1146,4 @@ if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
     only = os.environ.get("ONLY")
-    sys.exit(run_voice() if only == "voice" else agents_shots() if only == "agents" else run())
+    sys.exit(run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())

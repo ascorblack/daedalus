@@ -9,6 +9,8 @@ import { codeBlock } from "./md";
 import { Icon } from "./icons";
 import { PanelEntry } from "./panel";
 import { PreviewSource, fileGlyph, previewKind, sessionBase } from "./preview";
+import { DiffView } from "./previewparts";
+import { looksLikeDiff } from "./diff";
 import { t } from "./i18n";
 
 export type Verification = { id: number; criterion: string; command: string; exit_code: number; passed: number; output_head: string; duration_ms: number; at: string; sandboxed: number; dependencies: string; tests_run: number | null };
@@ -99,7 +101,7 @@ export function JobsTab({ sessionId, messages, onOpen, onPreview }: { sessionId:
                 {r.dependencies && t("session.receipt.depends", { list: r.dependencies })}
               </div>
               <div dangerouslySetInnerHTML={{ __html: codeBlock(r.command, "sh") }} />
-              {r.output_head && <pre className="filetext">{r.output_head}</pre>}
+              {r.output_head && (looksLikeDiff(r.output_head) ? <DiffView text={r.output_head} /> : <pre className="filetext">{r.output_head}</pre>)}
             </details>
           ))}
         </section>

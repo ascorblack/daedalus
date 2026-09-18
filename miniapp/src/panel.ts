@@ -79,29 +79,30 @@ function sameEntry(a: PanelEntry, b: PanelEntry): boolean {
 
 /** What a link carries: the open tab and the previewed file. `tab=` is read as the tab too, so a
  *  link written as `?panel=files&tab=preview&path=…` opens Preview on that path. */
-export function readPanelQuery(query: URLSearchParams): { tab: PanelTab; path: string | null } | null {
+export function readPanelQuery(query: URLSearchParams): { tab: PanelTab; path: string | null; lines?: string } | null {
   const tab = query.get("tab");
   const panel = query.get("panel");
   const which = isPanelTab(tab) ? tab : isPanelTab(panel) ? panel : null;
   if (!which) return null;
   const path = query.get("path");
-  return { tab: which, path: path || null };
+  const lines = query.get("lines") ?? "";
+  return { tab: which, path: path || null, ...(/^\d+(?:-\d+)?$/.test(lines) ? { lines } : {}) };
 }
 
 /** The query parameters the state writes; null for the ones to drop. */
 export function panelQuery(s: PanelState): Record<string, string | null> {
   const current = currentEntry(s);
-  return { panel: s.tab, path: s.tab === "preview" && current ? current.path : null, tab: null };
+  return { panel: s.tab, path: s.tab === "preview" && current ? current.path : null, lines: s.tab === "preview" ? current?.lines ?? null : null, tab: null };
 }
 
 /** The state a route describes, over what the pane already holds: the tab from the link, the file
  *  on top of the history when the link names one the pane is not already showing. */
-export function applyPanelQuery(s: PanelState, q: { tab: PanelTab; path: string | null } | null, base: string): PanelState {
+export function applyPanelQuery(s: PanelState, q: { tab: PanelTab; path: string | null; lines?: string } | null, base: string): PanelState {
   if (!q) return closePanel(s);
   let next = openTab(s, q.tab);
   if (q.path && (q.tab === "preview" || !currentEntry(next))) {
     const current = currentEntry(next);
-    if (!current || current.path !== q.path) next = openFile(next, { base, path: q.path });
+    if (!current || current.path !== q.path || current.lines !== q.lines) next = openFile(next, { base, path: q.path, ...(q.lines ? { lines: q.lines } : {}) });
     if (q.tab !== "preview") next = openTab(next, q.tab);
   }
   return next;
