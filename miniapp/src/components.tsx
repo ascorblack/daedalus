@@ -46,6 +46,15 @@ export function statusWord(status: string): string {
   return STATUS_WORDS.includes(status) ? t(`status.${status}`) : status;
 }
 
+/** The one disclosure glyph: a chevron that turns to point down when what it guards is open. */
+export function Chevron({ open, size = 14 }: { open: boolean; size?: number }) {
+  return (
+    <span className={`chev ${open ? "down" : ""}`} aria-hidden>
+      <Icon name="forward" size={size} />
+    </span>
+  );
+}
+
 export function Dot({ status, className }: { status: string; className?: string }) {
   return <span className={`dot ${status} ${className ?? ""}`} aria-hidden />;
 }

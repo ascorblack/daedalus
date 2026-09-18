@@ -1,16 +1,25 @@
 import { Component, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { api, AsrStatus, LoopView, ModelFallback, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
-import { Dot, ServiceRow, Status, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, statusWord, timeAgo } from "../components";
-import { OverflowMenu, Sheet, confirmDialog, Overlay } from "../dialogs";
-import { absDate, clock, commandPreview, duration, plainPreview, shortDateTime, untilShort } from "../format";
+import { api, ApiError, AsrStatus, ModelFallback, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, SessionDetail, Compacting } from "../api";
+import { Chevron, Dot, Status, copyText, fmtInt, statusWord, timeAgo } from "../components";
+import { MenuItem, OverflowMenu, confirmDialog, Overlay } from "../dialogs";
+import { absDate, clock, commandPreview, duration, plainPreview, shortDateTime } from "../format";
 import { EVIDENCE_EVENT, EvidenceRequest, codeBlock, renderCached, renderMarkdown } from "../md";
-import { confirmAsync, enterSends, errorText, fmtBytes, fmtTok, haptic } from "../ui";
+import { confirmAsync, errorText, fmtBytes, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
-import { AuthImg, FilePreview, PreviewSource, canPreview, fileGlyph, previewKind, sessionBase } from "../preview";
-import { Activity, LiveStore, SummaryItem, ToolItem, Turn, applyLive, buildTurns, createLiveStore, isOlderPage, liveAfter, liveBase, prepend, reconcile } from "../turns";
+import { AuthImg, FilePreview, PreviewSource, canPreview, downloadHref, fileGlyph, previewKind, sessionBase } from "../preview";
+import { Activity, LiveStore, SummaryItem, SystemNote, ToolItem, Turn, applyLive, buildTurns, createLiveStore, familyCounts, isOlderPage, liveAfter, liveBase, prepend, producedFiles, reconcile } from "../turns";
+import { ArtifactCard } from "../artifact";
+import { Answer, Composer, ComposerHandle } from "../composerbox";
+import { Approval, QueuedSteer, pendingApproval, readSteers, steersAfter } from "../composer";
+import { ModelChoice } from "../modelselect";
 import { MoveSessionSheet } from "../projects";
-import { navigate, pathFor } from "../router";
+import { panelShortcut } from "../panel";
+import { Panel, usePanel, usePanelWidth } from "../panelhost";
+import { SessionDetails } from "../details";
+import { JobsTab } from "../jobs";
+import { navigate, pathFor, useRoute } from "../router";
+import { useMedia } from "../shell";
 import { Windowed } from "../virtual";
 import { DICT, plural, t } from "../i18n";
 
@@ -41,37 +50,30 @@ export type SessionScreenProps = {
   pane?: "left" | "right";
   /** Open another session beside this one; absent when the screen cannot split. */
   onSplit?: () => void;
-  /** The sessions list beside the conversation (wide screens): whether it shows, and the switch. */
-  listOpen?: boolean;
-  onToggleList?: () => void;
 };
 
-export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOpen, onToggleList }: SessionScreenProps) {
+export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: SessionScreenProps) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   // The streaming turn's state is not React state: a token must repaint the turn it belongs to,
   // not the screen. The components that show it subscribe; everything else never hears about it.
   const liveRef = useRef<LiveStore | null>(null);
   if (!liveRef.current) liveRef.current = createLiveStore();
   const live = liveRef.current;
-  const [draft, setDraft] = useState("");
   const [moving, setMoving] = useState(false);
-  const [pending, setPending] = useState<File[]>([]);
-  const [sending, setSending] = useState(false);
-  // The layout is the operator's, not the session's: the pane they opened on the right (files, MCP) and
-  // whether the session panel is shown stay put across sessions and reloads, so leaving for Settings and
-  // coming back does not mean reopening the files and closing the panel again.
-  const [view, setView] = useState<"chat" | "files" | "mcp">(() => (readLayout("view") === "files" || readLayout("view") === "mcp" ? (readLayout("view") as "files" | "mcp") : "chat"));
-  useEffect(() => writeLayout("view", view), [view]);
-  const [info, setInfo] = useState<string | null>(null);
+  const composer = useRef<ComposerHandle>(null);
+  // The right panel: the route carries the open tab and the previewed file for the pane the URL
+  // names; the second pane of a dual view keeps its panel to itself. Phones host it in a sheet.
+  const route = useRoute();
+  const phone = !useMedia("(min-width: 1024px)");
+  const panel = usePanel(id, sessionBase(id), { route: pane === "right" ? null : route.query, beside: pane === "left" ? route.with : null, pane });
+  const [panelPct, dragPanel] = usePanelWidth();
+  const body = useRef<HTMLDivElement>(null);
+  const [detailsFocus, setDetailsFocus] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [modes, setModes] = useState<string[]>([]);
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [commandResult, setCommandResult] = useState<{ line: string; text: string } | null>(null);
-  const [picker, setPicker] = useState<null | { presets: Record<string, { provider: string; model: string; label: string }>; global: string }>(null);
-  const textarea = useRef<HTMLTextAreaElement>(null);
-  const [custom, setCustom] = useState("");
   const scroller = useRef<HTMLDivElement>(null);
-  const fileInput = useRef<HTMLInputElement>(null);
   const stick = useRef(true);
   const userScrolling = useRef(false);
   const [atBottom, setAtBottom] = useState(true);
@@ -80,12 +82,15 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   const [dragging, setDragging] = useState(0);
   const [providerUsage, setProviderUsage] = useState<ProviderUsage | null>(null);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
-  const [asideOpen, setAsideOpen] = useState(() => pane === undefined && readLayout("aside") !== "0");
-  useEffect(() => { if (pane === undefined) writeLayout("aside", asideOpen ? "1" : "0"); }, [asideOpen, pane]);
   const [asr, setAsr] = useState<AsrStatus | null>(null);
   const [snapshots, setSnapshots] = useState<SessionCheckpoints | null>(null);
-  const [asideWidth, setAsideWidth] = usePaneWidth("aside", 272, 200, 520);
-  const [paneWidth, setPaneWidth] = usePaneWidth("pane", 420, 280, 900);
+  const [voice, setVoice] = useState(false);
+  // The steers the host is holding for the next model call. `none` is a host without the route:
+  // the cards are simply not drawn, and the route is not asked again.
+  const [steers, setSteers] = useState<QueuedSteer[]>([]);
+  const steerRoute = useRef<"unknown" | "ok" | "none">("unknown");
+  // Approval keys the operator has spent or waved away, so the dock does not offer them twice.
+  const [seenKeys, setSeenKeys] = useState<Set<string>>(() => new Set());
 
   async function loopAction(a: string) {
     try {
@@ -119,8 +124,21 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   }, [id]);
 
   const turnAction = useCallback(
-    async (kind: "revert" | "fork", seq: number) => {
+    async (kind: "revert" | "fork" | "retry", seq: number) => {
       try {
+        if (kind === "retry") {
+          // The operator's words again, as a new message: the answer that follows is a new turn.
+          const text = msgs.current.find((m) => m.seq === seq)?.text ?? "";
+          if (!text.trim()) return;
+          if (busyRef.current) {
+            toast(t("session.stopfirst"));
+            return;
+          }
+          await api.post(`/api/sessions/${id}/messages`, { text });
+          stick.current = true;
+          load();
+          return;
+        }
         if (kind === "revert") {
           // With snapshots off — which is a project's default — there is nothing to put the files
           // back from, and the operator should read that before clicking rather than in the toast after.
@@ -275,40 +293,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     api.get<Record<string, unknown>>("/api/modes").then((m) => setModes(Object.keys(m))).catch(() => setModes([]));
     api.get<SlashCommand[]>("/api/commands").then(setCommands).catch(() => setCommands([]));
     api.get<AsrStatus>("/api/asr").then(setAsr).catch(() => setAsr(null));
+    api.get<{ enabled?: boolean }>("/api/voice").then((v) => setVoice(!!v?.enabled)).catch(() => setVoice(false));
     readSnapshots();
   }, [load, readSnapshots]);
-
-  // A recording from the microphone becomes text in the composer (or goes straight out with autosend).
-  const [transcribing, setTranscribing] = useState(false);
-  async function onRecording(blob: Blob, seconds: number) {
-    if (asr && seconds > asr.max_seconds) {
-      toast(t("session.transcribe.long", { n: seconds, max: asr.max_seconds }));
-      return;
-    }
-    setTranscribing(true);
-    try {
-      const ext = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
-      const form = new FormData();
-      form.append("audio", blob, `recording.${ext}`);
-      const res = await fetch(`/api/sessions/${id}/transcribe`, { method: "POST", headers: api.authHeaders(), body: form });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? `transcription failed (${res.status})`);
-      const r = (await res.json()) as { transcript: string; text: string; autosend: boolean };
-      if (r.autosend && !draft.trim()) {
-        await api.post(`/api/sessions/${id}/messages`, { text: r.text });
-        toast(t("session.transcribe.sent", { text: r.transcript.slice(0, 80) }));
-        stick.current = true;
-        load();
-      } else {
-        setDraft((d) => (d.trim() ? `${d.trimEnd()}\n\n${r.text}` : r.text));
-        textarea.current?.focus();
-        haptic("success");
-      }
-    } catch (e) {
-      toast(errorText(e));
-    } finally {
-      setTranscribing(false);
-    }
-  }
 
   // The scheduled tasks that belong to this session: created from it, aimed at it, or running in it now.
   const loadSchedules = useCallback(() => {
@@ -368,6 +355,60 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   // take it away; between the two this is what there is to show.
   const saving = !busy && !!detail?.housekeeping;
   const compacting = detail?.compacting ?? null;
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+
+  // What the host is holding for the next step. Read when a run begins and after every steer
+  // this screen sends; kept current from the stream, which carries the whole queue in each event.
+  const loadSteers = useCallback(async () => {
+    if (steerRoute.current === "none") return;
+    try {
+      const raw = await api.get<unknown>(`/api/sessions/${id}/steer`);
+      steerRoute.current = "ok";
+      setSteers(readSteers(raw));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) steerRoute.current = "none";
+      setSteers([]);
+    }
+  }, [id]);
+  useEffect(() => {
+    steerRoute.current = "unknown";
+    setSteers([]);
+  }, [id]);
+  useEffect(() => {
+    if (busy) void loadSteers();
+    else setSteers([]);
+  }, [busy, loadSteers]);
+  const withdraw = useCallback(
+    async (steer: QueuedSteer) => {
+      try {
+        await api.delete(`/api/sessions/${id}/steer/${encodeURIComponent(steer.id)}`);
+        setSteers((q) => q.filter((x) => x.id !== steer.id));
+        toast(t("composer.steer.withdrawn"));
+      } catch (e) {
+        // A 409 is the message having gone through after all; the list is re-read either way.
+        toast(e instanceof ApiError && e.status === 409 ? t("composer.steer.gone") : errorText(e));
+        void loadSteers();
+      }
+    },
+    [id, toast, loadSteers],
+  );
+
+  // A tool call the policy refused, waiting on the operator: the dock above the pill offers it once.
+  const approval = useMemo(() => pendingApproval(detail?.messages ?? [], seenKeys), [detail?.messages, seenKeys]);
+  const approve = useCallback(
+    async (a: Approval) => {
+      try {
+        await api.post(`/api/sessions/${id}/policy/grant`, { key: a.key });
+        setSeenKeys((k) => new Set(k).add(a.key));
+        toast(t("composer.approved"));
+      } catch (e) {
+        toast(errorText(e));
+      }
+    },
+    [id, toast],
+  );
+  const deny = useCallback((a: Approval) => setSeenKeys((k) => new Set(k).add(a.key)), []);
 
   // The event stream carries every change while a run is active; this is the safety net, not the
   // feed, and it asks what the session is doing — not for the conversation over again.
@@ -455,6 +496,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
         // triggers: the read says the same thing a round trip later.
         setDetail((prev) => (prev ? { ...prev, status: p.status === "awaiting" ? "waiting" : "idle", housekeeping: !!p.housekeeping } : prev));
         refreshSoon("tail");
+      } else if (event === "steer_changed") {
+        steerRoute.current = "ok";
+        setSteers((q) => steersAfter(q, p));
       } else if (event === "compaction_completed") refreshSoon("tail");
       else if (event === "state_changed" || event === "tool_call_pending") refreshSoon("state");
     }
@@ -605,95 +649,46 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     if (el.scrollTop < 400 && older === "more" && pageable) void loadOlder();
   }
 
-  // Files from the clipboard (a screenshot, a copied file) and files dropped on the chat join the draft.
-  function addFiles(files: Iterable<File>) {
-    const named = Array.from(files).map((f) => {
-      // A pasted screenshot arrives as "image.png" every time: give each one a name of its own.
-      if (!/^(image|blob|file)(\.[a-z0-9]+)?$/i.test(f.name)) return f;
-      const ext = f.name.includes(".") ? f.name.slice(f.name.lastIndexOf(".")) : f.type.startsWith("image/") ? `.${f.type.slice(6).replace("jpeg", "jpg")}` : "";
-      const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
-      return new File([f], `${f.type.startsWith("image/") ? "screenshot" : "pasted"}-${stamp}${ext}`, { type: f.type, lastModified: f.lastModified });
-    });
-    if (named.length) setPending((p) => [...p, ...named]);
-  }
-  function onPaste(e: React.ClipboardEvent) {
-    const items = Array.from(e.clipboardData?.items ?? []);
-    const files = items.filter((it) => it.kind === "file").map((it) => it.getAsFile()).filter((f): f is File => !!f);
-    if (!files.length) return;
-    // Text pasted alongside (rich-text editors add an HTML rendering of the image) is not wanted.
-    e.preventDefault();
-    addFiles(files);
-    haptic("light");
-  }
   function onDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragging(0);
-    if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
+    if (e.dataTransfer?.files?.length) composer.current?.addFiles(e.dataTransfer.files);
   }
 
-  const paletteQuery = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).split(" ")[0].toLowerCase() : null;
-  const paletteItems = paletteQuery === null || draft.includes(" ") ? [] : commands.filter((c) => c.name.startsWith(paletteQuery));
-
+  // A slash command, run by the host. A short answer is a toast, a long one a sheet; a failure is
+  // thrown back so the composer can put the line back in the field.
   async function runCommand(line: string) {
     const name = line.slice(1).split(" ")[0].toLowerCase();
     const spec = commands.find((c) => c.name === name);
     if (spec?.confirm && !(await confirmAsync(t("session.command.confirm", { name })))) return;
-    setDraft("");
-    if (textarea.current) textarea.current.style.height = "auto";
-    try {
-      const r = await api.post<{ text: string }>(`/api/sessions/${id}/command`, { line });
-      const short = r.text.length < 140 && !r.text.includes("\n");
-      if (short) toast(r.text);
-      else setCommandResult({ line, text: r.text });
-      load();
-    } catch (e) {
-      setDraft(line);
-      toast(errorText(e));
-    }
+    const r = await api.post<{ text: string }>(`/api/sessions/${id}/command`, { line });
+    const short = r.text.length < 140 && !r.text.includes("\n");
+    if (short) toast(r.text);
+    else setCommandResult({ line, text: r.text });
+    load();
   }
 
-  function pickCommand(c: SlashCommand) {
-    if (c.args) {
-      setDraft(`/${c.name} `);
-      textarea.current?.focus();
+  // The message goes out; while a run is on the host holds it as a steer for the next step, and the
+  // queue is re-read so the card is there before the stream says so.
+  async function send(text: string, files: File[]) {
+    const steer = busyRef.current && status === "running";
+    if (files.length > 0) {
+      const form = new FormData();
+      form.append("text", text);
+      for (const f of files) form.append("files", f, f.name);
+      const res = await fetch(`/api/sessions/${id}/upload`, { method: "POST", headers: api.authHeaders(), body: form });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? res.statusText);
     } else {
-      runCommand(`/${c.name}`);
+      await api.post(`/api/sessions/${id}/messages`, steer ? { text, steer: true } : { text });
     }
+    stick.current = true;
+    if (steer) void loadSteers();
+    load();
   }
 
-  async function send() {
-    const text = draft.trim();
-    const files = pending;
-    if (sending || (!text && files.length === 0)) return;
-    if (text.startsWith("/") && files.length === 0 && commands.some((c) => c.name === text.slice(1).split(" ")[0].toLowerCase())) {
-      await runCommand(text);
-      return;
-    }
-    setSending(true);
-    setDraft("");
-    setPending([]);
-    if (fileInput.current) fileInput.current.value = "";
-    if (textarea.current) textarea.current.style.height = "auto";
-    try {
-      if (files.length > 0) {
-        const form = new FormData();
-        form.append("text", text);
-        for (const f of files) form.append("files", f, f.name);
-        const res = await fetch(`/api/sessions/${id}/upload`, { method: "POST", headers: api.authHeaders(), body: form });
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? res.statusText);
-      } else {
-        await api.post(`/api/sessions/${id}/messages`, { text });
-      }
-      stick.current = true;
-      haptic("light");
-      load();
-    } catch (e) {
-      setDraft(text);
-      setPending(files);
-      toast(errorText(e));
-    } finally {
-      setSending(false);
-    }
+  async function answer(answers: Answer[]) {
+    await api.post(`/api/sessions/${id}/answer`, { answers });
+    load();
   }
 
   async function stop() {
@@ -719,7 +714,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   }
 
   async function compact() {
-    setInfo(null);
     if (busy) {
       toast(t("session.stopfirst"));
       return;
@@ -736,7 +730,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   }
 
   async function clearHistory() {
-    setInfo(null);
     if (busy) {
       toast(t("session.stopfirst"));
       return;
@@ -751,18 +744,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     }
   }
 
-  async function openPicker() {
-    try {
-      const st = await api.get<any>("/api/settings");
-      const def = st.presets?.[st.model?.preset];
-      setPicker({ presets: st.presets ?? {}, global: def ? def.label || `${def.provider}/${def.model}` : String(st.model?.preset ?? t("settings.heartbeat.default")) });
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }
+  const openPicker = () => composer.current?.openModel();
 
-  async function chooseModel(body: Record<string, unknown>) {
-    setPicker(null);
+  async function chooseModel(body: ModelChoice) {
     try {
       const r = await api.post<{ model: string }>(`/api/sessions/${id}/model`, body);
       toast(t("session.model.picked", { model: r.model }));
@@ -773,7 +757,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   }
 
   async function remove() {
-    setInfo(null);
     if (!(await confirmAsync(t("session.delete.title"), { body: t("session.delete.body"), action: t("session.delete.action") }))) return;
     try {
       await api.delete(`/api/sessions/${id}`);
@@ -801,26 +784,44 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
     }
   }
 
-  const ctxPct = detail?.context && detail.context.window > 0 ? Math.round((100 * detail.context.tokens) / detail.context.window) : null;
   const subRunning = (detail?.subagents ?? []).filter((x) => x.running).length;
 
-  // The chip that opened the sheet names the section it wants; the sheet scrolls there once mounted.
+  // A workspace file opens in the panel's Preview tab; a file waiting in the composer, which is
+  // nowhere the panel can fetch it from, still opens in the dialog.
+  const openPreview = useCallback(
+    (src: PreviewSource) => {
+      if ("file" in src) setPreview(src);
+      else panel.openFile(src);
+    },
+    [panel.openFile],
+  );
+
+  // Ctrl/⌘ . toggles the panel, with Shift it covers the chat. The pane the URL names owns the keys.
   useEffect(() => {
-    if (!info || info === "session") return;
-    const t = window.setTimeout(() => document.getElementById(`info-${info}`)?.scrollIntoView({ block: "start" }), 30);
-    return () => window.clearTimeout(t);
-  }, [info]);
+    if (phone || pane === "right") return;
+    const onKey = (e: KeyboardEvent) => {
+      const which = panelShortcut(e);
+      if (!which) return;
+      e.preventDefault();
+      if (which === "toggle") panel.toggle();
+      else panel.expand();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [phone, pane, panel.toggle, panel.expand]);
 
   const sessionCtx = useMemo(
     () => ({
       id,
       workspace: detail?.workspace ?? "",
-      preview: setPreview,
+      preview: openPreview,
+      openJobs: () => panel.open("jobs"),
+      toast,
       // An empty list is a session that never snapshots (a project with them off, a workspace over
       // the size cap): there is nothing retention took away and the undo behaves as it always did.
       revertable: snapshots && snapshots.total > 0 ? new Set(snapshots.checkpoints.filter((c) => c.kind === "before" && c.seq != null).map((c) => c.seq as number)) : null,
     }),
-    [id, detail?.workspace, snapshots],
+    [id, detail?.workspace, snapshots, openPreview, panel.open, toast],
   );
 
   // What the answer cited, clicked: a file opens at the lines it named, a Verify receipt opens as a
@@ -832,23 +833,25 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
       if (!cited) return;
       if (cited.kind === "run") {
         if (/^v\d+$/.test(cited.id)) setReceipt(cited.id);
-        else setPreview({ base: sessionBase(id), path: `.jobs/${cited.id}.log` });
+        else openPreview({ base: sessionBase(id), path: `.jobs/${cited.id}.log` });
         return;
       }
       const rel = workspaceRelative(cited.path, workspace);
-      if (rel) setPreview({ base: sessionBase(id), path: rel, lines: cited.lines });
+      if (rel) openPreview({ base: sessionBase(id), path: rel, lines: cited.lines });
       else toast(t("session.outside", { path: cited.path }));
     };
     document.addEventListener(EVIDENCE_EVENT, on);
     return () => document.removeEventListener(EVIDENCE_EVENT, on);
-  }, [id, detail?.workspace, toast]);
+  }, [id, detail?.workspace, toast, openPreview]);
   return (
     <div className={`chat ${pane ? `pane pane-${pane}` : ""}`} onDragEnter={(e) => { if (e.dataTransfer?.types.includes("Files")) setDragging((d) => d + 1); }} onDragLeave={() => setDragging((d) => Math.max(0, d - 1))} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
       {dragging > 0 && <div className="dropzone"><Icon name="attach" size={28} /> {t("session.drop")}</div>}
-      <div className="chat-head">
-        <button className="iconbtn" onClick={onBack} aria-label={t(pane === "right" ? "session.closepane" : "shell.back")} title={t(pane === "right" ? "session.closepane" : "shell.back")}>
-          <Icon name={pane === "right" ? "close" : "back"} />
-        </button>
+      <div className={`chat-head ${busy || saving || compacting ? "live" : ""}`}>
+        {(pane || phone) && (
+          <button className="iconbtn" onClick={onBack} aria-label={t(pane === "right" ? "session.closepane" : "shell.back")} title={t(pane === "right" ? "session.closepane" : "shell.back")}>
+            <Icon name={pane === "right" ? "close" : "back"} />
+          </button>
+        )}
         <div className="grow chat-identity" style={{ minWidth: 0 }}>
           {editingTitle !== null ? (
             <input
@@ -863,241 +866,61 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
               }}
             />
           ) : (
-            <button className="title chat-title" onClick={() => setInfo("session")} title={t("session.info")}>
-              {detail?.title ?? "…"}
+            <OverflowMenu
+              label={t("session.title.menu")}
+              className="chat-title"
+              trigger={<><span className="truncate">{detail?.title ?? "…"}</span><Icon name="chevron" size={14} /></>}
+              items={[
+                { label: t("session.rename"), icon: "pen", onSelect: () => setEditingTitle(detail?.title ?? "") },
+                { label: t("session.project.move"), icon: "folder", onSelect: () => setMoving(true) },
+                ...(onSplit ? [{ label: t("session.split"), icon: "split" as IconName, onSelect: onSplit }] : []),
+                { label: t("session.export"), icon: "download", onSelect: exportMarkdown },
+                "-",
+                { label: t("session.compact"), icon: "compact", onSelect: compact, disabled: busy },
+                { label: t("session.clear"), icon: "trash", onSelect: clearHistory, disabled: busy, danger: true },
+                { label: t("session.delete"), icon: "trash", onSelect: remove, danger: true },
+              ]}
+            />
+          )}
+          {detail?.subagent_of && (
+            <button className="leader-link" onClick={() => onOpen?.(detail.subagent_of!)} title={t("session.leader")}>
+              ↳ {detail.leader_title ?? t("session.leader.word")}
             </button>
           )}
-          <div className="sub meta">
-            {(busy || status === "failed") && <Dot status={status} />}
-            {(busy || status === "failed") && <span className={`word ${status}`}>{statusWord(status)}</span>}
-            {/* While another model holds the run the chip says so, and says what it stands in for. It goes
-                back to the plain label by itself: the note is the difference between two names, not a flag
-                anybody has to clear. */}
-            <button className={`chip model ${detail?.fallback ? "attn" : ""}`} onClick={openPicker} title={detail?.fallback ? t("session.model.fallback.turn", { to: detail.fallback.to, from: detail.fallback.from }) : t("session.model.for")}>
-              <Icon name="model" />{" "}
-              {detail?.fallback
-                ? t("session.model.fallback", { to: shortModel(detail.fallback.to, 14), from: shortModel(detail.fallback.from, 14) })
-                : shortModel(detail?.model, 22)}
-            </button>
-            {ctxPct !== null && ctxPct >= 60 && (
-              <button className={`chip ctx ${ctxPct >= 90 ? "bad" : "attn"}`} onClick={() => setInfo("context")} title={t("session.ctx.title", { used: fmtInt(detail!.context!.tokens), window: fmtInt(detail!.context!.window) })}>
-                {t("session.ctx", { n: ctxPct })}
-              </button>
-            )}
-            {detail?.subagents && detail.subagents.length > 0 && (
-              <button className={`chip ${subRunning ? "accent" : ""}`} onClick={() => setInfo("subagents")} title={t("session.subagents.title")}>
-                {subRunning ? <Dot status="running" /> : null}
-                {plural("session.subagents", detail.subagents.length)}{subRunning ? t("session.subagents.working", { n: subRunning }) : ""}
-              </button>
-            )}
-            {detail?.loop && <button className={`chip loop ${detail.loop.status}`} onClick={() => setInfo("loop")} title={detail.loop.instruction}>{loopLabel(detail.loop).replace(/^loop · /, "loop · ")}</button>}
-            {detail?.subagent_of && (
-              <button className="chip" onClick={() => onOpen?.(detail.subagent_of!)} title={t("session.leader")}>
-                ↳ {detail.leader_title ?? t("session.leader.word")}
-              </button>
-            )}
-            {offline && <span className="offline">{t("session.reconnecting")}</span>}
-          </div>
         </div>
+        {compacting ? (
+          <CompactionBar c={compacting} />
+        ) : busy || saving ? (
+          <LiveBar status={status} saving={saving} base={tail} live={live} workspace={detail?.workspace} onJump={jumpToBottom} />
+        ) : status === "failed" ? (
+          <span className="head-status failed" role="status"><Dot status={status} /><b>{statusWord(status)}</b></span>
+        ) : null}
+        {offline && <span className="head-status offline">{t("session.reconnecting")}</span>}
         <div className="head-actions">
-          {onToggleList && (
-            <button className={`iconbtn wide-only ${listOpen ? "on" : ""}`} onClick={onToggleList} aria-label={t("session.list")} title={t("session.list.title")}>
-              <Icon name="board" />
-            </button>
-          )}
-          <button className={`iconbtn wide-only ${asideOpen ? "on" : ""}`} onClick={() => setAsideOpen((v) => !v)} aria-label={t("session.panel")} title={t("session.panel.title")}>
-            <Icon name="columns" />
-          </button>
-          <button className={`iconbtn wide-only ${view === "files" ? "on" : ""}`} onClick={() => setView(view === "files" ? "chat" : "files")} aria-label={t("session.files")} title={t("session.files")}>
-            <Icon name="folder" />
+          <button className={`iconbtn ${panel.state.tab ? "on" : ""}`} onClick={panel.toggle} aria-label={t("panel.toggle")} title={t("panel.toggle.title")} aria-pressed={!!panel.state.tab}>
+            <Icon name="panel" />
           </button>
           <OverflowMenu
             label={t("session.actions")}
             items={[
-              { label: t("session.info"), icon: "settings", onSelect: () => setInfo("session") },
-              { label: t(view === "files" ? "session.files.hide" : "session.files"), icon: "folder", onSelect: () => setView(view === "files" ? "chat" : "files") },
-              { label: t(view === "mcp" ? "session.mcp.hide" : "session.mcp"), icon: "plug", onSelect: () => setView(view === "mcp" ? "chat" : "mcp") },
+              { label: t("panel.tab.details"), icon: "settings", onSelect: () => { setDetailsFocus("session"); panel.open("details"); } },
+              { label: t("session.files"), icon: "folder", onSelect: () => panel.open("files") },
+              { label: t("panel.tab.jobs"), icon: "terminal", onSelect: () => panel.open("jobs") },
+              { label: t("session.mcp"), icon: "plug", onSelect: () => { setDetailsFocus("mcp"); panel.open("details"); } },
               ...(onSplit ? [{ label: t("session.split"), icon: "split" as IconName, onSelect: onSplit }] : []),
-              { label: t("session.rename"), icon: "pen", onSelect: () => setEditingTitle(detail?.title ?? "") },
-              { label: t("session.export"), icon: "download", onSelect: exportMarkdown },
               "-",
-              { label: t("session.compact"), icon: "compact", onSelect: compact, disabled: busy },
-              { label: t("session.clear"), icon: "trash", onSelect: clearHistory, disabled: busy, danger: true },
-              { label: t("session.delete"), icon: "trash", onSelect: remove, danger: true },
+              { label: t("session.export"), icon: "download", onSelect: exportMarkdown },
             ]}
           />
         </div>
+        {(busy || saving || compacting) && <HeadProgress status={status} compacting={compacting} />}
       </div>
 
-      {info && detail && (
-        <Sheet title={t("session.info")} onClose={() => setInfo(null)} className="session-info">
-              <section className="sheet-section" id="info-session">
-              <div className="sheet-section-title">{t("session.card")}</div>
-              <label className="field">{t("session.title")}</label>
-              <input className="field" defaultValue={detail.title} onBlur={(e) => rename(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
-              <label className="field">{t("session.model")}</label>
-              <button className="menu-item" onClick={() => { setInfo(null); openPicker(); }}>
-                {detail.model || t("session.model.global")} <span className="sub">{t("session.model.change")}</span>
-              </button>
-              <label className="field">{t("session.mode")}</label>
-              <select className="field" value={detail.mode || "default"} onChange={(e) => setMode(e.target.value)}>
-                {["default", ...modes].map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-              </section>
-              <section className="sheet-section" id="info-usage">
-              <div className="sheet-section-title"><Icon name="chart" size={14} /> {t("session.usage")}</div>
-              <div className="kv"><span>{t("session.usage.cost")}</span><b>{fmtUsd(detail.usage.usd)}</b></div>
-              <div className="kv"><span>{t("session.usage.in")}</span><b>{fmtInt(detail.usage.i)}</b></div>
-              <div className="kv"><span>{t("session.usage.out")}</span><b>{fmtInt(detail.usage.o)}</b></div>
-              {!!detail.usage.ch && <div className="kv"><span>{t("session.usage.cache")}</span><b>{fmtInt(detail.usage.ch)}</b></div>}
-              <div className="kv"><span>{t("session.usage.calls")}</span><b>{fmtInt(detail.usage.c)}</b></div>
-              </section>
-              <section className="sheet-section" id="info-context">
-              <div className="sheet-section-title"><Icon name="compact" size={14} /> {t("session.context")}</div>
-              {detail.context && (
-                <>
-                  <div className="kv">
-                    <span>{t("session.context.inuse")}</span>
-                    <b>{ctxPct !== null ? `${ctxPct}% · ` : ""}{fmtTok(detail.context.tokens)}{detail.context.window > 0 ? ` / ${fmtTok(detail.context.window)}` : ""}</b>
-                  </div>
-                  {ctxPct !== null && <div className={`bar ${ctxPct >= 90 ? "bad" : ctxPct >= 60 ? "attn" : ""}`} style={{ ["--v" as string]: Math.min(100, ctxPct) }}><i /></div>}
-                  <div className="kv"><span>{t("session.context.history")}</span><b>{t("session.context.messages", { n: detail.context.messages, s: detail.context.summaries, o: detail.context.operator_turns })}</b></div>
-                </>
-              )}
-              <ToolTiming sessionId={id} />
-              <div className="btnrow">
-                <button className="btn small" onClick={compact} disabled={busy}><Icon name="compact" size={14} /> {t("session.compact")}</button>
-              </div>
-              </section>
-              <section className="sheet-section" id="info-loop">
-              <div className="sheet-section-title"><Icon name="loop" size={14} /> {t("session.loop")}{detail.loop ? ` · ${loopLabel(detail.loop).replace(/^\S+ · /, "")}` : ""}</div>
-              <LoopPanel sessionId={id} loop={detail.loop ?? null} onChange={() => load(true)} toast={toast} />
-              </section>
-              {detail.subagents && detail.subagents.length > 0 && (
-                <section className="sheet-section" id="info-subagents">
-                  <div className="sheet-section-title"><Icon name="spawn" size={14} /> {t("session.subagents.title")} · {detail.subagents.length}</div>
-                  {detail.subagents.map((sa) => (
-                    <button key={sa.session_id} className="aside-row link" onClick={() => { setInfo(null); onOpen?.(sa.session_id); }} title={`${sa.model} · ${sa.session_id}`}>
-                      <Dot status={sa.running ? "running" : sa.status === "failed" ? "failed" : "done"} />
-                      <span className="grow name">{sa.name || sa.session_id}</span>
-                      <span className="sub">{sa.running ? statusWord("running").toLowerCase() : sa.status === "failed" ? statusWord("failed").toLowerCase() : sa.kept ? t("session.sub.kept") : statusWord("done").toLowerCase()}</span>
-                    </button>
-                  ))}
-                </section>
-              )}
-              {detail.services && detail.services.length > 0 && (
-                <section className="sheet-section" id="info-services">
-                  <div className="sheet-section-title"><Icon name="globe" size={14} /> {t("session.services")}</div>
-                  {detail.services.map((sv) => (
-                    <ServiceRow key={sv.name} s={sv} sessionId={id} onChange={() => load(true)} toast={toast} onLogs={(text) => { setInfo(null); setCommandResult({ line: `service ${sv.name} · log`, text }); }} />
-                  ))}
-                </section>
-              )}
-              {schedules.length > 0 && (
-                <section className="sheet-section" id="info-cron">
-                  <div className="sheet-section-title"><Icon name="clock" size={14} /> {t("session.schedules")} · {schedules.length}</div>
-                  {schedules.map((sc) => <ScheduleRow key={sc.id} sc={sc} sessionId={id} onAction={scheduleAction} />)}
-                </section>
-              )}
-              <section className="sheet-section" id="info-tools">
-              <div className="sheet-section-title"><Icon name="wrench" size={14} /> {t("session.tools")}</div>
-              <ToolPicker
-                off={detail.tools_off ?? []}
-                note={t("session.tools.note")}
-                onChange={async (off) => {
-                  try {
-                    await api.post(`/api/sessions/${id}/tools`, { tools_off: off });
-                    load(true);
-                  } catch (e) {
-                    toast(errorText(e));
-                  }
-                }}
-              />
-              </section>
-              <section className="sheet-section" id="info-brief">
-              <div className="sheet-section-title"><Icon name="pen" size={14} /> {t("session.brief")}</div>
-              <label className="field">{t("session.brief.label")}{detail.spawned_by ? t("session.brief.by", { id: detail.spawned_by }) : ""}</label>
-              <textarea
-                className="field"
-                rows={4}
-                defaultValue={detail.brief ?? ""}
-                placeholder={t("session.brief.placeholder")}
-                onBlur={async (e) => {
-                  const brief = e.target.value.trim();
-                  if (brief === (detail.brief ?? "")) return;
-                  try {
-                    await api.post(`/api/sessions/${id}/brief`, { brief });
-                    toast(t(brief ? "session.brief.saved" : "session.brief.removed"));
-                    load();
-                  } catch (err) {
-                    toast(errorText(err));
-                  }
-                }}
-              />
-              </section>
-              <section className="sheet-section" id="info-spend">
-              <div className="sheet-section-title"><Icon name="chart" size={14} /> {t("session.cap")}</div>
-              <label className="field">{t("session.cap.label")}</label>
-              <div className="composer-row">
-                <input
-                  className="field"
-                  type="number"
-                  step="0.5"
-                  min={0}
-                  placeholder={t("session.cap.none")}
-                  defaultValue={detail.usd_cap ?? ""}
-                  onBlur={async (e) => {
-                    const raw = e.target.value.trim();
-                    const cap = raw === "" ? null : Number(raw);
-                    if (cap !== null && Number.isNaN(cap)) return;
-                    if (cap === (detail.usd_cap ?? null)) return;
-                    try {
-                      await api.post(`/api/sessions/${id}/cap`, { usd_cap: cap });
-                      toast(cap === null ? t("session.cap.removed") : t("session.cap.set", { n: cap }));
-                      load();
-                    } catch (err) {
-                      toast(errorText(err));
-                    }
-                  }}
-                />
-                <span className="sub" style={{ whiteSpace: "nowrap" }}>{t("settings.limits.spent", { sum: fmtUsd(detail.usage.usd) })}</span>
-              </div>
-              </section>
-              <section className="sheet-section" id="info-advanced">
-              <div className="sheet-section-title">{t("session.advanced")}</div>
-              <div className="kv"><span>{t("session.id")}</span><button className="linkbtn mono" onClick={async () => toast((await copyText(id)) ? t("session.id.copied") : id)} title={t("common.copy")}>{id}</button></div>
-              <div className="kv"><span>{t("session.workspace")}</span><button className="linkbtn mono truncate" onClick={async () => toast((await copyText(detail.workspace)) ? t("session.path.copied") : detail.workspace)} title={detail.workspace}>{detail.workspace_own === false ? detail.workspace_name : detail.workspace}</button></div>
-              {/* Where this agent is listed, and the one control that changes it. A project is not a
-                  setting of the session's own — it is which folder the Agents screen shows it in and,
-                  where the operator asks for it, which files it works on. */}
-              <div className="kv">
-                <span>{t("session.project")}</span>
-                <span className="grow truncate" title={detail.project ? detail.project.root : detail.workspace}>
-                  {detail.project ? t("session.project.inside", { name: detail.project.name }) : t("session.project.none")}
-                </span>
-                <button className="linkbtn" onClick={() => setMoving(true)}>{t("session.project.move")}</button>
-              </div>
-              {detail.run_id && <div className="kv"><span>{t("session.runid")}</span><span className="mono">{detail.run_id}</span></div>}
-              <div className="btnrow">
-                <button className="btn small" onClick={exportMarkdown}><Icon name="download" size={14} /> {t("session.export")}</button>
-              </div>
-              </section>
-              <section className="sheet-section danger">
-              <div className="sheet-section-title">{t("session.danger")}</div>
-              <div className="btnrow" style={{ marginTop: 0 }}>
-                <button className="btn small danger" onClick={clearHistory} disabled={busy}><Icon name="trash" size={14} /> {t("session.clear.short")}</button>
-                <button className="btn small danger" onClick={remove}><Icon name="trash" size={14} /> {t("session.delete.short")}</button>
-              </div>
-              </section>
-        </Sheet>
-      )}
-
-      <div className={`chat-body ${view === "chat" ? "" : "split"} ${asideOpen ? "" : "no-aside"}`} style={{ ["--aside-w" as string]: `${asideWidth}px`, ["--pane-w" as string]: `${paneWidth}px` }}>
+      <div ref={body} className={`chat-body ${panel.state.tab && !phone ? "with-panel" : ""} ${panel.state.expanded && !phone ? "panel-full" : ""}`} style={{ ["--panel-w" as string]: `${panelPct}%` }}>
         <div className="chat-main">
           <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
             <div className="timeline">
+              {!detail && <TurnSkeleton />}
               {pageable && <div className="sub older-note">{older === "loading" ? t("session.older") : ""}</div>}
               {snapshots?.pruned && (
                 <div className="sub older-note">
@@ -1119,183 +942,86 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
                 />
                 {busy && <LiveTurn base={tail} live={live} onTurnAction={turnAction} onRender={pinBottom} />}
               </SessionContext.Provider>
-              {detail?.pending && <QuestionCard key={detail.pending.questions.map((q) => q.question).join("|")} sessionId={id} questions={detail.pending.questions} onDone={() => load()} toast={toast} />}
             </div>
           </div>
-          {!atBottom && !busy && (
+          {!atBottom && (
             <button className="jump-down" onClick={jumpToBottom} aria-label={t("session.jump.label")} title={t("session.jump")}>
               <Icon name="down" size={18} />
             </button>
           )}
-          {compacting && <CompactionBar c={compacting} />}
-          {(busy || saving) && <LiveBar status={status} saving={saving} base={tail} live={live} workspace={detail?.workspace} atBottom={atBottom} onJump={jumpToBottom} />}
-          <div className="composer">
-            {pending.length > 0 && (
-              <div className="attachments" aria-label={t("session.attachments")}>
-                {pending.map((f, i) => (
-                  <AttachmentCard key={`${f.name}-${f.size}-${f.lastModified}-${i}`} file={f} onOpen={() => setPreview({ file: f })} onRemove={() => setPending((p) => p.filter((_, j) => j !== i))} />
-                ))}
-              </div>
-            )}
-            {paletteItems.length > 0 && (
-              <div className="palette">
-                {paletteItems.slice(0, 8).map((c) => (
-                  <button key={c.name} className="palette-item" onClick={() => pickCommand(c)}>
-                    <span className="mono">/{c.name} <span className="sub">{c.args}</span></span>
-                    <span className="sub">{c.description}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="composer-box line">
-              <input ref={fileInput} type="file" multiple hidden onChange={(e) => setPending((p) => [...p, ...Array.from(e.target.files ?? [])])} />
-              <button className="roundbtn" title={t("session.attach")} onClick={() => fileInput.current?.click()} aria-label={t("session.attach")}>
-                <Icon name="plus" />
-              </button>
-              <textarea
-                ref={textarea}
-                value={draft}
-                onChange={(e) => {
-                  setDraft(e.target.value);
-                  const el = e.target;
-                  el.style.height = "auto";
-                  el.style.height = `${Math.min(el.scrollHeight, Math.max(120, window.innerHeight * 0.4))}px`;
-                }}
-                placeholder={t(status === "running" ? "session.composer.running" : status === "waiting" ? "session.composer.waiting" : "session.composer.idle")}
-                rows={1}
-                onPaste={onPaste}
-                onKeyDown={(e) => {
-                  if (e.key === "Tab" && paletteItems.length > 0) {
-                    e.preventDefault();
-                    pickCommand(paletteItems[0]);
-                    return;
-                  }
-                  if (e.key === "Escape" && paletteQuery !== null) {
-                    setDraft("");
-                    return;
-                  }
-                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                    e.preventDefault();
-                    send();
-                    return;
-                  }
-                  if (e.key === "Enter" && !e.shiftKey && enterSends()) {
-                    e.preventDefault();
-                    send();
-                  }
+          <Composer
+            ref={composer}
+            sessionId={id}
+            status={status}
+            onSend={send}
+            onStop={stop}
+            commands={commands}
+            onCommand={runCommand}
+            model={detail?.model ?? ""}
+            fallback={detail?.fallback ?? null}
+            onChooseModel={chooseModel}
+            context={detail?.context ?? null}
+            onContext={() => { setDetailsFocus("context"); panel.open("details"); }}
+            asr={asr}
+            onVoice={voice ? () => navigate(pathFor("voice", null, { session: id })) : undefined}
+            steers={steers}
+            onWithdraw={withdraw}
+            questions={detail?.pending?.questions ?? null}
+            onAnswer={answer}
+            approval={approval}
+            onApprove={approve}
+            onDeny={deny}
+            onPreviewFile={(file) => setPreview({ file })}
+            phone={phone}
+            toast={toast}
+          />
+        </div>
+        {detail && (
+          <Panel
+            state={panel.state}
+            onTab={panel.open}
+            onClose={panel.close}
+            onExpand={panel.expand}
+            onBack={panel.back}
+            onForward={panel.forward}
+            root={detail.project?.name ?? t("session.files.crumb")}
+            downloadUrl={(e) => downloadHref(e.base, e.path)}
+            sheet={phone}
+            onDrag={(dx) => dragPanel(dx, body.current?.clientWidth ?? window.innerWidth)}
+            badges={{ details: subRunning }}
+            details={
+              <SessionDetails
+                id={id}
+                detail={detail}
+                busy={busy}
+                modes={modes}
+                schedules={schedules}
+                provider={provider}
+                providerUsage={providerUsage}
+                onOpen={onOpen}
+                toast={toast}
+                reload={load}
+                focus={detailsFocus}
+                on={{
+                  rename,
+                  setMode,
+                  openPicker,
+                  compact,
+                  clearHistory,
+                  remove,
+                  exportMarkdown,
+                  loopAction,
+                  scheduleAction,
+                  move: () => setMoving(true),
+                  showLog: (line, text) => setCommandResult({ line, text }),
+                  openFiles: () => panel.open("files"),
                 }}
               />
-              {asr?.configured && !draft.trim() && <MicButton onRecording={onRecording} busy={transcribing} />}
-              {status === "running" && (
-                <button className="roundbtn stop" onClick={stop} aria-label={t("session.stop")} title={t("session.stop")}>
-                  <Icon name="stop" />
-                </button>
-              )}
-              {(status !== "running" || draft.trim() || pending.length > 0) && (
-                <button className="roundbtn send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)} aria-label={t(status === "running" ? "session.send.steer" : "session.send")} title={t(status === "running" ? "session.send.steer.title" : "session.send")}>
-                  <Icon name="up" />
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-        {view !== "chat" && detail && <PaneHandle side="right" onDrag={(dx) => setPaneWidth(paneWidth - dx)} />}
-        {view !== "chat" && detail && (
-          <aside className="side-pane">
-            <div className="side-head">
-              <span className="side-title"><Icon name={view === "files" ? "folder" : "plug"} size={14} /> {t(view === "files" ? "session.files" : "session.mcp")}</span>
-              <button className="iconbtn small" onClick={() => setView("chat")} aria-label={t("common.close")} title={t("common.close")}>
-                <Icon name="close" size={16} />
-              </button>
-            </div>
-            <div className="side-body">{view === "files" ? <Files base={sessionBase(id)} uploadUrl={`${sessionBase(id)}/files/upload`} onPreview={setPreview} toast={toast} /> : <McpPanel sessionId={id} toast={toast} />}</div>
-          </aside>
+            }
+            files={<Files base={sessionBase(id)} uploadUrl={`${sessionBase(id)}/files/upload`} onPreview={openPreview} toast={toast} />}
+            jobs={<JobsTab sessionId={id} messages={detail.messages} onOpen={panel.openFile} onPreview={openPreview} />}
+          />
         )}
-        {detail && asideOpen && (
-          <aside className="session-aside wide-only">
-            <div className="aside-card">
-              <div className="aside-title">{t("session.card")}</div>
-              <div className="aside-row"><Icon name="model" size={16} /><span className="grow" title={detail.model}>{shortModel(detail.model, 30)}</span></div>
-              {detail.context && detail.context.window > 0 && (
-                <div className="aside-row" title={t("session.aside.ctx.title", { used: fmtInt(detail.context.tokens), window: fmtInt(detail.context.window), n: detail.context.messages })}>
-                  <Icon name="compact" size={16} />
-                  <span className="grow">{t("session.aside.ctx", { n: Math.round((100 * detail.context.tokens) / detail.context.window) })}</span>
-                  <i className="ctxbar wide" style={{ ["--fill" as string]: `${Math.min(100, Math.round((100 * detail.context.tokens) / detail.context.window))}%` }} />
-                </div>
-              )}
-              <div className="aside-row"><Icon name="chart" size={16} /><span className="grow">{fmtTok(detail.usage.i)}↑ {fmtTok(detail.usage.o)}↓ · {fmtUsd(detail.usage.usd)}</span></div>
-              {/* Where this agent works, and how far it reaches: in a project the folder is the name to
-                  show, because it is also the boundary — and whether snapshots are on decides what a
-                  Revert can put back. */}
-              <button className="aside-row link" onClick={() => setView(view === "files" ? "chat" : "files")} title={detail.project ? detail.project.root : detail.workspace}>
-                <Icon name="folder" size={16} />
-                <span className="grow name">{detail.project ? t("session.aside.project", { name: detail.project.name }) : detail.workspace_own === false ? t("session.aside.workspace", { name: detail.workspace_name ?? "" }) : t("session.aside.own")}</span>
-                {detail.workspace_sessions && detail.workspace_sessions.length > 0 && <span className="sub" title={detail.workspace_sessions.map((w) => w.title).join(", ")}>{plural("session.aside.plus", detail.workspace_sessions.length)}</span>}
-              </button>
-              {detail.project && (
-                <div className="aside-row project-root" title={t("session.aside.project.title", { root: detail.project.root })}>
-                  <span className="grow mono sub">{detail.project.root}</span>
-                  <span className="badge" title={t(detail.project.settings.snapshots ? "session.aside.snapshots.title" : "session.aside.nosnapshots.title")}>
-                    {t(detail.project.settings.snapshots ? "project.snapshots.badge" : "session.aside.nosnapshots")}
-                  </span>
-                </div>
-              )}
-              {detail.workspace_sessions && detail.workspace_sessions.length > 0 && detail.workspace_sessions.slice(0, 4).map((w) => (
-                <button key={w.id} className="aside-row link" onClick={() => onOpen?.(w.id)} title={t("session.aside.sameworkspace")}>
-                  <span className="dot" style={{ background: "var(--muted)" }} /><span className="grow name sub">{w.title}</span>
-                </button>
-              ))}
-              {detail.subagent_of && (
-                <button className="aside-row link" onClick={() => onOpen?.(detail.subagent_of!)}>
-                  <Icon name="back" size={16} /><span className="grow">{t("session.leader.word")}: {detail.leader_title ?? detail.subagent_of}</span>
-                </button>
-              )}
-            </div>
-            {provider && <ProviderUsageCard provider={provider} usage={providerUsage} />}
-            {schedules.length > 0 && (
-              <div className="aside-card">
-                <div className="aside-title"><Icon name="clock" size={14} /> {t("session.cron")} <span className="sub">{t("session.cron.on", { n: schedules.filter((x) => x.enabled).length })}</span></div>
-                {schedules.map((sc) => <ScheduleRow key={sc.id} sc={sc} sessionId={id} onAction={scheduleAction} />)}
-              </div>
-            )}
-            {detail.loop && (
-              <div className="aside-card">
-                <div className="aside-title"><Icon name="loop" size={14} /> {t("session.loop")} <span className={`badge loop ${detail.loop.status}`}>{statusWord(detail.loop.status).toLowerCase()}</span></div>
-                <div className="aside-text">{detail.loop.instruction}</div>
-                <div className="sub">{loopLabel(detail.loop).replace(/^\S+ · /, "")}{detail.loop.next_run_at && detail.loop.status === "active" ? t("agents.loop.next", { t: untilShort(detail.loop.next_run_at) }) : ""}</div>
-                <div className="btnrow" style={{ marginTop: 8 }}>
-                  {detail.loop.status === "active" ? (
-                    <button className="btn small" onClick={() => loopAction("pause")}><Icon name="pause" size={14} /> {t("common.pause")}</button>
-                  ) : (
-                    <button className="btn small primary" onClick={() => loopAction("resume")}><Icon name="play" size={14} /> {t("common.resume")}</button>
-                  )}
-                  {detail.loop.status === "active" && <button className="btn small" onClick={() => loopAction("run")}><Icon name="up" size={14} /> {t("common.runnow")}</button>}
-                </div>
-              </div>
-            )}
-            {detail.services && detail.services.length > 0 && (
-              <div className="aside-card">
-                <div className="aside-title"><Icon name="globe" size={14} /> {t("session.services")} <span className="sub">{t("session.services.running", { n: detail.services.filter((s) => s.status === "running").length })}</span></div>
-                {detail.services.map((s) => (
-                  <ServiceRow key={s.name} s={s} sessionId={id} onChange={() => load(true)} toast={toast} onLogs={(text) => setCommandResult({ line: `service ${s.name} · log`, text })} />
-                ))}
-              </div>
-            )}
-            {detail.subagents && detail.subagents.length > 0 && (
-              <div className="aside-card">
-                <div className="aside-title"><Icon name="spawn" size={14} /> {t("session.subagents.title")} <span className="sub">{t("session.subagents.working", { n: detail.subagents.filter((s) => s.running).length }).replace(/^ · /, "")}</span></div>
-                {detail.subagents.map((s) => (
-                  <button key={s.session_id} className={`aside-row link sub-${s.status}`} onClick={() => onOpen?.(s.session_id)} title={`${s.model} · ${s.session_id}`}>
-                    {s.running ? <span className="live-dot" /> : <span className={"dot " + s.status} />}
-                    <span className="grow name">{s.name || s.session_id}</span>
-                    <span className="sub">{s.running ? statusWord("running").toLowerCase() : s.status === "failed" ? statusWord("failed").toLowerCase() : s.kept ? t("session.sub.kept") : statusWord("done").toLowerCase()}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </aside>
-        )}
-        {detail && asideOpen && <PaneHandle side="right" onDrag={(dx) => setAsideWidth(asideWidth - dx)} />}
       </div>
 
       {commandResult && (
@@ -1316,339 +1042,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
 
       {receipt && <ReceiptDialog sessionId={id} receipt={receipt} onClose={() => setReceipt(null)} />}
 
-      {picker && (
-        <Overlay><div className="sheet-backdrop" onClick={() => setPicker(null)}>
-          <div className="sheet" onClick={(e) => e.stopPropagation()}>
-            <div className="grip" />
-            <h3>{t("session.model.for")}</h3>
-            <div className="sheet-body">
-              <button className="menu-item" onClick={() => chooseModel({ clear: true })}>
-                {t("session.model.global")} <span className="sub">{picker.global}</span>
-              </button>
-              {Object.entries(picker.presets).map(([pid, p]) => (
-                <button key={pid} className="menu-item" onClick={() => chooseModel({ preset: pid })}>
-                  {p.label || p.model} <span className="sub">{p.provider}/{p.model}</span>
-                </button>
-              ))}
-              <div className="sub" style={{ margin: "10px 0 4px" }}>{t("session.model.custom")}</div>
-              <div className="composer-row">
-                <input className="field" placeholder="vllm/Qwen3.6" value={custom} onChange={(e) => setCustom(e.target.value)} />
-                <button
-                  className="btn primary"
-                  disabled={!custom.trim()}
-                  onClick={() => {
-                    const [prov, ...rest] = custom.trim().split("/");
-                    const model = rest.join("/");
-                    chooseModel(model ? { provider: prov, model } : { model: prov });
-                  }}
-                >
-                  {t("session.model.use")}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div></Overlay>
-      )}
     </div>
-  );
-}
-
-function LoopPanel({ sessionId, loop, onChange, toast }: { sessionId: string; loop: LoopView | null; onChange: () => void; toast: (t: string) => void }) {
-  const [editing, setEditing] = useState(false);
-  const [text, setText] = useState(loop?.instruction ?? "");
-  const [mode, setMode] = useState<"interval" | "dynamic">(loop?.mode ?? "interval");
-  const [minutes, setMinutes] = useState(String(loop?.interval_seconds ? Math.round(loop.interval_seconds / 60) : 10));
-  const [maxRuns, setMaxRuns] = useState(loop?.max_runs ? String(loop.max_runs) : "");
-  async function action(a: string) {
-    try {
-      await api.post(`/api/sessions/${sessionId}/loop/action`, { action: a });
-      toast(t("session.loop.action", { action: a }));
-      onChange();
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }
-  async function save() {
-    if (!text.trim()) return;
-    try {
-      await api.post(`/api/sessions/${sessionId}/loop`, { instruction: text.trim(), mode, interval_minutes: mode === "interval" ? Math.max(1, Number(minutes) || 10) : null, max_runs: maxRuns.trim() ? Math.max(1, Number(maxRuns) || 1) : null, start_now: true });
-      toast(t(loop ? "session.loop.updated" : "session.loop.started"));
-      setEditing(false);
-      onChange();
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }
-  if (!loop && !editing) {
-    return (
-      <div className="btnrow" style={{ marginTop: 0 }}>
-        <span className="sub">{t("session.loop.none")}</span>
-        <button className="btn small" onClick={() => setEditing(true)}>{t("session.loop.add")}</button>
-      </div>
-    );
-  }
-  return (
-    <div className="loop-panel">
-      {loop && !editing && (
-        <>
-          <div className="sub loop-instruction">{loop.instruction}</div>
-          <div className="sub">
-            {loop.status === "active" && loop.next_run_at
-              ? t("session.loop.next", { time: clock(loop.next_run_at) })
-              : loop.status === "active"
-                ? t("session.loop.dynamic")
-                : `${statusWord(loop.status)}${loop.stop_reason || loop.pause_note ? `: ${loop.stop_reason || loop.pause_note}` : ""}`}
-            {loop.last_reason ? t("session.loop.lastreason", { reason: loop.last_reason }) : ""}
-          </div>
-          <div className="btnrow" style={{ marginTop: 6 }}>
-            {loop.status === "active" ? <button className="btn small" onClick={() => action("pause")}>{t("common.pause")}</button> : <button className="btn small primary" onClick={() => action("resume")}>{t("common.resume")}</button>}
-            {loop.status === "active" && <button className="btn small" onClick={() => action("run")}>{t("common.runnow")}</button>}
-            <button className="btn small" onClick={() => setEditing(true)}>{t("session.loop.edit")}</button>
-            {loop.status !== "stopped" && loop.status !== "done" && <button className="btn small danger" onClick={() => action("stop")}>{t("session.loop.stop")}</button>}
-            <button className="btn small danger" onClick={async () => { if (await confirmAsync(t("session.loop.remove.title"))) action("remove"); }}>{t("session.loop.remove")}</button>
-          </div>
-        </>
-      )}
-      {editing && (
-        <>
-          <textarea className="field" rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder={t("session.loop.placeholder")} />
-          <div className="composer-row">
-            <select className="field" value={mode} onChange={(e) => setMode(e.target.value as "interval" | "dynamic")}>
-              <option value="interval">{t("newagent.loop.interval")}</option>
-              <option value="dynamic">{t("loop.selfpaced")}</option>
-            </select>
-            {mode === "interval" && <input className="field" type="number" min={1} style={{ maxWidth: 110 }} value={minutes} onChange={(e) => setMinutes(e.target.value)} aria-label={t("newagent.loop.minutes")} />}
-            <input className="field" type="number" min={1} style={{ maxWidth: 130 }} placeholder={t("newagent.loop.max")} value={maxRuns} onChange={(e) => setMaxRuns(e.target.value)} aria-label={t("newagent.loop.max")} />
-          </div>
-          <div className="btnrow" style={{ marginTop: 6 }}>
-            <button className="btn small primary" onClick={save} disabled={!text.trim()}>{t(loop ? "session.loop.save" : "session.loop.start")}</button>
-            <button className="btn small" onClick={() => setEditing(false)}>{t("common.cancel")}</button>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// ── side panels: widths, usage, cron, attachments ─────────────────────────────────────────
-
-function readLayout(key: string): string | null {
-  try {
-    return localStorage.getItem(`daedalus.session.${key}`);
-  } catch {
-    return null;
-  }
-}
-
-function writeLayout(key: string, value: string): void {
-  try {
-    localStorage.setItem(`daedalus.session.${key}`, value);
-  } catch {
-    /* private mode: the layout lasts for the visit */
-  }
-}
-
-/** A pane width the operator dragged, remembered per browser. */
-function usePaneWidth(key: string, initial: number, min: number, max: number): [number, (w: number) => void] {
-  const storageKey = `daedalus.width.${key}`;
-  const [width, setWidth] = useState(() => {
-    try {
-      const v = Number(localStorage.getItem(storageKey));
-      return v >= min && v <= max ? v : initial;
-    } catch {
-      return initial;
-    }
-  });
-  const set = useCallback(
-    (w: number) => {
-      const clamped = Math.round(Math.min(max, Math.max(min, w)));
-      setWidth(clamped);
-      try {
-        localStorage.setItem(storageKey, String(clamped));
-      } catch {
-        /* private mode */
-      }
-    },
-    [storageKey, min, max],
-  );
-  return [width, set];
-}
-
-/** The strip between two panes: drag it to resize (pointer events, so mouse and touch alike). */
-function PaneHandle({ side, onDrag }: { side: "left" | "right"; onDrag: (dx: number) => void }) {
-  const last = useRef<number | null>(null);
-  return (
-    <div
-      className={`pane-handle wide-only ${side}`}
-      role="separator"
-      aria-orientation="vertical"
-      aria-label={t("session.resize")}
-      onPointerDown={(e) => {
-        last.current = e.clientX;
-        (e.target as HTMLElement).setPointerCapture(e.pointerId);
-        document.body.classList.add("resizing");
-      }}
-      onPointerMove={(e) => {
-        if (last.current === null) return;
-        const dx = e.clientX - last.current;
-        last.current = e.clientX;
-        if (dx) onDrag(dx);
-      }}
-      onPointerUp={(e) => {
-        last.current = null;
-        (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-        document.body.classList.remove("resizing");
-      }}
-      onPointerCancel={() => {
-        last.current = null;
-        document.body.classList.remove("resizing");
-      }}
-    />
-  );
-}
-
-const SUBSCRIPTION_LABEL: Record<string, string> = { codex: "Codex · ChatGPT", claude: "Claude · Max", grok: "Grok · SuperGrok" };
-
-function resetIn(at: number | string | null | undefined): string {
-  if (!at) return "";
-  const d = typeof at === "number" ? new Date(at * 1000) : new Date(at);
-  if (Number.isNaN(d.getTime())) return "";
-  const mins = Math.max(0, Math.round((d.getTime() - Date.now()) / 60000));
-  if (mins < 60) return t("fmt.min", { n: mins });
-  return mins < 48 * 60 ? t("fmt.hour", { n: Math.round(mins / 60) }) : t("fmt.day", { n: Math.round(mins / 1440) });
-}
-
-/** What the session's provider has left: a subscription's windows, or the day's metered spend and balance. */
-function ProviderUsageCard({ provider, usage }: { provider: string; usage: ProviderUsage | null }) {
-  const sub = usage?.subscription;
-  const today = usage?.today ?? {};
-  return (
-    <div className="aside-card">
-      <div className="aside-title">
-        <Icon name="chart" size={14} /> {SUBSCRIPTION_LABEL[provider] ?? provider}
-        {sub?.plan && <span className="badge">{sub.plan}</span>}
-        {sub?.limit_reached && <span className="badge" style={{ color: "var(--bad)" }}>limit</span>}
-      </div>
-      {!usage && <div className="sub">…</div>}
-      {sub && !sub.logged_in && <div className="sub">{t("usage.notloggedin")}</div>}
-      {sub?.error && <div className="sub" style={{ color: "var(--bad)" }}>{sub.error}</div>}
-      {(sub?.windows ?? []).map((w) => (
-        <div key={w.name} className="quota">
-          <div className="sub quota-line">
-            <span className="grow">{w.name}</span>
-            <span>{Math.round(w.used_percent)}%{w.resets_at ? t("session.provider.resets", { t: resetIn(w.resets_at) }) : ""}</span>
-          </div>
-          <div className="quota-bar">
-            <i style={{ width: `${Math.min(100, Math.max(0, w.used_percent))}%`, background: w.used_percent >= 100 ? "var(--bad)" : w.used_percent >= 80 ? "var(--warn)" : "var(--ok)" }} />
-          </div>
-        </div>
-      ))}
-      {usage && (
-        <div className="sub" style={{ marginTop: sub ? 6 : 0 }}>
-          {t("session.provider.today", { calls: plural("usage.calls", today.calls ?? 0), in: fmtTok(today.input_tokens), out: fmtTok(today.output_tokens) })}
-          {!sub && ` · ${fmtUsd(today.cost_usd)}`}
-          {usage.balance !== undefined && usage.balance !== null && t("session.provider.balance", { sum: fmtUsd(usage.balance) })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** One scheduled task of the session: cadence, next run, and the two things one does with it. */
-function ScheduleRow({ sc, sessionId, onAction }: { sc: Schedule; sessionId: string; onAction: (sc: Schedule, action: "run" | "delete") => void }) {
-  const where = t(sc.kind === "message" ? "session.sched.reminder" : sc.kind === "lazy" ? "session.sched.lazy" : sc.run_in === "self" || sc.target_session === sessionId ? "session.sched.here" : "session.sched.own");
-  return (
-    <div className="sched-row" title={sc.prompt}>
-      <div className="grow" style={{ minWidth: 0 }}>
-        <div className="sched-name">
-          {!sc.enabled && <span title={t("session.sched.off")}>⏸ </span>}
-          {sc.name} <span className="badge">{where}</span>
-          {sc.active_session_id === sessionId && <span className="live-dot" title={t("sched.running")} />}
-        </div>
-        <div className="sub sched-when">
-          {sc.cron ? t("session.sched.cron", { cron: sc.cron }) : t("session.sched.once", { when: shortDateTime(sc.run_at) })}
-          {sc.next_run_at && sc.enabled ? t("session.sched.next", { when: shortDateTime(sc.next_run_at) }) : ""}
-          {sc.last_run_at ? t("session.sched.last", { t: timeAgo(sc.last_run_at) }) : ""}
-          {sc.failure_count > 0 && <span style={{ color: "var(--bad)" }}>{t("session.sched.failed", { n: sc.failure_count })}</span>}
-        </div>
-      </div>
-      <button className="iconbtn small" onClick={() => onAction(sc, "run")} title={t("common.runnow")} aria-label={t("common.runnow")}><Icon name="play" size={14} /></button>
-      <button className="iconbtn small" onClick={() => onAction(sc, "delete")} title={t("common.delete")} aria-label={t("common.delete")}><Icon name="trash" size={14} /></button>
-    </div>
-  );
-}
-
-/** A file waiting in the composer: a thumbnail for images, a glyph and the size for the rest. */
-function AttachmentCard({ file, onOpen, onRemove }: { file: File; onOpen: () => void; onRemove: () => void }) {
-  const isImage = file.type.startsWith("image/") || previewKind(file.name) === "image";
-  const url = useMemo(() => (isImage ? URL.createObjectURL(file) : null), [file, isImage]);
-  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
-  return (
-    <div className={`attachment ${isImage ? "image" : ""}`}>
-      <button type="button" className="attachment-open" onClick={onOpen} title={canPreview(file.name) ? t("preview.open") : file.name}>
-        {url ? <img src={url} alt={file.name} /> : <span className="attachment-glyph" aria-hidden>{fileGlyph(file.name)}</span>}
-        <span className="attachment-meta">
-          <span className="attachment-name">{file.name}</span>
-          <span className="sub">{fmtBytes(file.size)}</span>
-        </span>
-      </button>
-      <button type="button" className="attachment-x" onClick={onRemove} aria-label={t("common.remove")} title={t("common.remove")}>
-        <Icon name="close" size={12} />
-      </button>
-    </div>
-  );
-}
-
-/** Hold-free recording: one tap starts, the next stops; the seconds tick while it runs. Disabled where the browser has no microphone API. */
-function MicButton({ onRecording, busy }: { onRecording: (blob: Blob, seconds: number) => void; busy: boolean }) {
-  const [rec, setRec] = useState<MediaRecorder | null>(null);
-  const [seconds, setSeconds] = useState(0);
-  const chunks = useRef<Blob[]>([]);
-  const startedAt = useRef(0);
-  const supported = typeof MediaRecorder !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
-  useEffect(() => {
-    if (!rec) return;
-    const t = setInterval(() => setSeconds(Math.round((Date.now() - startedAt.current) / 1000)), 500);
-    return () => clearInterval(t);
-  }, [rec]);
-  useEffect(() => () => rec?.stream.getTracks().forEach((tr) => tr.stop()), [rec]);
-  async function start() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const type = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"].find((t) => MediaRecorder.isTypeSupported(t));
-      const r = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
-      chunks.current = [];
-      r.ondataavailable = (e) => e.data.size && chunks.current.push(e.data);
-      r.onstop = () => {
-        stream.getTracks().forEach((tr) => tr.stop());
-        const blob = new Blob(chunks.current, { type: r.mimeType || "audio/webm" });
-        const took = Math.round((Date.now() - startedAt.current) / 1000);
-        setRec(null);
-        setSeconds(0);
-        if (blob.size > 0 && took >= 1) onRecording(blob, took);
-      };
-      startedAt.current = Date.now();
-      r.start(250);
-      setRec(r);
-      haptic("light");
-    } catch {
-      setRec(null);
-    }
-  }
-  function stop() {
-    rec?.stop();
-  }
-  if (rec) {
-    return (
-      <button className="chip recording" onClick={stop} title={t("session.mic.stop")} aria-label={t("session.mic.stop.label")}>
-        <span className="rec-dot" /> {t("session.mic.seconds", { n: seconds })}
-      </button>
-    );
-  }
-  return (
-    <button className="roundbtn" onClick={start} disabled={!supported || busy} title={t(!supported ? "session.mic.none" : busy ? "session.mic.busy" : "session.mic.title")} aria-label={t("session.mic")}>
-      <Icon name={busy ? "dot" : "mic"} />
-    </button>
   );
 }
 
@@ -1720,7 +1114,7 @@ function FallbackChip({ fallback }: { fallback: ModelFallback }) {
     <div className="fallback-note">
       <button className="chip attn" onClick={() => setOpen((o) => !o)}>
         <Icon name="model" size={14} /> {t("session.model.fallback.turn", { to: fallback.to, from: fallback.from })}
-        <span className={`chev ${open ? "down" : ""}`}>›</span>
+        <Chevron open={open} size={12} />
       </button>
       {open && (
         <div className="sub">
@@ -1734,8 +1128,42 @@ function FallbackChip({ fallback }: { fallback: ModelFallback }) {
   );
 }
 
-const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork", seq: number) => void }) {
-  const { id: sessionId, revertable } = useContext(SessionContext);
+/** The folded line's summary of the work: "read 2 files, ran 3 commands and 4 more". */
+function familyLine(items: Activity[]): string {
+  const { named, more } = familyCounts(items);
+  if (!named.length) return "";
+  const parts = named.map(({ family, n }) => (DICT[`turn.family.${family}`] ? plural(`turn.family.${family}`, n) : t("turn.family.other", { name: family, n })));
+  const text = parts.join(", ") + (more > 0 ? ` ${plural("turn.family.more", more)}` : "");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** What a system note is called on its one line. */
+function noteTitle(note: SystemNote): string {
+  if (note.kind === "loop") {
+    const head = note.iteration === undefined ? t("turn.note.loop.plain") : note.total ? t("turn.note.loop.of", { n: note.iteration, total: note.total }) : t("turn.note.loop", { n: note.iteration });
+    return [head, note.cadence, t("turn.note.instruction")].filter(Boolean).join(" · ");
+  }
+  if (note.kind === "other") return t("turn.note.other", { origin: note.origin });
+  return t(`turn.note.${note.kind}`);
+}
+
+/** A loop's wake-up, a schedule's prompt, a reminder: one folded line, never a bubble. */
+function SystemNoteRow({ note, cacheKey }: { note: SystemNote; cacheKey?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`sysnote ${note.kind}`}>
+      <button type="button" className="sysnote-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <Icon name={note.kind === "loop" ? "loop" : note.kind === "schedule" || note.kind === "reminder" ? "clock" : "compact"} size={14} />
+        <span className="truncate">{noteTitle(note)}</span>
+        <Chevron open={open} />
+      </button>
+      {open && <Md className="sysnote-body" text={note.body} cacheKey={cacheKey} />}
+    </div>
+  );
+}
+
+const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork" | "retry", seq: number) => void }) {
+  const { id: sessionId, revertable, preview, toast } = useContext(SessionContext);
   const [open, setOpen] = useDisclosed(`${sessionId}:turn:${turn.key}`, live);
   const wasLive = useRef(live);
   useEffect(() => {
@@ -1752,24 +1180,32 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
   // has gone, the undo is not offered: it would cut the history and leave the files as they are,
   // which is not what "revert to here" reads as. A session that never snapshots keeps the offer.
   const canRevert = revertable === null || (turn.user?.seq != null && revertable.has(turn.user.seq));
+  const seq = turn.user?.seq ?? null;
+  const settled = !!seq && !!onTurnAction && !live;
+  const inbound = turn.user?.origin?.startsWith("inbound:") ? turn.user.origin.slice(8) : "";
+  const artifacts = live ? [] : producedFiles(turn.activity);
+  const families = open ? "" : familyLine(turn.activity);
+  const copyLink = async () => {
+    const url = `${window.location.origin}${pathFor("agents", sessionId)}#m${seq}`;
+    toast((await copyText(url)) ? t("turn.link.copied") : url);
+  };
   return (
-    <div className="turn">
-      {turn.user && turn.user.origin && turn.user.origin !== "operator" && (
-        <div className="sub" style={{ textAlign: "right", marginBottom: 2 }}>
-          <span className="badge">{turn.user.origin}</span>
-        </div>
-      )}
-      {turn.user && (
+    <div className="turn" id={seq ? `m${seq}` : undefined}>
+      {turn.user && turn.note && <SystemNoteRow note={turn.note} cacheKey={live ? undefined : `n${seq ?? turn.key}`} />}
+      {turn.user && !turn.note && (
         <div className="msg-wrap">
-          <Md className="msg user" text={turn.user.text} cacheKey={live ? undefined : `u${turn.user.seq ?? turn.key}`} />
+          <div className="msg user">
+            {inbound && <span className="msg-origin">{t("turn.origin.inbound", { source: inbound })}</span>}
+            <Md text={turn.user.text} cacheKey={live ? undefined : `u${seq ?? turn.key}`} />
+          </div>
           {/* Under the message, not beside it: a row beside the bubble is off-screen on a phone. */}
           <MessageActions
             text={turn.user.text}
             actions={
-              turn.user.seq && onTurnAction && !live
+              settled
                 ? ([
-                    { icon: "fork", label: t("session.fork.action"), onSelect: () => onTurnAction("fork", turn.user!.seq!) },
-                    ...(canRevert ? [{ icon: "undo", label: t("session.revert.action.menu"), danger: true, onSelect: () => onTurnAction("revert", turn.user!.seq!) }] : []),
+                    { icon: "fork", label: t("session.fork.action"), onSelect: () => onTurnAction!("fork", seq!) },
+                    ...(canRevert ? [{ icon: "undo", label: t("session.revert.action.menu"), danger: true, onSelect: () => onTurnAction!("revert", seq!) }] : []),
                   ] as MessageAction[])
                 : []
             }
@@ -1777,15 +1213,16 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
         </div>
       )}
       {hasWork && (
-        <button className="thinking-head" onClick={() => setOpen((o) => !o)}>
+        <button className="thinking-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
           <span className={`dots ${live ? "on" : ""}`}>
             <i />
             <i />
             <i />
           </span>
-          {t(live ? (turn.pendingTools > 0 ? "session.working.for" : "session.thinking.for") : "session.worked", { t: duration(elapsed) })}
+          <span className="worked">{t(live ? (turn.pendingTools > 0 ? "session.working.for" : "session.thinking.for") : "session.worked", { t: duration(elapsed) })}</span>
           {steps > 0 && <span className="steps">{plural("session.steps", steps)}</span>}
-          <span className={`chev ${open ? "down" : ""}`}>›</span>
+          {families && <span className="families truncate">· {families}</span>}
+          <Chevron open={open} />
         </button>
       )}
       {open && (
@@ -1796,17 +1233,58 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
       )}
       {turn.fallback && (turn.answer || live) && <FallbackChip fallback={turn.fallback} />}
       {turn.answer && <Md className={`answer ${live ? "streaming" : ""}`} text={turn.answer} cacheKey={live ? undefined : `a${turn.key}`} />}
-      {turn.answer && !live && <MessageActions text={turn.answer} />}
-      <SentFiles items={turn.activity} />
+      {artifacts.length > 0 && (
+        <div className="artifacts" aria-label={t("turn.artifacts")}>
+          {artifacts.map((a) => {
+            // A written file is in the workspace; a sent one is served by the call that sent it, so a
+            // path outside the workspace opens too.
+            const src: PreviewSource = a.how === "sent" ? { base: `${sessionBase(sessionId)}/sent/${encodeURIComponent(a.callId)}`, path: a.name } : { base: sessionBase(sessionId), path: a.path.replace(/^\.\//, "") };
+            return <ArtifactCard key={a.callId} item={a} src={src} downloadUrl={downloadHref(src.base, src.path)} onOpen={preview} />;
+          })}
+        </div>
+      )}
+      {turn.answer && !live && (
+        <MessageActions
+          text={turn.answer}
+          actions={[
+            ...(seq ? [{ icon: "link" as IconName, label: t("turn.link"), onSelect: copyLink }] : []),
+            ...(settled ? [{ icon: "reload" as IconName, label: t("turn.retry"), onSelect: () => onTurnAction!("retry", seq!) }] : []),
+          ]}
+          more={
+            settled
+              ? [
+                  { label: t("session.fork.action"), icon: "fork", onSelect: () => onTurnAction!("fork", seq!) },
+                  ...(canRevert ? [{ label: t("session.revert.action.menu"), icon: "undo" as IconName, danger: true, onSelect: () => onTurnAction!("revert", seq!) }] : []),
+                ]
+              : undefined
+          }
+        />
+      )}
     </div>
   );
 });
+
+/** Three turn-shaped blocks while the first read is on its way. */
+function TurnSkeleton() {
+  return (
+    <div className="turn-skeleton" aria-hidden>
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="turn">
+          <div className="skeleton sk-user" style={{ width: `${34 + (i * 13) % 30}%` }} />
+          <div className="skeleton sk-line" style={{ width: "38%" }} />
+          <div className="skeleton sk-line" style={{ width: `${70 + (i * 9) % 25}%` }} />
+          <div className="skeleton sk-line" style={{ width: `${50 + (i * 17) % 40}%` }} />
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /**
  * The turn the run is writing right now. It reads the stream directly, so a token repaints this
  * component and nothing else: the settled turns above it never hear about it.
  */
-function LiveTurn({ base, live, onTurnAction, onRender }: { base: Turn | null; live: LiveStore; onTurnAction?: (kind: "revert" | "fork", seq: number) => void; onRender?: () => void }) {
+function LiveTurn({ base, live, onTurnAction, onRender }: { base: Turn | null; live: LiveStore; onTurnAction?: (kind: "revert" | "fork" | "retry", seq: number) => void; onRender?: () => void }) {
   const state = useSyncExternalStore(live.subscribe, live.get);
   useClock(1000);
   useLayoutEffect(() => onRender?.());
@@ -1826,45 +1304,65 @@ function LiveTurn({ base, live, onTurnAction, onRender }: { base: Turn | null; l
  *  `saving` above the composer. Same bar rather than a second one: the thing it reports on is the
  *  same turn, and a line that appears somewhere else would read as a new event.
  */
-function LiveBar({ status, saving, base, live, workspace, atBottom, onJump }: { status: Status; saving: boolean; base: Turn | null; live: LiveStore; workspace?: string; atBottom: boolean; onJump: () => void }) {
+/** The run, as one line in the header: dot, word, elapsed, step, what the agent is doing. Clicking it
+ *  brings the newest content back into view. The `livebar` classes are what the settle harness watches. */
+function LiveBar({ status, saving, base, live, workspace, onJump }: { status: Status; saving: boolean; base: Turn | null; live: LiveStore; workspace?: string; onJump: () => void }) {
   const state = useSyncExternalStore(live.subscribe, live.get);
   useClock(1000);
   if (saving) {
     return (
-      <button className="livebar saving" onClick={onJump} role="status" aria-live="polite" title={t("session.jump.step")}>
+      <button className="livebar head-status saving" onClick={onJump} role="status" aria-live="polite" title={t("session.jump.step")}>
         <Dot status="idle" />
         <b>{t("session.livebar.saving")}</b>
-        {!atBottom && <Icon name="down" size={16} />}
       </button>
     );
   }
   const turn = applyLive(base, state, Date.now());
   const steps = stepCount(turn.activity);
   const running = [...turn.activity].reverse().find((a) => a.kind === "tool" && a.running) as ToolItem | undefined;
-  const step = running
-    ? (() => {
-        const d = describe(running, workspace);
-        return `${d.verb}${d.detail ? ` ${d.detail}` : ""}`;
-      })()
-    : state.ended
-      ? t("session.livebar.saving")
-      : turn.answer
-      ? t("session.livebar.writing")
-      : state.thinking
-        ? t("session.reasoning")
-        : status === "waiting"
-          ? t("session.livebar.waiting")
-          : t("session.livebar.thinking");
+  // A session waiting on the operator has nothing in progress, whatever its last turn holds.
+  const step =
+    status === "waiting"
+      ? t("session.livebar.waiting")
+      : running
+        ? (() => {
+            const d = describe(running, workspace);
+            return `${d.verb}${d.detail ? ` ${d.detail}` : ""}`;
+          })()
+        : state.ended
+          ? t("session.livebar.saving")
+          : turn.answer
+            ? t("session.livebar.writing")
+            : state.thinking
+              ? t("session.reasoning")
+              : t("session.livebar.thinking");
   return (
-    <button className={`livebar ${status}`} onClick={onJump} role="status" aria-live="polite" title={t("session.jump.step")}>
+    <button className={`livebar head-status ${status}`} onClick={onJump} role="status" aria-live="polite" title={t("session.jump.step")}>
       <Dot status={status} />
       <b>{statusWord(status === "waiting" ? "waiting" : "running")}</b>
       <span className="num">{duration(Date.now() - turn.startedAt)}</span>
       {steps > 0 && <span>{t("session.livebar.step", { n: steps })}</span>}
       {step && <span className="truncate">· {step}</span>}
-      {!atBottom && <Icon name="down" size={16} />}
     </button>
   );
+}
+
+/** The 2 px line along the header's bottom edge: a shimmer while a run is on, a measured width while
+ *  the history is being compacted. */
+function HeadProgress({ status, compacting }: { status: Status; compacting: Compacting | null }) {
+  const pct = compacting ? compactionPct(compacting) : null;
+  // A session waiting on the operator is not progressing: the line holds still, in the waiting colour.
+  const mode = pct !== null ? "measured" : status === "waiting" ? "waiting" : "busy";
+  return (
+    <div className={`head-progress ${mode}`} aria-hidden>
+      <i style={pct === null ? undefined : { width: `${pct}%` }} />
+    </div>
+  );
+}
+
+function compactionPct(c: Compacting): number {
+  const parts = c.parts_total > 1 ? Math.round((100 * c.parts_done) / c.parts_total) : 0;
+  return c.stage === "writing" ? 97 : c.stage === "merging" ? 88 : c.parts_total > 1 ? Math.round(parts * 0.8) : 35;
 }
 
 /** A repaint on a timer, for the elapsed times — and only in the components that show one. */
@@ -1878,8 +1376,8 @@ function useClock(ms: number): void {
 
 type MessageAction = { icon: IconName; label: string; danger?: boolean; onSelect: () => void };
 
-/** The row of small buttons under a message: copy it, and whatever else the turn allows. */
-function MessageActions({ text, actions = [] }: { text: string; actions?: MessageAction[] }) {
+/** The row of small buttons under a message: copy it, and whatever else the turn allows; the rest behind ⋯. */
+function MessageActions({ text, actions = [], more }: { text: string; actions?: MessageAction[]; more?: MenuItem[] }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     setCopied(await copyText(text));
@@ -1895,6 +1393,7 @@ function MessageActions({ text, actions = [] }: { text: string; actions?: Messag
           <Icon name={a.icon} size={15} />
         </button>
       ))}
+      {more && more.length > 0 && <OverflowMenu small label={t("turn.more")} items={more} />}
     </div>
   );
 }
@@ -1907,7 +1406,7 @@ function SummaryBlock({ message }: { message: MessageView }) {
       <button className="summary-head" onClick={() => setOpen((o) => !o)}>
         <Icon name="compact" /> {t("session.summary")}
         {meta ? t("session.summary.meta", { n: meta.messages ?? 0, reason: meta.reason }) : ""}
-        <span className="chev">{open ? "⌄" : "›"}</span>
+        <Chevron open={open} />
       </button>
       {open && <Md className="summary-body" text={message.text} />}
     </div>
@@ -2050,7 +1549,7 @@ function ToolGroup({ family, group }: { family: string; group: ToolItem[] }) {
       <div className={`act head ${running ? "running" : ""}`} onClick={() => setOpen((o) => !o)}>
         <Icon name={d.icon} />
         <span className="verb">{groupVerb(d.family, running, group.length, family)}</span>
-        <span className={`chev ${open ? "down" : ""}`}>›</span>
+        <span className="act-end"><Chevron open={open} /></span>
       </div>
       {open && group.map((g) => <ToolRow key={g.id} item={g} nested />)}
     </div>
@@ -2073,7 +1572,7 @@ function SummaryGroup({ group }: { group: SummaryItem[] }) {
         <Icon name="compact" />
         <span className="verb">{t("session.compacted.title")}</span>
         <span className="detail">{t("session.compacted.group", { n: group.length })}</span>
-        <span className={`chev ${open ? "down" : ""}`}>›</span>
+        <span className="act-end"><Chevron open={open} /></span>
       </div>
       {open && group.map((s, k) => <SummaryRow key={k} text={s.text} reason={s.reason} />)}
     </div>
@@ -2088,7 +1587,7 @@ function SummaryRow({ text, reason }: { text: string; reason: string }) {
         <Icon name="compact" />
         <span className="verb">{t("session.compacted.title")}</span>
         <span className="detail">{reason !== "auto" ? `${reason} · ` : ""}{plainPreview(text, 100)}</span>
-        <span className={`chev ${open ? "down" : ""}`}>›</span>
+        <span className="act-end"><Chevron open={open} /></span>
       </div>
       {open && <Md className="summary-inline" text={text} />}
     </div>
@@ -2103,27 +1602,48 @@ function ThoughtBlock({ text }: { text: string }) {
         <Icon name="bulb" />
         <span className="verb">{t("session.reasoning")}</span>
         <span className="detail">{plainPreview(text, 100)}</span>
-        <span className={`chev ${open ? "down" : ""}`}>›</span>
+        <span className="act-end"><Chevron open={open} /></span>
       </div>
       {open && <div className="thought">{text}</div>}
     </div>
   );
 }
 
+/** The tools whose detail is a file the panel can open. */
+const FILE_TOOLS = ["Read", "Write", "Edit", "ImageView", "SendFile"];
+
 function ToolRow({ item, nested }: { item: ToolItem; nested?: boolean }) {
-  const { id: sessionId, workspace } = useContext(SessionContext);
+  const { id: sessionId, workspace, preview, openJobs } = useContext(SessionContext);
   const [open, setOpen] = useDisclosed(`${sessionId}:tool:${item.id}`, false);
   const d = describe(item, workspace);
   const expanded = open || (item.running && item.name === "Exec");
+  // The file a step names is the evidence: it opens where the answer's citations open.
+  const path = FILE_TOOLS.includes(item.name) && typeof item.args.path === "string" ? workspaceRelative(item.args.path, workspace) : null;
+  const openFile = (e: React.MouseEvent) => {
+    if (!path) return;
+    e.stopPropagation();
+    preview({ base: sessionBase(sessionId), path });
+  };
   return (
     <div className={`act-wrap ${nested ? "nested" : ""}`}>
-      <div className={`act ${item.error ? "error" : ""} ${item.running ? "running" : ""}`} onClick={() => setOpen((o) => !o)}>
-        <Icon name={d.icon} />
+      <div className={`act ${item.error ? "error" : ""} ${item.running ? "running" : ""}`} onClick={() => setOpen((o) => !o)} role="button" aria-expanded={expanded} tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen((o) => !o); } }}>
+        <Icon name={d.icon} size={16} />
         <span className="verb">{d.verb}</span>
-        {d.detail && <span className="detail">{d.detail}</span>}
-        <span className={`chev ${expanded ? "down" : ""}`}>›</span>
+        {d.detail && (path ? (
+          <button type="button" className="detail link" onClick={openFile} title={t("turn.open.file", { name: d.detail })}>{d.detail}</button>
+        ) : (
+          <span className="detail">{d.detail}</span>
+        ))}
+        <span className="act-end">
+          {item.error && !item.running && <span className="failed">{t("turn.failed")}</span>}
+          {item.name === "Verify" && !item.running && (
+            <button type="button" className="receipt-link" onClick={(e) => { e.stopPropagation(); openJobs(); }}>{t("turn.receipt")}</button>
+          )}
+          {item.ms !== undefined && item.ms >= 500 && <span className="dur num">{duration(item.ms)}</span>}
+          <Chevron open={expanded} />
+        </span>
       </div>
-      {(item.name === "ImageView" || item.name === "SendFile") && !item.running && <ToolAttachment item={item} />}
+      {item.name === "ImageView" && !item.running && <ToolAttachment item={item} />}
       {expanded && <ToolCard item={item} />}
     </div>
   );
@@ -2192,10 +1712,12 @@ function ReceiptDialog({ sessionId, receipt, onClose }: { sessionId: string; rec
   );
 }
 
-const SessionContext = createContext<{ id: string; workspace: string; preview: (src: PreviewSource) => void; revertable: Set<number> | null }>({
+const SessionContext = createContext<{ id: string; workspace: string; preview: (src: PreviewSource) => void; openJobs: () => void; toast: (text: string) => void; revertable: Set<number> | null }>({
   id: "",
   workspace: "",
   preview: () => undefined,
+  openJobs: () => undefined,
+  toast: () => undefined,
   revertable: null,
 });
 
@@ -2232,16 +1754,9 @@ function ToolAttachment({ item }: { item: ToolItem }) {
   );
 }
 
-/** The files the agent handed over in this turn, attached under the answer whatever the trace shows. */
 /** The compaction in flight: which stage, how many parts are summarised, how long it has run. */
 function CompactionBar({ c }: { c: Compacting }) {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
-  const parts = c.parts_total > 1 ? Math.round((100 * c.parts_done) / c.parts_total) : 0;
-  const pct = c.stage === "writing" ? 97 : c.stage === "merging" ? 88 : c.parts_total > 1 ? Math.round(parts * 0.8) : 35;
+  useClock(1000);
   const what =
     c.stage === "writing"
       ? t("session.compacting.writing")
@@ -2251,57 +1766,11 @@ function CompactionBar({ c }: { c: Compacting }) {
           ? t("session.compacting.part", { n: Math.min(c.parts_done + 1, c.parts_total), total: c.parts_total })
           : t("session.compacting.summarising");
   return (
-    <div className="livebar compacting" role="status" aria-live="polite">
+    <div className="livebar head-status compacting" role="status" aria-live="polite">
       <Dot status="compacting" />
       <b>{t("session.compacting.bar")}</b>
       <span className="num">{duration(Date.now() - new Date(c.started_at).getTime())}</span>
-      <span>{t("session.compacting.messages", { n: c.messages, what })}</span>
-      <div className="bar" aria-hidden><i style={{ ["--v" as string]: pct }} /></div>
-    </div>
-  );
-}
-
-function SentFiles({ items }: { items: Activity[] }) {
-  const { id, preview } = useContext(SessionContext);
-  const sent = items.filter((a): a is ToolItem => a.kind === "tool" && a.name === "SendFile" && !a.running && !a.error && typeof a.args.path === "string");
-  if (!sent.length || !id) return null;
-  return (
-    <div className="sent-files" aria-label={t("session.sentfiles")}>
-      {sent.map((file) => {
-        const path = String(file.args.path);
-        const name = path.split("/").filter(Boolean).pop() ?? path;
-        const caption = typeof file.args.caption === "string" ? file.args.caption : "";
-        // The file is served by the call that sent it, so a path outside the workspace opens too.
-        const src: PreviewSource = { base: `${sessionBase(id)}/sent/${encodeURIComponent(file.id)}`, path: name };
-        if (previewKind(name) === "image") {
-          return (
-            <figure key={file.id} className="sent-file image">
-              <AuthImg src={src} alt={name} className="tool-image" onClick={() => preview(src)} />
-              {caption && <figcaption className="sub">{caption}</figcaption>}
-            </figure>
-          );
-        }
-        return (
-          <button key={file.id} type="button" className="file-chip sent-file" onClick={() => preview(src)} title={caption || t(canPreview(name) ? "preview.open" : "preview.download")}>
-            <span aria-hidden>{fileGlyph(name)}</span>
-            <span className="truncate">{name}</span>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function ToolTiming({ sessionId }: { sessionId: string }) {
-  const [rows, setRows] = useState<{ name: string; calls: number; errors: number; total_ms: number; mean_ms: number }[]>([]);
-  useEffect(() => {
-    api.get<{ items: { name: string; calls: number; errors: number; total_ms: number; mean_ms: number }[] }>(`/api/sessions/${sessionId}/tools/timing`).then((r) => setRows(r.items)).catch(() => setRows([]));
-  }, [sessionId]);
-  if (!rows.length) return null;
-  const total = rows.reduce((a, r) => a + r.total_ms, 0);
-  return (
-    <div className="sub">
-      {t("session.tooltime", { n: Math.round(total / 1000), list: rows.slice(0, 5).map((r) => `${r.name} ${Math.round(r.total_ms / 1000)}s/${r.calls}${r.errors ? ` (${r.errors})` : ""}`).join(" · ") })}
+      <span className="truncate">{t("session.compacting.messages", { n: c.messages, what })}</span>
     </div>
   );
 }
@@ -2365,54 +1834,7 @@ function langOf(path: string): string {
   return map[ext] ?? ext;
 }
 
-// ── questions, files, mcp ─────────────────────────────────────────────────────────────────
-
-function QuestionCard({ sessionId, questions, onDone, toast }: { sessionId: string; questions: Question[]; onDone: () => void; toast: (t: string) => void }) {
-  const [answers, setAnswers] = useState(questions.map(() => ({ selected: [] as string[], custom: "" })));
-  function toggle(qi: number, label: string, multi: boolean) {
-    setAnswers((prev) =>
-      prev.map((a, i) => {
-        if (i !== qi) return a;
-        if (!multi) return { ...a, selected: [label] };
-        return { ...a, selected: a.selected.includes(label) ? a.selected.filter((x) => x !== label) : [...a.selected, label] };
-      }),
-    );
-  }
-  async function submit() {
-    try {
-      await api.post(`/api/sessions/${sessionId}/answer`, {
-        answers: questions.map((q, i) => ({ question: q.question, selected: answers[i].selected, custom: answers[i].custom || null })),
-      });
-      onDone();
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }
-  const complete = answers.every((a) => a.selected.length > 0 || a.custom.trim());
-  return (
-    <div className="card question">
-      {questions.map((q, qi) => (
-        <div key={qi}>
-          <div className="title">❓ {q.question}</div>
-          {(q.options ?? []).map((o) => (
-            <button key={o.label} className={`btn option ${answers[qi].selected.includes(o.label) ? "selected" : ""}`} onClick={() => toggle(qi, o.label, !!q.multiSelect)}>
-              {o.label}
-              {o.description && <div className="sub">{o.description}</div>}
-            </button>
-          ))}
-          {(q.allow_custom || !(q.options ?? []).length) && (
-            <input className="field" style={{ marginTop: 6 }} placeholder={t("session.answer.placeholder")} value={answers[qi].custom} onChange={(e) => setAnswers((p) => p.map((a, i) => (i === qi ? { ...a, custom: e.target.value } : a)))} />
-          )}
-        </div>
-      ))}
-      <div className="btnrow">
-        <button className="btn primary" disabled={!complete} onClick={submit}>
-          {t("session.answer")}
-        </button>
-      </div>
-    </div>
-  );
-}
+// ── files ─────────────────────────────────────────────────────────────────
 
 /** A file tree under an API root: a session's workspace or a named workspace; uploads go to ``uploadUrl`` when given. */
 export function Files({ base, uploadUrl, onPreview, toast }: { base: string; uploadUrl?: string; onPreview: (src: PreviewSource) => void; toast?: (t: string) => void }) {
@@ -2458,8 +1880,7 @@ export function Files({ base, uploadUrl, onPreview, toast }: { base: string; upl
   const all: any[] = data.kind === "dir" ? data.entries : [];
   const entries = all.filter((e) => showHidden || !e.name.startsWith("."));
   const hidden = all.length - all.filter((e) => !e.name.startsWith(".")).length;
-  const token = sessionStorage.getItem("daedalus_token");
-  const download = `${base}/download?path=${encodeURIComponent(path)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
+  const download = downloadHref(base, path);
   return (
     <div className="files">
       <div className="crumbs">
@@ -2515,52 +1936,6 @@ export function Files({ base, uploadUrl, onPreview, toast }: { base: string; upl
       {data.kind === "file" && <pre className="filetext">{data.content}</pre>}
       {data.kind === "binary" && previewKind(path) === "image" && <AuthImg className="preview" src={{ base, path }} alt={path} onClick={() => onPreview({ base, path })} />}
       {data.kind === "binary" && previewKind(path) !== "image" && <div className="empty">{t("session.files.binary", { size: fmtBytes(data.size) })}</div>}
-    </div>
-  );
-}
-
-type McpServer = { name: string; description: string; connected: boolean; error: string | null; tools: string[] };
-
-function McpPanel({ sessionId, toast }: { sessionId: string; toast: (t: string) => void }) {
-  const [data, setData] = useState<{ enabled: string[]; servers: McpServer[] } | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const load = useCallback(() => {
-    api.get<{ enabled: string[]; servers: McpServer[] }>(`/api/sessions/${sessionId}/mcp`).then(setData).catch((e) => toast(errorText(e)));
-  }, [sessionId, toast]);
-  useEffect(load, [load]);
-  async function toggle(server: string, enabled: boolean) {
-    setBusy(server);
-    try {
-      setData(await api.put(`/api/sessions/${sessionId}/mcp`, { server, enabled }));
-      toast(t("session.mcp.toggled", { name: server, state: t(enabled ? "session.mcp.enabled" : "session.mcp.disabled") }));
-    } catch (e) {
-      toast(errorText(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-  if (!data) return <div className="empty">…</div>;
-  if (data.servers.length === 0) return <div className="empty">{t("session.mcp.none")}</div>;
-  return (
-    <div>
-      <div className="sub" style={{ marginBottom: 8 }}>{t("session.mcp.sub")}</div>
-      {data.servers.map((s) => {
-        const on = data.enabled.includes(s.name);
-        return (
-          <div key={s.name} className="card">
-            <div className="row">
-              <div className="grow">
-                <div className="title">{s.name}</div>
-                <div className="sub">{s.description || t("session.mcp.nodesc")}{s.error && t("session.mcp.error", { error: s.error })}</div>
-                {s.tools.length > 0 && <div className="sub">{s.tools.join(", ")}</div>}
-              </div>
-              <button className={`btn small ${on ? "primary" : ""}`} disabled={busy === s.name} onClick={() => toggle(s.name, !on)}>
-                {t(on ? "common.on" : "common.off")}
-              </button>
-            </div>
-          </div>
-        );
-      })}
     </div>
   );
 }

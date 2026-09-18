@@ -40,7 +40,7 @@ const ALLOWED: Record<string, string[]> = {
   ],
   "./screens/Schedules.tsx": ["0 4 * * 1-5"],
   "./screens/AddModel.tsx": ["http://localhost:9000/v1"],
-  "./screens/Session.tsx": ["vllm/Qwen3.6"],
+  "./modelselect.tsx": ["vllm/Qwen3.6"],
 };
 
 const PROPS = /\b(?:title|placeholder|aria-label|ariaLabel|label|alt)="([^"]{2,})"/g;

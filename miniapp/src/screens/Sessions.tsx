@@ -6,7 +6,7 @@ import { relTime, shortModel, untilShort } from "../format";
 import { Folder, FREE, Row as RowModel, agentName, arrange, folderOpen, rememberFolder } from "../grouping";
 import { Icon } from "../icons";
 import { FilePreview, PreviewSource, workspaceBase } from "../preview";
-import { useProjects } from "../projects";
+import { ProjectChip, useProjects } from "../projects";
 import { PageHeader, screenTitle } from "../shell";
 import { useQuery } from "../store";
 import { confirmAsync, errorText, fmtBytes } from "../ui";
@@ -33,17 +33,27 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
     [data, project, filter, query],
   );
 
-  return (
+  // In the sidebar the screen is the column: no page header, no filter chips, one row of controls
+  // with the project switcher in it, and the search field under that row when it is open.
+  const head = compact ? (
     <>
+      <div className="sidebar-head">
+        {onProjects && <ProjectChip projects={projects} current={project} onOpen={onProjects} />}
+        <button className={`iconbtn small quiet ${searching ? "on" : ""}`} onClick={() => { setSearching((v) => !v); if (searching) setQuery(""); }} title={t("common.search")} aria-label={t("common.search")} aria-pressed={searching}><Icon name="search" size={16} /></button>
+        <button className="iconbtn small quiet" onClick={() => setCreating(true)} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" size={16} /></button>
+      </div>
+      {searching && <input className="field search" autoFocus placeholder={t("agents.search")} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") { setQuery(""); setSearching(false); } }} aria-label={t("agents.search.label")} />}
+    </>
+  ) : (
       <PageHeader
         title={inProject ? inProject.name : screenTitle("agents")}
         subtitle={data ? `${plural("agents.count", folders.total)}${folders.active ? ` · ${t("agents.active", { n: folders.active })}` : ""}${inProject ? ` · ${inProject.root}` : ""}` : undefined}
         actions={
           <>
             {/* Not a folder glyph: Workspaces sits beside it with one, and two identical icons next to each other name nothing. */}
-            {!compact && onProjects && <button className="iconbtn" onClick={onProjects} title={t("shell.projects")} aria-label={t("shell.projects")}><Icon name="skill" /></button>}
+            {onProjects && <button className="iconbtn" onClick={onProjects} title={t("shell.projects")} aria-label={t("shell.projects")}><Icon name="skill" /></button>}
             <button className={`iconbtn ${searching ? "on" : ""}`} onClick={() => { setSearching((v) => !v); if (searching) setQuery(""); }} title={t("common.search")} aria-label={t("common.search")} aria-pressed={searching}><Icon name="search" /></button>
-            {!compact && <button className="iconbtn" onClick={() => setShowWorkspaces(true)} title={t("agents.workspaces")} aria-label={t("agents.workspaces")}><Icon name="folder" /></button>}
+            <button className="iconbtn" onClick={() => setShowWorkspaces(true)} title={t("agents.workspaces")} aria-label={t("agents.workspaces")}><Icon name="folder" /></button>
             <button className="iconbtn primary" onClick={() => setCreating(true)} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" /></button>
           </>
         }
@@ -57,6 +67,10 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
           ))}
         </div>
       </PageHeader>
+  );
+  return (
+    <>
+      {head}
       <div className="screen agents-screen">
         {loading && !error && <Skeleton rows={5} />}
         {error && !data && <div className="empty"><b>{t("agents.error")}</b><div>{error}</div></div>}
@@ -69,7 +83,7 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
         )}
         {data && folders.total > 0 && folders.shown === 0 && <div className="empty">{t("common.nothing")}</div>}
         {folders.folders.map((f) => (
-          <FolderSection key={f.key} folder={f} onOpen={onOpen} current={current} filtered={filter !== "all" || query.trim() !== ""} />
+          <FolderSection key={f.key} folder={f} onOpen={onOpen} current={current} filtered={filter !== "all" || query.trim() !== ""} compact={compact} />
         ))}
       </div>
       {creating && <NewAgentSheet onClose={() => setCreating(false)} onCreated={onOpen} toast={toast} project={project} />}
@@ -92,23 +106,32 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
  * A search or a filter opens what it found: leaving a match behind a closed folder would be a screen
  * that answers "nothing" while holding the answer.
  */
-type FolderProps = { folder: Folder; onOpen: (id: string) => void; current?: string; filtered: boolean };
+type FolderProps = { folder: Folder; onOpen: (id: string) => void; current?: string; filtered: boolean; compact?: boolean };
+
+/** Whether the open session is in these rows, a fork of one of them, or a subagent of one. */
+function holds(rows: RowModel[], id: string | undefined): boolean {
+  if (!id) return false;
+  return rows.some((r) => r.s.id === id || r.kids.some((k) => k.id === id) || holds(r.forks, id));
+}
 
 /** Whether an open folder would look the same. Without it an installation with hundreds of agents
  *  reconciles all of them on every poll for a list that did not change a character; `sig` is built
  *  once while the folders are arranged, so this costs a string comparison. */
 function sameFolder(a: FolderProps, b: FolderProps): boolean {
   const l = a.folder, r = b.folder;
-  if (a.filtered !== b.filtered || a.current !== b.current || a.onOpen !== b.onOpen) return false;
+  if (a.filtered !== b.filtered || a.current !== b.current || a.onOpen !== b.onOpen || a.compact !== b.compact) return false;
   if (l.key !== r.key || l.name !== r.name || l.total !== r.total || l.active !== r.active || l.loops !== r.loops || l.last_message_at !== r.last_message_at) return false;
   if (l.project?.root !== r.project?.root) return false;
   return l.sig === r.sig;
 }
 
-const FolderSection = memo(function FolderSection({ folder, onOpen, current, filtered }: FolderProps) {
+const FolderSection = memo(function FolderSection({ folder, onOpen, current, filtered, compact }: FolderProps) {
   const [open, setOpen] = useState(() => folderOpen(folder.key));
   const free = folder.project === null;
-  const showing = open || (filtered && folder.rows.length > 0);
+  // The folder holding the open session opens itself, without remembering it: a sidebar whose
+  // current row is behind a closed folder answers "where am I" with nothing.
+  const mine = holds(folder.rows, current);
+  const showing = open || mine || (filtered && folder.rows.length > 0);
   const toggle = () => {
     const next = !open;
     setOpen(next);
@@ -122,29 +145,33 @@ const FolderSection = memo(function FolderSection({ folder, onOpen, current, fil
         <Icon name={folder.system ? "mic" : free ? "bots" : "folder"} size={16} />
         <span className="folder-name truncate">{free ? t("agents.free") : folder.name}</span>
         {folder.active > 0 && <span className="folder-live" title={t("agents.active", { n: folder.active })}><Dot status="running" /></span>}
-        <span className="folder-counts sub">
-          {plural("agents.count", folder.total)}
-          {folder.active > 0 && ` · ${t("agents.active", { n: folder.active })}`}
-          {folder.loops > 0 && ` · ${t("agents.filter.loops", { n: folder.loops })}`}
-        </span>
-        {folder.last_message_at && <span className="folder-time sub num" title={new Date(folder.last_message_at).toLocaleString()}>{relTime(folder.last_message_at)}</span>}
+        {compact ? (
+          <span className="folder-counts sub num" title={plural("agents.count", folder.total)}>{folder.total}</span>
+        ) : (
+          <span className="folder-counts sub">
+            {plural("agents.count", folder.total)}
+            {folder.active > 0 && ` · ${t("agents.active", { n: folder.active })}`}
+            {folder.loops > 0 && ` · ${t("agents.filter.loops", { n: folder.loops })}`}
+          </span>
+        )}
+        {!compact && folder.last_message_at && <span className="folder-time sub num" title={new Date(folder.last_message_at).toLocaleString()}>{relTime(folder.last_message_at)}</span>}
       </button>
-      {showing && folder.project && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
-      {showing && free && <div className="folder-root sub">{t("agents.free.hint")}</div>}
+      {showing && !compact && folder.project && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
+      {showing && !compact && free && <div className="folder-root sub">{t("agents.free.hint")}</div>}
       {showing && folder.rows.length === 0 && <div className="folder-empty sub">{filtered ? t("common.nothing") : free ? t("agents.free.none") : t("agents.folder.none")}</div>}
-      {showing && folder.rows.map((r) => <RowTree key={r.s.id} row={r} onOpen={onOpen} current={current} free={free} />)}
+      {showing && folder.rows.map((r) => <RowTree key={r.s.id} row={r} onOpen={onOpen} current={current} free={free} compact={compact} />)}
     </section>
   );
 }, sameFolder);
 
 /** An agent, the forks taken from it under it, and each fork's own forks under those. */
-function RowTree({ row, onOpen, current, free, fork }: { row: RowModel; onOpen: (id: string) => void; current?: string; free: boolean; fork?: { of: string; seq: number } }) {
+function RowTree({ row, onOpen, current, free, fork, compact }: { row: RowModel; onOpen: (id: string) => void; current?: string; free: boolean; fork?: { of: string; seq: number }; compact?: boolean }) {
   const mine = current === row.s.id || row.kids.some((c) => c.id === current);
   return (
     <Fragment>
-      <Row s={row.s} kids={row.kids} onOpen={onOpen} current={mine} fork={fork} free={free} />
+      <Row s={row.s} kids={row.kids} onOpen={onOpen} current={mine} fork={fork} free={free} compact={compact} />
       {row.forks.map((f) => (
-        <RowTree key={f.s.id} row={f} onOpen={onOpen} current={current} free={free} fork={{ of: row.s.title, seq: f.s.metadata!.forked_from!.seq }} />
+        <RowTree key={f.s.id} row={f} onOpen={onOpen} current={current} free={free} fork={{ of: row.s.title, seq: f.s.metadata!.forked_from!.seq }} compact={compact} />
       ))}
     </Fragment>
   );
@@ -169,15 +196,15 @@ function loopLine(s: SessionSummary): string {
 function sameRow(a: RowProps, b: RowProps): boolean {
   const l = a.s, r = b.s;
   if (l.id !== r.id || l.title !== r.title || l.status !== r.status || l.last_message_at !== r.last_message_at || l.model !== r.model || l.workspace_path !== r.workspace_path) return false;
-  if (a.current !== b.current || a.free !== b.free || a.fork?.seq !== b.fork?.seq || a.fork?.of !== b.fork?.of) return false;
+  if (a.current !== b.current || a.free !== b.free || a.compact !== b.compact || a.fork?.seq !== b.fork?.seq || a.fork?.of !== b.fork?.of) return false;
   if (JSON.stringify(l.metadata?.loop ?? null) !== JSON.stringify(r.metadata?.loop ?? null)) return false;
   if (a.kids.length !== b.kids.length) return false;
   return a.kids.every((k, i) => k.id === b.kids[i].id && k.status === b.kids[i].status && k.title === b.kids[i].title);
 }
 
-type RowProps = { s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number }; free?: boolean };
+type RowProps = { s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number }; free?: boolean; compact?: boolean };
 
-const Row = memo(function Row({ s, kids, onOpen, current, fork, free }: RowProps) {
+const Row = memo(function Row({ s, kids, onOpen, current, fork, free, compact }: RowProps) {
   const [showKids, setShowKids] = useState(false);
   const orphan = !!s.metadata?.subagent_of;
   const status = s.status as Status;
@@ -185,6 +212,26 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, free }: RowProps
   const loop = loopLine(s);
   const visibleKids = showKids ? kids : kids.slice(0, 3);
   const open = () => onOpen(s.id);
+  if (compact) {
+    // The sidebar's row: a dot for the state, the name, the time, and a second line only when it
+    // carries something the reader needs now — a loop's next run, what a fork was taken from, a
+    // leader that is gone. Never the model: it is in the open session, and in the tooltip here.
+    const needs = status === "waiting" || status === "failed";
+    const second = fork ? t("agents.fork.at", { n: fork.seq }) : loop || (orphan ? t("agents.orphan") : "");
+    return (
+      <div className={`erow ${status} ${current ? "current" : ""} ${fork ? "fork" : ""}`} title={s.model ? `${s.model} · ${s.id}` : s.id} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
+        <Dot status={status} className="erow-dot" />
+        <div className="erow-main">
+          <div className="erow-head">
+            <span className="erow-title truncate">{agentName(s)}</span>
+            {needs && <span className={`erow-state ${status}`}>{statusWord(status)}</span>}
+            <span className="erow-time num" title={new Date(s.last_message_at).toLocaleString()}>{relTime(s.last_message_at)}</span>
+          </div>
+          {second && <div className={`erow-meta ${s.metadata?.loop?.status === "paused" ? "waiting" : ""}`}>{fork && <Icon name="fork" size={11} />}{second}</div>}
+        </div>
+      </div>
+    );
+  }
   return (
     <div className={`erow ${status} ${current ? "current" : ""} ${fork ? "fork" : ""}`} title={s.workspace_path} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
       <Avatar status={status} seed={s.id} />

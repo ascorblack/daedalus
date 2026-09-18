@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -9,4 +10,7 @@ export default defineConfig({
     port: 5173,
     proxy: { "/api": "http://127.0.0.1:8765" },
   },
+  // The stylesheet is read as text by density.test.ts; without this the test runner hands every
+  // CSS import over as an empty string and a guard over an empty file passes everything.
+  test: { css: { include: [/styles\.css/] } },
 });

@@ -190,6 +190,9 @@ class Stub(BaseHTTPRequestHandler):
                 tail = Stub.initial_tail or Stub.messages
             before = int(query["before"]) if query.get("before") else None
             return detail(Stub.messages, tail, before)
+        if path == f"/api/sessions/{SESSION_ID}/steer":
+            # The composer asks what the host holds for the next step of a running session: nothing here.
+            return []
         if path == f"/api/sessions/{SESSION_ID}/checkpoints":
             # Which turns can still put the files back. The screen asks once, when it opens.
             return {"checkpoints": [], "total": 0, "pruned": False, "pruned_before": None, "removed": 0, "note": "", "keep_days": 14, "keep_last": 40}

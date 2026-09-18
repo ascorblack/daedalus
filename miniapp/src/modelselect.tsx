@@ -1,0 +1,155 @@
+// The model, chosen from inside the composer. The button names the model in use with a glyph for
+// its speed; the list opens upward from it (a sheet on a phone) with the global default, every
+// preset, and a field for a model the presets do not name. While another model stands in for the
+// configured one the button is amber and says so, and the list offers the way back first.
+
+import { useEffect, useRef, useState } from "react";
+import { api, ModelFallback, Preset } from "./api";
+import { Popover, Sheet } from "./dialogs";
+import { Icon } from "./icons";
+import { shortModel } from "./format";
+import { readCustomModel, rememberCustomModel } from "./composer";
+import { DICT, t } from "./i18n";
+
+export type ModelChoice = { clear: true } | { preset: string } | { provider: string; model: string } | { model: string };
+
+type Catalogue = { presets: Record<string, Preset>; global: string; globalId: string };
+
+export type ModelSelectProps = {
+  /** The model the session is set to, as the host names it. */
+  model: string;
+  fallback: ModelFallback | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onChoose: (choice: ModelChoice) => void;
+  /** Phones: a sheet instead of a popover. */
+  sheet: boolean;
+};
+
+/** Whether a preset is the one the session is set to: by its label, or by its provider/model pair. */
+function isCurrent(id: string, p: Preset, model: string): boolean {
+  if (!model) return false;
+  return model === id || model === p.label || model === p.model || model === `${p.provider}/${p.model}`;
+}
+
+export function ModelSelect({ model, fallback, open, onOpenChange, onChoose, sheet }: ModelSelectProps) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [cat, setCat] = useState<Catalogue | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let gone = false;
+    setFailed(null);
+    api
+      .get<{ presets?: Record<string, Preset>; model?: { preset?: string } }>("/api/settings")
+      .then((st) => {
+        if (gone) return;
+        const presets = st.presets ?? {};
+        const globalId = String(st.model?.preset ?? "");
+        const def = presets[globalId];
+        setCat({ presets, globalId, global: def ? def.label || `${def.provider}/${def.model}` : globalId || t("settings.heartbeat.default") });
+      })
+      .catch((e) => !gone && setFailed(String(e)));
+    return () => {
+      gone = true;
+    };
+  }, [open]);
+  const pick = (choice: ModelChoice) => {
+    onOpenChange(false);
+    onChoose(choice);
+  };
+  const label = fallback ? t("session.model.fallback", { to: shortModel(fallback.to, 14), from: shortModel(fallback.from, 14) }) : shortModel(model, 22);
+  const reason = fallback ? (DICT[`session.model.reason.${fallback.reason}`] ? t(`session.model.reason.${fallback.reason}`) : fallback.reason) : "";
+  const title = fallback ? `${t("session.model.fallback.turn", { to: fallback.to, from: fallback.from })} — ${reason}` : t("composer.model.title");
+  const list = <ModelList cat={cat} failed={failed} model={model} fallback={fallback} onPick={pick} />;
+  return (
+    <>
+      <button ref={trigger} type="button" className={`model-select ${fallback ? "attn" : ""} ${open ? "on" : ""}`} onClick={() => onOpenChange(!open)} title={title} aria-label={t("session.model.for")} aria-haspopup="menu" aria-expanded={open}>
+        {fallback ? <span className="model-dot" aria-hidden /> : <Icon name="model" size={14} />}
+        <span className="model-label truncate">{label}</span>
+        <Icon name="chevron" size={12} />
+      </button>
+      {open && sheet && (
+        <Sheet title={t("session.model.for")} onClose={() => onOpenChange(false)} className="model-sheet">
+          {list}
+        </Sheet>
+      )}
+      {open && !sheet && (
+        <Popover anchor={trigger.current} onClose={() => onOpenChange(false)} className="model-menu" align="right" label={t("session.model.for")}>
+          {list}
+        </Popover>
+      )}
+    </>
+  );
+}
+
+function ModelList({ cat, failed, model, fallback, onPick }: { cat: Catalogue | null; failed: string | null; model: string; fallback: ModelFallback | null; onPick: (c: ModelChoice) => void }) {
+  const [custom, setCustom] = useState(() => readCustomModel());
+  if (failed) return <div className="sub model-row-note">{failed}</div>;
+  if (!cat) return <div className="sub model-row-note">{t("common.loading")}</div>;
+  const entries = Object.entries(cat.presets);
+  // The way back from a fallback: the configured model, named first, as the preset it is or as itself.
+  const configured = fallback ? (entries.find(([id, p]) => isCurrent(id, p, fallback.from)) ?? null) : null;
+  const useCustom = () => {
+    const value = custom.trim();
+    if (!value) return;
+    rememberCustomModel(value);
+    const [prov, ...rest] = value.split("/");
+    const m = rest.join("/");
+    onPick(m ? { provider: prov, model: m } : { model: prov });
+  };
+  return (
+    <div className="model-list">
+      {fallback && (
+        <>
+          <div className="model-row-note sub attn">{t("composer.model.configured", { model: fallback.from })}</div>
+          <button type="button" role="menuitem" className="model-row restore" onClick={() => onPick(configured ? { preset: configured[0] } : { model: fallback.from })}>
+            <Icon name="undo" size={16} />
+            <span className="grow truncate">{t("composer.model.restore", { model: shortModel(fallback.from, 24) })}</span>
+          </button>
+          <div className="menu-sep" />
+        </>
+      )}
+      <button type="button" role="menuitem" className="model-row" onClick={() => onPick({ clear: true })}>
+        <Icon name="model" size={16} />
+        <span className="grow truncate">{t("session.model.global")}</span>
+        <span className="sub truncate">{cat.global}</span>
+      </button>
+      {entries.map(([id, p]) => {
+        const current = isCurrent(id, p, model);
+        return (
+          <button key={id} type="button" role="menuitem" className={`model-row ${current ? "on" : ""}`} onClick={() => onPick({ preset: id })} aria-current={current ? "true" : undefined}>
+            <span className={`model-kind ${p.thinking ? "thinking" : "fast"}`} title={t(p.thinking ? "composer.model.thinking" : "composer.model.fast")} aria-label={t(p.thinking ? "composer.model.thinking" : "composer.model.fast")}>
+              {p.thinking ? "✦" : "⚡"}
+            </span>
+            <span className="grow model-text">
+              <span className="truncate">{p.label || p.model}</span>
+              <span className="sub truncate">{p.provider}/{p.model}</span>
+            </span>
+            {current && <Icon name="check" size={16} />}
+          </button>
+        );
+      })}
+      <div className="menu-sep" />
+      <div className="model-custom">
+        <div className="sub">{t("session.model.custom")}</div>
+        <div className="model-custom-row">
+          <input
+            className="field"
+            placeholder="vllm/Qwen3.6"
+            value={custom}
+            onChange={(e) => setCustom(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                useCustom();
+              }
+            }}
+            aria-label={t("session.model.custom")}
+          />
+          <button type="button" className="btn small primary" disabled={!custom.trim()} onClick={useCustom}>{t("session.model.use")}</button>
+        </div>
+      </div>
+    </div>
+  );
+}

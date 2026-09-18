@@ -9,9 +9,14 @@ import { t } from "./i18n";
 
 // ── sheet ────────────────────────────────────────────────────────────────────────────────
 
-/** The layers open right now, top last: Escape goes to the top one only. */
+/** The layers open right now, top last: Escape goes to the top one only.
+
+    The key is read in the capture phase. Every layer is drawn through `Overlay`, whose root stops
+    events so a click in a sheet never reaches the row that opened it — and that stop happens at
+    the portal's container, before the document's bubble phase. A listener there never heard the
+    key at all; capture runs first. */
 const layers: symbol[] = [];
-function useLayer(onEscape: () => void) {
+export function useLayer(onEscape: () => void) {
   const cb = useRef(onEscape);
   cb.current = onEscape;
   useEffect(() => {
@@ -23,9 +28,9 @@ function useLayer(onEscape: () => void) {
         cb.current();
       }
     };
-    document.addEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, { capture: true });
     return () => {
-      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keydown", onKey, { capture: true });
       const i = layers.indexOf(me);
       if (i >= 0) layers.splice(i, 1);
     };
@@ -154,16 +159,20 @@ function ConfirmDialog({ pending, onDone }: { pending: Pending; onDone: (ok: boo
 
 export type MenuItem = { label: string; icon?: IconName; danger?: boolean; disabled?: boolean; onSelect: () => void } | "-";
 
-export function OverflowMenu({ items, label, icon = "more", small, className }: { items: MenuItem[]; label?: string; icon?: IconName; small?: boolean; className?: string }) {
+/** With `trigger`, the button is that content (a title with a chevron) rather than an icon. */
+export function OverflowMenu({ items, label, icon = "more", small, className, trigger: customTrigger }: { items: MenuItem[]; label?: string; icon?: IconName; small?: boolean; className?: string; trigger?: ReactNode }) {
   const name = label ?? t("dlg.menu");
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
+  const [pos, setPos] = useState<{ top?: number; bottom?: number; right: number } | null>(null);
   useLayoutEffect(() => {
     if (!open || !trigger.current) return;
     const r = trigger.current.getBoundingClientRect();
-    setPos({ top: r.bottom + 4, right: Math.max(8, window.innerWidth - r.right) });
+    const right = Math.max(8, window.innerWidth - r.right);
+    // A control in the lower half opens its menu upward: a menu that runs off the bottom edge has to
+    // be scrolled to, and the scroll is what closes it.
+    setPos(r.top > window.innerHeight / 2 ? { bottom: window.innerHeight - r.top + 4, right } : { top: r.bottom + 4, right });
   }, [open]);
   useEffect(() => {
     if (!open) return;
@@ -172,7 +181,6 @@ export function OverflowMenu({ items, label, icon = "more", small, className }: 
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         const buttons = Array.from(menu.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
         const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
@@ -181,7 +189,12 @@ export function OverflowMenu({ items, label, icon = "more", small, className }: 
         e.preventDefault();
       }
     };
-    const onScroll = () => setOpen(false);
+    // A scroll closes the menu — except the one that brought the control into view a frame ago:
+    // the browser reports that scroll after the click that opened the menu, not before it.
+    const openedAt = performance.now();
+    const onScroll = () => {
+      if (performance.now() - openedAt > 200) setOpen(false);
+    };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("touchstart", onDown);
     document.addEventListener("keydown", onKey);
@@ -198,8 +211,8 @@ export function OverflowMenu({ items, label, icon = "more", small, className }: 
   }, [open]);
   return (
     <>
-      <button ref={trigger} className={`iconbtn ${small ? "small" : ""} ${open ? "on" : ""} ${className ?? ""}`} aria-label={name} title={name} aria-haspopup="menu" aria-expanded={open} onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}>
-        <Icon name={icon} size={small ? 16 : 18} />
+      <button ref={trigger} className={`${customTrigger ? "" : `iconbtn ${small ? "small" : ""}`} ${open ? "on" : ""} ${className ?? ""}`} aria-label={name} title={name} aria-haspopup="menu" aria-expanded={open} onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}>
+        {customTrigger ?? <Icon name={icon} size={small ? 16 : 18} />}
       </button>
       {open && pos && createPortal(
         // In the document's own stacking context, not the row's: a `position: fixed` menu inside an
@@ -207,7 +220,8 @@ export function OverflowMenu({ items, label, icon = "more", small, className }: 
         // pressing finger) is positioned against that element instead of the viewport. The menu then
         // jumps away between mousedown and mouseup, the release lands outside it, and no click ever
         // reaches the item — every action in the menu looked dead.
-        <div ref={menu} className="menu" role="menu" style={{ position: "fixed", top: pos.top, right: pos.right }} onClick={(e) => e.stopPropagation()}>
+        <div ref={menu} className="menu" role="menu" style={{ position: "fixed", top: pos.top ?? "auto", bottom: pos.bottom, right: pos.right }} onClick={(e) => e.stopPropagation()}>
+          <MenuLayer onClose={() => setOpen(false)} />
           {items.map((it, i) =>
             it === "-" ? (
               <div key={i} className="menu-sep" />
@@ -222,6 +236,66 @@ export function OverflowMenu({ items, label, icon = "more", small, className }: 
         document.body,
       )}
     </>
+  );
+}
+
+/** The open menu is a layer like a sheet: Escape reaches it first, and only it. */
+function MenuLayer({ onClose }: { onClose: () => void }) {
+  useLayer(onClose);
+  return null;
+}
+
+// ── popover ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A small menu anchored to a control and opening upward from it: the composer's `+` and its model
+ * list. Left-aligned to the control rather than right-aligned like the overflow menu, because the
+ * controls it serves sit at the left edge of the pill, where a right-aligned menu leaves the window.
+ * A layer for Escape, a click outside closes it, arrows move between its buttons, focus goes to the
+ * first one and comes back to the control after.
+ */
+export function Popover({ anchor, onClose, children, className, align = "left", label }: { anchor: HTMLElement | null; onClose: () => void; children: ReactNode; className?: string; align?: "left" | "right"; label?: string }) {
+  const box = useRef<HTMLDivElement>(null);
+  useLayer(onClose);
+  const [pos, setPos] = useState<{ bottom: number; left?: number; right?: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!anchor) return;
+    const r = anchor.getBoundingClientRect();
+    const bottom = Math.max(8, window.innerHeight - r.top + 6);
+    setPos(align === "left" ? { bottom, left: Math.max(8, r.left) } : { bottom, right: Math.max(8, window.innerWidth - r.right) });
+  }, [anchor, align]);
+  useEffect(() => {
+    const onDown = (e: MouseEvent | TouchEvent) => {
+      if (box.current?.contains(e.target as Node) || anchor?.contains(e.target as Node)) return;
+      onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+      const buttons = Array.from(box.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+      if (!buttons.length) return;
+      const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const next = e.key === "ArrowDown" ? buttons[(i + 1) % buttons.length] : buttons[(i - 1 + buttons.length) % buttons.length];
+      next.focus();
+      e.preventDefault();
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("touchstart", onDown);
+    document.addEventListener("keydown", onKey);
+    const first = box.current?.querySelector<HTMLElement>("input, button:not(:disabled)");
+    first?.focus();
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("touchstart", onDown);
+      document.removeEventListener("keydown", onKey);
+      if (document.activeElement === document.body || !document.activeElement) anchor?.focus();
+    };
+  }, [anchor, onClose]);
+  if (!pos) return null;
+  return createPortal(
+    <div ref={box} className={`menu pop ${className ?? ""}`} role="menu" aria-label={label} style={{ position: "fixed", top: "auto", bottom: pos.bottom, left: pos.left, right: pos.right }} onClick={(e) => e.stopPropagation()}>
+      {children}
+    </div>,
+    document.body,
   );
 }
 
