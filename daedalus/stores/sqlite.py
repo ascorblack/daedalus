@@ -929,6 +929,16 @@ class SqliteUsageSink(UsageSink):
         )
 
 
+def _queue_item_id(item: dict[str, Any]) -> str:
+    return str(item.get("id") or "")
+
+
+def _merged_queue(kept: list[dict[str, Any]], stored: list[dict[str, Any]], seen: Sequence[str]) -> list[dict[str, Any]]:
+    """What a run hands back, followed by whatever the store gained while the run was holding it."""
+    known = {_queue_item_id(item) for item in kept} | set(seen)
+    return list(kept) + [item for item in stored if _queue_item_id(item) not in known]
+
+
 class LiveControlStore:
     """Per-session steer / follow-up queues and live model overrides."""
 
@@ -969,6 +979,43 @@ class LiveControlStore:
             " follow_up_queue = excluded.follow_up_queue, updated_at = excluded.updated_at",
             (session_id, json.dumps(steer), json.dumps(follow_up), _now()),
         )
+
+    async def replace_seen(
+        self,
+        session_id: str,
+        steer: list[dict[str, Any]],
+        follow_up: list[dict[str, Any]],
+        *,
+        seen_steer: Sequence[str],
+        seen_follow_up: Sequence[str],
+    ) -> list[str]:
+        """Write back the queues a run is holding without losing what was enqueued while it ran.
+
+        ``steer`` and ``follow_up`` are what the run has left; ``seen_*`` are the ids it was handed
+        when it last read this row. An item in the store that is in neither list arrived after that
+        read: it is kept, appended behind the run's own remainder so the order stays the order the
+        operator queued things in. A blind write of the run's lists would drop it, and the operator
+        would be told it had been delivered.
+
+        Returns the steer ids that are genuinely gone — handed to the run and not handed back — so
+        the caller can say ``consumed`` about those and only those.
+        """
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute("SELECT steer_queue, follow_up_queue FROM live_control WHERE session_id = ?", (session_id,))
+            row = await cursor.fetchone()
+            await cursor.close()
+            stored_steer = json.loads(row["steer_queue"] or "[]") if row else []
+            stored_follow_up = json.loads(row["follow_up_queue"] or "[]") if row else []
+            merged_steer = _merged_queue(steer, stored_steer, seen_steer)
+            merged_follow_up = _merged_queue(follow_up, stored_follow_up, seen_follow_up)
+            await conn.execute(
+                "INSERT INTO live_control(session_id, steer_queue, follow_up_queue, updated_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(session_id) DO UPDATE SET steer_queue = excluded.steer_queue,"
+                " follow_up_queue = excluded.follow_up_queue, updated_at = excluded.updated_at",
+                (session_id, json.dumps(merged_steer), json.dumps(merged_follow_up), _now()),
+            )
+        kept = {_queue_item_id(item) for item in merged_steer}
+        return [item_id for item_id in seen_steer if item_id not in kept]
 
     async def enqueue(self, session_id: str, kind: str, item: dict[str, Any]) -> None:
         column = "steer_queue" if kind == "steer" else "follow_up_queue"

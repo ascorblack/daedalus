@@ -225,6 +225,12 @@ class SessionState:
     usage_floor_seq: int = 0
     """Usage rows up to here were recorded before the last history rewrite; reading one of them as
     the current prompt size is what made a compaction fire again on the very next turn."""
+    steer_seen: list[str] = field(default_factory=list)
+    """Ids of the steers the running engine was handed at its last reload, in order. What is written
+    back is judged against these: an id that was never handed over was enqueued mid-round and is
+    still waiting, and an id that was handed over and not returned is one the model has read."""
+    follow_up_seen: list[str] = field(default_factory=list)
+    """The same for the follow-up queue."""
 
     @property
     def running(self) -> bool:
@@ -1914,16 +1920,27 @@ class SessionManager:
 
         async def reload_live_control(eng: QueryEngine) -> None:
             data = await self.live.load(session_id)
-            eng._steer_queue = list(data["steer"])  # type: ignore[attr-defined]
-            eng._follow_up_queue = list(data["follow_up"])  # type: ignore[attr-defined]
+            steer = list(data["steer"])
+            follow_up = list(data["follow_up"])
+            state.steer_seen = [str(item.get("id") or "") for item in steer]
+            state.follow_up_seen = [str(item.get("id") or "") for item in follow_up]
+            eng._steer_queue = steer  # type: ignore[attr-defined]
+            eng._follow_up_queue = follow_up  # type: ignore[attr-defined]
 
         async def persist_live_control(eng: QueryEngine) -> None:
             steer = list(getattr(eng, "_steer_queue", []) or [])
-            before = [str(item.get("id") or "") for item in (await self.live.load(session_id))["steer"]]
-            await self.live.save_queues(session_id, steer, list(getattr(eng, "_follow_up_queue", []) or []))
-            if before != [str(item.get("id") or "") for item in steer]:
-                # The round placed queued text into the history (or the operator withdrew some of it
-                # while the round ran): the cards the app draws above its composer are now stale.
+            follow_up = list(getattr(eng, "_follow_up_queue", []) or [])
+            # A merge, not a write: a steer that arrived after this round's reload is in the store
+            # and not in the engine's list, and writing that list over the column would destroy it
+            # while the app was being told the model had read it.
+            consumed = await self.live.replace_seen(
+                session_id, steer, follow_up, seen_steer=state.steer_seen, seen_follow_up=state.follow_up_seen,
+            )
+            state.steer_seen = [str(item.get("id") or "") for item in steer]
+            state.follow_up_seen = [str(item.get("id") or "") for item in follow_up]
+            if consumed:
+                # The round placed queued text into the history, so the cards the app draws above its
+                # composer are stale. Only what this round was handed and did not hand back counts.
                 await self.steer_changed(session_id, reason="consumed")
 
         def start_persist(history: list[Message], fresh: list[Message] | None) -> None:

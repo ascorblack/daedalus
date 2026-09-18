@@ -139,3 +139,35 @@ async def test_the_id_the_app_holds_is_the_id_the_store_wrote(settings: Settings
     assert await manager.drop_queued_steer(sid, stored[0])
     assert [item["id"] for item in await manager.queued_steers(sid)] == stored[1:]
     await manager.close()
+
+
+async def test_a_steer_queued_after_the_round_read_the_queue_survives_the_round(settings: Settings, db: Database) -> None:
+    """The round writes back what it is holding, and what arrived behind its back is still waiting."""
+    provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "sleep 3"}}, {"text": "done"}])
+    manager = await _manager(settings, db, provider)
+    changes = _watch(manager)
+    state = await manager.create_session("racing")
+    sid = state.session.id
+    await manager.submit(sid, "start")
+    await asyncio.sleep(0.3)
+    engine = state.engine
+    assert engine is not None
+
+    # The round reads the queue — empty — and the operator's message lands after that read.
+    await engine.reload_live_control(engine)
+    await manager.submit(sid, "and while you are there", steer=True)
+    assert list(getattr(engine, "_steer_queue", [])) == []
+
+    await engine.persist_live_control(engine)
+    waiting = await manager.queued_steers(sid)
+    assert [item["text"] for item in waiting] == ["and while you are there"]
+    assert [c["reason"] for c in changes] == ["queued"]
+
+    # Now the round is handed it and places it: that, and only that, is consumed.
+    await engine.reload_live_control(engine)
+    assert [item["id"] for item in engine._steer_queue] == [waiting[0]["id"]]
+    engine._steer_queue = []
+    await engine.persist_live_control(engine)
+    assert await manager.queued_steers(sid) == []
+    assert [c["reason"] for c in changes] == ["queued", "consumed"]
+    await manager.close()
