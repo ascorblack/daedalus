@@ -9,6 +9,7 @@ import { confirmAsync, enterSends, errorText, fmtBytes, fmtTok, haptic } from ".
 import { Icon, IconName } from "../icons";
 import { AuthImg, FilePreview, PreviewSource, canPreview, fileGlyph, previewKind, sessionBase } from "../preview";
 import { Activity, LiveStore, SummaryItem, ToolItem, Turn, applyLive, buildTurns, createLiveStore, isOlderPage, liveAfter, liveBase, prepend, reconcile } from "../turns";
+import { MoveSessionSheet } from "../projects";
 import { Windowed } from "../virtual";
 import { plural, t } from "../i18n";
 
@@ -52,6 +53,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
   if (!liveRef.current) liveRef.current = createLiveStore();
   const live = liveRef.current;
   const [draft, setDraft] = useState("");
+  const [moving, setMoving] = useState(false);
   const [pending, setPending] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
   // The layout is the operator's, not the session's: the pane they opened on the right (files, MCP) and
@@ -1048,7 +1050,16 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
               <div className="sheet-section-title">{t("session.advanced")}</div>
               <div className="kv"><span>{t("session.id")}</span><button className="linkbtn mono" onClick={async () => toast((await copyText(id)) ? t("session.id.copied") : id)} title={t("common.copy")}>{id}</button></div>
               <div className="kv"><span>{t("session.workspace")}</span><button className="linkbtn mono truncate" onClick={async () => toast((await copyText(detail.workspace)) ? t("session.path.copied") : detail.workspace)} title={detail.workspace}>{detail.workspace_own === false ? detail.workspace_name : detail.workspace}</button></div>
-              {detail.project && <div className="kv"><span>{t("session.project")}</span><span className="truncate" title={detail.project.root}>{t("session.project.inside", { name: detail.project.name })}</span></div>}
+              {/* Where this agent is listed, and the one control that changes it. A project is not a
+                  setting of the session's own — it is which folder the Agents screen shows it in and,
+                  where the operator asks for it, which files it works on. */}
+              <div className="kv">
+                <span>{t("session.project")}</span>
+                <span className="grow truncate" title={detail.project ? detail.project.root : detail.workspace}>
+                  {detail.project ? t("session.project.inside", { name: detail.project.name }) : t("session.project.none")}
+                </span>
+                <button className="linkbtn" onClick={() => setMoving(true)}>{t("session.project.move")}</button>
+              </div>
               {detail.run_id && <div className="kv"><span>{t("session.runid")}</span><span className="mono">{detail.run_id}</span></div>}
               <div className="btnrow">
                 <button className="btn small" onClick={exportMarkdown}><Icon name="download" size={14} /> {t("session.export")}</button>
@@ -1279,6 +1290,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, listOp
           </div>
         </div></Overlay>
       )}
+
+      {moving && <MoveSessionSheet sessionId={id} current={detail?.project?.id ?? ""} onClose={() => setMoving(false)} onMoved={() => load(true)} toast={toast} />}
 
       {preview && <FilePreview src={preview} onClose={() => setPreview(null)} />}
 

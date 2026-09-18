@@ -224,3 +224,59 @@ export function ProjectSettingsSheet({ project, onClose, onRemoved, toast }: { p
     </Sheet>
   );
 }
+
+/** Move one agent into a project, between two, or out of every one.
+ *
+ * Nothing on disk moves, and the sheet says which of the two things that means: an agent that keeps
+ * its own directory is listed in the project and shares none of its files, and one that takes the
+ * project's folder sees the rest of the project's work from its next turn on.
+ */
+export function MoveSessionSheet({ sessionId, current, onClose, onMoved, toast }: { sessionId: string; current: string; onClose: () => void; onMoved: () => void; toast: (t: string) => void }) {
+  const projects = useProjects();
+  const [target, setTarget] = useState(current);
+  const [useFolder, setUseFolder] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const chosen = (projects.data ?? []).find((p) => p.id === target);
+  async function move() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api.post(`/api/sessions/${encodeURIComponent(sessionId)}/project`, { project_id: target || null, use_project_folder: !!target && useFolder });
+      afterChange();
+      invalidate(`/api/sessions/${sessionId}`);
+      toast(t(target ? "move.done" : "move.done.free", { name: chosen?.name ?? "" }));
+      onMoved();
+      onClose();
+    } catch (e) {
+      toast(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Sheet title={t("move.title")} onClose={onClose} size="narrow">
+      <label className="field" htmlFor="move-project">{t("move.where")}</label>
+      <select id="move-project" className="field" value={target} onChange={(e) => setTarget(e.target.value)}>
+        <option value="">{t("move.free")}</option>
+        {(projects.data ?? []).map((p) => (
+          <option key={p.id} value={p.id}>{p.name} · {p.root}</option>
+        ))}
+      </select>
+      {chosen && (
+        <>
+          <label className="toggle-row">
+            <input type="checkbox" checked={useFolder} onChange={(e) => setUseFolder(e.target.checked)} disabled={!chosen.reachable} />
+            <span>{t("move.usefolder")}</span>
+            <span className="sub">{t("move.usefolder.hint", { root: chosen.root })}</span>
+          </label>
+          <div className="sub attn">{useFolder ? t("move.warn.shared", { root: chosen.root }) : t("move.warn.separate")}</div>
+        </>
+      )}
+      {!target && <div className="sub">{t("move.free.hint")}</div>}
+      <div className="sheet-foot">
+        <button className="btn ghost" onClick={onClose}>{t("common.cancel")}</button>
+        <button className="btn primary" onClick={move} disabled={busy || target === current}>{t("move.action")}</button>
+      </div>
+    </Sheet>
+  );
+}

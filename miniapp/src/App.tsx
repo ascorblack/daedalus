@@ -1,5 +1,5 @@
 import { Component, Suspense, lazy, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, SessionSummary, telegram } from "./api";
+import { api, SessionList, SessionSummary, telegram } from "./api";
 import { StatusLabel } from "./components";
 import { ConfirmHost, Sheet, ToastHost, toast as showToast } from "./dialogs";
 import type { AuthConfig } from "./screens/Login";
@@ -309,7 +309,7 @@ export function App() {
   const open = (id: string) => navigate(sessionPath(id));
   const closeSession = () => back(pathFor("agents"));
   const paletteItems = (): PaletteItem[] => {
-    const sessions = peek<SessionSummary[]>("/api/sessions") ?? [];
+    const sessions = peek<SessionList>("/api/sessions")?.sessions ?? [];
     return [
       { id: "new-agent", label: t("shell.search.newagent"), icon: "plus", run: () => navigate(pathFor("agents", null, { new: "1" })) },
       { id: "projects", label: t("shell.projects"), hint: projectList.find((p) => p.id === project)?.name ?? t("shell.projects.all"), icon: "folder", run: () => setSwitching(true) },
@@ -460,7 +460,7 @@ function SessionPicker({ exclude, onPick, onClose }: { exclude: string | null; o
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
   const [filter, setFilter] = useState("");
   useEffect(() => {
-    api.get<SessionSummary[]>("/api/sessions").then(setSessions).catch(() => setSessions([]));
+    api.get<SessionList>("/api/sessions").then((listing) => setSessions(listing.sessions)).catch(() => setSessions([]));
   }, []);
   const q = filter.trim().toLowerCase();
   const items = (sessions ?? []).filter((s) => s.id !== exclude && (!q || s.title.toLowerCase().includes(q) || s.id.includes(q)));
