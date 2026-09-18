@@ -1383,7 +1383,8 @@ class SessionManager:
                 metadata.pop("workspace", None)
         await self.sessions.update_metadata(session_id, metadata)
         await self.projects.attach(session_id, project.id if project is not None else None)
-        state.session.metadata = metadata
+        state.session.metadata.clear()  # the Session model is frozen; its dict is the thing that is kept
+        state.session.metadata.update(metadata)
         state.metadata = dict(metadata)
         state.project = project
         state.workspace = self.workspace_of(session_id, metadata, project)

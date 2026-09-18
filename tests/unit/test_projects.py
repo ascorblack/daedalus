@@ -216,7 +216,7 @@ async def test_project_crud_and_a_session_that_works_in_one(settings: Settings, 
             created = await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "root": str(root)})
             assert created.status_code == 200
             project = created.json()
-            assert project["root"] == str(root) and project["reachable"] is True and project["settings"] == {"snapshots": False}
+            assert project["root"] == str(root) and project["reachable"] is True and project["settings"] == {"snapshots": False, "system": ""}
 
             listing = (await client.get("/api/projects", headers=HEADERS)).json()
             assert [p["id"] for p in listing] == [project["id"]] and listing[0]["sessions"] == []
@@ -230,8 +230,12 @@ async def test_project_crud_and_a_session_that_works_in_one(settings: Settings, 
 
             detail = (await client.get(f"/api/sessions/{sid}", headers=HEADERS)).json()
             assert detail["workspace"] == str(root) and detail["project"]["name"] == "Bakery"
-            rows = (await client.get("/api/sessions", headers=HEADERS)).json()
+            listing = (await client.get("/api/sessions", headers=HEADERS)).json()
+            rows = listing["sessions"]
             assert [(r["id"], r["project_id"], r["project"]) for r in rows if r["id"] == sid] == [(sid, project["id"], "Bakery")]
+            # The folders come back beside the rows, each counting its own agents.
+            folder = next(p for p in listing["projects"] if p["id"] == project["id"])
+            assert folder["name"] == "Bakery" and folder["total"] == 1 and folder["system"] == ""
 
             # The file endpoints take their scope from the session, so they show the project and refuse the way out.
             files = (await client.get(f"/api/sessions/{sid}/files", headers=HEADERS)).json()
@@ -273,8 +277,11 @@ async def test_a_session_created_without_a_project_keeps_its_own_workspace(setti
             assert detail["project"] is None
             assert detail["workspace"] == str(manager.workspace_for(sid))
             assert detail["workspace_own"] is True
-            rows = (await client.get("/api/sessions", headers=HEADERS)).json()
+            listing = (await client.get("/api/sessions", headers=HEADERS)).json()
+            rows = listing["sessions"]
             assert [r["project_id"] for r in rows if r["id"] == sid] == [None]
+            # A session with no project is in the free bucket, and the bucket counts it.
+            assert listing["free"]["total"] >= 1
         state = manager.live_state(sid)
         assert state is not None and state.project is None
         assert state.services is not None and state.services.project_root is None
