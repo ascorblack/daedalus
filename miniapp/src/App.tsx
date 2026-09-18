@@ -306,7 +306,9 @@ export function App() {
     setMore(false);
   }, [route.screen, route.session]);
 
-  const open = (id: string) => navigate(sessionPath(id));
+  // Stable, so the Agents list can skip a folder that did not change between two polls: a new
+  // function on every render of the shell would defeat every memo below it.
+  const open = useCallback((id: string) => navigate(sessionPath(id)), []);
   const closeSession = () => back(pathFor("agents"));
   const paletteItems = (): PaletteItem[] => {
     const sessions = peek<SessionList>("/api/sessions")?.sessions ?? [];

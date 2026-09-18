@@ -53,23 +53,28 @@ def ahead(**kw: float) -> str:
 # ---- the invented installation ------------------------------------------------------------
 
 S1, S2, S3, S4, S5, S6, S7, S8 = "a1b2c3d4e5f6", "b2c3d4e5f6a1", "c3d4e5f6a1b2", "d4e5f6a1b2c3", "e5f6a1b2c3d4", "f6a1b2c3d4e5", "0a1b2c3d4e5f", "1b2c3d4e5f6a"
+S9, S10, S11 = "2c3d4e5f6a1b", "3d4e5f6a1b2c", "4e5f6a1b2c3d"
 
 LOOP = {"mode": "interval", "interval_seconds": 5400, "status": "active", "run_count": 14, "max_runs": None, "next_run_at": ahead(minutes=38), "last_run_at": ago(minutes=52), "last_reason": None, "stop_reason": None, "pause_note": None, "instruction": "Read the support inbox, answer what you can, and put the rest on the board."}
 
 
-P1, P2 = "9f3c2a1b7d40", "2e7b5c9a1f88"
+P1, P2, PV = "9f3c2a1b7d40", "2e7b5c9a1f88", "7c1e4d9f2a06"
 
 PROJECTS = [
     {"id": P1, "name": "Bakery site", "root": "/home/operator/work/bakery", "created_at": ago(days=9), "settings": {"snapshots": True}, "reachable": True, "writable": True, "sessions": [{"id": "a1b2c3d4e5f6", "title": "Bakery site", "running": True}, {"id": "b2c3d4e5f6a1", "title": "Bakery site: photos", "running": False}, {"id": "e5f6a1b2c3d4", "title": "Bakery site (fork @412)", "running": False}]},
     {"id": P2, "name": "Expenses", "root": "/home/operator/work/expenses", "created_at": ago(days=4), "settings": {"snapshots": False}, "reachable": True, "writable": True, "sessions": [{"id": "f6a1b2c3d4e5", "title": "Expense tracker", "running": False}]},
     # A folder added but not mounted yet: in Docker that is a restart away, and the app says so.
     {"id": "5a8d1c0b6e22", "name": "Courier rates", "root": "/home/operator/documents/courier", "created_at": ago(hours=2), "settings": {"snapshots": False}, "reachable": False, "writable": False, "sessions": []},
+    # The installation's own: the concierge and what it started by being spoken to.
+    {"id": PV, "name": "Voice", "root": "/home/operator/.daedalus/workspaces/voice", "created_at": ago(days=12), "settings": {"snapshots": False, "system": "voice"}, "system": "voice", "reachable": True, "writable": True, "sessions": []},
 ]
 
 
 def session(id_: str, title: str, model: str, *, status: str = "idle", last: str, workspace: str | None = None, own: bool = True, meta: dict | None = None, project: str | None = None) -> dict:
     name = next((p["name"] for p in PROJECTS if p["id"] == project), None)
-    return {"id": id_, "title": title, "status": status, "created_at": ago(days=3), "last_message_at": last, "run_id": "run1" if status == "running" else None, "model": model, "workspace": workspace or id_, "workspace_own": own, "metadata": meta or {}, "project_id": project, "project": name}
+    root = next((p["root"] for p in PROJECTS if p["id"] == project), None)
+    path = root if (root and own is False) else f"/home/operator/.daedalus/workspaces/{workspace or id_}"
+    return {"id": id_, "title": title, "status": status, "created_at": ago(days=3), "last_message_at": last, "run_id": "run1" if status == "running" else None, "model": model, "workspace": workspace or id_, "workspace_path": path, "workspace_own": own, "metadata": meta or {}, "project_id": project, "project": name}
 
 
 SESSIONS = [
@@ -81,7 +86,27 @@ SESSIONS = [
     session(S4, "Weekly digest", "DeepSeek Flash", status="waiting", last=ago(minutes=4)),
     session(S5, "Bakery site (fork @412)", "DeepSeek Flash", last=ago(hours=1), meta={"forked_from": {"session_id": S1, "seq": 412}}, project=P1),
     session(S6, "Expense tracker", "Local Qwen3.8", last=ago(days=1), project=P2),
+    # Started by talking: the concierge itself, one agent in the folder they share and one with its own.
+    session(S9, "Voice", "Qwen 3.7 Flash", last=ago(minutes=3), project=PV, own=False),
+    session(S10, "Invoice run", "Claude Opus 5", status="running", last=ago(seconds=20), project=PV, own=False, meta={"voice_parent": S9}),
+    session(S11, "Courier quotes", "DeepSeek Flash", last=ago(minutes=26), project=PV, meta={"voice_parent": S9}),
 ]
+
+# Counted over the whole table by the API: the folder header says how many agents are in it whatever
+# the page of rows beside it reached.
+FOLDER_COUNTS = {
+    P1: {"total": 3, "active": 1, "loops": 0, "last_message_at": ago(seconds=40)},
+    P2: {"total": 1, "active": 0, "loops": 0, "last_message_at": ago(days=1)},
+    "5a8d1c0b6e22": {"total": 0, "active": 0, "loops": 0, "last_message_at": ""},
+    PV: {"total": 3, "active": 1, "loops": 0, "last_message_at": ago(seconds=20)},
+}
+FREE_COUNT = {"total": 2, "active": 1, "loops": 1, "last_message_at": ago(minutes=4)}
+
+
+def listing() -> dict:
+    """What GET /api/sessions answers: the page of rows, the folders, and the free bucket."""
+    folders = [{k: v for k, v in p.items() if k != "sessions"} | FOLDER_COUNTS[p["id"]] for p in PROJECTS]
+    return {"sessions": SESSIONS, "projects": folders, "free": FREE_COUNT}
 
 ANSWER = """The menu page is live and checked on a phone.
 
@@ -522,7 +547,7 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     if rel == "/api/auth/config":
         return respond(route, {"telegram": None, "passkeys": 1, "pairing": True})
     if rel == "/api/sessions":
-        return respond(route, SESSIONS)
+        return respond(route, listing())
     if rel == "/api/services":
         return respond(route, SERVICES_ALL)
     if rel.startswith("/api/sessions/"):
@@ -867,6 +892,34 @@ def run_voice() -> int:
     return UNHANDLED.report()
 
 
+def agents_shots() -> int:
+    """The Agents screen at the three widths, in both of the two states a folder has.
+
+    Collapsed is how the screen opens: the folders of the projects, the concierge's first with its
+    mic, and the free agents under them. Expanded is every folder open, which is the case the reader
+    asks for one folder at a time and the picture shows all at once.
+    """
+    open_keys = [p["id"] for p in PROJECTS] + ["\u0000free"]
+    out = 0
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        for prefix, viewport, mobile in (
+            ("agents-phone-", PHONE, True),
+            ("agents-", DESK, False),
+            ("agents-wide-", {"width": 2560, "height": 1300}, False),
+        ):
+            for state in ("collapsed", "expanded"):
+                context = browser.new_context(viewport=viewport, device_scale_factor=2 if not mobile else 3, color_scheme="dark", is_mobile=mobile, has_touch=mobile)
+                script = "" if state == "collapsed" else " ".join(f"localStorage.setItem('daedalus.folder.{k}', '1');" for k in open_keys)
+                context.add_init_script("try { " + script + " } catch (e) {}")
+                page = context.new_page()
+                page.route("**/api/**", stub)
+                shot(page, f"{prefix}{state}", "agents", wait=".folder")
+                context.close()
+        browser.close()
+    return out or UNHANDLED.report()
+
+
 def run() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
@@ -927,4 +980,5 @@ def run() -> int:
 if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
-    sys.exit(run_voice() if os.environ.get("ONLY") == "voice" else run())
+    only = os.environ.get("ONLY")
+    sys.exit(run_voice() if only == "voice" else agents_shots() if only == "agents" else run())

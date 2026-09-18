@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useMemo, useState } from "react";
+import { Fragment, memo, useCallback, useMemo, useState } from "react";
 import { api, Project, ProjectFolder, SessionList, SessionSummary, Settings, Workspace } from "../api";
 import { Avatar, Dot, Skeleton, Status, ToolPicker, fmtInterval, statusWord } from "../components";
 import { Sheet } from "../dialogs";
@@ -57,7 +57,7 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
           ))}
         </div>
       </PageHeader>
-      <div className="screen wide agents-screen">
+      <div className="screen agents-screen">
         {loading && !error && <Skeleton rows={5} />}
         {error && !data && <div className="empty"><b>{t("agents.error")}</b><div>{error}</div></div>}
         {data && folders.total === 0 && (
@@ -92,7 +92,20 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
  * A search or a filter opens what it found: leaving a match behind a closed folder would be a screen
  * that answers "nothing" while holding the answer.
  */
-function FolderSection({ folder, onOpen, current, filtered }: { folder: Folder; onOpen: (id: string) => void; current?: string; filtered: boolean }) {
+type FolderProps = { folder: Folder; onOpen: (id: string) => void; current?: string; filtered: boolean };
+
+/** Whether an open folder would look the same. Without it an installation with hundreds of agents
+ *  reconciles all of them on every poll for a list that did not change a character; `sig` is built
+ *  once while the folders are arranged, so this costs a string comparison. */
+function sameFolder(a: FolderProps, b: FolderProps): boolean {
+  const l = a.folder, r = b.folder;
+  if (a.filtered !== b.filtered || a.current !== b.current || a.onOpen !== b.onOpen) return false;
+  if (l.key !== r.key || l.name !== r.name || l.total !== r.total || l.active !== r.active || l.loops !== r.loops || l.last_message_at !== r.last_message_at) return false;
+  if (l.project?.root !== r.project?.root) return false;
+  return l.sig === r.sig;
+}
+
+const FolderSection = memo(function FolderSection({ folder, onOpen, current, filtered }: FolderProps) {
   const [open, setOpen] = useState(() => folderOpen(folder.key));
   const free = folder.project === null;
   const showing = open || (filtered && folder.rows.length > 0);
@@ -118,11 +131,11 @@ function FolderSection({ folder, onOpen, current, filtered }: { folder: Folder; 
       </button>
       {showing && folder.project && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
       {showing && free && <div className="folder-root sub">{t("agents.free.hint")}</div>}
-      {showing && folder.rows.length === 0 && <div className="folder-empty sub">{t("common.nothing")}</div>}
+      {showing && folder.rows.length === 0 && <div className="folder-empty sub">{filtered ? t("common.nothing") : free ? t("agents.free.none") : t("agents.folder.none")}</div>}
       {showing && folder.rows.map((r) => <RowTree key={r.s.id} row={r} onOpen={onOpen} current={current} free={free} />)}
     </section>
   );
-}
+}, sameFolder);
 
 /** An agent, the forks taken from it under it, and each fork's own forks under those. */
 function RowTree({ row, onOpen, current, free, fork }: { row: RowModel; onOpen: (id: string) => void; current?: string; free: boolean; fork?: { of: string; seq: number } }) {
@@ -148,7 +161,23 @@ function loopLine(s: SessionSummary): string {
   return `${t("agents.loop.stopped", { status: statusWord(loop.status).toLowerCase() })}${why ? `: ${why.slice(0, 80)}` : ""} · ${runs}`;
 }
 
-function Row({ s, kids, onOpen, current, fork, free }: { s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number }; free?: boolean }) {
+/** What a row actually draws, so the poll every five seconds does not reconcile a folder that did not change.
+ *
+ *  The list is re-fetched whole and every object in it is new each time, so identity says nothing;
+ *  this says what the row would look different for. The children are in it because a subagent's
+ *  status is drawn under its leader. */
+function sameRow(a: RowProps, b: RowProps): boolean {
+  const l = a.s, r = b.s;
+  if (l.id !== r.id || l.title !== r.title || l.status !== r.status || l.last_message_at !== r.last_message_at || l.model !== r.model || l.workspace_path !== r.workspace_path) return false;
+  if (a.current !== b.current || a.free !== b.free || a.fork?.seq !== b.fork?.seq || a.fork?.of !== b.fork?.of) return false;
+  if (JSON.stringify(l.metadata?.loop ?? null) !== JSON.stringify(r.metadata?.loop ?? null)) return false;
+  if (a.kids.length !== b.kids.length) return false;
+  return a.kids.every((k, i) => k.id === b.kids[i].id && k.status === b.kids[i].status && k.title === b.kids[i].title);
+}
+
+type RowProps = { s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number }; free?: boolean };
+
+const Row = memo(function Row({ s, kids, onOpen, current, fork, free }: RowProps) {
   const [showKids, setShowKids] = useState(false);
   const orphan = !!s.metadata?.subagent_of;
   const status = s.status as Status;
@@ -195,7 +224,7 @@ function Row({ s, kids, onOpen, current, fork, free }: { s: SessionSummary; kids
       </div>
     </div>
   );
-}
+}, sameRow);
 
 /** The form for a new agent: a name, a first task and where it works; the loop and the tools sit behind Advanced. */
 function NewAgentSheet({ onClose, onCreated, toast, project: initial = "" }: { onClose: () => void; onCreated: (id: string) => void; toast: (t: string) => void; project?: string }) {

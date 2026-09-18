@@ -883,6 +883,9 @@ body.resizing iframe { pointer-events: none; }
    Dark elevation, so a folder reads as a surface laid ON the page rather than a hole cut into it:
    the header is one step lighter than the ground, the open body one step lighter again, and the
    seams are hairlines. Nothing here is darker than what is behind it. */
+/* The list is as wide as the window. A folder is a full-width band with its counts on the right, so
+   centring it in a column would leave a wide screen mostly gutter and push the counts into the middle. */
+.agents-screen { width: 100%; }
 .folder { margin-bottom: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-1); overflow: hidden; }
 .folder.open { background: var(--surface-1); border-color: var(--line-strong); }
 .folder-head { display: flex; align-items: center; gap: 10px; width: 100%; padding: 11px 12px; background: var(--surface-2); border: 0; color: var(--fg); font: inherit; font-size: 14px; text-align: left; cursor: pointer; transition: background .15s; }
@@ -899,8 +902,10 @@ body.resizing iframe { pointer-events: none; }
 .folder-time { flex: none; font-size: 12.5px; }
 .folder-root { padding: 8px 12px 0; }
 .folder-empty { padding: 10px 12px; }
-.folder.open > .erow, .folder.open > .folder-empty ~ .erow { margin: 8px 10px; }
+.folder.open > .erow { margin: 8px 10px; }
 .folder.open > .erow:first-of-type { margin-top: 10px; }
+/* A fork keeps its step in from the session it was taken from, inside a folder as outside one. */
+.folder.open > .erow.fork { margin-left: 32px; }
 .chip.tiny { padding: 2px 8px; font-size: 11px; min-height: 0; flex: none; }
 @media (max-width: 520px) {
   /* At 390 px the counts and the time would push the name out; the name is what the folder is. */

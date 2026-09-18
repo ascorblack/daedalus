@@ -692,6 +692,8 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "agents.filter.loops": { en: "Loops · {n}", ru: "Циклы · {n}" },
   "agents.free": { en: "Free agents", ru: "Свободные агенты" },
   "agents.free.hint": { en: "Each of these works in a directory of its own, outside every project.", ru: "Каждый работает в своей папке, вне всех проектов." },
+  "agents.folder.none": { en: "No agents in this project yet.", ru: "В этом проекте пока нет агентов." },
+  "agents.free.none": { en: "Every agent belongs to a project.", ru: "Все агенты числятся в проектах." },
   "agents.own.chip": { en: "own workspace", ru: "своя папка" },
   "agents.error": { en: "Could not load agents", ru: "Не удалось загрузить агентов" },
   "agents.empty": { en: "No agents yet", ru: "Агентов пока нет" },

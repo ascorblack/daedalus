@@ -50,7 +50,7 @@ GATES: dict[str, object] = {
     "/api/asr": {"configured": False, "reason": "", "provider": "", "model": "", "max_seconds": 120, "autosend": False},
     "/api/proposals": [],
     "/api/schedules": [],
-    "/api/sessions": [],
+    "/api/sessions": {"sessions": [], "projects": [], "free": {"total": 0, "active": 0, "loops": 0, "last_message_at": ""}},
     # The shell asks which projects there are before it draws the rail.
     "/api/projects": [],
 }
