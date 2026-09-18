@@ -37,6 +37,8 @@ const SAME_IN_BOTH = [
   "settings.search.title",
   "settings.vision.title",
   "settings.web.title",
+  // A tool named by its own id and a count: the id is the same in both languages.
+  "turn.family.other",
   "usage.col.usd",
 ];
 

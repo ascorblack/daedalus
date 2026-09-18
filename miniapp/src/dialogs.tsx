@@ -245,6 +245,60 @@ function MenuLayer({ onClose }: { onClose: () => void }) {
   return null;
 }
 
+// ── popover ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A small menu anchored to a control and opening upward from it: the composer's `+` and its model
+ * list. Left-aligned to the control rather than right-aligned like the overflow menu, because the
+ * controls it serves sit at the left edge of the pill, where a right-aligned menu leaves the window.
+ * A layer for Escape, a click outside closes it, arrows move between its buttons, focus goes to the
+ * first one and comes back to the control after.
+ */
+export function Popover({ anchor, onClose, children, className, align = "left", label }: { anchor: HTMLElement | null; onClose: () => void; children: ReactNode; className?: string; align?: "left" | "right"; label?: string }) {
+  const box = useRef<HTMLDivElement>(null);
+  useLayer(onClose);
+  const [pos, setPos] = useState<{ bottom: number; left?: number; right?: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!anchor) return;
+    const r = anchor.getBoundingClientRect();
+    const bottom = Math.max(8, window.innerHeight - r.top + 6);
+    setPos(align === "left" ? { bottom, left: Math.max(8, r.left) } : { bottom, right: Math.max(8, window.innerWidth - r.right) });
+  }, [anchor, align]);
+  useEffect(() => {
+    const onDown = (e: MouseEvent | TouchEvent) => {
+      if (box.current?.contains(e.target as Node) || anchor?.contains(e.target as Node)) return;
+      onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+      const buttons = Array.from(box.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+      if (!buttons.length) return;
+      const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const next = e.key === "ArrowDown" ? buttons[(i + 1) % buttons.length] : buttons[(i - 1 + buttons.length) % buttons.length];
+      next.focus();
+      e.preventDefault();
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("touchstart", onDown);
+    document.addEventListener("keydown", onKey);
+    const first = box.current?.querySelector<HTMLElement>("input, button:not(:disabled)");
+    first?.focus();
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("touchstart", onDown);
+      document.removeEventListener("keydown", onKey);
+      if (document.activeElement === document.body || !document.activeElement) anchor?.focus();
+    };
+  }, [anchor, onClose]);
+  if (!pos) return null;
+  return createPortal(
+    <div ref={box} className={`menu pop ${className ?? ""}`} role="menu" aria-label={label} style={{ position: "fixed", top: "auto", bottom: pos.bottom, left: pos.left, right: pos.right }} onClick={(e) => e.stopPropagation()}>
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
 // ── toast ────────────────────────────────────────────────────────────────────────────────
 
 type ToastState = { text: string; undo?: () => void; id: number };

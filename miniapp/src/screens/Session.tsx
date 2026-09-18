@@ -1,14 +1,18 @@
 import { Component, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { api, AsrStatus, ModelFallback, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
-import { Dot, Status, copyText, fmtInt, statusWord, timeAgo } from "../components";
-import { OverflowMenu, confirmDialog, Overlay } from "../dialogs";
+import { api, ApiError, AsrStatus, ModelFallback, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, SessionDetail, Compacting } from "../api";
+import { Chevron, Dot, Status, copyText, fmtInt, statusWord, timeAgo } from "../components";
+import { MenuItem, OverflowMenu, confirmDialog, Overlay } from "../dialogs";
 import { absDate, clock, commandPreview, duration, plainPreview, shortDateTime } from "../format";
 import { EVIDENCE_EVENT, EvidenceRequest, codeBlock, renderCached, renderMarkdown } from "../md";
-import { confirmAsync, enterSends, errorText, fmtBytes, haptic } from "../ui";
+import { confirmAsync, errorText, fmtBytes, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
 import { AuthImg, FilePreview, PreviewSource, canPreview, downloadHref, fileGlyph, previewKind, sessionBase } from "../preview";
-import { Activity, LiveStore, SummaryItem, ToolItem, Turn, applyLive, buildTurns, createLiveStore, isOlderPage, liveAfter, liveBase, prepend, reconcile } from "../turns";
+import { Activity, LiveStore, SummaryItem, SystemNote, ToolItem, Turn, applyLive, buildTurns, createLiveStore, familyCounts, isOlderPage, liveAfter, liveBase, prepend, producedFiles, reconcile } from "../turns";
+import { ArtifactCard } from "../artifact";
+import { Answer, Composer, ComposerHandle } from "../composerbox";
+import { Approval, QueuedSteer, pendingApproval, readSteers, steersAfter } from "../composer";
+import { ModelChoice } from "../modelselect";
 import { MoveSessionSheet } from "../projects";
 import { panelShortcut } from "../panel";
 import { Panel, usePanel, usePanelWidth } from "../panelhost";
@@ -55,10 +59,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   const liveRef = useRef<LiveStore | null>(null);
   if (!liveRef.current) liveRef.current = createLiveStore();
   const live = liveRef.current;
-  const [draft, setDraft] = useState("");
   const [moving, setMoving] = useState(false);
-  const [pending, setPending] = useState<File[]>([]);
-  const [sending, setSending] = useState(false);
+  const composer = useRef<ComposerHandle>(null);
   // The right panel: the route carries the open tab and the previewed file for the pane the URL
   // names; the second pane of a dual view keeps its panel to itself. Phones host it in a sheet.
   const route = useRoute();
@@ -71,11 +73,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   const [modes, setModes] = useState<string[]>([]);
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [commandResult, setCommandResult] = useState<{ line: string; text: string } | null>(null);
-  const [picker, setPicker] = useState<null | { presets: Record<string, { provider: string; model: string; label: string }>; global: string }>(null);
-  const textarea = useRef<HTMLTextAreaElement>(null);
-  const [custom, setCustom] = useState("");
   const scroller = useRef<HTMLDivElement>(null);
-  const fileInput = useRef<HTMLInputElement>(null);
   const stick = useRef(true);
   const userScrolling = useRef(false);
   const [atBottom, setAtBottom] = useState(true);
@@ -86,6 +84,13 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [asr, setAsr] = useState<AsrStatus | null>(null);
   const [snapshots, setSnapshots] = useState<SessionCheckpoints | null>(null);
+  const [voice, setVoice] = useState(false);
+  // The steers the host is holding for the next model call. `none` is a host without the route:
+  // the cards are simply not drawn, and the route is not asked again.
+  const [steers, setSteers] = useState<QueuedSteer[]>([]);
+  const steerRoute = useRef<"unknown" | "ok" | "none">("unknown");
+  // Approval keys the operator has spent or waved away, so the dock does not offer them twice.
+  const [seenKeys, setSeenKeys] = useState<Set<string>>(() => new Set());
 
   async function loopAction(a: string) {
     try {
@@ -119,8 +124,21 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   }, [id]);
 
   const turnAction = useCallback(
-    async (kind: "revert" | "fork", seq: number) => {
+    async (kind: "revert" | "fork" | "retry", seq: number) => {
       try {
+        if (kind === "retry") {
+          // The operator's words again, as a new message: the answer that follows is a new turn.
+          const text = msgs.current.find((m) => m.seq === seq)?.text ?? "";
+          if (!text.trim()) return;
+          if (busyRef.current) {
+            toast(t("session.stopfirst"));
+            return;
+          }
+          await api.post(`/api/sessions/${id}/messages`, { text });
+          stick.current = true;
+          load();
+          return;
+        }
         if (kind === "revert") {
           // With snapshots off — which is a project's default — there is nothing to put the files
           // back from, and the operator should read that before clicking rather than in the toast after.
@@ -275,40 +293,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     api.get<Record<string, unknown>>("/api/modes").then((m) => setModes(Object.keys(m))).catch(() => setModes([]));
     api.get<SlashCommand[]>("/api/commands").then(setCommands).catch(() => setCommands([]));
     api.get<AsrStatus>("/api/asr").then(setAsr).catch(() => setAsr(null));
+    api.get<{ enabled?: boolean }>("/api/voice").then((v) => setVoice(!!v?.enabled)).catch(() => setVoice(false));
     readSnapshots();
   }, [load, readSnapshots]);
-
-  // A recording from the microphone becomes text in the composer (or goes straight out with autosend).
-  const [transcribing, setTranscribing] = useState(false);
-  async function onRecording(blob: Blob, seconds: number) {
-    if (asr && seconds > asr.max_seconds) {
-      toast(t("session.transcribe.long", { n: seconds, max: asr.max_seconds }));
-      return;
-    }
-    setTranscribing(true);
-    try {
-      const ext = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
-      const form = new FormData();
-      form.append("audio", blob, `recording.${ext}`);
-      const res = await fetch(`/api/sessions/${id}/transcribe`, { method: "POST", headers: api.authHeaders(), body: form });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? `transcription failed (${res.status})`);
-      const r = (await res.json()) as { transcript: string; text: string; autosend: boolean };
-      if (r.autosend && !draft.trim()) {
-        await api.post(`/api/sessions/${id}/messages`, { text: r.text });
-        toast(t("session.transcribe.sent", { text: r.transcript.slice(0, 80) }));
-        stick.current = true;
-        load();
-      } else {
-        setDraft((d) => (d.trim() ? `${d.trimEnd()}\n\n${r.text}` : r.text));
-        textarea.current?.focus();
-        haptic("success");
-      }
-    } catch (e) {
-      toast(errorText(e));
-    } finally {
-      setTranscribing(false);
-    }
-  }
 
   // The scheduled tasks that belong to this session: created from it, aimed at it, or running in it now.
   const loadSchedules = useCallback(() => {
@@ -368,6 +355,60 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   // take it away; between the two this is what there is to show.
   const saving = !busy && !!detail?.housekeeping;
   const compacting = detail?.compacting ?? null;
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+
+  // What the host is holding for the next step. Read when a run begins and after every steer
+  // this screen sends; kept current from the stream, which carries the whole queue in each event.
+  const loadSteers = useCallback(async () => {
+    if (steerRoute.current === "none") return;
+    try {
+      const raw = await api.get<unknown>(`/api/sessions/${id}/steer`);
+      steerRoute.current = "ok";
+      setSteers(readSteers(raw));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) steerRoute.current = "none";
+      setSteers([]);
+    }
+  }, [id]);
+  useEffect(() => {
+    steerRoute.current = "unknown";
+    setSteers([]);
+  }, [id]);
+  useEffect(() => {
+    if (busy) void loadSteers();
+    else setSteers([]);
+  }, [busy, loadSteers]);
+  const withdraw = useCallback(
+    async (steer: QueuedSteer) => {
+      try {
+        await api.delete(`/api/sessions/${id}/steer/${encodeURIComponent(steer.id)}`);
+        setSteers((q) => q.filter((x) => x.id !== steer.id));
+        toast(t("composer.steer.withdrawn"));
+      } catch (e) {
+        // A 409 is the message having gone through after all; the list is re-read either way.
+        toast(e instanceof ApiError && e.status === 409 ? t("composer.steer.gone") : errorText(e));
+        void loadSteers();
+      }
+    },
+    [id, toast, loadSteers],
+  );
+
+  // A tool call the policy refused, waiting on the operator: the dock above the pill offers it once.
+  const approval = useMemo(() => pendingApproval(detail?.messages ?? [], seenKeys), [detail?.messages, seenKeys]);
+  const approve = useCallback(
+    async (a: Approval) => {
+      try {
+        await api.post(`/api/sessions/${id}/policy/grant`, { key: a.key });
+        setSeenKeys((k) => new Set(k).add(a.key));
+        toast(t("composer.approved"));
+      } catch (e) {
+        toast(errorText(e));
+      }
+    },
+    [id, toast],
+  );
+  const deny = useCallback((a: Approval) => setSeenKeys((k) => new Set(k).add(a.key)), []);
 
   // The event stream carries every change while a run is active; this is the safety net, not the
   // feed, and it asks what the session is doing — not for the conversation over again.
@@ -455,6 +496,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
         // triggers: the read says the same thing a round trip later.
         setDetail((prev) => (prev ? { ...prev, status: p.status === "awaiting" ? "waiting" : "idle", housekeeping: !!p.housekeeping } : prev));
         refreshSoon("tail");
+      } else if (event === "steer_changed") {
+        steerRoute.current = "ok";
+        setSteers((q) => steersAfter(q, p));
       } else if (event === "compaction_completed") refreshSoon("tail");
       else if (event === "state_changed" || event === "tool_call_pending") refreshSoon("state");
     }
@@ -605,95 +649,46 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     if (el.scrollTop < 400 && older === "more" && pageable) void loadOlder();
   }
 
-  // Files from the clipboard (a screenshot, a copied file) and files dropped on the chat join the draft.
-  function addFiles(files: Iterable<File>) {
-    const named = Array.from(files).map((f) => {
-      // A pasted screenshot arrives as "image.png" every time: give each one a name of its own.
-      if (!/^(image|blob|file)(\.[a-z0-9]+)?$/i.test(f.name)) return f;
-      const ext = f.name.includes(".") ? f.name.slice(f.name.lastIndexOf(".")) : f.type.startsWith("image/") ? `.${f.type.slice(6).replace("jpeg", "jpg")}` : "";
-      const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
-      return new File([f], `${f.type.startsWith("image/") ? "screenshot" : "pasted"}-${stamp}${ext}`, { type: f.type, lastModified: f.lastModified });
-    });
-    if (named.length) setPending((p) => [...p, ...named]);
-  }
-  function onPaste(e: React.ClipboardEvent) {
-    const items = Array.from(e.clipboardData?.items ?? []);
-    const files = items.filter((it) => it.kind === "file").map((it) => it.getAsFile()).filter((f): f is File => !!f);
-    if (!files.length) return;
-    // Text pasted alongside (rich-text editors add an HTML rendering of the image) is not wanted.
-    e.preventDefault();
-    addFiles(files);
-    haptic("light");
-  }
   function onDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragging(0);
-    if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
+    if (e.dataTransfer?.files?.length) composer.current?.addFiles(e.dataTransfer.files);
   }
 
-  const paletteQuery = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).split(" ")[0].toLowerCase() : null;
-  const paletteItems = paletteQuery === null || draft.includes(" ") ? [] : commands.filter((c) => c.name.startsWith(paletteQuery));
-
+  // A slash command, run by the host. A short answer is a toast, a long one a sheet; a failure is
+  // thrown back so the composer can put the line back in the field.
   async function runCommand(line: string) {
     const name = line.slice(1).split(" ")[0].toLowerCase();
     const spec = commands.find((c) => c.name === name);
     if (spec?.confirm && !(await confirmAsync(t("session.command.confirm", { name })))) return;
-    setDraft("");
-    if (textarea.current) textarea.current.style.height = "auto";
-    try {
-      const r = await api.post<{ text: string }>(`/api/sessions/${id}/command`, { line });
-      const short = r.text.length < 140 && !r.text.includes("\n");
-      if (short) toast(r.text);
-      else setCommandResult({ line, text: r.text });
-      load();
-    } catch (e) {
-      setDraft(line);
-      toast(errorText(e));
-    }
+    const r = await api.post<{ text: string }>(`/api/sessions/${id}/command`, { line });
+    const short = r.text.length < 140 && !r.text.includes("\n");
+    if (short) toast(r.text);
+    else setCommandResult({ line, text: r.text });
+    load();
   }
 
-  function pickCommand(c: SlashCommand) {
-    if (c.args) {
-      setDraft(`/${c.name} `);
-      textarea.current?.focus();
+  // The message goes out; while a run is on the host holds it as a steer for the next step, and the
+  // queue is re-read so the card is there before the stream says so.
+  async function send(text: string, files: File[]) {
+    const steer = busyRef.current && status === "running";
+    if (files.length > 0) {
+      const form = new FormData();
+      form.append("text", text);
+      for (const f of files) form.append("files", f, f.name);
+      const res = await fetch(`/api/sessions/${id}/upload`, { method: "POST", headers: api.authHeaders(), body: form });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? res.statusText);
     } else {
-      runCommand(`/${c.name}`);
+      await api.post(`/api/sessions/${id}/messages`, steer ? { text, steer: true } : { text });
     }
+    stick.current = true;
+    if (steer) void loadSteers();
+    load();
   }
 
-  async function send() {
-    const text = draft.trim();
-    const files = pending;
-    if (sending || (!text && files.length === 0)) return;
-    if (text.startsWith("/") && files.length === 0 && commands.some((c) => c.name === text.slice(1).split(" ")[0].toLowerCase())) {
-      await runCommand(text);
-      return;
-    }
-    setSending(true);
-    setDraft("");
-    setPending([]);
-    if (fileInput.current) fileInput.current.value = "";
-    if (textarea.current) textarea.current.style.height = "auto";
-    try {
-      if (files.length > 0) {
-        const form = new FormData();
-        form.append("text", text);
-        for (const f of files) form.append("files", f, f.name);
-        const res = await fetch(`/api/sessions/${id}/upload`, { method: "POST", headers: api.authHeaders(), body: form });
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? res.statusText);
-      } else {
-        await api.post(`/api/sessions/${id}/messages`, { text });
-      }
-      stick.current = true;
-      haptic("light");
-      load();
-    } catch (e) {
-      setDraft(text);
-      setPending(files);
-      toast(errorText(e));
-    } finally {
-      setSending(false);
-    }
+  async function answer(answers: Answer[]) {
+    await api.post(`/api/sessions/${id}/answer`, { answers });
+    load();
   }
 
   async function stop() {
@@ -749,18 +744,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     }
   }
 
-  async function openPicker() {
-    try {
-      const st = await api.get<any>("/api/settings");
-      const def = st.presets?.[st.model?.preset];
-      setPicker({ presets: st.presets ?? {}, global: def ? def.label || `${def.provider}/${def.model}` : String(st.model?.preset ?? t("settings.heartbeat.default")) });
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }
+  const openPicker = () => composer.current?.openModel();
 
-  async function chooseModel(body: Record<string, unknown>) {
-    setPicker(null);
+  async function chooseModel(body: ModelChoice) {
     try {
       const r = await api.post<{ model: string }>(`/api/sessions/${id}/model`, body);
       toast(t("session.model.picked", { model: r.model }));
@@ -829,11 +815,13 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
       id,
       workspace: detail?.workspace ?? "",
       preview: openPreview,
+      openJobs: () => panel.open("jobs"),
+      toast,
       // An empty list is a session that never snapshots (a project with them off, a workspace over
       // the size cap): there is nothing retention took away and the undo behaves as it always did.
       revertable: snapshots && snapshots.total > 0 ? new Set(snapshots.checkpoints.filter((c) => c.kind === "before" && c.seq != null).map((c) => c.seq as number)) : null,
     }),
-    [id, detail?.workspace, snapshots, openPreview],
+    [id, detail?.workspace, snapshots, openPreview, panel.open, toast],
   );
 
   // What the answer cited, clicked: a file opens at the lines it named, a Verify receipt opens as a
@@ -908,11 +896,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
           <span className="head-status failed" role="status"><Dot status={status} /><b>{statusWord(status)}</b></span>
         ) : null}
         {offline && <span className="head-status offline">{t("session.reconnecting")}</span>}
-        {/* The model, until the composer holds it: a muted label, amber while another model stands in
-            for the configured one. It goes back to the plain name by itself. */}
-        <button className={`head-model ${detail?.fallback ? "attn" : ""}`} onClick={openPicker} title={detail?.fallback ? t("session.model.fallback.turn", { to: detail.fallback.to, from: detail.fallback.from }) : t("session.model.for")}>
-          {detail?.fallback ? t("session.model.fallback", { to: shortModel(detail.fallback.to, 14), from: shortModel(detail.fallback.from, 14) }) : shortModel(detail?.model, 22)}
-        </button>
         <div className="head-actions">
           <button className={`iconbtn ${panel.state.tab ? "on" : ""}`} onClick={panel.toggle} aria-label={t("panel.toggle")} title={t("panel.toggle.title")} aria-pressed={!!panel.state.tab}>
             <Icon name="panel" />
@@ -937,6 +920,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
         <div className="chat-main">
           <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
             <div className="timeline">
+              {!detail && <TurnSkeleton />}
               {pageable && <div className="sub older-note">{older === "loading" ? t("session.older") : ""}</div>}
               {snapshots?.pruned && (
                 <div className="sub older-note">
@@ -958,7 +942,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                 />
                 {busy && <LiveTurn base={tail} live={live} onTurnAction={turnAction} onRender={pinBottom} />}
               </SessionContext.Provider>
-              {detail?.pending && <QuestionCard key={detail.pending.questions.map((q) => q.question).join("|")} sessionId={id} questions={detail.pending.questions} onDone={() => load()} toast={toast} />}
             </div>
           </div>
           {!atBottom && (
@@ -966,75 +949,32 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
               <Icon name="down" size={18} />
             </button>
           )}
-          <div className="composer">
-            {pending.length > 0 && (
-              <div className="attachments" aria-label={t("session.attachments")}>
-                {pending.map((f, i) => (
-                  <AttachmentCard key={`${f.name}-${f.size}-${f.lastModified}-${i}`} file={f} onOpen={() => setPreview({ file: f })} onRemove={() => setPending((p) => p.filter((_, j) => j !== i))} />
-                ))}
-              </div>
-            )}
-            {paletteItems.length > 0 && (
-              <div className="palette">
-                {paletteItems.slice(0, 8).map((c) => (
-                  <button key={c.name} className="palette-item" onClick={() => pickCommand(c)}>
-                    <span className="mono">/{c.name} <span className="sub">{c.args}</span></span>
-                    <span className="sub">{c.description}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="composer-box line">
-              <input ref={fileInput} type="file" multiple hidden onChange={(e) => setPending((p) => [...p, ...Array.from(e.target.files ?? [])])} />
-              <button className="roundbtn" title={t("session.attach")} onClick={() => fileInput.current?.click()} aria-label={t("session.attach")}>
-                <Icon name="plus" />
-              </button>
-              <textarea
-                ref={textarea}
-                value={draft}
-                onChange={(e) => {
-                  setDraft(e.target.value);
-                  const el = e.target;
-                  el.style.height = "auto";
-                  el.style.height = `${Math.min(el.scrollHeight, Math.max(120, window.innerHeight * 0.4))}px`;
-                }}
-                placeholder={t(status === "running" ? "session.composer.running" : status === "waiting" ? "session.composer.waiting" : "session.composer.idle")}
-                rows={1}
-                onPaste={onPaste}
-                onKeyDown={(e) => {
-                  if (e.key === "Tab" && paletteItems.length > 0) {
-                    e.preventDefault();
-                    pickCommand(paletteItems[0]);
-                    return;
-                  }
-                  if (e.key === "Escape" && paletteQuery !== null) {
-                    setDraft("");
-                    return;
-                  }
-                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                    e.preventDefault();
-                    send();
-                    return;
-                  }
-                  if (e.key === "Enter" && !e.shiftKey && enterSends()) {
-                    e.preventDefault();
-                    send();
-                  }
-                }}
-              />
-              {asr?.configured && !draft.trim() && <MicButton onRecording={onRecording} busy={transcribing} />}
-              {status === "running" && (
-                <button className="roundbtn stop" onClick={stop} aria-label={t("session.stop")} title={t("session.stop")}>
-                  <Icon name="stop" />
-                </button>
-              )}
-              {(status !== "running" || draft.trim() || pending.length > 0) && (
-                <button className="roundbtn send" onClick={send} disabled={sending || (!draft.trim() && pending.length === 0)} aria-label={t(status === "running" ? "session.send.steer" : "session.send")} title={t(status === "running" ? "session.send.steer.title" : "session.send")}>
-                  <Icon name="up" />
-                </button>
-              )}
-            </div>
-          </div>
+          <Composer
+            ref={composer}
+            sessionId={id}
+            status={status}
+            onSend={send}
+            onStop={stop}
+            commands={commands}
+            onCommand={runCommand}
+            model={detail?.model ?? ""}
+            fallback={detail?.fallback ?? null}
+            onChooseModel={chooseModel}
+            context={detail?.context ?? null}
+            onContext={() => { setDetailsFocus("context"); panel.open("details"); }}
+            asr={asr}
+            onVoice={voice ? () => navigate(pathFor("voice", null, { session: id })) : undefined}
+            steers={steers}
+            onWithdraw={withdraw}
+            questions={detail?.pending?.questions ?? null}
+            onAnswer={answer}
+            approval={approval}
+            onApprove={approve}
+            onDeny={deny}
+            onPreviewFile={(file) => setPreview({ file })}
+            phone={phone}
+            toast={toast}
+          />
         </div>
         {detail && (
           <Panel
@@ -1102,113 +1042,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
 
       {receipt && <ReceiptDialog sessionId={id} receipt={receipt} onClose={() => setReceipt(null)} />}
 
-      {picker && (
-        <Overlay><div className="sheet-backdrop" onClick={() => setPicker(null)}>
-          <div className="sheet" onClick={(e) => e.stopPropagation()}>
-            <div className="grip" />
-            <h3>{t("session.model.for")}</h3>
-            <div className="sheet-body">
-              <button className="menu-item" onClick={() => chooseModel({ clear: true })}>
-                {t("session.model.global")} <span className="sub">{picker.global}</span>
-              </button>
-              {Object.entries(picker.presets).map(([pid, p]) => (
-                <button key={pid} className="menu-item" onClick={() => chooseModel({ preset: pid })}>
-                  {p.label || p.model} <span className="sub">{p.provider}/{p.model}</span>
-                </button>
-              ))}
-              <div className="sub" style={{ margin: "10px 0 4px" }}>{t("session.model.custom")}</div>
-              <div className="composer-row">
-                <input className="field" placeholder="vllm/Qwen3.6" value={custom} onChange={(e) => setCustom(e.target.value)} />
-                <button
-                  className="btn primary"
-                  disabled={!custom.trim()}
-                  onClick={() => {
-                    const [prov, ...rest] = custom.trim().split("/");
-                    const model = rest.join("/");
-                    chooseModel(model ? { provider: prov, model } : { model: prov });
-                  }}
-                >
-                  {t("session.model.use")}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div></Overlay>
-      )}
     </div>
-  );
-}
-
-function AttachmentCard({ file, onOpen, onRemove }: { file: File; onOpen: () => void; onRemove: () => void }) {
-  const isImage = file.type.startsWith("image/") || previewKind(file.name) === "image";
-  const url = useMemo(() => (isImage ? URL.createObjectURL(file) : null), [file, isImage]);
-  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
-  return (
-    <div className={`attachment ${isImage ? "image" : ""}`}>
-      <button type="button" className="attachment-open" onClick={onOpen} title={canPreview(file.name) ? t("preview.open") : file.name}>
-        {url ? <img src={url} alt={file.name} /> : <span className="attachment-glyph" aria-hidden>{fileGlyph(file.name)}</span>}
-        <span className="attachment-meta">
-          <span className="attachment-name">{file.name}</span>
-          <span className="sub">{fmtBytes(file.size)}</span>
-        </span>
-      </button>
-      <button type="button" className="attachment-x" onClick={onRemove} aria-label={t("common.remove")} title={t("common.remove")}>
-        <Icon name="close" size={12} />
-      </button>
-    </div>
-  );
-}
-
-/** Hold-free recording: one tap starts, the next stops; the seconds tick while it runs. Disabled where the browser has no microphone API. */
-function MicButton({ onRecording, busy }: { onRecording: (blob: Blob, seconds: number) => void; busy: boolean }) {
-  const [rec, setRec] = useState<MediaRecorder | null>(null);
-  const [seconds, setSeconds] = useState(0);
-  const chunks = useRef<Blob[]>([]);
-  const startedAt = useRef(0);
-  const supported = typeof MediaRecorder !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
-  useEffect(() => {
-    if (!rec) return;
-    const t = setInterval(() => setSeconds(Math.round((Date.now() - startedAt.current) / 1000)), 500);
-    return () => clearInterval(t);
-  }, [rec]);
-  useEffect(() => () => rec?.stream.getTracks().forEach((tr) => tr.stop()), [rec]);
-  async function start() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const type = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"].find((t) => MediaRecorder.isTypeSupported(t));
-      const r = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
-      chunks.current = [];
-      r.ondataavailable = (e) => e.data.size && chunks.current.push(e.data);
-      r.onstop = () => {
-        stream.getTracks().forEach((tr) => tr.stop());
-        const blob = new Blob(chunks.current, { type: r.mimeType || "audio/webm" });
-        const took = Math.round((Date.now() - startedAt.current) / 1000);
-        setRec(null);
-        setSeconds(0);
-        if (blob.size > 0 && took >= 1) onRecording(blob, took);
-      };
-      startedAt.current = Date.now();
-      r.start(250);
-      setRec(r);
-      haptic("light");
-    } catch {
-      setRec(null);
-    }
-  }
-  function stop() {
-    rec?.stop();
-  }
-  if (rec) {
-    return (
-      <button className="chip recording" onClick={stop} title={t("session.mic.stop")} aria-label={t("session.mic.stop.label")}>
-        <span className="rec-dot" /> {t("session.mic.seconds", { n: seconds })}
-      </button>
-    );
-  }
-  return (
-    <button className="roundbtn" onClick={start} disabled={!supported || busy} title={t(!supported ? "session.mic.none" : busy ? "session.mic.busy" : "session.mic.title")} aria-label={t("session.mic")}>
-      <Icon name={busy ? "dot" : "mic"} />
-    </button>
   );
 }
 
@@ -1280,7 +1114,7 @@ function FallbackChip({ fallback }: { fallback: ModelFallback }) {
     <div className="fallback-note">
       <button className="chip attn" onClick={() => setOpen((o) => !o)}>
         <Icon name="model" size={14} /> {t("session.model.fallback.turn", { to: fallback.to, from: fallback.from })}
-        <span className={`chev ${open ? "down" : ""}`}>›</span>
+        <Chevron open={open} size={12} />
       </button>
       {open && (
         <div className="sub">
@@ -1294,8 +1128,42 @@ function FallbackChip({ fallback }: { fallback: ModelFallback }) {
   );
 }
 
-const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork", seq: number) => void }) {
-  const { id: sessionId, revertable } = useContext(SessionContext);
+/** The folded line's summary of the work: "read 2 files, ran 3 commands and 4 more". */
+function familyLine(items: Activity[]): string {
+  const { named, more } = familyCounts(items);
+  if (!named.length) return "";
+  const parts = named.map(({ family, n }) => (DICT[`turn.family.${family}`] ? plural(`turn.family.${family}`, n) : t("turn.family.other", { name: family, n })));
+  const text = parts.join(", ") + (more > 0 ? ` ${plural("turn.family.more", more)}` : "");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** What a system note is called on its one line. */
+function noteTitle(note: SystemNote): string {
+  if (note.kind === "loop") {
+    const head = note.iteration === undefined ? t("turn.note.loop.plain") : note.total ? t("turn.note.loop.of", { n: note.iteration, total: note.total }) : t("turn.note.loop", { n: note.iteration });
+    return [head, note.cadence, t("turn.note.instruction")].filter(Boolean).join(" · ");
+  }
+  if (note.kind === "other") return t("turn.note.other", { origin: note.origin });
+  return t(`turn.note.${note.kind}`);
+}
+
+/** A loop's wake-up, a schedule's prompt, a reminder: one folded line, never a bubble. */
+function SystemNoteRow({ note, cacheKey }: { note: SystemNote; cacheKey?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`sysnote ${note.kind}`}>
+      <button type="button" className="sysnote-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <Icon name={note.kind === "loop" ? "loop" : note.kind === "schedule" || note.kind === "reminder" ? "clock" : "compact"} size={14} />
+        <span className="truncate">{noteTitle(note)}</span>
+        <Chevron open={open} />
+      </button>
+      {open && <Md className="sysnote-body" text={note.body} cacheKey={cacheKey} />}
+    </div>
+  );
+}
+
+const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork" | "retry", seq: number) => void }) {
+  const { id: sessionId, revertable, preview, toast } = useContext(SessionContext);
   const [open, setOpen] = useDisclosed(`${sessionId}:turn:${turn.key}`, live);
   const wasLive = useRef(live);
   useEffect(() => {
@@ -1312,24 +1180,32 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
   // has gone, the undo is not offered: it would cut the history and leave the files as they are,
   // which is not what "revert to here" reads as. A session that never snapshots keeps the offer.
   const canRevert = revertable === null || (turn.user?.seq != null && revertable.has(turn.user.seq));
+  const seq = turn.user?.seq ?? null;
+  const settled = !!seq && !!onTurnAction && !live;
+  const inbound = turn.user?.origin?.startsWith("inbound:") ? turn.user.origin.slice(8) : "";
+  const artifacts = live ? [] : producedFiles(turn.activity);
+  const families = open ? "" : familyLine(turn.activity);
+  const copyLink = async () => {
+    const url = `${window.location.origin}${pathFor("agents", sessionId)}#m${seq}`;
+    toast((await copyText(url)) ? t("turn.link.copied") : url);
+  };
   return (
-    <div className="turn">
-      {turn.user && turn.user.origin && turn.user.origin !== "operator" && (
-        <div className="sub" style={{ textAlign: "right", marginBottom: 2 }}>
-          <span className="badge">{turn.user.origin}</span>
-        </div>
-      )}
-      {turn.user && (
+    <div className="turn" id={seq ? `m${seq}` : undefined}>
+      {turn.user && turn.note && <SystemNoteRow note={turn.note} cacheKey={live ? undefined : `n${seq ?? turn.key}`} />}
+      {turn.user && !turn.note && (
         <div className="msg-wrap">
-          <Md className="msg user" text={turn.user.text} cacheKey={live ? undefined : `u${turn.user.seq ?? turn.key}`} />
+          <div className="msg user">
+            {inbound && <span className="msg-origin">{t("turn.origin.inbound", { source: inbound })}</span>}
+            <Md text={turn.user.text} cacheKey={live ? undefined : `u${seq ?? turn.key}`} />
+          </div>
           {/* Under the message, not beside it: a row beside the bubble is off-screen on a phone. */}
           <MessageActions
             text={turn.user.text}
             actions={
-              turn.user.seq && onTurnAction && !live
+              settled
                 ? ([
-                    { icon: "fork", label: t("session.fork.action"), onSelect: () => onTurnAction("fork", turn.user!.seq!) },
-                    ...(canRevert ? [{ icon: "undo", label: t("session.revert.action.menu"), danger: true, onSelect: () => onTurnAction("revert", turn.user!.seq!) }] : []),
+                    { icon: "fork", label: t("session.fork.action"), onSelect: () => onTurnAction!("fork", seq!) },
+                    ...(canRevert ? [{ icon: "undo", label: t("session.revert.action.menu"), danger: true, onSelect: () => onTurnAction!("revert", seq!) }] : []),
                   ] as MessageAction[])
                 : []
             }
@@ -1337,15 +1213,16 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
         </div>
       )}
       {hasWork && (
-        <button className="thinking-head" onClick={() => setOpen((o) => !o)}>
+        <button className="thinking-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
           <span className={`dots ${live ? "on" : ""}`}>
             <i />
             <i />
             <i />
           </span>
-          {t(live ? (turn.pendingTools > 0 ? "session.working.for" : "session.thinking.for") : "session.worked", { t: duration(elapsed) })}
+          <span className="worked">{t(live ? (turn.pendingTools > 0 ? "session.working.for" : "session.thinking.for") : "session.worked", { t: duration(elapsed) })}</span>
           {steps > 0 && <span className="steps">{plural("session.steps", steps)}</span>}
-          <span className={`chev ${open ? "down" : ""}`}>›</span>
+          {families && <span className="families truncate">· {families}</span>}
+          <Chevron open={open} />
         </button>
       )}
       {open && (
@@ -1356,17 +1233,58 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
       )}
       {turn.fallback && (turn.answer || live) && <FallbackChip fallback={turn.fallback} />}
       {turn.answer && <Md className={`answer ${live ? "streaming" : ""}`} text={turn.answer} cacheKey={live ? undefined : `a${turn.key}`} />}
-      {turn.answer && !live && <MessageActions text={turn.answer} />}
-      <SentFiles items={turn.activity} />
+      {artifacts.length > 0 && (
+        <div className="artifacts" aria-label={t("turn.artifacts")}>
+          {artifacts.map((a) => {
+            // A written file is in the workspace; a sent one is served by the call that sent it, so a
+            // path outside the workspace opens too.
+            const src: PreviewSource = a.how === "sent" ? { base: `${sessionBase(sessionId)}/sent/${encodeURIComponent(a.callId)}`, path: a.name } : { base: sessionBase(sessionId), path: a.path.replace(/^\.\//, "") };
+            return <ArtifactCard key={a.callId} item={a} src={src} downloadUrl={downloadHref(src.base, src.path)} onOpen={preview} />;
+          })}
+        </div>
+      )}
+      {turn.answer && !live && (
+        <MessageActions
+          text={turn.answer}
+          actions={[
+            ...(seq ? [{ icon: "link" as IconName, label: t("turn.link"), onSelect: copyLink }] : []),
+            ...(settled ? [{ icon: "reload" as IconName, label: t("turn.retry"), onSelect: () => onTurnAction!("retry", seq!) }] : []),
+          ]}
+          more={
+            settled
+              ? [
+                  { label: t("session.fork.action"), icon: "fork", onSelect: () => onTurnAction!("fork", seq!) },
+                  ...(canRevert ? [{ label: t("session.revert.action.menu"), icon: "undo" as IconName, danger: true, onSelect: () => onTurnAction!("revert", seq!) }] : []),
+                ]
+              : undefined
+          }
+        />
+      )}
     </div>
   );
 });
+
+/** Three turn-shaped blocks while the first read is on its way. */
+function TurnSkeleton() {
+  return (
+    <div className="turn-skeleton" aria-hidden>
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="turn">
+          <div className="skeleton sk-user" style={{ width: `${34 + (i * 13) % 30}%` }} />
+          <div className="skeleton sk-line" style={{ width: "38%" }} />
+          <div className="skeleton sk-line" style={{ width: `${70 + (i * 9) % 25}%` }} />
+          <div className="skeleton sk-line" style={{ width: `${50 + (i * 17) % 40}%` }} />
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /**
  * The turn the run is writing right now. It reads the stream directly, so a token repaints this
  * component and nothing else: the settled turns above it never hear about it.
  */
-function LiveTurn({ base, live, onTurnAction, onRender }: { base: Turn | null; live: LiveStore; onTurnAction?: (kind: "revert" | "fork", seq: number) => void; onRender?: () => void }) {
+function LiveTurn({ base, live, onTurnAction, onRender }: { base: Turn | null; live: LiveStore; onTurnAction?: (kind: "revert" | "fork" | "retry", seq: number) => void; onRender?: () => void }) {
   const state = useSyncExternalStore(live.subscribe, live.get);
   useClock(1000);
   useLayoutEffect(() => onRender?.());
@@ -1458,8 +1376,8 @@ function useClock(ms: number): void {
 
 type MessageAction = { icon: IconName; label: string; danger?: boolean; onSelect: () => void };
 
-/** The row of small buttons under a message: copy it, and whatever else the turn allows. */
-function MessageActions({ text, actions = [] }: { text: string; actions?: MessageAction[] }) {
+/** The row of small buttons under a message: copy it, and whatever else the turn allows; the rest behind ⋯. */
+function MessageActions({ text, actions = [], more }: { text: string; actions?: MessageAction[]; more?: MenuItem[] }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     setCopied(await copyText(text));
@@ -1475,6 +1393,7 @@ function MessageActions({ text, actions = [] }: { text: string; actions?: Messag
           <Icon name={a.icon} size={15} />
         </button>
       ))}
+      {more && more.length > 0 && <OverflowMenu small label={t("turn.more")} items={more} />}
     </div>
   );
 }
@@ -1487,7 +1406,7 @@ function SummaryBlock({ message }: { message: MessageView }) {
       <button className="summary-head" onClick={() => setOpen((o) => !o)}>
         <Icon name="compact" /> {t("session.summary")}
         {meta ? t("session.summary.meta", { n: meta.messages ?? 0, reason: meta.reason }) : ""}
-        <span className="chev">{open ? "⌄" : "›"}</span>
+        <Chevron open={open} />
       </button>
       {open && <Md className="summary-body" text={message.text} />}
     </div>
@@ -1630,7 +1549,7 @@ function ToolGroup({ family, group }: { family: string; group: ToolItem[] }) {
       <div className={`act head ${running ? "running" : ""}`} onClick={() => setOpen((o) => !o)}>
         <Icon name={d.icon} />
         <span className="verb">{groupVerb(d.family, running, group.length, family)}</span>
-        <span className={`chev ${open ? "down" : ""}`}>›</span>
+        <span className="act-end"><Chevron open={open} /></span>
       </div>
       {open && group.map((g) => <ToolRow key={g.id} item={g} nested />)}
     </div>
@@ -1653,7 +1572,7 @@ function SummaryGroup({ group }: { group: SummaryItem[] }) {
         <Icon name="compact" />
         <span className="verb">{t("session.compacted.title")}</span>
         <span className="detail">{t("session.compacted.group", { n: group.length })}</span>
-        <span className={`chev ${open ? "down" : ""}`}>›</span>
+        <span className="act-end"><Chevron open={open} /></span>
       </div>
       {open && group.map((s, k) => <SummaryRow key={k} text={s.text} reason={s.reason} />)}
     </div>
@@ -1668,7 +1587,7 @@ function SummaryRow({ text, reason }: { text: string; reason: string }) {
         <Icon name="compact" />
         <span className="verb">{t("session.compacted.title")}</span>
         <span className="detail">{reason !== "auto" ? `${reason} · ` : ""}{plainPreview(text, 100)}</span>
-        <span className={`chev ${open ? "down" : ""}`}>›</span>
+        <span className="act-end"><Chevron open={open} /></span>
       </div>
       {open && <Md className="summary-inline" text={text} />}
     </div>
@@ -1683,27 +1602,48 @@ function ThoughtBlock({ text }: { text: string }) {
         <Icon name="bulb" />
         <span className="verb">{t("session.reasoning")}</span>
         <span className="detail">{plainPreview(text, 100)}</span>
-        <span className={`chev ${open ? "down" : ""}`}>›</span>
+        <span className="act-end"><Chevron open={open} /></span>
       </div>
       {open && <div className="thought">{text}</div>}
     </div>
   );
 }
 
+/** The tools whose detail is a file the panel can open. */
+const FILE_TOOLS = ["Read", "Write", "Edit", "ImageView", "SendFile"];
+
 function ToolRow({ item, nested }: { item: ToolItem; nested?: boolean }) {
-  const { id: sessionId, workspace } = useContext(SessionContext);
+  const { id: sessionId, workspace, preview, openJobs } = useContext(SessionContext);
   const [open, setOpen] = useDisclosed(`${sessionId}:tool:${item.id}`, false);
   const d = describe(item, workspace);
   const expanded = open || (item.running && item.name === "Exec");
+  // The file a step names is the evidence: it opens where the answer's citations open.
+  const path = FILE_TOOLS.includes(item.name) && typeof item.args.path === "string" ? workspaceRelative(item.args.path, workspace) : null;
+  const openFile = (e: React.MouseEvent) => {
+    if (!path) return;
+    e.stopPropagation();
+    preview({ base: sessionBase(sessionId), path });
+  };
   return (
     <div className={`act-wrap ${nested ? "nested" : ""}`}>
-      <div className={`act ${item.error ? "error" : ""} ${item.running ? "running" : ""}`} onClick={() => setOpen((o) => !o)}>
-        <Icon name={d.icon} />
+      <div className={`act ${item.error ? "error" : ""} ${item.running ? "running" : ""}`} onClick={() => setOpen((o) => !o)} role="button" aria-expanded={expanded} tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen((o) => !o); } }}>
+        <Icon name={d.icon} size={16} />
         <span className="verb">{d.verb}</span>
-        {d.detail && <span className="detail">{d.detail}</span>}
-        <span className={`chev ${expanded ? "down" : ""}`}>›</span>
+        {d.detail && (path ? (
+          <button type="button" className="detail link" onClick={openFile} title={t("turn.open.file", { name: d.detail })}>{d.detail}</button>
+        ) : (
+          <span className="detail">{d.detail}</span>
+        ))}
+        <span className="act-end">
+          {item.error && !item.running && <span className="failed">{t("turn.failed")}</span>}
+          {item.name === "Verify" && !item.running && (
+            <button type="button" className="receipt-link" onClick={(e) => { e.stopPropagation(); openJobs(); }}>{t("turn.receipt")}</button>
+          )}
+          {item.ms !== undefined && item.ms >= 500 && <span className="dur num">{duration(item.ms)}</span>}
+          <Chevron open={expanded} />
+        </span>
       </div>
-      {(item.name === "ImageView" || item.name === "SendFile") && !item.running && <ToolAttachment item={item} />}
+      {item.name === "ImageView" && !item.running && <ToolAttachment item={item} />}
       {expanded && <ToolCard item={item} />}
     </div>
   );
@@ -1772,10 +1712,12 @@ function ReceiptDialog({ sessionId, receipt, onClose }: { sessionId: string; rec
   );
 }
 
-const SessionContext = createContext<{ id: string; workspace: string; preview: (src: PreviewSource) => void; revertable: Set<number> | null }>({
+const SessionContext = createContext<{ id: string; workspace: string; preview: (src: PreviewSource) => void; openJobs: () => void; toast: (text: string) => void; revertable: Set<number> | null }>({
   id: "",
   workspace: "",
   preview: () => undefined,
+  openJobs: () => undefined,
+  toast: () => undefined,
   revertable: null,
 });
 
@@ -1812,7 +1754,6 @@ function ToolAttachment({ item }: { item: ToolItem }) {
   );
 }
 
-/** The files the agent handed over in this turn, attached under the answer whatever the trace shows. */
 /** The compaction in flight: which stage, how many parts are summarised, how long it has run. */
 function CompactionBar({ c }: { c: Compacting }) {
   useClock(1000);
@@ -1830,37 +1771,6 @@ function CompactionBar({ c }: { c: Compacting }) {
       <b>{t("session.compacting.bar")}</b>
       <span className="num">{duration(Date.now() - new Date(c.started_at).getTime())}</span>
       <span className="truncate">{t("session.compacting.messages", { n: c.messages, what })}</span>
-    </div>
-  );
-}
-
-function SentFiles({ items }: { items: Activity[] }) {
-  const { id, preview } = useContext(SessionContext);
-  const sent = items.filter((a): a is ToolItem => a.kind === "tool" && a.name === "SendFile" && !a.running && !a.error && typeof a.args.path === "string");
-  if (!sent.length || !id) return null;
-  return (
-    <div className="sent-files" aria-label={t("session.sentfiles")}>
-      {sent.map((file) => {
-        const path = String(file.args.path);
-        const name = path.split("/").filter(Boolean).pop() ?? path;
-        const caption = typeof file.args.caption === "string" ? file.args.caption : "";
-        // The file is served by the call that sent it, so a path outside the workspace opens too.
-        const src: PreviewSource = { base: `${sessionBase(id)}/sent/${encodeURIComponent(file.id)}`, path: name };
-        if (previewKind(name) === "image") {
-          return (
-            <figure key={file.id} className="sent-file image">
-              <AuthImg src={src} alt={name} className="tool-image" onClick={() => preview(src)} />
-              {caption && <figcaption className="sub">{caption}</figcaption>}
-            </figure>
-          );
-        }
-        return (
-          <button key={file.id} type="button" className="file-chip sent-file" onClick={() => preview(src)} title={caption || t(canPreview(name) ? "preview.open" : "preview.download")}>
-            <span aria-hidden>{fileGlyph(name)}</span>
-            <span className="truncate">{name}</span>
-          </button>
-        );
-      })}
     </div>
   );
 }
@@ -1924,54 +1834,7 @@ function langOf(path: string): string {
   return map[ext] ?? ext;
 }
 
-// ── questions, files, mcp ─────────────────────────────────────────────────────────────────
-
-function QuestionCard({ sessionId, questions, onDone, toast }: { sessionId: string; questions: Question[]; onDone: () => void; toast: (t: string) => void }) {
-  const [answers, setAnswers] = useState(questions.map(() => ({ selected: [] as string[], custom: "" })));
-  function toggle(qi: number, label: string, multi: boolean) {
-    setAnswers((prev) =>
-      prev.map((a, i) => {
-        if (i !== qi) return a;
-        if (!multi) return { ...a, selected: [label] };
-        return { ...a, selected: a.selected.includes(label) ? a.selected.filter((x) => x !== label) : [...a.selected, label] };
-      }),
-    );
-  }
-  async function submit() {
-    try {
-      await api.post(`/api/sessions/${sessionId}/answer`, {
-        answers: questions.map((q, i) => ({ question: q.question, selected: answers[i].selected, custom: answers[i].custom || null })),
-      });
-      onDone();
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }
-  const complete = answers.every((a) => a.selected.length > 0 || a.custom.trim());
-  return (
-    <div className="card question">
-      {questions.map((q, qi) => (
-        <div key={qi}>
-          <div className="title">❓ {q.question}</div>
-          {(q.options ?? []).map((o) => (
-            <button key={o.label} className={`btn option ${answers[qi].selected.includes(o.label) ? "selected" : ""}`} onClick={() => toggle(qi, o.label, !!q.multiSelect)}>
-              {o.label}
-              {o.description && <div className="sub">{o.description}</div>}
-            </button>
-          ))}
-          {(q.allow_custom || !(q.options ?? []).length) && (
-            <input className="field" style={{ marginTop: 6 }} placeholder={t("session.answer.placeholder")} value={answers[qi].custom} onChange={(e) => setAnswers((p) => p.map((a, i) => (i === qi ? { ...a, custom: e.target.value } : a)))} />
-          )}
-        </div>
-      ))}
-      <div className="btnrow">
-        <button className="btn primary" disabled={!complete} onClick={submit}>
-          {t("session.answer")}
-        </button>
-      </div>
-    </div>
-  );
-}
+// ── files ─────────────────────────────────────────────────────────────────
 
 /** A file tree under an API root: a session's workspace or a named workspace; uploads go to ``uploadUrl`` when given. */
 export function Files({ base, uploadUrl, onPreview, toast }: { base: string; uploadUrl?: string; onPreview: (src: PreviewSource) => void; toast?: (t: string) => void }) {
