@@ -35,6 +35,7 @@ from daedalus.speech.tts_engine import (
     CACHE,
     MAX_TEXT_CHARS,
     OUTPUT_GAIN,
+    SUPERTONIC_GRAPHS,
     TtsCache,
     TtsEngine,
     TtsError,
@@ -1000,6 +1001,58 @@ def test_a_sample_is_the_voices_own_language_through_the_real_engine(client: Tes
     assert answer.status_code == 200 and answer.headers["content-type"].startswith("audio/wav")
     assert answer.content.startswith(b"RIFF") and len(answer.content) > 44
     assert FakeTts.calls and "Привет" in FakeTts.calls[0][0]
+
+
+def test_a_multilingual_voice_samples_in_the_language_it_is_being_picked_for(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Filter the picker to Polish, press Play on a voice that reads Polish, hear Polish.
+
+    A multilingual voice is filed under one language and used to read its sample in that one, so an
+    operator narrowing the list to Polish pressed Play on the voice the picker had correctly offered
+    them and heard Russian.
+    """
+    app = client.app_state  # type: ignore[attr-defined]
+    voice = catalog.get("multi-supertonic")
+    lay_out(app.tts.downloads.directory(voice.id), {
+        **{f"{stem}.onnx": b"M" for stem in SUPERTONIC_GRAPHS},
+        "tts.json": b"{}", "unicode_indexer.bin": b"i", "voice.bin": b"v",
+    })
+    manifest = app.tts.downloads.manifest()
+    manifest[voice.id] = Installed(id=voice.id, archive=voice.archive, sha256=voice.sha256, disk_bytes=4096)
+    app.tts.downloads._write_manifest(manifest)
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", FakeSherpa)
+    monkeypatch.setattr("daedalus.speech.tts_service.encoder_present", lambda: False)
+    # The Russian sample goes through the stress dictionary on its way, so it is matched on a word
+    # the dictionary does not touch rather than on its first one.
+    for language, expected in (("pl", "Cześć"), ("uk", "Привіт"), ("", "Вот как звучит")):
+        FakeTts.calls = []
+        app.tts.forget()
+        query = f"?language={language}" if language else ""
+        answer = client.post(f"/api/tts/voices/multi-supertonic/sample{query}", headers=HEAD)
+        assert answer.status_code == 200, answer.text
+        assert FakeTts.calls and expected in FakeTts.calls[0][0], (language, FakeTts.calls[0][0][:30])
+    # A language it does not read is not one it can be auditioned in: it reads its own.
+    FakeTts.calls = []
+    app.tts.forget()
+    assert client.post("/api/tts/voices/multi-supertonic/sample?language=zh", headers=HEAD).status_code == 200
+    assert "Вот как звучит" in FakeTts.calls[0][0]
+
+
+def test_downloading_the_chosen_voice_again_clears_a_load_that_failed(client: TestClient) -> None:
+    """A voice whose first load failed stays failed until something forgets it — a re-download does.
+
+    ``warm`` declines while the cache holds an error for the same voice, and only ``forget``/``drop``
+    clears it. Delete called forget; the download path did not, so a voice re-fetched after a short
+    archive stayed "error" until the operator re-selected it.
+    """
+    app = client.app_state  # type: ignore[attr-defined]
+    app.config.voice.tts.local_voice = "ru-irina"
+    forgotten: list[str] = []
+    original = app.tts.forget
+    app.tts.forget = lambda: (forgotten.append("ru-irina"), original())[1]  # type: ignore[method-assign]
+    app.tts.downloads.installed("ru-irina")
+    assert forgotten == ["ru-irina"], "the chosen voice arriving must clear whatever was held for it"
+    app.tts.downloads.installed("ru-dmitri")
+    assert forgotten == ["ru-irina"], "another voice arriving is nothing to do with the one in use"
 
 
 # -- the precedence -------------------------------------------------------------------------------

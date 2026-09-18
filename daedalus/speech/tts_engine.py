@@ -641,7 +641,9 @@ class TtsCache:
             self._key = None
         if self._warming is not None and not self._warming.done():
             # A load in flight is a load of the voice that was just let go of. The thread building it
-            # cannot be stopped, and what it produces is discarded by the generation above; what must
+            # cannot be stopped — so for the second or two it takes to finish, two voices are
+            # resident at once, which on a small host is worth knowing: Kokoro beside Supertonic is
+            # the worst of it — and what it produces is discarded by the generation above; what must
             # not survive is the *guard*, or the next warm-up — of the voice the operator has just
             # chosen — would see a load already running and decline to start one, and the new voice
             # would be built by the first answer after all.

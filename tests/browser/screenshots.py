@@ -693,7 +693,7 @@ TTS = {
         dict(_tts_voice("en-kokoro", "Kokoro (English, 11 voices)", "en", "mixed", 319_625_534, 369_315_617, 92, 21, 0.692,
                         "The most natural English here, and the largest download.",
                         speakers=("af", "af_bella", "am_adam", "bf_emma", "bm_george")),
-             kind="kokoro", sample_rate=24000, licence="Apache-2.0", memory_mb=320),
+             kind="kokoro", sample_rate=24000, licence="Apache-2.0", memory_mb=620),
         _tts_voice("de-thorsten", "Thorsten (German)", "de", "male", 20_949_833, 36_577_367, 76, 60, 0.183,
                    "The German voice most German projects use.", recommended=("de",)),
         _tts_voice("fr-siwis", "Siwis (French)", "fr", "female", 20_914_888, 36_577_449, 73, 59, 0.189,

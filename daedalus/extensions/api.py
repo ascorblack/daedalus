@@ -1119,7 +1119,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         default_label = default[1].display(default[0]) if default else NO_MODEL_LABEL
         overrides_by_id = await manager.live.load_models([row["id"] for row in rows])
         for row in rows:
-            # The directory the session works in, so the list can group sessions by workspace.
+            # The directory the session works in, for the tooltip on its row and the chip that says
+            # it has one of its own. The list groups by project now, not by workspace.
             workspace = Path(str(row["metadata"].get("workspace"))) if row["metadata"].get("workspace") else manager.workspace_for(row["id"])
             row["workspace"] = workspace.name
             row["workspace_path"] = str(workspace)
@@ -1821,10 +1822,15 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return {**_tts_view(), "load": app.tts.warm()}
 
     @api.post("/api/tts/voices/{voice_id}/sample")
-    async def tts_sample(voice_id: str, _: dict[str, Any] = Depends(auth)) -> Response:
-        """A short phrase in this voice, in its own language, so it can be heard before it is chosen."""
+    async def tts_sample(voice_id: str, language: str = "", _: dict[str, Any] = Depends(auth)) -> Response:
+        """A short phrase in this voice, so it can be heard before it is chosen.
+
+        ``language`` is what the picker is filtered by: a voice that speaks thirty-one languages is
+        filed under one of them, and reading its sample in that one answered a question the operator
+        filtering for another language had not asked.
+        """
         try:
-            clip, media_type = await app.tts.sample(voice_id)
+            clip, media_type = await app.tts.sample(voice_id, language)
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
         except TtsError as exc:

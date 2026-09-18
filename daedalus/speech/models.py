@@ -115,11 +115,16 @@ class Downloads:
         *,
         lookup: Callable[[str], Any] = get_speech_model,
         resolver: Callable[[Path, Any], None] | None = None,
+        installed: Callable[[str], None] | None = None,
     ) -> None:
         self.root = root
         self.parts = root / ".part"
         self.lookup = lookup
         self.resolver = resolver
+        self.installed = installed
+        """Called with a model id the moment its files are on disk and in the manifest. What holds a
+        loaded copy of that model needs to know: a load that failed on a half-written archive stays
+        failed, and re-downloading the archive is exactly the operator saying "try again"."""
         self._running: dict[str, asyncio.Task[None]] = {}
         self._progress: dict[str, Progress] = {}
         self._watchers: list[asyncio.Queue[Progress]] = []
@@ -278,6 +283,11 @@ class Downloads:
             archive.unlink(missing_ok=True)
             self._publish(Progress(id=model.id, state="installed", done_bytes=model.size_bytes, total_bytes=model.size_bytes))
             logger.warning("local speech model %s installed (%d MB on disk)", model.id, disk >> 20)
+            if self.installed is not None:
+                try:
+                    self.installed(model.id)
+                except Exception:  # noqa: BLE001 - the model is installed either way; this is bookkeeping
+                    logger.warning("the installed hook for %s failed", model.id, exc_info=True)
         except asyncio.CancelledError:
             self._publish(Progress(id=model.id, state="cancelled", total_bytes=model.size_bytes))
             raise
