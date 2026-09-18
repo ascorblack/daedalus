@@ -506,7 +506,8 @@ MIGRATIONS: list[str] = [
     # agents were meant to be listed all along.
     """
     ALTER TABLE projects ADD COLUMN system TEXT NOT NULL DEFAULT '';
-    UPDATE projects SET system = COALESCE(json_extract(settings, '$.system'), '');
+    UPDATE projects SET system = COALESCE(json_extract(settings, '$.system'), '')
+    WHERE json_valid(settings);
     UPDATE sessions SET project_id = (
         SELECT k.id FROM projects k
         WHERE k.system = (SELECT d.system FROM projects d WHERE d.id = sessions.project_id)

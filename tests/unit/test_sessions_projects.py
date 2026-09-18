@@ -130,6 +130,44 @@ async def test_the_duplicate_system_projects_an_installation_already_has_are_mer
         await db.close()
 
 
+@pytest.mark.parametrize("settings", ["not json at all", "", "null"])
+async def test_unreadable_project_settings_do_not_prevent_migration(tmp_path: Path, settings: str) -> None:
+    path = tmp_path / "old.sqlite"
+    with sqlite3.connect(path) as raw:
+        raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL);")
+        raw.execute("INSERT INTO schema_version VALUES (?)", (len(MIGRATIONS) - 1,))
+        for script in MIGRATIONS[:-1]:
+            raw.executescript(script)
+        raw.execute(
+            "INSERT INTO projects(id, name, root, created_at, settings) VALUES ('p', 'Bakery', ?, '', ?)",
+            (str(tmp_path / "bakery"), settings),
+        )
+        raw.execute(
+            "INSERT INTO projects(id, name, root, created_at, settings) VALUES ('v', 'Voice', ?, '', ?)",
+            (str(tmp_path / "voice"), '{"system": "voice"}'),
+        )
+        raw.execute(
+            "INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata, project_id) VALUES ('s', 't', 'agent', '', '', '{}', 'p')",
+        )
+    raw.close()
+
+    db = Database(path)
+    for _ in range(2):
+        await db.open()
+        try:
+            rows = await db.fetchall("SELECT id, settings, system FROM projects ORDER BY id")
+            assert [dict(row) for row in rows] == [
+                {"id": "p", "settings": settings, "system": ""},
+                {"id": "v", "settings": '{"system": "voice"}', "system": "voice"},
+            ]
+            rows = await db.fetchall("SELECT project_id FROM sessions WHERE id = 's'")
+            assert rows[0]["project_id"] == "p"
+            rows = await db.fetchall("SELECT version FROM schema_version")
+            assert rows[0]["version"] == len(MIGRATIONS)
+        finally:
+            await db.close()
+
+
 async def test_the_counts_beside_the_folders_are_of_the_table_and_not_of_a_page(db: Database, tmp_path: Path) -> None:
     store = ProjectStore(db)
     root = tmp_path / "bakery"
