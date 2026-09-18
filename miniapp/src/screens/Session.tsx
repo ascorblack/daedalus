@@ -994,8 +994,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             sheet={phone}
             onDrag={(dx) => dragPanel(dx, body.current?.clientWidth ?? window.innerWidth)}
             badges={{ details: subRunning }}
-            details={
+            details={(ids) =>
               <SessionDetails
+                ids={ids}
                 id={id}
                 detail={detail}
                 busy={busy}

@@ -19,7 +19,7 @@ import os
 import sys
 from pathlib import Path
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Page, expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from api_stub import DEFAULT_APP, expect_app  # noqa: E402
@@ -246,6 +246,23 @@ def dual(browser) -> list[str]:  # type: ignore[no-untyped-def]
     print("dual at 2560: panels open", n)
     if n != 2:
         problems.append(f"dual view at 2560 holds {n} panels, not two")
+    sections = page.locator(".panel .dt-section")
+    section_ids = sections.evaluate_all("els => els.map(el => el.id)")
+    assert len(section_ids) == len(set(section_ids)), "Details sections share ids across panels"
+    for side in ("right", "left"):
+        for section in page.locator(".panel [id$='-info-context']").all():
+            if section.get_attribute("open") is not None:
+                section.locator("summary").click()
+            expect(section).not_to_have_attribute("open", "")
+        pane = page.locator(f".pane-{side}")
+        target = pane.locator(".panel [id$='-info-context']")
+        other = page.locator(f".pane-{'left' if side == 'right' else 'right'} .panel [id$='-info-context']")
+        pane.get_by_role("button", name="Context in use").click()
+        expect(target).to_have_attribute("open", "")
+        expect(other).not_to_have_attribute("open", "")
+        prefix = pane.locator(".panel [role='tabpanel']").get_attribute("id").removesuffix("-body")
+        assert target.get_attribute("id") == f"{prefix}-info-context"
+        print(f"{side} Context in use opens its own section; the other stays closed")
     context.close()
     return problems
 

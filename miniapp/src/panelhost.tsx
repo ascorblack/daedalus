@@ -52,7 +52,7 @@ export type PanelHostProps = {
   /** Where the current file downloads from, for open-in-new. */
   downloadUrl: (entry: PanelEntry) => string;
   /** The Details, Files and Jobs tabs, rendered by the screen that owns their data. */
-  details: ReactNode;
+  details: (ids: string) => ReactNode;
   files: ReactNode;
   jobs: ReactNode;
   /** A number on a tab: subagents working on Details, jobs on Jobs. */
@@ -221,7 +221,7 @@ function Body(props: HostProps) {
   return (
     <div ref={box} id={`${local.ids}-body`} role="tabpanel" aria-labelledby={`${local.ids}-tab-${state.tab}`} tabIndex={-1} className={`panel-body tab-${state.tab} ${split ? "split" : ""}`}>
       {loading && <div className={`preview-progress ${progress == null ? "busy" : ""}`} role="progressbar" aria-label={t("common.loading")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress == null ? undefined : Math.round(progress * 100)}><i style={progress == null ? undefined : { width: `${progress * 100}%` }} /></div>}
-      {state.tab === "details" && props.details}
+      {state.tab === "details" && props.details(local.ids)}
       <div className="panel-files" hidden={state.tab !== "files" && !split} style={split ? { width } : undefined}>{(visited || state.tab === "files" || split) && props.files}{split && <PaneHandle side="left" onDrag={(dx) => setWidth(width + dx)} />}</div>
       {state.tab === "preview" && (entry ? <Viewer key={`${entry.base}:${entry.path}:${entry.lines ?? ""}:${local.gen}`} src={entry as PreviewSource} onInfo={local.setInfo} onNavigation={local.setNav} className="panel-viewer" /> : <div className="empty">{t("panel.preview.empty")}</div>)}
       {state.tab === "jobs" && props.jobs}

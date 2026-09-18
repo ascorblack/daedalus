@@ -2,7 +2,7 @@
 // value or a row or two, a hairline between sections. It is the old aside's cards and the "Session
 // info" sheet in one place; the right panel hosts it on a desktop and a full sheet on a phone.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, LoopView, ProviderUsage, Schedule, SessionDetail } from "./api";
 import { Dot, ServiceRow, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, statusWord, timeAgo } from "./components";
 import { readLayout, writeLayout } from "./layout";
@@ -27,6 +27,7 @@ export type DetailsActions = {
 };
 
 export type SessionDetailsProps = {
+  ids: string;
   id: string;
   detail: SessionDetail;
   busy: boolean;
@@ -42,10 +43,10 @@ export type SessionDetailsProps = {
   focus?: string | null;
 };
 
-function Section({ id, label, children, className, aside }: { id: string; label: string; children: React.ReactNode; className?: string; aside?: React.ReactNode }) {
+function Section({ ids, id, label, children, className, aside }: { ids: string; id: string; label: string; children: React.ReactNode; className?: string; aside?: React.ReactNode }) {
   const [open, setOpen] = useState(() => readLayout(`details.${id}`) !== "closed");
   return (
-    <details className={`dt-section ${className ?? ""}`} id={`info-${id}`} open={open} onToggle={(e) => { const next = e.currentTarget.open; setOpen(next); writeLayout(`details.${id}`, next ? "open" : "closed"); }}>
+    <details className={`dt-section ${className ?? ""}`} id={`${ids}-info-${id}`} open={open} onToggle={(e) => { const next = e.currentTarget.open; setOpen(next); writeLayout(`details.${id}`, next ? "open" : "closed"); }}>
       <summary className="dt-label" onClick={(e) => {
         // Persist at the click, before a navigation can discard the native toggle event's task.
         e.preventDefault();
@@ -60,17 +61,18 @@ function Section({ id, label, children, className, aside }: { id: string; label:
   );
 }
 
-export function SessionDetails({ id, detail, busy, modes, schedules, provider, providerUsage, onOpen, toast, reload, on, focus }: SessionDetailsProps) {
+export function SessionDetails({ ids, id, detail, busy, modes, schedules, provider, providerUsage, onOpen, toast, reload, on, focus }: SessionDetailsProps) {
+  const container = useRef<HTMLDivElement>(null);
   const ctxPct = detail.context && detail.context.window > 0 ? Math.round((100 * detail.context.tokens) / detail.context.window) : null;
   useEffect(() => {
     if (!focus || focus === "session") return;
-    const timer = window.setTimeout(() => { const section = document.getElementById(`info-${focus}`) as HTMLDetailsElement | null; if (section) { section.open = true; section.scrollIntoView({ block: "start" }); } }, 30);
+    const timer = window.setTimeout(() => { const section = container.current?.querySelector<HTMLDetailsElement>(`#${CSS.escape(`${ids}-info-${focus}`)}`); if (section) { section.open = true; section.scrollIntoView({ block: "start" }); } }, 30);
     return () => window.clearTimeout(timer);
-  }, [focus]);
+  }, [focus, ids]);
   const subRunning = (detail.subagents ?? []).filter((x) => x.running).length;
   return (
-    <div className="details">
-      <Section id="session" label={t("session.card")}>
+    <div ref={container} className="details">
+      <Section ids={ids} id="session" label={t("session.card")}>
         <input className="field" defaultValue={detail.title} aria-label={t("session.title")} onBlur={(e) => on.rename(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
         <div className="dt-row">
           <span className="dt-key">{t("session.model")}</span>
@@ -88,7 +90,7 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
       </Section>
 
       {detail.context && (
-        <Section id="context" label={t("session.context")} aside={ctxPct !== null ? `${ctxPct}%` : undefined}>
+        <Section ids={ids} id="context" label={t("session.context")} aside={ctxPct !== null ? `${ctxPct}%` : undefined}>
           {ctxPct !== null && (
             <div className={`bar ${ctxPct >= 90 ? "bad" : ctxPct >= 60 ? "attn" : ""}`} title={t("session.ctx.title", { used: fmtInt(detail.context.tokens), window: fmtInt(detail.context.window) })} style={{ ["--v" as string]: Math.min(100, ctxPct) }}><i /></div>
           )}
@@ -104,7 +106,7 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
         </Section>
       )}
 
-      <Section id="usage" label={t("session.usage")} aside={fmtUsd(detail.usage.usd)}>
+      <Section ids={ids} id="usage" label={t("session.usage")} aside={fmtUsd(detail.usage.usd)}>
         <div className="dt-row sub">
           {/* The arrow says which way the tokens went, and an arrow is neither translatable nor
               announced: the label carries the word and the glyph stays decoration. */}
@@ -116,7 +118,7 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
         </div>
       </Section>
 
-      <Section id="workspace" label={t("session.workspace")}>
+      <Section ids={ids} id="workspace" label={t("session.workspace")}>
         <button className="aside-row link" onClick={on.openFiles} title={detail.project ? detail.project.root : detail.workspace}>
           <Icon name="folder" size={16} />
           <span className="grow name">{detail.project ? t("session.aside.project", { name: detail.project.name }) : detail.workspace_own === false ? t("session.aside.workspace", { name: detail.workspace_name ?? "" }) : t("session.aside.own")}</span>
@@ -152,9 +154,9 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
         </div>
       </Section>
 
-      {provider && <ProviderUsageCard provider={provider} usage={providerUsage} />}
+      {provider && <ProviderUsageCard ids={ids} provider={provider} usage={providerUsage} />}
 
-      <Section id="loop" label={t("session.loop")} aside={detail.loop ? <span className={`badge loop ${detail.loop.status}`}>{statusWord(detail.loop.status).toLowerCase()}</span> : undefined}>
+      <Section ids={ids} id="loop" label={t("session.loop")} aside={detail.loop ? <span className={`badge loop ${detail.loop.status}`}>{statusWord(detail.loop.status).toLowerCase()}</span> : undefined}>
         {detail.loop && (
           <div className="sub">{loopLabel(detail.loop).replace(/^\S+ · /, "")}{detail.loop.next_run_at && detail.loop.status === "active" ? t("agents.loop.next", { t: untilShort(detail.loop.next_run_at) }) : ""}</div>
         )}
@@ -162,13 +164,13 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
       </Section>
 
       {schedules.length > 0 && (
-        <Section id="cron" label={t("session.cron")} aside={t("session.cron.on", { n: schedules.filter((x) => x.enabled).length })}>
+        <Section ids={ids} id="cron" label={t("session.cron")} aside={t("session.cron.on", { n: schedules.filter((x) => x.enabled).length })}>
           {schedules.map((sc) => <ScheduleRow key={sc.id} sc={sc} sessionId={id} onAction={on.scheduleAction} />)}
         </Section>
       )}
 
       {detail.services && detail.services.length > 0 && (
-        <Section id="services" label={t("session.services")} aside={t("session.services.running", { n: detail.services.filter((s) => s.status === "running").length })}>
+        <Section ids={ids} id="services" label={t("session.services")} aside={t("session.services.running", { n: detail.services.filter((s) => s.status === "running").length })}>
           {detail.services.map((s) => (
             <ServiceRow key={s.name} s={s} sessionId={id} onChange={() => reload(true)} toast={toast} onLogs={(text) => on.showLog(`service ${s.name} · log`, text)} />
           ))}
@@ -176,7 +178,7 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
       )}
 
       {(detail.subagents && detail.subagents.length > 0) || detail.subagent_of ? (
-        <Section id="subagents" label={t("session.subagents.title")} aside={subRunning ? t("session.subagents.working", { n: subRunning }).replace(/^ · /, "") : detail.subagents?.length ? String(detail.subagents.length) : undefined}>
+        <Section ids={ids} id="subagents" label={t("session.subagents.title")} aside={subRunning ? t("session.subagents.working", { n: subRunning }).replace(/^ · /, "") : detail.subagents?.length ? String(detail.subagents.length) : undefined}>
           {detail.subagent_of && (
             <button className="aside-row link" onClick={() => onOpen?.(detail.subagent_of!)} title={t("session.leader")}>
               <Icon name="back" size={16} /><span className="grow name">{t("session.leader.word")}: {detail.leader_title ?? detail.subagent_of}</span>
@@ -192,11 +194,11 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
         </Section>
       ) : null}
 
-      <Section id="mcp" label={t("session.mcp")}>
+      <Section ids={ids} id="mcp" label={t("session.mcp")}>
         <McpPanel sessionId={id} toast={toast} />
       </Section>
 
-      <Section id="tools" label={t("session.tools")}>
+      <Section ids={ids} id="tools" label={t("session.tools")}>
         <ToolPicker
           off={detail.tools_off ?? []}
           note={t("session.tools.note")}
@@ -211,7 +213,7 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
         />
       </Section>
 
-      <Section id="brief" label={t("session.brief")}>
+      <Section ids={ids} id="brief" label={t("session.brief")}>
         <label className="field">{t("session.brief.label")}{detail.spawned_by ? t("session.brief.by", { id: detail.spawned_by }) : ""}</label>
         <textarea
           className="field"
@@ -232,7 +234,7 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
         />
       </Section>
 
-      <Section id="spend" label={t("session.cap")} aside={t("settings.limits.spent", { sum: fmtUsd(detail.usage.usd) })}>
+      <Section ids={ids} id="spend" label={t("session.cap")} aside={t("settings.limits.spent", { sum: fmtUsd(detail.usage.usd) })}>
         <input
           className="field"
           type="number"
@@ -257,7 +259,7 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
         />
       </Section>
 
-      <Section id="advanced" label={t("session.advanced")}>
+      <Section ids={ids} id="advanced" label={t("session.advanced")}>
         <div className="dt-row sub"><span className="dt-key">{t("session.id")}</span><button className="linkbtn mono" onClick={async () => toast((await copyText(id)) ? t("session.id.copied") : id)} title={t("common.copy")}>{id}</button></div>
         <div className="dt-row sub"><span className="dt-key">{t("session.workspace")}</span><button className="linkbtn mono truncate" onClick={async () => toast((await copyText(detail.workspace)) ? t("session.path.copied") : detail.workspace)} title={detail.workspace}>{detail.workspace_own === false ? detail.workspace_name : detail.workspace}</button></div>
         {detail.run_id && <div className="dt-row sub"><span className="dt-key">{t("session.runid")}</span><span className="mono">{detail.run_id}</span></div>}
@@ -266,7 +268,7 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
         </div>
       </Section>
 
-      <Section id="danger" label={t("session.danger")} className="danger">
+      <Section ids={ids} id="danger" label={t("session.danger")} className="danger">
         <div className="btnrow" style={{ marginTop: 0 }}>
           <button className="btn small danger" onClick={on.clearHistory} disabled={busy}><Icon name="trash" size={14} /> {t("session.clear.short")}</button>
           <button className="btn small danger" onClick={on.remove}><Icon name="trash" size={14} /> {t("session.delete.short")}</button>
@@ -367,11 +369,11 @@ function resetIn(at: number | string | null | undefined): string {
 }
 
 /** What the session's provider has left: a subscription's windows, or the day's metered spend and balance. */
-function ProviderUsageCard({ provider, usage }: { provider: string; usage: ProviderUsage | null }) {
+function ProviderUsageCard({ ids, provider, usage }: { ids: string; provider: string; usage: ProviderUsage | null }) {
   const sub = usage?.subscription;
   const today = usage?.today ?? {};
   return (
-    <Section id="provider" label={SUBSCRIPTION_LABEL[provider] ?? provider} aside={<>
+    <Section ids={ids} id="provider" label={SUBSCRIPTION_LABEL[provider] ?? provider} aside={<>
       {sub?.plan && <span className="badge">{sub.plan}</span>}
       {sub?.limit_reached && <span className="badge" style={{ color: "var(--bad)" }}>limit</span>}
     </>}>
