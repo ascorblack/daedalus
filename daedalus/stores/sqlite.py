@@ -984,6 +984,25 @@ class LiveControlStore:
                 (session_id, json.dumps(current), _now()),
             )
 
+    async def remove(self, session_id: str, kind: str, item_id: str) -> bool:
+        """Drop one queued item by its id; ``False`` when it is no longer there (consumed, or never was)."""
+        column = "steer_queue" if kind == "steer" else "follow_up_queue"
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(f"SELECT {column} FROM live_control WHERE session_id = ?", (session_id,))
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                return False
+            current = json.loads(row[column] or "[]")
+            kept = [item for item in current if str(item.get("id") or "") != item_id]
+            if len(kept) == len(current):
+                return False
+            await conn.execute(
+                f"UPDATE live_control SET {column} = ?, updated_at = ? WHERE session_id = ?",
+                (json.dumps(kept), _now(), session_id),
+            )
+        return True
+
     async def set_model(
         self,
         session_id: str,

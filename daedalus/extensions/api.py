@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fnmatch
 import hashlib
 import hmac
 import json
 import logging
 import mimetypes
+import os
 import re
 import secrets
 import shutil
+import subprocess
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -744,6 +748,27 @@ GZIP_MIN_BYTES = 1024
 
 MAX_TRANSCRIPT_PAGE = 2000
 """Turns one request may ask for. Beyond this a client is asking for a session, not a page."""
+
+FILE_SEARCH_SKIP = frozenset({".git", "__pycache__", "node_modules", ".venv", ".checkpoints", ".mypy_cache", ".ruff_cache", ".pytest_cache"})
+"""Folders the explorer never shows and neither search walks into; the tree hides the same names."""
+
+FILE_SEARCH_MAX_ENTRIES = 20_000
+"""Paths one name search may look at. A tree larger than this answers from its first part of it, and says so."""
+
+FILE_SEARCH_MAX_RESULTS = 200
+"""Hits one search answers with. The box that asks is a filter, not a report."""
+
+FILE_SEARCH_BUDGET_SECONDS = 0.2
+"""Wall-clock one name search may spend. It answers a key press, so a slow disk truncates rather than waits."""
+
+FILE_GREP_BUDGET_SECONDS = 1.0
+"""Wall-clock one content search may spend: reading files is the slower of the two, and still bounded."""
+
+FILE_GREP_MAX_FILESIZE = "1M"
+"""Files larger than this are not read for a snippet — as ripgrep spells a size."""
+
+FILE_GREP_MAX_COLUMNS = 300
+"""How much of a matching line comes back. A minified bundle is one line and nobody wants all of it."""
 
 
 _TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -2847,6 +2872,147 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             entries.append({"name": child.name, "dir": child.is_dir(), "size": stat.st_size, "mtime": stat.st_mtime})
         return {"path": path, "kind": "dir", "entries": entries}
 
+    def _contained(root: Path, rel: str) -> Path | None:
+        """``_safe_path`` as a filter: the real path when it is inside the pane, ``None`` when it is not.
+
+        A search reaches paths nobody typed — whatever the walk or ripgrep turned up — so every one
+        of them is put through the browser's own check rather than trusted for having come from
+        under the root. A link out of the tree and a name that lands in the installation are both
+        simply absent from the answer.
+        """
+        try:
+            return _safe_path(root, rel)
+        except HTTPException:
+            return None
+
+    def _walk_files(root: Path) -> Iterator[str]:
+        """Every file under ``root`` as a root-relative path, skipping what the browser never shows."""
+        for folder, dirs, names in os.walk(root, followlinks=False):
+            dirs[:] = sorted(d for d in dirs if d not in FILE_SEARCH_SKIP and not d.startswith("."))
+            base = Path(folder).relative_to(root)
+            for name in sorted(names):
+                yield name if str(base) == "." else f"{base}/{name}"
+
+    def _rg_lines(args: list[str], root: Path) -> Iterator[str]:
+        """Run ripgrep in ``root`` and hand back its output a line at a time.
+
+        The caller stops at its own bound, so the process must not be left to finish a walk nobody
+        is reading: closing the generator kills it and drains the pipe, which is why every caller
+        wraps this in ``closing``.
+        """
+        process = subprocess.Popen(args, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace")
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                stripped = line.rstrip("\n")
+                if stripped:
+                    yield stripped
+        finally:
+            process.kill()
+            if process.stdout is not None:
+                process.stdout.close()
+            process.wait()
+
+    def _rg_file_list(root: Path) -> Iterator[str] | None:
+        """Ripgrep's own file list, which already honours .gitignore — ``None`` where ripgrep is not installed."""
+        if shutil.which("rg") is None:
+            return None
+        args = ["rg", "--files", "--no-messages"]
+        for name in sorted(FILE_SEARCH_SKIP):
+            args += ["--glob", f"!{name}"]
+        return _rg_lines(args, root)
+
+    def _search_names(root: Path, query: str, limit: int) -> tuple[list[dict[str, Any]], bool, str]:
+        """Files and folders under ``root`` whose name matches ``query``: (results, truncated, engine).
+
+        Bounded three ways at once — entries visited, results collected, and wall-clock — because
+        this answers a key press in the explorer's filter box and a workspace with a node_modules in
+        it is not a size the caller knows in advance. Whichever bound is reached first ends the
+        search and sets ``truncated``; a partial answer arrives in the same shape as a whole one.
+
+        Folders are found through the files under them, which is what both walkers produce: a folder
+        with nothing in it is not something a file search is looking for.
+        """
+        deadline = time.monotonic() + FILE_SEARCH_BUDGET_SECONDS
+        pattern = query.lower()
+        is_glob = any(ch in query for ch in "*?[")
+
+        def matches(name: str, rel: str) -> bool:
+            if is_glob:
+                return fnmatch.fnmatch(name.lower(), pattern) or fnmatch.fnmatch(rel.lower(), pattern)
+            return pattern in name.lower()
+
+        results: list[dict[str, Any]] = []
+        offered: set[str] = set()
+
+        def take(rel: str, kind: str) -> None:
+            if rel in offered:
+                return
+            offered.add(rel)
+            target = _contained(root, rel)
+            if target is None:
+                return
+            try:
+                stat = target.stat()
+            except OSError:
+                return
+            results.append({"path": rel, "kind": kind, "size": stat.st_size, "mtime": stat.st_mtime})
+
+        lister = _rg_file_list(root)
+        truncated = False
+        visited = 0
+        with closing(lister if lister is not None else _walk_files(root)) as walker:
+            for rel in walker:
+                visited += 1
+                if visited > FILE_SEARCH_MAX_ENTRIES or time.monotonic() > deadline:
+                    truncated = True
+                    break
+                parts = rel.split("/")
+                for depth in range(1, len(parts)):
+                    branch = "/".join(parts[:depth])
+                    if matches(parts[depth - 1], branch):
+                        take(branch, "dir")
+                if matches(parts[-1], rel):
+                    take(rel, "file")
+                if len(results) >= limit:
+                    truncated = True
+                    break
+        return results[:limit], truncated, "rg" if lister is not None else "walk"
+
+    def _search_content(root: Path, query: str, limit: int) -> tuple[list[dict[str, Any]], bool]:
+        """Lines under ``root`` containing ``query``, as (hits, truncated).
+
+        The query is matched literally, not as a pattern: the box it comes from is a search field,
+        and a half-typed bracket there should find nothing rather than fail or run away. Binary
+        files, files over the size cap and anything the browser hides are ripgrep's own defaults
+        plus the same exclusions the tree uses.
+        """
+        deadline = time.monotonic() + FILE_GREP_BUDGET_SECONDS
+        args = [
+            "rg", "--line-number", "--no-heading", "--color", "never", "--no-messages",
+            "--fixed-strings", "--smart-case", "--max-filesize", FILE_GREP_MAX_FILESIZE,
+            "--max-columns", str(FILE_GREP_MAX_COLUMNS),
+        ]
+        for name in sorted(FILE_SEARCH_SKIP):
+            args += ["--glob", f"!{name}"]
+        args += ["--", query]
+        hits: list[dict[str, Any]] = []
+        truncated = False
+        with closing(_rg_lines(args, root)) as lines:
+            for line in lines:
+                if time.monotonic() > deadline:
+                    truncated = True
+                    break
+                rel, _, rest = line.partition(":")
+                number, _, text = rest.partition(":")
+                if not rel or not number.isdigit() or _contained(root, rel) is None:
+                    continue
+                hits.append({"path": rel, "line": int(number), "text": text[:FILE_GREP_MAX_COLUMNS]})
+                if len(hits) >= limit:
+                    truncated = True
+                    break
+        return hits, truncated
+
     def _file_response(root: Path, path: str) -> FileResponse:
         target = _safe_path(root, path)
         if not target.is_file():
@@ -2993,12 +3159,71 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such session")
         return _read_path(state.workspace, path)
 
+    @api.get("/api/sessions/{session_id}/files/search")
+    async def search_files(session_id: str, q: str = "", limit: int = FILE_SEARCH_MAX_RESULTS, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Find a file by name anywhere in the session's tree — the explorer's filter box, unbounded by what it has loaded.
+
+        ``q`` is a case-insensitive substring of the name, or a glob when it carries one of ``*?[``;
+        a glob is matched against the name and against the path, so ``*.py`` and ``src/**/*.py``
+        both work. Every answer goes through the browser's containment, so a symlink out of the
+        tree and a path inside the installation are absent rather than refused.
+        """
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        query = q.strip()
+        if not query:
+            return {"query": "", "results": [], "truncated": False, "engine": "none"}
+        wanted = max(1, min(int(limit), FILE_SEARCH_MAX_RESULTS))
+        results, truncated, engine = await asyncio.to_thread(_search_names, state.workspace, query, wanted)
+        return {"query": query, "results": results, "truncated": truncated, "engine": engine}
+
+    @api.get("/api/sessions/{session_id}/files/grep")
+    async def grep_files(session_id: str, q: str = "", limit: int = FILE_SEARCH_MAX_RESULTS, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Find a line by its text anywhere in the session's tree, with the line it is on.
+
+        Content search is ripgrep's job and is not reimplemented in Python: an install without it
+        gets 501 and a sentence saying so, which the panel shows in place of the results instead of
+        offering a search that would walk the whole tree in the event loop.
+        """
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        if shutil.which("rg") is None:
+            raise HTTPException(501, "content search needs ripgrep (rg), which is not installed here; search by name instead")
+        query = q.strip()
+        if not query:
+            return {"query": "", "hits": [], "truncated": False}
+        wanted = max(1, min(int(limit), FILE_SEARCH_MAX_RESULTS))
+        hits, truncated = await asyncio.to_thread(_search_content, state.workspace, query, wanted)
+        return {"query": query, "hits": hits, "truncated": truncated}
+
     @api.get("/api/sessions/{session_id}/download")
     async def download(session_id: str, path: str, _: dict[str, Any] = Depends(auth)) -> FileResponse:
         state = await manager.get_state(session_id)
         if state is None:
             raise HTTPException(404, "no such session")
         return _file_response(state.workspace, path)
+
+    # -- the steer queue: what was sent to a working agent and has not reached it yet -------
+
+    @api.get("/api/sessions/{session_id}/steer")
+    async def list_steer(session_id: str, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        """Steers this session has taken in and not yet handed to the model, oldest first."""
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        return await manager.queued_steers(session_id)
+
+    @api.delete("/api/sessions/{session_id}/steer/{msg_id}")
+    async def drop_steer(session_id: str, msg_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Take a queued steer back. 409 once the run has read it: by then it is in the history, not in a queue."""
+        state = await manager.get_state(session_id)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        if not await manager.drop_queued_steer(session_id, msg_id):
+            raise HTTPException(409, "that message has already reached the agent")
+        return {"deleted": True}
 
     # -- memory: what the agent remembered, per session and globally ----------------------
 

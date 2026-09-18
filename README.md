@@ -460,6 +460,36 @@ uv run pytest -q                                 # tests
 
 Every session command also works from the app's composer with the same `/` palette.
 
+## The HTTP API, where the app is not enough
+
+Everything the app does it does over the same API, with the same token (`X-Daedalus-Token`, or the
+browser session cookie), so anything the app can show you a script can fetch. Two of those endpoints
+exist for the app's panels and are worth naming here.
+
+**Finding a file.** `GET /api/sessions/{id}/files/search?q=&limit=` searches the session's tree by
+name: a case-insensitive substring, or a glob when `q` carries one of `*?[` — `*.py` matches the
+name, `src/**/*.py` the path. It answers `{"query", "results": [{"path", "kind", "size", "mtime"}],
+"truncated", "engine"}`, where `kind` is `file` or `dir` and `engine` says whether ripgrep or the
+built-in walk produced the list. `GET …/files/grep?q=&limit=` is the same search over file
+*contents* — `q` is matched literally, never as a pattern — and answers
+`{"query", "hits": [{"path", "line", "text"}], "truncated"}`. Both are bounded rather than complete:
+at most 200 results, 20,000 paths looked at, and a fifth of a second of wall clock for names or one
+second for contents, whichever runs out first, with `truncated` saying so. Both reach the filesystem
+through the containment the file browser uses, so a symlink out of the tree, a `..` and anything
+belonging to the installation itself are absent from the answer rather than refused. Content search
+needs ripgrep: without it, `files/grep` answers **501** and a sentence saying to search by name.
+
+**The queue in front of a working agent.** A message sent to a session that is already running is a
+steer: it waits in a queue and is placed in front of the model's next call rather than starting a
+second run. `GET /api/sessions/{id}/steer` lists what is still waiting, oldest first, as
+`[{"id", "text", "queued_at"}]`, and `DELETE /api/sessions/{id}/steer/{id}` takes one back — **409**
+once the run has read it, because by then it is in the history and no longer in a queue. The ids are
+the ones the queue is stored under, so they survive a restart and mean the same thing to every
+client. Whenever the queue changes — a steer taken in, one withdrawn, or a round placing what was
+waiting — the session's event stream (`GET /api/sessions/{id}/stream`) carries a `steer_changed`
+event with the whole queue in its payload, so a composer draws its cards from the events and never
+polls.
+
 ## Layout
 
 ```

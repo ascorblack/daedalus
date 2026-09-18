@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -92,8 +93,30 @@ GRANT_TTL_SECONDS = 2 * 3600
 """How long an approval key stays spendable: long enough for the agent to retry, short enough that a forgotten grant does not wait for a later call."""
 """How much of the workspace AGENTS.md rides along in the prompt; the rest is one Read away."""
 
-EventSink = Callable[[str, TurnEvent], Awaitable[None]]
+EventSink = Callable[[str, Any], Awaitable[None]]
+"""A session's listener. It takes the loop's ``TurnEvent`` and the host's own ``HostEvent`` alike: both carry ``type``, ``run_id`` and ``payload``."""
 RunFinished = Callable[[str, str, str], Awaitable[None]]  # session_id, run_id, status
+
+
+class HostEventType(StrEnum):
+    """Event kinds the host raises beside the core's turn taxonomy."""
+
+    STEER_CHANGED = "steer_changed"
+
+
+@dataclass(slots=True)
+class HostEvent:
+    """One of those, shaped like a ``TurnEvent`` so the same sinks carry it.
+
+    It travels to the session's listeners — the app's stream — and no further: it is not a run
+    event, so it is never written to the durable event log. Its ``type`` is deliberately outside
+    ``EventType``, so a sink that switches on the core's taxonomy falls through it untouched and
+    only a sink that reads the name off the wire (the stream does) sees it at all.
+    """
+
+    type: HostEventType
+    run_id: str
+    payload: dict[str, Any]
 
 
 @dataclass(slots=True)
@@ -922,9 +945,18 @@ class SessionManager:
             run_id=state.run_id or "",
             payload={"from": "idle", "to": "compacting" if state.compacting else "idle", "reason": "compaction_progress", "compacting": state.compacting},
         )
+        await self._notify_sinks(state.session.id, event)
+
+    async def _notify_sinks(self, session_id: str, event: TurnEvent | HostEvent) -> None:
+        """Hand an event to the session's listeners without booking it as a run event.
+
+        ``_dispatch_event`` is the path for everything the loop produces: it redacts, times, and
+        writes to the durable log. What the host itself raises about a session — a compaction's
+        progress, a change to the steer queue — has no place in that log and takes this door.
+        """
         for sink in self._sinks:
             try:
-                await sink(state.session.id, event)
+                await sink(session_id, event)
             except Exception:  # noqa: BLE001
                 logger.exception("event sink failed")
 
@@ -1176,6 +1208,7 @@ class SessionManager:
             _forget_persisted(state)
             # Input queued during the undone turns and any run snapshot that could resume them are pre-revert by definition.
             await self.live.save_queues(session_id, [], [])
+            await self.steer_changed(session_id, reason="cleared")
             for run in await self.db.fetchall("SELECT id FROM runs WHERE session_id = ?", (session_id,)):
                 await self.events.delete_snapshot(run["id"])
             workspace_note = ""
@@ -1219,6 +1252,7 @@ class SessionManager:
             await self.sessions.replace_messages(session_id, TENANT, [])
             _forget_persisted(state)
             await self.live.save_queues(session_id, [], [])
+            await self.steer_changed(session_id, reason="cleared")
             for run in await self.db.fetchall("SELECT id FROM runs WHERE session_id = ?", (session_id,)):
                 await self.events.delete_snapshot(run["id"])
             marker = Message(
@@ -1523,6 +1557,59 @@ class SessionManager:
                 if q not in state.services.writable:
                     state.services.writable.append(q)
 
+    # -- the steer queue, as the app sees it ----------------------------------------
+
+    async def queued_steers(self, session_id: str) -> list[dict[str, Any]]:
+        """The steers this session has taken in and not yet given to the model, oldest first.
+
+        The store is the record: a run reloads the queue from it before every model call and writes
+        back what it did not place. Between those two moments a running engine holds the only copy,
+        so a listing taken exactly then can name an item the model is already reading; the change
+        event that follows the write corrects it within the round.
+        """
+        queued = await self.live.load(session_id)
+        return [
+            {"id": str(item.get("id") or ""), "text": str(item.get("text") or ""), "queued_at": item.get("queued_at")}
+            for item in queued["steer"]
+            if str(item.get("text") or "").strip()
+        ]
+
+    async def drop_queued_steer(self, session_id: str, item_id: str) -> bool:
+        """Take one steer back before the run reads it; ``False`` when it is already gone.
+
+        The engine is asked first and the store second. A run between its reload and its next model
+        call holds the queue in memory and would write that copy back over any store-only removal —
+        emptying its list first is what actually stops the message, and the store write behind it
+        stops a reload from bringing the item round again.
+        """
+        state = self._states.get(session_id)
+        removed = False
+        engine = state.engine if state is not None else None
+        if engine is not None:
+            queue = list(getattr(engine, "_steer_queue", []) or [])
+            kept = [item for item in queue if str(item.get("id") or "") != item_id]
+            if len(kept) != len(queue):
+                engine._steer_queue = kept  # type: ignore[attr-defined]
+                removed = True
+        if await self.live.remove(session_id, "steer", item_id):
+            removed = True
+        if removed:
+            await self.steer_changed(session_id, reason="withdrawn")
+        return removed
+
+    async def steer_changed(self, session_id: str, *, reason: str) -> None:
+        """Tell the session's listeners that its steer queue is not what they last drew."""
+        state = self._states.get(session_id)
+        queued = await self.queued_steers(session_id)
+        await self._notify_sinks(
+            session_id,
+            HostEvent(
+                type=HostEventType.STEER_CHANGED,
+                run_id=(state.run_id if state is not None else "") or "",
+                payload={"session_id": session_id, "reason": reason, "count": len(queued), "queued": queued},
+            ),
+        )
+
     # -- input --------------------------------------------------------------------
 
     async def submit(
@@ -1558,7 +1645,7 @@ class SessionManager:
                 if as_answer:
                     # Free-text reply to a pending question counts as a custom answer.
                     return await self.answer(session_id, [{"custom": body}])
-                await self.live.enqueue(session_id, "follow_up", new_queued_prompt("follow_up", body).to_dict())
+                await self.live.enqueue(session_id, "follow_up", {**new_queued_prompt("follow_up", body).to_dict(), "queued_at": datetime.now(UTC).isoformat()})
                 await self.sessions.append_transcript(
                     session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up", "daedalus.origin": origin})]
                 )
@@ -1586,12 +1673,14 @@ class SessionManager:
                 # A message sent while the agent works is a steer: the core places it before the
                 # next model call (after the current tool batch). follow_up would wait for the end.
                 kind = "follow_up" if not steer and state.metadata.get("queue_mode") == "follow_up" else "steer"
-                await self.live.enqueue(session_id, kind, {**new_queued_prompt(kind, body).to_dict(), "origin": origin})  # type: ignore[arg-type]
+                await self.live.enqueue(session_id, kind, {**new_queued_prompt(kind, body).to_dict(), "origin": origin, "queued_at": datetime.now(UTC).isoformat()})  # type: ignore[arg-type]
                 # The core folds queued prompts into the model's history later (and compaction may
                 # rewrite them); the transcript keeps the operator's words as sent.
                 await self.sessions.append_transcript(
                     session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind, "daedalus.origin": origin})]
                 )
+                if kind == "steer":
+                    await self.steer_changed(session_id, reason="queued")
                 return state.run_id or ""
             # A new run starts. The one before it may still be tidying up behind the answer, and most
             # of that is none of this run's business — but the files are: a revert of the turn that
@@ -1829,11 +1918,13 @@ class SessionManager:
             eng._follow_up_queue = list(data["follow_up"])  # type: ignore[attr-defined]
 
         async def persist_live_control(eng: QueryEngine) -> None:
-            await self.live.save_queues(
-                session_id,
-                list(getattr(eng, "_steer_queue", []) or []),
-                list(getattr(eng, "_follow_up_queue", []) or []),
-            )
+            steer = list(getattr(eng, "_steer_queue", []) or [])
+            before = [str(item.get("id") or "") for item in (await self.live.load(session_id))["steer"]]
+            await self.live.save_queues(session_id, steer, list(getattr(eng, "_follow_up_queue", []) or []))
+            if before != [str(item.get("id") or "") for item in steer]:
+                # The round placed queued text into the history (or the operator withdrew some of it
+                # while the round ran): the cards the app draws above its composer are now stale.
+                await self.steer_changed(session_id, reason="consumed")
 
         def start_persist(history: list[Message], fresh: list[Message] | None) -> None:
             """Queue one round's write behind the writes of the rounds before it.
@@ -2301,6 +2392,7 @@ class SessionManager:
         if not items:
             return
         await self.live.save_queues(state.session.id, [], [])
+        await self.steer_changed(state.session.id, reason="consumed")
         texts = [str(item["text"]).strip() for item in items]
         origins = {str(item.get("origin") or "operator") for item in items}
         # The transcript already holds each item as it was sent; this copy only opens the run and stays hidden.

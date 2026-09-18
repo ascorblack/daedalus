@@ -19,6 +19,26 @@ Notable changes, newest first. The repository's `main` is the released version.
   paragraph above true rather than merely intended: changing what is on the screen builds nothing
   and tears nothing down. On a phone the transcript takes the whole screen and the agents panel
   becomes a sheet that rises over it.
+- **A file can be found by name or by what is in it, without opening a folder at a time.**
+  `GET /api/sessions/{id}/files/search?q=` searches the session's tree by name — a substring, or a
+  glob when the query carries one — and `GET …/files/grep?q=` searches what is inside the files,
+  literally rather than as a pattern, answering the line and the text on it. Both are bounded
+  rather than complete, because a filter box types a letter at a time and a workspace with a
+  `node_modules` in it is not a size anyone knows in advance: at most two hundred results, twenty
+  thousand paths looked at, and a fraction of a second, whichever runs out first, with the answer
+  saying when it was cut short. Both reach the disk through the containment the file browser
+  already uses, so a symlink out of the tree, a `..` and anything belonging to the installation are
+  absent from the answer rather than refused. Content search is ripgrep's work and is not imitated
+  where ripgrep is missing: there it answers 501 and a sentence saying to search by name.
+- **A message sent to a working agent can be taken back before it reads it.**
+  `GET /api/sessions/{id}/steer` lists what is still waiting in front of the next model call, with
+  the id and the moment each one was sent, and `DELETE /api/sessions/{id}/steer/{id}` withdraws
+  one — 409 once the run has read it, because by then it is in the history and no longer in a
+  queue. Withdrawal asks the running engine before it asks the store, which is the only order that
+  works: a run holding the queue in memory would otherwise write its copy back over the removal.
+  Whenever the queue changes the session's stream carries a `steer_changed` event with the whole
+  queue in it, so a composer draws what is pending from the events instead of asking again.
+
 - **The voice is built before it is needed, and an answer is never read out over the one before
   it.** The first answer of a session used to arrive on the screen and be read aloud about fifteen
   seconds later, and when the next answer came the page played both, one after the other. A voice
