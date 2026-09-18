@@ -496,6 +496,29 @@ MIGRATIONS: list[str] = [
         at TEXT NOT NULL
     );
     """,
+    # the installation's own projects are one per kind, and the database is what says so. The flag
+    # lived only inside the ``settings`` JSON, where no constraint can reach it, and the code that
+    # kept it unique read the table and then inserted — with two awaits in between. Two delegations
+    # asked for at once therefore made two "Voice" folders, and a system project cannot be deleted,
+    # so the installation could not be tidied up from the app at all. The column carries the flag
+    # out of the JSON so a partial unique index can hold it; the rows before it are merged onto the
+    # oldest of each kind and the sessions of the others are re-pointed at it, which is where their
+    # agents were meant to be listed all along.
+    """
+    ALTER TABLE projects ADD COLUMN system TEXT NOT NULL DEFAULT '';
+    UPDATE projects SET system = COALESCE(json_extract(settings, '$.system'), '');
+    UPDATE sessions SET project_id = (
+        SELECT k.id FROM projects k
+        WHERE k.system = (SELECT d.system FROM projects d WHERE d.id = sessions.project_id)
+        ORDER BY k.created_at, k.rowid LIMIT 1
+    )
+    WHERE project_id IN (SELECT id FROM projects WHERE system != '');
+    DELETE FROM projects WHERE system != '' AND id NOT IN (
+        SELECT (SELECT k.id FROM projects k WHERE k.system = p.system ORDER BY k.created_at, k.rowid LIMIT 1)
+        FROM projects p WHERE p.system != ''
+    );
+    CREATE UNIQUE INDEX projects_system ON projects(system) WHERE system != '';
+    """,
 ]
 
 

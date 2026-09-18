@@ -16,6 +16,7 @@ model call.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,7 +29,7 @@ from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions.api import build_app
 from daedalus.extensions.voice import PROJECT_DIR, PROJECT_KIND, Voice
 from daedalus.host.session_runner import SessionManager
-from daedalus.stores.database import Database
+from daedalus.stores.database import MIGRATIONS, Database
 from daedalus.stores.projects import ProjectError, ProjectStore
 from tests.unit.test_session_runner import ScriptedProvider, _manager, _wait_finished
 
@@ -69,6 +70,63 @@ async def test_a_system_project_is_made_once_and_refuses_to_be_moved_or_removed(
     # What the operator may still change: its name, and whether it snapshots.
     renamed = await store.update(made.id, name="Voice agents")
     assert renamed.name == "Voice agents" and renamed.settings.system == PROJECT_KIND
+
+
+async def test_several_callers_asking_at_once_make_one_system_project(db: Database, tmp_path: Path) -> None:
+    """The concierge is told to fan errands out in parallel, and each of them wants the folder.
+
+    ``ensure_system`` reads the table and then inserts, with awaits in between; nothing used to
+    serialise that, so a fresh installation asked twice at once grew two "Voice" folders — and a
+    system project cannot be deleted, so there was no way to tidy that up from the app.
+    """
+    store = ProjectStore(db, reserved=[tmp_path / "state"], home=tmp_path)
+    root = tmp_path / "state" / "workspaces" / PROJECT_DIR
+    made = await asyncio.gather(*[store.ensure_system(PROJECT_KIND, name="Voice", root=root) for _ in range(8)])
+    assert len({p.id for p in made}) == 1, "one folder, whoever won the race"
+    assert [p.settings.system for p in await store.list()] == [PROJECT_KIND]
+    # …and the table refuses a second one even if the code above ever stops checking.
+    with pytest.raises(sqlite3.IntegrityError):
+        await db.execute(
+            "INSERT INTO projects(id, name, root, created_at, settings, system) VALUES ('x', 'Voice', ?, '', '{}', ?)",
+            (str(root / "other"), PROJECT_KIND),
+        )
+
+
+async def test_the_duplicate_system_projects_an_installation_already_has_are_merged(tmp_path: Path) -> None:
+    """The repair for an installation that ran the racing code: one folder, and nobody's agents lost."""
+    path = tmp_path / "old.sqlite"
+    raw = sqlite3.connect(path)
+    raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version(version) VALUES (?);".replace("?", str(len(MIGRATIONS) - 1)))
+    for script in MIGRATIONS[: len(MIGRATIONS) - 1]:
+        raw.executescript(script)
+    for n, name in enumerate(("Voice", "Voice", "Voice")):
+        raw.execute(
+            "INSERT INTO projects(id, name, root, created_at, settings) VALUES (?, ?, ?, ?, ?)",
+            (f"v{n}", name, str(tmp_path / f"voice{n}"), f"2026-09-0{n + 1}T00:00:00+00:00", '{"snapshots": false, "system": "voice"}'),
+        )
+        raw.execute(
+            "INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata, project_id) VALUES (?, 't', ?, '', '', '{}', ?)",
+            (f"s{n}", f"agent {n}", f"v{n}"),
+        )
+    raw.execute(
+        "INSERT INTO projects(id, name, root, created_at, settings) VALUES ('p0', 'Bakery', ?, '2026-09-01T00:00:00+00:00', '{}')",
+        (str(tmp_path / "bakery"),),
+    )
+    raw.commit()
+    raw.close()
+
+    db = Database(path)
+    await db.open()
+    try:
+        store = ProjectStore(db)
+        projects = await store.list()
+        assert [p.name for p in projects] == ["Bakery", "Voice"], "one Voice folder is left, and the operator's is untouched"
+        voice = next(p for p in projects if p.settings.system == PROJECT_KIND)
+        assert voice.id == "v0", "the oldest is the one that is kept"
+        rows = await db.fetchall("SELECT id, project_id FROM sessions ORDER BY id")
+        assert {r["id"]: r["project_id"] for r in rows} == {"s0": "v0", "s1": "v0", "s2": "v0"}, "every agent is still listed under Voice"
+    finally:
+        await db.close()
 
 
 async def test_the_counts_beside_the_folders_are_of_the_table_and_not_of_a_page(db: Database, tmp_path: Path) -> None:

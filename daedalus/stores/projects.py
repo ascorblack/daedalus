@@ -12,8 +12,10 @@ the launcher cannot mount. Reachability is reported, not enforced.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import sqlite3
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -129,6 +131,10 @@ class ProjectStore:
 
     def __init__(self, db: Database, *, reserved: Iterable[Path] = (), home: Path | None = None) -> None:
         self._db = db
+        self._write = asyncio.Lock()
+        """Held across the whole of a read-check-insert. Both ways of making a project look the table
+        up and then write to it, with awaits in between; nothing else serialised them, so two callers
+        that asked at the same moment each saw a table without the row the other was about to add."""
         self._roots: tuple[Path, ...] = ()
         self._reserved = tuple(dict.fromkeys(Path(os.path.normpath(Path(p).expanduser())) for p in reserved))
         """This installation's own directories. A project may not be one, contain one or sit inside one."""
@@ -163,14 +169,31 @@ class ProjectStore:
             raise ProjectError("a project needs a name")
         path = normalise_root(root)
         self._refuse_reserved(path)
-        await self._refuse_overlap(path)
-        project = Project(id=uuid.uuid4().hex[:12], name=label, root=path, created_at=datetime.now(UTC), settings=settings or ProjectSettings())
-        await self._db.execute(
-            "INSERT INTO projects(id, name, root, created_at, settings) VALUES (?, ?, ?, ?, ?)",
-            (project.id, project.name, str(project.root), project.created_at.isoformat(), json.dumps(project.settings.dump())),
-        )
-        await self.list()
+        async with self._write:
+            await self._refuse_overlap(path)
+            project = Project(id=uuid.uuid4().hex[:12], name=label, root=path, created_at=datetime.now(UTC), settings=settings or ProjectSettings())
+            await self._insert(project)
+            await self.list()
         return project
+
+    async def _insert(self, project: Project) -> None:
+        """One row, with the system flag written to its own column as well as into the settings blob.
+
+        The column exists for the partial unique index over it: the flag is what makes a project the
+        installation's own, and an invariant a query enforces holds even when the code that was
+        meant to check it lost a race.
+        """
+        await self._db.execute(
+            "INSERT INTO projects(id, name, root, created_at, settings, system) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                project.id,
+                project.name,
+                str(project.root),
+                project.created_at.isoformat(),
+                json.dumps(project.settings.dump()),
+                project.settings.system,
+            ),
+        )
 
     async def ensure_system(self, kind: str, *, name: str, root: Path) -> Project:
         """The installation's own project of this kind, made the first time something needs it.
@@ -180,18 +203,29 @@ class ProjectStore:
         installation. So the reserved check is skipped here and nowhere else, and the overlap check
         is kept — an operator project that already contains this folder would make containment mean
         two things at once, whoever created which first.
+
+        One per kind, and the database says so: the check and the insert are held under one lock, and
+        a partial unique index over the ``system`` column is what makes the invariant survive a lost
+        race rather than turn into a second undeletable folder.
         """
-        for existing in await self.list():
-            if existing.settings.system == kind:
+        async with self._write:
+            existing = await self.system(kind)
+            if existing is not None:
                 return existing
-        path = Path(os.path.normpath(Path(root).expanduser()))
-        await self._refuse_overlap(path)
-        project = Project(id=uuid.uuid4().hex[:12], name=name, root=path, created_at=datetime.now(UTC), settings=ProjectSettings(system=kind))
-        await self._db.execute(
-            "INSERT INTO projects(id, name, root, created_at, settings) VALUES (?, ?, ?, ?, ?)",
-            (project.id, project.name, str(project.root), project.created_at.isoformat(), json.dumps(project.settings.dump())),
-        )
-        await self.list()
+            path = Path(os.path.normpath(Path(root).expanduser()))
+            await self._refuse_overlap(path)
+            project = Project(id=uuid.uuid4().hex[:12], name=name, root=path, created_at=datetime.now(UTC), settings=ProjectSettings(system=kind))
+            try:
+                await self._insert(project)
+            except sqlite3.IntegrityError:
+                # The unique index refused a second project of this kind. Somebody else made it —
+                # from another process against the same file, which is the one race the lock above
+                # cannot see. Read theirs rather than raising at a caller that only asked for it.
+                made = await self.system(kind)
+                if made is None:
+                    raise
+                return made
+            await self.list()
         return project
 
     async def system(self, kind: str) -> Project | None:
@@ -243,8 +277,8 @@ class ProjectStore:
             # The flag is what makes the two refusals above stick; nothing outside this module sets it.
             merged = ProjectSettings(snapshots=merged.snapshots, system=project.settings.system)
         await self._db.execute(
-            "UPDATE projects SET name = ?, root = ?, settings = ? WHERE id = ?",
-            (label, str(path), json.dumps(merged.dump()), project_id),
+            "UPDATE projects SET name = ?, root = ?, settings = ?, system = ? WHERE id = ?",
+            (label, str(path), json.dumps(merged.dump()), merged.system, project_id),
         )
         await self.list()
         return Project(id=project.id, name=label, root=path, created_at=project.created_at, settings=merged)
