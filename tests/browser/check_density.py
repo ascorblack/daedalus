@@ -46,7 +46,8 @@ READ = """
   const single = rows.filter((r) => !r.querySelector('.erow-meta') && !r.querySelector('.erow-line2'));
   const double = rows.filter((r) => r.querySelector('.erow-meta') || r.querySelector('.erow-line2'));
   const acts = all('.act:not(.head)');
-  const icons = all('.chat-head .iconbtn', '.pagehead .iconbtn');
+  // Only what is drawn: the desktop-only buttons are display:none on a phone and measure 0×0.
+  const icons = all('.chat-head .iconbtn', '.pagehead .iconbtn').filter((el) => el.getBoundingClientRect().width > 0);
   return {
     body: px(document.body, 'fontSize'),
     left: box(one('.sidebar', '.rail')),

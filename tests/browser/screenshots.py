@@ -769,7 +769,7 @@ def expand_steps(page: Page) -> None:
 
 
 def open_files_and_preview(page: Page) -> None:
-    page.evaluate("() => { localStorage.setItem('daedalus.sessionList', '0'); localStorage.setItem('daedalus.session.aside', '0'); }")
+    page.evaluate("() => { localStorage.setItem('daedalus.sidebar', 'collapsed'); localStorage.setItem('daedalus.session.aside', '0'); }")
     page.reload()
     page.wait_for_selector(".chat-scroll .timeline", timeout=15000)
     page.locator(f"button[aria-label='{word('files')}']").click()
@@ -815,8 +815,20 @@ def open_workspaces(page: Page) -> None:
 
 def open_projects(page: Page) -> None:
     """The switcher over a list already grouped by project: the folders on one side, the agents in them on the other."""
-    page.locator(".rail .project-chip").click()
+    page.locator(".sidebar .project-chip").click()
     page.wait_for_selector(".project-row", timeout=5000)
+
+
+def open_menu(page: Page) -> None:
+    """The menu at the bottom-left: every destination with its count, the language, Settings — over the conversation."""
+    page.locator(".sidebar-menu").click()
+    page.wait_for_selector(".navmenu[role='menu']", timeout=5000)
+
+
+def fold_sidebar(page: Page) -> None:
+    """The sidebar as a strip: the same controls as icons, and a dot for every agent that is working or waiting."""
+    page.keyboard.press("Control+\\")
+    page.wait_for_timeout(400)
 
 
 # ---- the voice page in each of its states --------------------------------------------------
@@ -959,6 +971,8 @@ def run() -> int:
         page.route("**/api/**", stub)
         shot(page, "bots", "agents")
         shot(page, "session", f"agents/{S1}", wait=".chat-scroll .timeline", before=expand_steps, settle=300)
+        shot(page, "session-menu", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_menu, settle=500)
+        shot(page, "session-folded", f"agents/{S1}", wait=".chat-scroll .timeline", before=fold_sidebar, settle=500)
         shot(page, "dual", f"agents/{S1}?with={S2}", wait=".chat-scroll .timeline", settle=1500)
         shot(page, "files-preview", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_files_and_preview, settle=1200)
         shot(page, "session-share", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_share, settle=800)
