@@ -77,6 +77,11 @@ PROVIDER_OUTAGE_KINDS = frozenset({"llm_provider_error", "llm_timeout", "llm_str
 RECOVERY_REASONS = frozenset({"transient_llm_error_retry", "model_fallback_triggered", "soft_stop_notified", "llm_context_window_exceeded", "context_window_recovered", "reasoning_length_cut_retry", "continue_prompt_injected", "max_output_token_recovery"})
 """The state changes worth a log line: each is a round the run had to recover from, and the log is where the reason survives."""
 MODEL_METADATA_KEY = "daedalus.model"
+
+MODEL_STAMPS_KEPT = 512
+"""How many un-persisted turn stamps a session holds at once. A run writes its rounds as they finish,
+so the map is normally one or two entries deep; the cap is only there so a store that is refusing
+every write cannot turn it into a leak."""
 """Message metadata naming what produced an assistant turn: provider, model, the configured model, and the fallback if it was one."""
 FALLBACK_REASONS = {
     "llm_rate_limit": "rate_limit",
@@ -189,6 +194,11 @@ class SessionState:
     """``provider:model`` that actually answered last, as the core reported it at the message it started."""
     model_change_reason: str = ""
     """Why the next change of model happened, taken from the core's own account of the demotion; empty means nobody said."""
+    model_stamps: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Which model produced each assistant turn, recorded the moment the turn ended and keyed by its
+    transcript key. Persists are fire-and-forget, so a turn is very often written after the chain has
+    already stepped down; reading the model at write time therefore names whoever is answering *now*.
+    An entry is taken out of the map when the turn it describes is stamped."""
     run_history_start: int = 0
     """Length of the working history when the current run began: what this run added starts here."""
     checkpoint_capped: bool = False
@@ -1794,6 +1804,7 @@ class SessionManager:
         state.configured_model = self._rung_label(rungs[0][0], rungs[0][1])
         state.effective_model = ""
         state.model_change_reason = ""
+        state.model_stamps.clear()
         engine = build_engine(
             deps=deps,
             config=self.config,
@@ -1963,18 +1974,29 @@ class SessionManager:
         and stamping that with the model answering now would put today's fallback on every answer
         the session ever gave.
 
+        The stamp itself is not read here: it was taken at ``message_stop``, while the model that
+        wrote the turn was still the one answering. A persist is a fire-and-forget task, so round *n*
+        is very often written after round *n+1* has already stepped the chain down — reading
+        ``effective_model`` at write time is what made a turn the configured model produced claim the
+        fallback wrote it, permanently, since transcript rows are written once.
+
         The metadata dict is annotated in place. It is the same dict the core's own history holds,
         and that is the point: the working copy and the transcript copy say the same thing, and
         neither is a message the model is ever shown.
         """
-        if not state.effective_model:
+        if not state.model_stamps:
             return
-        record = self._model_record(state)
         known = set(previous_keys)
         for message in messages:
             if message.role is not MessageRole.assistant:
                 continue
-            if MODEL_METADATA_KEY in message.metadata or self.sessions.transcript_key(message) in known:
+            key = self.sessions.transcript_key(message)
+            if MODEL_METADATA_KEY in message.metadata or key in known:
+                continue
+            record = state.model_stamps.pop(key, None)
+            if record is None:
+                # Nobody watched this turn end — a history the host did not stream, a turn the core
+                # wrote itself. An unstamped turn says nothing; a guessed one says something false.
                 continue
             message.metadata[MODEL_METADATA_KEY] = record
 
@@ -2413,6 +2435,27 @@ class SessionManager:
             },
         )
 
+    def _record_model_stamp(self, state: SessionState) -> None:
+        """Name the model on the assistant turn that has just ended, while it is still the one answering.
+
+        The turn is already in the working history by ``message_stop`` — the tool result of a tool
+        round lands before it — so the last assistant message there is the one that stopped. The
+        record is kept against that message's transcript key until the persist of its round picks it
+        up; the map is capped so a session whose turns are never written cannot grow it without end.
+        """
+        engine = state.engine
+        if engine is None or not state.effective_model:
+            return
+        message = next((m for m in reversed(list(engine.history)) if m.role is MessageRole.assistant), None)
+        if message is None:
+            return
+        key = self.sessions.transcript_key(message)
+        if key in state.model_stamps:
+            return
+        state.model_stamps[key] = self._model_record(state)
+        while len(state.model_stamps) > MODEL_STAMPS_KEPT:
+            state.model_stamps.pop(next(iter(state.model_stamps)))
+
     async def _dispatch_event(self, state: SessionState, event: TurnEvent) -> None:
         change = self._model_change(state, event)
         if change is not None:
@@ -2445,6 +2488,7 @@ class SessionManager:
             except Exception:  # noqa: BLE001
                 logger.exception("event sink failed")
         if event.type is EventType.MESSAGE_STOP:
+            self._record_model_stamp(state)
             await self._enforce_caps(state, event.run_id)
 
     def _time_tool(self, state: SessionState, event: TurnEvent) -> None:
