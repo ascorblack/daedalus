@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -96,6 +98,15 @@ async def front(settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatc
     f.submitted = submitted  # type: ignore[attr-defined]
     f.answered = answered  # type: ignore[attr-defined]
     yield f  # type: ignore[misc]
+    # Everything the front still has in flight is stopped before the manager is closed. A test that
+    # waits for the effect it asserts on — rather than sleeping and hoping — can legitimately finish
+    # while a handler task is still unwinding, and a task that reaches the database while it is
+    # being shut under it is a hang, not a failure.
+    for task in [b.task for b in f._buffers.values() if b.task is not None] + list(f._topic_status_tasks.values()) + list(f._stale_notices.values()):
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
     await manager.close()
 
 
