@@ -1042,7 +1042,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
         </div></Overlay>
       )}
 
-      {moving && <MoveSessionSheet sessionId={id} current={detail?.project?.id ?? ""} onClose={() => setMoving(false)} onMoved={() => load(true)} toast={toast} />}
+      {moving && detail && <MoveSessionSheet sessionId={id} current={detail.project.id} currentOwn={!!detail.workspace_own} onClose={() => setMoving(false)} onMoved={() => load(true)} toast={toast} />}
 
       {preview && <FilePreview src={preview} onClose={() => setPreview(null)} />}
 

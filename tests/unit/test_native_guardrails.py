@@ -157,7 +157,7 @@ def test_a_relative_path_is_the_path_it_names() -> None:
     assert policy.evaluate("Exec", {"command": "cat ~ada/.ssh/id_ed25519"}).action == ASK
 
 
-def test_a_symlink_the_agent_makes_in_its_own_workspace_is_not_a_way_round(tmp_path: Path) -> None:
+def test_a_symlink_the_agent_makes_in_its_own_directory_is_not_a_way_round(tmp_path: Path) -> None:
     """The workspace is the agent's to write, so the link is easy to make. The rules answer on the
     file the link lands on, not on the name it was reached by."""
     install = tmp_path / "Daedalus"

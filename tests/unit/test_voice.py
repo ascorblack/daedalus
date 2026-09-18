@@ -43,8 +43,8 @@ async def app(settings: Settings, db: Database) -> Any:
     await manager.start()
     application = SimpleNamespace(settings=settings, config=manager.config, db=db, manager=manager, front=None, extensions={})
 
-    async def create_session(title: str, *, metadata: dict[str, Any] | None = None, workspace: Any = None, project_id: str | None = None, own_workspace: bool = False) -> Any:
-        return await manager.create_session(title, metadata=metadata, workspace=workspace, project_id=project_id, own_workspace=own_workspace)
+    async def create_session(title: str, *, metadata: dict[str, Any] | None = None, workspace: Any = None, project_id: str | None = None, own_directory: bool = False) -> Any:
+        return await manager.create_session(title, metadata=metadata, workspace=workspace, project_id=project_id, own_directory=own_directory)
 
     application.create_session = create_session
     yield application

@@ -16,12 +16,11 @@ import { parseCsv } from "./csv";
 export { parseCsv } from "./csv";
 import { FileSkeleton } from "./feedback";
 
-/** Where the bytes come from: a file under an API file root (`/api/sessions/<id>` or `/api/workspaces/<name>`), or a File object from the composer.
+/** Where the bytes come from: a file under a session API root, or a File object from the composer.
  * `lines` ("20-40", or a single number) is what an answer cited: the file opens as source with that range marked. */
 export type PreviewSource = { base: string; path: string; lines?: string } | { file: File };
 
 export const sessionBase = (sessionId: string) => `/api/sessions/${sessionId}`;
-export const workspaceBase = (name: string) => `/api/workspaces/${encodeURIComponent(name)}`;
 
 export type PreviewKind = "image" | "markdown" | "csv" | "pdf" | "docx" | "sheet" | "audio" | "video" | "text" | "html" | "json" | "diff" | "other";
 

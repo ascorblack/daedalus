@@ -1,25 +1,22 @@
 import { memo, useCallback, useMemo, useRef, useState } from "react";
-import { api, Project, ProjectFolder, SessionList, SessionSummary, Settings, Workspace } from "../api";
+import { api, Project, ProjectFolder, SessionList, SessionSummary, Settings } from "../api";
 import { Avatar, Dot, Skeleton, Status, ToolPicker, fmtInterval, statusWord } from "../components";
 import { Sheet } from "../dialogs";
 import { relTime, shortModel, untilShort } from "../format";
-import { Folder, FREE, Row as RowModel, agentName, arrange, folderOpen, rememberFolder } from "../grouping";
+import { Folder, Row as RowModel, agentName, arrange, folderOpen, rememberFolder } from "../grouping";
 import { Icon } from "../icons";
-import { FilePreview, PreviewSource, workspaceBase } from "../preview";
 import { ProjectChip, useProjects } from "../projects";
 import { PageHeader, screenTitle } from "../shell";
 import { useQuery } from "../store";
 import { WindowedRows } from "../virtual";
-import { confirmAsync, errorText, fmtBytes } from "../ui";
+import { errorText } from "../ui";
 import { plural, t } from "../i18n";
-import { Files } from "./Session";
 
 type Filter = "all" | "working" | "loops";
 
 export function SessionsScreen({ onOpen, toast, current, compact, project = "", projects = [], onProjects }: { onOpen: (id: string) => void; toast: (t: string) => void; current?: string; compact?: boolean; project?: string; projects?: Project[]; onProjects?: () => void }) {
   const { data, error, loading } = useQuery<SessionList>("/api/sessions", { pollMs: 5000, staleMs: 3000 });
   const [creating, setCreating] = useState(() => new URLSearchParams(window.location.search).get("new") === "1");
-  const [showWorkspaces, setShowWorkspaces] = useState(false);
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
@@ -30,7 +27,7 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
   // three things that can change it, so typing in the search box does not re-walk a list that did not.
   const sessions = data?.sessions ?? [];
   const folders = useMemo(
-    () => arrange(sessions, data?.projects ?? [], data?.free ?? { total: 0, active: 0, loops: 0, last_message_at: "" }, { project, filter, query }),
+    () => arrange(sessions, data?.projects ?? [], { project, filter, query }),
     [data, project, filter, query],
   );
 
@@ -51,10 +48,8 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
         subtitle={data ? `${plural("agents.count", folders.total)}${folders.active ? ` · ${t("agents.active", { n: folders.active })}` : ""}${inProject ? ` · ${inProject.root}` : ""}` : undefined}
         actions={
           <>
-            {/* Not a folder glyph: Workspaces sits beside it with one, and two identical icons next to each other name nothing. */}
             {onProjects && <button className="iconbtn" onClick={onProjects} title={t("shell.projects")} aria-label={t("shell.projects")}><Icon name="skill" /></button>}
             <button className={`iconbtn ${searching ? "on" : ""}`} onClick={() => { setSearching((v) => !v); if (searching) setQuery(""); }} title={t("common.search")} aria-label={t("common.search")} aria-pressed={searching}><Icon name="search" /></button>
-            <button className="iconbtn" onClick={() => setShowWorkspaces(true)} title={t("agents.workspaces")} aria-label={t("agents.workspaces")}><Icon name="folder" /></button>
             <button className="iconbtn primary" onClick={() => setCreating(true)} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" /></button>
           </>
         }
@@ -88,11 +83,6 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
         ))}
       </div>
       {creating && <NewAgentSheet onClose={() => setCreating(false)} onCreated={onOpen} toast={toast} project={project} />}
-      {showWorkspaces && (
-        <Sheet title={t("agents.workspaces")} onClose={() => setShowWorkspaces(false)}>
-          <WorkspacesPanel onOpen={(id) => { setShowWorkspaces(false); onOpen(id); }} toast={toast} />
-        </Sheet>
-      )}
     </>
   );
 }
@@ -146,7 +136,6 @@ const FolderSection = memo(function FolderSection({ folder, onOpen, current, fil
   const section = useRef<HTMLElement | null>(null);
   const rows = useMemo(() => lines(folder.rows), [folder.rows]);
   const keys = useMemo(() => rows.map((line) => line.row.s.id), [rows]);
-  const free = folder.project === null;
   // The folder holding the open session opens itself, without remembering it: a sidebar whose
   // current row is behind a closed folder answers "where am I" with nothing.
   const mine = holds(folder.rows, current);
@@ -156,13 +145,12 @@ const FolderSection = memo(function FolderSection({ folder, onOpen, current, fil
     setOpen(next);
     rememberFolder(folder.key, next);
   };
-  if (free && folder.rows.length === 0 && folder.total === 0) return null;
   return (
     <section ref={section} className={`folder ${folder.system ? "system" : ""} ${showing ? "open" : ""}`}>
       <button className="folder-head" onClick={toggle} aria-expanded={showing}>
         <span className={`chev ${showing ? "down" : ""}`} aria-hidden>›</span>
-        <Icon name={folder.system ? "mic" : free ? "bots" : "folder"} size={16} />
-        <span className="folder-name truncate">{free ? t("agents.free") : folder.name}</span>
+        <Icon name={folder.system ? "mic" : "folder"} size={16} />
+        <span className="folder-name truncate">{folder.name}</span>
         {folder.active > 0 && <span className="folder-live" title={t("agents.active", { n: folder.active })}><Dot status="running" /></span>}
         {compact ? (
           <span className="folder-counts sub num" title={plural("agents.count", folder.total)}>{folder.total}</span>
@@ -175,9 +163,8 @@ const FolderSection = memo(function FolderSection({ folder, onOpen, current, fil
         )}
         {!compact && folder.last_message_at && <span className="folder-time sub num" title={new Date(folder.last_message_at).toLocaleString()}>{relTime(folder.last_message_at)}</span>}
       </button>
-      {showing && !compact && folder.project && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
-      {showing && !compact && free && <div className="folder-root sub">{t("agents.free.hint")}</div>}
-      {showing && folder.rows.length === 0 && <div className="folder-empty sub">{filtered ? t("common.nothing") : free ? t("agents.free.none") : t("agents.folder.none")}</div>}
+      {showing && !compact && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
+      {showing && folder.rows.length === 0 && <div className="folder-empty sub">{filtered ? t("common.nothing") : t("agents.folder.none")}</div>}
       {showing && (
         <WindowedRows
           keys={keys}
@@ -191,7 +178,6 @@ const FolderSection = memo(function FolderSection({ folder, onOpen, current, fil
               onOpen={onOpen}
               current={current === rows[i].row.s.id || rows[i].row.kids.some((c) => c.id === current)}
               fork={rows[i].fork}
-              free={free}
               compact={compact}
             />
           )}
@@ -220,15 +206,15 @@ function loopLine(s: SessionSummary): string {
 function sameRow(a: RowProps, b: RowProps): boolean {
   const l = a.s, r = b.s;
   if (l.id !== r.id || l.title !== r.title || l.status !== r.status || l.last_message_at !== r.last_message_at || l.model !== r.model || l.workspace_path !== r.workspace_path) return false;
-  if (a.current !== b.current || a.free !== b.free || a.compact !== b.compact || a.fork?.seq !== b.fork?.seq || a.fork?.of !== b.fork?.of) return false;
+  if (a.current !== b.current || a.compact !== b.compact || a.fork?.seq !== b.fork?.seq || a.fork?.of !== b.fork?.of) return false;
   if (JSON.stringify(l.metadata?.loop ?? null) !== JSON.stringify(r.metadata?.loop ?? null)) return false;
   if (a.kids.length !== b.kids.length) return false;
   return a.kids.every((k, i) => k.id === b.kids[i].id && k.status === b.kids[i].status && k.title === b.kids[i].title);
 }
 
-type RowProps = { s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number }; free?: boolean; compact?: boolean };
+type RowProps = { s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number }; compact?: boolean };
 
-const Row = memo(function Row({ s, kids, onOpen, current, fork, free, compact }: RowProps) {
+const Row = memo(function Row({ s, kids, onOpen, current, fork, compact }: RowProps) {
   const [showKids, setShowKids] = useState(false);
   const orphan = !!s.metadata?.subagent_of;
   const status = s.status as Status;
@@ -262,8 +248,7 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, free, compact }:
       <div className="erow-main">
         <div className="erow-head">
           <span className="erow-title clamp-2">{agentName(s)}</span>
-          {/* The one thing a row in the free bucket has to say about itself: its folder is its own. */}
-          {free && !fork && <span className="chip tiny" title={s.workspace_path}>{t("agents.own.chip")}</span>}
+          {s.workspace_own && !fork && <span className="chip tiny" title={s.workspace_path}>{t("agents.own.chip")}</span>}
           <span className="erow-time num" title={new Date(s.last_message_at).toLocaleString()}>{relTime(s.last_message_at)}</span>
         </div>
         <div className={`erow-meta ${spoken ? status : ""}`}>
@@ -307,12 +292,11 @@ function NewAgentSheet({ onClose, onCreated, toast, project: initial = "" }: { o
   const [loopMode, setLoopMode] = useState<"interval" | "dynamic">("interval");
   const [loopMinutes, setLoopMinutes] = useState("10");
   const [loopMax, setLoopMax] = useState("");
-  const [workspace, setWorkspace] = useState("");
   const [project, setProject] = useState(initial);
+  const [ownDirectory, setOwnDirectory] = useState(false);
   const [preset, setPreset] = useState("");
   const [advanced, setAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
-  const workspaces = useQuery<Workspace[]>("/api/workspaces", { staleMs: 30000 });
   const projects = useProjects();
   const chosen = (projects.data ?? []).find((p) => p.id === project);
   const settings = useQuery<Settings>("/api/settings", { staleMs: 60000 });
@@ -330,9 +314,7 @@ function NewAgentSheet({ onClose, onCreated, toast, project: initial = "" }: { o
       const loop = loopOn && loopText.trim()
         ? { instruction: loopText.trim(), mode: loopMode, interval_minutes: loopMode === "interval" ? Math.max(1, Number(loopMinutes) || 10) : null, max_runs: loopMax.trim() ? Math.max(1, Number(loopMax) || 1) : null }
         : undefined;
-      // A project and a workspace are two answers to the same question; the project wins, and the
-      // workspace select is not shown while one is chosen.
-      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff, loop, project_id: project || undefined, workspace: project ? undefined : workspace || undefined, preset: preset || undefined });
+      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff, loop, project_id: project || undefined, own_directory: ownDirectory, preset: preset || undefined });
       onClose();
       onCreated(created.id);
     } catch (e) {
@@ -341,10 +323,6 @@ function NewAgentSheet({ onClose, onCreated, toast, project: initial = "" }: { o
       setBusy(false);
     }
   }
-  const wsLabel = (w: Workspace) =>
-    `${w.own_session ? t("newagent.ws.session", { name: w.sessions.find((s) => s.id === w.name)?.title ?? w.name }) : w.name}` +
-    `${w.sessions.length ? plural("newagent.ws.sessions", w.sessions.length) : t("newagent.ws.unused")}` +
-    t("newagent.ws.files", { n: w.files });
   return (
     <Sheet title={t("newagent.title")} onClose={onClose}>
       <label className="field">{t("common.name")}</label>
@@ -360,25 +338,15 @@ function NewAgentSheet({ onClose, onCreated, toast, project: initial = "" }: { o
       </select>
       <label className="field">{t("newagent.where")}</label>
       <select className="field" value={project} onChange={(e) => setProject(e.target.value)}>
-        <option value="">{t("newagent.where.free")}</option>
+        <option value="">{t("newagent.where.newproject")}</option>
         {(projects.data ?? []).map((p) => (
           <option key={p.id} value={p.id} disabled={!p.reachable}>
             {p.name} · {p.root}{p.reachable ? "" : t("newagent.where.unmounted")}
           </option>
         ))}
       </select>
-      {chosen ? <div className="sub">{t("newagent.where.inside", { root: chosen.root })}</div> : <div className="sub">{t("newagent.where.free.hint")}</div>}
-      {!project && (
-        <>
-          <label className="field">{t("newagent.workspace")}</label>
-          <select className="field" value={workspace} onChange={(e) => setWorkspace(e.target.value)}>
-            <option value="">{t("newagent.workspace.own")}</option>
-            {(workspaces.data ?? []).map((w) => (
-              <option key={w.name} value={w.name}>{wsLabel(w)}</option>
-            ))}
-          </select>
-        </>
-      )}
+      {chosen ? <div className="sub">{t("newagent.where.inside", { root: chosen.root })}</div> : <div className="sub">{t("newagent.where.newproject.hint")}</div>}
+      {chosen && <label className="toggle-row"><input type="checkbox" checked={ownDirectory} onChange={(e) => setOwnDirectory(e.target.checked)} /><span>{t("newagent.directory.own")}</span><span className="sub">{t("newagent.directory.own.hint")}</span></label>}
       <button type="button" className="disclosure" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced}>
         <span className={`chev ${advanced ? "down" : ""}`}>›</span> {t("newagent.advanced")}{loopOn ? t("newagent.advanced.loop") : ""}{toolsOff.length ? t("newagent.advanced.tools", { n: toolsOff.length }) : ""}
       </button>
@@ -418,77 +386,7 @@ function NewAgentSheet({ onClose, onCreated, toast, project: initial = "" }: { o
   );
 }
 
-/** The directories under the workspaces root: who works in each, what is in it; make one, fill it, browse it, drop an unused one. */
-function WorkspacesPanel({ onOpen, toast }: { onOpen: (id: string) => void; toast: (t: string) => void }) {
-  const { data: workspaces, refresh } = useQuery<Workspace[]>("/api/workspaces", { staleMs: 0 });
-  const [name, setName] = useState("");
-  const [browsing, setBrowsing] = useState<Workspace | null>(null);
-  const [preview, setPreview] = useState<PreviewSource | null>(null);
-  async function create() {
-    const n = name.trim();
-    if (!n) return;
-    try {
-      await api.post("/api/workspaces", { name: n });
-      toast(t("ws.created", { name: n }));
-      setName("");
-      refresh();
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }
-  async function remove(w: Workspace) {
-    if (!(await confirmAsync(t("ws.delete.title", { name: w.name }), { body: plural("ws.delete.body", w.files), action: t("common.delete") }))) return;
-    try {
-      await api.delete(`/api/workspaces/${encodeURIComponent(w.name)}`);
-      toast(t("ws.deleted"));
-      refresh();
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }
-  const onClose = useCallback(() => setBrowsing(null), []);
-  return (
-    <div className="workspaces">
-      <div className="composer-row" style={{ marginTop: 0, marginBottom: 8 }}>
-        <input className="field" placeholder={t("ws.new.placeholder")} value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && create()} />
-        <button className="btn primary" disabled={!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name.trim())} onClick={create}>{t("common.create")}</button>
-      </div>
-      {!workspaces && <div className="sub">{t("common.loading")}</div>}
-      {workspaces?.length === 0 && <div className="sub">{t("ws.empty")}</div>}
-      {workspaces?.map((w) => (
-        <div key={w.name} className="ws-row">
-          <span aria-hidden>📁</span>
-          <div className="grow" style={{ minWidth: 0 }}>
-            <div className="ws-name">
-              {w.name}
-              {w.kind === "session" && <span className="badge" title={t("ws.badge.session.title")}>{t("ws.badge.session")}</span>}
-              {w.kind === "schedule" && <span className="badge" title={t("ws.badge.schedule.title", { name: w.schedule ?? "" })}>{t("ws.badge.schedule", { name: w.schedule ?? "" })}</span>}
-              {w.kind === "heartbeat" && <span className="badge">{t("ws.badge.heartbeat")}</span>}
-              {w.kind === "named" && w.sessions.length === 0 && <span className="badge">{t("ws.badge.unused")}</span>}
-            </div>
-            <div className="sub ws-meta">
-              {plural("ws.files", w.files)} · {fmtBytes(w.size)} · {relTime(w.mtime)}
-              {w.sessions.map((s) => (
-                <button key={s.id} className="linkbtn sub" onClick={() => onOpen(s.id)} title={t("ws.open.session")}> · {s.title}</button>
-              ))}
-            </div>
-          </div>
-          <button className="iconbtn small" onClick={() => setBrowsing(w)} title={t("ws.browse")} aria-label={t("ws.browse.label")}><Icon name="folder" size={15} /></button>
-          {w.sessions.length === 0 && w.kind === "named" && <button className="iconbtn small" onClick={() => remove(w)} title={t("common.delete")} aria-label={t("common.delete")}><Icon name="trash" size={15} /></button>}
-        </div>
-      ))}
-      {browsing && (
-        <Sheet title={<><span aria-hidden>📁</span> {browsing.name}</>} ariaLabel={t("ws.sheet", { name: browsing.name })} onClose={onClose}>
-          <Files base={workspaceBase(browsing.name)} uploadUrl={`${workspaceBase(browsing.name)}/upload`} onPreview={setPreview} toast={toast} />
-        </Sheet>
-      )}
-      {preview && <FilePreview src={preview} onClose={() => setPreview(null)} />}
-    </div>
-  );
-}
-
 export function useSessionTitles(): Record<string, string> {
   const { data } = useQuery<SessionList>("/api/sessions", { staleMs: 15000 });
   return useMemo(() => Object.fromEntries((data?.sessions ?? []).map((s) => [s.id, s.title])), [data]);
 }
-

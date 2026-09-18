@@ -1,5 +1,4 @@
-// How the Agents screen is arranged: folders for the projects, and below them the agents that work
-// in a directory of their own.
+// How the Agents screen is arranged: one folder for every project and its agents.
 //
 // All of it is pure, and that is the point — the screen renders what these functions return, and a
 // test can ask what the arrangement is without a browser. Nesting (a subagent under its leader, a
@@ -14,12 +13,11 @@ export type Kind = "waiting" | "working" | "loop" | "idle";
 /** One agent and what hangs off it: its subagents, and the forks taken from it (each with its own). */
 export type Row = { s: SessionSummary; kids: SessionSummary[]; forks: Row[] };
 
-/** A project's folder in the list, or the free bucket, which has no project behind it. */
+/** A project's folder in the list. */
 export type Folder = {
   key: string;
   name: string;
-  /** The project, or null for the free bucket: everything with a directory of its own. */
-  project: ProjectFolder | null;
+  project: ProjectFolder;
   /** True on the installation's own project — the concierge's — which is drawn with a mic and sorted first. */
   system: boolean;
   rows: Row[];
@@ -34,9 +32,6 @@ export type Folder = {
   loops: number;
   last_message_at: string;
 };
-
-/** The bucket key for agents with no project. Not an id, so it can never collide with one. */
-export const FREE = "\u0000free";
 
 const OPEN_PREFIX = "daedalus.folder.";
 
@@ -89,13 +84,11 @@ function rowSig(rows: Row[]): string {
  * Arrange the listing.
  *
  * `project` narrows the whole screen to one project (the shell's switcher); `filter` and `query`
- * apply inside every folder, the free bucket included, because a reader who filters wants the answer
- * across the screen and not per folder.
+ * apply inside every folder because a reader who filters wants the answer across the screen.
  */
 export function arrange(
   sessions: SessionSummary[],
   projects: ProjectFolder[],
-  counts: { total: number; active: number; loops: number; last_message_at: string },
   opts: { project?: string; filter?: Filter; query?: string } = {},
 ): Arranged {
   const { project = "", filter = "all", query = "" } = opts;
@@ -135,7 +128,8 @@ export function arrange(
 
   const byProject = new Map<string, Row[]>();
   for (const s of kept) {
-    const key = s.project_id && projects.some((p) => p.id === s.project_id) ? s.project_id : FREE;
+    const key = s.project_id;
+    if (!projects.some((p) => p.id === key)) continue;
     byProject.set(key, [...(byProject.get(key) ?? []), row(s)]);
   }
 
@@ -158,10 +152,6 @@ export function arrange(
       last_message_at: p.last_message_at,
     }))
     .sort((a, b) => (a.system !== b.system ? (a.system ? -1 : 1) : a.name.localeCompare(b.name)));
-  if (!project) {
-    folders.push({ key: FREE, name: "", project: null, system: false, rows: byProject.get(FREE) ?? [], sig: rowSig(byProject.get(FREE) ?? []), total: counts.total, active: counts.active, loops: counts.loops, last_message_at: counts.last_message_at });
-  }
-
   return {
     folders,
     shown: kept.length,

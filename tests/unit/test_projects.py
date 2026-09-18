@@ -1,9 +1,8 @@
 """Projects: the folder is the wall.
 
 A session in a project reads and writes inside its root and nowhere else — through the tools and
-through the API — and a session without one behaves exactly as every session did before projects
-existed. The rest is the store, the migration that makes room for it, and the paragraph the agent
-is told.
+through the API. Every session belongs to a project; a private directory is a child inside it.
+The rest is the store, the migration, and the paragraph the agent is told.
 """
 
 from __future__ import annotations
@@ -32,12 +31,10 @@ HEADERS = {"X-Daedalus-Token": "tok"}
 # -- the store and its migration -------------------------------------------------------------
 
 
-async def test_the_migration_adds_the_table_and_a_nullable_column(db: Database) -> None:
-    """Nothing is backfilled: every session that existed keeps a project_id of NULL, which is what
-    makes it a session with a directory of its own."""
+async def test_the_migration_makes_project_membership_required(db: Database) -> None:
     columns = {r[1]: r for r in await db.fetchall("PRAGMA table_info(sessions)")}
     assert "project_id" in columns
-    assert columns["project_id"][3] == 0, "project_id must be nullable — existing sessions have none"
+    assert columns["project_id"][3] == 1
     tables = {r[0] for r in await db.fetchall("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert "projects" in tables
 
@@ -49,18 +46,18 @@ async def test_a_project_round_trips_and_the_link_to_sessions_is_the_column(db: 
     project = await store.create("Bakery site", str(root), settings=ProjectSettings(snapshots=True))
     assert project.root == root and project.settings.snapshots is True and project.reachable is True
 
-    await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at) VALUES ('s1', 't', 'one', '', '')")
-    await store.attach("s1", project.id)
+    await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, project_id) VALUES ('s1', 't', 'one', '', '', ?)", (project.id,))
     assert (await store.for_session("s1")).id == project.id
     assert await store.sessions_of(project.id) == [{"id": "s1", "title": "one"}]
     assert await store.by_session() == {"s1": project.id}
 
-    moved = await store.update(project.id, name="Bakery", root=str(tmp_path / "site2"))
-    assert moved.name == "Bakery" and moved.root == tmp_path / "site2" and moved.settings.snapshots is True
+    moved = await store.update(project.id, name="Bakery")
+    assert moved.name == "Bakery" and moved.root == root and moved.settings.snapshots is True
 
-    # Removing a project forgets it; the folder and the session are both still there.
+    with pytest.raises(ProjectError, match="still has sessions"):
+        await store.delete(project.id)
+    await db.execute("DELETE FROM sessions WHERE id = 's1'")
     await store.delete(project.id)
-    assert await store.for_session("s1") is None
     assert root.is_dir()
 
 
@@ -173,16 +170,14 @@ async def test_the_file_tools_refuse_a_path_outside_the_project(tmp_path: Path) 
     ctx = ToolContext(tenant_id="t", run_id="r", session_id="p-tools", metadata={"tool_call_id": "c"})
     try:
         assert "inside" in (await read_file().invoke(ctx, {"path": "ok.txt"})).content
-        # The refusal is raised where the path is resolved rather than returned by each tool: a tool
-        # that forgot to check would still be refused, and the dispatcher turns it into the error the
-        # model reads. Nothing outside the root is read, written or listed.
+        # Nothing outside the root is read, written or listed, and the tool gives the agent a useful refusal.
         for tool, args in (
             (read_file, {"path": str(outside / "secret.txt")}),
             (write_file, {"path": "../outside/planted.txt", "content": "x"}),
             (find_files, {"pattern": "*.txt", "path": str(outside)}),
         ):
-            with pytest.raises(PathOutsideProject, match="outside this project"):
-                await tool().invoke(ctx, args)
+            result = await tool().invoke(ctx, args)
+            assert result.is_error and "outside this project" in result.content
         assert not (outside / "planted.txt").exists()
     finally:
         locator.unregister("p-tools")
@@ -192,8 +187,8 @@ async def test_the_file_tools_refuse_a_path_outside_the_project(tmp_path: Path) 
 
 
 def _app(settings: Settings, config: RuntimeConfig, db: Database, manager: SessionManager) -> Any:
-    async def create_session(title: str, *, metadata: dict[str, Any] | None = None, project_id: str | None = None, workspace: Path | None = None) -> Any:
-        return await manager.create_session(title, metadata=metadata, project_id=project_id, workspace=workspace)
+    async def create_session(title: str, *, metadata: dict[str, Any] | None = None, project_id: str | None = None, workspace: Path | None = None, own_directory: bool = False) -> Any:
+        return await manager.create_session(title, metadata=metadata, project_id=project_id, workspace=workspace, own_directory=own_directory)
 
     return SimpleNamespace(settings=settings, config=config, db=db, manager=manager, front=None, extensions={}, guard=None, create_session=create_session)
 
@@ -257,16 +252,15 @@ async def test_project_crud_and_a_session_that_works_in_one(settings: Settings, 
 
             busy = await client.delete(f"/api/projects/{project['id']}", headers=HEADERS)
             assert busy.status_code == 409 and "2 agents work in" in busy.json()["detail"]
-            gone = await client.delete(f"/api/projects/{project['id']}", headers=HEADERS, params={"detach": 1})
-            assert sorted(gone.json()["detached"]) == sorted([sid, second]) and gone.status_code == 200
-            assert (await client.get("/api/projects", headers=HEADERS)).json() == []
+            gone = await client.delete(f"/api/projects/{project['id']}", headers=HEADERS)
+            assert gone.status_code == 409
             # Not one file of it was touched.
             assert (root / "menu" / "items.json").is_file()
     finally:
         await manager.close()
 
 
-async def test_a_session_created_without_a_project_keeps_its_own_workspace(settings: Settings, config: RuntimeConfig, db: Database) -> None:
+async def test_a_session_created_without_a_project_choice_gets_a_project(settings: Settings, config: RuntimeConfig, db: Database) -> None:
     manager = SessionManager(settings, config, db=db)
     await manager.start()
     try:
@@ -274,19 +268,18 @@ async def test_a_session_created_without_a_project_keeps_its_own_workspace(setti
             made = await client.post("/api/sessions", headers=HEADERS, json={"title": "Plain"})
             sid = made.json()["id"]
             detail = (await client.get(f"/api/sessions/{sid}", headers=HEADERS)).json()
-            assert detail["project"] is None
-            assert detail["workspace"] == str(manager.workspace_for(sid))
-            assert detail["workspace_own"] is True
+            assert detail["project"] is not None
+            assert Path(detail["workspace"]).parent == settings.workspaces_dir
+            assert detail["workspace_own"] is False
             listing = (await client.get("/api/sessions", headers=HEADERS)).json()
             rows = listing["sessions"]
-            assert [r["project_id"] for r in rows if r["id"] == sid] == [None]
-            # A session with no project is in the free bucket, and the bucket counts it.
-            assert listing["free"]["total"] >= 1
+            assert all(r["project_id"] for r in rows if r["id"] == sid)
+            assert "free" not in listing
         state = manager.live_state(sid)
-        assert state is not None and state.project is None
-        assert state.services is not None and state.services.project_root is None
-        # Which is the point: it resolves paths the way it always has.
-        assert state.services.resolve("/etc/hostname") == Path("/etc/hostname")
+        assert state is not None and state.project is not None
+        assert state.services is not None and state.services.project_root == state.workspace
+        with pytest.raises(PathOutsideProject):
+            state.services.resolve("/etc/hostname")
     finally:
         await manager.close()
 
@@ -402,8 +395,8 @@ async def test_a_subagent_of_a_plain_session_still_shares_its_directory(settings
         leader = await manager.create_session("lead")
         result = await Subagents(app).spawn(leader_id=leader.session.id, task="count", name="counter")
         child = await manager.get_state(result["session_id"])
-        assert child is not None and child.workspace == leader.workspace and child.project is None
-        assert child.services is not None and child.services.project_root is None
+        assert child is not None and child.workspace == leader.workspace and child.project == leader.project
+        assert child.services is not None and child.services.project_root == leader.workspace
     finally:
         await manager.close()
 
@@ -434,6 +427,29 @@ async def test_a_fork_of_a_project_session_stays_in_it_and_copies_nothing(settin
                 fork.services.resolve("/etc/passwd")
             # Not one byte of the folder was duplicated into the state directory.
             assert not (manager.workspace_for(body["id"]) / ".git").exists()
+    finally:
+        await manager.close()
+
+
+async def test_a_fork_of_a_private_directory_gets_a_private_sibling(settings: Settings, config: RuntimeConfig, db: Database) -> None:
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    try:
+        async with await _client(settings, config, db, manager) as client:
+            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Research"})).json()
+            sid = (await client.post("/api/sessions", headers=HEADERS, json={"title": "one", "project_id": project["id"], "own_directory": True})).json()["id"]
+            source = await manager.get_state(sid)
+            assert source is not None
+            (source.workspace / "result.txt").write_text("kept apart", encoding="utf-8")
+
+            response = await client.post(f"/api/sessions/{sid}/fork", headers=HEADERS, json={"seq": 1})
+            assert response.status_code == 200
+            body = response.json()
+            fork = await manager.get_state(body["id"])
+            assert fork is not None and fork.project is not None and fork.project.id == project["id"]
+            assert fork.workspace != source.workspace and fork.workspace.parent == source.workspace.parent
+            assert (fork.workspace / "result.txt").read_text(encoding="utf-8") == "kept apart"
+            assert body["workspace_copied"] is True and body["workspace_shared"] is False
     finally:
         await manager.close()
 
@@ -591,9 +607,8 @@ async def test_a_project_may_not_be_the_installation_or_the_whole_home_folder(db
     assert (await store.create("Work", str(home / "work"))).root == home / "work"
 
 
-async def test_a_project_cannot_be_moved_or_removed_while_an_agent_is_working_in_it(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
-    """Re-pointing a loaded session's workspace mid-turn means its next tool call lands in a different
-    directory from its earlier reads — the refusal ``revert`` and ``fork`` already make."""
+async def test_a_project_root_is_immutable_and_a_nonempty_project_cannot_be_removed(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    """A project keeps its directory for life and cannot strand sessions when removed."""
     manager = SessionManager(settings, config, db=db)
     await manager.start()
     root = tmp_path / "repo"
@@ -609,13 +624,14 @@ async def test_a_project_cannot_be_moved_or_removed_while_an_agent_is_working_in
             assert listing[0]["sessions"] == [{"id": sid, "title": "worker", "running": True}]
 
             moved = await client.patch(f"/api/projects/{project['id']}", headers=HEADERS, json={"root": str(tmp_path / "elsewhere")})
-            assert moved.status_code == 409 and "working in Repo right now" in moved.json()["detail"]
+            assert moved.status_code == 422, "project roots are immutable and no obsolete setting is accepted"
             removed = await client.delete(f"/api/projects/{project['id']}", headers=HEADERS, params={"detach": 1})
-            assert removed.status_code == 409 and "mid-turn" in removed.json()["detail"]
+            assert removed.status_code == 409 and "works in Repo" in removed.json()["detail"]
             # A rename touches no directory and is not refused.
             assert (await client.patch(f"/api/projects/{project['id']}", headers=HEADERS, json={"name": "Repo 2"})).status_code == 200
 
             manager.live_state(sid).pending = None
+            await manager.delete_session(sid)
             assert (await client.delete(f"/api/projects/{project['id']}", headers=HEADERS, params={"detach": 1})).status_code == 200
     finally:
         await manager.close()

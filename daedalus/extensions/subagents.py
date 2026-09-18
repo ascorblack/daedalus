@@ -184,11 +184,9 @@ class Subagents:
         # root and the same wall. The project is passed rather than the directory, because the
         # directory alone would give the child the leader's files with none of the containment —
         # and moving the project would then move the leader and leave the child behind.
-        if leader.project is not None:
-            child = await manager.create_session(f"[sub] {label}", metadata=metadata, project_id=leader.project.id)
-        else:
-            metadata["workspace"] = str(leader.workspace)
-            child = await manager.create_session(f"[sub] {label}", workspace=leader.workspace, metadata=metadata)
+        if leader.project is None:
+            raise RuntimeError("the leader has no project")
+        child = await manager.create_session(f"[sub] {label}", metadata=metadata, project_id=leader.project.id)
         cid = child.session.id
         if model is not None:
             await manager.set_model(cid, preset=model)

@@ -223,7 +223,7 @@ async def test_delete_session_removes_records_and_workspace(settings: Settings, 
     await manager.submit(state.session.id, "hello")
     await waiter
     assert await manager.delete_session(state.session.id)
-    assert not state.workspace.exists()
+    assert state.workspace.exists(), "deleting a session never deletes its project's files"
     for table in ("sessions", "session_messages", "runs", "live_control"):
         row = await db.fetchone(f"SELECT count(*) c FROM {table}")
         assert row["c"] == 0, table

@@ -52,7 +52,7 @@ def config() -> RuntimeConfig:
 
 @pytest.fixture
 async def db(settings: Settings) -> Database:
-    database = Database(settings.db_path)
+    database = Database(settings.db_path, workspaces_dir=settings.workspaces_dir)
     await database.open()
     yield database  # type: ignore[misc]
     await database.close()

@@ -78,7 +78,7 @@ class _SharedManager:
                 settings.state_dir.mkdir(parents=True, exist_ok=True)
                 settings.workspaces_dir.mkdir(parents=True, exist_ok=True)
                 config = RuntimeConfig.load(settings.config_path)
-                self.db = Database(settings.db_path)
+                self.db = Database(settings.db_path, workspaces_dir=settings.workspaces_dir)
                 await self.db.open()
                 self.manager = SessionManager(settings, config, db=self.db)
                 await self.manager.start(recovering=False)

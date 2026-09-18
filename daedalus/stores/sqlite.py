@@ -114,10 +114,22 @@ class SqliteSessionStore(ISessionStore):
         self._db = db
         self._view = view
 
-    async def create(self, session: Session) -> None:
+    async def create(self, session: Session, *, project_id: str | None = None) -> None:
+        if project_id is None:
+            project_id = session.id
+            await self._db.execute(
+                "INSERT OR IGNORE INTO projects(id, name, root, created_at, settings, system) VALUES (?, ?, ?, ?, ?, '')",
+                (
+                    project_id,
+                    session.title.strip() or "Project",
+                    str(self._db.workspaces_dir / session.id),
+                    session.created_at.isoformat(),
+                    '{"snapshots":true,"system":""}',
+                ),
+            )
         await self._db.execute(
-            "INSERT OR REPLACE INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata, project_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 session.id,
                 session.tenant_id,
@@ -125,6 +137,7 @@ class SqliteSessionStore(ISessionStore):
                 session.created_at.isoformat(),
                 session.last_message_at.isoformat(),
                 json.dumps(session.metadata),
+                project_id,
             ),
         )
 

@@ -43,7 +43,7 @@ def ago(seconds: float) -> str:
 
 
 def installation(agents: int, folders: int) -> dict:
-    """``folders`` projects, the agents spread over them, and a fifth of them free.
+    """``folders`` projects, with every agent in one and a fifth using private children.
 
     Every eleventh agent is a subagent of the one before it and every seventeenth a fork of it, so
     the nesting the screen does is part of what is being measured and not a case it never meets.
@@ -68,8 +68,9 @@ def installation(agents: int, folders: int) -> dict:
     sessions = []
     for i in range(agents):
         sid = f"{i:012x}"
-        free = i % 5 == 0
-        project = None if free else projects[i % folders]["id"]
+        own = i % 5 == 0
+        project_row = projects[i % folders]
+        project = project_row["id"]
         meta: dict = {}
         if i % 11 == 10 and i:
             meta = {"subagent_of": f"{i - 1:012x}", "subagent_name": f"helper {i}"}
@@ -88,11 +89,11 @@ def installation(agents: int, folders: int) -> dict:
                 "run_id": "r1" if status == "running" else None,
                 "model": MODELS[i % len(MODELS)],
                 "workspace": sid,
-                "workspace_path": f"/home/operator/.daedalus/workspaces/{sid}",
-                "workspace_own": free,
+                "workspace_path": f"{project_row['root']}/.agents/{sid}" if own else project_row["root"],
+                "workspace_own": own,
                 "metadata": meta,
                 "project_id": project,
-                "project": None if project is None else f"Project {int(project[1:]):02d}",
+                "project": project_row["name"],
             }
         )
     for p in projects:
@@ -100,14 +101,7 @@ def installation(agents: int, folders: int) -> dict:
         p["total"] = len(mine)
         p["active"] = sum(1 for s in mine if s["status"] in ("running", "waiting"))
         p["loops"] = sum(1 for s in mine if s["metadata"].get("loop"))
-    free_rows = [s for s in sessions if s["project_id"] is None]
-    free = {
-        "total": len(free_rows),
-        "active": sum(1 for s in free_rows if s["status"] in ("running", "waiting")),
-        "loops": sum(1 for s in free_rows if s["metadata"].get("loop")),
-        "last_message_at": ago(20),
-    }
-    return {"sessions": sessions, "projects": projects, "free": free}
+    return {"sessions": sessions, "projects": projects}
 
 
 class Stub(BaseHTTPRequestHandler):
@@ -132,8 +126,6 @@ class Stub(BaseHTTPRequestHandler):
             return Stub.listing
         if path == "/api/projects":
             return [{**p, "sessions": []} for p in Stub.listing["projects"]]
-        if path == "/api/workspaces":
-            return []
         if path in GATES:
             return GATES[path]
         Stub.unhandled.record(path)

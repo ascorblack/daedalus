@@ -60,7 +60,7 @@ from daedalus.security import redact
 from daedalus.stores.blobs import FileBlobStore
 from daedalus.stores.database import Database
 from daedalus.stores.persistent import PersistentMemory, PersistentWorkspace
-from daedalus.stores.projects import Project, ProjectStore
+from daedalus.stores.projects import Project, ProjectSettings, ProjectStore
 from daedalus.stores.sqlite import (
     LiveControlStore,
     SqliteEventStream,
@@ -346,6 +346,7 @@ class SessionManager:
         # a project root is reachable to every agent in it and is an open root to the policy.
         self.projects = ProjectStore(
             db,
+            managed_root=settings.workspaces_dir,
             reserved=[Path(p) for p in settings.sandbox_never_writable] + [settings.secrets_dir, settings.workspaces_dir],
             home=Path.home(),
         )
@@ -632,25 +633,19 @@ class SessionManager:
         return self.settings.workspaces_dir / session_id
 
     def workspace_of(self, session_id: str, metadata: dict[str, Any], project: Project | None) -> Path:
-        """Where a session works, from the two things that decide it: its project and its metadata.
-
-        The rule, in one place because three callers need the same answer (creation, loading, and a
-        project that moved):
-
-        * no project — the directory named in the metadata (a subagent in its leader's, a session
-          attached to a named workspace), or one of the session's own under the workspaces root;
-        * a project — the project's folder, which is why moving the project moves every session in
-          it and there is no second copy of the path to fall out of step;
-        * a project and ``own_workspace`` — a directory of the session's own, named in the metadata.
-          It is listed under the project and it does not share the project's files, in either
-          direction: the directory is outside the project's folder, so no session walled at that
-          folder can reach into it. That is what the concierge asks for when it hands an agent work
-          that has nothing to do with the rest.
-        """
-        named = metadata.get("workspace")
-        if project is not None:
-            return Path(str(named)) if metadata.get("own_workspace") and named else project.root
-        return Path(str(named)) if named else self.workspace_for(session_id)
+        """Return the project root or the session's project-relative private directory."""
+        if project is None:
+            raise RuntimeError(f"session {session_id} has no project")
+        relative = str(metadata.get("directory") or "").strip()
+        if not relative:
+            return project.root
+        candidate = Path(relative)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise RuntimeError(f"session {session_id} has an invalid project directory")
+        target = Path(os.path.normpath(project.root / candidate))
+        if project.root != target and project.root not in target.parents:
+            raise RuntimeError(f"session {session_id} has a directory outside its project")
+        return target
 
     def locator_services(self, session_id: str) -> SessionServices | None:
         state = self._states.get(session_id)
@@ -664,31 +659,27 @@ class SessionManager:
         workspace: Path | None = None,
         metadata: dict[str, Any] | None = None,
         project_id: str | None = None,
-        own_workspace: bool = False,
+        own_directory: bool = False,
     ) -> SessionState:
         sid = session_id or uuid.uuid4().hex[:12]
         project = await self.projects.get(project_id) if project_id else None
         if project_id and project is None:
             raise KeyError(project_id)
-        # A session may work in a directory that is not its own (a subagent in its leader's, a session the
-        # operator attached to an existing workspace): the metadata names it, and get_state reads the same key.
-        # A project overrides both: its root IS the workspace, and moving the project moves every session in it,
-        # which is why the project is the stored link and the directory is derived from it.
         meta = dict(metadata or {})
-        if project is not None and own_workspace:
-            # Listed in the project, working in a directory of its own under the workspaces root —
-            # outside the project's folder, not a subdirectory of it. Nested, containment ran only
-            # one way: the agents walled at the project's folder *contain* every private directory
-            # in it, so "its files are nobody else's" was true of the agent and false of everybody
-            # else. Outside, neither folder contains the other and the wall holds both ways.
-            meta["own_workspace"] = True
-            meta["workspace"] = str(self.workspace_for(sid))
-        workspace = self.workspace_of(sid, meta, project) if (project is not None or not workspace) else workspace
+        if project is None:
+            project = (
+                await self.projects.adopt_directory(title, workspace)
+                if workspace is not None
+                else await self.projects.create(title, settings=ProjectSettings(snapshots=True), project_id=sid)
+            )
+        if own_directory:
+            meta["directory"] = f".agents/{sid}"
+        else:
+            meta.pop("directory", None)
+        workspace = self.workspace_of(sid, meta, project)
         _ensure_inbox(workspace, project)
         session = Session(id=sid, tenant_id=TENANT, title=title, metadata=dict(meta))
-        await self.sessions.create(session)
-        if project is not None:
-            await self.projects.attach(sid, project.id)
+        await self.sessions.create(session, project_id=project.id)
         state = SessionState(session=session, workspace=workspace, metadata=dict(meta), project=project)
         self._states[sid] = state
         self.register_services(state)
@@ -881,9 +872,8 @@ class SessionManager:
             await conn.execute("DELETE FROM verifications WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM learning_records WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        # A subagent shares its leader's workspace: only a session's own directory is ever removed — and not
-        # while another session (one the operator attached to it) still works there.
-        if delete_workspace and state.workspace == self.workspace_for(session_id) and state.workspace.exists() and state.workspace.is_relative_to(self.settings.workspaces_dir):
+        # A private child belongs to this session. A project root never goes with a session.
+        if delete_workspace and state.metadata.get("directory") and state.workspace.exists() and state.project is not None and state.workspace.is_relative_to(state.project.root):
             if await self.workspace_users(state.workspace):
                 logger.warning("session %s deleted; its workspace stays, other sessions work in it", session_id)
             else:
@@ -893,16 +883,17 @@ class SessionManager:
     async def workspace_users(self, workspace: Path) -> list[dict[str, str]]:
         """The sessions that work in ``workspace``: a project's, their own directory, or one they were attached to."""
         target = workspace.resolve()
-        roots = {p.id: p.root for p in await self.projects.list()}
+        projects = {p.id: p for p in await self.projects.list()}
         out: list[dict[str, str]] = []
         for row in await self.db.fetchall("SELECT id, title, metadata, project_id FROM sessions"):
             try:
-                named = json.loads(row["metadata"] or "{}").get("workspace")
+                metadata = json.loads(row["metadata"] or "{}")
             except (ValueError, AttributeError):
-                named = None
-            # A project's root comes first: a session in one has no workspace in its metadata, and
-            # without this the sessions sharing a project would not see each other in the list.
-            path = roots.get(row["project_id"]) or (Path(str(named)) if named else self.workspace_for(row["id"]))
+                metadata = {}
+            project = projects.get(row["project_id"])
+            if project is None:
+                continue
+            path = self.workspace_of(row["id"], metadata, project)
             if path.resolve() == target:
                 out.append({"id": row["id"], "title": row["title"]})
         return out
@@ -1330,14 +1321,14 @@ class SessionManager:
                 await self.events.delete_snapshot(run["id"])
             marker = Message(
                 role=MessageRole.user,
-                content_blocks=[TextBlock(text=f"[history cleared: {len(history)} message(s) left the working history; the workspace and the session's settings stay]")],
+                content_blocks=[TextBlock(text=f"[history cleared: {len(history)} message(s) left the working history; the project files and the session's settings stay]")],
                 metadata={"daedalus.origin": "clear", "daedalus.clear": {"dropped": len(history)}},
             )
             await self.sessions.append_transcript(session_id, [marker])
             return {"dropped": len(history)}
 
     async def fork_into(self, source_id: str, seq: int, target: SessionState) -> dict[str, Any]:
-        """Give ``target`` the source's history before transcript ``seq`` and a copy of its workspace as of then.
+        """Give ``target`` the source's history before transcript ``seq`` and the right project files.
 
         Turns a revert undid and turns a compaction summary already stands for are left out of
         the working history; the archived originals still go into the fork's transcript, and
@@ -1471,12 +1462,7 @@ class SessionManager:
         return removed
 
     async def reload_project(self, project: Project | None, project_id: str) -> None:
-        """Point the sessions of ``project_id`` at what the project is now — a new root, new settings, or gone.
-
-        A session already loaded in this process holds its workspace and its services; without this,
-        a renamed root would reach only the sessions opened after it, and the ones already open would
-        keep writing into the old folder.
-        """
+        """Refresh the editable project value held by loaded sessions."""
         for state in self._states.values():
             if state.project is None or state.project.id != project_id:
                 continue
@@ -1486,40 +1472,18 @@ class SessionManager:
                 _ensure_inbox(state.workspace, project)
             self.register_services(state)
 
-    async def attach_project(self, session_id: str, project: Project | None, *, own_workspace: bool = False) -> SessionState:
-        """Move a session into a project, or out of every project, and point it at the right folder.
-
-        The directory follows the link: into a project it is the project's folder unless the caller
-        keeps the session's own one, in which case it is the folder the session is working in *now*.
-        The files are not moved and not copied; where the session works changes, what is on disk does
-        not — and "keeps its own directory" therefore has to mean the same directory, not a fresh
-        empty one. Taking the default would have stranded everything a session had written in the
-        folder it was in, because a session that once took a project's folder has no directory of
-        its own in its metadata to go back to.
-        """
+    async def attach_project(self, session_id: str, project: Project, *, own_directory: bool = False) -> SessionState:
+        """Move a session to a project root or to its private child in that project."""
         state = await self.get_state(session_id)
         if state is None:
             raise KeyError(session_id)
         metadata = dict(state.session.metadata)
-        current = state.workspace
-        if project is not None and not own_workspace:
-            metadata.pop("own_workspace", None)
-            metadata.pop("workspace", None)
-        elif project is not None:
-            # ``workspace_of`` reads the directory out of the metadata for a project session that
-            # keeps its own, so it is written there as a concrete path — the one it is in now.
-            metadata["own_workspace"] = True
-            metadata["workspace"] = str(current)
+        if own_directory:
+            metadata["directory"] = f".agents/{session_id}"
         else:
-            metadata.pop("own_workspace", None)
-            if current == self.workspace_for(session_id):
-                # The directory it would be given anyway: naming it would only pin a path that is
-                # derived from the workspaces root and moves with it.
-                metadata.pop("workspace", None)
-            else:
-                metadata["workspace"] = str(current)
+            metadata.pop("directory", None)
         await self.sessions.update_metadata(session_id, metadata)
-        await self.projects.attach(session_id, project.id if project is not None else None)
+        await self.projects.attach(session_id, project.id)
         state.session.metadata.clear()  # the Session model is frozen; its dict is the thing that is kept
         state.session.metadata.update(metadata)
         state.metadata = dict(metadata)
@@ -1732,6 +1696,11 @@ class SessionManager:
                 raise RuntimeError("the bot is stopping; the run starts after the restart")
             if self.recovering and not state.running:
                 raise RuntimeError("the bot is starting up and first continues the runs it left behind; try again in a moment")
+            if not state.workspace.is_dir():
+                name = state.project.name if state.project is not None else state.session.title
+                raise RuntimeError(f"the working directory for {name} is not reachable; restore or mount it before starting a run")
+            if not os.access(state.workspace, os.W_OK):
+                raise RuntimeError(f"the working directory for {state.session.title} is not writable")
             body, image_refs = await self._ingest_attachments(state, text, attachments)
             if state.pending is not None:
                 if as_answer:

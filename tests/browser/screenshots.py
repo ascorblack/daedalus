@@ -59,11 +59,13 @@ S9, S10, S11 = "2c3d4e5f6a1b", "3d4e5f6a1b2c", "4e5f6a1b2c3d"
 LOOP = {"mode": "interval", "interval_seconds": 5400, "status": "active", "run_count": 14, "max_runs": None, "next_run_at": ahead(minutes=38), "last_run_at": ago(minutes=52), "last_reason": None, "stop_reason": None, "pause_note": None, "instruction": "Read the support inbox, answer what you can, and put the rest on the board."}
 
 
-P1, P2, PV = "9f3c2a1b7d40", "2e7b5c9a1f88", "7c1e4d9f2a06"
+P1, P2, P3, P4, PV = "9f3c2a1b7d40", "2e7b5c9a1f88", "4c6d8e0f2a13", "6e8f0a2b4c35", "7c1e4d9f2a06"
 
 PROJECTS = [
     {"id": P1, "name": "Bakery site", "root": "/home/operator/work/bakery", "created_at": ago(days=9), "settings": {"snapshots": True}, "reachable": True, "writable": True, "sessions": [{"id": "a1b2c3d4e5f6", "title": "Bakery site", "running": True}, {"id": "b2c3d4e5f6a1", "title": "Bakery site: photos", "running": False}, {"id": "e5f6a1b2c3d4", "title": "Bakery site (fork @412)", "running": False}]},
     {"id": P2, "name": "Expenses", "root": "/home/operator/work/expenses", "created_at": ago(days=4), "settings": {"snapshots": False}, "reachable": True, "writable": True, "sessions": [{"id": "f6a1b2c3d4e5", "title": "Expense tracker", "running": False}]},
+    {"id": P3, "name": "Support", "root": "/home/operator/work/support", "created_at": ago(days=6), "settings": {"snapshots": True}, "reachable": True, "writable": True, "sessions": [{"id": S3, "title": "Support inbox", "running": False}]},
+    {"id": P4, "name": "Weekly digest", "root": "/home/operator/work/digest", "created_at": ago(days=5), "settings": {"snapshots": True}, "reachable": True, "writable": True, "sessions": [{"id": S4, "title": "Weekly digest", "running": True}]},
     # A folder added but not mounted yet: in Docker that is a restart away, and the app says so.
     {"id": "5a8d1c0b6e22", "name": "Courier rates", "root": "/home/operator/documents/courier", "created_at": ago(hours=2), "settings": {"snapshots": False}, "reachable": False, "writable": False, "sessions": []},
     # The installation's own: the concierge and what it started by being spoken to.
@@ -71,26 +73,25 @@ PROJECTS = [
 ]
 
 
-def session(id_: str, title: str, model: str, *, status: str = "idle", last: str, workspace: str | None = None, own: bool = True, meta: dict | None = None, project: str | None = None) -> dict:
-    name = next((p["name"] for p in PROJECTS if p["id"] == project), None)
-    root = next((p["root"] for p in PROJECTS if p["id"] == project), None)
-    path = root if (root and own is False) else f"/home/operator/.daedalus/workspaces/{workspace or id_}"
-    return {"id": id_, "title": title, "status": status, "created_at": ago(days=3), "last_message_at": last, "run_id": "run1" if status == "running" else None, "model": model, "workspace": workspace or id_, "workspace_path": path, "workspace_own": own, "metadata": meta or {}, "project_id": project, "project": name}
+def session(id_: str, title: str, model: str, *, status: str = "idle", last: str, own: bool = False, meta: dict | None = None, project: str) -> dict:
+    row = next(p for p in PROJECTS if p["id"] == project)
+    path = f"{row['root']}/.agents/{id_}" if own else row["root"]
+    return {"id": id_, "title": title, "status": status, "created_at": ago(days=3), "last_message_at": last, "run_id": "run1" if status == "running" else None, "model": model, "workspace": path.rsplit("/", 1)[-1], "workspace_path": path, "workspace_own": own, "metadata": meta or {}, "project_id": project, "project": row["name"]}
 
 
 SESSIONS = [
     session(S1, "Bakery site", "Claude Opus 5", status="running", last=ago(seconds=40), project=P1),
-    session(S2, "Bakery site: photos", "Local Qwen3.8", last=ago(minutes=12), workspace=S1, own=False, project=P1),
-    session(S3, "Support inbox", "GPT-5.6 Luna", last=ago(minutes=52), meta={"loop": LOOP}),
-    session(S7, "[sub] triage", "GPT-5.6 Luna", last=ago(minutes=53), meta={"subagent_of": S3, "subagent_name": "triage"}),
-    session(S8, "[sub] reply-drafts", "GPT-5.6 Luna", last=ago(minutes=51), meta={"subagent_of": S3, "subagent_name": "reply-drafts"}),
-    session(S4, "Weekly digest", "DeepSeek Flash", status="waiting", last=ago(minutes=4)),
+    session(S2, "Bakery site: photos", "Local Qwen3.8", last=ago(minutes=12), project=P1),
+    session(S3, "Support inbox", "GPT-5.6 Luna", last=ago(minutes=52), meta={"loop": LOOP}, project=P3),
+    session(S7, "[sub] triage", "GPT-5.6 Luna", last=ago(minutes=53), meta={"subagent_of": S3, "subagent_name": "triage"}, project=P3),
+    session(S8, "[sub] reply-drafts", "GPT-5.6 Luna", last=ago(minutes=51), meta={"subagent_of": S3, "subagent_name": "reply-drafts"}, project=P3),
+    session(S4, "Weekly digest", "DeepSeek Flash", status="waiting", last=ago(minutes=4), project=P4),
     session(S5, "Bakery site (fork @412)", "DeepSeek Flash", last=ago(hours=1), meta={"forked_from": {"session_id": S1, "seq": 412}}, project=P1),
     session(S6, "Expense tracker", "Local Qwen3.8", last=ago(days=1), project=P2),
     # Started by talking: the concierge itself, one agent in the folder they share and one with its own.
     session(S9, "Voice", "Qwen 3.7 Flash", last=ago(minutes=3), project=PV, own=False),
     session(S10, "Invoice run", "Claude Opus 5", status="running", last=ago(seconds=20), project=PV, own=False, meta={"voice_parent": S9}),
-    session(S11, "Courier quotes", "DeepSeek Flash", last=ago(minutes=26), project=PV, meta={"voice_parent": S9}),
+    session(S11, "Courier quotes", "DeepSeek Flash", last=ago(minutes=26), project=PV, own=True, meta={"voice_parent": S9}),
 ]
 
 # Counted over the whole table by the API: the folder header says how many agents are in it whatever
@@ -98,16 +99,15 @@ SESSIONS = [
 FOLDER_COUNTS = {
     P1: {"total": 3, "active": 1, "loops": 0, "last_message_at": ago(seconds=40)},
     P2: {"total": 1, "active": 0, "loops": 0, "last_message_at": ago(days=1)},
+    P3: {"total": 1, "active": 0, "loops": 1, "last_message_at": ago(minutes=52)},
+    P4: {"total": 1, "active": 1, "loops": 0, "last_message_at": ago(minutes=4)},
     "5a8d1c0b6e22": {"total": 0, "active": 0, "loops": 0, "last_message_at": ""},
     PV: {"total": 3, "active": 1, "loops": 0, "last_message_at": ago(seconds=20)},
 }
-FREE_COUNT = {"total": 2, "active": 1, "loops": 1, "last_message_at": ago(minutes=4)}
-
-
 def listing() -> dict:
-    """What GET /api/sessions answers: the page of rows, the folders, and the free bucket."""
+    """What GET /api/sessions answers: the page of rows and their project folders."""
     folders = [{k: v for k, v in p.items() if k != "sessions"} | FOLDER_COUNTS[p["id"]] for p in PROJECTS]
-    return {"sessions": SESSIONS, "projects": folders, "free": FREE_COUNT}
+    return {"sessions": SESSIONS, "projects": folders}
 
 ANSWER = """The menu page is live and checked on a phone.
 
@@ -185,13 +185,13 @@ QUESTION = {"questions": [{"question": "The digest has 14 items this week; keep 
 def detail(id_: str) -> dict:
     s = next(x for x in SESSIONS if x["id"] == id_)
     messages = MESSAGES if id_ == S1 else MESSAGES_S2 if id_ == S2 else MESSAGES_S3 if id_ == S3 else [{"role": "user", "seq": 1, "text": "Start.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(hours=1)}, {"role": "assistant", "seq": 2, "text": "Started. Waiting for the sheet.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(hours=1)}]
-    project = next((p for p in PROJECTS if p["id"] == s["project_id"]), None)
+    project = next(p for p in PROJECTS if p["id"] == s["project_id"])
     # A project session works in the project root, and the server answers exactly that: the folder is
     # not a directory of the session's own, and its name is the folder's.
-    workspace = project["root"] if project else f"/srv/workspaces/{s['workspace']}"
+    workspace = s["workspace_path"]
     return {
         "id": id_, "title": s["title"], "status": "idle" if id_ != S4 else "waiting", "run_id": None, "compacting": None,
-        "workspace": workspace, "workspace_name": workspace.rsplit("/", 1)[-1], "workspace_own": False if project else s["workspace_own"],
+        "workspace": workspace, "workspace_name": workspace.rsplit("/", 1)[-1], "workspace_own": s["workspace_own"],
         "project": project,
         "workspace_sessions": [{"id": S2, "title": "Bakery site: photos"}] if id_ == S1 else [{"id": S1, "title": "Bakery site"}] if id_ == S2 else [],
         "pending": QUESTION if id_ == S4 else None, "model": s["model"], "provider": "claude" if id_ == S1 else "opencode",
@@ -283,14 +283,6 @@ SCHEDULES = [
     {"id": "sch2", "name": "Backup check", "run_in": "new", "cron": "30 3 * * *", "run_at": None, "prompt": "Verify last night's backup restored into a scratch directory; report sizes.", "enabled": 1, "next_run_at": ahead(hours=5), "last_run_at": ago(hours=19), "last_summary": "Restore ok: 2.1 GB, 12 340 files.", "kind": "agent", "target_session": None, "created_by_session": None, "active_session_id": None, "failure_count": 0, "last_error": None},
     {"id": "sch3", "name": "Remind: renew the domain", "run_in": "new", "cron": None, "run_at": ahead(days=12), "prompt": "The bakery domain renews in 3 days.", "enabled": 1, "next_run_at": ahead(days=12), "last_run_at": None, "last_summary": None, "kind": "message", "target_session": None, "created_by_session": S1, "active_session_id": None, "failure_count": 0, "last_error": None},
 ]
-
-WORKSPACES = [
-    {"name": S1, "path": f"/srv/workspaces/{S1}", "sessions": [{"id": S1, "title": "Bakery site"}, {"id": S2, "title": "Bakery site: photos"}], "files": 214, "size": 48_300_000, "mtime": (NOW - timedelta(minutes=4)).timestamp(), "own_session": True, "kind": "session", "schedule": None},
-    {"name": S3, "path": f"/srv/workspaces/{S3}", "sessions": [{"id": S3, "title": "Support inbox"}], "files": 58, "size": 1_200_000, "mtime": (NOW - timedelta(minutes=52)).timestamp(), "own_session": True, "kind": "session", "schedule": None},
-    {"name": "sched-backup-check", "path": "/srv/workspaces/sched-backup-check", "sessions": [], "files": 9, "size": 40_000, "mtime": (NOW - timedelta(hours=19)).timestamp(), "own_session": False, "kind": "schedule", "schedule": "Backup check"},
-    {"name": "shared-assets", "path": "/srv/workspaces/shared-assets", "sessions": [], "files": 131, "size": 260_000_000, "mtime": (NOW - timedelta(days=2)).timestamp(), "own_session": False, "kind": "named", "schedule": None},
-]
-
 
 def usage_data() -> dict:
     daily = []
@@ -632,10 +624,6 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, SCHEDULES)
     if rel == "/api/projects":
         return respond(route, PROJECTS)
-    if rel == "/api/workspaces":
-        return respond(route, WORKSPACES)
-    if rel.startswith("/api/workspaces/"):
-        return respond(route, {"path": params.get("path", [""])[0], "kind": "dir", "entries": FILES[""] + [{"name": "src", "dir": True, "size": 0, "mtime": 0}, {"name": ".env", "dir": False, "size": 24, "mtime": 0}, {"name": "node_modules", "dir": True, "size": 0, "mtime": 0}] if not params.get("path", [""])[0] else file_entries(params["path"][0])})
     if rel == "/api/settings":
         return respond(route, SETTINGS)
     if rel == "/api/onboarding":
@@ -765,8 +753,8 @@ PHONE = {"width": 390, "height": 844}
 # The handful of words these helpers click on, in the language the run is in. Everything else is
 # picked by class or by data, which no translation moves.
 WORDS = {
-    "en": {"steps": "8 steps", "panel": "Panel", "workspaces": "Workspaces", "access": "Access"},
-    "ru": {"steps": "8 шагов", "panel": "Панель", "workspaces": "Рабочие папки", "access": "Доступ"},
+    "en": {"steps": "8 steps", "panel": "Panel", "access": "Access"},
+    "ru": {"steps": "8 шагов", "panel": "Панель", "access": "Доступ"},
 }
 
 
@@ -844,11 +832,6 @@ def scroll_to_voices(page: Page) -> None:
     """
     page.locator(".stt-list").last.scroll_into_view_if_needed()
     page.wait_for_timeout(400)
-
-
-def open_workspaces(page: Page) -> None:
-    page.locator(f"button[aria-label='{word('workspaces')}']").click()
-    page.wait_for_selector(".sheet", timeout=5000)
 
 
 def open_projects(page: Page) -> None:
@@ -1097,7 +1080,6 @@ def run() -> int:
         shot(page, "session-folded", f"agents/{S1}", wait=".chat-scroll .timeline", before=fold_sidebar, settle=500)
         shot(page, "dual", f"agents/{S1}?with={S2}", wait=".chat-scroll .timeline", settle=1500)
         shot(page, "session-share", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_share, settle=800)
-        shot(page, "workspaces", "agents", before=open_workspaces)
         desk.add_init_script("try { localStorage.setItem('agents.groupBy', 'project'); } catch (e) {}")
         shot(page, "projects", "agents", before=open_projects)
         shot(page, "voice", "voice")

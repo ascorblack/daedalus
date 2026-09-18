@@ -67,6 +67,7 @@ DETAIL = {
     "workspace_name": "ws",
     "workspace_own": True,
     "workspace_sessions": [],
+    "project": {"id": "p", "name": "Project", "root": "/workspace", "settings": {"snapshots": True}},
     "pending": None,
     "model": CONFIGURED,
     "provider": "claude",

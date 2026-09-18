@@ -1,4 +1,4 @@
-"""Starting a session over (/clear), several sessions in one workspace, and the operator's view of the agent's memory."""
+"""Starting a session over, shared project directories, and the operator's view of memory."""
 
 from __future__ import annotations
 
@@ -49,22 +49,21 @@ async def test_clear_drops_the_working_history_and_keeps_everything_else(manager
     assert await manager.clear_history(sid) == {"dropped": 0}
 
 
-async def test_sessions_can_share_a_workspace_and_deleting_one_keeps_it(manager: SessionManager) -> None:
+async def test_sessions_can_share_a_project_directory_and_deleting_one_keeps_it(manager: SessionManager) -> None:
     first = await manager.create_session("first")
-    second = await manager.create_session("second", metadata={"workspace": str(first.workspace)})
+    assert first.project is not None
+    second = await manager.create_session("second", project_id=first.project.id)
     assert second.workspace == first.workspace
     (first.workspace / "shared.txt").write_text("x")
     users = await manager.workspace_users(first.workspace)
     assert {u["id"] for u in users} == {first.session.id, second.session.id}
-    # the first session owns the directory, but the second still works there: it stays
+    # The directory belongs to the project, not either session.
     assert await manager.delete_session(first.session.id)
     assert first.workspace.is_dir() and (first.workspace / "shared.txt").exists()
     assert [u["id"] for u in await manager.workspace_users(first.workspace)] == [second.session.id]
-    # the attached session's deletion never removes a directory that is not its own
     assert await manager.delete_session(second.session.id)
     assert first.workspace.is_dir()
-    # reloaded from the database, the attachment holds
-    third = await manager.create_session("third", metadata={"workspace": str(first.workspace)})
+    third = await manager.create_session("third", project_id=first.project.id)
     manager._states.pop(third.session.id)
     assert (await manager.get_state(third.session.id)).workspace == first.workspace  # type: ignore[union-attr]
 
@@ -117,35 +116,9 @@ async def test_memory_api_round_trip(client: httpx.AsyncClient) -> None:
     assert (await client.get("/api/memory", headers=H)).json()["records"] == []
 
 
-async def test_workspace_api_create_list_upload_attach_delete(client: httpx.AsyncClient) -> None:
-    assert (await client.post("/api/workspaces", json={"name": "../x"}, headers=H)).status_code == 422
-    r = await client.post("/api/workspaces", json={"name": "shared-lab"}, headers=H)
-    assert r.status_code == 200, r.text
-    assert (await client.post("/api/workspaces", json={"name": "shared-lab"}, headers=H)).status_code == 409
-    r = await client.post("/api/workspaces/shared-lab/upload", files=[("files", ("a.txt", b"hello", "text/plain"))], data={"path": "docs"}, headers=H)
-    assert r.json() == {"files": ["a.txt"]}
-    assert (await client.get("/api/workspaces/shared-lab/files?path=docs", headers=H)).json()["entries"][0]["name"] == "a.txt"
-    assert (await client.get("/api/workspaces/shared-lab/download?path=docs/a.txt", headers=H)).text == "hello"
-    assert (await client.get("/api/workspaces/shared-lab/files?path=../", headers=H)).status_code == 400
-    # a session attached to the workspace works there and shows up on it
-    sid = (await client.post("/api/sessions", json={"title": "in the lab", "workspace": "shared-lab"}, headers=H)).json()["id"]
-    detail = (await client.get(f"/api/sessions/{sid}", headers=H)).json()
-    assert detail["workspace_name"] == "shared-lab" and detail["workspace_own"] is False
-    # The list names each session's workspace, so the Mini App can group agents by it.
-    own = (await client.post("/api/sessions", json={"title": "alone"}, headers=H)).json()["id"]
-    listed = {row["id"]: row for row in (await client.get("/api/sessions", headers=H)).json()["sessions"]}
-    assert listed[sid]["workspace"] == "shared-lab" and listed[sid]["workspace_own"] is False
-    assert listed[own]["workspace"] == own and listed[own]["workspace_own"] is True
-    assert (await client.delete(f"/api/sessions/{own}", headers=H)).json() == {"deleted": True}
-    assert (await client.get(f"/api/sessions/{sid}/files?path=docs", headers=H)).json()["entries"][0]["name"] == "a.txt"
-    ws = {w["name"]: w for w in (await client.get("/api/workspaces", headers=H)).json()}
-    assert ws["shared-lab"]["sessions"] == [{"id": sid, "title": "in the lab"}] and ws["shared-lab"]["files"] == 1
-    assert (await client.delete("/api/workspaces/shared-lab", headers=H)).status_code == 409
-    assert (await client.post("/api/sessions", json={"title": "nowhere", "workspace": "no-such"}, headers=H)).status_code == 404
-    assert (await client.delete(f"/api/sessions/{sid}", headers=H)).json() == {"deleted": True}
-    assert (await client.get("/api/workspaces/shared-lab/files", headers=H)).status_code == 200  # the attached session's deletion left it
-    assert (await client.delete("/api/workspaces/shared-lab", headers=H)).json() == {"deleted": True}
-    assert (await client.get("/api/workspaces/shared-lab/files", headers=H)).status_code == 404
+async def test_the_removed_directory_catalog_routes_are_not_served(client: httpx.AsyncClient) -> None:
+    assert (await client.get("/api/workspaces", headers=H)).status_code == 404
+    assert (await client.post("/api/workspaces", json={"name": "shared-lab"}, headers=H)).status_code == 404
 
 
 async def test_new_session_starts_on_the_chosen_model_preset(client: httpx.AsyncClient, manager: SessionManager) -> None:
@@ -189,8 +162,8 @@ async def test_sent_file_is_served_by_the_call_that_sent_it(client: httpx.AsyncC
     r = await client.get(f"/api/sessions/{sid}/sent/s1/download", headers=H)
     assert r.status_code == 200 and r.text == "# report" and "report.md" in r.headers["content-disposition"]
     r = await client.get(f"/api/sessions/{sid}/sent/s2/download", headers=H)
-    assert r.status_code == 200 and r.content == b"\x89PNG-ish" and r.headers["content-type"].startswith("image/png")
+    assert r.status_code == 403, "a transcript cannot turn an outside path into a download capability"
     assert (await client.get(f"/api/sessions/{sid}/sent/r1/download", headers=H)).status_code == 404
     assert (await client.get(f"/api/sessions/{sid}/sent/nope/download", headers=H)).status_code == 404
     outside.unlink()
-    assert (await client.get(f"/api/sessions/{sid}/sent/s2/download", headers=H)).status_code == 404
+    assert (await client.get(f"/api/sessions/{sid}/sent/s2/download", headers=H)).status_code == 403

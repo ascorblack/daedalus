@@ -30,10 +30,8 @@ def _hook(context: ToolContext):  # type: ignore[no-untyped-def]
         "it is waiting for the operator: ask the operator, then send their words to that session id. "
         "Several things asked at once are several calls, one per "
         "task, so they run in parallel. Say out loud that you are setting it up; do not wait silently. "
-        "workspace says where a new agent works: 'shared' (the default) is the folder every agent you "
-        "started shares, so they can hand each other files and carry on each other's work; 'own' is a "
-        "directory of that agent's own, outside the shared folder and reachable by nobody else, for "
-        "an errand that has nothing to do with the rest. "
+        "workspace chooses a directory inside the project: 'shared' (the default) is the project root "
+        "and 'own' is a private child for that agent, for an errand that should not share files. "
         "project_id starts the agent inside one of the operator's projects instead — use it only when "
         "the operator named the project ('in the bakery project, ...'); call Projects for the ids."
     ),
@@ -52,7 +50,7 @@ async def delegate(context: ToolContext, title: str, task: str, session_id: str 
         return ok(context, f"your answer reached agent {result['title']!r} ({result['session_id']}), which was waiting for it and is working again", session_id=result["session_id"])
     if result["steered"]:
         return ok(context, f"the instruction reached agent {result['title']!r} ({result['session_id']}), which is already working", session_id=result["session_id"])
-    where = f"in {result['project']}" + (", in a directory of its own" if result["workspace"] == "own" else ", in the folder your agents share")
+    where = f"in {result['project']}" + (", in its own directory" if result["workspace"] == "own" else ", in the shared project folder")
     return ok(context, f"agent {result['title']!r} started as session {result['session_id']} {where}; it reports here when it finishes", session_id=result["session_id"])
 
 
@@ -126,7 +124,7 @@ async def stop_agent(context: ToolContext, session_id: str) -> ToolResult:
     description=(
         "The operator's projects — a name, a folder and how many agents work in each — and the id to "
         "pass to Delegate as project_id. Call it when the operator names a project ('in the bakery "
-        "project, ...'); without one, an agent you start works in your own shared folder and needs none."
+        "project, ...'); without one, an agent you start belongs to the Voice project."
     ),
 )
 async def projects(context: ToolContext) -> ToolResult:
@@ -135,7 +133,7 @@ async def projects(context: ToolContext) -> ToolResult:
         return error(context, "the project list is not available here")
     rows = await hook("projects")
     if not rows:
-        return ok(context, "the operator has no projects; an agent you start works in your own folder")
+        return ok(context, "the operator has no projects")
     lines = [
         f"- {r['name']} ({r['id']}): {r['agents']} agent(s)" + ("" if r["reachable"] else ", folder not reachable — an agent cannot be started in it")
         for r in rows

@@ -47,7 +47,7 @@ export function ServicesScreen({ onOpen, toast }: { onOpen: (id: string) => void
         {[...groups.entries()].map(([sid, items]) => (
           <section key={sid} className="service-group">
             <div className="section-title">
-              <button className="linkbtn" onClick={() => onOpen(sid)} title={t("ws.open.session")}>{items[0].session_title}</button>
+              <button className="linkbtn" onClick={() => onOpen(sid)} title={t("services.open.session")}>{items[0].session_title}</button>
               <span className="n">{t("services.started", { t: relTime(items[0].started_at) })}</span>
             </div>
             {items.map((s) => (
