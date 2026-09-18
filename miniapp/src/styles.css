@@ -338,6 +338,11 @@ a { color: var(--accent); text-decoration: none; }
 .diff .del { background:rgba(248,113,113,.14); border-radius:12px 12px 0 0; color:#fca5a5; }
 .diff .add { background:rgba(74,222,128,.12); border-radius:0 0 12px 12px; color:#86efac; }
 
+/* The answer's own label when another model wrote it: above the text, never inside it. */
+.fallback-note { margin: 6px 0 2px; }
+.fallback-note .chip { cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.fallback-note .chev { margin-left: 2px; }
+.fallback-note .sub { margin: 4px 0 0 2px; line-height: 1.45; }
 .answer { font-size:16px; line-height:1.55; word-break:break-word; padding-top:4px; }
 .answer.streaming::after { content:"▍"; color:var(--muted); animation:pulse 1s infinite; }
 .answer p, .summary-body p, .sheet-body p { margin:0 0 10px; }

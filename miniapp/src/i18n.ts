@@ -1566,6 +1566,18 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "session.model.picked": { en: "model: {model}", ru: "модель: {model}" },
   "session.model.custom": { en: "Or a specific model: provider/model-id", ru: "Или конкретная модель: клиент/идентификатор" },
   "session.model.use": { en: "Use", ru: "Выбрать" },
+
+  // A run does not always answer with the model it was set to: the provider chain steps down when an
+  // endpoint refuses or stalls. What is said here is the difference between the two, never the chain.
+  "session.model.via": { en: "via {model}", ru: "через {model}" },
+  "session.model.fallback": { en: "via {to} (fallback from {from})", ru: "через {to} (вместо {from})" },
+  "session.model.fallback.turn": { en: "answered by {to} — {from} unavailable", ru: "ответила {to} — {from} недоступна" },
+  "session.model.fallback.why": { en: "{from} did not answer: {reason}. The run moved to {to} and stayed there.", ru: "{from} не ответила: {reason}. Запуск перешёл на {to} и остался на ней." },
+  "session.model.fallback.calls": { en: "every call of this run, by model", ru: "все вызовы этого запуска, по моделям" },
+  "session.model.reason.outage": { en: "the provider was unreachable", ru: "провайдер был недоступен" },
+  "session.model.reason.rate_limit": { en: "the provider refused on quota", ru: "провайдер отказал по квоте" },
+  "session.model.reason.chain_step": { en: "the next model in the chain took over", ru: "запуск перешёл на следующую модель в цепочке" },
+  "session.model.reason.live_override": { en: "the model was changed during the run", ru: "модель сменили во время запуска" },
   "session.transcribe.long": { en: "recording is {n}s, the limit is {max}s", ru: "запись длится {n} с, а предел — {max} с" },
   "session.transcribe.sent": { en: "sent: {text}", ru: "отправлено: {text}" },
   "session.mic": { en: "record a voice note", ru: "записать голосовую заметку" },

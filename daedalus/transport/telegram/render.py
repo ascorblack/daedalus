@@ -124,6 +124,12 @@ class RunView:
     delivery_failed: bool = False
     draft_id: int = 0
     draft_sent: str = ""
+    fallback_from: str = ""
+    """The model the run was set to answer with, while another one is answering instead.
+
+    Telegram has no header to change, so the only place the operator can be told is under the
+    answer itself — and only when it is true, which is why this is cleared the moment the
+    configured model takes the run back."""
 
 
 class RunRenderer:
@@ -223,6 +229,7 @@ class RunRenderer:
             self._mark()
         elif t is EventType.MODEL_CHANGED:
             v.model = str(p.get("model_name") or p.get("to") or v.model)
+            v.fallback_from = str(p.get("configured") or p.get("from") or "") if p.get("fallback") else ""
             self._mark()
 
     def _start_ticker(self) -> None:
@@ -421,6 +428,10 @@ class RunRenderer:
                 cost = await self.cost_lookup(v.run_id)
             except Exception:  # noqa: BLE001
                 cost = None
+        if final and v.fallback_from and v.fallback_from != v.model:
+            # One line, under the answer, because the operator's next question depends on knowing it:
+            # the reply he is reading was not written by the model this session is set to.
+            final = f"{final}\n\n_answered by {v.model} — {v.fallback_from} was unavailable_"
         if final and not v.final_sent:
             v.final_sent = True
             await self._deliver_final(final, workspace)

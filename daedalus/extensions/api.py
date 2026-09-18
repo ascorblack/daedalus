@@ -1217,6 +1217,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "pending": state.pending.payload if state.pending else None,
             "model": await session_model_label(state),
             "provider": await session_provider(state),
+            # What is really answering, when that is not what the session was set to. The header
+            # reads this on every poll, so a fallback that ends while the screen is open goes away
+            # on its own instead of waiting for the session to be reopened.
+            **manager.model_status(state),
             "mode": state.metadata.get("mode") or "",
             "usd_cap": state.metadata.get("usd_cap"),
             "brief": state.metadata.get("brief") or "",

@@ -192,6 +192,9 @@ export type ToolInfo = { name: string; description: string; group: string };
 
 export type SubagentView = { session_id: string; name: string | null; running: boolean; status: string; model: string; kept?: boolean };
 
+/** A model answering in place of the configured one: what it replaced, what took over, and why. */
+export type ModelFallback = { from: string; to: string; reason: string };
+
 export type MessageView = {
   role: "system" | "user" | "assistant" | "tool";
   summary?: boolean;
@@ -201,6 +204,11 @@ export type MessageView = {
   /** The engine holds this one and the transcript does not yet: its `seq` is the one it will get. */
   live?: boolean;
   compaction?: { reason: string; messages?: number; at?: string } | null;
+  /** The model that produced this answer, as the host recorded it. Empty on turns written before it was recorded. */
+  model?: string;
+  provider?: string;
+  /** Set when that model was not the one the session was set to answer with. */
+  fallback?: ModelFallback | null;
   text: string;
   thinking: string;
   tool_calls: { id: string; name: string; arguments: Record<string, unknown> }[];
@@ -227,6 +235,11 @@ export type SessionDetail = {
   pending: { questions: Question[] } | null;
   model: string;
   provider?: string;
+  /** The model name the session is set to answer with, and the one really answering; they differ during a fallback. */
+  configured_model?: string;
+  effective_model?: string;
+  effective_provider?: string;
+  fallback?: ModelFallback | null;
   messages: MessageView[];
   mode?: string;
   usd_cap?: number | null;

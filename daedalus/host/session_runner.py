@@ -76,6 +76,15 @@ PROVIDER_OUTAGE_KINDS = frozenset({"llm_provider_error", "llm_timeout", "llm_str
 """Terminal error kinds that mean the endpoint, not the request, failed: the run is driven again once the wait is over."""
 RECOVERY_REASONS = frozenset({"transient_llm_error_retry", "model_fallback_triggered", "soft_stop_notified", "llm_context_window_exceeded", "context_window_recovered", "reasoning_length_cut_retry", "continue_prompt_injected", "max_output_token_recovery"})
 """The state changes worth a log line: each is a round the run had to recover from, and the log is where the reason survives."""
+MODEL_METADATA_KEY = "daedalus.model"
+"""Message metadata naming what produced an assistant turn: provider, model, the configured model, and the fallback if it was one."""
+FALLBACK_REASONS = {
+    "llm_rate_limit": "rate_limit",
+    "llm_timeout": "outage",
+    "llm_stream_idle": "outage",
+    "llm_provider_error": "outage",
+}
+"""The core's error class behind a demotion, as the one word the app and the operator read."""
 BRIEF_MAX_CHARS = 12_000
 """A spawned agent's brief lives in its system prompt; longer hand-overs belong in files."""
 WORKSPACE_NOTES_CHARS = 6000
@@ -172,6 +181,14 @@ class SessionState:
     """The rewrite scheduled by a failed write, so a store that is down is retried once and not in a loop."""
     persist_gen: int = 0
     """Bumped by every history rewrite (manual compaction); a persist captured before the bump is dropped."""
+    configured_model: str = ""
+    """``provider:model`` the session is set to answer with: the first rung of the chain this run was built on.
+    A live override (a preset chosen for the session, the voice concierge pointing at its own) is part of it —
+    what the operator chose is never a fallback, however far it is from the global default."""
+    effective_model: str = ""
+    """``provider:model`` that actually answered last, as the core reported it at the message it started."""
+    model_change_reason: str = ""
+    """Why the next change of model happened, taken from the core's own account of the demotion; empty means nobody said."""
     run_history_start: int = 0
     """Length of the working history when the current run began: what this run added starts here."""
     checkpoint_capped: bool = False
@@ -1668,6 +1685,12 @@ class SessionManager:
             state.engine.apply_live_controls(
                 model_name=model_name, thinking_enabled=thinking, reasoning_effort=reasoning_effort
             )
+            if model_name:
+                # The operator moved the running session onto another model. That is a change the
+                # fronts should say out loud, and it is not a fallback: what the session is set to
+                # moves with it, so the header notes the switch once and then reads as normal again.
+                state.configured_model = self._rung_label(getattr(state.engine, "llm", None), model_name)
+                state.model_change_reason = "live_override"
 
     # -- runs -----------------------------------------------------------------------
 
@@ -1706,6 +1729,12 @@ class SessionManager:
                 except Exception:  # noqa: BLE001
                     logger.warning("MCP warm-up for %s failed; tools may be unavailable this run", server, exc_info=True)
         chain = build_chain(rungs, room=self.providers.room_for(self.config))
+        # What this run was *asked* for. Everything the fallback notice says is measured against it,
+        # so it is read once here, from the same rungs the chain is built on, and not re-derived later
+        # from a configuration the operator may have changed while the run was going.
+        state.configured_model = self._rung_label(rungs[0][0], rungs[0][1])
+        state.effective_model = ""
+        state.model_change_reason = ""
         engine = build_engine(
             deps=deps,
             config=self.config,
@@ -1866,6 +1895,30 @@ class SessionManager:
             return
         await self._persist_history(state, history, state.history_keys)
 
+    def _stamp_model(self, state: SessionState, messages: Sequence[Message], previous_keys: Sequence[str]) -> None:
+        """Name the model on every assistant turn this round added, before its row is written.
+
+        The transcript row is written once and ignored ever after, so the stamp has to be on the
+        message the first time it is offered — a turn stamped later is a turn the app never sees
+        stamped. Only turns this round added are touched: a rewrite hands over the whole history,
+        and stamping that with the model answering now would put today's fallback on every answer
+        the session ever gave.
+
+        The metadata dict is annotated in place. It is the same dict the core's own history holds,
+        and that is the point: the working copy and the transcript copy say the same thing, and
+        neither is a message the model is ever shown.
+        """
+        if not state.effective_model:
+            return
+        record = self._model_record(state)
+        known = set(previous_keys)
+        for message in messages:
+            if message.role is not MessageRole.assistant:
+                continue
+            if MODEL_METADATA_KEY in message.metadata or self.sessions.transcript_key(message) in known:
+                continue
+            message.metadata[MODEL_METADATA_KEY] = record
+
     async def _write_history(
         self,
         state: SessionState,
@@ -1878,6 +1931,7 @@ class SessionManager:
         session_id = state.session.id
         current = {self.sessions.transcript_key(m) for m in history}
         removed = [k for k in previous_keys if k not in current]
+        self._stamp_model(state, fresh if fresh is not None else history, previous_keys)
         unlabelled = [i for i, m in enumerate(history) if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in m.metadata]
         if unlabelled:
             seqs = await self.sessions.transcript_seqs(session_id, removed) if removed else []
@@ -2198,7 +2252,114 @@ class SessionManager:
         await self.checkpoint(state, kind="before", seq=seqs[0] if seqs else None)
         await self._start_run(state, message)
 
+    @staticmethod
+    def _rung_label(provider: Any, model: str) -> str:
+        """``provider:model`` — one rung of the chain, named the way the chain names it."""
+        return f"{getattr(getattr(provider, 'endpoint', None), 'id', '') or '?'}:{model}"
+
+    def model_status(self, state: SessionState) -> dict[str, Any]:
+        """What is really answering this session, and whether that is what it was set to.
+
+        ``fallback`` is present only while another model holds the run: the configured one
+        answering again takes it away, which is what makes the header's note self-clearing.
+        """
+        configured = state.configured_model
+        effective = state.effective_model or configured
+        out: dict[str, Any] = {
+            "configured_model": configured.split(":", 1)[-1] if configured else "",
+            "effective_model": effective.split(":", 1)[-1] if effective else "",
+            "effective_provider": effective.split(":", 1)[0] if ":" in effective else "",
+            "fallback": None,
+        }
+        if configured and effective and effective != configured:
+            out["fallback"] = {
+                "from": configured.split(":", 1)[-1],
+                "to": effective.split(":", 1)[-1],
+                "reason": state.model_change_reason or "chain_step",
+            }
+        return out
+
+    def _model_record(self, state: SessionState) -> dict[str, Any]:
+        """The stamp an assistant turn carries: who answered, and what the session had asked for."""
+        status = self.model_status(state)
+        record: dict[str, Any] = {
+            "provider": status["effective_provider"],
+            "model": status["effective_model"],
+            "configured": status["configured_model"],
+        }
+        if status["fallback"] is not None:
+            record["fallback"] = status["fallback"]
+        return record
+
+    def _model_change(self, state: SessionState, event: TurnEvent) -> TurnEvent | None:
+        """The event that says the model answering has changed — or ``None`` when it has not.
+
+        Two kinds of event feed this, and both are needed. The core's ``model_fallback_triggered``
+        is the demotion itself: it names the rung the run moved to and why, and it is the only
+        notice there is, because the retry re-opens the stream inside the assistant message that
+        was already started — no second ``message_start`` announces it. And ``message_start`` is
+        what catches every other way the model can differ from the configured one without a
+        demotion ever being announced: a chain position restored from a snapshot, a model rebound
+        by a live override.
+        """
+        payload = event.payload
+        engine = state.engine
+        if engine is None:
+            return None
+        if event.type is EventType.STATE_CHANGED and payload.get("reason") == "model_fallback_triggered":
+            # ``from``/``to`` here are the loop's own state, not models; the rung is the other field.
+            return self._observe_model(
+                state,
+                event.run_id,
+                str(payload.get("fallback_model_id") or ""),
+                FALLBACK_REASONS.get(str(payload.get("error_class") or ""), "chain_step"),
+            )
+        if event.type is EventType.MESSAGE_START:
+            return self._observe_model(
+                state,
+                event.run_id,
+                str(payload.get("model") or getattr(engine.config, "model_name", "") or ""),
+                state.model_change_reason or "chain_step",
+            )
+        return None
+
+    def _observe_model(self, state: SessionState, run_id: str, model: str, reason: str) -> TurnEvent | None:
+        """Record which model is answering now; say so on the wire when it is not the one before."""
+        engine = state.engine
+        if engine is None or not model:
+            return None
+        observed = self._rung_label(getattr(engine, "llm", None), model)
+        previous = state.effective_model
+        if observed == previous:
+            return None
+        state.effective_model = observed
+        if not previous and observed == state.configured_model:
+            # The run's first message on the model it was configured with: nothing changed, it began.
+            return None
+        if not previous:
+            reason = "live_override" if reason == "chain_step" else reason
+        state.model_change_reason = "" if observed == state.configured_model else reason
+        return TurnEvent(
+            type=EventType.MODEL_CHANGED,
+            run_id=run_id,
+            payload={
+                "from": (previous or state.configured_model).split(":", 1)[-1],
+                "to": model,
+                "model_name": model,
+                "provider": observed.split(":", 1)[0],
+                "configured": state.configured_model.split(":", 1)[-1],
+                "reason": reason,
+                "fallback": observed != state.configured_model,
+                "session_id": state.session.id,
+            },
+        )
+
     async def _dispatch_event(self, state: SessionState, event: TurnEvent) -> None:
+        change = self._model_change(state, event)
+        if change is not None:
+            # Before the message it explains, not after it: the header says which model is speaking
+            # while the first token of that model is still on its way.
+            await self._dispatch_event(state, change)
         if event.type is EventType.TOOL_CALL_PENDING and event.payload.get("kind") == "ask_user":
             pending = PendingQuestion(
                 session_id=state.session.id,
