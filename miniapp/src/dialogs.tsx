@@ -2,7 +2,7 @@
 // that says what happens, an overflow menu, and a toast that can undo. Escape closes the top one,
 // focus goes in and comes back to the control that opened it.
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Icon, IconName } from "./icons";
 import { t } from "./i18n";
@@ -166,14 +166,18 @@ export function OverflowMenu({ items, label, icon = "more", small, className, tr
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ top?: number; bottom?: number; right: number } | null>(null);
-  useLayoutEffect(() => {
-    if (!open || !trigger.current) return;
+  /** Put the menu against the trigger as it stands now. Called again on the scroll that opened it. */
+  const place = useCallback(() => {
+    if (!trigger.current) return;
     const r = trigger.current.getBoundingClientRect();
     const right = Math.max(8, window.innerWidth - r.right);
     // A control in the lower half opens its menu upward: a menu that runs off the bottom edge has to
     // be scrolled to, and the scroll is what closes it.
     setPos(r.top > window.innerHeight / 2 ? { bottom: window.innerHeight - r.top + 4, right } : { top: r.bottom + 4, right });
-  }, [open]);
+  }, []);
+  useLayoutEffect(() => {
+    if (open) place();
+  }, [open, place]);
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent | TouchEvent) => {
@@ -181,25 +185,35 @@ export function OverflowMenu({ items, label, icon = "more", small, className, tr
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        const buttons = Array.from(menu.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
-        const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
-        const next = e.key === "ArrowDown" ? buttons[(i + 1) % buttons.length] : buttons[(i - 1 + buttons.length) % buttons.length];
-        next?.focus();
-        e.preventDefault();
-      }
+      const buttons = Array.from(menu.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+      if (buttons.length === 0) return;
+      const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      // Tab is part of the ring, not a way out of it: this menu carries the app's navigation, and a
+      // Tab that walked into the page behind it would leave an open menu the reader cannot see.
+      const to =
+        e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey) ? buttons[(i + 1) % buttons.length]
+        : e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey) ? buttons[(i - 1 + buttons.length) % buttons.length]
+        : e.key === "Home" ? buttons[0]
+        : e.key === "End" ? buttons[buttons.length - 1]
+        : null;
+      if (!to) return;
+      to.focus();
+      e.preventDefault();
     };
     // A scroll closes the menu — except the one that brought the control into view a frame ago:
     // the browser reports that scroll after the click that opened the menu, not before it.
     const openedAt = performance.now();
     const onScroll = () => {
+      // ... and that one moves the menu with its control instead of being ignored: the coordinates
+      // were measured before the scroll, and a fixed box left at them floats away from the trigger
+      // and stays there.
       if (performance.now() - openedAt > 200) setOpen(false);
+      else place();
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("touchstart", onDown);
     document.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, { capture: true });
-    (menu.current?.querySelector("button:not(:disabled)") as HTMLButtonElement | null)?.focus();
     return () => {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("touchstart", onDown);
@@ -208,7 +222,12 @@ export function OverflowMenu({ items, label, icon = "more", small, className, tr
       // The menu is gone; a keyboard reader continues from the control that opened it.
       if (document.activeElement === document.body || !document.activeElement) trigger.current?.focus();
     };
-  }, [open]);
+  }, [open, place]);
+  // The menu exists only once it has somewhere to be, which is a render later than the open: taking
+  // the focus before that is taking it from nothing, and the reader stays on the trigger.
+  useEffect(() => {
+    if (open && pos) (menu.current?.querySelector("button:not(:disabled)") as HTMLButtonElement | null)?.focus();
+  }, [open, pos]);
   return (
     <>
       <button ref={trigger} className={`${customTrigger ? "" : `iconbtn ${small ? "small" : ""}`} ${open ? "on" : ""} ${className ?? ""}`} aria-label={name} title={name} aria-haspopup="menu" aria-expanded={open} onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}>

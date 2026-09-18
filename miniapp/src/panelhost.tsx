@@ -3,7 +3,7 @@
 // On a desktop it is a column of the chat grid; on a phone the same tabs in a full-height sheet.
 // The state is a value (panel.ts); this file draws it and wires the pointer and the keys.
 
-import { useCallback, useEffect, useRef, useState, useId, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Sheet, useLayer } from "./dialogs";
 import { Icon } from "./icons";
 import {
@@ -63,8 +63,11 @@ export type PanelHostProps = {
   onDrag?: (dx: number) => void;
 };
 
-/** What the panel keeps for itself: a reload counter for the viewer, and the phone-width toggle. */
-type Local = { gen: number; reload: () => void; narrow: boolean; toggleNarrow: () => void; info: ViewerInfo | null; setInfo: (info: ViewerInfo) => void; nav: HtmlNavigation | null; setNav: (nav: HtmlNavigation | null) => void; id: string; closing: boolean };
+/** What the panel keeps for itself: a reload counter for the viewer, the phone-width toggle,
+ *  viewer info, HTML navigation, the closing state, and its id. The tab and body prefix uses that
+ *  same id — two panels are open at once on a wide screen, and an id that is not this panel's own
+ *  would point a reader's screen reader at the other one. */
+type Local = { gen: number; reload: () => void; narrow: boolean; toggleNarrow: () => void; info: ViewerInfo | null; setInfo: (info: ViewerInfo) => void; nav: HtmlNavigation | null; setNav: (nav: HtmlNavigation | null) => void; id: string; ids: string; closing: boolean };
 type HostProps = PanelHostProps & { local: Local };
 
 export function Panel(props: PanelHostProps) {
@@ -83,7 +86,7 @@ export function Panel(props: PanelHostProps) {
   const [info, setInfo] = useState<ViewerInfo | null>(null);
   const [nav, setNav] = useState<HtmlNavigation | null>(null);
   const id = useId();
-  const local: Local = { closing: state.tab === null, info, setInfo, nav, setNav, id, gen, reload: () => setGen((g) => g + 1), narrow, toggleNarrow: () => setNarrow((n) => !n) };
+  const local: Local = { closing: state.tab === null, info, setInfo, nav, setNav, id, ids: id, gen, reload: () => setGen((g) => g + 1), narrow, toggleNarrow: () => setNarrow((n) => !n) };
   if (shown.tab === null) return null;
   if (sheet) {
     return (
@@ -126,7 +129,7 @@ function Column(props: HostProps) {
 
 const TAB_ICON: Record<PanelTab, "settings" | "folder" | "eye" | "terminal"> = { details: "settings", files: "folder", preview: "eye", jobs: "terminal" };
 
-function Tabs({ local, state, onTab, onClose, onExpand, badges, inSheet }: HostProps & { inSheet?: boolean }) {
+function Tabs({ state, onTab, onClose, onExpand, badges, inSheet, local }: HostProps & { inSheet?: boolean }) {
   const strip = useRef<HTMLDivElement>(null);
   const onKey = (e: React.KeyboardEvent) => {
     const i = PANEL_TABS.indexOf(state.tab!);
@@ -143,7 +146,7 @@ function Tabs({ local, state, onTab, onClose, onExpand, badges, inSheet }: HostP
         {PANEL_TABS.map((tab) => {
           const n = badges?.[tab] ?? 0;
           return (
-            <button key={tab} id={`${local.id}-${tab}`} aria-controls={`${local.id}-body`} role="tab" data-tab={tab} className={`panel-tab ${state.tab === tab ? "on" : ""}`} aria-selected={state.tab === tab} tabIndex={state.tab === tab ? 0 : -1} onClick={() => onTab(tab)}>
+            <button key={tab} role="tab" id={`${local.ids}-tab-${tab}`} aria-controls={`${local.ids}-body`} data-tab={tab} className={`panel-tab ${state.tab === tab ? "on" : ""}`} aria-selected={state.tab === tab} tabIndex={state.tab === tab ? 0 : -1} onClick={() => onTab(tab)}>
               <Icon name={TAB_ICON[tab]} size={14} />
               <span>{t(`panel.tab.${tab}`)}</span>
               {n > 0 && <span className="count">{n}</span>}
@@ -216,7 +219,7 @@ function Body(props: HostProps) {
   const progress = local.nav?.busy ? null : local.info?.progress;
   const loading = state.tab === "preview" && (local.info?.loading || local.nav?.busy);
   return (
-    <div ref={box} id={`${local.id}-body`} role="tabpanel" aria-labelledby={`${local.id}-${state.tab}`} className={`panel-body tab-${state.tab} ${split ? "split" : ""}`}>
+    <div ref={box} id={`${local.ids}-body`} role="tabpanel" aria-labelledby={`${local.ids}-tab-${state.tab}`} tabIndex={-1} className={`panel-body tab-${state.tab} ${split ? "split" : ""}`}>
       {loading && <div className={`preview-progress ${progress == null ? "busy" : ""}`} role="progressbar" aria-label={t("common.loading")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress == null ? undefined : Math.round(progress * 100)}><i style={progress == null ? undefined : { width: `${progress * 100}%` }} /></div>}
       {state.tab === "details" && props.details}
       <div className="panel-files" hidden={state.tab !== "files" && !split} style={split ? { width } : undefined}>{(visited || state.tab === "files" || split) && props.files}{split && <PaneHandle side="left" onDrag={(dx) => setWidth(width + dx)} />}</div>

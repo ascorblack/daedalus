@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import { api, Project, ProjectFolder, SessionList, SessionSummary, Settings, Workspace } from "../api";
 import { Avatar, Dot, Skeleton, Status, ToolPicker, fmtInterval, statusWord } from "../components";
 import { Sheet } from "../dialogs";
@@ -9,6 +9,7 @@ import { FilePreview, PreviewSource, workspaceBase } from "../preview";
 import { ProjectChip, useProjects } from "../projects";
 import { PageHeader, screenTitle } from "../shell";
 import { useQuery } from "../store";
+import { WindowedRows } from "../virtual";
 import { confirmAsync, errorText, fmtBytes } from "../ui";
 import { plural, t } from "../i18n";
 import { Files } from "./Session";
@@ -100,13 +101,28 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
  * One folder: a project, or the bucket of agents that work in a directory of their own.
  *
  * Collapsed to its header until it is opened, and which folders are open is remembered per folder.
- * That is also what keeps the screen cheap on an installation with hundreds of agents: what is not
- * open is not in the DOM at all, so the list costs the folders and not the sessions.
+ * A closed folder is not in the DOM at all, and an open one is windowed: the rows near the viewport
+ * are rendered and the rest are two spacers, so an installation with hundreds of agents costs the
+ * same whether its folders are open or shut. The sidebar carries this list on every screen, which is
+ * what makes the difference worth having.
  *
  * A search or a filter opens what it found: leaving a match behind a closed folder would be a screen
  * that answers "nothing" while holding the answer.
  */
 type FolderProps = { folder: Folder; onOpen: (id: string) => void; current?: string; filtered: boolean; compact?: boolean };
+
+/** One row per line the folder draws: an agent, then the forks taken from it, then their forks.
+ *  The nesting is in the model and not in the DOM, so the rows can be windowed as one list. */
+type Line = { row: RowModel; fork?: { of: string; seq: number } };
+
+function lines(rows: RowModel[], fork?: { of: string; seq: number }): Line[] {
+  const out: Line[] = [];
+  for (const r of rows) {
+    out.push({ row: r, fork });
+    for (const f of r.forks) out.push(...lines([f], { of: r.s.title, seq: f.s.metadata!.forked_from!.seq }));
+  }
+  return out;
+}
 
 /** Whether the open session is in these rows, a fork of one of them, or a subagent of one. */
 function holds(rows: RowModel[], id: string | undefined): boolean {
@@ -127,6 +143,9 @@ function sameFolder(a: FolderProps, b: FolderProps): boolean {
 
 const FolderSection = memo(function FolderSection({ folder, onOpen, current, filtered, compact }: FolderProps) {
   const [open, setOpen] = useState(() => folderOpen(folder.key));
+  const section = useRef<HTMLElement | null>(null);
+  const rows = useMemo(() => lines(folder.rows), [folder.rows]);
+  const keys = useMemo(() => rows.map((line) => line.row.s.id), [rows]);
   const free = folder.project === null;
   // The folder holding the open session opens itself, without remembering it: a sidebar whose
   // current row is behind a closed folder answers "where am I" with nothing.
@@ -139,7 +158,7 @@ const FolderSection = memo(function FolderSection({ folder, onOpen, current, fil
   };
   if (free && folder.rows.length === 0 && folder.total === 0) return null;
   return (
-    <section className={`folder ${folder.system ? "system" : ""} ${showing ? "open" : ""}`}>
+    <section ref={section} className={`folder ${folder.system ? "system" : ""} ${showing ? "open" : ""}`}>
       <button className="folder-head" onClick={toggle} aria-expanded={showing}>
         <span className={`chev ${showing ? "down" : ""}`} aria-hidden>›</span>
         <Icon name={folder.system ? "mic" : free ? "bots" : "folder"} size={16} />
@@ -159,23 +178,28 @@ const FolderSection = memo(function FolderSection({ folder, onOpen, current, fil
       {showing && !compact && folder.project && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
       {showing && !compact && free && <div className="folder-root sub">{t("agents.free.hint")}</div>}
       {showing && folder.rows.length === 0 && <div className="folder-empty sub">{filtered ? t("common.nothing") : free ? t("agents.free.none") : t("agents.folder.none")}</div>}
-      {showing && folder.rows.map((r) => <RowTree key={r.s.id} row={r} onOpen={onOpen} current={current} free={free} compact={compact} />)}
+      {showing && (
+        <WindowedRows
+          keys={keys}
+          host={section}
+          rowSelector=":scope > .erow"
+          estimate={compact ? 40 : 72}
+          render={(i) => (
+            <Row
+              s={rows[i].row.s}
+              kids={rows[i].row.kids}
+              onOpen={onOpen}
+              current={current === rows[i].row.s.id || rows[i].row.kids.some((c) => c.id === current)}
+              fork={rows[i].fork}
+              free={free}
+              compact={compact}
+            />
+          )}
+        />
+      )}
     </section>
   );
 }, sameFolder);
-
-/** An agent, the forks taken from it under it, and each fork's own forks under those. */
-function RowTree({ row, onOpen, current, free, fork, compact }: { row: RowModel; onOpen: (id: string) => void; current?: string; free: boolean; fork?: { of: string; seq: number }; compact?: boolean }) {
-  const mine = current === row.s.id || row.kids.some((c) => c.id === current);
-  return (
-    <Fragment>
-      <Row s={row.s} kids={row.kids} onOpen={onOpen} current={mine} fork={fork} free={free} compact={compact} />
-      {row.forks.map((f) => (
-        <RowTree key={f.s.id} row={f} onOpen={onOpen} current={current} free={free} fork={{ of: row.s.title, seq: f.s.metadata!.forked_from!.seq }} compact={compact} />
-      ))}
-    </Fragment>
-  );
-}
 
 /** "Loop every 40m · run #4 · next in 12m", or the reason it is paused. */
 function loopLine(s: SessionSummary): string {

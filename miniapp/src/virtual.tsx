@@ -13,6 +13,23 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode, RefObject } from "react";
 
+/** The nearest ancestor that really scrolls: the sidebar's body in the shell, the screen on a phone.
+ *
+ *  Nearest *scrolling*, not nearest scrollable: the sidebar's column holds a screen that is allowed
+ *  to scroll and does not, inside a body that does. Taking the first ``overflow: auto`` ancestor
+ *  there gives an element whose scrollTop is always zero, and a window that never moves with the
+ *  reader. */
+export function scrollParent(el: HTMLElement | null): HTMLElement | null {
+  let candidate: HTMLElement | null = null;
+  for (let p = el?.parentElement ?? null; p; p = p.parentElement) {
+    const overflow = getComputedStyle(p).overflowY;
+    if (overflow !== "auto" && overflow !== "scroll") continue;
+    candidate ??= p;
+    if (p.scrollHeight > p.clientHeight + 4) return p;
+  }
+  return candidate ?? ((document.scrollingElement as HTMLElement | null) ?? null);
+}
+
 export type WindowedProps = {
   /** One stable key per item, in order. */
   keys: string[];
@@ -178,6 +195,177 @@ export function Windowed({ keys, render, scroller, estimate = 260, overscan = 90
       {padTop > 0 && <div style={{ height: padTop }} aria-hidden />}
       {slots}
       {padBottom > 0 && <div style={{ height: padBottom }} aria-hidden />}
+    </>
+  );
+}
+
+// A windowed list for rows that are already inside something else: the sessions in a folder, where
+// the folder's own header, its root line and its empty state are rendered by the caller and only
+// the rows between them are windowed.
+//
+// Nothing is plumbed through the shell for this. The rows are found in the host by the selector the
+// caller gives, the element that scrolls is found by walking up from the host, and the position of
+// the list is read from the first row that is actually on screen rather than assumed — so a folder
+// below another one whose window just changed is right on the next frame either way.
+//
+// Heights are measured as rows render and remembered by key; a row nobody has seen is as tall as the
+// average of the ones that have been. The row the reader has focused is kept rendered wherever it
+// is, because a focused element that unmounts takes the focus to the body with it.
+
+export type WindowedRowsProps = {
+  /** One stable key per row, in order. */
+  keys: string[];
+  render: (index: number) => ReactNode;
+  /** The element the rows are rendered into, and how to find them in it. */
+  host: RefObject<HTMLElement | null>;
+  rowSelector: string;
+  /** Height assumed for a row nobody has measured yet. */
+  estimate?: number;
+  /** How much above and below the viewport is rendered anyway, in pixels. */
+  overscan?: number;
+  /** Below this many rows nothing is windowed and the rows are rendered exactly as they were. */
+  threshold?: number;
+};
+
+export function WindowedRows({ keys, render, host, rowSelector, estimate = 64, overscan = 400, threshold = 24 }: WindowedRowsProps) {
+  const sizes = useRef(new Map<string, number>());
+  const scroller = useRef<HTMLElement | null>(null);
+  /** The row the reader is on, so the window never unmounts it from under them. */
+  const focused = useRef(-1);
+  const [range, setRange] = useState({ start: 0, end: keys.length });
+  const held = useRef(range);
+  held.current = range;
+  const windowed = keys.length > threshold;
+
+  /** Every row's height: measured where it has been on screen, and the estimate where it has not.
+   *  A fixed estimate rather than a running average of what has been seen: these rows are one or two
+   *  lines and nothing else, so the estimate is right to a pixel or two, and a guess that does not
+   *  move is a spacer that does not move the list under the reader as they scroll into it. */
+  const heights = useCallback(() => keys.map((key) => sizes.current.get(key) ?? estimate), [keys, estimate]);
+
+  /** The element that scrolls, looked up again while it is not one.
+   *
+   *  The host is the caller's own element and its ref is attached after this component's effects
+   *  have run, so the first look-up finds nothing; and the sidebar's body only starts scrolling once
+   *  there are rows in it. Both are answered by asking again rather than by assuming. */
+  const resolve = useCallback(() => {
+    const found = scroller.current;
+    if (found && found.isConnected && found.scrollHeight > found.clientHeight + 4) return found;
+    scroller.current = scrollParent(host.current) ?? found;
+    return scroller.current;
+  }, [host]);
+
+  const recompute = useCallback(() => {
+    const scroll = resolve();
+    const section = host.current;
+    if (!scroll || !section || !windowed) return;
+    const rows = section.querySelectorAll<HTMLElement>(rowSelector);
+    if (rows.length === 0) return;
+    const hs = heights();
+    // Where row zero would be, in the scroller's own coordinates, taken from a row that is really
+    // there: the rows above it are as tall as they have been measured to be.
+    const base = scroll.getBoundingClientRect().top - scroll.scrollTop;
+    let above = 0;
+    for (let i = 0; i < held.current.start && i < hs.length; i++) above += hs[i];
+    const listTop = rows[0].getBoundingClientRect().top - base - above;
+    const viewTop = scroll.scrollTop - overscan;
+    const viewBottom = scroll.scrollTop + scroll.clientHeight + overscan;
+    let start = 0;
+    let y = listTop;
+    while (start < keys.length - 1 && y + hs[start] < viewTop) {
+      y += hs[start];
+      start += 1;
+    }
+    let end = start;
+    let bottom = y;
+    while (end < keys.length && bottom < viewBottom) {
+      bottom += hs[end];
+      end += 1;
+    }
+    end = Math.max(end, start + 1);
+    if (focused.current >= 0 && focused.current < keys.length) {
+      start = Math.min(start, focused.current);
+      end = Math.max(end, focused.current + 1);
+    }
+    setRange((r) => (r.start === start && r.end === end ? r : { start, end }));
+  }, [keys.length, heights, host, overscan, resolve, rowSelector, windowed]);
+
+  useEffect(() => {
+    if (windowed) recompute();
+    else setRange((r) => (r.start === 0 && r.end === keys.length ? r : { start: 0, end: keys.length }));
+  }, [keys, windowed, recompute]);
+
+  useEffect(() => {
+    const scroll = resolve();
+    if (!scroll || !windowed) return;
+    const target: EventTarget = scroll === document.scrollingElement ? window : scroll;
+    let frame = 0;
+    const on = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        recompute();
+      });
+    };
+    target.addEventListener("scroll", on, { passive: true });
+    window.addEventListener("resize", on);
+    return () => {
+      target.removeEventListener("scroll", on);
+      window.removeEventListener("resize", on);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [keys.length, windowed, resolve, recompute]);
+
+  // Measure what is on screen. A row's height is taken from where the next one starts, so the margin
+  // between them is part of it and the spacers keep the list exactly as tall as it was.
+  useLayoutEffect(() => {
+    const section = host.current;
+    if (!section || !windowed) return;
+    const rows = [...section.querySelectorAll<HTMLElement>(rowSelector)];
+    let dirty = false;
+    for (let i = 0; i < rows.length; i++) {
+      const key = keys[held.current.start + i];
+      if (key === undefined) break;
+      const rect = rows[i].getBoundingClientRect();
+      const next = rows[i + 1];
+      const h = Math.round(next ? next.getBoundingClientRect().top - rect.top : rect.height);
+      if (h > 0 && sizes.current.get(key) !== h) {
+        sizes.current.set(key, h);
+        dirty = true;
+      }
+    }
+    if (dirty) recompute();
+  });
+
+  // Where the reader's focus is, so the window keeps that row however far they scroll away from it.
+  useEffect(() => {
+    const section = host.current;
+    if (!section || !windowed) return;
+    const on = (e: FocusEvent) => {
+      const rows = [...section.querySelectorAll<HTMLElement>(rowSelector)];
+      const at = rows.findIndex((row) => row === e.target || row.contains(e.target as Node));
+      focused.current = at < 0 ? -1 : held.current.start + at;
+    };
+    section.addEventListener("focusin", on);
+    return () => section.removeEventListener("focusin", on);
+  }, [host, rowSelector, windowed]);
+
+  if (!windowed) return <>{keys.map((_, i) => <Fragment key={keys[i]}>{render(i)}</Fragment>)}</>;
+
+  const hs = heights();
+  const start = Math.min(range.start, Math.max(0, keys.length - 1));
+  const end = Math.min(Math.max(range.end, start + 1), keys.length);
+  let padTop = 0;
+  for (let i = 0; i < start; i++) padTop += hs[i];
+  let padBottom = 0;
+  for (let i = end; i < keys.length; i++) padBottom += hs[i];
+  const slots: ReactNode[] = [];
+  for (let i = start; i < end; i++) slots.push(<Fragment key={keys[i]}>{render(i)}</Fragment>);
+  return (
+    <>
+      {padTop > 0 && <div style={{ height: Math.round(padTop) }} aria-hidden />}
+      {slots}
+      {padBottom > 0 && <div style={{ height: Math.round(padBottom) }} aria-hidden />}
     </>
   );
 }
