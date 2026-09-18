@@ -19,8 +19,15 @@ here that does not work that way, Mandarin, ships a lexicon and three rule FSTs 
 :func:`resolve` tells the two apart by what is in the directory rather than by anything in the
 catalog — the same rule the recognition side follows for the same reason.
 
-Files are found by shape, not by name (see :mod:`daedalus.speech.tts_catalog`). :func:`resolve` is the
-whole of that knowledge, and it is deliberately small.
+One family does none of that. Supertonic carries no phonemiser at all — it indexes unicode straight
+into its text encoder — which is how a hundred and forty megabytes reads thirty-one languages and
+expands "17" into words in each of them. It is also the one family that can be *told* where the stress
+falls, so a Russian answer going to it goes through :mod:`daedalus.speech.ru_stress` first; see
+:data:`OUTPUT_GAIN` for the other thing that family needs, which is to be played louder.
+
+Files are found by shape, not by name (see :mod:`daedalus.speech.tts_catalog`) — except Supertonic's,
+which are found by name because it has four of them. :func:`resolve` is the whole of that knowledge,
+and it is deliberately small.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from daedalus.speech import ru_stress
 from daedalus.speech.tts_catalog import TtsVoice
 
 logger = logging.getLogger(__name__)
@@ -79,6 +87,27 @@ RULE_FSTS = ("phone.fst", "date.fst", "number.fst")
 """The text-normalisation rules a lexicon-phonemised voice ships, in the order sherpa wants them: how a
 character is pronounced, then dates, then numbers."""
 
+SUPERTONIC_GRAPHS = ("text_encoder", "duration_predictor", "vector_estimator", "vocoder")
+"""The four ONNX files a Supertonic archive is made of, each under its own name.
+
+Every other family here is one graph and a tokens file. This one is a text encoder, a duration
+predictor, a vector estimator and a vocoder, and it has no tokens file at all: it indexes unicode
+directly, which is why it reads thirty-one languages without an espeak-ng copy or a lexicon."""
+
+SUPERTONIC_DATA = (("tts_json", "tts.json"), ("unicode_indexer", "unicode_indexer.bin"), ("voices", "voice.bin"))
+"""The three data files beside those graphs: the architecture, the character index, and the style
+vectors of the ten preset voices."""
+
+OUTPUT_GAIN: dict[str, float] = {"supertonic": 0.85}
+"""What a family's output is multiplied by so that two voices can be compared by ear and not by level.
+
+A voice that is a decibel or two louder than the one beside it wins an A/B for a reason that has
+nothing to do with how it sounds, so the level is levelled here rather than left to the listener.
+0.85 is measured, not assumed: on the same four sentences through this engine, Supertonic renders at
+RMS 0.055 and Piper's Russian at 0.047, and 0.85 is what puts the first onto the second. It is applied
+to the samples before they are quantised, and the clamp in :func:`to_pcm16` is what would keep a
+gained peak from wrapping round into a click. A family not named here is played as it was rendered."""
+
 
 class TtsError(RuntimeError):
     """Anything that stops audio coming out: the wheel, the files, or the voice itself."""
@@ -101,17 +130,33 @@ def require_sherpa() -> Any:
 
 @dataclass(frozen=True)
 class Files:
-    """The files one voice is loaded from, found inside an unpacked archive."""
+    """The files one voice is loaded from, found inside an unpacked archive.
 
-    model: Path
-    tokens: Path
+    A family brings the files it has and leaves the rest empty: a Piper voice is one graph and a tokens
+    file, and a Supertonic voice is four graphs, two data files and no tokens file anywhere. Nothing
+    here is required of every family, which is why every field has a default — what a family does
+    require is checked in :func:`resolve`, where the archive is in front of it.
+    """
+
+    model: Path | None = None
+    tokens: Path | None = None
     data_dir: Path | None = None
     """``espeak-ng-data``, where the voice phonemises through espeak-ng — which is all but one of them."""
     lexicon: Path | None = None
     """``lexicon.txt``, where it does not."""
     voices: Path | None = None
-    """``voices.bin``: the style vectors of a multi-speaker Kokoro or KittenTTS archive."""
+    """The style vectors of a multi-speaker archive: ``voices.bin`` for Kokoro and KittenTTS,
+    ``voice.bin`` for Supertonic's ten preset styles."""
     rule_fsts: tuple[Path, ...] = ()
+    text_encoder: Path | None = None
+    duration_predictor: Path | None = None
+    vector_estimator: Path | None = None
+    vocoder: Path | None = None
+    """Supertonic's four graphs. Empty for every other family."""
+    tts_json: Path | None = None
+    """``tts.json``: what Supertonic's four graphs are wired into."""
+    unicode_indexer: Path | None = None
+    """``unicode_indexer.bin``: Supertonic's whole phonemiser, in a quarter of a megabyte."""
 
 
 def _model_file(directory: Path) -> Path:
@@ -123,12 +168,45 @@ def _model_file(directory: Path) -> Path:
     return (quantised or found)[0]
 
 
+def _graph(directory: Path, stem: str) -> Path:
+    """One named graph, preferring the quantised build where an archive ships both of it.
+
+    The same preference :func:`_model_file` makes, per file rather than per directory: a Supertonic
+    archive holds four graphs and may hold either build of each.
+    """
+    for name in (f"{stem}.int8.onnx", f"{stem}.onnx"):
+        found = directory / name
+        if found.is_file():
+            return found
+    raise TtsError(f"{directory.name} has no {stem}.onnx — the download is incomplete")
+
+
+def _supertonic(directory: Path) -> Files:
+    """A Supertonic archive: four graphs and three data files, every one of them required.
+
+    There is no tokens file and no phonemiser directory to find, so unlike every other family nothing
+    here is discovered by shape — the whole archive is named, and a missing name is a short download.
+    """
+    graphs = {stem: _graph(directory, stem) for stem in SUPERTONIC_GRAPHS}
+    data: dict[str, Path] = {}
+    for field, name in SUPERTONIC_DATA:
+        found = directory / name
+        if not found.is_file():
+            raise TtsError(f"{directory.name} has no {name} — the download is incomplete")
+        data[field] = found
+    return Files(**graphs, **data)
+
+
 def resolve(directory: Path, kind: str) -> Files:
     """What to load a voice from, discovered inside the unpacked archive.
 
     This is also the integrity check a download gets after it is unpacked: an archive that arrived
     short raises here rather than at the first sentence somebody asks to hear.
     """
+    if kind == "supertonic":
+        # Before the model file and before the tokens check, because this family has neither in the
+        # shape the rest of them do.
+        return _supertonic(directory)
     model = _model_file(directory)
     tokens = directory / "tokens.txt"
     if not tokens.is_file():
@@ -156,10 +234,17 @@ def resolve(directory: Path, kind: str) -> Files:
 
 
 def _config(voice: TtsVoice, files: Files, threads: int) -> Any:
-    """sherpa's configuration for one voice. The only place that knows the three families apart."""
+    """sherpa's configuration for one voice. The only place that knows the four families apart."""
     sherpa = require_sherpa()
     model = sherpa.OfflineTtsModelConfig(num_threads=max(1, threads), provider="cpu")
-    if voice.kind == "kokoro":
+    if voice.kind == "supertonic":
+        model.supertonic = sherpa.OfflineTtsSupertonicModelConfig(
+            text_encoder=str(files.text_encoder), duration_predictor=str(files.duration_predictor),
+            vector_estimator=str(files.vector_estimator), vocoder=str(files.vocoder),
+            tts_json=str(files.tts_json), unicode_indexer=str(files.unicode_indexer),
+            voice_style=str(files.voices),
+        )
+    elif voice.kind == "kokoro":
         model.kokoro = sherpa.OfflineTtsKokoroModelConfig(
             model=str(files.model), voices=str(files.voices), tokens=str(files.tokens),
             data_dir=str(files.data_dir),
@@ -280,13 +365,18 @@ def sentences(text: str) -> list[str]:
 # -- audio ------------------------------------------------------------------------------------
 
 
-def to_pcm16(samples: Any) -> bytes:
+def to_pcm16(samples: Any, gain: float = 1.0) -> bytes:
     """sherpa's floats as the 16-bit samples everything downstream speaks in.
 
     Clamped rather than scaled: a synthesiser occasionally puts a sample just past full scale, and
     normalising the whole clip to it would make one loud consonant quieten the sentence around it.
+
+    ``gain`` is the family's own level put beside everyone else's (see :data:`OUTPUT_GAIN`) and is a
+    constant per family rather than anything measured on the clip, for the same reason: a per-clip
+    normalisation makes a quiet sentence and a loud one come out at the same level, which is a
+    different voice, not a fairer one.
     """
-    out = array.array("h", (max(-32768, min(32767, int(value * 32767))) for value in samples))
+    out = array.array("h", (max(-32768, min(32767, int(value * gain * 32767))) for value in samples))
     if struct.pack("=h", 1) != b"\x01\x00":  # pragma: no cover - no big-endian machine runs this
         out.byteswap()
     return out.tobytes()
@@ -351,8 +441,10 @@ class TtsEngine:
         if not body:
             return b""
         rate = max(MIN_SPEED, min(MAX_SPEED, speed))
+        if ru_stress.applies(self.voice):
+            body = ru_stress.mark(body)
         audio = self.tts.generate(body, sid=self.speaker_id(speaker), speed=rate)
-        return to_pcm16(audio.samples)
+        return to_pcm16(audio.samples, OUTPUT_GAIN.get(self.voice.kind, 1.0))
 
     def pieces(self, body: str, *, speaker: str | int = "", speed: float = 1.0) -> Iterator[bytes]:
         """The text as samples, a sentence at a time, in order. Blocking; holds the lock per sentence.
@@ -595,6 +687,7 @@ __all__ = [
     "MAX_TEXT_CHARS",
     "MIN_SPEED",
     "OPENING_CHARS",
+    "OUTPUT_GAIN",
     "Files",
     "TtsCache",
     "TtsLoadState",

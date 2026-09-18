@@ -306,6 +306,8 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "tts.gender.male": { en: "Male", ru: "Мужской" },
   "tts.gender.mixed": { en: "Several voices", ru: "Несколько голосов" },
   "tts.slow": { en: "Slower than speech", ru: "Медленнее речи" },
+  "tts.new": { en: "New", ru: "Новый" },
+  "tts.facts.languages": { en: "Also reads {langs}", ru: "Читает также: {langs}" },
   "tts.quality": { en: "Quality", ru: "Качество" },
   "tts.speed": { en: "Speed", ru: "Скорость" },
   "tts.facts.size": { en: "{dl} download · {disk} on disk · ~{mem} MB in memory", ru: "{dl} скачать · {disk} на диске · ~{mem} МБ в памяти" },

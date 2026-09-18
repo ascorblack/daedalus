@@ -12,6 +12,11 @@ export type TtsVoice = {
   label: string;
   kind: string;
   language: string;
+  // Every language the model reads, where it reads more than one; empty for the ordinary case of a
+  // voice that speaks what it was trained on. The filter consults it, so a Russian filter finds a
+  // multilingual voice that is filed under English.
+  languages: string[];
+  new: boolean;
   gender: string;
   size_bytes: number;
   disk_bytes: number;

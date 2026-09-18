@@ -9,6 +9,8 @@ const voice = (over: Partial<TtsView["models"][number]> = {}): TtsView["models"]
   label: "Dmitri",
   kind: "piper",
   language: "ru",
+  languages: [],
+  new: false,
   gender: "male",
   size_bytes: 1,
   disk_bytes: 1,
@@ -58,6 +60,16 @@ describe("mergeTtsView", () => {
     const after = mergeTtsView(loaded, { state: { ...EMPTY_TTS_VIEW.state, speed: 1.5 } });
     expect(after.state.speed).toBe(1.5);
     expect(after.models).toHaveLength(1);
+  });
+
+  it("carries a multilingual voice's whole language list through a fold", () => {
+    // The card says which languages it reads and the filter consults the same list; an answer that
+    // mentioned neither must not leave the card looking like a single-language voice.
+    const many = voice({ id: "multi-supertonic", languages: ["ru", "en", "de"], new: true });
+    const after = mergeTtsView({ ...loaded, models: [many] }, { selected: "multi-supertonic" });
+    expect(after.models[0].languages).toEqual(["ru", "en", "de"]);
+    expect(after.models[0].new).toBe(true);
+    expect(after.models[0].licence).toBe("CC BY 4.0");
   });
 
   it("never wipes a bar that is moving on a card", () => {

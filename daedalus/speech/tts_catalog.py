@@ -14,9 +14,13 @@ from a measured real-time factor by ``100·(1 − e^(−(1/rtf)/6))``, so a voic
 of speech in one second scores well above one that cannot keep up with a person talking. Each ``rtf``
 is the median of three runs of that voice's own ``sample()`` through :meth:`TtsEngine.stream` — the
 path the answers actually take — on an ordinary eight-core desktop with two threads. Read the bar as
-"this one is quicker than that one" rather than as a guarantee about another machine. Two entries
-here are slower than real time on an ordinary CPU and say so in their own note rather than only in a
-bar: Kokoro and Piper's "high" quality are worth their cost only on a machine with cores to spare.
+"this one is quicker than that one" rather than as a guarantee about another machine. One entry
+here is slower than real time on an ordinary CPU and says so in its own note rather than only in a
+bar: Piper's "high" quality is worth its cost only on a machine with cores to spare.
+
+Most entries speak one language. ``languages`` is where an entry that speaks several says so, and
+the picker's filter reads it: one download that reads Russian and English is a different thing from
+two, because only one of them is resident at a time and swapping costs a load.
 
 ``kind`` is the model family, not the file layout. What the files are called and whether the voice
 phonemises through espeak-ng or through a lexicon is discovered inside the unpacked directory by
@@ -43,6 +47,10 @@ Kind = str
 ``vits``    a single Piper/VITS ``.onnx`` with a tokens file, phonemised by espeak-ng or a lexicon.
 ``kokoro``  Kokoro's model plus a ``voices.bin`` of style vectors, one per named speaker.
 ``kitten``  KittenTTS, the same two-file shape as Kokoro and a different runtime.
+``supertonic``
+            Four graphs, a ``voice.bin`` of ten preset styles and no tokens file at all: it indexes
+            unicode directly, which is how one download speaks thirty-one languages without carrying
+            a phonemiser for any of them.
 """
 
 SAMPLES: dict[str, str] = {
@@ -80,8 +88,10 @@ class TtsVoice:
     """Basename of the ``.tar.bz2`` in the zoo release; the download URL is ``ZOO`` plus this."""
     kind: Kind
     language: str
-    """ISO 639-1. One language per voice — a synthesiser speaks the language it was trained on, and a
-    voice reading another one is a party trick rather than a feature."""
+    """ISO 639-1, and the one the entry is filed under: the language its card is played in and the
+    heading it appears beneath. For all but one entry here it is also the only language the model
+    knows, because a synthesiser usually speaks the language it was trained on and a voice reading
+    another one is a party trick rather than a feature."""
     gender: str
     """``female``, ``male`` or ``mixed`` (a multi-speaker archive holding both)."""
     size_bytes: int
@@ -106,6 +116,17 @@ class TtsVoice:
     note: str
     """One line of UI copy: who this voice is for, in the operator's terms."""
     sha256: str
+    languages: tuple[str, ...] = ()
+    """Every language the model actually speaks, where that is more than one — including
+    :attr:`language` itself. Empty means "just the one", which is the ordinary case.
+
+    Only languages this catalog can play a sample in are listed. A multilingual model usually reads
+    more than that (Supertonic 3 reads thirty-one), but a voice that cannot be heard in a language
+    before it is chosen cannot be chosen in it either, so offering it there would be a claim the
+    picker has no way to let anybody check."""
+    new: bool = False
+    """Whether to say on the card that this one is new. It is an editorial flag with a shelf life: it
+    goes when the entry stops being the thing an operator has not seen before."""
     speakers: tuple[str, ...] = ()
     """Named speakers inside a multi-speaker archive, in the order the model numbers them. Empty for a
     single-voice model. The names come from the model's own ONNX metadata; ``a``/``b`` is the accent
@@ -143,11 +164,34 @@ class TtsVoice:
         """Whether this voice is in a language. Empty or ``"any"`` asks nothing of it."""
         if not language or language == "any":
             return True
-        return self.language == language.split("-")[0].lower()
+        wanted = language.split("-")[0].lower()
+        return wanted == self.language or wanted in self.languages
 
 
 VOICES: tuple[TtsVoice, ...] = (
     # -- Russian ------------------------------------------------------------------------------
+    TtsVoice(
+        id="multi-supertonic",
+        label="Supertonic 3 (Russian and 30 more, 10 styles)",
+        archive="sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2",
+        kind="supertonic",
+        language="ru",
+        languages=("ru", "en", "de", "es", "fr", "it", "pl", "pt", "uk"),
+        gender="mixed",
+        size_bytes=128_774_318,
+        unpacked_bytes=145_316_356,
+        memory_mb=256,
+        sample_rate=44_100,
+        licence="OpenRAIL-M (use restrictions apply)",
+        quality=90,
+        speed=61,
+        rtf=0.175,
+        new=True,
+        note="The best Russian here, and the fastest: forty-four kilohertz, ten voices in one download, and it reads thirty-one languages including English.",
+        sha256="82fa96f91c4ef8abaae3a14a3f4153facf88bed821d1f7331cec2700f432c427",
+        speakers=("Style 1", "Style 2", "Style 3", "Style 4", "Style 5", "Style 6", "Style 7", "Style 8", "Style 9", "Style 10"),
+        recommended_for=("ru",),
+    ),
     TtsVoice(
         id="ru-dmitri",
         label="Dmitri (Russian)",
@@ -163,9 +207,8 @@ VOICES: tuple[TtsVoice, ...] = (
         quality=74,
         speed=50,
         rtf=0.243,
-        note="A clear male Russian, four times faster than speech, and the only one here whose dataset is public domain.",
+        note="A clear male Russian, four times faster than speech, and the only one here whose dataset is public domain. The fallback where Supertonic's licence is not wanted.",
         sha256="7636793307f634ce54c6e65528a91a61683114f1a6635a08caf64ba6c54e6a63",
-        recommended_for=("ru",),
     ),
     TtsVoice(
         id="ru-irina",
@@ -205,6 +248,28 @@ VOICES: tuple[TtsVoice, ...] = (
     ),
     # -- English ------------------------------------------------------------------------------
     TtsVoice(
+        id="en-supertonic2",
+        label="Supertonic 2 (English, 10 styles)",
+        archive="sherpa-onnx-supertonic-tts-int8-2026-03-06.tar.bz2",
+        kind="supertonic",
+        language="en",
+        languages=("en", "es", "fr", "pt"),
+        gender="mixed",
+        size_bytes=84_692_981,
+        unpacked_bytes=96_426_478,
+        memory_mb=232,
+        sample_rate=44_100,
+        licence="OpenRAIL-M (use restrictions apply)",
+        quality=88,
+        speed=86,
+        rtf=0.084,
+        new=True,
+        note="The quickest voice here by a distance — twelve seconds of speech per second of work — at forty-four kilohertz, with ten voices to choose between.",
+        sha256="8c74359f63edd5045d47747f65331f0f6dbcbc91d7e898dd756d631295fe3259",
+        speakers=("Style 1", "Style 2", "Style 3", "Style 4", "Style 5", "Style 6", "Style 7", "Style 8", "Style 9", "Style 10"),
+        recommended_for=("en",),
+    ),
+    TtsVoice(
         id="en-amy",
         label="Amy (American English)",
         archive="vits-piper-en_US-amy-medium-int8.tar.bz2",
@@ -221,7 +286,6 @@ VOICES: tuple[TtsVoice, ...] = (
         rtf=0.251,
         note="Twenty megabytes, four times faster than speech, and it never makes the conversation wait.",
         sha256="bd23c0aa629eb3719448582f45ede49e8fa6a679061fed5eab16a6a6fd8e7e82",
-        recommended_for=("en",),
     ),
     TtsVoice(
         id="en-alba",
@@ -284,20 +348,20 @@ VOICES: tuple[TtsVoice, ...] = (
     TtsVoice(
         id="en-kokoro",
         label="Kokoro (English, 11 voices)",
-        archive="kokoro-int8-en-v0_19.tar.bz2",
+        archive="kokoro-en-v0_19.tar.bz2",
         kind="kokoro",
         language="en",
         gender="mixed",
-        size_bytes=103_248_205,
-        unpacked_bytes=157_947_103,
+        size_bytes=319_625_534,
+        unpacked_bytes=369_315_617,
         memory_mb=320,
         sample_rate=24_000,
         licence="Apache-2.0",
         quality=92,
-        speed=10,
-        rtf=1.665,
-        note="The best-sounding English here by a distance, and slower than real time: it suits a machine with cores to spare.",
-        sha256="c9f0dd393615805b0bab050c340834d5e684e732aec91c0e860cd30e982c08bd",
+        speed=21,
+        rtf=0.692,
+        note="The most natural English here, and the largest download: it keeps up with a person talking, but only just, and wants a machine with cores to spare.",
+        sha256="912804855a04745fa77a30be545b3f9a5d15c4d66db00b88cbcd4921df605ac7",
         speakers=(
             "af", "af_bella", "af_nicole", "af_sarah", "af_sky", "am_adam",
             "am_michael", "bf_emma", "bf_isabella", "bm_george", "bm_lewis",
@@ -470,8 +534,12 @@ def get(voice_id: str) -> TtsVoice:
 
 
 def languages() -> list[str]:
-    """Every language a voice speaks, sorted, for the picker's filter."""
-    return sorted({voice.language for voice in VOICES})
+    """Every language a voice speaks, sorted, for the picker's filter.
+
+    A multilingual entry contributes all of its own, which is why this is not simply the set of
+    :attr:`TtsVoice.language`: filtering to a language has to find every voice that reads it, not only
+    the ones filed under it."""
+    return sorted({code for voice in VOICES for code in (voice.language, *voice.languages)})
 
 
 def recommended(language: str = "") -> TtsVoice | None:
@@ -490,6 +558,8 @@ def as_json(voice: TtsVoice) -> dict[str, object]:
         "label": voice.label,
         "kind": voice.kind,
         "language": voice.language,
+        "languages": list(voice.languages),
+        "new": voice.new,
         "gender": voice.gender,
         "size_bytes": voice.size_bytes,
         "disk_bytes": voice.unpacked_bytes,
