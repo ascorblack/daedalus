@@ -14,7 +14,7 @@ function folder(id: string, name: string, over: Partial<ProjectFolder> = {}): Pr
   return {
     id,
     name,
-    root: `/home/op/${name}`,
+    root: `/projects/${name}`,
     created_at: "2026-09-01T00:00:00Z",
     settings: { snapshots: false, system: "" },
     reachable: true,
