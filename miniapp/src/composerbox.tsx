@@ -558,4 +558,3 @@ function MicButton({ sessionId, asr, onText, onAutosend, toast }: { sessionId: s
     </button>
   );
 }
-
