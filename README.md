@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/session.png" alt="A session: the agent's steps, an image it looked at, the file it sent, and the panel with quota, cron, services and subagents" width="100%" />
+  <img src="docs/screenshots/session.png" alt="A session: the agent's steps, an image it looked at, the file it sent, and the panel beside it with the session's details — model, context, quota, cron, services, subagents" width="100%" />
 </p>
 
 > Built on [protocore](https://github.com/ascorblack-labs/protocore-community), an open agent core (ReAct loop, tools, context compaction, snapshots and resumable runs, memory, skills). The copy it runs on is [protocore-exp](https://github.com/ascorblack/protocore-exp).
@@ -140,11 +140,11 @@ A single tool result is clipped to a limit you set; the twenty results already b
 <td align="center"><sub>Memory — what the agent remembered, global and per session; edit, add, forget in bulk</sub></td>
 </tr>
 <tr>
-<td><img src="docs/screenshots/files-preview.png" alt="Workspace files with a Markdown preview" /></td>
+<td><img src="docs/screenshots/session-panel-preview.png" alt="The panel on its Preview tab: a Markdown file from the workspace, with the breadcrumb and the history buttons" /></td>
 <td><img src="docs/screenshots/board.png" alt="The task board" /></td>
 </tr>
 <tr>
-<td align="center"><sub>Workspace files with previews and uploads</sub></td>
+<td align="center"><sub>The panel — files, previews and uploads beside the conversation</sub></td>
 <td align="center"><sub>The boards the agents keep: every task says whose it is</sub></td>
 </tr>
 <tr>

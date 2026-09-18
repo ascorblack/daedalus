@@ -159,16 +159,20 @@ function ConfirmDialog({ pending, onDone }: { pending: Pending; onDone: (ok: boo
 
 export type MenuItem = { label: string; icon?: IconName; danger?: boolean; disabled?: boolean; onSelect: () => void } | "-";
 
-export function OverflowMenu({ items, label, icon = "more", small, className }: { items: MenuItem[]; label?: string; icon?: IconName; small?: boolean; className?: string }) {
+/** With `trigger`, the button is that content (a title with a chevron) rather than an icon. */
+export function OverflowMenu({ items, label, icon = "more", small, className, trigger: customTrigger }: { items: MenuItem[]; label?: string; icon?: IconName; small?: boolean; className?: string; trigger?: ReactNode }) {
   const name = label ?? t("dlg.menu");
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
+  const [pos, setPos] = useState<{ top?: number; bottom?: number; right: number } | null>(null);
   useLayoutEffect(() => {
     if (!open || !trigger.current) return;
     const r = trigger.current.getBoundingClientRect();
-    setPos({ top: r.bottom + 4, right: Math.max(8, window.innerWidth - r.right) });
+    const right = Math.max(8, window.innerWidth - r.right);
+    // A control in the lower half opens its menu upward: a menu that runs off the bottom edge has to
+    // be scrolled to, and the scroll is what closes it.
+    setPos(r.top > window.innerHeight / 2 ? { bottom: window.innerHeight - r.top + 4, right } : { top: r.bottom + 4, right });
   }, [open]);
   useEffect(() => {
     if (!open) return;
@@ -177,7 +181,6 @@ export function OverflowMenu({ items, label, icon = "more", small, className }: 
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         const buttons = Array.from(menu.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
         const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
@@ -186,7 +189,12 @@ export function OverflowMenu({ items, label, icon = "more", small, className }: 
         e.preventDefault();
       }
     };
-    const onScroll = () => setOpen(false);
+    // A scroll closes the menu — except the one that brought the control into view a frame ago:
+    // the browser reports that scroll after the click that opened the menu, not before it.
+    const openedAt = performance.now();
+    const onScroll = () => {
+      if (performance.now() - openedAt > 200) setOpen(false);
+    };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("touchstart", onDown);
     document.addEventListener("keydown", onKey);
@@ -203,8 +211,8 @@ export function OverflowMenu({ items, label, icon = "more", small, className }: 
   }, [open]);
   return (
     <>
-      <button ref={trigger} className={`iconbtn ${small ? "small" : ""} ${open ? "on" : ""} ${className ?? ""}`} aria-label={name} title={name} aria-haspopup="menu" aria-expanded={open} onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}>
-        <Icon name={icon} size={small ? 16 : 18} />
+      <button ref={trigger} className={`${customTrigger ? "" : `iconbtn ${small ? "small" : ""}`} ${open ? "on" : ""} ${className ?? ""}`} aria-label={name} title={name} aria-haspopup="menu" aria-expanded={open} onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}>
+        {customTrigger ?? <Icon name={icon} size={small ? 16 : 18} />}
       </button>
       {open && pos && createPortal(
         // In the document's own stacking context, not the row's: a `position: fixed` menu inside an
@@ -212,7 +220,8 @@ export function OverflowMenu({ items, label, icon = "more", small, className }: 
         // pressing finger) is positioned against that element instead of the viewport. The menu then
         // jumps away between mousedown and mouseup, the release lands outside it, and no click ever
         // reaches the item — every action in the menu looked dead.
-        <div ref={menu} className="menu" role="menu" style={{ position: "fixed", top: pos.top, right: pos.right }} onClick={(e) => e.stopPropagation()}>
+        <div ref={menu} className="menu" role="menu" style={{ position: "fixed", top: pos.top ?? "auto", bottom: pos.bottom, right: pos.right }} onClick={(e) => e.stopPropagation()}>
+          <MenuLayer onClose={() => setOpen(false)} />
           {items.map((it, i) =>
             it === "-" ? (
               <div key={i} className="menu-sep" />
@@ -228,6 +237,12 @@ export function OverflowMenu({ items, label, icon = "more", small, className }: 
       )}
     </>
   );
+}
+
+/** The open menu is a layer like a sheet: Escape reaches it first, and only it. */
+function MenuLayer({ onClose }: { onClose: () => void }) {
+  useLayer(onClose);
+  return null;
 }
 
 // ── toast ────────────────────────────────────────────────────────────────────────────────

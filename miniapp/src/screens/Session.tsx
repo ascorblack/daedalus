@@ -1,17 +1,21 @@
 import { Component, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { api, AsrStatus, LoopView, ModelFallback, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
-import { Dot, ServiceRow, Status, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, statusWord, timeAgo } from "../components";
-import { OverflowMenu, Sheet, confirmDialog, Overlay } from "../dialogs";
-import { absDate, clock, commandPreview, duration, plainPreview, shortDateTime, untilShort } from "../format";
+import { api, AsrStatus, ModelFallback, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, Question, SessionDetail, Compacting } from "../api";
+import { Dot, Status, copyText, fmtInt, statusWord, timeAgo } from "../components";
+import { OverflowMenu, confirmDialog, Overlay } from "../dialogs";
+import { absDate, clock, commandPreview, duration, plainPreview, shortDateTime } from "../format";
 import { EVIDENCE_EVENT, EvidenceRequest, codeBlock, renderCached, renderMarkdown } from "../md";
-import { confirmAsync, enterSends, errorText, fmtBytes, fmtTok, haptic } from "../ui";
+import { confirmAsync, enterSends, errorText, fmtBytes, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
-import { AuthImg, FilePreview, PreviewSource, canPreview, fileGlyph, previewKind, sessionBase } from "../preview";
+import { AuthImg, FilePreview, PreviewSource, canPreview, downloadHref, fileGlyph, previewKind, sessionBase } from "../preview";
 import { Activity, LiveStore, SummaryItem, ToolItem, Turn, applyLive, buildTurns, createLiveStore, isOlderPage, liveAfter, liveBase, prepend, reconcile } from "../turns";
 import { MoveSessionSheet } from "../projects";
-import { PaneHandle, readLayout, usePaneWidth, writeLayout } from "../layout";
-import { navigate, pathFor } from "../router";
+import { panelShortcut } from "../panel";
+import { Panel, usePanel, usePanelWidth } from "../panelhost";
+import { SessionDetails } from "../details";
+import { JobsTab } from "../jobs";
+import { navigate, pathFor, useRoute } from "../router";
+import { useMedia } from "../shell";
 import { Windowed } from "../virtual";
 import { DICT, plural, t } from "../i18n";
 
@@ -55,12 +59,14 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   const [moving, setMoving] = useState(false);
   const [pending, setPending] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
-  // The layout is the operator's, not the session's: the pane they opened on the right (files, MCP) and
-  // whether the session panel is shown stay put across sessions and reloads, so leaving for Settings and
-  // coming back does not mean reopening the files and closing the panel again.
-  const [view, setView] = useState<"chat" | "files" | "mcp">(() => (readLayout("view") === "files" || readLayout("view") === "mcp" ? (readLayout("view") as "files" | "mcp") : "chat"));
-  useEffect(() => writeLayout("view", view), [view]);
-  const [info, setInfo] = useState<string | null>(null);
+  // The right panel: the route carries the open tab and the previewed file for the pane the URL
+  // names; the second pane of a dual view keeps its panel to itself. Phones host it in a sheet.
+  const route = useRoute();
+  const phone = !useMedia("(min-width: 1024px)");
+  const panel = usePanel(id, sessionBase(id), { route: pane === "right" ? null : route.query, beside: pane === "left" ? route.with : null, pane });
+  const [panelPct, dragPanel] = usePanelWidth();
+  const body = useRef<HTMLDivElement>(null);
+  const [detailsFocus, setDetailsFocus] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [modes, setModes] = useState<string[]>([]);
   const [commands, setCommands] = useState<SlashCommand[]>([]);
@@ -78,12 +84,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   const [dragging, setDragging] = useState(0);
   const [providerUsage, setProviderUsage] = useState<ProviderUsage | null>(null);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
-  const [asideOpen, setAsideOpen] = useState(() => pane === undefined && readLayout("aside") !== "0");
-  useEffect(() => { if (pane === undefined) writeLayout("aside", asideOpen ? "1" : "0"); }, [asideOpen, pane]);
   const [asr, setAsr] = useState<AsrStatus | null>(null);
   const [snapshots, setSnapshots] = useState<SessionCheckpoints | null>(null);
-  const [asideWidth, setAsideWidth] = usePaneWidth("aside", 272, 200, 520);
-  const [paneWidth, setPaneWidth] = usePaneWidth("pane", 420, 280, 900);
 
   async function loopAction(a: string) {
     try {
@@ -717,7 +719,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   }
 
   async function compact() {
-    setInfo(null);
     if (busy) {
       toast(t("session.stopfirst"));
       return;
@@ -734,7 +735,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   }
 
   async function clearHistory() {
-    setInfo(null);
     if (busy) {
       toast(t("session.stopfirst"));
       return;
@@ -771,7 +771,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   }
 
   async function remove() {
-    setInfo(null);
     if (!(await confirmAsync(t("session.delete.title"), { body: t("session.delete.body"), action: t("session.delete.action") }))) return;
     try {
       await api.delete(`/api/sessions/${id}`);
@@ -799,26 +798,42 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     }
   }
 
-  const ctxPct = detail?.context && detail.context.window > 0 ? Math.round((100 * detail.context.tokens) / detail.context.window) : null;
   const subRunning = (detail?.subagents ?? []).filter((x) => x.running).length;
 
-  // The chip that opened the sheet names the section it wants; the sheet scrolls there once mounted.
+  // A workspace file opens in the panel's Preview tab; a file waiting in the composer, which is
+  // nowhere the panel can fetch it from, still opens in the dialog.
+  const openPreview = useCallback(
+    (src: PreviewSource) => {
+      if ("file" in src) setPreview(src);
+      else panel.openFile(src);
+    },
+    [panel.openFile],
+  );
+
+  // Ctrl/⌘ . toggles the panel, with Shift it covers the chat. The pane the URL names owns the keys.
   useEffect(() => {
-    if (!info || info === "session") return;
-    const t = window.setTimeout(() => document.getElementById(`info-${info}`)?.scrollIntoView({ block: "start" }), 30);
-    return () => window.clearTimeout(t);
-  }, [info]);
+    if (phone || pane === "right") return;
+    const onKey = (e: KeyboardEvent) => {
+      const which = panelShortcut(e);
+      if (!which) return;
+      e.preventDefault();
+      if (which === "toggle") panel.toggle();
+      else panel.expand();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [phone, pane, panel.toggle, panel.expand]);
 
   const sessionCtx = useMemo(
     () => ({
       id,
       workspace: detail?.workspace ?? "",
-      preview: setPreview,
+      preview: openPreview,
       // An empty list is a session that never snapshots (a project with them off, a workspace over
       // the size cap): there is nothing retention took away and the undo behaves as it always did.
       revertable: snapshots && snapshots.total > 0 ? new Set(snapshots.checkpoints.filter((c) => c.kind === "before" && c.seq != null).map((c) => c.seq as number)) : null,
     }),
-    [id, detail?.workspace, snapshots],
+    [id, detail?.workspace, snapshots, openPreview],
   );
 
   // What the answer cited, clicked: a file opens at the lines it named, a Verify receipt opens as a
@@ -830,23 +845,25 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
       if (!cited) return;
       if (cited.kind === "run") {
         if (/^v\d+$/.test(cited.id)) setReceipt(cited.id);
-        else setPreview({ base: sessionBase(id), path: `.jobs/${cited.id}.log` });
+        else openPreview({ base: sessionBase(id), path: `.jobs/${cited.id}.log` });
         return;
       }
       const rel = workspaceRelative(cited.path, workspace);
-      if (rel) setPreview({ base: sessionBase(id), path: rel, lines: cited.lines });
+      if (rel) openPreview({ base: sessionBase(id), path: rel, lines: cited.lines });
       else toast(t("session.outside", { path: cited.path }));
     };
     document.addEventListener(EVIDENCE_EVENT, on);
     return () => document.removeEventListener(EVIDENCE_EVENT, on);
-  }, [id, detail?.workspace, toast]);
+  }, [id, detail?.workspace, toast, openPreview]);
   return (
     <div className={`chat ${pane ? `pane pane-${pane}` : ""}`} onDragEnter={(e) => { if (e.dataTransfer?.types.includes("Files")) setDragging((d) => d + 1); }} onDragLeave={() => setDragging((d) => Math.max(0, d - 1))} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
       {dragging > 0 && <div className="dropzone"><Icon name="attach" size={28} /> {t("session.drop")}</div>}
-      <div className="chat-head">
-        <button className="iconbtn" onClick={onBack} aria-label={t(pane === "right" ? "session.closepane" : "shell.back")} title={t(pane === "right" ? "session.closepane" : "shell.back")}>
-          <Icon name={pane === "right" ? "close" : "back"} />
-        </button>
+      <div className={`chat-head ${busy || saving || compacting ? "live" : ""}`}>
+        {(pane || phone) && (
+          <button className="iconbtn" onClick={onBack} aria-label={t(pane === "right" ? "session.closepane" : "shell.back")} title={t(pane === "right" ? "session.closepane" : "shell.back")}>
+            <Icon name={pane === "right" ? "close" : "back"} />
+          </button>
+        )}
         <div className="grow chat-identity" style={{ minWidth: 0 }}>
           {editingTitle !== null ? (
             <input
@@ -861,233 +878,62 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
               }}
             />
           ) : (
-            <button className="title chat-title" onClick={() => setInfo("session")} title={t("session.info")}>
-              {detail?.title ?? "…"}
+            <OverflowMenu
+              label={t("session.title.menu")}
+              className="chat-title"
+              trigger={<><span className="truncate">{detail?.title ?? "…"}</span><Icon name="chevron" size={14} /></>}
+              items={[
+                { label: t("session.rename"), icon: "pen", onSelect: () => setEditingTitle(detail?.title ?? "") },
+                { label: t("session.project.move"), icon: "folder", onSelect: () => setMoving(true) },
+                ...(onSplit ? [{ label: t("session.split"), icon: "split" as IconName, onSelect: onSplit }] : []),
+                { label: t("session.export"), icon: "download", onSelect: exportMarkdown },
+                "-",
+                { label: t("session.compact"), icon: "compact", onSelect: compact, disabled: busy },
+                { label: t("session.clear"), icon: "trash", onSelect: clearHistory, disabled: busy, danger: true },
+                { label: t("session.delete"), icon: "trash", onSelect: remove, danger: true },
+              ]}
+            />
+          )}
+          {detail?.subagent_of && (
+            <button className="leader-link" onClick={() => onOpen?.(detail.subagent_of!)} title={t("session.leader")}>
+              ↳ {detail.leader_title ?? t("session.leader.word")}
             </button>
           )}
-          <div className="sub meta">
-            {(busy || status === "failed") && <Dot status={status} />}
-            {(busy || status === "failed") && <span className={`word ${status}`}>{statusWord(status)}</span>}
-            {/* While another model holds the run the chip says so, and says what it stands in for. It goes
-                back to the plain label by itself: the note is the difference between two names, not a flag
-                anybody has to clear. */}
-            <button className={`chip model ${detail?.fallback ? "attn" : ""}`} onClick={openPicker} title={detail?.fallback ? t("session.model.fallback.turn", { to: detail.fallback.to, from: detail.fallback.from }) : t("session.model.for")}>
-              <Icon name="model" />{" "}
-              {detail?.fallback
-                ? t("session.model.fallback", { to: shortModel(detail.fallback.to, 14), from: shortModel(detail.fallback.from, 14) })
-                : shortModel(detail?.model, 22)}
-            </button>
-            {ctxPct !== null && ctxPct >= 60 && (
-              <button className={`chip ctx ${ctxPct >= 90 ? "bad" : "attn"}`} onClick={() => setInfo("context")} title={t("session.ctx.title", { used: fmtInt(detail!.context!.tokens), window: fmtInt(detail!.context!.window) })}>
-                {t("session.ctx", { n: ctxPct })}
-              </button>
-            )}
-            {detail?.subagents && detail.subagents.length > 0 && (
-              <button className={`chip ${subRunning ? "accent" : ""}`} onClick={() => setInfo("subagents")} title={t("session.subagents.title")}>
-                {subRunning ? <Dot status="running" /> : null}
-                {plural("session.subagents", detail.subagents.length)}{subRunning ? t("session.subagents.working", { n: subRunning }) : ""}
-              </button>
-            )}
-            {detail?.loop && <button className={`chip loop ${detail.loop.status}`} onClick={() => setInfo("loop")} title={detail.loop.instruction}>{loopLabel(detail.loop).replace(/^loop · /, "loop · ")}</button>}
-            {detail?.subagent_of && (
-              <button className="chip" onClick={() => onOpen?.(detail.subagent_of!)} title={t("session.leader")}>
-                ↳ {detail.leader_title ?? t("session.leader.word")}
-              </button>
-            )}
-            {offline && <span className="offline">{t("session.reconnecting")}</span>}
-          </div>
         </div>
+        {compacting ? (
+          <CompactionBar c={compacting} />
+        ) : busy || saving ? (
+          <LiveBar status={status} saving={saving} base={tail} live={live} workspace={detail?.workspace} onJump={jumpToBottom} />
+        ) : status === "failed" ? (
+          <span className="head-status failed" role="status"><Dot status={status} /><b>{statusWord(status)}</b></span>
+        ) : null}
+        {offline && <span className="head-status offline">{t("session.reconnecting")}</span>}
+        {/* The model, until the composer holds it: a muted label, amber while another model stands in
+            for the configured one. It goes back to the plain name by itself. */}
+        <button className={`head-model ${detail?.fallback ? "attn" : ""}`} onClick={openPicker} title={detail?.fallback ? t("session.model.fallback.turn", { to: detail.fallback.to, from: detail.fallback.from }) : t("session.model.for")}>
+          {detail?.fallback ? t("session.model.fallback", { to: shortModel(detail.fallback.to, 14), from: shortModel(detail.fallback.from, 14) }) : shortModel(detail?.model, 22)}
+        </button>
         <div className="head-actions">
-          <button className={`iconbtn wide-only ${asideOpen ? "on" : ""}`} onClick={() => setAsideOpen((v) => !v)} aria-label={t("session.panel")} title={t("session.panel.title")}>
-            <Icon name="columns" />
-          </button>
-          <button className={`iconbtn wide-only ${view === "files" ? "on" : ""}`} onClick={() => setView(view === "files" ? "chat" : "files")} aria-label={t("session.files")} title={t("session.files")}>
-            <Icon name="folder" />
+          <button className={`iconbtn ${panel.state.tab ? "on" : ""}`} onClick={panel.toggle} aria-label={t("panel.toggle")} title={t("panel.toggle.title")} aria-pressed={!!panel.state.tab}>
+            <Icon name="panel" />
           </button>
           <OverflowMenu
             label={t("session.actions")}
             items={[
-              { label: t("session.info"), icon: "settings", onSelect: () => setInfo("session") },
-              { label: t(view === "files" ? "session.files.hide" : "session.files"), icon: "folder", onSelect: () => setView(view === "files" ? "chat" : "files") },
-              { label: t(view === "mcp" ? "session.mcp.hide" : "session.mcp"), icon: "plug", onSelect: () => setView(view === "mcp" ? "chat" : "mcp") },
+              { label: t("panel.tab.details"), icon: "settings", onSelect: () => { setDetailsFocus("session"); panel.open("details"); } },
+              { label: t("session.files"), icon: "folder", onSelect: () => panel.open("files") },
+              { label: t("panel.tab.jobs"), icon: "terminal", onSelect: () => panel.open("jobs") },
+              { label: t("session.mcp"), icon: "plug", onSelect: () => { setDetailsFocus("mcp"); panel.open("details"); } },
               ...(onSplit ? [{ label: t("session.split"), icon: "split" as IconName, onSelect: onSplit }] : []),
-              { label: t("session.rename"), icon: "pen", onSelect: () => setEditingTitle(detail?.title ?? "") },
-              { label: t("session.export"), icon: "download", onSelect: exportMarkdown },
               "-",
-              { label: t("session.compact"), icon: "compact", onSelect: compact, disabled: busy },
-              { label: t("session.clear"), icon: "trash", onSelect: clearHistory, disabled: busy, danger: true },
-              { label: t("session.delete"), icon: "trash", onSelect: remove, danger: true },
+              { label: t("session.export"), icon: "download", onSelect: exportMarkdown },
             ]}
           />
         </div>
+        {(busy || saving || compacting) && <HeadProgress status={status} compacting={compacting} />}
       </div>
 
-      {info && detail && (
-        <Sheet title={t("session.info")} onClose={() => setInfo(null)} className="session-info">
-              <section className="sheet-section" id="info-session">
-              <div className="sheet-section-title">{t("session.card")}</div>
-              <label className="field">{t("session.title")}</label>
-              <input className="field" defaultValue={detail.title} onBlur={(e) => rename(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
-              <label className="field">{t("session.model")}</label>
-              <button className="menu-item" onClick={() => { setInfo(null); openPicker(); }}>
-                {detail.model || t("session.model.global")} <span className="sub">{t("session.model.change")}</span>
-              </button>
-              <label className="field">{t("session.mode")}</label>
-              <select className="field" value={detail.mode || "default"} onChange={(e) => setMode(e.target.value)}>
-                {["default", ...modes].map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-              </section>
-              <section className="sheet-section" id="info-usage">
-              <div className="sheet-section-title"><Icon name="chart" size={14} /> {t("session.usage")}</div>
-              <div className="kv"><span>{t("session.usage.cost")}</span><b>{fmtUsd(detail.usage.usd)}</b></div>
-              <div className="kv"><span>{t("session.usage.in")}</span><b>{fmtInt(detail.usage.i)}</b></div>
-              <div className="kv"><span>{t("session.usage.out")}</span><b>{fmtInt(detail.usage.o)}</b></div>
-              {!!detail.usage.ch && <div className="kv"><span>{t("session.usage.cache")}</span><b>{fmtInt(detail.usage.ch)}</b></div>}
-              <div className="kv"><span>{t("session.usage.calls")}</span><b>{fmtInt(detail.usage.c)}</b></div>
-              </section>
-              <section className="sheet-section" id="info-context">
-              <div className="sheet-section-title"><Icon name="compact" size={14} /> {t("session.context")}</div>
-              {detail.context && (
-                <>
-                  <div className="kv">
-                    <span>{t("session.context.inuse")}</span>
-                    <b>{ctxPct !== null ? `${ctxPct}% · ` : ""}{fmtTok(detail.context.tokens)}{detail.context.window > 0 ? ` / ${fmtTok(detail.context.window)}` : ""}</b>
-                  </div>
-                  {ctxPct !== null && <div className={`bar ${ctxPct >= 90 ? "bad" : ctxPct >= 60 ? "attn" : ""}`} style={{ ["--v" as string]: Math.min(100, ctxPct) }}><i /></div>}
-                  <div className="kv"><span>{t("session.context.history")}</span><b>{t("session.context.messages", { n: detail.context.messages, s: detail.context.summaries, o: detail.context.operator_turns })}</b></div>
-                </>
-              )}
-              <ToolTiming sessionId={id} />
-              <div className="btnrow">
-                <button className="btn small" onClick={compact} disabled={busy}><Icon name="compact" size={14} /> {t("session.compact")}</button>
-              </div>
-              </section>
-              <section className="sheet-section" id="info-loop">
-              <div className="sheet-section-title"><Icon name="loop" size={14} /> {t("session.loop")}{detail.loop ? ` · ${loopLabel(detail.loop).replace(/^\S+ · /, "")}` : ""}</div>
-              <LoopPanel sessionId={id} loop={detail.loop ?? null} onChange={() => load(true)} toast={toast} />
-              </section>
-              {detail.subagents && detail.subagents.length > 0 && (
-                <section className="sheet-section" id="info-subagents">
-                  <div className="sheet-section-title"><Icon name="spawn" size={14} /> {t("session.subagents.title")} · {detail.subagents.length}</div>
-                  {detail.subagents.map((sa) => (
-                    <button key={sa.session_id} className="aside-row link" onClick={() => { setInfo(null); onOpen?.(sa.session_id); }} title={`${sa.model} · ${sa.session_id}`}>
-                      <Dot status={sa.running ? "running" : sa.status === "failed" ? "failed" : "done"} />
-                      <span className="grow name">{sa.name || sa.session_id}</span>
-                      <span className="sub">{sa.running ? statusWord("running").toLowerCase() : sa.status === "failed" ? statusWord("failed").toLowerCase() : sa.kept ? t("session.sub.kept") : statusWord("done").toLowerCase()}</span>
-                    </button>
-                  ))}
-                </section>
-              )}
-              {detail.services && detail.services.length > 0 && (
-                <section className="sheet-section" id="info-services">
-                  <div className="sheet-section-title"><Icon name="globe" size={14} /> {t("session.services")}</div>
-                  {detail.services.map((sv) => (
-                    <ServiceRow key={sv.name} s={sv} sessionId={id} onChange={() => load(true)} toast={toast} onLogs={(text) => { setInfo(null); setCommandResult({ line: `service ${sv.name} · log`, text }); }} />
-                  ))}
-                </section>
-              )}
-              {schedules.length > 0 && (
-                <section className="sheet-section" id="info-cron">
-                  <div className="sheet-section-title"><Icon name="clock" size={14} /> {t("session.schedules")} · {schedules.length}</div>
-                  {schedules.map((sc) => <ScheduleRow key={sc.id} sc={sc} sessionId={id} onAction={scheduleAction} />)}
-                </section>
-              )}
-              <section className="sheet-section" id="info-tools">
-              <div className="sheet-section-title"><Icon name="wrench" size={14} /> {t("session.tools")}</div>
-              <ToolPicker
-                off={detail.tools_off ?? []}
-                note={t("session.tools.note")}
-                onChange={async (off) => {
-                  try {
-                    await api.post(`/api/sessions/${id}/tools`, { tools_off: off });
-                    load(true);
-                  } catch (e) {
-                    toast(errorText(e));
-                  }
-                }}
-              />
-              </section>
-              <section className="sheet-section" id="info-brief">
-              <div className="sheet-section-title"><Icon name="pen" size={14} /> {t("session.brief")}</div>
-              <label className="field">{t("session.brief.label")}{detail.spawned_by ? t("session.brief.by", { id: detail.spawned_by }) : ""}</label>
-              <textarea
-                className="field"
-                rows={4}
-                defaultValue={detail.brief ?? ""}
-                placeholder={t("session.brief.placeholder")}
-                onBlur={async (e) => {
-                  const brief = e.target.value.trim();
-                  if (brief === (detail.brief ?? "")) return;
-                  try {
-                    await api.post(`/api/sessions/${id}/brief`, { brief });
-                    toast(t(brief ? "session.brief.saved" : "session.brief.removed"));
-                    load();
-                  } catch (err) {
-                    toast(errorText(err));
-                  }
-                }}
-              />
-              </section>
-              <section className="sheet-section" id="info-spend">
-              <div className="sheet-section-title"><Icon name="chart" size={14} /> {t("session.cap")}</div>
-              <label className="field">{t("session.cap.label")}</label>
-              <div className="composer-row">
-                <input
-                  className="field"
-                  type="number"
-                  step="0.5"
-                  min={0}
-                  placeholder={t("session.cap.none")}
-                  defaultValue={detail.usd_cap ?? ""}
-                  onBlur={async (e) => {
-                    const raw = e.target.value.trim();
-                    const cap = raw === "" ? null : Number(raw);
-                    if (cap !== null && Number.isNaN(cap)) return;
-                    if (cap === (detail.usd_cap ?? null)) return;
-                    try {
-                      await api.post(`/api/sessions/${id}/cap`, { usd_cap: cap });
-                      toast(cap === null ? t("session.cap.removed") : t("session.cap.set", { n: cap }));
-                      load();
-                    } catch (err) {
-                      toast(errorText(err));
-                    }
-                  }}
-                />
-                <span className="sub" style={{ whiteSpace: "nowrap" }}>{t("settings.limits.spent", { sum: fmtUsd(detail.usage.usd) })}</span>
-              </div>
-              </section>
-              <section className="sheet-section" id="info-advanced">
-              <div className="sheet-section-title">{t("session.advanced")}</div>
-              <div className="kv"><span>{t("session.id")}</span><button className="linkbtn mono" onClick={async () => toast((await copyText(id)) ? t("session.id.copied") : id)} title={t("common.copy")}>{id}</button></div>
-              <div className="kv"><span>{t("session.workspace")}</span><button className="linkbtn mono truncate" onClick={async () => toast((await copyText(detail.workspace)) ? t("session.path.copied") : detail.workspace)} title={detail.workspace}>{detail.workspace_own === false ? detail.workspace_name : detail.workspace}</button></div>
-              {/* Where this agent is listed, and the one control that changes it. A project is not a
-                  setting of the session's own — it is which folder the Agents screen shows it in and,
-                  where the operator asks for it, which files it works on. */}
-              <div className="kv">
-                <span>{t("session.project")}</span>
-                <span className="grow truncate" title={detail.project ? detail.project.root : detail.workspace}>
-                  {detail.project ? t("session.project.inside", { name: detail.project.name }) : t("session.project.none")}
-                </span>
-                <button className="linkbtn" onClick={() => setMoving(true)}>{t("session.project.move")}</button>
-              </div>
-              {detail.run_id && <div className="kv"><span>{t("session.runid")}</span><span className="mono">{detail.run_id}</span></div>}
-              <div className="btnrow">
-                <button className="btn small" onClick={exportMarkdown}><Icon name="download" size={14} /> {t("session.export")}</button>
-              </div>
-              </section>
-              <section className="sheet-section danger">
-              <div className="sheet-section-title">{t("session.danger")}</div>
-              <div className="btnrow" style={{ marginTop: 0 }}>
-                <button className="btn small danger" onClick={clearHistory} disabled={busy}><Icon name="trash" size={14} /> {t("session.clear.short")}</button>
-                <button className="btn small danger" onClick={remove}><Icon name="trash" size={14} /> {t("session.delete.short")}</button>
-              </div>
-              </section>
-        </Sheet>
-      )}
-
-      <div className={`chat-body ${view === "chat" ? "" : "split"} ${asideOpen ? "" : "no-aside"}`} style={{ ["--aside-w" as string]: `${asideWidth}px`, ["--pane-w" as string]: `${paneWidth}px` }}>
+      <div ref={body} className={`chat-body ${panel.state.tab && !phone ? "with-panel" : ""} ${panel.state.expanded && !phone ? "panel-full" : ""}`} style={{ ["--panel-w" as string]: `${panelPct}%` }}>
         <div className="chat-main">
           <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
             <div className="timeline">
@@ -1115,13 +961,11 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
               {detail?.pending && <QuestionCard key={detail.pending.questions.map((q) => q.question).join("|")} sessionId={id} questions={detail.pending.questions} onDone={() => load()} toast={toast} />}
             </div>
           </div>
-          {!atBottom && !busy && (
+          {!atBottom && (
             <button className="jump-down" onClick={jumpToBottom} aria-label={t("session.jump.label")} title={t("session.jump")}>
               <Icon name="down" size={18} />
             </button>
           )}
-          {compacting && <CompactionBar c={compacting} />}
-          {(busy || saving) && <LiveBar status={status} saving={saving} base={tail} live={live} workspace={detail?.workspace} atBottom={atBottom} onJump={jumpToBottom} />}
           <div className="composer">
             {pending.length > 0 && (
               <div className="attachments" aria-label={t("session.attachments")}>
@@ -1192,103 +1036,52 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             </div>
           </div>
         </div>
-        {view !== "chat" && detail && <PaneHandle side="right" onDrag={(dx) => setPaneWidth(paneWidth - dx)} />}
-        {view !== "chat" && detail && (
-          <aside className="side-pane">
-            <div className="side-head">
-              <span className="side-title"><Icon name={view === "files" ? "folder" : "plug"} size={14} /> {t(view === "files" ? "session.files" : "session.mcp")}</span>
-              <button className="iconbtn small" onClick={() => setView("chat")} aria-label={t("common.close")} title={t("common.close")}>
-                <Icon name="close" size={16} />
-              </button>
-            </div>
-            <div className="side-body">{view === "files" ? <Files base={sessionBase(id)} uploadUrl={`${sessionBase(id)}/files/upload`} onPreview={setPreview} toast={toast} /> : <McpPanel sessionId={id} toast={toast} />}</div>
-          </aside>
+        {detail && (
+          <Panel
+            state={panel.state}
+            onTab={panel.open}
+            onClose={panel.close}
+            onExpand={panel.expand}
+            onBack={panel.back}
+            onForward={panel.forward}
+            root={detail.project?.name ?? t("session.files.crumb")}
+            downloadUrl={(e) => downloadHref(e.base, e.path)}
+            sheet={phone}
+            onDrag={(dx) => dragPanel(dx, body.current?.clientWidth ?? window.innerWidth)}
+            badges={{ details: subRunning }}
+            details={
+              <SessionDetails
+                id={id}
+                detail={detail}
+                busy={busy}
+                modes={modes}
+                schedules={schedules}
+                provider={provider}
+                providerUsage={providerUsage}
+                onOpen={onOpen}
+                toast={toast}
+                reload={load}
+                focus={detailsFocus}
+                on={{
+                  rename,
+                  setMode,
+                  openPicker,
+                  compact,
+                  clearHistory,
+                  remove,
+                  exportMarkdown,
+                  loopAction,
+                  scheduleAction,
+                  move: () => setMoving(true),
+                  showLog: (line, text) => setCommandResult({ line, text }),
+                  openFiles: () => panel.open("files"),
+                }}
+              />
+            }
+            files={<Files base={sessionBase(id)} uploadUrl={`${sessionBase(id)}/files/upload`} onPreview={openPreview} toast={toast} />}
+            jobs={<JobsTab sessionId={id} messages={detail.messages} onOpen={panel.openFile} onPreview={openPreview} />}
+          />
         )}
-        {detail && asideOpen && (
-          <aside className="session-aside wide-only">
-            <div className="aside-card">
-              <div className="aside-title">{t("session.card")}</div>
-              <div className="aside-row"><Icon name="model" size={16} /><span className="grow" title={detail.model}>{shortModel(detail.model, 30)}</span></div>
-              {detail.context && detail.context.window > 0 && (
-                <div className="aside-row" title={t("session.aside.ctx.title", { used: fmtInt(detail.context.tokens), window: fmtInt(detail.context.window), n: detail.context.messages })}>
-                  <Icon name="compact" size={16} />
-                  <span className="grow">{t("session.aside.ctx", { n: Math.round((100 * detail.context.tokens) / detail.context.window) })}</span>
-                  <i className="ctxbar wide" style={{ ["--fill" as string]: `${Math.min(100, Math.round((100 * detail.context.tokens) / detail.context.window))}%` }} />
-                </div>
-              )}
-              <div className="aside-row"><Icon name="chart" size={16} /><span className="grow">{fmtTok(detail.usage.i)}↑ {fmtTok(detail.usage.o)}↓ · {fmtUsd(detail.usage.usd)}</span></div>
-              {/* Where this agent works, and how far it reaches: in a project the folder is the name to
-                  show, because it is also the boundary — and whether snapshots are on decides what a
-                  Revert can put back. */}
-              <button className="aside-row link" onClick={() => setView(view === "files" ? "chat" : "files")} title={detail.project ? detail.project.root : detail.workspace}>
-                <Icon name="folder" size={16} />
-                <span className="grow name">{detail.project ? t("session.aside.project", { name: detail.project.name }) : detail.workspace_own === false ? t("session.aside.workspace", { name: detail.workspace_name ?? "" }) : t("session.aside.own")}</span>
-                {detail.workspace_sessions && detail.workspace_sessions.length > 0 && <span className="sub" title={detail.workspace_sessions.map((w) => w.title).join(", ")}>{plural("session.aside.plus", detail.workspace_sessions.length)}</span>}
-              </button>
-              {detail.project && (
-                <div className="aside-row project-root" title={t("session.aside.project.title", { root: detail.project.root })}>
-                  <span className="grow mono sub">{detail.project.root}</span>
-                  <span className="badge" title={t(detail.project.settings.snapshots ? "session.aside.snapshots.title" : "session.aside.nosnapshots.title")}>
-                    {t(detail.project.settings.snapshots ? "project.snapshots.badge" : "session.aside.nosnapshots")}
-                  </span>
-                </div>
-              )}
-              {detail.workspace_sessions && detail.workspace_sessions.length > 0 && detail.workspace_sessions.slice(0, 4).map((w) => (
-                <button key={w.id} className="aside-row link" onClick={() => onOpen?.(w.id)} title={t("session.aside.sameworkspace")}>
-                  <span className="dot" style={{ background: "var(--muted)" }} /><span className="grow name sub">{w.title}</span>
-                </button>
-              ))}
-              {detail.subagent_of && (
-                <button className="aside-row link" onClick={() => onOpen?.(detail.subagent_of!)}>
-                  <Icon name="back" size={16} /><span className="grow">{t("session.leader.word")}: {detail.leader_title ?? detail.subagent_of}</span>
-                </button>
-              )}
-            </div>
-            {provider && <ProviderUsageCard provider={provider} usage={providerUsage} />}
-            {schedules.length > 0 && (
-              <div className="aside-card">
-                <div className="aside-title"><Icon name="clock" size={14} /> {t("session.cron")} <span className="sub">{t("session.cron.on", { n: schedules.filter((x) => x.enabled).length })}</span></div>
-                {schedules.map((sc) => <ScheduleRow key={sc.id} sc={sc} sessionId={id} onAction={scheduleAction} />)}
-              </div>
-            )}
-            {detail.loop && (
-              <div className="aside-card">
-                <div className="aside-title"><Icon name="loop" size={14} /> {t("session.loop")} <span className={`badge loop ${detail.loop.status}`}>{statusWord(detail.loop.status).toLowerCase()}</span></div>
-                <div className="aside-text">{detail.loop.instruction}</div>
-                <div className="sub">{loopLabel(detail.loop).replace(/^\S+ · /, "")}{detail.loop.next_run_at && detail.loop.status === "active" ? t("agents.loop.next", { t: untilShort(detail.loop.next_run_at) }) : ""}</div>
-                <div className="btnrow" style={{ marginTop: 8 }}>
-                  {detail.loop.status === "active" ? (
-                    <button className="btn small" onClick={() => loopAction("pause")}><Icon name="pause" size={14} /> {t("common.pause")}</button>
-                  ) : (
-                    <button className="btn small primary" onClick={() => loopAction("resume")}><Icon name="play" size={14} /> {t("common.resume")}</button>
-                  )}
-                  {detail.loop.status === "active" && <button className="btn small" onClick={() => loopAction("run")}><Icon name="up" size={14} /> {t("common.runnow")}</button>}
-                </div>
-              </div>
-            )}
-            {detail.services && detail.services.length > 0 && (
-              <div className="aside-card">
-                <div className="aside-title"><Icon name="globe" size={14} /> {t("session.services")} <span className="sub">{t("session.services.running", { n: detail.services.filter((s) => s.status === "running").length })}</span></div>
-                {detail.services.map((s) => (
-                  <ServiceRow key={s.name} s={s} sessionId={id} onChange={() => load(true)} toast={toast} onLogs={(text) => setCommandResult({ line: `service ${s.name} · log`, text })} />
-                ))}
-              </div>
-            )}
-            {detail.subagents && detail.subagents.length > 0 && (
-              <div className="aside-card">
-                <div className="aside-title"><Icon name="spawn" size={14} /> {t("session.subagents.title")} <span className="sub">{t("session.subagents.working", { n: detail.subagents.filter((s) => s.running).length }).replace(/^ · /, "")}</span></div>
-                {detail.subagents.map((s) => (
-                  <button key={s.session_id} className={`aside-row link sub-${s.status}`} onClick={() => onOpen?.(s.session_id)} title={`${s.model} · ${s.session_id}`}>
-                    {s.running ? <span className="live-dot" /> : <span className={"dot " + s.status} />}
-                    <span className="grow name">{s.name || s.session_id}</span>
-                    <span className="sub">{s.running ? statusWord("running").toLowerCase() : s.status === "failed" ? statusWord("failed").toLowerCase() : s.kept ? t("session.sub.kept") : statusWord("done").toLowerCase()}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </aside>
-        )}
-        {detail && asideOpen && <PaneHandle side="right" onDrag={(dx) => setAsideWidth(asideWidth - dx)} />}
       </div>
 
       {commandResult && (
@@ -1346,157 +1139,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   );
 }
 
-function LoopPanel({ sessionId, loop, onChange, toast }: { sessionId: string; loop: LoopView | null; onChange: () => void; toast: (t: string) => void }) {
-  const [editing, setEditing] = useState(false);
-  const [text, setText] = useState(loop?.instruction ?? "");
-  const [mode, setMode] = useState<"interval" | "dynamic">(loop?.mode ?? "interval");
-  const [minutes, setMinutes] = useState(String(loop?.interval_seconds ? Math.round(loop.interval_seconds / 60) : 10));
-  const [maxRuns, setMaxRuns] = useState(loop?.max_runs ? String(loop.max_runs) : "");
-  async function action(a: string) {
-    try {
-      await api.post(`/api/sessions/${sessionId}/loop/action`, { action: a });
-      toast(t("session.loop.action", { action: a }));
-      onChange();
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }
-  async function save() {
-    if (!text.trim()) return;
-    try {
-      await api.post(`/api/sessions/${sessionId}/loop`, { instruction: text.trim(), mode, interval_minutes: mode === "interval" ? Math.max(1, Number(minutes) || 10) : null, max_runs: maxRuns.trim() ? Math.max(1, Number(maxRuns) || 1) : null, start_now: true });
-      toast(t(loop ? "session.loop.updated" : "session.loop.started"));
-      setEditing(false);
-      onChange();
-    } catch (e) {
-      toast(errorText(e));
-    }
-  }
-  if (!loop && !editing) {
-    return (
-      <div className="btnrow" style={{ marginTop: 0 }}>
-        <span className="sub">{t("session.loop.none")}</span>
-        <button className="btn small" onClick={() => setEditing(true)}>{t("session.loop.add")}</button>
-      </div>
-    );
-  }
-  return (
-    <div className="loop-panel">
-      {loop && !editing && (
-        <>
-          <div className="sub loop-instruction">{loop.instruction}</div>
-          <div className="sub">
-            {loop.status === "active" && loop.next_run_at
-              ? t("session.loop.next", { time: clock(loop.next_run_at) })
-              : loop.status === "active"
-                ? t("session.loop.dynamic")
-                : `${statusWord(loop.status)}${loop.stop_reason || loop.pause_note ? `: ${loop.stop_reason || loop.pause_note}` : ""}`}
-            {loop.last_reason ? t("session.loop.lastreason", { reason: loop.last_reason }) : ""}
-          </div>
-          <div className="btnrow" style={{ marginTop: 6 }}>
-            {loop.status === "active" ? <button className="btn small" onClick={() => action("pause")}>{t("common.pause")}</button> : <button className="btn small primary" onClick={() => action("resume")}>{t("common.resume")}</button>}
-            {loop.status === "active" && <button className="btn small" onClick={() => action("run")}>{t("common.runnow")}</button>}
-            <button className="btn small" onClick={() => setEditing(true)}>{t("session.loop.edit")}</button>
-            {loop.status !== "stopped" && loop.status !== "done" && <button className="btn small danger" onClick={() => action("stop")}>{t("session.loop.stop")}</button>}
-            <button className="btn small danger" onClick={async () => { if (await confirmAsync(t("session.loop.remove.title"))) action("remove"); }}>{t("session.loop.remove")}</button>
-          </div>
-        </>
-      )}
-      {editing && (
-        <>
-          <textarea className="field" rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder={t("session.loop.placeholder")} />
-          <div className="composer-row">
-            <select className="field" value={mode} onChange={(e) => setMode(e.target.value as "interval" | "dynamic")}>
-              <option value="interval">{t("newagent.loop.interval")}</option>
-              <option value="dynamic">{t("loop.selfpaced")}</option>
-            </select>
-            {mode === "interval" && <input className="field" type="number" min={1} style={{ maxWidth: 110 }} value={minutes} onChange={(e) => setMinutes(e.target.value)} aria-label={t("newagent.loop.minutes")} />}
-            <input className="field" type="number" min={1} style={{ maxWidth: 130 }} placeholder={t("newagent.loop.max")} value={maxRuns} onChange={(e) => setMaxRuns(e.target.value)} aria-label={t("newagent.loop.max")} />
-          </div>
-          <div className="btnrow" style={{ marginTop: 6 }}>
-            <button className="btn small primary" onClick={save} disabled={!text.trim()}>{t(loop ? "session.loop.save" : "session.loop.start")}</button>
-            <button className="btn small" onClick={() => setEditing(false)}>{t("common.cancel")}</button>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// ── side panels: usage, cron, attachments ─────────────────────────────────────────────────
-
-const SUBSCRIPTION_LABEL: Record<string, string> = { codex: "Codex · ChatGPT", claude: "Claude · Max", grok: "Grok · SuperGrok" };
-
-function resetIn(at: number | string | null | undefined): string {
-  if (!at) return "";
-  const d = typeof at === "number" ? new Date(at * 1000) : new Date(at);
-  if (Number.isNaN(d.getTime())) return "";
-  const mins = Math.max(0, Math.round((d.getTime() - Date.now()) / 60000));
-  if (mins < 60) return t("fmt.min", { n: mins });
-  return mins < 48 * 60 ? t("fmt.hour", { n: Math.round(mins / 60) }) : t("fmt.day", { n: Math.round(mins / 1440) });
-}
-
-/** What the session's provider has left: a subscription's windows, or the day's metered spend and balance. */
-function ProviderUsageCard({ provider, usage }: { provider: string; usage: ProviderUsage | null }) {
-  const sub = usage?.subscription;
-  const today = usage?.today ?? {};
-  return (
-    <div className="aside-card">
-      <div className="aside-title">
-        <Icon name="chart" size={14} /> {SUBSCRIPTION_LABEL[provider] ?? provider}
-        {sub?.plan && <span className="badge">{sub.plan}</span>}
-        {sub?.limit_reached && <span className="badge" style={{ color: "var(--bad)" }}>limit</span>}
-      </div>
-      {!usage && <div className="sub">…</div>}
-      {sub && !sub.logged_in && <div className="sub">{t("usage.notloggedin")}</div>}
-      {sub?.error && <div className="sub" style={{ color: "var(--bad)" }}>{sub.error}</div>}
-      {(sub?.windows ?? []).map((w) => (
-        <div key={w.name} className="quota">
-          <div className="sub quota-line">
-            <span className="grow">{w.name}</span>
-            <span>{Math.round(w.used_percent)}%{w.resets_at ? t("session.provider.resets", { t: resetIn(w.resets_at) }) : ""}</span>
-          </div>
-          <div className="quota-bar">
-            <i style={{ width: `${Math.min(100, Math.max(0, w.used_percent))}%`, background: w.used_percent >= 100 ? "var(--bad)" : w.used_percent >= 80 ? "var(--warn)" : "var(--ok)" }} />
-          </div>
-        </div>
-      ))}
-      {usage && (
-        <div className="sub" style={{ marginTop: sub ? 6 : 0 }}>
-          {t("session.provider.today", { calls: plural("usage.calls", today.calls ?? 0), in: fmtTok(today.input_tokens), out: fmtTok(today.output_tokens) })}
-          {!sub && ` · ${fmtUsd(today.cost_usd)}`}
-          {usage.balance !== undefined && usage.balance !== null && t("session.provider.balance", { sum: fmtUsd(usage.balance) })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** One scheduled task of the session: cadence, next run, and the two things one does with it. */
-function ScheduleRow({ sc, sessionId, onAction }: { sc: Schedule; sessionId: string; onAction: (sc: Schedule, action: "run" | "delete") => void }) {
-  const where = t(sc.kind === "message" ? "session.sched.reminder" : sc.kind === "lazy" ? "session.sched.lazy" : sc.run_in === "self" || sc.target_session === sessionId ? "session.sched.here" : "session.sched.own");
-  return (
-    <div className="sched-row" title={sc.prompt}>
-      <div className="grow" style={{ minWidth: 0 }}>
-        <div className="sched-name">
-          {!sc.enabled && <span title={t("session.sched.off")}>⏸ </span>}
-          {sc.name} <span className="badge">{where}</span>
-          {sc.active_session_id === sessionId && <span className="live-dot" title={t("sched.running")} />}
-        </div>
-        <div className="sub sched-when">
-          {sc.cron ? t("session.sched.cron", { cron: sc.cron }) : t("session.sched.once", { when: shortDateTime(sc.run_at) })}
-          {sc.next_run_at && sc.enabled ? t("session.sched.next", { when: shortDateTime(sc.next_run_at) }) : ""}
-          {sc.last_run_at ? t("session.sched.last", { t: timeAgo(sc.last_run_at) }) : ""}
-          {sc.failure_count > 0 && <span style={{ color: "var(--bad)" }}>{t("session.sched.failed", { n: sc.failure_count })}</span>}
-        </div>
-      </div>
-      <button className="iconbtn small" onClick={() => onAction(sc, "run")} title={t("common.runnow")} aria-label={t("common.runnow")}><Icon name="play" size={14} /></button>
-      <button className="iconbtn small" onClick={() => onAction(sc, "delete")} title={t("common.delete")} aria-label={t("common.delete")}><Icon name="trash" size={14} /></button>
-    </div>
-  );
-}
-
-/** A file waiting in the composer: a thumbnail for images, a glyph and the size for the rest. */
 function AttachmentCard({ file, onOpen, onRemove }: { file: File; onOpen: () => void; onRemove: () => void }) {
   const isImage = file.type.startsWith("image/") || previewKind(file.name) === "image";
   const url = useMemo(() => (isImage ? URL.createObjectURL(file) : null), [file, isImage]);
@@ -1744,45 +1386,65 @@ function LiveTurn({ base, live, onTurnAction, onRender }: { base: Turn | null; l
  *  `saving` above the composer. Same bar rather than a second one: the thing it reports on is the
  *  same turn, and a line that appears somewhere else would read as a new event.
  */
-function LiveBar({ status, saving, base, live, workspace, atBottom, onJump }: { status: Status; saving: boolean; base: Turn | null; live: LiveStore; workspace?: string; atBottom: boolean; onJump: () => void }) {
+/** The run, as one line in the header: dot, word, elapsed, step, what the agent is doing. Clicking it
+ *  brings the newest content back into view. The `livebar` classes are what the settle harness watches. */
+function LiveBar({ status, saving, base, live, workspace, onJump }: { status: Status; saving: boolean; base: Turn | null; live: LiveStore; workspace?: string; onJump: () => void }) {
   const state = useSyncExternalStore(live.subscribe, live.get);
   useClock(1000);
   if (saving) {
     return (
-      <button className="livebar saving" onClick={onJump} role="status" aria-live="polite" title={t("session.jump.step")}>
+      <button className="livebar head-status saving" onClick={onJump} role="status" aria-live="polite" title={t("session.jump.step")}>
         <Dot status="idle" />
         <b>{t("session.livebar.saving")}</b>
-        {!atBottom && <Icon name="down" size={16} />}
       </button>
     );
   }
   const turn = applyLive(base, state, Date.now());
   const steps = stepCount(turn.activity);
   const running = [...turn.activity].reverse().find((a) => a.kind === "tool" && a.running) as ToolItem | undefined;
-  const step = running
-    ? (() => {
-        const d = describe(running, workspace);
-        return `${d.verb}${d.detail ? ` ${d.detail}` : ""}`;
-      })()
-    : state.ended
-      ? t("session.livebar.saving")
-      : turn.answer
-      ? t("session.livebar.writing")
-      : state.thinking
-        ? t("session.reasoning")
-        : status === "waiting"
-          ? t("session.livebar.waiting")
-          : t("session.livebar.thinking");
+  // A session waiting on the operator has nothing in progress, whatever its last turn holds.
+  const step =
+    status === "waiting"
+      ? t("session.livebar.waiting")
+      : running
+        ? (() => {
+            const d = describe(running, workspace);
+            return `${d.verb}${d.detail ? ` ${d.detail}` : ""}`;
+          })()
+        : state.ended
+          ? t("session.livebar.saving")
+          : turn.answer
+            ? t("session.livebar.writing")
+            : state.thinking
+              ? t("session.reasoning")
+              : t("session.livebar.thinking");
   return (
-    <button className={`livebar ${status}`} onClick={onJump} role="status" aria-live="polite" title={t("session.jump.step")}>
+    <button className={`livebar head-status ${status}`} onClick={onJump} role="status" aria-live="polite" title={t("session.jump.step")}>
       <Dot status={status} />
       <b>{statusWord(status === "waiting" ? "waiting" : "running")}</b>
       <span className="num">{duration(Date.now() - turn.startedAt)}</span>
       {steps > 0 && <span>{t("session.livebar.step", { n: steps })}</span>}
       {step && <span className="truncate">· {step}</span>}
-      {!atBottom && <Icon name="down" size={16} />}
     </button>
   );
+}
+
+/** The 2 px line along the header's bottom edge: a shimmer while a run is on, a measured width while
+ *  the history is being compacted. */
+function HeadProgress({ status, compacting }: { status: Status; compacting: Compacting | null }) {
+  const pct = compacting ? compactionPct(compacting) : null;
+  // A session waiting on the operator is not progressing: the line holds still, in the waiting colour.
+  const mode = pct !== null ? "measured" : status === "waiting" ? "waiting" : "busy";
+  return (
+    <div className={`head-progress ${mode}`} aria-hidden>
+      <i style={pct === null ? undefined : { width: `${pct}%` }} />
+    </div>
+  );
+}
+
+function compactionPct(c: Compacting): number {
+  const parts = c.parts_total > 1 ? Math.round((100 * c.parts_done) / c.parts_total) : 0;
+  return c.stage === "writing" ? 97 : c.stage === "merging" ? 88 : c.parts_total > 1 ? Math.round(parts * 0.8) : 35;
 }
 
 /** A repaint on a timer, for the elapsed times — and only in the components that show one. */
@@ -2153,13 +1815,7 @@ function ToolAttachment({ item }: { item: ToolItem }) {
 /** The files the agent handed over in this turn, attached under the answer whatever the trace shows. */
 /** The compaction in flight: which stage, how many parts are summarised, how long it has run. */
 function CompactionBar({ c }: { c: Compacting }) {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
-  const parts = c.parts_total > 1 ? Math.round((100 * c.parts_done) / c.parts_total) : 0;
-  const pct = c.stage === "writing" ? 97 : c.stage === "merging" ? 88 : c.parts_total > 1 ? Math.round(parts * 0.8) : 35;
+  useClock(1000);
   const what =
     c.stage === "writing"
       ? t("session.compacting.writing")
@@ -2169,12 +1825,11 @@ function CompactionBar({ c }: { c: Compacting }) {
           ? t("session.compacting.part", { n: Math.min(c.parts_done + 1, c.parts_total), total: c.parts_total })
           : t("session.compacting.summarising");
   return (
-    <div className="livebar compacting" role="status" aria-live="polite">
+    <div className="livebar head-status compacting" role="status" aria-live="polite">
       <Dot status="compacting" />
       <b>{t("session.compacting.bar")}</b>
       <span className="num">{duration(Date.now() - new Date(c.started_at).getTime())}</span>
-      <span>{t("session.compacting.messages", { n: c.messages, what })}</span>
-      <div className="bar" aria-hidden><i style={{ ["--v" as string]: pct }} /></div>
+      <span className="truncate">{t("session.compacting.messages", { n: c.messages, what })}</span>
     </div>
   );
 }
@@ -2206,20 +1861,6 @@ function SentFiles({ items }: { items: Activity[] }) {
           </button>
         );
       })}
-    </div>
-  );
-}
-
-function ToolTiming({ sessionId }: { sessionId: string }) {
-  const [rows, setRows] = useState<{ name: string; calls: number; errors: number; total_ms: number; mean_ms: number }[]>([]);
-  useEffect(() => {
-    api.get<{ items: { name: string; calls: number; errors: number; total_ms: number; mean_ms: number }[] }>(`/api/sessions/${sessionId}/tools/timing`).then((r) => setRows(r.items)).catch(() => setRows([]));
-  }, [sessionId]);
-  if (!rows.length) return null;
-  const total = rows.reduce((a, r) => a + r.total_ms, 0);
-  return (
-    <div className="sub">
-      {t("session.tooltime", { n: Math.round(total / 1000), list: rows.slice(0, 5).map((r) => `${r.name} ${Math.round(r.total_ms / 1000)}s/${r.calls}${r.errors ? ` (${r.errors})` : ""}`).join(" · ") })}
     </div>
   );
 }
@@ -2376,8 +2017,7 @@ export function Files({ base, uploadUrl, onPreview, toast }: { base: string; upl
   const all: any[] = data.kind === "dir" ? data.entries : [];
   const entries = all.filter((e) => showHidden || !e.name.startsWith("."));
   const hidden = all.length - all.filter((e) => !e.name.startsWith(".")).length;
-  const token = sessionStorage.getItem("daedalus_token");
-  const download = `${base}/download?path=${encodeURIComponent(path)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
+  const download = downloadHref(base, path);
   return (
     <div className="files">
       <div className="crumbs">
@@ -2433,52 +2073,6 @@ export function Files({ base, uploadUrl, onPreview, toast }: { base: string; upl
       {data.kind === "file" && <pre className="filetext">{data.content}</pre>}
       {data.kind === "binary" && previewKind(path) === "image" && <AuthImg className="preview" src={{ base, path }} alt={path} onClick={() => onPreview({ base, path })} />}
       {data.kind === "binary" && previewKind(path) !== "image" && <div className="empty">{t("session.files.binary", { size: fmtBytes(data.size) })}</div>}
-    </div>
-  );
-}
-
-type McpServer = { name: string; description: string; connected: boolean; error: string | null; tools: string[] };
-
-function McpPanel({ sessionId, toast }: { sessionId: string; toast: (t: string) => void }) {
-  const [data, setData] = useState<{ enabled: string[]; servers: McpServer[] } | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const load = useCallback(() => {
-    api.get<{ enabled: string[]; servers: McpServer[] }>(`/api/sessions/${sessionId}/mcp`).then(setData).catch((e) => toast(errorText(e)));
-  }, [sessionId, toast]);
-  useEffect(load, [load]);
-  async function toggle(server: string, enabled: boolean) {
-    setBusy(server);
-    try {
-      setData(await api.put(`/api/sessions/${sessionId}/mcp`, { server, enabled }));
-      toast(t("session.mcp.toggled", { name: server, state: t(enabled ? "session.mcp.enabled" : "session.mcp.disabled") }));
-    } catch (e) {
-      toast(errorText(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-  if (!data) return <div className="empty">…</div>;
-  if (data.servers.length === 0) return <div className="empty">{t("session.mcp.none")}</div>;
-  return (
-    <div>
-      <div className="sub" style={{ marginBottom: 8 }}>{t("session.mcp.sub")}</div>
-      {data.servers.map((s) => {
-        const on = data.enabled.includes(s.name);
-        return (
-          <div key={s.name} className="card">
-            <div className="row">
-              <div className="grow">
-                <div className="title">{s.name}</div>
-                <div className="sub">{s.description || t("session.mcp.nodesc")}{s.error && t("session.mcp.error", { error: s.error })}</div>
-                {s.tools.length > 0 && <div className="sub">{s.tools.join(", ")}</div>}
-              </div>
-              <button className={`btn small ${on ? "primary" : ""}`} disabled={busy === s.name} onClick={() => toggle(s.name, !on)}>
-                {t(on ? "common.on" : "common.off")}
-              </button>
-            </div>
-          </div>
-        );
-      })}
     </div>
   );
 }

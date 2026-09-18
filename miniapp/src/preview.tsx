@@ -1,10 +1,10 @@
-// File previews: images, Markdown, CSV, PDF, Word, Excel, audio/video and plain text — in a dialog,
-// for workspace files and for attachments waiting in the composer. Everything is fetched with the
+// File previews: images, Markdown, CSV, PDF, Word, Excel, audio/video and plain text — inline in
+// the right panel, in a sheet on a phone, and in a dialog for attachments waiting in the composer. Everything is fetched with the
 // auth header (an <img src> cannot carry one) and shown from a blob URL; the office formats are
 // converted in the browser by libraries loaded only when such a file is opened.
 
-import { Overlay } from "./dialogs";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Overlay, useLayer } from "./dialogs";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { Icon } from "./icons";
 import { renderMarkdown } from "./md";
@@ -64,6 +64,17 @@ export function fileGlyph(name: string, dir = false): string {
     default:
       return "📄";
   }
+}
+
+/** The address a browser tab can open the file at: the token travels in the query, since a tab carries no header. */
+export function downloadHref(base: string, path: string): string {
+  let token: string | null = null;
+  try {
+    token = sessionStorage.getItem("daedalus_token");
+  } catch {
+    /* private mode */
+  }
+  return `${base}/download?path=${encodeURIComponent(path)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
 }
 
 function sourceName(src: PreviewSource): string {
@@ -218,11 +229,16 @@ function LinedText({ text, range }: { text: string; range: { from: number; to: n
   );
 }
 
-// ── the dialog ─────────────────────────────────────────────────────────────────────────
+// ── the viewer, and the dialog around it ─────────────────────────────────────────────────
 
 const TEXT_LIMIT = 512_000;
 
-export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () => void }) {
+/** What the viewer learned about the file once it arrived: for the host's toolbar (download, size). */
+export type ViewerInfo = { url: string | null; size: number | null; name: string; kind: PreviewKind };
+
+/** The file itself, rendered inline into whatever hosts it: the preview dialog, the right panel's
+ *  Preview tab, a phone sheet. It fetches, parses and draws; the host draws the chrome around it. */
+export function Viewer({ src, onInfo, className }: { src: PreviewSource; onInfo?: (info: ViewerInfo) => void; className?: string }) {
   const name = sourceName(src);
   // A cited range is about the source, so a Markdown or CSV file opens as text rather than rendered.
   const cited = "path" in src && src.lines ? parseRange(src.lines) : null;
@@ -232,12 +248,13 @@ export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () 
   const [sheet, setSheet] = useState(0);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    onInfo?.({ url, size: blob?.size ?? null, name, kind });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url, blob, name, kind]);
 
   useEffect(() => {
+    setBody(null);
+    setSheet(0);
     if (!blob) return;
     let gone = false;
     const done = (b: typeof body) => !gone && setBody(b);
@@ -273,23 +290,63 @@ export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () 
     };
   }, [blob, kind]);
 
-  const downloadName = useMemo(() => name, [name]);
   const failure = error ?? body?.error;
   const loading = !failure && (!url || (kind !== "image" && kind !== "pdf" && kind !== "audio" && kind !== "video" && kind !== "other" && !body));
 
   return (
+    <div className={`viewer ${kind} ${className ?? ""}`}>
+      {body?.sheets && body.sheets.length > 1 && (
+        <div className="segmented preview-tabs">
+          {body.sheets.map((s, i) => (
+            <button key={s.name} className={i === sheet ? "on" : ""} onClick={() => setSheet(i)}>{s.name}</button>
+          ))}
+        </div>
+      )}
+      <div className="preview-body">
+        {failure && <div className="empty">{failure}</div>}
+        {loading && <div className="empty">{t("common.loading")}</div>}
+        {!failure && url && kind === "image" && <img className="preview-image" src={url} alt={name} />}
+        {!failure && url && kind === "pdf" && <iframe className="preview-frame" src={url} title={name} />}
+        {!failure && url && kind === "audio" && <audio className="preview-media" controls src={url} />}
+        {!failure && url && kind === "video" && <video className="preview-media" controls src={url} />}
+        {!failure && body?.html && kind === "markdown" && <div className="answer preview-doc" dangerouslySetInnerHTML={{ __html: body.html }} />}
+        {!failure && body?.html && kind === "docx" && <div className="answer preview-doc docx" dangerouslySetInnerHTML={{ __html: body.html }} />}
+        {!failure && body?.text !== undefined && kind === "html" && <pre className="filetext">{body.text}</pre>}
+        {!failure && body?.text !== undefined && kind === "text" && (cited ? <LinedText text={body.text} range={cited} /> : <pre className="filetext">{body.text}</pre>)}
+        {!failure && body?.rows && <Grid rows={body.rows} note={body.error} />}
+        {!failure && body?.sheets && <Grid rows={body.sheets[sheet]?.rows ?? []} note={(body.sheets[sheet]?.rows.length ?? 0) >= 2000 ? t("preview.rows") : undefined} />}
+        {!failure && url && kind === "other" && (
+          <div className="empty">
+            {t("preview.none")}
+            <div style={{ marginTop: 10 }}>
+              <a className="btn small" href={url} download={name}>{t("preview.download")} {fmtBytes(blob?.size ?? 0)}</a>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The viewer in a dialog: for a file waiting in the composer, and for phones without the panel. */
+export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () => void }) {
+  const name = sourceName(src);
+  const cited = "path" in src && src.lines ? parseRange(src.lines) : null;
+  const [info, setInfo] = useState<ViewerInfo | null>(null);
+  useLayer(onClose);
+  return (
     <Overlay>
     <div className="sheet-backdrop preview-backdrop" onClick={onClose}>
-      <div className={`sheet preview ${kind}`} onClick={(e) => e.stopPropagation()} role="dialog" aria-label={name}>
+      <div className={`sheet preview ${info?.kind ?? previewKind(name)}`} onClick={(e) => e.stopPropagation()} role="dialog" aria-label={name}>
         <div className="sheet-head">
           <h3 className="preview-name" title={"file" in src ? name : src.path}>
             <span aria-hidden>{fileGlyph(name)}</span> {name}
             {cited && <span className="sub">{t("preview.lines", { range: cited.from === cited.to ? cited.from : `${cited.from}–${cited.to}` })}</span>}
-            {blob && <span className="sub"> · {fmtBytes(blob.size)}</span>}
+            {info?.size != null && <span className="sub"> · {fmtBytes(info.size)}</span>}
           </h3>
           <div className="head-actions">
-            {url && (
-              <a className="iconbtn small" href={url} download={downloadName} title={t("common.download")} aria-label={t("common.download")}>
+            {info?.url && (
+              <a className="iconbtn small" href={info.url} download={name} title={t("common.download")} aria-label={t("common.download")}>
                 <Icon name="download" size={16} />
               </a>
             )}
@@ -298,35 +355,7 @@ export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () 
             </button>
           </div>
         </div>
-        {body?.sheets && body.sheets.length > 1 && (
-          <div className="segmented preview-tabs">
-            {body.sheets.map((s, i) => (
-              <button key={s.name} className={i === sheet ? "on" : ""} onClick={() => setSheet(i)}>{s.name}</button>
-            ))}
-          </div>
-        )}
-        <div className="sheet-body preview-body">
-          {failure && <div className="empty">{failure}</div>}
-          {loading && <div className="empty">{t("common.loading")}</div>}
-          {!failure && url && kind === "image" && <img className="preview-image" src={url} alt={name} />}
-          {!failure && url && kind === "pdf" && <iframe className="preview-frame" src={url} title={name} />}
-          {!failure && url && kind === "audio" && <audio className="preview-media" controls src={url} />}
-          {!failure && url && kind === "video" && <video className="preview-media" controls src={url} />}
-          {!failure && body?.html && kind === "markdown" && <div className="answer preview-doc" dangerouslySetInnerHTML={{ __html: body.html }} />}
-          {!failure && body?.html && kind === "docx" && <div className="answer preview-doc docx" dangerouslySetInnerHTML={{ __html: body.html }} />}
-          {!failure && body?.text !== undefined && kind === "html" && <pre className="filetext">{body.text}</pre>}
-          {!failure && body?.text !== undefined && kind === "text" && (cited ? <LinedText text={body.text} range={cited} /> : <pre className="filetext">{body.text}</pre>)}
-          {!failure && body?.rows && <Grid rows={body.rows} note={body.error} />}
-          {!failure && body?.sheets && <Grid rows={body.sheets[sheet]?.rows ?? []} note={(body.sheets[sheet]?.rows.length ?? 0) >= 2000 ? t("preview.rows") : undefined} />}
-          {!failure && url && kind === "other" && (
-            <div className="empty">
-              {t("preview.none")}
-              <div style={{ marginTop: 10 }}>
-                <a className="btn small" href={url} download={downloadName}>{t("preview.download")} {fmtBytes(blob?.size ?? 0)}</a>
-              </div>
-            </div>
-          )}
-        </div>
+        <Viewer src={src} onInfo={setInfo} />
       </div>
     </div>
     </Overlay>
