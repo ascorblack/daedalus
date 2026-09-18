@@ -2,6 +2,26 @@
 
 Notable changes, newest first. The repository's `main` is the released version.
 
+## 2026-09-18
+
+- **A better Russian voice, and a fourth kind of model behind it.** Settings → Voice offers
+  **Supertonic 3**: thirty-one languages including Russian in one hundred and forty megabytes, ten
+  voices inside it, forty-four kilohertz against the twenty-two of everything else here, and faster
+  than any Piper voice on the same processor. It is now what a Russian installation is pointed at,
+  with the Piper voices kept for anyone who would rather not take an OpenRAIL-M licence, which the
+  card states rather than implies. **Supertonic 2** joins it as the English recommendation — twelve
+  seconds of speech per second of work. An entry can now say it speaks several languages, and the
+  picker's filter and its card both read that list instead of assuming one.
+- **Russian stress is written in before the words are spoken.** «Приве́т», not «При́вет». Supertonic
+  can be told where the stress falls, and a Russian answer going to it passes through a small
+  dictionary of the words an assistant uses every day. A word the dictionary does not know, or one
+  that is two words in writing — «замок» is a castle or a lock — is left exactly as it was, and no
+  other voice is handed a mark it has no rule for.
+- **The Kokoro entry pointed at the wrong build.** The hundred-and-fifty-megabyte quantised archive
+  renders at nearly twice the cost of the three-hundred-and-fifty-megabyte float one it was supposed
+  to accelerate, so the catalog now fetches the float build: the best-sounding English here stops
+  being the one voice too slow to keep up with a person talking.
+
 ## 2026-09-17
 
 - **The optional pieces are listed, and installed from the app.** Settings → Components is every

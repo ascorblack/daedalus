@@ -178,7 +178,7 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
   const wanted = query.trim().toLowerCase();
   const shown = view.models.filter((m) => {
     if (fastOnly && !m.keeps_up) return false;
-    if (language && m.language !== language) return false;
+    if (language && m.language !== language && !m.languages.includes(language)) return false;
     if (wanted && !`${m.label} ${m.note} ${name(m.language)}`.toLowerCase().includes(wanted)) return false;
     return true;
   });
@@ -226,6 +226,9 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
           const downloading = progress && ["downloading", "verifying", "unpacking"].includes(progress.state);
           const queued = progress?.state === "queued";
           const recommended = language ? m.recommended_for.includes(language) : m.recommended_for.length > 0;
+          // A card filed under Russian that also reads English has to say so, or the only way to find
+          // out is to download it: the language chip alone reads as a single-language voice.
+          const also = m.languages.filter((code) => code !== m.language);
           return (
             <div key={m.id} className={`stt-card ${m.selected ? "using" : ""}`}>
               <div className="stt-head">
@@ -233,6 +236,7 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
                 {recommended && <span className="chip accent">{language ? t("tts.recommended.for", { lang: name(language) }) : t("tts.recommended")}</span>}
                 <span className="chip">{t(`tts.gender.${m.gender}`)}</span>
                 <span className="chip">{name(m.language)}</span>
+                {m.new && <span className="chip accent">{t("tts.new")}</span>}
                 {/* Only the exception is coloured. Two of these voices render slower than a person
                     talks, which is the one fact on the card that changes how the page feels. */}
                 {!m.keeps_up && <span className="chip attn">{t("tts.slow")}</span>}
@@ -243,6 +247,7 @@ export function TtsVoices({ toast }: { toast: (message: string) => void }) {
                 <span>{t("tts.facts.size", { dl: size(m.size_bytes), disk: size(m.disk_bytes), mem: m.memory_mb })}</span>
                 <span>{t("tts.facts.rate", { khz: Math.round(m.sample_rate / 1000), licence: m.licence })}</span>
                 {m.speakers.length > 1 && <span>{plural("tts.facts.speakers", m.speakers.length)}</span>}
+                {also.length > 0 && <span>{t("tts.facts.languages", { langs: also.map(name).join(", ") })}</span>}
               </div>
               <div className="stt-bars">
                 <Bar label={t("tts.quality")} value={m.quality} />

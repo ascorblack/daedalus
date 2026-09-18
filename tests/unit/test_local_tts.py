@@ -27,12 +27,14 @@ from fastapi.testclient import TestClient
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions.api import build_app
+from daedalus.speech import ru_stress
 from daedalus.speech import tts_catalog as catalog
 from daedalus.speech.models import DownloadError, Downloads, Installed, view
 from daedalus.speech.service import LocalSpeech
 from daedalus.speech.tts_engine import (
     CACHE,
     MAX_TEXT_CHARS,
+    OUTPUT_GAIN,
     TtsCache,
     TtsEngine,
     TtsError,
@@ -69,7 +71,7 @@ def test_every_entry_is_complete_and_unique() -> None:
         assert 0 < voice.quality <= 100 and 0 < voice.speed <= 100, voice.id
         assert voice.rtf > 0, voice.id
         assert voice.gender in GENDERS, voice.id
-        assert voice.sample_rate in (16_000, 22_050, 24_000), voice.id
+        assert voice.sample_rate in (16_000, 22_050, 24_000, 44_100), voice.id
         assert len(voice.speakers) == len(set(voice.speakers)), voice.id
 
 
@@ -86,9 +88,16 @@ def test_every_archive_carries_a_published_checksum() -> None:
 
 
 def test_nothing_in_the_catalog_is_larger_than_the_operator_asked_for() -> None:
-    """Two hundred megabytes on disk was the brief; a voice past that belongs on a server."""
+    """Two hundred megabytes on disk was the brief; a voice past that belongs on a server.
+
+    One entry is over it and is named here rather than let through by a looser rule. Kokoro's float
+    build is three hundred and fifty megabytes and is the only build of it worth having: the hundred
+    and fifty megabyte quantised archive renders at twice the cost of the file it was meant to make
+    cheaper. The exception is the entry, not the size, so a new voice still has to fit.
+    """
     for voice in catalog.VOICES:
-        assert voice.unpacked_bytes < 200 << 20, f"{voice.id} takes {voice.unpacked_bytes >> 20} MB on disk"
+        cap = 400 << 20 if voice.id == "en-kokoro" else 200 << 20
+        assert voice.unpacked_bytes < cap, f"{voice.id} takes {voice.unpacked_bytes >> 20} MB on disk"
 
 
 def test_the_catalog_covers_what_the_operator_actually_speaks() -> None:
@@ -103,10 +112,10 @@ def test_the_catalog_covers_what_the_operator_actually_speaks() -> None:
     assert len(catalog.VOICES) >= 8
 
 
-def test_two_voices_are_slower_than_speech_and_are_the_only_ones() -> None:
-    """The fact that changes how the page feels, pinned so a new entry cannot join them unnoticed."""
+def test_one_voice_is_slower_than_speech_and_is_the_only_one() -> None:
+    """The fact that changes how the page feels, pinned so a new entry cannot join it unnoticed."""
     slow = sorted(v.id for v in catalog.VOICES if not v.keeps_up)
-    assert slow == ["en-kokoro", "en-ryan"]
+    assert slow == ["en-ryan"]
     assert all(v.rtf > 1 for v in catalog.VOICES if not v.keeps_up)
 
 
@@ -125,8 +134,8 @@ def test_every_language_has_a_sample_to_play_and_a_recommendation() -> None:
         assert catalog.recommended(code).language == code
     for voice in catalog.VOICES:
         assert voice.sample() and len(voice.sample()) < 200
-    assert catalog.recommended("ru").id == "ru-dmitri"
-    assert catalog.recommended("en").id == "en-amy"
+    assert catalog.recommended("ru").id == "multi-supertonic"
+    assert catalog.recommended("en").id == "en-supertonic2"
     assert catalog.recommended("xx") is None
 
 
@@ -137,8 +146,8 @@ def test_a_sample_carries_a_number_so_the_listener_hears_how_it_reads_one() -> N
 
 
 def test_every_kind_is_one_the_engine_can_build() -> None:
-    assert {v.kind for v in catalog.VOICES} <= {"vits", "kokoro", "kitten"}
-    assert all(v.multi for v in catalog.VOICES if v.kind in ("kokoro", "kitten"))
+    assert {v.kind for v in catalog.VOICES} <= {"vits", "kokoro", "kitten", "supertonic"}
+    assert all(v.multi for v in catalog.VOICES if v.kind in ("kokoro", "kitten", "supertonic"))
 
 
 def test_an_unknown_id_names_what_is_actually_on_offer() -> None:
@@ -148,16 +157,47 @@ def test_an_unknown_id_names_what_is_actually_on_offer() -> None:
 
 
 def test_the_card_the_app_reads_carries_what_it_draws() -> None:
+    both = catalog.as_json(catalog.get("multi-supertonic"))
+    assert both["languages"][:2] == ["ru", "en"] and both["new"] is True
+    assert both["sample_rate"] == 44_100 and len(both["speakers"]) == 10
+    assert catalog.as_json(catalog.get("ru-irina"))["languages"] == []
     body = catalog.as_json(catalog.get("en-kokoro"))
     assert body["speakers"][0] == "af" and len(body["speakers"]) == 11
-    assert body["keeps_up"] is False and body["gender"] == "mixed" and body["sample_rate"] == 24_000
-    assert catalog.as_json(catalog.get("ru-dmitri"))["recommended_for"] == ["ru"]
+    assert body["keeps_up"] is True and body["gender"] == "mixed" and body["sample_rate"] == 24_000
+    assert catalog.as_json(catalog.get("multi-supertonic"))["recommended_for"] == ["ru"]
 
 
 def test_a_voice_speaks_one_language_and_says_so() -> None:
     dmitri = catalog.get("ru-dmitri")
     assert dmitri.speaks("ru") and dmitri.speaks("ru-RU") and dmitri.speaks("")
     assert not dmitri.speaks("en")
+    assert dmitri.languages == (), "a single-language voice has nothing to list"
+
+
+def test_the_one_voice_that_speaks_several_languages_says_all_of_them() -> None:
+    """The assumption the rest of the catalog rests on, and the one entry that breaks it."""
+    both = catalog.get("multi-supertonic")
+    assert both.speaks("ru") and both.speaks("en") and both.speaks("ru-RU") and both.speaks("en-GB")
+    assert not both.speaks("zh"), "it reads thirty-one languages; it is offered in the ones with a sample"
+    assert both.language in both.languages, "the language it is filed under has to be one it speaks"
+    for voice in catalog.VOICES:
+        assert not voice.languages or voice.language in voice.languages, voice.id
+        assert len(voice.languages) != 1, f"{voice.id}: one language is said by `language` alone"
+    assert set(catalog.languages()) >= set(both.languages), "the filter cannot offer fewer than a voice reads"
+
+
+def test_the_new_ones_are_the_ones_that_are_new() -> None:
+    """An editorial flag with a shelf life, pinned so it is not left on a voice nobody calls new."""
+    assert sorted(v.id for v in catalog.VOICES if v.new) == ["en-supertonic2", "multi-supertonic"]
+    assert catalog.VOICES[0].id == "multi-supertonic", "the Russian recommendation heads the list"
+
+
+def test_the_russian_default_is_the_one_the_owner_chose_and_piper_is_still_there() -> None:
+    """Supertonic is recommended; the Piper voices stay, because its licence is not everybody's."""
+    assert catalog.recommended("ru").id == "multi-supertonic"
+    assert "OpenRAIL-M" in catalog.recommended("ru").licence
+    piper = [v for v in catalog.VOICES if v.language == "ru" and v.kind == "vits"]
+    assert len(piper) >= 3 and any("CC0" in v.licence for v in piper)
 
 
 # -- what an archive has to hold ---------------------------------------------------------------
@@ -216,6 +256,47 @@ def test_an_archive_that_arrived_short_is_refused_here_rather_than_at_the_first_
         resolve(lay_out(tmp_path / "c", {"a.onnx": b"M", "tokens.txt": b"t"}), "vits")
     with pytest.raises(TtsError, match="does not load"):
         resolve(lay_out(tmp_path / "d", {"a.onnx": b"M", "tokens.txt": b"t", **ESPEAK}), "zipvoice")
+
+
+SUPERTONIC = {
+    "text_encoder.int8.onnx": b"T", "duration_predictor.int8.onnx": b"D",
+    "vector_estimator.int8.onnx": b"V", "vocoder.int8.onnx": b"C",
+    "tts.json": b"{}", "unicode_indexer.bin": b"U", "voice.bin": b"S",
+}
+
+
+def test_a_supertonic_voice_is_four_graphs_and_no_tokens_file_at_all(tmp_path: Path) -> None:
+    """The shape every other entry here has — one model, one tokens file — is not this one's."""
+    found = resolve(lay_out(tmp_path, SUPERTONIC), "supertonic")
+    assert found.text_encoder is not None and found.text_encoder.name == "text_encoder.int8.onnx"
+    assert found.duration_predictor is not None and found.vector_estimator is not None
+    assert found.vocoder is not None and found.vocoder.name == "vocoder.int8.onnx"
+    assert found.tts_json is not None and found.unicode_indexer is not None
+    assert found.voices is not None and found.voices.name == "voice.bin"
+    assert found.tokens is None and found.model is None and found.data_dir is None
+
+
+def test_a_supertonic_archive_missing_any_one_file_is_refused_and_the_file_is_named(tmp_path: Path) -> None:
+    """Seven files, and a download that arrived with six says which one it is short of."""
+    for missing, expected in (
+        ("text_encoder.int8.onnx", "text_encoder"), ("duration_predictor.int8.onnx", "duration_predictor"),
+        ("vector_estimator.int8.onnx", "vector_estimator"), ("vocoder.int8.onnx", "vocoder"),
+        ("tts.json", "tts.json"), ("unicode_indexer.bin", "unicode_indexer.bin"), ("voice.bin", "voice.bin"),
+    ):
+        short = {name: body for name, body in SUPERTONIC.items() if name != missing}
+        with pytest.raises(TtsError, match=expected):
+            resolve(lay_out(tmp_path / missing, short), "supertonic")
+
+
+def test_the_quantised_build_of_each_supertonic_graph_is_the_one_that_is_loaded(tmp_path: Path) -> None:
+    """Per graph rather than per directory: the archive may ship either build of any of the four."""
+    both = dict(SUPERTONIC)
+    both["vocoder.onnx"] = b"F"
+    del both["vector_estimator.int8.onnx"]
+    both["vector_estimator.onnx"] = b"F"
+    found = resolve(lay_out(tmp_path, both), "supertonic")
+    assert found.vocoder is not None and found.vocoder.name == "vocoder.int8.onnx"
+    assert found.vector_estimator is not None and found.vector_estimator.name == "vector_estimator.onnx"
 
 
 def test_the_download_managers_check_speaks_in_its_own_terms(tmp_path: Path) -> None:
@@ -421,6 +502,83 @@ def test_nothing_is_lost_or_invented_between_the_sentences() -> None:
     assert "".join(sentences(text)).replace(" ", "") == text.replace(" ", "")
 
 
+# -- where the stress falls ------------------------------------------------------------------------
+
+ACUTE = "\u0301"
+
+
+def test_the_words_an_assistant_says_every_day_are_stressed_where_they_belong() -> None:
+    """A dozen of them, written out, because a table of stresses is only worth the words in it."""
+    for plain, marked in (
+        ("привет", "приве" + ACUTE + "т"),
+        ("сегодня", "сего" + ACUTE + "дня"),
+        ("задачи", "зада" + ACUTE + "чи"),
+        ("проверил", "прове" + ACUTE + "рил"),
+        ("результат", "результа" + ACUTE + "т"),
+        ("конфигурацию", "конфигура" + ACUTE + "цию"),
+        ("минут", "мину" + ACUTE + "т"),
+        ("работа", "рабо" + ACUTE + "та"),
+        ("вопрос", "вопро" + ACUTE + "с"),
+        ("хорошо", "хорошо" + ACUTE),
+        ("спасибо", "спаси" + ACUTE + "бо"),
+        ("пожалуйста", "пожа" + ACUTE + "луйста"),
+    ):
+        assert ru_stress.mark(plain) == marked, plain
+
+
+def test_a_capital_letter_and_a_sentence_around_it_survive_the_marking() -> None:
+    said = ru_stress.mark("Привет! Я проверил тесты, осталось 3 задачи.")
+    assert said.startswith("Приве" + ACUTE + "т!")
+    assert "3 зада" + ACUTE + "чи." in said
+    assert said.count(ACUTE) == 4, "every word it knows, and only those"
+
+
+def test_a_word_that_is_two_words_in_writing_is_left_for_the_model_to_decide() -> None:
+    """«замок» is a castle or a lock depending on the sentence, and no table can read the sentence."""
+    for ambiguous in ("замок", "мука", "уже", "дома", "слова"):
+        assert ru_stress.mark(ambiguous) == ambiguous
+        assert ambiguous not in ru_stress.TABLE
+
+
+def test_nothing_that_is_not_a_russian_word_is_touched() -> None:
+    """A Latin word inside a Russian sentence is not ours to stress, and neither is a number."""
+    said = ru_stress.mark("Я запустил deploy через CI и проверил лог в Kubernetes 17 раз.")
+    assert "deploy" in said and "CI" in said and "Kubernetes" in said and "17" in said
+    assert "запусти" + ACUTE + "л" in said and "че" + ACUTE + "рез" in said
+
+
+def test_a_word_with_one_vowel_or_a_letter_that_is_already_stressed_is_left_alone() -> None:
+    assert ru_stress.mark("я не там") == "я не там", "one vowel decides nothing"
+    assert ru_stress.mark("ещё") == "ещё", "ё is a stressed vowel already written as one"
+
+
+def test_marking_text_twice_is_marking_it_once() -> None:
+    """The mark is part of a word, not a break in one; otherwise the halves would be marked again."""
+    once = ru_stress.mark("Привет! Через пару минут скажу результат.")
+    assert ru_stress.mark(once) == once
+    assert ACUTE + ACUTE not in once
+
+
+def test_the_table_refuses_to_contradict_itself() -> None:
+    """Every row parses, no row claims a consonant, and a form claimed twice is dropped, not guessed."""
+    for entry in ru_stress.WORDS.split():
+        at = entry.find(ru_stress.MARK)
+        plain = entry.replace(ru_stress.MARK, "")
+        assert 0 <= at < len(plain), entry
+        assert plain[at] in ru_stress.VOWELS, f"{entry}: the mark is not in front of a vowel"
+        assert sum(ch in ru_stress.VOWELS for ch in plain) > 1, f"{entry}: one vowel needs no mark"
+    assert not ru_stress.HOMOGRAPHS & set(ru_stress.TABLE)
+    assert len(ru_stress.TABLE) > 200
+
+
+def test_only_the_family_that_reads_the_mark_is_handed_one() -> None:
+    """espeak-ng has no rule for a combining acute, so a Piper voice must never see one."""
+    assert ru_stress.applies(catalog.get("multi-supertonic"))
+    assert not ru_stress.applies(catalog.get("ru-irina")), "Piper phonemises through espeak-ng"
+    assert not ru_stress.applies(catalog.get("en-supertonic2")), "Russian stress is not English"
+    assert not ru_stress.applies(catalog.get("uk-lada")), "the same letters, a different language"
+
+
 # -- the audio -------------------------------------------------------------------------------------
 
 
@@ -527,6 +685,7 @@ class FakeSherpa:
     OfflineTtsVitsModelConfig = _Config
     OfflineTtsKokoroModelConfig = _Config
     OfflineTtsKittenModelConfig = _Config
+    OfflineTtsSupertonicModelConfig = _Config
 
 
 @pytest.fixture
@@ -604,6 +763,44 @@ def test_a_kokoro_voice_is_handed_its_style_vectors(tmp_path: Path, monkeypatch:
     files = {"model.int8.onnx": b"M", "tokens.txt": b"t", "voices.bin": b"V", **ESPEAK}
     TtsEngine(catalog.get("en-kokoro"), lay_out(tmp_path, files))
     assert FakeTts.made[-1].model.kokoro.voices.endswith("voices.bin")
+
+
+def test_a_supertonic_voice_is_handed_all_four_graphs_and_its_style_vectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", FakeSherpa)
+    FakeTts.made = []
+    TtsEngine(catalog.get("multi-supertonic"), lay_out(tmp_path, SUPERTONIC), threads=2)
+    built = FakeTts.made[-1].model.supertonic
+    assert built.text_encoder.endswith("text_encoder.int8.onnx")
+    assert built.duration_predictor.endswith("duration_predictor.int8.onnx")
+    assert built.vector_estimator.endswith("vector_estimator.int8.onnx")
+    assert built.vocoder.endswith("vocoder.int8.onnx")
+    assert built.tts_json.endswith("tts.json") and built.unicode_indexer.endswith("unicode_indexer.bin")
+    assert built.voice_style.endswith("voice.bin"), "the ten styles are where the speakers come from"
+    assert not hasattr(FakeTts.made[-1].model, "vits"), "nothing else may be configured beside it"
+
+
+def test_a_family_that_renders_quietly_is_played_at_the_same_level_as_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Otherwise an A/B between two voices is decided by their level rather than by how they sound."""
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", FakeSherpa)
+    FakeTts.made, FakeTts.calls, FakeTts.rate, FakeTts.speakers = [], [], 44_100, 10
+    engine = TtsEngine(catalog.get("multi-supertonic"), lay_out(tmp_path, SUPERTONIC), threads=2)
+    quiet = engine.render("A sentence to say out loud.")
+    plain = to_pcm16([0.25] * (len(quiet) // 2))
+    assert OUTPUT_GAIN["supertonic"] != 1.0
+    assert len(quiet) == len(plain), "the gain must not change how many samples come out"
+    assert quiet != plain, "the family's gain was not applied"
+    expected = int(0.25 * OUTPUT_GAIN["supertonic"] * 32767)
+    assert struct.unpack("<h", quiet[:2])[0] == expected
+
+
+def test_the_gain_cannot_push_a_sample_past_full_scale() -> None:
+    """A clamp rather than a wrap: past full scale the sample is loud, not a click in the other direction."""
+    assert to_pcm16([0.9, -0.9], 2.0) == struct.pack("<hh", 32767, -32768)
+    assert to_pcm16([0.5], 1.0) == to_pcm16([0.25], 2.0)
 
 
 async def test_a_voice_dropped_while_it_was_loading_does_not_become_resident(
@@ -685,10 +882,15 @@ def test_the_picker_is_served_with_everything_the_page_needs(client: TestClient)
     body = client.get("/api/tts", headers=HEAD).json()
     assert len(body["models"]) == len(catalog.VOICES)
     assert body["selected"] == "" and body["state"]["voice"] == "" and body["state"]["threads"] == 2
-    assert body["recommended"]["ru"] == "ru-dmitri" and body["recommended"]["en"] == "en-amy"
+    assert body["recommended"]["ru"] == "multi-supertonic" and body["recommended"]["en"] == "en-supertonic2"
     assert body["languages"] == catalog.languages()
+    ryan = next(m for m in body["models"] if m["id"] == "en-ryan")
+    assert ryan["keeps_up"] is False, "the one voice slower than speech has to say so on its card"
     kokoro = next(m for m in body["models"] if m["id"] == "en-kokoro")
-    assert kokoro["keeps_up"] is False and len(kokoro["speakers"]) == 11
+    assert kokoro["keeps_up"] is True and len(kokoro["speakers"]) == 11
+    both = next(m for m in body["models"] if m["id"] == "multi-supertonic")
+    assert both["languages"] == ["ru", "en", "de", "es", "fr", "it", "pl", "pt", "uk"]
+    assert both["new"] is True and "OpenRAIL-M" in both["licence"]
 
 
 def test_a_voice_that_is_not_downloaded_cannot_be_chosen(client: TestClient) -> None:
@@ -1060,7 +1262,10 @@ def test_a_real_voice_starts_talking_long_before_it_has_finished_reading(tmp_pat
     found = [p for p in sorted(root.iterdir()) if p.is_dir() and p.name in by_archive]
     if not found:
         pytest.skip(f"no unpacked catalog voice in {root}")
-    directory = found[0]
+    # A Russian paragraph is timed through a voice that speaks Russian. Reading it with an English
+    # one measures a synthesiser spelling its way through a foreign alphabet, which is slower than
+    # anything this is a claim about and is not what anybody's machine would be doing.
+    directory = next((p for p in found if by_archive[p.name].speaks("ru")), found[0])
     voice = by_archive[directory.name]
 
     state = tmp_path / "state"

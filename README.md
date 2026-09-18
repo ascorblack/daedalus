@@ -532,15 +532,25 @@ neither, the page still works from the keyboard and says why the microphone is m
 
 **Speaking back.** Three ways, tried in that order, and the first is the one to use.
 
-**A voice that runs here.** **Settings → Voice → Voice (speech synthesis)** is a catalog of sixteen
-voices — Piper in ten languages including three Russian ones, plus Kokoro and KittenTTS for English —
-between thirteen and a hundred megabytes each. Pick one, press **Play sample** to hear it say a
-sentence in its own language, and press **Use this one**. From then on every answer is synthesised on
-this machine's processor: no endpoint, no key, nothing metered, and it works with the network down.
-Most of them render four to five times faster than a person talks, so the audio is ready before the
-sentence before it has finished playing; the two that do not — Kokoro and Piper's "high" quality — say
-so on their own cards. Numbers, dates and Latin words inside a Russian sentence are read properly:
-each archive carries its own copy of espeak-ng's data, so nothing has to be installed for it.
+**A voice that runs here.** **Settings → Voice → Voice (speech synthesis)** is a catalog of eighteen
+voices — Supertonic at the top of it, Piper in ten languages including three Russian ones, and Kokoro
+and KittenTTS for English — between thirteen and three hundred and fifty megabytes each. Pick one,
+press **Play sample** to hear it say a sentence in its own language, and press **Use this one**. From
+then on every answer is synthesised on this machine's processor: no endpoint, no key, nothing metered,
+and it works with the network down. Most of them render four to five times faster than a person talks,
+so the audio is ready before the sentence before it has finished playing; the one that does not —
+Piper's "high" quality — says so on its own card. Numbers, dates and Latin words inside a Russian
+sentence are read properly: each Piper archive carries its own copy of espeak-ng's data, so nothing
+has to be installed for it.
+
+The recommended Russian voice is **Supertonic 3**: a hundred and forty megabytes that reads
+thirty-one languages, renders at forty-four kilohertz — twice the rate of the rest — offers ten voices
+inside one download, and is still quicker than any Piper voice here. A Russian answer going to it has
+its stress marked first, from a small dictionary of the words an assistant says every day, because
+that is the one thing about a Russian voice a listener notices immediately. Its licence is
+OpenRAIL-M rather than a permissive one — commercial use is allowed with use restrictions that travel
+with it — and the card says so; the Piper voices, one of them public domain, are still there for an
+installation that would rather not think about it.
 
 **An endpoint**, if you would rather: any OpenAI-compatible `/audio/speech` — a self-hosted
 Kokoro-FastAPI or Piper server, or a hosted model like `gpt-4o-mini-tts`. Set `provider` to reuse a

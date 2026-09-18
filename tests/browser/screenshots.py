@@ -625,7 +625,7 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
 
 def _tts_voice(vid, label, language, gender, size, disk, quality, speed, rtf, note, installed=False, selected=False, speakers=(), recommended=()):  # type: ignore[no-untyped-def]
     return {
-        "id": vid, "label": label, "kind": "vits", "language": language, "gender": gender,
+        "id": vid, "label": label, "kind": "vits", "language": language, "languages": [], "new": False, "gender": gender,
         "size_bytes": size, "disk_bytes": disk, "memory_mb": 120, "sample_rate": 22050,
         "licence": "CC0 (public domain)", "quality": quality, "speed": speed, "rtf": rtf,
         "keeps_up": rtf < 1.0, "note": note, "speakers": list(speakers),
@@ -636,14 +636,21 @@ def _tts_voice(vid, label, language, gender, size, disk, quality, speed, rtf, no
 
 TTS = {
     "models": [
+        dict(_tts_voice("multi-supertonic", "Supertonic 3 (Russian and 30 more, 10 styles)", "ru", "mixed",
+                        128_774_318, 145_316_356, 90, 61, 0.175,
+                        "The best Russian here, and the fastest: forty-four kilohertz, ten voices in one download.",
+                        speakers=tuple(f"Style {n}" for n in range(1, 11)), recommended=("ru",)),
+             kind="supertonic", sample_rate=44100, memory_mb=256, new=True,
+             languages=["ru", "en", "de", "es", "fr", "it", "pl", "pt", "uk"],
+             licence="OpenRAIL-M (use restrictions apply)"),
         _tts_voice("ru-dmitri", "Dmitri (Russian)", "ru", "male", 21_129_441, 36_577_368, 74, 53, 0.219,
-                   "A clear male Russian, four times faster than speech.", installed=True, selected=True, recommended=("ru",)),
+                   "A clear male Russian, four times faster than speech.", installed=True, selected=True),
         _tts_voice("ru-irina", "Irina (Russian)", "ru", "female", 21_149_417, 36_577_296, 73, 39, 0.337,
                    "The female Russian voice. Warm and unhurried.", installed=True),
         _tts_voice("en-amy", "Amy (American English)", "en", "female", 21_028_122, 36_679_476, 72, 57, 0.195,
                    "Twenty megabytes, five times faster than speech.", recommended=("en",)),
-        dict(_tts_voice("en-kokoro", "Kokoro (English, 11 voices)", "en", "mixed", 103_248_205, 157_947_103, 92, 13, 1.203,
-                        "The best-sounding English here, and slower than real time.",
+        dict(_tts_voice("en-kokoro", "Kokoro (English, 11 voices)", "en", "mixed", 319_625_534, 369_315_617, 92, 21, 0.692,
+                        "The most natural English here, and the largest download.",
                         speakers=("af", "af_bella", "am_adam", "bf_emma", "bm_george")),
              kind="kokoro", sample_rate=24000, licence="Apache-2.0", memory_mb=320),
         _tts_voice("de-thorsten", "Thorsten (German)", "de", "male", 20_949_833, 36_577_367, 76, 60, 0.183,
@@ -651,12 +658,12 @@ TTS = {
         _tts_voice("fr-siwis", "Siwis (French)", "fr", "female", 20_914_888, 36_577_449, 73, 59, 0.189,
                    "A steady French, quick enough that nothing waits for it.", recommended=("fr",)),
     ],
-    "languages": ["de", "en", "fr", "ru"],
+    "languages": ["de", "en", "es", "fr", "it", "pl", "pt", "ru", "uk"],
     "selected": "ru-dmitri",
     "disk_bytes": 73_154_664,
     "root": "/srv/state/models/tts",
     "engine_installed": True,
-    "recommended": {"de": "de-thorsten", "en": "en-amy", "fr": "fr-siwis", "ru": "ru-dmitri"},
+    "recommended": {"de": "de-thorsten", "en": "en-amy", "fr": "fr-siwis", "ru": "multi-supertonic"},
     "state": {
         "voice": "ru-dmitri", "label": "Dmitri (Russian)", "language": "ru", "speaker": "", "speed": 1.0,
         "threads": 2, "installed": True, "active": True, "engine_installed": True, "state": "ready",
