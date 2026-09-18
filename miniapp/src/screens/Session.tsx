@@ -9,6 +9,9 @@ import { confirmAsync, errorText, fmtBytes, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
 import { AuthImg, FilePreview, PreviewSource, canPreview, downloadHref, fileGlyph, previewKind, sessionBase } from "../preview";
 import { Activity, LiveStore, SummaryItem, SystemNote, ToolItem, Turn, applyLive, buildTurns, createLiveStore, familyCounts, isOlderPage, liveAfter, liveBase, prepend, producedFiles, reconcile } from "../turns";
+import { Explorer } from "../explorerpanel";
+import { DiffView } from "../previewparts";
+import { looksLikeDiff } from "../diff";
 import { ArtifactCard } from "../artifact";
 import { Answer, Composer, ComposerHandle } from "../composerbox";
 import { Approval, QueuedSteer, pendingApproval, readSteers, steersAfter } from "../composer";
@@ -78,6 +81,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   const userScrolling = useRef(false);
   const [atBottom, setAtBottom] = useState(true);
   const [preview, setPreview] = useState<PreviewSource | null>(null);
+  const [filesGeneration, setFilesGeneration] = useState(0);
   const [receipt, setReceipt] = useState<string | null>(null);
   const [dragging, setDragging] = useState(0);
   const [providerUsage, setProviderUsage] = useState<ProviderUsage | null>(null);
@@ -492,6 +496,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             : prev,
         );
       } else if (event === "run_settled") {
+        setFilesGeneration((n) => n + 1);
         // The run is over as the host knows it. The chip flips on this event, not on the read it
         // triggers: the read says the same thing a round trip later.
         setDetail((prev) => (prev ? { ...prev, status: p.status === "awaiting" ? "waiting" : "idle", housekeeping: !!p.housekeeping } : prev));
@@ -1018,7 +1023,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                 }}
               />
             }
-            files={<Files base={sessionBase(id)} uploadUrl={`${sessionBase(id)}/files/upload`} onPreview={openPreview} toast={toast} />}
+            files={<Explorer key={id} base={sessionBase(id)} root={detail?.project?.name} uploadUrl={`${sessionBase(id)}/files/upload`} onPreview={openPreview} toast={toast} refresh={filesGeneration} written={producedFiles(turns.at(-1)?.activity ?? []).filter((f) => f.how === "wrote").map((f) => workspaceRelative(f.path, detail.workspace) ?? "")} />}
             jobs={<JobsTab sessionId={id} messages={detail.messages} onOpen={panel.openFile} onPreview={openPreview} />}
           />
         )}
@@ -1702,7 +1707,7 @@ function ReceiptDialog({ sessionId, receipt, onClose }: { sessionId: string; rec
                   {row.dependencies && t("session.receipt.depends", { list: row.dependencies })}
                 </div>
                 <div dangerouslySetInnerHTML={{ __html: codeBlock(row.command, "sh") }} />
-                {row.output_head && <pre className="filetext">{row.output_head}</pre>}
+                {row.output_head && (looksLikeDiff(row.output_head) ? <DiffView text={row.output_head} /> : <pre className="filetext">{row.output_head}</pre>)}
               </>
             )}
           </div>

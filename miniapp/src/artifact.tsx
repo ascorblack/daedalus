@@ -12,6 +12,10 @@ export function fileIcon(name: string): IconName {
   switch (previewKind(name)) {
     case "image":
       return "image";
+    case "json":
+      return "terminal";
+    case "diff":
+      return "changes";
     case "html":
       return "globe";
     case "csv":

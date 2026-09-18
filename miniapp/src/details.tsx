@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, LoopView, ProviderUsage, Schedule, SessionDetail } from "./api";
 import { Dot, ServiceRow, ToolPicker, copyText, fmtInt, fmtUsd, loopLabel, statusWord, timeAgo } from "./components";
+import { readLayout, writeLayout } from "./layout";
 import { clock, shortDateTime, untilShort } from "./format";
 import { Icon } from "./icons";
 import { confirmAsync, errorText, fmtTok } from "./ui";
@@ -42,14 +43,20 @@ export type SessionDetailsProps = {
 };
 
 function Section({ id, label, children, className, aside }: { id: string; label: string; children: React.ReactNode; className?: string; aside?: React.ReactNode }) {
+  const [open, setOpen] = useState(() => readLayout(`details.${id}`) !== "closed");
   return (
-    <section className={`dt-section ${className ?? ""}`} id={`info-${id}`}>
-      <div className="dt-label">
+    <details className={`dt-section ${className ?? ""}`} id={`info-${id}`} open={open} onToggle={(e) => { const next = e.currentTarget.open; setOpen(next); writeLayout(`details.${id}`, next ? "open" : "closed"); }}>
+      <summary className="dt-label" onClick={(e) => {
+        // Persist at the click, before a navigation can discard the native toggle event's task.
+        e.preventDefault();
+        setOpen(!open);
+        writeLayout(`details.${id}`, open ? "closed" : "open");
+      }}>
         <span>{label}</span>
         {aside && <span className="dt-aside">{aside}</span>}
-      </div>
-      {children}
-    </section>
+      </summary>
+      <div className="dt-content">{children}</div>
+    </details>
   );
 }
 
@@ -57,7 +64,7 @@ export function SessionDetails({ id, detail, busy, modes, schedules, provider, p
   const ctxPct = detail.context && detail.context.window > 0 ? Math.round((100 * detail.context.tokens) / detail.context.window) : null;
   useEffect(() => {
     if (!focus || focus === "session") return;
-    const timer = window.setTimeout(() => document.getElementById(`info-${focus}`)?.scrollIntoView({ block: "start" }), 30);
+    const timer = window.setTimeout(() => { const section = document.getElementById(`info-${focus}`) as HTMLDetailsElement | null; if (section) { section.open = true; section.scrollIntoView({ block: "start" }); } }, 30);
     return () => window.clearTimeout(timer);
   }, [focus]);
   const subRunning = (detail.subagents ?? []).filter((x) => x.running).length;
@@ -362,12 +369,10 @@ function ProviderUsageCard({ provider, usage }: { provider: string; usage: Provi
   const sub = usage?.subscription;
   const today = usage?.today ?? {};
   return (
-    <section className="dt-section" id="info-provider">
-      <div className="dt-label">
-        <span>{SUBSCRIPTION_LABEL[provider] ?? provider}</span>
-        {sub?.plan && <span className="badge">{sub.plan}</span>}
-        {sub?.limit_reached && <span className="badge" style={{ color: "var(--bad)" }}>limit</span>}
-      </div>
+    <Section id="provider" label={SUBSCRIPTION_LABEL[provider] ?? provider} aside={<>
+      {sub?.plan && <span className="badge">{sub.plan}</span>}
+      {sub?.limit_reached && <span className="badge" style={{ color: "var(--bad)" }}>limit</span>}
+    </>}>
       {!usage && <div className="sub">…</div>}
       {sub && !sub.logged_in && <div className="sub">{t("usage.notloggedin")}</div>}
       {sub?.error && <div className="sub" style={{ color: "var(--bad)" }}>{sub.error}</div>}
@@ -389,7 +394,7 @@ function ProviderUsageCard({ provider, usage }: { provider: string; usage: Provi
           {usage.balance !== undefined && usage.balance !== null && t("session.provider.balance", { sum: fmtUsd(usage.balance) })}
         </div>
       )}
-    </section>
+    </Section>
   );
 }
 

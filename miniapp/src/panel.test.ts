@@ -102,11 +102,18 @@ describe("the preview history", () => {
 });
 
 describe("the route", () => {
+  it("keeps cited lines when a link is copied or reloaded", () => {
+    const source = openFile(PANEL_CLOSED, { base, path: "src/main.py", lines: "4-5" });
+    const q = new URLSearchParams();
+    for (const [key, value] of Object.entries(panelQuery(source))) if (value) q.set(key, value);
+    expect(currentEntry(applyPanelQuery(PANEL_CLOSED, readPanelQuery(q), base))?.lines).toBe("4-5");
+  });
+
   it("writes the tab and, on Preview, the path", () => {
-    expect(panelQuery(PANEL_CLOSED)).toEqual({ panel: null, path: null, tab: null });
-    expect(panelQuery(openTab(PANEL_CLOSED, "files"))).toEqual({ panel: "files", path: null, tab: null });
+    expect(panelQuery(PANEL_CLOSED)).toEqual({ panel: null, path: null, lines: null, tab: null });
+    expect(panelQuery(openTab(PANEL_CLOSED, "files"))).toEqual({ panel: "files", path: null, lines: null, tab: null });
     const s = openFile(PANEL_CLOSED, { base, path: "reports/menu-check.md" });
-    expect(panelQuery(s)).toEqual({ panel: "preview", path: "reports/menu-check.md", tab: null });
+    expect(panelQuery(s)).toEqual({ panel: "preview", path: "reports/menu-check.md", lines: null, tab: null });
     expect(panelQuery(openTab(s, "details")).path).toBeNull();
   });
 

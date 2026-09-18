@@ -4,12 +4,17 @@
 // converted in the browser by libraries loaded only when such a file is opened.
 
 import { Overlay, useLayer } from "./dialogs";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "./api";
 import { Icon } from "./icons";
 import { renderMarkdown } from "./md";
 import { errorText, fmtBytes } from "./ui";
 import { t } from "./i18n";
+import { SourceView, JsonView, DiffView, ImageView } from "./previewparts";
+import { HtmlPreview, HtmlNavigation } from "./htmlpreview";
+import { parseCsv } from "./csv";
+export { parseCsv } from "./csv";
+import { FileSkeleton } from "./feedback";
 
 /** Where the bytes come from: a file under an API file root (`/api/sessions/<id>` or `/api/workspaces/<name>`), or a File object from the composer.
  * `lines` ("20-40", or a single number) is what an answer cited: the file opens as source with that range marked. */
@@ -18,13 +23,15 @@ export type PreviewSource = { base: string; path: string; lines?: string } | { f
 export const sessionBase = (sessionId: string) => `/api/sessions/${sessionId}`;
 export const workspaceBase = (name: string) => `/api/workspaces/${encodeURIComponent(name)}`;
 
-export type PreviewKind = "image" | "markdown" | "csv" | "pdf" | "docx" | "sheet" | "audio" | "video" | "text" | "html" | "other";
+export type PreviewKind = "image" | "markdown" | "csv" | "pdf" | "docx" | "sheet" | "audio" | "video" | "text" | "html" | "json" | "diff" | "other";
 
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/i;
 const TEXT_RE = /\.(txt|log|json|jsonl|ya?ml|toml|ini|cfg|conf|env|py|ts|tsx|js|jsx|mjs|cjs|sh|bash|zsh|sql|xml|rs|go|java|kt|c|h|cpp|hpp|cs|rb|php|swift|css|scss|less|diff|patch|lock|gitignore|dockerfile|makefile|tex|bib|srt|vtt)$/i;
 
 export function previewKind(name: string): PreviewKind {
   const n = name.toLowerCase();
+  if (/\.(json|jsonl)$/.test(n)) return "json";
+  if (/\.(diff|patch)$/.test(n)) return "diff";
   if (IMAGE_RE.test(n)) return "image";
   if (/\.(md|markdown|mdx)$/.test(n)) return "markdown";
   if (/\.(csv|tsv)$/.test(n)) return "csv";
@@ -81,31 +88,45 @@ function sourceName(src: PreviewSource): string {
   return "file" in src ? src.file.name : src.path.split("/").pop() || src.path;
 }
 
-async function sourceBlob(src: PreviewSource): Promise<Blob> {
+async function sourceBlob(src: PreviewSource, signal: AbortSignal, progress: (value: number | null) => void): Promise<Blob> {
   if ("file" in src) return src.file;
-  const res = await fetch(`${src.base}/download?path=${encodeURIComponent(src.path)}`, { headers: api.authHeaders() });
+  const res = await fetch(`${src.base}/download?path=${encodeURIComponent(src.path)}`, { headers: api.authHeaders(), signal });
   if (!res.ok) throw new Error(res.status === 404 ? t("preview.nofile") : t("preview.failed", { status: res.status }));
-  return res.blob();
+  if (!res.body) return res.blob();
+  const reader = res.body.getReader();
+  const total = Number(res.headers.get("content-length"));
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    progress(total > 0 ? Math.min(1, received / total) : null);
+  }
+  return new Blob(chunks, { type: res.headers.get("content-type") || "application/octet-stream" });
 }
 
 /** A blob URL for the source, revoked when the component that asked for it goes away. */
-export function useBlobUrl(src: PreviewSource | null): { url: string | null; blob: Blob | null; error: string | null } {
-  const [state, setState] = useState<{ url: string | null; blob: Blob | null; error: string | null }>({ url: null, blob: null, error: null });
+export function useBlobUrl(src: PreviewSource | null): { url: string | null; blob: Blob | null; error: string | null; progress: number | null } {
+  const [state, setState] = useState<{ url: string | null; blob: Blob | null; error: string | null; progress: number | null }>({ url: null, blob: null, error: null, progress: null });
   const key = src === null ? "" : "file" in src ? `file:${src.file.name}:${src.file.size}:${src.file.lastModified}` : `${src.base}:${src.path}`;
   useEffect(() => {
     if (!src) return;
     let url: string | null = null;
     let gone = false;
-    setState({ url: null, blob: null, error: null });
-    sourceBlob(src)
+    setState({ url: null, blob: null, error: null, progress: null });
+    const controller = new AbortController();
+    sourceBlob(src, controller.signal, (progress) => { if (!gone) setState((s) => ({ ...s, progress })); })
       .then((blob) => {
         if (gone) return;
         url = URL.createObjectURL(blob);
-        setState({ url, blob, error: null });
+        setState({ url, blob, error: null, progress: 1 });
       })
-      .catch((e) => !gone && setState({ url: null, blob: null, error: errorText(e) }));
+      .catch((e) => !gone && setState({ url: null, blob: null, error: errorText(e), progress: null }));
     return () => {
       gone = true;
+      controller.abort();
       if (url) URL.revokeObjectURL(url);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -122,44 +143,6 @@ export function AuthImg({ src, alt, className, onClick }: { src: PreviewSource; 
 }
 
 // ── parsers ────────────────────────────────────────────────────────────────────────────
-
-/** CSV/TSV with quoted fields; the delimiter is guessed from the first line. */
-export function parseCsv(text: string, max = 2000): string[][] {
-  const first = text.split(/\r?\n/, 1)[0] ?? "";
-  const delimiter = [",", ";", "\t", "|"].map((d) => [d, (first.match(new RegExp(`\\${d}`, "g")) ?? []).length] as const).sort((a, b) => b[1] - a[1])[0][0];
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let quoted = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (quoted) {
-      if (c === '"' && text[i + 1] === '"') {
-        cell += '"';
-        i++;
-      } else if (c === '"') quoted = false;
-      else cell += c;
-      continue;
-    }
-    if (c === '"') quoted = true;
-    else if (c === delimiter) {
-      row.push(cell);
-      cell = "";
-    } else if (c === "\n" || c === "\r") {
-      if (c === "\r" && text[i + 1] === "\n") i++;
-      row.push(cell);
-      rows.push(row);
-      row = [];
-      cell = "";
-      if (rows.length >= max) return rows;
-    } else cell += c;
-  }
-  if (cell !== "" || row.length) {
-    row.push(cell);
-    rows.push(row);
-  }
-  return rows;
-}
 
 function Grid({ rows, note }: { rows: string[][]; note?: string }) {
   if (!rows.length) return <div className="empty">{t("preview.empty")}</div>;
@@ -198,59 +181,23 @@ export function parseRange(spec: string): { from: number; to: number } | null {
   return from >= 1 && to >= from ? { from, to } : null;
 }
 
-/** How much of a long file is shown around the cited range. */
-const WINDOW_LINES = 120;
-
-/** The file as numbered source lines with the cited range marked; a long file is shown around the range. */
-function LinedText({ text, range }: { text: string; range: { from: number; to: number } }) {
-  const all = text.split("\n");
-  const start = Math.max(0, range.from - 1 - WINDOW_LINES);
-  const end = Math.min(all.length, range.to + WINDOW_LINES);
-  const windowed = start > 0 || end < all.length;
-  const shown = all.slice(start, end);
-  const first = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    first.current?.scrollIntoView({ block: "center" });
-  }, [range.from, range.to]);
-  return (
-    <div className="filetext lined">
-      {windowed && <div className="sub">{t("preview.lines.of", { from: start + 1, to: end, total: all.length })}</div>}
-      {shown.map((line, i) => {
-        const n = start + i + 1;
-        const cited = n >= range.from && n <= range.to;
-        return (
-          <div key={n} className={cited ? "line cited" : "line"} ref={n === range.from ? first : undefined}>
-            <span className="linenum">{n}</span>
-            <span className="linebody">{line || " "}</span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── the viewer, and the dialog around it ─────────────────────────────────────────────────
-
 const TEXT_LIMIT = 512_000;
 
 /** What the viewer learned about the file once it arrived: for the host's toolbar (download, size). */
-export type ViewerInfo = { url: string | null; size: number | null; name: string; kind: PreviewKind };
+export type ViewerInfo = { url: string | null; size: number | null; name: string; kind: PreviewKind; loading: boolean; progress: number | null };
 
 /** The file itself, rendered inline into whatever hosts it: the preview dialog, the right panel's
  *  Preview tab, a phone sheet. It fetches, parses and draws; the host draws the chrome around it. */
-export function Viewer({ src, onInfo, className }: { src: PreviewSource; onInfo?: (info: ViewerInfo) => void; className?: string }) {
+export function Viewer({ src, onInfo, onNavigation, className }: { src: PreviewSource; onInfo?: (info: ViewerInfo) => void; onNavigation?: (nav: HtmlNavigation | null) => void; className?: string }) {
   const name = sourceName(src);
   // A cited range is about the source, so a Markdown or CSV file opens as text rather than rendered.
   const cited = "path" in src && src.lines ? parseRange(src.lines) : null;
-  const kind = cited && ["markdown", "csv", "html", "text"].includes(previewKind(name)) ? "text" : previewKind(name);
-  const { url, blob, error } = useBlobUrl(src);
+  const [source, setSource] = useState(false);
+  const [binary, setBinary] = useState(false);
+  const kind = binary ? "other" : (source || cited) && ["markdown", "csv", "html", "json", "diff", "text"].includes(previewKind(name)) ? "text" : previewKind(name);
+  const { url, blob, error, progress } = useBlobUrl(src);
   const [body, setBody] = useState<{ html?: string; text?: string; rows?: string[][]; sheets?: { name: string; rows: string[][] }[]; error?: string } | null>(null);
   const [sheet, setSheet] = useState(0);
-
-  useEffect(() => {
-    onInfo?.({ url, size: blob?.size ?? null, name, kind });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, blob, name, kind]);
 
   useEffect(() => {
     setBody(null);
@@ -260,12 +207,13 @@ export function Viewer({ src, onInfo, className }: { src: PreviewSource; onInfo?
     const done = (b: typeof body) => !gone && setBody(b);
     (async () => {
       try {
-        if (kind === "markdown" || kind === "text" || kind === "csv" || kind === "html") {
+        if (kind === "markdown" || kind === "text" || kind === "csv" || kind === "html" || kind === "json" || kind === "diff") {
           const text = await blob.slice(0, TEXT_LIMIT).text();
+          if (text.includes("\0")) { if (!gone) setBinary(true); return; }
           const clipped = blob.size > TEXT_LIMIT ? `\n\n${t("preview.more", { size: fmtBytes(blob.size - TEXT_LIMIT) })}` : "";
           if (kind === "markdown") done({ html: renderMarkdown(text + clipped) });
           else if (kind === "csv") {
-            const rows = parseCsv(text);
+            const rows = parseCsv(text, 2000, /\.tsv$/i.test(name) ? "\t" : undefined);
             done({ rows, error: rows.length >= 2000 ? t("preview.rows") : undefined });
           } else done({ text: text + clipped });
         } else if (kind === "docx") {
@@ -290,11 +238,15 @@ export function Viewer({ src, onInfo, className }: { src: PreviewSource; onInfo?
     };
   }, [blob, kind]);
 
-  const failure = error ?? body?.error;
+  const failure = error ?? (body?.rows ? null : body?.error);
   const loading = !failure && (!url || (kind !== "image" && kind !== "pdf" && kind !== "audio" && kind !== "video" && kind !== "other" && !body));
+
+  useEffect(() => { onInfo?.({ url, size: blob?.size ?? null, name, kind, loading, progress }); }, [url, blob, name, kind, loading, progress, onInfo]);
 
   return (
     <div className={`viewer ${kind} ${className ?? ""}`}>
+      {!onInfo && loading && <div className={`preview-progress ${progress === null ? "busy" : ""}`} role="progressbar" aria-label={t("common.loading")}><i style={progress === null ? undefined : { width: `${progress * 100}%` }} /></div>}
+      {["markdown", "html", "json", "diff"].includes(previewKind(name)) && <div className="source-tools segmented"><button className={!source && !cited ? "on" : ""} onClick={() => setSource(false)} disabled={!!cited}>{t("preview.rendered")}</button><button className={source || cited ? "on" : ""} onClick={() => setSource(true)}>{t("preview.source")}</button></div>}
       {body?.sheets && body.sheets.length > 1 && (
         <div className="segmented preview-tabs">
           {body.sheets.map((s, i) => (
@@ -304,15 +256,17 @@ export function Viewer({ src, onInfo, className }: { src: PreviewSource; onInfo?
       )}
       <div className="preview-body">
         {failure && <div className="empty">{failure}</div>}
-        {loading && <div className="empty">{t("common.loading")}</div>}
-        {!failure && url && kind === "image" && <img className="preview-image" src={url} alt={name} />}
+        {loading && <FileSkeleton />}
+        {!failure && url && kind === "image" && <ImageView url={url} name={name} />}
         {!failure && url && kind === "pdf" && <iframe className="preview-frame" src={url} title={name} />}
         {!failure && url && kind === "audio" && <audio className="preview-media" controls src={url} />}
         {!failure && url && kind === "video" && <video className="preview-media" controls src={url} />}
         {!failure && body?.html && kind === "markdown" && <div className="answer preview-doc" dangerouslySetInnerHTML={{ __html: body.html }} />}
         {!failure && body?.html && kind === "docx" && <div className="answer preview-doc docx" dangerouslySetInnerHTML={{ __html: body.html }} />}
-        {!failure && body?.text !== undefined && kind === "html" && <pre className="filetext">{body.text}</pre>}
-        {!failure && body?.text !== undefined && kind === "text" && (cited ? <LinedText text={body.text} range={cited} /> : <pre className="filetext">{body.text}</pre>)}
+        {!failure && body?.text !== undefined && kind === "html" && <HtmlPreview text={body.text} base={"base" in src ? src.base : undefined} path={"path" in src ? src.path : name} onNavigation={onNavigation} />}
+        {!failure && body?.text !== undefined && kind === "text" && <SourceView text={body.text} name={name} range={cited} />}
+        {!failure && body?.text !== undefined && kind === "json" && <JsonView text={body.text} />}
+        {!failure && body?.text !== undefined && kind === "diff" && <DiffView text={body.text} />}
         {!failure && body?.rows && <Grid rows={body.rows} note={body.error} />}
         {!failure && body?.sheets && <Grid rows={body.sheets[sheet]?.rows ?? []} note={(body.sheets[sheet]?.rows.length ?? 0) >= 2000 ? t("preview.rows") : undefined} />}
         {!failure && url && kind === "other" && (
@@ -346,15 +300,16 @@ export function FilePreview({ src, onClose }: { src: PreviewSource; onClose: () 
           </h3>
           <div className="head-actions">
             {info?.url && (
-              <a className="iconbtn small" href={info.url} download={name} title={t("common.download")} aria-label={t("common.download")}>
+              <><a className="iconbtn small" href={info.url} target="_blank" rel="noreferrer" aria-label={t("panel.opennew")}><Icon name="external" size={16} /></a><a className="iconbtn small" href={info.url} download={name} title={t("common.download")} aria-label={t("common.download")}>
                 <Icon name="download" size={16} />
-              </a>
+              </a></>
             )}
             <button className="iconbtn small" onClick={onClose} aria-label={t("common.close")} title={t("common.close")}>
               <Icon name="close" size={16} />
             </button>
           </div>
         </div>
+        {info?.loading && <div className="preview-progress busy" role="progressbar" aria-label={t("common.loading")}><i /></div>}
         <Viewer src={src} onInfo={setInfo} />
       </div>
     </div>
