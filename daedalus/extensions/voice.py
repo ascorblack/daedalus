@@ -61,7 +61,13 @@ PROJECT_DIR = "voice"
 ANSWER_CLIP = 4000
 """How much of an agent's answer AgentResult returns; a spoken summary needs no more."""
 LIST_CLIP = 300
-REPORT_CLIP = 500
+REPORT_CLIP = 6000
+"""How much of an agent's final answer is handed to the concierge.
+
+It used to be a few hundred characters, and a long answer that opened with its checks and closed
+with its findings reached the concierge as the checks alone, which it then reported as "there was
+nothing about that in the answer" — truthfully, and wrongly. The concierge reads a whole answer
+now; what is cut is marked, and the tool that fetches the rest is named where the cut happens."""
 PROGRESS_CLIP = 300
 """How much of an interim line is relayed. One spoken sentence comes out of it; the rest would be read
 by a model that is about to throw it away, and an agent's next paragraph supersedes it anyway."""
@@ -97,6 +103,17 @@ early and write outside it."""
 def quoted(text: str) -> str:
     """An agent's words as data: the frame's own characters replaced, so only we can open or close a block."""
     return text.replace("⟪", "«").replace("⟫", "»")
+
+
+def clip_report(answer: str) -> str:
+    """An agent's answer as the concierge receives it, saying so when the end was left out."""
+    if len(answer) <= REPORT_CLIP:
+        return answer
+    missing = len(answer) - REPORT_CLIP
+    return answer[:REPORT_CLIP].rstrip() + (
+        f"\n\n[{missing} characters of this answer are not here; call AgentResult with the id "
+        "above to read it whole before saying what it does or does not contain]"
+    )
 
 
 def report_block(*, kind: str, title: str, session_id: str, state: str, body: str) -> str:
@@ -1035,7 +1052,7 @@ class Voice:
         if state is None or state.metadata.get("voice_parent") != voice_id or status == "awaiting":
             return
         answer = await self.last_answer(session_id) if status == "completed" else ""
-        body = answer[:REPORT_CLIP] if answer else f"no final answer ({status}); its session has the detail"
+        body = clip_report(answer) if answer else f"no final answer ({status}); its session has the detail"
         # Whatever it was about to say on the way is behind us now: the answer says more, and a progress
         # line spoken after "it finished" would tell the operator the job is still running.
         self._stop_relay(session_id)

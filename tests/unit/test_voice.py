@@ -907,3 +907,23 @@ async def test_the_event_stream_leaves_the_process_a_frame_at_a_time_and_uncompr
     assert "content-encoding" not in headers, "the event stream went out compressed"
     # Every frame is its own write, byte for byte: nothing was held back for the next one.
     assert [chunk for chunk in out if chunk] == frames
+
+
+def test_a_long_answer_reaches_the_concierge_whole() -> None:
+    """The defect this pins: an answer that opened with its checks and closed with its findings was
+    cut to the checks, and the concierge then said the findings were not in it."""
+    from daedalus.extensions.voice import clip_report
+
+    answer = "checks: " + ("a" * 400) + "\n\nwhat it is: an engineering practice"
+    assert clip_report(answer) == answer
+    assert "what it is" in clip_report(answer)
+
+
+def test_an_answer_past_the_budget_says_what_is_missing_and_how_to_read_it() -> None:
+    from daedalus.extensions.voice import REPORT_CLIP, clip_report
+
+    answer = "x" * (REPORT_CLIP + 250)
+    clipped = clip_report(answer)
+    assert clipped.startswith("x" * 100)
+    assert "250 characters of this answer are not here" in clipped
+    assert "AgentResult" in clipped
