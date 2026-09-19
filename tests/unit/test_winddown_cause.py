@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
-from protocore.contracts.llm import LLMProviderError, LLMRequest, ProviderDelta
+from protocore.contracts.llm import LLMProviderError, LLMRequest, ProviderDelta, ProviderDeltaKind
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
@@ -114,6 +114,30 @@ async def test_a_refused_run_fails_instead_of_apologising(
     history = await manager.sessions.list_messages(state.session.id, "daedalus", limit=100)
     assert [m.role.value for m in history] == ["user"], "no invented closing statement"
     assert state.last_error_kind == "llm_provider_error"
+    await manager.close()
+
+
+async def test_reasoning_only_exhaustion_is_failed_even_after_a_closing_answer(settings: Settings, db: Database) -> None:
+    class StalledProvider(ScriptedProvider):
+        async def stream_with_tools(self, request: LLMRequest) -> AsyncIterator[ProviderDelta]:
+            if len(self.requests) < 4:
+                self.requests.append(request)
+                yield ProviderDelta(kind=ProviderDeltaKind.thinking, content="Considering the task.")
+                yield ProviderDelta(kind=ProviderDeltaKind.finish, finish_reason="stop")
+            else:
+                async for delta in super().stream_with_tools(request):
+                    yield delta
+
+    provider = StalledProvider([{"text": "Could not finish."}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("stalled")
+    waiter = asyncio.create_task(_wait_finished(manager))
+    await manager.submit(state.session.id, "Explain the result")
+    assert (await waiter)[0][2] == "failed"
+    assert state.soft_stop_cause == "model_no_progress"
+    assert state.last_error_kind == "model_no_progress"
+    assert state.outage_task is None
+    assert (await manager.list_sessions(ids=[state.session.id]))[0]["status"] == "failed"
     await manager.close()
 
 

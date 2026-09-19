@@ -11,7 +11,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -38,7 +38,7 @@ from protocore.runtime.events.types import EventType
 from protocore.runtime.live_control import new_queued_prompt
 from protocore.runtime.loop_state import LoopState
 from protocore.runtime.query_engine import QueryEngine
-from protocore.runtime.soft_stop import CAUSE_PROVIDER_ERROR
+from protocore.runtime.soft_stop import CAUSE_MODEL_NO_PROGRESS, CAUSE_PROVIDER_ERROR
 from protocore.tests_support.adapters import InMemoryToolRegistry
 from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
@@ -163,6 +163,7 @@ class SessionState:
     session: Session
     workspace: Path
     engine: QueryEngine | None = None
+    provider_hold: ExitStack | None = None
     task: asyncio.Task[None] | None = None
     run_id: str | None = None
     pending: PendingQuestion | None = None
@@ -743,6 +744,9 @@ class SessionManager:
             return None
         self.unloadable_sessions.pop(session_id, None)
         state = SessionState(session=session, workspace=workspace, metadata=dict(session.metadata), project=project)
+        measurement = await self.db.kv_get(f"context_measurement:{session_id}", {})
+        state.usage_floor_seq = int(measurement.get("floor", 0))
+        state.observed_prompt_tokens = int(measurement.get("tokens", 0))
         self._states[session_id] = state
         self.register_services(state)
         return state
@@ -836,7 +840,7 @@ class SessionManager:
                     status = "waiting"
                 elif state.compacting is not None:
                     status = "compacting"
-                elif state.engine is not None and state.engine.state is LoopState.FAILED:
+                elif state.last_error_kind or (state.engine is not None and state.engine.state is LoopState.FAILED):
                     status = "failed"
             out.append(
                 {
@@ -874,6 +878,10 @@ class SessionManager:
         if state.housekeeping is not None and not state.housekeeping.done():
             state.housekeeping.cancel()
             await asyncio.gather(state.housekeeping, return_exceptions=True)
+        if state.provider_hold is not None:
+            state.provider_hold.close()
+            state.provider_hold = None
+            await self.providers.close_retired()
         self._states.pop(session_id, None)
         locator.unregister(session_id)
         for job in self._jobs.pop(session_id, {}).values():
@@ -894,6 +902,7 @@ class SessionManager:
             await conn.execute("DELETE FROM transcript_fts WHERE rowid IN (SELECT seq FROM transcript WHERE session_id = ?)", (session_id,))
             await conn.execute("DELETE FROM transcript WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM live_control WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM kv WHERE key = ?", (f"context_measurement:{session_id}",))
             await conn.execute("DELETE FROM pending_questions WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM topics WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM checkpoints WHERE session_id = ?", (session_id,))
@@ -1076,7 +1085,8 @@ class SessionManager:
         provider, model = await self._compaction_rung(state)
         language = self.config.answer_language if self.config.answer_language != "auto" else operator_language(history)
         observability = LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, run_id=state.run_id, call_purpose="compaction", call_category="compaction")
-        summary = await self._summarise_history(provider, model, history, language=language, instructions=instructions, observability=observability, progress=lambda **f: self._compaction_progress(state, **f))
+        with self.providers.hold([provider]):
+            summary = await self._summarise_history(provider, model, history, language=language, instructions=instructions, observability=observability, progress=lambda **f: self._compaction_progress(state, **f))
         await self._compaction_progress(state, stage="writing")
         # What the operator said is written by code, never by the summariser: rules do not decay.
         summary = self.redactor.redact(summary + operator_quotes(history) + identifier_index(history) + verbatim_tail(history))
@@ -1137,6 +1147,7 @@ class SessionManager:
         scaled = round(measured * history_tokens(after) / was) if was else 0
         # A rewrite that did not shrink the history says nothing about the prompt getting smaller.
         state.observed_prompt_tokens = min(measured, scaled)
+        await self.db.kv_set(f"context_measurement:{state.session.id}", {"floor": state.usage_floor_seq, "tokens": state.observed_prompt_tokens})
 
     async def _summarise_history(self, provider: Any, model: str, history: Sequence[Message], *, language: str, instructions: str, observability: LLMObservabilityContext, progress: Callable[..., Awaitable[None]] | None = None) -> str:
         """One structured summary of ``history``: a single call, or parallel part summaries merged when the transcript is long.
@@ -1957,6 +1968,20 @@ class SessionManager:
     async def _build_engine(self, state: SessionState, run_id: str) -> QueryEngine:
         overrides = await self.live.load(state.session.id)
         rungs, preset = self.resolve_model(overrides)
+        hold = ExitStack()
+        hold.enter_context(self.providers.hold([provider for provider, _ in rungs]))
+        try:
+            engine = await self._assemble_engine(state, run_id, overrides, rungs, preset)
+        except BaseException:
+            hold.close()
+            await self.providers.close_retired()
+            raise
+        if state.provider_hold is not None:
+            state.provider_hold.close()
+        state.provider_hold = hold
+        return engine
+
+    async def _assemble_engine(self, state: SessionState, run_id: str, overrides: dict[str, Any], rungs: list[Any], preset: Any) -> QueryEngine:
         if rungs and self.provider_costs_nothing(rungs[0][0].endpoint.id):
             # A local primary remains usable after a hosted-provider budget is exhausted. Paid
             # fallbacks do not inherit that exemption: when any applicable dollar guard is already
@@ -2365,6 +2390,10 @@ class SessionManager:
                 TurnEvent(type=EventType.ERROR, run_id=run_id, payload={"message": f"{type(exc).__name__}: {exc}"}),
             )
         finally:
+            if status != "awaiting" and state.provider_hold is not None:
+                state.provider_hold.close()
+                state.provider_hold = None
+                await self.providers.close_retired()
             # Everything between the last token and the end of this function is time the app spends
             # drawing a run that is over: the chip says "running" and the cursor blinks under the
             # finished answer. So only what the answer itself depends on — writing it down and saying
@@ -2420,6 +2449,15 @@ class SessionManager:
         Nothing is claimed without the provider's own words: a wind-down with no detail behind it is
         some other kind of stop and is left alone.
         """
+        if state.soft_stop_cause == CAUSE_MODEL_NO_PROGRESS:
+            await self._dispatch_event(
+                state,
+                TurnEvent(type=EventType.ERROR, run_id=run_id, payload={
+                    "kind": "model_no_progress",
+                    "message": "The model repeatedly returned reasoning without an answer or a tool call; recovery attempts were exhausted.",
+                }),
+            )
+            return True
         if state.soft_stop_cause != CAUSE_PROVIDER_ERROR or not state.soft_stop_detail:
             return False
         await self._dispatch_event(
@@ -2849,24 +2887,29 @@ class SessionManager:
         while a run is live; the usage log has it between runs), so it includes the system
         prompt and tool schemas, not only the history.
         """
+        history = list(state.engine.history) if state.engine is not None else list(await self.sessions.list_messages(state.session.id, TENANT, limit=10_000))
+        rewritten_at = max((str(m.metadata.get("daedalus.compaction", {}).get("at", "")) for m in history if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)), default="")
         tokens = int(state.engine.last_observed_prompt_tokens) if state.engine is not None else 0
+        estimated = False
         if not tokens:
             # Only a call made against the history as it stands now says anything about it: a row
             # from before the last rewrite measured a history that no longer exists.
             row = await self.db.fetchone(
-                "SELECT input_tokens FROM usage_events WHERE session_id = ? AND purpose = 'stream' AND seq > ? ORDER BY seq DESC LIMIT 1",
-                (state.session.id, state.usage_floor_seq),
+                "SELECT input_tokens FROM usage_events WHERE session_id = ? AND purpose = 'stream' AND seq > ? AND at > ? ORDER BY seq DESC LIMIT 1",
+                (state.session.id, state.usage_floor_seq, rewritten_at),
             )
             tokens = int(row["input_tokens"] or 0) if row else state.observed_prompt_tokens
+            estimated = row is None
+            if not tokens and rewritten_at:
+                tokens = history_tokens(history)
         try:
             _, preset = self.resolve_model(await self.live.load(state.session.id))
             window = int(state.context_window or preset.context_window or 0)
         except Exception:  # noqa: BLE001 — no usable model is reported elsewhere
             window = int(state.context_window or 0)
-        history = list(state.engine.history) if state.engine is not None else list(await self.sessions.list_messages(state.session.id, TENANT, limit=10_000))
         summaries = sum(1 for m in history if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY))
         operator = sum(1 for m in history if m.role is MessageRole.user and m.metadata.get("daedalus.origin") not in (None, "core") and not m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY))
-        return {"tokens": tokens, "window": window, "messages": len(history), "summaries": summaries, "operator_turns": operator}
+        return {"tokens": tokens, "estimated": estimated, "window": window, "messages": len(history), "summaries": summaries, "operator_turns": operator}
 
     def tools_off(self, state: SessionState) -> set[str]:
         """Tools the operator switched off for this session (``metadata["tools_off"]``); unknown names are ignored."""
@@ -3432,8 +3475,9 @@ until the next call comes back with the provider's own count, which is what ever
 
 
 def history_tokens(messages: Sequence[Message]) -> int:
-    """Roughly what a history costs in tokens, from its searchable text."""
-    return sum(len(message_text(m)) for m in messages) // CHARS_PER_TOKEN
+    """Rough text-token estimate, including reasoning that the adapter sends back to the model."""
+    # Search intentionally omits reasoning; using only its text undercounted reasoning-heavy tails.
+    return sum(len(message_text(m)) + len(m.reasoning_content or "".join(b.text for b in m.content_blocks if isinstance(b, ThinkingBlock))) for m in messages) // CHARS_PER_TOKEN
 
 
 def compaction_cut(history: Sequence[Message], keep_recent: int) -> int:

@@ -261,7 +261,7 @@ export type SessionDetail = {
   subagent_name?: string | null;
   leader_title?: string | null;
   subagents?: SubagentView[];
-  context?: { tokens: number; window: number; messages: number; summaries: number; operator_turns: number };
+  context?: { tokens: number; estimated?: boolean; window: number; messages: number; summaries: number; operator_turns: number };
   usage: { c?: number; i?: number; o?: number; ch?: number; usd?: number | null };
 };
 

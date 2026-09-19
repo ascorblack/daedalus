@@ -15,6 +15,7 @@ from daedalus.extensions.api import build_app
 from daedalus.host.session_runner import (
     SessionManager,
     compaction_cut,
+    history_tokens,
     identifier_index,
     operator_quotes,
     split_transcript,
@@ -105,6 +106,11 @@ async def test_auto_compaction_keeps_the_tail_and_quotes_the_operator(settings: 
     await manager.close()
 
 
+def test_context_estimate_counts_retained_reasoning() -> None:
+    message = Message(role=MessageRole.assistant, content_blocks=[], reasoning_content="thinking " * 100)
+    assert history_tokens([message]) == 225
+
+
 def test_identifiers_are_indexed_by_code() -> None:
     history = [
         _op("Deploy to /srv/state/worktrees/bot and open PR #42 on port 8765; see https://example.org/x?y=1."),
@@ -185,6 +191,17 @@ async def test_a_compaction_does_not_fire_again_on_the_next_turn(settings: Setti
     assert len(calls) == 1  # and the summariser is not paid a second time to compact nothing
     status = await manager.context_status(state)
     assert status["tokens"] == state.observed_prompt_tokens < 300_000  # what is reported describes the history that is left
+    manager._states.pop(state.session.id)
+    restored = await manager.get_state(state.session.id)
+    assert restored is not None
+    assert (await manager.context_status(restored))["tokens"] == status["tokens"]
+    assert (await manager.context_status(restored))["estimated"] is True
+    await db.execute("DELETE FROM kv WHERE key = ?", (f"context_measurement:{state.session.id}",))
+    manager._states.pop(state.session.id)
+    restored = await manager.get_state(state.session.id)
+    assert restored is not None
+    assert 0 < (await manager.context_status(restored))["tokens"] < 300_000
+    assert (await manager.context_status(restored))["estimated"] is True
     await manager.usage.record(UsageRecord(provider_id=provider.endpoint.id, model="m", purpose="stream", raw={}, normalized={"input_tokens": 310_000}, cost_usd=0.0, duration_ms=1, run_id="r2", session_id=state.session.id))
     assert (await manager.context_status(state))["tokens"] == 310_000  # a real call after it is read again
 

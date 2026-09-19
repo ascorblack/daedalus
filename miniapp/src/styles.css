@@ -740,6 +740,11 @@ input.field, select.field, textarea.field {
 .dt-aside { display: inline-flex; align-items: center; gap: 6px; font-weight: 400; color: var(--fg-3); }
 .dt-row { display: flex; align-items: center; gap: 8px; min-height: var(--row-h-dense); min-width: 0; }
 .dt-row.sub { min-height: 24px; color: var(--fg-2); }
+.tool-timing summary { cursor: pointer; min-height: var(--row-h-touch); display: flex; align-items: center; }
+.tool-timing summary::before { content: "›"; margin-right: 8px; }
+.tool-timing[open] summary::before { transform: rotate(90deg); }
+.tool-timing .dt-row { flex-wrap: wrap; padding-block: 4px; }
+.tool-timing .dt-row > span:first-child { overflow-wrap: anywhere; }
 .dt-key { flex: none; min-width: 72px; color: var(--fg-3); }
 .dt-sep { color: var(--fg-3); }
 .dt-row .field { margin: 0; }

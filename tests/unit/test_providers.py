@@ -255,6 +255,30 @@ async def test_core_tier2_compaction_runs_through_the_provider() -> None:
     assert history[-1].content_blocks[0].content.startswith("file line")  # type: ignore[union-attr]
 
 
+async def test_reloaded_clients_survive_until_every_run_releases_them() -> None:
+    from daedalus.config import Settings
+    from daedalus.providers.registry import ProviderRegistry
+    from tests.support.models import model_config
+
+    config = model_config()
+    registry = ProviderRegistry(Settings(), config)
+    provider = registry.get("openrouter")
+    with registry.hold([provider]):
+        with registry.hold([provider]):
+            changed = config.model_copy(deep=True)
+            changed.providers["openrouter"].timeout_seconds += 1
+            registry.reload(changed)
+            await registry.close_retired()
+            assert registry.get("openrouter") is not provider
+            assert not provider._client.is_closed
+        await registry.close_retired()
+        assert not provider._client.is_closed
+    await registry.close_retired()
+    assert provider._client.is_closed
+    with registry.hold([registry.get("openrouter")]):
+        await registry.aclose()
+
+
 def test_preset_rungs_put_the_chosen_model_first_then_the_chain() -> None:
     from daedalus.config import ModelPresetConfig, Settings
     from daedalus.providers.registry import ProviderRegistry

@@ -97,9 +97,9 @@ export function SessionDetails({ ids, id, detail, busy, modes, schedules, provid
           <div className="dt-row sub">
             <span>{fmtTok(detail.context.tokens)}{detail.context.window > 0 ? ` / ${fmtTok(detail.context.window)}` : ""}</span>
             <span className="dt-sep">·</span>
-            <span className="truncate">{t("session.context.messages", { n: detail.context.messages, s: detail.context.summaries, o: detail.context.operator_turns })}</span>
+            <span>{t(detail.context.estimated ? "session.context.estimated" : "session.context.measured")}</span>
           </div>
-          <ToolTiming sessionId={id} />
+          <p className="sub">{t("session.context.messages", { n: detail.context.messages, s: detail.context.summaries, o: detail.context.operator_turns })}</p>
           <div className="btnrow">
             <button className="btn small" onClick={on.compact} disabled={busy}><Icon name="compact" size={14} /> {t("session.compact")}</button>
           </div>
@@ -107,6 +107,7 @@ export function SessionDetails({ ids, id, detail, busy, modes, schedules, provid
       )}
 
       <Section ids={ids} id="usage" label={t("session.usage")} aside={fmtUsd(detail.usage.usd)}>
+        <p className="sub">{t("session.usage.scope")}</p>
         <div className="dt-row sub">
           {/* The arrow says which way the tokens went, and an arrow is neither translatable nor
               announced: the label carries the word and the glyph stays decoration. */}
@@ -116,6 +117,7 @@ export function SessionDetails({ ids, id, detail, busy, modes, schedules, provid
           <span className="dt-sep">·</span>
           <span>{plural("usage.calls", detail.usage.c ?? 0)}</span>
         </div>
+        <ToolTiming sessionId={id} />
       </Section>
 
       <Section ids={ids} id="workspace" label={t("session.workspace")}>
@@ -435,9 +437,13 @@ function ToolTiming({ sessionId }: { sessionId: string }) {
   if (!rows.length) return null;
   const total = rows.reduce((a, r) => a + r.total_ms, 0);
   return (
-    <div className="sub">
-      {t("session.tooltime", { n: Math.round(total / 1000), list: rows.slice(0, 5).map((r) => `${r.name} ${Math.round(r.total_ms / 1000)}s/${r.calls}${r.errors ? ` (${r.errors})` : ""}`).join(" · ") })}
-    </div>
+    <details className="tool-timing sub">
+      <summary>{t("session.tooltime", { n: Math.round(total / 1000) })}</summary>
+      {rows.map((r) => <div className="dt-row" key={r.name}>
+        <span className="grow">{r.name}</span>
+        <span>{t("session.tooltime.row", { n: Math.round(r.total_ms / 1000), c: r.calls, e: r.errors })}</span>
+      </div>)}
+    </details>
   );
 }
 

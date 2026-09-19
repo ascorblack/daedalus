@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -45,6 +46,7 @@ class ProviderRegistry:
         self._image_loader = image_loader
         self._providers: dict[str, OpenAICompatibleProvider] = {}
         self._retired: list[OpenAICompatibleProvider] = []
+        self._users: dict[OpenAICompatibleProvider, int] = {}
         self._fetched: dict[str, dict[str, ModelPricing]] = {}
         """Prices fetched from models.dev, by provider kind; under the operator's own entries."""
         self.reload(config)
@@ -81,10 +83,29 @@ class ProviderRegistry:
         self._providers = fresh
 
     async def close_retired(self) -> None:
-        """Close adapters replaced by :meth:`reload` (their in-flight requests keep their client alive)."""
+        """Close replaced adapters only after their whole run releases them, including pauses."""
         retired, self._retired = self._retired, []
         for provider in retired:
-            await provider.aclose()
+            if self._users.get(provider, 0):
+                self._retired.append(provider)
+            else:
+                await provider.aclose()
+
+    @contextmanager
+    def hold(self, providers: Sequence[OpenAICompatibleProvider]) -> Iterator[None]:
+        """Keep a run's adapters alive between requests while settings can replace the registry."""
+        held = set(providers)
+        for provider in held:
+            self._users[provider] = self._users.get(provider, 0) + 1
+        try:
+            yield
+        finally:
+            for provider in held:
+                remaining = self._users[provider] - 1
+                if remaining:
+                    self._users[provider] = remaining
+                else:
+                    del self._users[provider]
 
     def _endpoint(self, provider_id: str, pc: ProviderConfig) -> ProviderEndpoint | None:
         base_url = pc.base_url
@@ -203,8 +224,8 @@ class ProviderRegistry:
         return [(target, model), *rest]
 
     async def aclose(self) -> None:
-        await self.close_retired()
-        for provider in self._providers.values():
+        retired, self._retired = self._retired, []
+        for provider in set([*retired, *self._providers.values()]):
             await provider.aclose()
 
 
