@@ -241,6 +241,9 @@ export type SessionDetail = {
   pending: { questions: Question[] } | null;
   model: string;
   provider?: string;
+  /** Session override, else the preset: whether the next call thinks, and how hard. */
+  thinking?: boolean;
+  reasoning_effort?: string;
   /** The model name the session is set to answer with, and the one really answering; they differ during a fallback. */
   configured_model?: string;
   effective_model?: string;
@@ -375,6 +378,7 @@ export type ProviderConf = {
   name?: string;
   base_url: string;
   timeout_seconds: number;
+  temperature?: number | null;
   api_key?: string; // always "" from the API — stored keys are masked
   api_key_set?: boolean;
   pricing?: Record<string, unknown>;

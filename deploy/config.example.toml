@@ -16,7 +16,7 @@ chain = []               # preset ids tried in order after the default one fails
 # model = "deepseek-flash"
 # label = ""                 # what the app shows; empty = "provider/model"
 # thinking = true
-# reasoning_effort = "medium"  # low | medium | high
+# reasoning_effort = "medium"  # low | medium | high | xhigh
 # images = false             # the model accepts pictures (ImageView, photos in chat)
 # context_window = 128000    # history a run may hold before it is compacted
 # max_output_tokens = 32000  # cap on one reply; thinking tokens count against it
@@ -42,7 +42,9 @@ chain = []               # preset ids tried in order after the default one fails
 # provider = "llamacpp"
 # model = "local-model"       # discovered from the server; editable when the server cannot list it
 # thinking = false
+# reasoning_effort = "low"    # Bonsai: low | medium | xhigh (high is sent as xhigh)
 # context_window = 128000      # discovered from /props when that endpoint is exposed
+# max_output_tokens = 8192     # thinking counts against this; a 32k cap lets a stuck local write run to the wall
 
 # A subscription endpoint (Claude Code, Codex, SuperGrok) is a generic openai_compat client
 # behind the key proxy; the preset looks like any other.
@@ -104,6 +106,7 @@ name = "Local llama.cpp"
 base_url = "http://127.0.0.1:8080/v1"
 api_key = ""
 timeout_seconds = 600.0
+# temperature = 0.6  # omit to use the host default; pin for local sampling
 
 # The agent's eyes: a preset with images = true answers questions about pictures, so the main
 # context never carries pixels. Empty = the first image-capable preset, if there is one.

@@ -151,7 +151,10 @@ def sandbox_never_writable() -> frozenset[str]:
     """
     return frozenset(SYSTEM_NEVER_WRITABLE) | frozenset(_runtime_paths())
 
-ReasoningEffort = Literal["low", "medium", "high"]
+ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
+REASONING_EFFORTS: tuple[ReasoningEffort, ...] = ("low", "medium", "high", "xhigh")
+"""Efforts a preset or a session may ask for. Hosted vendors map these onto their own names;
+Bonsai's chat template only knows ``low``, ``medium`` and ``xhigh`` (and defaults to xhigh)."""
 ApprovalMode = Literal["manual", "auto"]
 ScheduleTopicMode = Literal["per_task", "per_run"]
 TelegramMode = Literal["topics", "private"]

@@ -43,7 +43,7 @@ from protocore.tests_support.adapters import InMemoryToolRegistry
 from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
 
-from daedalus.config import VOICE_ONLY_TOOLS, VOICE_TOOLS, NoModelConfigured, RuntimeConfig, Settings
+from daedalus.config import REASONING_EFFORTS, VOICE_ONLY_TOOLS, VOICE_TOOLS, NoModelConfigured, RuntimeConfig, Settings
 from daedalus.host import capabilities, launcher_bridge, prompts
 from daedalus.host.checkpoint_retention import CheckpointRetention, RetentionBounds, RetentionReport
 from daedalus.host.checkpoints import DIR_NAME as CHECKPOINT_DIR_NAME
@@ -1935,6 +1935,8 @@ class SessionManager:
             raise ValueError(f"no such model preset {preset!r}")
         if provider is not None and provider not in self.providers.available():
             raise ValueError(f"unknown or unusable provider {provider!r}")
+        if reasoning_effort is not None and reasoning_effort not in REASONING_EFFORTS:
+            raise ValueError(f"reasoning_effort must be one of {', '.join(REASONING_EFFORTS)}")
         await self.live.set_model(
             session_id, model_name=model_name, provider=provider, preset=preset, thinking_enabled=thinking, reasoning_effort=reasoning_effort
         )

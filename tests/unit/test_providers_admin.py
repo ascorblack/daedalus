@@ -25,6 +25,10 @@ def test_apply_provider_patch_merges_partials_and_creates_new_entries() -> None:
     providers: dict[str, Any] = {"vllm": {"kind": "vllm", "base_url": "http://a"}}
     apply_provider_patch(providers, "vllm", {"timeout_seconds": 30, "api_key": "secret", "unknown": 1, "default_model": "legacy"})
     assert providers["vllm"] == {"kind": "vllm", "base_url": "http://a", "timeout_seconds": 30, "api_key": "secret"}
+    apply_provider_patch(providers, "vllm", {"temperature": 0.2})
+    assert providers["vllm"]["temperature"] == 0.2
+    apply_provider_patch(providers, "vllm", {"temperature": None})
+    assert providers["vllm"]["temperature"] is None
     # id that does not exist yet starts as a generic openai_compat endpoint
     apply_provider_patch(providers, "local", {"base_url": "http://b"})
     assert providers["local"] == {"kind": "openai_compat", "base_url": "http://b"}
@@ -172,6 +176,23 @@ def test_provider_put_validates_and_refuses_empty_base_url() -> None:
     r = client.put("/api/providers/x", json={"kind": "vllm", "base_url": ""}, headers={"X-Daedalus-Token": "tok"})
     assert r.status_code == 400
     assert app.saved == []
+
+
+def test_provider_put_sets_and_clears_temperature() -> None:
+    client, app = _client()
+    headers = {"X-Daedalus-Token": "tok"}
+    r = client.put("/api/providers/local", json={"kind": "llamacpp", "base_url": "http://127.0.0.1:8080/v1", "temperature": 0.2}, headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["providers"]["local"]["temperature"] == 0.2
+    assert app.saved[-1].providers["local"].temperature == 0.2
+    r = client.put("/api/providers/local", json={"temperature": 0}, headers=headers)
+    assert r.status_code == 200, r.text
+    assert app.saved[-1].providers["local"].temperature == 0.0
+    r = client.put("/api/providers/local", json={"temperature": None}, headers=headers)
+    assert r.status_code == 200, r.text
+    assert app.saved[-1].providers["local"].temperature is None
+    r = client.put("/api/providers/local", json={"temperature": 3}, headers=headers)
+    assert r.status_code == 422
 
 
 def test_provider_put_preserves_stored_key_when_omitted() -> None:

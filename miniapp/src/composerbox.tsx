@@ -8,6 +8,7 @@ import { Icon } from "./icons";
 import { fileGlyph, previewKind, canPreview } from "./preview";
 import { enterSends, errorText, fmtBytes, fmtTok, haptic } from "./ui";
 import { ModelChoice, ModelSelect } from "./modelselect";
+import { REASONING_EFFORTS } from "./models";
 import {
   Approval,
   ComposerStatus,
@@ -54,6 +55,10 @@ export type ComposerProps = {
   model: string;
   fallback: ModelFallback | null;
   onChooseModel: (choice: ModelChoice) => void;
+  /** Effective thinking for this session (override or the preset). */
+  thinking?: boolean;
+  reasoningEffort?: string;
+  onChooseEffort?: (effort: string) => void;
   place?: ComposerPlace;
   context?: { tokens: number; window: number; messages: number } | null;
   onContext?: () => void;
@@ -420,6 +425,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           onKeyDown={onKeyDown}
           aria-label={t(placeholderKey(status, asking))}
         />
+        {props.onChooseEffort && (
+          <div className="composer-effort" role="group" aria-label={t("composer.effort")}>
+            {REASONING_EFFORTS.map((e) => (
+              <button
+                key={e}
+                type="button"
+                className={props.thinking && props.reasoningEffort === e ? "on" : ""}
+                aria-pressed={!!props.thinking && props.reasoningEffort === e}
+                title={t(`add.effort.${e}`)}
+                onClick={() => props.onChooseEffort?.(e)}
+              >
+                {t(`add.effort.${e}`)}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="composer-row">
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => { addFiles(e.target.files ?? []); e.target.value = ""; }} />
           <input ref={photoInput} type="file" accept="image/*" capture="environment" hidden onChange={(e) => { addFiles(e.target.files ?? []); e.target.value = ""; }} />

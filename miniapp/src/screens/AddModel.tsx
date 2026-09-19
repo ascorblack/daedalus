@@ -15,7 +15,7 @@ import { Icon } from "../icons";
 import { t, useLang } from "../i18n";
 import { LangPicker } from "../components";
 import { errorText, numInput } from "../ui";
-import { BLANK, ModelEntry, Picked, prefilled, presetIdFor, priceFor, retyped } from "../models";
+import { BLANK, ModelEntry, Picked, REASONING_EFFORTS, prefilled, presetIdFor, priceFor, retyped } from "../models";
 
 export type { ModelEntry, Picked } from "../models";
 export { presetIdFor } from "../models";
@@ -372,7 +372,7 @@ export function AddModel({ onSaved, onCancel, toast }: { onSaved: (presetId: str
             {preset.thinking ? t("add.thinking.on") : t("add.thinking.off")}
           </button>
           <div className="segmented inline" role="group" aria-label={t("add.effort")}>
-            {["low", "medium", "high"].map((e) => (
+            {REASONING_EFFORTS.map((e) => (
               <button key={e} className={preset.reasoning_effort === e ? "on" : ""} disabled={!preset.thinking} onClick={() => setPreset({ ...preset, reasoning_effort: e })}>
                 {t(`add.effort.${e}`)}
               </button>

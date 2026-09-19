@@ -2041,6 +2041,10 @@ input.field[type="range"] {
 .composer-tools { margin-left:auto; gap:var(--space-1); }
 .composer-tools .roundbtn { margin-left:0; }
 .composer-tools .ctx-ring { display:inline-flex; flex:none; }
+.composer-effort { display:flex; flex-wrap:wrap; align-items:center; gap:2px; min-width:0; padding:0 var(--space-2); }
+.composer-effort button { flex:none; height:var(--ctl-h-sm); padding:0 8px; border:0; background:transparent; color:var(--fg-3); border-radius:var(--radius-lg); font:inherit; font-size:var(--fs-11); cursor:pointer; }
+.composer-effort button:hover { background:var(--surface-2); color:var(--fg); }
+.composer-effort button.on { background:var(--surface-2); color:var(--fg); }
 .composer-place { display:flex; gap:var(--space-2); min-width:0; padding-inline:var(--space-2); }
 .composer-place-chip { display:inline-flex; align-items:center; gap:var(--space-1); min-width:0; color:var(--fg-3); font-size:var(--fs-11); }
 .composer-place-chip .ic { flex:none; }

@@ -766,6 +766,16 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     }
   }
 
+  async function chooseEffort(effort: string) {
+    try {
+      const r = await api.post<{ reasoning_effort?: string }>(`/api/sessions/${id}/model`, { thinking: true, reasoning_effort: effort });
+      toast(t("session.effort.picked", { effort: t(`add.effort.${r.reasoning_effort || effort}`) }));
+      load();
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
+
   async function remove() {
     if (!(await confirmAsync(t("session.delete.title"), { body: t("session.delete.body"), action: t("session.delete.action") }))) return;
     try {
@@ -977,6 +987,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             model={detail?.model ?? ""}
             fallback={detail?.fallback ?? null}
             onChooseModel={chooseModel}
+            thinking={detail?.thinking}
+            reasoningEffort={detail?.reasoning_effort}
+            onChooseEffort={chooseEffort}
             place={{ project: detail?.project?.name, workspace: detail?.workspace_name || detail?.workspace, system: !!(detail?.project?.system || detail?.project?.settings.system) }}
             context={detail?.context ?? null}
             onContext={() => { setDetailsFocus("context"); panel.open("details"); }}

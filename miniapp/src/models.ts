@@ -20,6 +20,10 @@ export type ModelEntry = {
   pricing?: { input?: number; output?: number; cache_hit?: number };
 };
 
+/** Efforts a preset or a session may ask for. Hosted vendors map these onto their own names. */
+export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
 /** A preset with nothing of any model in it: the conservative answer, not an empty one. */
 export const BLANK: Preset = { provider: "", model: "", label: "", thinking: true, reasoning_effort: "medium", images: false, context_window: 128000, max_output_tokens: 32000 };
 

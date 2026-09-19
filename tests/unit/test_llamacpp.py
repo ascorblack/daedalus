@@ -213,8 +213,45 @@ async def test_llamacpp_tool_call_round_trip_uses_its_request_dialect() -> None:
     assert stop.tool_name == "weather" and stop.tool_input_final == {"city": "Almaty"}
     sent = captured["body"]
     assert sent["cache_prompt"] is True and sent["tools"][0]["function"]["name"] == "weather"
-    assert "thinking" not in sent and "reasoning" not in sent and "reasoning_effort" not in sent
-    assert "chat_template_kwargs" not in sent
+    assert "thinking" not in sent and "reasoning" not in sent
+    # Bonsai's template rejects `high` (low | medium | xhigh) and defaults to xhigh when nothing is sent.
+    assert sent["reasoning_effort"] == "xhigh"
+    assert sent["chat_template_kwargs"] == {"enable_thinking": True, "reasoning_effort": "xhigh"}
+
+
+async def test_llamacpp_thinking_off_sends_the_template_switch_without_an_effort() -> None:
+    body = _sse(
+        [
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 4, "completion_tokens": 1}},
+        ]
+    )
+    provider, captured = _provider(lambda request: httpx.Response(200, text=body, headers={"content-type": "text/event-stream"}))
+    request = _request().model_copy(update={"extra": {"enable_thinking": False, "reasoning_effort": "low"}, "tools": []})
+    try:
+        [delta async for delta in provider.stream_with_tools(request)]
+    finally:
+        await provider.aclose()
+    sent = captured["body"]
+    assert sent["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "reasoning_effort" not in sent
+
+
+async def test_llamacpp_keeps_low_and_medium_effort_names() -> None:
+    body = _sse(
+        [
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 4, "completion_tokens": 1}},
+        ]
+    )
+    for asked in ("low", "medium", "xhigh"):
+        provider, captured = _provider(lambda request: httpx.Response(200, text=body, headers={"content-type": "text/event-stream"}))
+        request = _request().model_copy(update={"extra": {"enable_thinking": True, "reasoning_effort": asked}, "tools": []})
+        try:
+            [delta async for delta in provider.stream_with_tools(request)]
+        finally:
+            await provider.aclose()
+        assert captured["body"]["reasoning_effort"] == asked
+        assert captured["body"]["chat_template_kwargs"]["reasoning_effort"] == asked
 
 
 async def test_llamacpp_streaming_round_trip_normalizes_cached_usage() -> None:

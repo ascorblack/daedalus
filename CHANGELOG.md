@@ -2,6 +2,16 @@
 
 Notable changes, newest first. The repository's `main` is the released version.
 
+## 2026-09-19
+
+- **A session can pick its reasoning effort.** The composer has buttons from **low** to **xhigh**;
+  the choice stays on that session until the model is cleared back to the global default. Slash
+  command `/thinking` accepts `xhigh` too.
+- **A local endpoint can pin sampling temperature.** llama.cpp, vLLM and a generic OpenAI-compatible
+  client show the field; empty uses the host default.
+- **llama.cpp is told the session's thinking settings.** Sending nothing left Bonsai at xhigh even
+  when the preset asked for low. `high` is not a Bonsai effort and is sent as xhigh.
+
 ## 2026-09-18
 
 - **The transcript opens without ending the voice conversation.** Pressing **Transcript** (or `T`)

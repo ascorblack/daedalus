@@ -400,9 +400,17 @@ class OpenAICompatibleProvider(ILLMProvider):
     def _apply_thinking(self, body: dict[str, Any], *, thinking: bool, effort: str) -> None:
         kind = self.endpoint.kind
         if kind == "llamacpp":
-            # Thinking is a property of the loaded model and its chat template. llama.cpp builds do
-            # not share a stable reasoning parameter dialect, so a preset's vendor-facing controls
-            # must not turn into fields the server can reject.
+            # The loaded chat template reads these as jinja variables. Sending nothing leaves the
+            # template's own default, which for Bonsai is xhigh even when the preset asked for low.
+            # `high` is not a Bonsai effort (low | medium | xhigh) and raises in the template, so it
+            # is sent as xhigh: the next step up, the same mapping DeepSeek uses for medium -> high.
+            kwargs = dict(body.get("chat_template_kwargs") or {})
+            kwargs["enable_thinking"] = thinking
+            if thinking:
+                mapped = {"minimal": "low", "low": "low", "medium": "medium", "high": "xhigh", "xhigh": "xhigh", "max": "xhigh"}.get(effort, effort)
+                kwargs["reasoning_effort"] = mapped
+                body["reasoning_effort"] = mapped
+            body["chat_template_kwargs"] = kwargs
             return
         if kind in DEEPSEEK_SHAPED:
             # OpenCode Go passes DeepSeek's fields through unchanged; its other models take the same shape.

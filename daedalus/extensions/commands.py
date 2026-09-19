@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from daedalus.config import NO_MODEL_MESSAGE
+from daedalus.config import NO_MODEL_MESSAGE, REASONING_EFFORTS
 from daedalus.doctor import DoctorContext, render_text, run_checks
 from daedalus.extensions.inbox import format_entries
 from daedalus.host.prompts import DEFAULT_RULES
@@ -41,7 +41,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("clear", "", "start over with an empty history; project files, brief and settings stay", confirm=True),
     CommandSpec("stop", "", "stop the current run"),
     CommandSpec("model", "[preset | provider/model | default]", "the model for this session (no argument: list)"),
-    CommandSpec("thinking", "on|off|low|medium|high", "thinking for this session"),
+    CommandSpec("thinking", "on|off|low|medium|high|xhigh", "thinking for this session"),
     CommandSpec("mode", "[quick|deep|careful|default]", "limits and rules for this session (no argument: list)"),
     CommandSpec("rename", "<title>", "rename this session and its topic"),
     CommandSpec("cap", "<usd | none>", "spend cap for this session over all of its runs"),
@@ -177,10 +177,13 @@ async def run_command(app: Application, session_id: str, line: str) -> str:  # n
         default_id, default = found
         if arg in ("on", "off"):
             thinking, effort = arg == "on", None
-        elif arg in ("low", "medium", "high"):
+        elif arg in REASONING_EFFORTS:
             thinking, effort = True, arg
         else:
-            return f"{default.display(default_id)}: thinking={default.thinking} effort={default.reasoning_effort}\nusage: /thinking on|off|low|medium|high"
+            return (
+                f"{default.display(default_id)}: thinking={default.thinking} effort={default.reasoning_effort}\n"
+                f"usage: /thinking on|off|{'|'.join(REASONING_EFFORTS)}"
+            )
         await manager.set_model(session_id, thinking=thinking, reasoning_effort=effort)
         return f"Session thinking={thinking} effort={effort or default.reasoning_effort}"
     if name == "mode":

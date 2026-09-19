@@ -97,7 +97,9 @@ async def test_the_chat_commands_are_not_the_chat_s_to_run(settings: Settings, d
     assert "global default" in await run("/model default")
     assert "usage: /model" in await run("/model nosuchprovider/x")
     assert "thinking=True effort=high" in await run("/thinking high")
+    assert "thinking=True effort=xhigh" in await run("/thinking xhigh")
     assert "usage: /thinking" in await run("/thinking perhaps")
+    assert "xhigh" in await run("/thinking perhaps")
     assert "mode: default" in await run("/mode")
     assert "no such mode" in await run("/mode nonesuch")
 

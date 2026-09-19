@@ -13,6 +13,7 @@ import { TtsVoices } from "./Voices";
 import { VoiceSettings } from "./Voice";
 import { ComponentsTab } from "./Components";
 import { AddModel } from "./AddModel";
+import { REASONING_EFFORTS } from "../models";
 import { Sheet } from "../dialogs";
 import { t } from "../i18n";
 import { LangPicker } from "../components";
@@ -20,6 +21,8 @@ import { useQuery } from "../store";
 import { Capabilities, componentsNeedAttention } from "../capabilities";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "llamacpp", "openai_compat"];
+/** Self-hosted endpoints: temperature is a sampling pin, not a vendor default. */
+const LOCAL_KINDS = new Set(["vllm", "llamacpp", "openai_compat"]);
 
 function RulesEditor({ rules, fallback, onSave }: { rules: string; fallback: string; onSave: (rules: string) => void }) {
   const [text, setText] = useState(rules || fallback);
@@ -173,7 +176,7 @@ function PresetRow({ id, p, isDefault, inChain, providers, onDefault, onChain, o
           <div className="btnrow">
             <Toggle on={p.thinking} onClick={() => onPatch({ thinking: !p.thinking })}>{t("settings.preset.thinking", { state: t(p.thinking ? "common.on" : "common.off") })}</Toggle>
             <div className="segmented inline" role="group" aria-label={t("settings.preset.effort")}>
-              {["low", "medium", "high"].map((e) => (
+              {REASONING_EFFORTS.map((e) => (
                 <button key={e} className={p.reasoning_effort === e ? "on" : ""} disabled={!p.thinking} onClick={() => onPatch({ reasoning_effort: e })}>{t(`add.effort.${e}`)}</button>
               ))}
             </div>
@@ -250,6 +253,31 @@ function ProviderBlock({ id, p, kinds, available, onPatch, onRemove }: {
                 onBlur={() => baseUrl.trim() !== p.base_url && baseUrl.trim() && onPatch(id, { base_url: baseUrl.trim() })}
               />
             </label>
+            {LOCAL_KINDS.has(p.kind) && (
+              <label className="mfield">
+                <span>{t("settings.provider.temperature")}</span>
+                <input
+                  className="field num"
+                  type="number"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  defaultValue={p.temperature ?? ""}
+                  placeholder={t("settings.provider.temperature.default")}
+                  title={t("settings.provider.temperature.hint")}
+                  onBlur={(e) => {
+                    const raw = e.target.value.trim();
+                    if (!raw) {
+                      if (p.temperature != null) onPatch(id, { temperature: null });
+                      return;
+                    }
+                    const v = Number(raw);
+                    if (!Number.isFinite(v) || v < 0 || v > 2) return;
+                    if (v !== p.temperature) onPatch(id, { temperature: v });
+                  }}
+                />
+              </label>
+            )}
             <label className="mfield wide">
               <span>{t(p.api_key_set ? "settings.provider.apikey.stored" : "settings.provider.apikey")}</span>
               <div className="row" style={{ gap: 8 }}>

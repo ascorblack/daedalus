@@ -58,6 +58,8 @@ class Host:
         self.posted: list[tuple[str, str, dict | None]] = []
         self.pending: dict | None = None
         self.fallback: dict | None = None
+        self.thinking = True
+        self.effort = "high"
         self.messages = [message(101, "user", "Check the run and tell me what the log says."), message(102, "assistant", "One slow query on the events table; the plan is below.")]
         self.steer_route = True
         self.n = 0
@@ -67,7 +69,8 @@ class Host:
             "id": SESSION, "title": "A session", "status": self.status, "error": self.error, "run_id": "r1" if self.status == "running" else None, "workspace": "/workspace",
             "workspace_name": "ws", "workspace_own": True, "workspace_sessions": [], "pending": self.pending, "model": "Claude Opus 5", "provider": "claude",
             "project": {"id": "p", "name": "Project", "root": "/workspace", "settings": {"snapshots": True}},
-            "configured_model": CONFIGURED, "effective_model": STANDBY if self.fallback else CONFIGURED, "fallback": self.fallback, "mode": "", "brief": "",
+            "configured_model": CONFIGURED, "effective_model": STANDBY if self.fallback else CONFIGURED, "fallback": self.fallback,
+            "thinking": self.thinking, "reasoning_effort": self.effort, "mode": "", "brief": "",
             "tools_off": [], "loop": None, "services": [], "subagents": [], "usage": {}, "context": {"tokens": 42000, "window": 200000, "messages": 38, "summaries": 1, "operator_turns": 6},
             "messages": self.messages,
         }
@@ -113,7 +116,10 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
             HOST.status = "running"
             return route.fulfill(status=200, content_type="application/json", body="{}")
         if rel == f"/api/sessions/{SESSION}/model":
-            return route.fulfill(status=200, content_type="application/json", body=json.dumps({"model": "DeepSeek Flash"}))
+            if isinstance(data, dict) and data.get("reasoning_effort"):
+                HOST.effort = str(data["reasoning_effort"])
+                HOST.thinking = bool(data.get("thinking", True))
+            return route.fulfill(status=200, content_type="application/json", body=json.dumps({"model": "DeepSeek Flash", "thinking": HOST.thinking, "reasoning_effort": HOST.effort}))
         return route.fulfill(status=200, content_type="application/json", body="{}")
     if rel == "/api/auth/me":
         body = {"user_id": 1, "via": "token"}
@@ -183,6 +189,10 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
     ring = page.locator(".composer .ctx-ring").get_attribute("title") or ""
     if "21%" not in ring or "38" not in ring:
         problems.append(f"the ring's tooltip does not carry the numbers ({ring!r})")
+    if page.locator(".composer-effort button").count() != 4:
+        problems.append("the effort buttons are not in the pill")
+    if not page.locator(".composer-effort button.on").filter(has_text="high").count():
+        problems.append("the current effort is not marked")
 
     # Typing: Shift+Enter is a new line, Enter sends, the draft is remembered while it is being written.
     field(page).click()
@@ -346,6 +356,13 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
     if page.locator(".model-list").count():
         problems.append("Escape did not close the model list")
 
+    page.locator(".composer-effort button", has_text="xhigh").click()
+    page.wait_for_timeout(200)
+    efforted = [p for p in posts("/model") if isinstance(p[2], dict) and p[2].get("reasoning_effort")]
+    print("effort:", efforted[-1] if efforted else None)
+    if not efforted or efforted[-1][2] != {"thinking": True, "reasoning_effort": "xhigh"}:
+        problems.append(f"the effort pick did not reach the host ({efforted})")
+
     # The fallback state: the button is amber and names both models; the list offers the way back.
     HOST.fallback = {"from": CONFIGURED, "to": STANDBY, "reason": "rate_limit"}
     page.reload()
@@ -376,6 +393,8 @@ def phone(browser) -> list[str]:  # type: ignore[no-untyped-def]
         problems.append(f"phone: the pill is outside the viewport ({pill})")
     if not page.locator(".composer .model-select").count():
         problems.append("phone: the model selector is not in the pill")
+    if page.locator(".composer-effort button").count() != 4:
+        problems.append("phone: the effort buttons are not in the pill")
     fs = page.evaluate("() => getComputedStyle(document.querySelector('.composer textarea')).fontSize")
     if fs != "16px":
         problems.append(f"phone: the field is {fs}, which Safari would zoom into")

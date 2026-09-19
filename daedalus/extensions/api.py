@@ -501,6 +501,8 @@ class ProviderPatch(BaseModel):
     api_key: str | None = None
     """Omitted = keep the stored key; "" or null = clear it; any other value = store it."""
     timeout_seconds: float | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    """Sampling temperature for this endpoint. ``null`` clears a pin and returns to the host default."""
     pricing: dict[str, dict[str, Any]] | None = None
     """Per-model USD per 1M tokens; a subscription-backed endpoint sets zeros so its runs are metered, not unknown."""
 
@@ -676,6 +678,9 @@ def apply_provider_patch(providers: dict[str, Any], provider_id: str, patch: dic
     for key, value in patch.items():
         if key == "api_key":
             entry[key] = value or ""
+        elif key == "temperature":
+            # ``null`` is how the Mini App clears a pin; skipping None would make the field sticky.
+            entry[key] = value
         elif value is not None and key in ProviderConfig.model_fields:
             entry[key] = value
     providers[provider_id] = entry
@@ -1310,6 +1315,24 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         default = app.config.default_preset()
         return default[1].display(default[0]) if default else NO_MODEL_LABEL
 
+    async def session_thinking(state: Any) -> dict[str, Any]:
+        """The thinking switch and effort this session will use on the next call.
+
+        A live override wins; otherwise the preset the session is on (or the global default).
+        The composer draws these so a pick stays on this session and nowhere else.
+        """
+        overrides = await manager.live.load(state.session.id)
+        if overrides.get("preset") and overrides["preset"] in app.config.presets:
+            preset = app.config.presets[overrides["preset"]]
+        else:
+            found = app.config.default_preset()
+            preset = found[1] if found else None
+        if preset is None:
+            return {"thinking": True, "reasoning_effort": "medium"}
+        thinking = preset.thinking if overrides.get("thinking_enabled") is None else bool(overrides["thinking_enabled"])
+        effort = overrides.get("reasoning_effort") or preset.reasoning_effort
+        return {"thinking": thinking, "reasoning_effort": effort}
+
     async def session_provider(state: Any) -> str:
         """The provider id the session's next call goes to (for the usage card beside the chat)."""
         overrides = await manager.live.load(state.session.id)
@@ -1375,6 +1398,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "pending": state.pending.payload if state.pending else None,
             "model": await session_model_label(state),
             "provider": await session_provider(state),
+            **(await session_thinking(state)),
             # What is really answering, when that is not what the session was set to. The header
             # reads this on every poll, so a fallback that ends while the screen is open goes away
             # on its own instead of waiting for the session to be reopened.
@@ -2926,7 +2950,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        return {"ok": True, "model": await session_model_label(state)}
+        return {"ok": True, "model": await session_model_label(state), **(await session_thinking(state))}
 
     # -- MCP per session --------------------------------------------------------------
 

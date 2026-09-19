@@ -143,7 +143,7 @@ describe("the keys the code asks for", () => {
       // bare `[panel.tab.x]` with every test here green.
       ["panel.tab.", listed("./panel.ts", "PANEL_TABS")],
       ["voice.phase.", listed("./voice.ts", "VOICE_PHASES")],
-      ["add.effort.", ["low", "medium", "high"]],
+      ["add.effort.", ["low", "medium", "high", "xhigh"]],
       ["lang.name.", [...LANGS]],
       ["status.", ["idle", "running", "waiting", "compacting", "failed", "done", "paused", "stopped", "pending", "merged", "approved", "rejected", "closed", "dead"]],
       ["fmt.dow.", ["0", "1", "2", "3", "4", "5", "6"]],
