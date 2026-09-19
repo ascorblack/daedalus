@@ -528,6 +528,19 @@ def _project_unification(workspaces_dir: Path) -> str:
     """Build the migration that turns every existing working directory into a project."""
     base = str(Path(os.path.normpath(workspaces_dir.expanduser()))).replace("'", "''")
     return f"""
+    UPDATE sessions SET metadata = CASE WHEN json_valid(metadata)
+        THEN CASE WHEN json_type(metadata) = 'object' THEN metadata ELSE '{{}}' END
+        ELSE '{{}}' END;
+
+    CREATE TEMP TABLE duplicate_projects AS
+    SELECT p.id, (SELECT k.id FROM projects k WHERE k.root = p.root
+                  ORDER BY (k.system != '') DESC, k.created_at, k.rowid LIMIT 1) AS keeper
+    FROM projects p;
+    UPDATE sessions SET project_id = (SELECT keeper FROM duplicate_projects WHERE id = sessions.project_id)
+    WHERE project_id IN (SELECT id FROM duplicate_projects WHERE id != keeper);
+    DELETE FROM projects WHERE id IN (SELECT id FROM duplicate_projects WHERE id != keeper);
+    DROP TABLE duplicate_projects;
+
     INSERT INTO projects(id, name, root, created_at, settings, system)
     SELECT 'project-' || substr(min(id), 1, 12), 'Voice',
            (SELECT CASE
@@ -639,18 +652,22 @@ class Database:
     async def open(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self.path, isolation_level=None)
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute("PRAGMA journal_mode=WAL")
-        await self._conn.execute("PRAGMA busy_timeout=5000")
-        await self._conn.execute("PRAGMA synchronous=NORMAL")
-        await self._conn.execute("PRAGMA foreign_keys=ON")
-        # Takes effect for a database created here; an existing one keeps whatever it was made
-        # with until a full VACUUM rewrites it (``daedalus db vacuum``).
-        await self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
-        await self._conn.execute(f"PRAGMA cache_size={CACHE_PAGES}")
-        await self._conn.execute("PRAGMA temp_store=MEMORY")
-        await self._conn.execute(f"PRAGMA wal_autocheckpoint={WAL_AUTOCHECKPOINT_PAGES}")
-        await self._migrate()
+        try:
+            self._conn.row_factory = aiosqlite.Row
+            await self._conn.execute("PRAGMA journal_mode=WAL")
+            await self._conn.execute("PRAGMA busy_timeout=5000")
+            await self._conn.execute("PRAGMA synchronous=NORMAL")
+            await self._conn.execute("PRAGMA foreign_keys=ON")
+            # Takes effect for a database created here; an existing one keeps whatever it was made
+            # with until a full VACUUM rewrites it (``daedalus db vacuum``).
+            await self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            await self._conn.execute(f"PRAGMA cache_size={CACHE_PAGES}")
+            await self._conn.execute("PRAGMA temp_store=MEMORY")
+            await self._conn.execute(f"PRAGMA wal_autocheckpoint={WAL_AUTOCHECKPOINT_PAGES}")
+            await self._migrate()
+        except BaseException:
+            await self.close()
+            raise
 
     async def reclaim(self) -> int:
         """Hand a bounded number of free pages back to the filesystem; returns how many.
