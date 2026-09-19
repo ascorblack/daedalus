@@ -95,8 +95,8 @@ async def test_the_duplicate_system_projects_an_installation_already_has_are_mer
     """The repair for an installation that ran the racing code: one folder, and nobody's agents lost."""
     path = tmp_path / "old.sqlite"
     raw = sqlite3.connect(path)
-    raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version(version) VALUES (?);".replace("?", str(len(MIGRATIONS) - 2)))
-    for script in MIGRATIONS[: len(MIGRATIONS) - 2]:
+    raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version(version) VALUES (?);".replace("?", str(27)))
+    for script in MIGRATIONS[: 27]:
         raw.executescript(script)
     for n, name in enumerate(("Voice", "Voice", "Voice")):
         raw.execute(
@@ -133,8 +133,8 @@ async def test_unreadable_project_settings_do_not_prevent_migration(tmp_path: Pa
     path = tmp_path / "old.sqlite"
     with sqlite3.connect(path) as raw:
         raw.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL);")
-        raw.execute("INSERT INTO schema_version VALUES (?)", (len(MIGRATIONS) - 2,))
-        for script in MIGRATIONS[:-2]:
+        raw.execute("INSERT INTO schema_version VALUES (?)", (27,))
+        for script in MIGRATIONS[:27]:
             raw.executescript(script)
         raw.execute(
             "INSERT INTO projects(id, name, root, created_at, settings) VALUES ('p', 'Bakery', ?, '', ?)",
@@ -176,7 +176,7 @@ async def test_the_counts_beside_the_folders_are_of_the_table_and_not_of_a_page(
         await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata, project_id) VALUES (?, 't', ?, '', ?, ?, ?)", (f"p{n}", f"in it {n}", f"2026-09-0{n + 1}", loop if n == 0 else "{}", project.id))
 
     counts = await store.summary(active={"p1"})
-    assert counts[project.id] == {"total": 3, "active": 1, "loops": 1, "last_message_at": "2026-09-03"}
+    assert counts[project.id] == {"total": 3, "members": 3, "active": 1, "loops": 1, "last_message_at": "2026-09-03"}
     assert "" not in counts
 
     # A subagent and a fork are drawn inside the row they belong to, so the header over the folder

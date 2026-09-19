@@ -175,10 +175,17 @@ class SqliteSessionStore(ISessionStore):
 
     # -- host extras --------------------------------------------------------------
 
-    async def list_sessions(self, tenant_id: str, *, limit: int = 100) -> list[Session]:
+    async def list_sessions(self, tenant_id: str, *, limit: int = 100, ids: list[str] | None = None) -> list[Session]:
+        scope = ""
+        params: list[Any] = [tenant_id]
+        if ids is not None:
+            if not ids:
+                return []
+            scope = " AND id IN (" + ",".join("?" for _ in ids[:50]) + ")"
+            params.extend(ids[:50])
         rows = await self._db.fetchall(
-            "SELECT * FROM sessions WHERE tenant_id = ? ORDER BY last_message_at DESC LIMIT ?",
-            (tenant_id, limit),
+            f"SELECT * FROM sessions WHERE tenant_id = ?{scope} ORDER BY last_message_at DESC, id LIMIT ?",
+            (*params, limit),
         )
         return [_row_to_session(r) for r in rows]
 

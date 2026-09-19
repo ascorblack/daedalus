@@ -288,18 +288,19 @@ class ProjectStore:
             parsed.append((row, metadata if isinstance(metadata, dict) else {}))
         known = {row["id"] for row, _ in parsed}
         for row, metadata in parsed:
+            bucket = out.setdefault(str(row["project_id"]), {"total": 0, "active": 0, "loops": 0, "last_message_at": ""})
+            last = str(row["last_message_at"] or "")
+            if last > bucket["last_message_at"]:
+                bucket["last_message_at"] = last
+            bucket["members"] = bucket.get("members", 0) + 1
             if _nested_under(row["id"], metadata, known):
                 continue
-            bucket = out.setdefault(str(row["project_id"]), {"total": 0, "active": 0, "loops": 0, "last_message_at": ""})
             bucket["total"] += 1
             if row["id"] in working:
                 bucket["active"] += 1
             loop = metadata.get("loop")
             if isinstance(loop, dict) and loop.get("status") == "active":
                 bucket["loops"] += 1
-            last = str(row["last_message_at"] or "")
-            if last > bucket["last_message_at"]:
-                bucket["last_message_at"] = last
         return out
 
     async def update(self, project_id: str, *, name: str | None = None, settings: ProjectSettings | None = None) -> Project:

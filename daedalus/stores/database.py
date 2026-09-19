@@ -630,6 +630,40 @@ def _project_unification(workspaces_dir: Path) -> str:
 MIGRATIONS.append("-- generated from the configured project directory")
 
 
+MIGRATIONS.append("""
+CREATE TABLE search_vectors (
+    seq INTEGER NOT NULL REFERENCES transcript(seq) ON DELETE CASCADE,
+    block INTEGER NOT NULL,
+    offset INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    dimension INTEGER NOT NULL,
+    vector BLOB NOT NULL,
+    PRIMARY KEY(seq, block, offset)
+);
+CREATE TABLE search_pending (
+    seq INTEGER PRIMARY KEY REFERENCES transcript(seq) ON DELETE CASCADE,
+    block INTEGER NOT NULL DEFAULT 0,
+    offset INTEGER NOT NULL DEFAULT 0,
+    revision TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO search_pending(seq) SELECT seq FROM transcript;
+CREATE TRIGGER search_append AFTER INSERT ON transcript BEGIN
+    INSERT OR REPLACE INTO search_pending(seq, revision) VALUES (new.seq, hex(randomblob(8)));
+END;
+CREATE TRIGGER search_replace AFTER UPDATE OF message ON transcript BEGIN
+    DELETE FROM search_vectors WHERE seq = new.seq;
+    INSERT OR REPLACE INTO search_pending(seq, revision) VALUES (new.seq, hex(randomblob(8)));
+END;
+CREATE TABLE search_titles (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    model TEXT NOT NULL,
+    dimension INTEGER NOT NULL,
+    vector BLOB NOT NULL
+);
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""

@@ -196,6 +196,8 @@ class Downloads:
         # The part file and any interrupted staging tree are counted by ``disk_usage`` and are not
         # reachable from the picker, so leaving them would show the operator bytes nothing can free.
         (self.parts / model.archive).unlink(missing_ok=True)
+        for entry in getattr(model, "files", ()):
+            (self.parts / entry.archive).unlink(missing_ok=True)
         shutil.rmtree(self.parts / f"{model.id}.staging", ignore_errors=True)
         if records.pop(model.id, None) is not None or existed:
             self._write_manifest(records)
@@ -272,15 +274,21 @@ class Downloads:
     async def _run(self, model: Any, client: httpx.AsyncClient | None, url: str) -> None:
         try:
             await asyncio.to_thread(self._check_room, model)
-            archive = await self._fetch(model, client, url)
-            self._publish(Progress(id=model.id, state="verifying", done_bytes=model.size_bytes, total_bytes=model.size_bytes))
-            await asyncio.to_thread(verify, archive, model)
-            self._publish(Progress(id=model.id, state="unpacking", done_bytes=model.size_bytes, total_bytes=model.size_bytes))
-            disk = await asyncio.to_thread(self._unpack, archive, model)
+            if getattr(model, "files", ()):
+                disk = await self._fetch_files(model, client)
+                archive = None
+            else:
+                archive = await self._fetch(model, client, url)
+            if archive is not None:
+                self._publish(Progress(id=model.id, state="verifying", done_bytes=model.size_bytes, total_bytes=model.size_bytes))
+                await asyncio.to_thread(verify, archive, model)
+                self._publish(Progress(id=model.id, state="unpacking", done_bytes=model.size_bytes, total_bytes=model.size_bytes))
+                disk = await asyncio.to_thread(self._unpack, archive, model)
             records = self.manifest()
             records[model.id] = Installed(id=model.id, archive=model.archive, sha256=model.sha256, disk_bytes=disk)
             self._write_manifest(records)
-            archive.unlink(missing_ok=True)
+            if archive is not None:
+                archive.unlink(missing_ok=True)
             self._publish(Progress(id=model.id, state="installed", done_bytes=model.size_bytes, total_bytes=model.size_bytes))
             logger.warning("local speech model %s installed (%d MB on disk)", model.id, disk >> 20)
             if self.installed is not None:
@@ -298,7 +306,29 @@ class Downloads:
         finally:
             self._running.pop(model.id, None)
 
-    async def _fetch(self, model: Any, client: httpx.AsyncClient | None, url: str) -> Path:
+    async def _fetch_files(self, model: Any, client: httpx.AsyncClient | None) -> int:
+        staging = self.parts / f"{model.id}.staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        done = 0
+        try:
+            for entry in model.files:
+                target = await self._fetch(entry, client, entry.url, offset=done, total=model.size_bytes)
+                self._publish(Progress(id=model.id, state="verifying", done_bytes=done + entry.size_bytes, total_bytes=model.size_bytes))
+                await asyncio.to_thread(verify, target, entry)
+                await asyncio.to_thread(shutil.copyfile, target, staging / entry.archive)
+                done += entry.size_bytes
+            if self.resolver:
+                await asyncio.to_thread(self.resolver, staging, model)
+            directory = self.directory(model.id)
+            shutil.rmtree(directory, ignore_errors=True)
+            staging.rename(directory)
+            for entry in model.files:
+                (self.parts / entry.archive).unlink(missing_ok=True)
+            return done
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    async def _fetch(self, model: Any, client: httpx.AsyncClient | None, url: str, *, offset: int = 0, total: int = 0) -> Path:
         """The archive on disk, continuing a part file where one is already there."""
         self.parts.mkdir(parents=True, exist_ok=True)
         target = self.parts / model.archive
@@ -331,10 +361,12 @@ class Downloads:
                     async for chunk in response.aiter_bytes(CHUNK):
                         fh.write(chunk)
                         have += len(chunk)
+                        if have > model.size_bytes:
+                            raise DownloadError("the download exceeds the catalog size")
                         now = time.monotonic()
                         if now - last >= PROGRESS_INTERVAL:
                             last = now
-                            self._publish(Progress(id=model.id, state="downloading", done_bytes=have, total_bytes=model.size_bytes))
+                            self._publish(Progress(id=model.id, state="downloading", done_bytes=offset + have, total_bytes=total or model.size_bytes))
         except httpx.HTTPError as exc:
             raise DownloadError(f"the download did not finish: {type(exc).__name__}") from exc
         finally:
@@ -397,6 +429,8 @@ def _host_allowed(start: str, landed: str) -> bool:
     begun = (httpx.URL(start).host or "").lower()
     if any(begun == allowed or begun.endswith("." + allowed) for allowed in ALLOWED_HOSTS):
         return any(landed == allowed or landed.endswith("." + allowed) for allowed in ALLOWED_HOSTS)
+    if begun == "huggingface.co":
+        return landed == begun or landed.endswith(".hf.co") or landed.endswith(".huggingface.co")
     return landed == begun
 
 
