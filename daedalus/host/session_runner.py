@@ -681,6 +681,8 @@ class SessionManager:
                 if workspace is not None
                 else await self.projects.create(title, settings=ProjectSettings(snapshots=True), project_id=sid)
             )
+        if project_id is None and workspace is None:
+            await self.db.execute("UPDATE projects SET settings = json_set(settings, '$.auto_created', json('true')) WHERE id = ?", (project.id,))
         if own_directory:
             meta["directory"] = f".agents/{sid}"
         else:
@@ -881,6 +883,17 @@ class SessionManager:
             await conn.execute("DELETE FROM verifications WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM learning_records WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            project = state.project
+            if project is not None and project.root != self.settings.workspaces_dir and project.root.is_relative_to(self.settings.workspaces_dir):
+                # Remember ownership for older projects too, even when their creator goes first.
+                if project.id == session_id:
+                    await conn.execute("UPDATE projects SET settings = json_set(settings, '$.auto_created', json('true')) WHERE id = ?", (project.id,))
+                await conn.execute(
+                    "DELETE FROM projects WHERE id = ? AND system = '' AND json_extract(settings, '$.auto_created') = 1 "
+                    "AND NOT EXISTS (SELECT 1 FROM sessions WHERE project_id = projects.id)",
+                    (project.id,),
+                )
+        await self.projects.list()
         # A private child belongs to this session. A project root never goes with a session.
         if delete_workspace and state.metadata.get("directory") and state.workspace.exists() and state.project is not None and state.workspace.is_relative_to(state.project.root):
             if await self.workspace_users(state.workspace):

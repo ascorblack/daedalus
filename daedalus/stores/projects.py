@@ -315,7 +315,7 @@ class ProjectStore:
             # The flag is what makes the two refusals above stick; nothing outside this module sets it.
             merged = ProjectSettings(snapshots=merged.snapshots, system=project.settings.system)
         await self._db.execute(
-            "UPDATE projects SET name = ?, root = ?, settings = ?, system = ? WHERE id = ?",
+            "UPDATE projects SET name = ?, root = ?, settings = json_patch(CASE WHEN json_valid(settings) THEN settings ELSE '{}' END, ?), system = ? WHERE id = ?",
             (label, str(path), json.dumps(merged.dump()), merged.system, project_id),
         )
         await self.list()

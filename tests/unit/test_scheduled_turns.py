@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -144,6 +145,7 @@ async def test_provider_outage_drives_the_turn_again_with_a_growing_wait(setting
     await manager.start()
     calls: list[str] = []
     slept: list[float] = []
+    state = None
 
     async def fake_submit(session_id: str, text: str, attachments=(), *, steer=False, as_answer=True, origin="operator") -> str:  # type: ignore[no-untyped-def]
         calls.append(f"submit:{origin}")
@@ -151,10 +153,14 @@ async def test_provider_outage_drives_the_turn_again_with_a_growing_wait(setting
         return "run-2"
 
     async def fake_sleep(seconds: float) -> None:
-        slept.append(seconds)
+        if state is not None and asyncio.current_task() is state.outage_task:
+            slept.append(seconds)
+        else:
+            await asyncio.sleep(seconds)
 
     manager.submit = fake_submit  # type: ignore[method-assign]
-    monkeypatch.setattr("daedalus.host.session_runner.asyncio.sleep", fake_sleep)
+    # Only replace the retry task's waits; background maintenance keeps its own clock.
+    monkeypatch.setattr("daedalus.host.session_runner.asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": fake_sleep}))
     try:
         state = await manager.create_session("s")
         state.run_id = "r1"

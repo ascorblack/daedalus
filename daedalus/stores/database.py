@@ -591,7 +591,7 @@ def _project_unification(workspaces_dir: Path) -> str:
     SELECT 'project-' || substr(min(s.id), 1, 12),
            COALESCE(NULLIF(trim((SELECT s2.title FROM sessions s2 JOIN session_project_roots r2 ON r2.id = s2.id
                                 WHERE r2.root = r.root ORDER BY s2.created_at, s2.id LIMIT 1)), ''), 'Project'),
-           r.root, min(s.created_at), '{{"snapshots":true,"system":""}}', ''
+           r.root, min(s.created_at), '{{"snapshots":true,"system":"","auto_created":true}}', ''
     FROM session_project_roots r JOIN sessions s ON s.id = r.id
     WHERE NOT EXISTS (SELECT 1 FROM projects p WHERE p.root = r.root)
     GROUP BY r.root;

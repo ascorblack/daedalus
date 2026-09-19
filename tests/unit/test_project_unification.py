@@ -114,3 +114,48 @@ async def test_the_directory_browser_is_authenticated_sealed_contained_and_bound
             assert timed["truncated"] is True and timed["entries"] == []
     finally:
         await manager.close()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("creator_first", [False, True])
+@pytest.mark.parametrize("delete_workspace", [False, True])
+async def test_last_member_removes_automatic_project_but_keeps_files(settings: Settings, config: RuntimeConfig, db: Database, creator_first: bool, delete_workspace: bool, legacy: bool) -> None:
+    from daedalus.stores.projects import ProjectSettings
+
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    try:
+        creator = await manager.create_session("automatic")
+        pid = creator.project.id
+        if legacy:
+            await db.execute("UPDATE projects SET settings = json_remove(settings, '$.auto_created') WHERE id = ?", (pid,))
+        sibling = await manager.create_session("sibling", project_id=pid)
+        (creator.workspace / "keep.txt").write_text("keep")
+        await manager.projects.update(pid, name="renamed", settings=ProjectSettings(snapshots=False))
+        first, last = (creator, sibling) if creator_first else (sibling, creator)
+        await manager.delete_session(first.session.id, delete_workspace=delete_workspace)
+        assert await manager.projects.get(pid) is not None
+        await manager.close()
+        manager = SessionManager(settings, config, db=db)
+        await manager.start()
+        await manager.delete_session(last.session.id, delete_workspace=delete_workspace)
+        assert await manager.projects.get(pid) is None
+        assert creator.workspace not in manager.projects.roots
+        assert (creator.workspace / "keep.txt").read_text() == "keep"
+    finally:
+        await manager.close()
+
+
+async def test_empty_explicit_and_system_projects_remain(settings: Settings, config: RuntimeConfig, db: Database) -> None:
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    try:
+        explicit = await manager.projects.create("explicit")
+        system = await manager.projects.ensure_system("voice", name="Voice", root=settings.workspaces_dir / "voice")
+        for project in (explicit, system):
+            state = await manager.create_session("member", project_id=project.id)
+            await manager.delete_session(state.session.id)
+            assert await manager.projects.get(project.id) is not None
+            assert project.root.exists()
+    finally:
+        await manager.close()

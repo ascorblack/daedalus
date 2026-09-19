@@ -63,7 +63,8 @@ async def test_sessions_can_share_a_project_directory_and_deleting_one_keeps_it(
     assert [u["id"] for u in await manager.workspace_users(first.workspace)] == [second.session.id]
     assert await manager.delete_session(second.session.id)
     assert first.workspace.is_dir()
-    third = await manager.create_session("third", project_id=first.project.id)
+    assert await manager.projects.get(first.project.id) is None
+    third = await manager.create_session("third", workspace=first.workspace)
     manager._states.pop(third.session.id)
     assert (await manager.get_state(third.session.id)).workspace == first.workspace  # type: ignore[union-attr]
 
