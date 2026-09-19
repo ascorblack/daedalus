@@ -165,15 +165,20 @@ export function OverflowMenu({ items, label, icon = "more", small, className, tr
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ top?: number; bottom?: number; right: number } | null>(null);
+  const [pos, setPos] = useState<{ top?: number; bottom?: number; right?: number; left?: number } | null>(null);
   /** Put the menu against the trigger as it stands now. Called again on the scroll that opened it. */
   const place = useCallback(() => {
     if (!trigger.current) return;
     const r = trigger.current.getBoundingClientRect();
-    const right = Math.max(8, window.innerWidth - r.right);
+    // Which edge the menu hangs from is the trigger's own position, not a habit. A control near the
+    // right edge opens leftward; one near the left edge — the session's title sits there, against the
+    // sidebar — opens rightward, because a menu hung from its right edge would run under the sidebar
+    // and lose its first characters.
+    const width = menu.current?.offsetWidth ?? 260;
+    const side = r.right - width < 8 ? { left: Math.max(8, Math.min(r.left, window.innerWidth - width - 8)) } : { right: Math.max(8, window.innerWidth - r.right) };
     // A control in the lower half opens its menu upward: a menu that runs off the bottom edge has to
     // be scrolled to, and the scroll is what closes it.
-    setPos(r.top > window.innerHeight / 2 ? { bottom: window.innerHeight - r.top + 4, right } : { top: r.bottom + 4, right });
+    setPos(r.top > window.innerHeight / 2 ? { bottom: window.innerHeight - r.top + 4, ...side } : { top: r.bottom + 4, ...side });
   }, []);
   useLayoutEffect(() => {
     if (open) place();

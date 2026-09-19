@@ -29,7 +29,9 @@ from pathlib import Path
 from playwright.sync_api import Page, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import screenshots as shots  # noqa: E402
 from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app  # noqa: E402
+from screenshots import S1 as SESSION  # noqa: E402
 
 UNHANDLED = Unhandled()
 
@@ -152,9 +154,33 @@ def run() -> int:
 
         if os.environ.get("SHOTS"):
             page.screenshot(path=str(Path(__file__).parent / "overflow-menu.png"))
+        for width in (1440, 2560):
+            wide = browser.new_page(viewport={"width": width, "height": 900})
+            wide.route("**/api/**", shots.stub)
+            wide.goto(f"{BASE}/agents/{SESSION}?token=t&scheme=dark&lang=en", wait_until="networkidle")
+            wide.wait_for_selector(".chat-title", timeout=15000)
+            problems += check_title_menu_stays_on_screen(wide)
+            wide.close()
         browser.close()
     print("problems:", problems or "none")
     return 1 if problems else 0
+
+
+def check_title_menu_stays_on_screen(page) -> list[str]:  # type: ignore[no-untyped-def]
+    """The session's title sits against the sidebar. A menu hung from its right edge ran under the
+    sidebar and lost its first characters, so the side it hangs from is chosen, not assumed."""
+    problems: list[str] = []
+    page.locator(".chat-title").first.click()
+    page.wait_for_timeout(400)
+    menu = page.locator(".menu, [role=menu]").first
+    box = menu.bounding_box() if menu.count() else None
+    width = page.viewport_size["width"]
+    if not box:
+        problems.append("the title menu did not open")
+    elif box["x"] < 8 or box["x"] + box["width"] > width - 8:
+        problems.append(f"the title menu runs off the screen: {box['x']:.0f}..{box['x'] + box['width']:.0f} of {width}")
+    page.keyboard.press("Escape")
+    return problems
 
 
 if __name__ == "__main__":
