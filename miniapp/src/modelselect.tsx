@@ -10,6 +10,7 @@ import { Icon } from "./icons";
 import { shortModel } from "./format";
 import { readCustomModel, rememberCustomModel } from "./composer";
 import { DICT, num, t } from "./i18n";
+import { EffortOptions } from "./effortselect";
 
 export type ModelChoice = { clear: true } | { preset: string } | { provider: string; model: string } | { model: string };
 
@@ -24,6 +25,9 @@ export type ModelSelectProps = {
   onChoose: (choice: ModelChoice) => void;
   /** Phones: a sheet instead of a popover. */
   sheet: boolean;
+  effort?: string;
+  thinking?: boolean;
+  onChooseEffort?: (effort: string) => void;
 };
 
 /** Whether a preset is the one the session is set to: by its label, or by its provider/model pair. */
@@ -32,7 +36,7 @@ function isCurrent(id: string, p: Preset, model: string): boolean {
   return model === id || model === p.label || model === p.model || model === `${p.provider}/${p.model}`;
 }
 
-export function ModelSelect({ model, fallback, open, onOpenChange, onChoose, sheet }: ModelSelectProps) {
+export function ModelSelect({ model, fallback, open, onOpenChange, onChoose, sheet, effort, thinking, onChooseEffort }: ModelSelectProps) {
   const trigger = useRef<HTMLButtonElement>(null);
   const [cat, setCat] = useState<Catalogue | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -66,11 +70,12 @@ export function ModelSelect({ model, fallback, open, onOpenChange, onChoose, she
     <>
       <button ref={trigger} type="button" className={`model-select ${fallback ? "attn" : ""} ${open ? "on" : ""}`} onClick={() => onOpenChange(!open)} title={title} aria-label={t("session.model.for")} aria-haspopup="menu" aria-expanded={open}>
         {fallback ? <span className="model-dot" aria-hidden /> : <Icon name="model" size={14} />}
-        <span className="model-label truncate">{label}</span>
+        <span className="model-label truncate">{label}{onChooseEffort && thinking ? ` · ${t(`add.effort.${effort || "medium"}`)}` : ""}</span>
         <Icon name="chevron" size={12} />
       </button>
       {open && sheet && (
-        <Sheet title={t("session.model.for")} onClose={() => onOpenChange(false)} className="model-sheet">
+        <Sheet title={t("composer.settings")} onClose={() => onOpenChange(false)} className="model-sheet">
+          {onChooseEffort && <EffortOptions effort={effort} thinking={thinking} onChoose={onChooseEffort} />}
           {list}
         </Sheet>
       )}

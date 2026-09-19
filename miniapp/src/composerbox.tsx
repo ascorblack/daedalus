@@ -119,7 +119,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const cs = getComputedStyle(el);
     const line = parseFloat(cs.lineHeight);
     const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
-    el.style.height = `${fieldHeight(el.scrollHeight, line, pad, phone ? 3 : 1)}px`;
+    el.style.height = `${fieldHeight(el.scrollHeight, line, pad, 1, phone ? 5 : undefined)}px`;
   }, [phone]);
   useLayoutEffect(fit, [draft, fit, status, props.questions]);
   useEffect(() => {
@@ -402,7 +402,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         </div>
       )}
       <div className="composer-box">
-        {place.length > 0 && (
+        {status === "running" && <div className="composer-steering">{t("composer.steering")}</div>}
+        {!phone && place.length > 0 && (
           <div className="composer-place" aria-label={t("composer.place")}>
             {place.map((chip) => <span key={chip.kind} className="composer-place-chip" title={t(`composer.place.${chip.kind}`, { name: chip.name })}>
               <Icon name="folder" size={12} /><span className="truncate">{chip.name}</span>
@@ -421,7 +422,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder={t(placeholderKey(status, asking))}
-          rows={phone ? 3 : 1}
+          rows={1}
           onPaste={onPaste}
           onKeyDown={onKeyDown}
           aria-label={t(placeholderKey(status, asking))}
@@ -440,9 +441,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             </Popover>
           )}
           <span className="composer-mode">{t("composer.mode.agent")}</span>
-          <ModelSelect model={props.model} fallback={props.fallback} open={modelOpen} onOpenChange={setModelOpen} onChoose={props.onChooseModel} sheet={phone} />
+          {(!phone || status !== "running") && <ModelSelect model={props.model} fallback={props.fallback} open={modelOpen} onOpenChange={setModelOpen} onChoose={props.onChooseModel} sheet={phone}
+            effort={phone ? props.reasoningEffort : undefined} thinking={props.thinking} onChooseEffort={phone ? props.onChooseEffort : undefined} />}
           <div className="composer-tools">
-            {props.onChooseEffort && (
+            {!phone && props.onChooseEffort && (
               <EffortSelect effort={props.reasoningEffort} thinking={props.thinking} model={props.model} onChoose={props.onChooseEffort} />
             )}
             {pct !== null && ctx && (

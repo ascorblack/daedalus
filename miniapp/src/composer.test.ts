@@ -179,10 +179,10 @@ describe("the agent's questions", () => {
 });
 
 describe("the card layout", () => {
-  it("reserves three phone lines, grows, then scrolls after eight", () => {
-    expect(fieldHeight(0, 22.4, 16, 3)).toBe(84);
-    expect(fieldHeight(129, 22.4, 16, 3)).toBe(129);
-    expect(fieldHeight(900, 22.4, 16, 3)).toBe(195);
+  it("reserves one phone line, grows, then scrolls after five", () => {
+    expect(fieldHeight(0, 22.4, 16, 1, 5)).toBe(39);
+    expect(fieldHeight(83, 22.4, 16, 1, 5)).toBe(83);
+    expect(fieldHeight(900, 22.4, 16, 1, 5)).toBe(128);
   });
 
   it("uses the physical Enter keys with either alphabet", () => {

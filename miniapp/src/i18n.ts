@@ -18,7 +18,16 @@ const LOCALES: Record<Lang, string> = { en: "en-GB", ru: "ru-RU" };
 
 /** Every word the app shows, in both languages. `{name}`-style holes are filled by `t`. */
 export const DICT: Record<string, Record<Lang, string>> = {
-  "search.placeholder": { en: "Describe the conversation…", ru: "О чём был разговор?" },
+  "composer.settings": { en: "Run settings", ru: "Настройки запуска" },
+  "composer.steering": { en: "Agent is working · Steer this run", ru: "Агент работает · Уточните текущую задачу" },
+  "session.activity": { en: "Activity", ru: "Действия" },
+  "turn.run.show": { en: "Show result", ru: "Показать результат" },
+  "turn.run.hide": { en: "Collapse result", ru: "Свернуть результат" },
+  "composer.effort.low.hint": { en: "Faster, simpler tasks", ru: "Быстрее, для простых задач" },
+  "composer.effort.medium.hint": { en: "Balanced", ru: "Баланс скорости и глубины" },
+  "composer.effort.high.hint": { en: "More reasoning", ru: "Более глубокий анализ" },
+  "composer.effort.xhigh.hint": { en: "Hardest tasks", ru: "Для самых сложных задач" },
+  "search.placeholder": { en: "Search conversations by topic…", ru: "Найти разговор по теме…" },
   "search.label": { en: "Search conversations", ru: "Поиск разговоров" },
   "search.failed": { en: "Search is unavailable. Try again.", ru: "Поиск недоступен. Попробуйте ещё раз." },
   "search.loading": { en: "Searching conversations…", ru: "Ищем разговоры…" },
@@ -488,7 +497,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "add.effort.low": { en: "low", ru: "низкая" },
   "add.effort.medium": { en: "medium", ru: "средняя" },
   "add.effort.high": { en: "high", ru: "высокая" },
-  "add.effort.xhigh": { en: "xhigh", ru: "макс." },
+  "add.effort.xhigh": { en: "max", ru: "макс." },
   "add.images.on": { en: "images on", ru: "картинки вкл" },
   "add.images.off": { en: "images off", ru: "картинки выкл" },
   "add.images.title": { en: "the model accepts pictures", ru: "модель принимает картинки" },

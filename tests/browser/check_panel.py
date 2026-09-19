@@ -273,7 +273,8 @@ def phone(browser) -> list[str]:  # type: ignore[no-untyped-def]
     page = open_page(context, f"agents/{S1}")
     if page.locator(".panel").count():
         problems.append("a phone drew the panel as a column")
-    page.locator(".chat-head button[aria-label='Panel']").click()
+    page.get_by_role("button", name="Session actions", exact=True).click()
+    page.get_by_role("menuitem", name="Details", exact=True).click()
     page.wait_for_selector(".panel-sheet", timeout=5000)
     h = page.evaluate("() => Math.round(document.querySelector('.panel-sheet').getBoundingClientRect().height)")
     print("phone sheet height:", h)

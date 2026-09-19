@@ -369,16 +369,12 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
         problems.append("Escape did not close the model list")
 
     page.locator(".composer .effort-select").click()
-    page.wait_for_selector(".effort-slider", timeout=5000)
+    page.wait_for_selector(".effort-options", timeout=5000)
     effort_menu = page.locator(".effort-menu").bounding_box()
     chip = page.locator(".composer .effort-select").bounding_box()
     if effort_menu and chip and effort_menu["y"] + effort_menu["height"] > chip["y"] + 4:
         problems.append("the effort menu did not open upward")
-    slider = page.locator(".effort-slider").bounding_box()
-    if not slider:
-        problems.append("the effort slider is missing")
-    else:
-        page.mouse.click(slider["x"] + slider["width"] - 4, slider["y"] + slider["height"] / 2)
+    page.locator('.effort-option').filter(has=page.locator('input[value="xhigh"]')).click()
     page.wait_for_timeout(300)
     efforted = [p for p in posts("/model") if isinstance(p[2], dict) and p[2].get("reasoning_effort")]
     print("effort:", efforted[-1] if efforted else None)
@@ -410,6 +406,7 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
 
 def phone(browser) -> list[str]:  # type: ignore[no-untyped-def]
     problems: list[str] = []
+    HOST.status = "idle"
     context = browser.new_context(viewport={"width": 390, "height": 844}, color_scheme="dark", is_mobile=True, has_touch=True)
     page = open_page(context, phone=True)
     pill = page.locator(".composer-box").bounding_box()
@@ -417,13 +414,19 @@ def phone(browser) -> list[str]:  # type: ignore[no-untyped-def]
         problems.append(f"phone: the pill is outside the viewport ({pill})")
     if not page.locator(".composer .model-select").count():
         problems.append("phone: the model selector is not in the pill")
-    if not page.locator(".composer .effort-select").count():
-        problems.append("phone: the effort selector is not in the pill")
+    if page.locator(".composer .effort-select").count():
+        problems.append("phone: effort still occupies a separate composer control")
     fs = page.evaluate("() => getComputedStyle(document.querySelector('.composer textarea')).fontSize")
     if fs != "16px":
         problems.append(f"phone: the field is {fs}, which Safari would zoom into")
     page.locator(".composer .model-select").click()
     page.wait_for_selector(".sheet .model-list", timeout=5000)
+    if pill and pill["height"] > 130:
+        problems.append(f"phone: the empty composer is too tall ({pill})")
+    page.locator('.sheet .effort-options input[value="low"]').click()
+    page.wait_for_timeout(300)
+    if HOST.effort != "low":
+        problems.append("phone: the named effort choice did not reach the host")
     page.keyboard.press("Escape")
     page.wait_for_timeout(200)
     if page.locator(".sheet .model-list").count():
@@ -502,8 +505,8 @@ def layout(browser) -> list[str]:  # type: ignore[no-untyped-def]
                 print("layout", width, language, state, json.dumps(measure))
                 f, row, card = measure["field"], measure["row"], measure["card"]
                 prefix = f"{width}/{language}/{state}"
-                if width < 1024 and f["h"] + 1 < measure["line"] * 3 + measure["padding"]:
-                    problems.append(f"{prefix}: fewer than three field lines")
+                if width < 1024 and f["h"] > measure["line"] * 2 + measure["padding"] + 1:
+                    problems.append(f"{prefix}: an empty field reserves more than two lines")
                 if measure["scroll"] > measure["client"] + 1:
                     problems.append(f"{prefix}: placeholder is clipped")
                 if f["bottom"] > row["y"] or abs(f["w"] - row["w"]) > 1:

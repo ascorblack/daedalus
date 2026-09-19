@@ -76,10 +76,10 @@ export function dockKey(e: KeyLike, typing: boolean): "approve" | "deny" | null 
 /** How many lines the field grows to before it scrolls. */
 export const MAX_ROWS = 8;
 
-/** Reserve the minimum rows, grow with content, then scroll after `MAX_ROWS` lines. */
-export function fieldHeight(scrollHeight: number, lineHeight: number, padding: number, minRows = 1): number {
+/** Reserve the minimum rows, grow with content, then scroll at the supplied row limit. */
+export function fieldHeight(scrollHeight: number, lineHeight: number, padding: number, minRows = 1, maxRows = MAX_ROWS): number {
   const floor = Math.ceil(lineHeight * minRows + padding);
-  const cap = Math.round(lineHeight * MAX_ROWS + padding);
+  const cap = Math.round(lineHeight * maxRows + padding);
   return Math.max(floor, Math.min(scrollHeight, cap));
 }
 

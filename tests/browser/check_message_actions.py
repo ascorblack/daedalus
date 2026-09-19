@@ -159,6 +159,10 @@ def run() -> int:
             labels = [b for row in rows for b in row["buttons"]]
             if "Copy" not in labels:
                 problems.append(f"{name}: no copy button ({labels})")
+            if name == "phone":
+                page.locator(".msg-actions").first.get_by_role("button", name="More actions").click()
+                labels += page.locator('[role="menuitem"]').all_text_contents()
+                page.keyboard.press("Escape")
             if not any(b and "Fork" in b for b in labels):
                 problems.append(f"{name}: the operator's turn has no fork action ({labels})")
             if not any(b and "Revert" in b for b in labels):

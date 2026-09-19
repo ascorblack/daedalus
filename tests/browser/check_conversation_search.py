@@ -54,7 +54,9 @@ def run() -> int:
         expect(garden).to_contain_text('Needs you')
         assert garden.locator('.erow-time').get_attribute('title')
         garden.locator('.folder-expand').click()
-        expect(garden.locator('.folder-root')).to_be_visible()
+        # The path is available in project settings; mobile navigation spends no row on it.
+        expect(garden.locator('.folder-root')).to_be_hidden()
+        expect(garden.locator('.folder-expand')).to_have_attribute('aria-expanded', 'true')
         expect(garden.locator('.folder-actions')).to_be_visible()
         page.locator('[data-project="empty"] .folder-head').click()
         expect(page.locator('[data-project="empty"] .folder-add')).to_be_visible()

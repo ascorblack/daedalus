@@ -917,9 +917,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
         ) : null}
         {offline && <span className="head-status offline">{t("session.reconnecting")}</span>}
         <div className="head-actions">
-          <button className={`iconbtn ${panel.state.tab ? "on" : ""}`} onClick={panel.toggle} aria-label={t("panel.toggle")} title={t("panel.toggle.title")} aria-pressed={!!panel.state.tab}>
+          {!phone && <button className={`iconbtn ${panel.state.tab ? "on" : ""}`} onClick={panel.toggle} aria-label={t("panel.toggle")} title={t("panel.toggle.title")} aria-pressed={!!panel.state.tab}>
             <Icon name="panel" />
-          </button>
+          </button>}
           <OverflowMenu
             label={t("session.actions")}
             items={[
@@ -1180,15 +1180,20 @@ function noteTitle(note: SystemNote): string {
 }
 
 /** A loop's wake-up, a schedule's prompt, a reminder: one folded line, never a bubble. */
-function SystemNoteRow({ note, cacheKey }: { note: SystemNote; cacheKey?: string }) {
+function SystemNoteRow({ note, cacheKey, run }: { note: SystemNote; cacheKey?: string; run?: { folded: boolean; toggle: () => void } }) {
   const [open, setOpen] = useState(false);
   return (
     <div className={`sysnote ${note.kind}`}>
+      <div className="sysnote-row">
       <button type="button" className="sysnote-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         <Icon name={note.kind === "loop" ? "loop" : note.kind === "schedule" || note.kind === "reminder" ? "clock" : "compact"} size={14} />
         <span className="truncate">{noteTitle(note)}</span>
         <Chevron open={open} />
       </button>
+      {run && <button type="button" className="run-disclosure" onClick={run.toggle} aria-expanded={!run.folded} aria-label={t(run.folded ? "turn.run.show" : "turn.run.hide")} title={t(run.folded ? "turn.run.show" : "turn.run.hide")}>
+        <span>{t(run.folded ? "turn.run.show" : "turn.run.hide")}</span><Chevron open={!run.folded} />
+      </button>}
+      </div>
       {open && <Md className="sysnote-body" text={note.body} cacheKey={cacheKey} />}
     </div>
   );
@@ -1196,18 +1201,20 @@ function SystemNoteRow({ note, cacheKey }: { note: SystemNote; cacheKey?: string
 
 const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork" | "retry", seq: number) => void }) {
   const { id: sessionId, revertable, preview, toast } = useContext(SessionContext);
-  const [open, setOpen] = useDisclosed(`${sessionId}:turn:${turn.key}`, live);
+  const [open, setOpen] = useDisclosed(`${sessionId}:turn:${turn.key}`, false);
+  const [folded, setFolded] = useDisclosed(`${sessionId}:run:${turn.key}`, false);
   const wasLive = useRef(live);
   useEffect(() => {
-    // Expanded while the agent works; folds away once the turn is over.
+    // Activity is opt-in, including during streaming; completion folds the details away.
     if (wasLive.current && !live) setOpen(false);
-    if (live) setOpen(true);
     wasLive.current = live;
   }, [live]);
   if (turn.summary) return <SummaryBlock message={turn.summary} />;
   const hasWork = turn.activity.length > 0 || live;
   const elapsed = (live ? Date.now() : turn.endedAt) - turn.startedAt;
   const steps = stepCount(turn.activity);
+  const activeTool = live ? [...turn.activity].reverse().find((item) => item.kind === "tool" && item.running) as ToolItem | undefined : undefined;
+  const activeAction = activeTool ? describe(activeTool) : null;
   // Retention drops the oldest snapshots once a store passes its bounds. Where this turn's snapshot
   // has gone, the undo is not offered: it would cut the history and leave the files as they are,
   // which is not what "revert to here" reads as. A session that never snapshots keeps the offer.
@@ -1222,8 +1229,9 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
     toast((await copyText(url)) ? t("turn.link.copied") : url);
   };
   return (
-    <div className="turn" id={seq ? `m${seq}` : undefined}>
-      {turn.user && turn.note && <SystemNoteRow note={turn.note} cacheKey={live ? undefined : `n${seq ?? turn.key}`} />}
+    <div className={`turn ${turn.note?.kind === "loop" ? "loop-turn" : ""} ${folded && !live ? "folded" : ""}`} id={seq ? `m${seq}` : undefined}>
+      {turn.user && turn.note && <SystemNoteRow note={turn.note} cacheKey={live ? undefined : `n${seq ?? turn.key}`} run={turn.note.kind === "loop" && !live ? { folded, toggle: () => setFolded(!folded) } : undefined} />}
+      <div className="turn-content" hidden={folded && !live}>
       {turn.user && !turn.note && (
         <div className="msg-wrap">
           <div className="msg user">
@@ -1251,9 +1259,10 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
             <i />
             <i />
           </span>
-          <span className="worked">{t(live ? (turn.pendingTools > 0 ? "session.working.for" : "session.thinking.for") : "session.worked", { t: duration(elapsed) })}</span>
+          <span className="worked">{t(live ? "session.activity" : "session.worked", { t: duration(elapsed) })}</span>
+          {activeAction && <span className="activity-current truncate">{activeAction.verb}{activeAction.detail ? ` · ${activeAction.detail}` : ""}</span>}
           {steps > 0 && <span className="steps">{plural("session.steps", steps)}</span>}
-          {families && <span className="families truncate">· {families}</span>}
+          {families && <span className="families truncate" title={families}>· {families}</span>}
           <Chevron open={open} />
         </button>
       )}
@@ -1292,6 +1301,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
           }
         />
       )}
+      </div>
     </div>
   );
 });
@@ -1410,6 +1420,8 @@ type MessageAction = { icon: IconName; label: string; danger?: boolean; onSelect
 
 /** The row of small buttons under a message: copy it, and whatever else the turn allows; the rest behind ⋯. */
 function MessageActions({ text, actions = [], more }: { text: string; actions?: MessageAction[]; more?: MenuItem[] }) {
+  const phone = !useMedia("(min-width: 1024px)");
+  const menu = phone ? [...actions, ...(more ?? [])] : more ?? [];
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     setCopied(await copyText(text));
@@ -1419,13 +1431,14 @@ function MessageActions({ text, actions = [], more }: { text: string; actions?: 
     <div className="msg-actions">
       <button className="iconbtn small" onClick={copy} aria-label={t(copied ? "common.copied" : "common.copy")} title={t(copied ? "common.copied" : "common.copy")}>
         <Icon name={copied ? "check" : "copy"} size={15} />
+        {phone && <span>{t(copied ? "common.copied" : "common.copy")}</span>}
       </button>
-      {actions.map((a) => (
+      {!phone && actions.map((a) => (
         <button key={a.label} className={`iconbtn small ${a.danger ? "danger" : ""}`} onClick={a.onSelect} aria-label={a.label} title={a.label}>
           <Icon name={a.icon} size={15} />
         </button>
       ))}
-      {more && more.length > 0 && <OverflowMenu small label={t("turn.more")} items={more} />}
+      {menu.length > 0 && <OverflowMenu small label={t("turn.more")} items={menu} />}
     </div>
   );
 }

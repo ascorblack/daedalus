@@ -241,7 +241,7 @@ export const FolderSection = memo(function FolderSection({ folder, onOpen, curre
           )}
         />
       )}
-      {showing && <button className="btn small ghost folder-add" onClick={() => setAdding(true)}>{t("agents.new")}</button>}
+      {showing && <button className="btn small ghost folder-add" onClick={() => setAdding(true)}><Icon name="plus" size={16} />{t("agents.new")}</button>}
       {editing && <ProjectSettingsSheet project={{ ...folder.project, sessions: folder.rows.map((r) => ({ id: r.s.id, title: r.s.title })) }} onClose={() => setEditing(false)} onRemoved={() => setEditing(false)} toast={toast} />}
       {adding && <NewAgentSheet project={folder.key} onClose={() => setAdding(false)} onCreated={onOpen} toast={toast} />}
     </section>
@@ -295,7 +295,7 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, compact, project
         <Dot status={status} className="erow-dot" />
         <div className="erow-main">
           <div className="erow-head">
-            <span className="erow-title truncate">{projectName && <span className="erow-project">{projectName} · </span>}{agentName(s)}</span>
+            <span className="erow-title truncate">{projectName && projectName !== agentName(s) && <span className="erow-project">{projectName} · </span>}{agentName(s)}</span>
             {needs && <span className={`erow-state ${status}`}>{statusWord(status)}</span>}
             <span className="erow-time num" title={new Date(s.last_message_at).toLocaleString()}>{relTime(s.last_message_at)}</span>
           </div>
@@ -310,7 +310,7 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, compact, project
       <Avatar status={status} seed={s.id} />
       <div className="erow-main">
         <div className="erow-head">
-          <span className="erow-title clamp-2">{projectName && <span className="erow-project">{projectName} · </span>}{agentName(s)}</span>
+          <span className="erow-title clamp-2">{projectName && projectName !== agentName(s) && <span className="erow-project">{projectName} · </span>}{agentName(s)}</span>
           {s.workspace_own && !fork && <span className="chip tiny" title={s.workspace_path}>{t("agents.own.chip")}</span>}
           <span className="erow-time num" title={new Date(s.last_message_at).toLocaleString()}>{relTime(s.last_message_at)}</span>
         </div>

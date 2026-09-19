@@ -754,8 +754,8 @@ PHONE = {"width": 390, "height": 844}
 # The handful of words these helpers click on, in the language the run is in. Everything else is
 # picked by class or by data, which no translation moves.
 WORDS = {
-    "en": {"steps": "8 steps", "panel": "Panel", "access": "Access"},
-    "ru": {"steps": "8 шагов", "panel": "Панель", "access": "Доступ"},
+    "en": {"steps": "8 steps", "panel": "Panel", "access": "Access", "actions": "Session actions", "details": "Details"},
+    "ru": {"steps": "8 шагов", "panel": "Панель", "access": "Доступ", "actions": "Действия с сессией", "details": "Сведения"},
 }
 
 
@@ -798,8 +798,9 @@ def open_panel_preview(page: Page) -> None:
 
 
 def open_phone_panel(page: Page) -> None:
-    """On a phone the same tabs come up as a full sheet, from the panel button in the header."""
-    page.locator(f".chat-head button[aria-label='{word('panel')}']").click()
+    """On a phone the tabs open as a full sheet from the session's action menu."""
+    page.get_by_role("button", name=word("actions"), exact=True).click()
+    page.get_by_role("menuitem", name=word("details"), exact=True).click()
     page.wait_for_selector(".panel-sheet .panel-tab", timeout=5000)
     page.locator(".panel-sheet .panel-tab[data-tab='files']").click()
     page.wait_for_selector(".panel-sheet .filerow", timeout=5000)
@@ -1136,7 +1137,7 @@ def run() -> int:
         page = phone.new_page()
         page.route("**/api/**", stub)
         shot(page, "phone-bots", "agents")
-        shot(page, "phone-session", f"agents/{S1}", wait=".chat-scroll .timeline", before=expand_steps, settle=300)
+        shot(page, "phone-session", f"agents/{S1}", wait=".chat-scroll .timeline", settle=300)
         shot(page, "phone-session-panel", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_phone_panel, settle=600)
         shot(page, "phone-voice", "voice")
         shot(page, "phone-memory", "memory")

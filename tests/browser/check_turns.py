@@ -154,6 +154,13 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
         body = notes.first.locator(".sysnote-body").inner_text()
         if "Read the support inbox" not in body or "Loop iteration" in body:
             problems.append(f"the open note does not show the instruction alone ({body[:60]!r})")
+        loop_turn = page.locator(".loop-turn")
+        loop_turn.locator(".run-disclosure").click()
+        if loop_turn.locator(".turn-content").is_visible():
+            problems.append("collapsing a completed run did not hide its result")
+        loop_turn.locator(".run-disclosure").click()
+        if not loop_turn.locator(".answer").is_visible():
+            problems.append("expanding a completed run did not restore its answer")
     if page.locator(".msg.user").count() != 1:
         problems.append(f"the loop session should have one operator card, found {page.locator('.msg.user').count()}")
     for card in page.locator(".msg.user").all_inner_texts():

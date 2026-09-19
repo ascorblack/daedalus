@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { REASONING_EFFORTS, effortIndex } from "./models";
 
-describe("the effort slider's stops", () => {
+describe("the named effort choices", () => {
   it("are low, medium, high, xhigh in that order", () => {
     expect([...REASONING_EFFORTS]).toEqual(["low", "medium", "high", "xhigh"]);
   });

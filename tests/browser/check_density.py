@@ -196,10 +196,10 @@ def judge(m: dict) -> list[str]:
                 problems.append(f"{m['vw']}: the panel's tab row is {m['panelTabs']}, not 40")
     elif m["panel"]:
         problems.append(f"{m['vw']}: a phone shows the panel as a column")
-    # The model selector is in the composer at every width, on one 32 px line at most.
-    if not m["headModel"]:
+    # Running phones reserve the composer for steering; idle settings use a full touch target.
+    if not m["headModel"] and not phone:
         problems.append(f"{m['vw']}: the composer has no model selector")
-    elif m["headModel"]["h"] > 32:
+    elif m["headModel"] and m["headModel"]["h"] > (44 if phone else 32):
         problems.append(f"{m['vw']}: the model selector in the composer is {m['headModel']}")
     # The field grows independently; the controls remain one compact row.
     if m["composerRow"] and m["composerRow"]["h"] > 44:
@@ -207,7 +207,7 @@ def judge(m: dict) -> list[str]:
     for h in m["act"]:
         if h > 28:
             problems.append(f"{m['vw']}: a step row is {h}px")
-    want = 40 if phone else 32
+    want = 44 if phone else 32
     for b in m["iconbtn"]:
         if b["w"] != want or b["h"] != want:
             problems.append(f"{m['vw']}: an icon button is {b['w']}×{b['h']}, not {want}")
