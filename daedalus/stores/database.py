@@ -575,10 +575,10 @@ def _project_unification(workspaces_dir: Path) -> str:
     SELECT d.id, d.directory,
            COALESCE(
              (SELECT p.root FROM projects p
-              WHERE d.directory = p.root OR d.directory LIKE replace(replace(p.root, '%', '\\%'), '_', '\\_') || '/%' ESCAPE '\\'
+              WHERE d.directory = p.root OR substr(d.directory, 1, length(p.root) + 1) = p.root || '/'
               ORDER BY length(p.root), p.root LIMIT 1),
              (SELECT p.directory FROM session_directories p
-              WHERE d.directory = p.directory OR d.directory LIKE replace(replace(p.directory, '%', '\\%'), '_', '\\_') || '/%' ESCAPE '\\'
+              WHERE d.directory = p.directory OR substr(d.directory, 1, length(p.directory) + 1) = p.directory || '/'
               ORDER BY length(p.directory), p.directory LIMIT 1),
              d.directory
            ) AS root

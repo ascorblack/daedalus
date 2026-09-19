@@ -94,3 +94,23 @@ def test_failed_migration_exits_with_error_and_rolls_back(tmp_path: Path) -> Non
         assert raw.execute("SELECT version FROM schema_version").fetchone() == (28,)
         assert raw.execute("SELECT count(*) FROM sessions").fetchone() == (1,)
         assert raw.execute("SELECT count(*) FROM projects").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("existing", [False, True])
+async def test_directory_grouping_is_case_sensitive(tmp_path: Path, existing: bool) -> None:
+    path = tmp_path / "old.sqlite"
+    lower, upper = tmp_path / "abc", tmp_path / "ABC" / "child"
+    with seed(path) as raw:
+        if existing:
+            project(raw, "existing", lower)
+        session(raw, "lower", json.dumps({"workspace": str(lower)}))
+        session(raw, "upper", json.dumps({"workspace": str(upper)}))
+    raw.close()
+    db = Database(path)
+    try:
+        await db.open()
+        rows = await db.fetchall("SELECT s.id, s.metadata, p.root FROM sessions s JOIN projects p ON p.id = s.project_id")
+        assert {r["id"]: Path(r["root"]) / json.loads(r["metadata"]).get("directory", "") for r in rows} == {"lower": lower, "upper": upper}
+        assert len(await db.fetchall("SELECT id FROM projects")) == 2
+    finally:
+        await db.close()
