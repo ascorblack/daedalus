@@ -36,17 +36,17 @@ describe("arrange", () => {
       agent("c", { project_id: "p2" }),
     ];
     const { folders } = arrange(sessions, projects);
-    expect(folders.map((f) => f.key)).toEqual(["p1", "p2"]);
-    expect(folders[0].rows.map((r) => r.s.id)).toEqual(["a", "b"]);
+    expect(folders.map((f) => f.key)).toEqual(["p2", "p1"]);
+    expect(folders[1].rows.map((r) => r.s.id)).toEqual(["b", "a"]);
     // The count on a folder is the API's, over the whole table — not the rows that reached this page.
-    expect(folders[0].total).toBe(2);
+    expect(folders[1].total).toBe(2);
   });
 
-  it("puts the concierge's own project first and the operator's in name order", () => {
-    const projects = [folder("p2", "Zebra"), folder("p1", "Apples"), folder("v", "Voice", { system: "voice" })];
+  it("sorts every project by activity, including Voice and empty projects", () => {
+    const projects = [folder("p2", "Zebra", { last_message_at: "2026-09-19T00:00:00Z" }), folder("p1", "Apples"), folder("v", "Voice", { system: "voice", last_message_at: "2026-09-18T00:00:00Z" })];
     const { folders } = arrange([], projects);
-    expect(folders.map((f) => f.name)).toEqual(["Voice", "Apples", "Zebra"]);
-    expect(folders[0].system).toBe(true);
+    expect(folders.map((f) => f.name)).toEqual(["Zebra", "Voice", "Apples"]);
+    expect(folders[1].system).toBe(true);
   });
 
   it("nests a subagent under its leader and a fork under what it was taken from", () => {
@@ -60,10 +60,10 @@ describe("arrange", () => {
     ];
     const { folders } = arrange(sessions, [folder("p", "Project")]);
     const rows = folders[0].rows;
-    expect(rows.map((r) => r.s.id)).toEqual(["leader", "orphan-fork"]);
-    expect(rows[0].kids.map((k) => k.id)).toEqual(["sub"]);
-    expect(rows[0].forks.map((f) => f.s.id)).toEqual(["fork"]);
-    expect(rows[0].forks[0].forks.map((f) => f.s.id)).toEqual(["forkfork"]);
+    expect(rows.map((r) => r.s.id)).toEqual(["orphan-fork", "leader"]);
+    expect(rows[1].kids.map((k) => k.id)).toEqual(["sub"]);
+    expect(rows[1].forks.map((f) => f.s.id)).toEqual(["fork"]);
+    expect(rows[1].forks[0].forks.map((f) => f.s.id)).toEqual(["forkfork"]);
   });
 
   it("counts a leader whose subagent is running as working", () => {
@@ -101,9 +101,9 @@ describe("arrange", () => {
       agent("sub", { title: "[sub] menu prices", project_id: "p1", metadata: { subagent_of: "photos", subagent_name: "menu prices" } }),
     ];
     const found = arrange(sessions, projects, { query: "menu" });
-    expect(found.folders[0].rows[0].forks.map((f) => f.s.id)).toEqual(["fork"]);
+    expect(found.folders[0].rows[1].forks.map((f) => f.s.id)).toEqual(["fork"]);
     // "Photos" itself does not match; the subagent named "menu prices" under it does.
-    expect(found.folders[0].rows.map((r) => r.s.id)).toEqual(["menu", "photos"]);
+    expect(found.folders[0].rows.map((r) => r.s.id)).toEqual(["photos", "menu"]);
     expect(arrange(sessions, projects, { query: "nothing here" }).shown).toBe(0);
   });
 

@@ -1,0 +1,98 @@
+// @vitest-environment jsdom
+import { act } from "react";
+import { createRoot, Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ProjectFolder, SessionSummary } from "../api";
+import { arrange } from "../grouping";
+import { setLang } from "../i18n";
+import { FolderSection, SessionsScreen } from "./Sessions";
+
+const listing = vi.hoisted(() => ({ data: { sessions: [] as SessionSummary[], projects: [] as ProjectFolder[] } }));
+vi.mock("../store", () => ({ useQuery: () => ({ data: listing.data, loading: false }) }));
+vi.mock("../projects", () => ({ ProjectChip: () => null, useProjects: () => ({ data: [] }), ProjectSettingsSheet: () => <div data-settings /> }));
+vi.mock("../shell", () => ({ PageHeader: ({ children }: { children: React.ReactNode }) => <header>{children}</header>, screenTitle: () => "Agents" }));
+
+const project: ProjectFolder = { id: "p", name: "Garden", root: "/projects/garden", created_at: "2026-01-01T00:00:00Z", settings: { snapshots: false }, reachable: true, writable: true, total: 1, members: 1, active: 0, loops: 0, last_message_at: "2026-09-18T00:00:00Z" };
+const agent: SessionSummary = { id: "a", title: "Plan the planting", project_id: "p", project: "Garden", model: "Local model", status: "waiting", created_at: project.created_at, last_message_at: project.last_message_at, run_id: null };
+let host: HTMLDivElement;
+let root: Root;
+const onOpen = vi.fn();
+const toast = vi.fn();
+
+beforeEach(() => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  localStorage.clear();
+  setLang("en");
+  listing.data = { sessions: [agent], projects: [project] };
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  onOpen.mockClear();
+});
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.restoreAllMocks(); });
+
+async function folder(sessions = [agent], p = project, compact = false) {
+  const arranged = arrange(sessions, [p]);
+  await act(async () => root.render(<FolderSection folder={arranged.folders[0]} onOpen={onOpen} toast={toast} filtered={false} compact={compact} />));
+}
+async function click(selector: string) { await act(async () => (host.querySelector(selector) as HTMLElement).click()); }
+
+describe("project conversations", () => {
+  it("opens a single agent directly, with model, status, activity and project controls", async () => {
+    await folder();
+    expect(host.querySelector(".folder.single")).not.toBeNull();
+    expect(host.textContent).toContain("Garden");
+    expect(host.textContent).toContain("Local model");
+    expect(host.textContent).toContain("Needs you");
+    expect(host.querySelector(".erow-time")?.getAttribute("title")).toBeTruthy();
+    await click('[role="link"]');
+    expect(onOpen).toHaveBeenCalledWith("a");
+    await click(".folder-expand");
+    expect(host.textContent).toContain("/projects/garden");
+    expect(host.querySelectorAll(".erow")).toHaveLength(1);
+    await click(".folder-actions");
+    expect(host.querySelector("[data-settings]")).not.toBeNull();
+  });
+  it("keeps the model visible in the compact hybrid", async () => {
+    await folder([agent], project, true);
+    expect(host.textContent).toContain("Local model");
+  });
+  it("becomes an open folder in the same section when the second agent appears", async () => {
+    await folder();
+    const section = host.querySelector("section");
+    (host.querySelector(".erow") as HTMLElement).focus();
+    await folder([agent, { ...agent, id: "b", title: "Watering", last_message_at: "2026-09-19T00:00:00Z" }], { ...project, total: 2, members: 2 });
+    expect(host.querySelector("section")).toBe(section);
+    expect(host.querySelector(".folder.single")).toBeNull();
+    expect(host.querySelectorAll(".erow")).toHaveLength(2);
+    expect((document.activeElement as HTMLElement).dataset.session).toBe("a");
+    expect(host.querySelector(".erow-title")?.textContent).toBe("Watering");
+  });
+  it("offers project actions and creation in an empty project", async () => {
+    await folder([], { ...project, total: 0, members: 0 });
+    await click(".folder-head");
+    expect(host.querySelector(".folder-empty")).not.toBeNull();
+    expect(host.querySelector(".folder-add")).not.toBeNull();
+    expect(host.querySelector(".folder-actions")).not.toBeNull();
+  });
+  it("does not turn one search hit from a larger project into a single-agent project", async () => {
+    const found = arrange([{ ...agent, match: { snippet: "The best passage", score: 1 } }], [{ ...project, total: 2, members: 2 }], { results: true });
+    await act(async () => root.render(<FolderSection folder={found.folders[0]} onOpen={onOpen} toast={toast} filtered />));
+    expect(host.querySelector(".folder.single")).toBeNull();
+    expect(host.querySelector(".search-passage")?.textContent).toBe("The best passage");
+  });
+  it("replaces the old chips with a real debounced search and shows exact-only fallback", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ sessions: [{ ...agent, match: { snippet: "Grow tomatoes on the balcony", score: 1 } }], projects: [project], semantic: false, reason: "off", partial: false, indexing: false })));
+    await act(async () => root.render(<SessionsScreen onOpen={onOpen} toast={toast} />));
+    expect(host.querySelector(".chips")).toBeNull();
+    const input = host.querySelector('input[type="search"]') as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "vegetables outside");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 350)); });
+    expect(fetcher).toHaveBeenCalledWith(expect.stringContaining("/api/sessions/search?q=vegetables%20outside"), expect.anything());
+    expect(host.textContent).toContain("Exact search only");
+    expect(host.textContent).toContain("Grow tomatoes on the balcony");
+  });
+});

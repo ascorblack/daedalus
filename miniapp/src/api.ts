@@ -145,6 +145,7 @@ export type SearchCheck = {
 };
 
 export type SessionSummary = {
+  match?: { snippet: string; score: number };
   id: string;
   title: string;
   status: "idle" | "running" | "waiting" | "failed" | "compacting";
@@ -301,7 +302,7 @@ export type ProjectRef = Omit<Project, "sessions">;
 
 /** A project in the agents listing: the project, and how many agents are in it — counted over the
  *  whole table, not over the page of rows beside it. */
-export type ProjectFolder = ProjectRef & { total: number; active: number; loops: number; last_message_at: string };
+export type ProjectFolder = ProjectRef & { members?: number; total: number; active: number; loops: number; last_message_at: string };
 
 /** What GET /api/sessions answers: a page of agents and the project folders they are in. */
 export type SessionList = {
