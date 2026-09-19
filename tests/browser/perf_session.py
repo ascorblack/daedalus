@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import threading
@@ -370,7 +371,7 @@ def main() -> int:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     rows = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(args=["--enable-precise-memory-info"])
+        browser = p.chromium.launch(executable_path=os.environ.get("CHROMIUM"), args=["--enable-precise-memory-info"])
         for n in sizes:
             row = run_case(browser, args.port, n, args.seconds, args.rate, args.width, args.height, args.settle)
             rows.append(row)

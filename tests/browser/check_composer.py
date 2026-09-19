@@ -173,9 +173,9 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
     if primary(page) != "send" or not page.locator(".composer .roundbtn.primary").is_disabled():
         problems.append("at rest the circle is not a disabled Send")
     box = page.locator(".composer-box").bounding_box()
-    print("pill at rest:", box and round(box["height"]))
-    if not box or box["height"] > 52:
-        problems.append(f"the pill at rest is {box and round(box['height'])} px, not one row")
+    print("card at rest:", box)
+    if not box:
+        problems.append("the composer card is missing")
     if not page.locator(".composer .model-select").count() or "Opus" not in page.locator(".composer .model-select").inner_text():
         problems.append("the model selector is not in the pill")
     if not page.locator(".composer .ctx-ring").count():
@@ -426,6 +426,105 @@ def failure_bar(browser) -> list[str]:  # type: ignore[no-untyped-def]
     return problems
 
 
+def layout(browser) -> list[str]:  # type: ignore[no-untyped-def]
+    """Measure both rows, wrapping placeholders, growth and the visible keyboard viewport."""
+    problems: list[str] = []
+    original_asr = GATES["/api/asr"]
+    GATES["/api/asr"] = {**original_asr, "configured": True}
+    HOST.pending = None
+    HOST.messages = [message(101, "user", "Check the run."), message(102, "assistant", "A line of the conversation.\n\n" * 40 + "The last message stays readable.")]
+    for width in (390, 768, 1440):
+        for language in ("en", "ru"):
+            context = browser.new_context(viewport={"width": width, "height": 844}, is_mobile=width < 1024, has_touch=width < 1024, reduced_motion="reduce")
+            context.add_init_script("localStorage.setItem('daedalus.session.panel', '0')")
+            page = context.new_page()
+            page.route("**/api/**", stub)
+            for state in ("idle", "running", "waiting"):
+                HOST.status = state
+                page.goto(f"{BASE}/agents/{SESSION}?token=t&scheme=dark&lang={language}")
+                page.wait_for_selector(".composer textarea")
+                page.wait_for_timeout(150)
+                measure = page.evaluate("""() => {
+                  const one = s => document.querySelector(s);
+                  const rect = el => { const r = el.getBoundingClientRect(); return {x:r.x, y:r.y, w:r.width, h:r.height, bottom:r.bottom, right:r.right}; };
+                  const field = one('.composer textarea'), cs = getComputedStyle(field);
+                  const row = one('.composer-row');
+                  const controls = [...row.querySelectorAll('button, .composer-mode')].filter(el => el.getBoundingClientRect().width > 0);
+                  return {field:rect(field), card:rect(one('.composer-box')), row:rect(row),
+                    line:parseFloat(cs.lineHeight), padding:parseFloat(cs.paddingTop)+parseFloat(cs.paddingBottom),
+                    scroll:field.scrollHeight, client:field.clientHeight,
+                    controls:controls.map(rect), scrollBox:rect(one('.chat-scroll')),
+                    tab:one('.tabbar')?.getBoundingClientRect().height ? rect(one('.tabbar')) : null};
+                }""")
+                print("layout", width, language, state, json.dumps(measure))
+                f, row, card = measure["field"], measure["row"], measure["card"]
+                prefix = f"{width}/{language}/{state}"
+                if width < 1024 and f["h"] + 1 < measure["line"] * 3 + measure["padding"]:
+                    problems.append(f"{prefix}: fewer than three field lines")
+                if measure["scroll"] > measure["client"] + 1:
+                    problems.append(f"{prefix}: placeholder is clipped")
+                if f["bottom"] > row["y"] or abs(f["w"] - row["w"]) > 1:
+                    problems.append(f"{prefix}: text does not own a full row")
+                if any(abs(c["y"] + c["h"] / 2 - row["y"] - row["h"] / 2) > 1 or c["right"] > row["right"] + 1 for c in measure["controls"]):
+                    problems.append(f"{prefix}: controls wrap or overflow")
+                if measure["scrollBox"]["bottom"] > card["y"] + 1 or (measure["tab"] and card["bottom"] > measure["tab"]["y"]):
+                    problems.append(f"{prefix}: composer overlaps messages or navigation")
+                if card["x"] < 0 or card["right"] > width:
+                    problems.append(f"{prefix}: card overflows")
+            field(page).fill("\n".join(["A full line of text"] * 5))
+            grown = field(page).bounding_box()
+            if not grown or grown["height"] <= f["h"]:
+                problems.append(f"{width}/{language}: field does not grow")
+            field(page).fill("\n".join(["A full line of text"] * 12))
+            overflow = field(page).evaluate("el => ({h:el.clientHeight, scroll:el.scrollHeight, line:parseFloat(getComputedStyle(el).lineHeight)})")
+            if overflow["scroll"] <= overflow["h"] or overflow["h"] > overflow["line"] * 8 + measure["padding"] + 1:
+                problems.append(f"{width}/{language}: long draft does not scroll at eight lines")
+            field(page).fill("")
+            scroll = page.locator(".chat-scroll")
+            scroll.hover()
+            page.mouse.wheel(0, -10000)
+            page.wait_for_selector(".composer-jump-anchor .jump-down")
+            jump = page.locator(".jump-down").bounding_box()
+            card = page.locator(".composer-box").bounding_box()
+            if not jump or not card or jump["y"] + jump["height"] > card["y"]:
+                problems.append(f"{width}/{language}: newest-message shortcut covers the field")
+            page.locator(".jump-down").click()
+            page.wait_for_function("""() => {
+              const el = document.querySelector('.chat-scroll');
+              return el.scrollHeight - el.scrollTop - el.clientHeight < 2;
+            }""")
+            last = page.locator(".answer").last.bounding_box()
+            viewport = scroll.bounding_box()
+            if not last or not viewport or last["y"] + last["height"] > viewport["y"] + viewport["height"] + 1:
+                problems.append(f"{width}/{language}: the last message cannot be scrolled above the card")
+            page.evaluate("""() => {
+              const pasted = new DataTransfer();
+              pasted.items.add(new File(['pasted'], 'paste.txt', {type:'text/plain'}));
+              document.querySelector('.composer textarea').dispatchEvent(new ClipboardEvent('paste', {clipboardData:pasted, bubbles:true, cancelable:true}));
+              const dropped = new DataTransfer();
+              dropped.items.add(new File(['dropped'], 'drop.txt', {type:'text/plain'}));
+              document.querySelector('.chat').dispatchEvent(new DragEvent('drop', {dataTransfer:dropped, bubbles:true, cancelable:true}));
+            }""")
+            page.wait_for_selector(".attachment")
+            if page.locator(".attachment").count() != 2:
+                problems.append(f"{width}/{language}: paste or file drop lost an attachment")
+            for _ in range(page.locator(".attachment-x").count()):
+                page.locator(".attachment-x").first.click()
+            if width == 390:
+                field(page).focus()
+                page.set_viewport_size({"width": width, "height": 480})
+                page.wait_for_timeout(200)
+                visible = page.locator(".composer-row").bounding_box()
+                tab = page.locator(".tabbar").bounding_box() if page.locator(".tabbar").count() else None
+                if not visible or visible["y"] < 0 or visible["y"] + visible["height"] > min(480, tab["y"] if tab else 480):
+                    problems.append(f"{language}: keyboard viewport hides controls")
+                print("keyboard", language, visible)
+            context.close()
+    GATES["/api/asr"] = original_asr
+    HOST.status = "idle"
+    return problems
+
+
 def run() -> int:
     problems: list[str] = []
     with sync_playwright() as p:
@@ -433,6 +532,7 @@ def run() -> int:
         problems += desktop(browser)
         problems += phone(browser)
         problems += failure_bar(browser)
+        problems += layout(browser)
         browser.close()
     print("problems:", problems or "none")
     return 1 if problems else 0

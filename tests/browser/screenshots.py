@@ -170,10 +170,10 @@ MESSAGES_S3 = [
     {"role": "assistant", "seq": 95, "text": "Nine of eleven answered from the templates. Two ask about courier rates for next month, which is a price decision: both are on the board, blocked on the rates.", "thinking": "", "tool_calls": [], "tool_results": [], "created_at": ago(minutes=52)},
 ]
 
-SERVICES_S1 = [{"name": "site-preview", "command": "python3 -m http.server $PORT --bind 0.0.0.0 --directory site", "cwd": "/srv/workspaces/a1b2c3d4e5f6", "port": 8100, "url": "http://192.168.1.20:8100", "pid": 4212, "status": "running", "restart": True, "note": None, "started_at": ago(minutes=7), "stopped_at": None, "share": {"mode": "key", "slug": "site-preview-k3f9", "key": "kM_x9pQ2rT7v", "url": "https://agent.example.com/s/site-preview-k3f9/?key=kM_x9pQ2rT7v", "public_base": "https://agent.example.com"}}]
+SERVICES_S1 = [{"name": "site-preview", "command": "python3 -m http.server $PORT --bind 0.0.0.0 --directory site", "cwd": "/srv/workspaces/a1b2c3d4e5f6", "port": 8100, "url": "http://203.0.113.20:8100", "pid": 4212, "status": "running", "restart": True, "note": None, "started_at": ago(minutes=7), "stopped_at": None, "share": {"mode": "key", "slug": "site-preview-k3f9", "key": "kM_x9pQ2rT7v", "url": "https://agent.example.com/s/site-preview-k3f9/?key=kM_x9pQ2rT7v", "public_base": "https://agent.example.com"}}]
 SERVICES_ALL = [
     {**SERVICES_S1[0], "session_id": S1, "session_title": "Bakery site"},
-    {"name": "digest-api", "command": "uvicorn app:api --host 0.0.0.0 --port $PORT", "cwd": "/srv/workspaces/d4e5f6a1b2c3", "port": 8101, "url": "http://192.168.1.20:8101", "pid": 4380, "status": "running", "restart": True, "note": None, "started_at": ago(hours=3), "stopped_at": None, "share": {"mode": "local", "slug": None, "key": None, "url": None, "public_base": "https://agent.example.com"}, "session_id": S4, "session_title": "Weekly digest"},
+    {"name": "digest-api", "command": "uvicorn app:api --host 0.0.0.0 --port $PORT", "cwd": "/srv/workspaces/d4e5f6a1b2c3", "port": 8101, "url": "http://203.0.113.20:8101", "pid": 4380, "status": "running", "restart": True, "note": None, "started_at": ago(hours=3), "stopped_at": None, "share": {"mode": "local", "slug": None, "key": None, "url": None, "public_base": "https://agent.example.com"}, "session_id": S4, "session_title": "Weekly digest"},
     {"name": "expense-ui", "command": "npm run dev -- --port $PORT", "cwd": "/srv/workspaces/f6a1b2c3d4e5", "port": 8102, "url": None, "pid": None, "status": "stopped", "restart": False, "note": "stopped by the operator", "started_at": ago(days=1), "stopped_at": ago(hours=20), "share": {"mode": "local", "slug": None, "key": None, "url": None, "public_base": "https://agent.example.com"}, "session_id": S6, "session_title": "Expense tracker"},
 ]
 
@@ -1062,6 +1062,30 @@ def run_workspace() -> int:
     return UNHANDLED.report()
 
 
+def run_composer() -> int:
+    """Retake conversation cards and the voice page that embeds them, in the selected language."""
+    result = run_workspace()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM, args=FAKE_MEDIA)
+        for prefix, viewport, mobile in (
+            ("voice", DESK, False),
+            ("voice-phone", PHONE, True),
+            ("voice-wide", {"width": 2560, "height": 1300}, False),
+        ):
+            context = browser.new_context(viewport=viewport, device_scale_factor=3 if mobile else 2, color_scheme="dark", is_mobile=mobile, has_touch=mobile, permissions=["microphone"])
+            page = context.new_page()
+            page.route("**/api/**", stub)
+            if prefix != "voice-wide":
+                shot(page, "phone-voice" if mobile else "voice", "voice")
+            stub.voice_frames = VOICE_STATES["speaking"]["frames"]  # type: ignore[attr-defined]
+            for name, before in VOICE_VIEWS.items():
+                shot(page, f"{prefix}-{name}", "voice", settle=1200, before=before)
+            stub.voice_frames = ""  # type: ignore[attr-defined]
+            context.close()
+        browser.close()
+    return result or UNHANDLED.report()
+
+
 def run() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
@@ -1128,4 +1152,4 @@ if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
     only = os.environ.get("ONLY")
-    sys.exit(run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
+    sys.exit(run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())

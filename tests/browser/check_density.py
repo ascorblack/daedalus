@@ -201,9 +201,9 @@ def judge(m: dict) -> list[str]:
         problems.append(f"{m['vw']}: the composer has no model selector")
     elif m["headModel"]["h"] > 32:
         problems.append(f"{m['vw']}: the model selector in the composer is {m['headModel']}")
-    # One row at rest: the pill is the 46 px the plan draws, give or take a hairline.
-    if m["composerBox"] and m["composerBox"]["h"] > 52:
-        problems.append(f"{m['vw']}: the composer pill is {m['composerBox']['h']}px at rest")
+    # The field grows independently; the controls remain one compact row.
+    if m["composerRow"] and m["composerRow"]["h"] > 44:
+        problems.append(f"{m['vw']}: the composer controls are {m['composerRow']['h']}px at rest")
     for h in m["act"]:
         if h > 28:
             problems.append(f"{m['vw']}: a step row is {h}px")

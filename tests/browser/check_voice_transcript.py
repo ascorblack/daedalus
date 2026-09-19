@@ -223,6 +223,21 @@ def check_the_phone(browser, check) -> None:  # type: ignore[no-untyped-def]
     check(middle < 40, f"the microphone sits at the bottom centre, under a thumb ({middle:.0f}px off)")
     check(box["y"] > read["y"], "over the transcript rather than beside it")
     check(read["width"] > 330, f"and the transcript has the width of the screen ({read['width']:.0f}px)")
+    page.locator(".voice-panel-key").click()
+    page.locator(".voice-agent").first.click()
+    page.wait_for_selector(".voice-read .composer textarea")
+    for height in (844, 480):
+        page.locator(".voice-read .composer textarea").focus()
+        page.set_viewport_size({"width": 390, "height": height})
+        page.wait_for_timeout(300)
+        bounds = page.evaluate("""() => {
+          const rect = s => { const r = document.querySelector(s).getBoundingClientRect(); return {top:r.top, bottom:r.bottom}; };
+          return {row:rect('.voice-read .composer-row'), card:rect('.voice-read .composer-box'),
+            mic:rect('.voice-mic-float'), tab:rect('.tabbar'), messages:rect('.voice-read .chat-scroll')};
+        }""")
+        check(bounds["row"]["top"] >= 0 and bounds["row"]["bottom"] <= bounds["mic"]["top"], f"{height}: embedded composer controls stay above the microphone ({bounds})")
+        check(bounds["card"]["bottom"] <= bounds["tab"]["top"] <= height, f"{height}: the card stays above the tab bar")
+        check(bounds["messages"]["bottom"] <= bounds["card"]["top"], f"{height}: the card leaves the message viewport clear")
     context.close()
 
 

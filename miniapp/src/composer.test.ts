@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   answersComplete,
   composerKey,
+  composerContext,
   dockKey,
   draftKey,
   fieldHeight,
@@ -88,7 +89,7 @@ describe("keys in the field", () => {
 
 describe("the field's height", () => {
   it("follows the text up to eight lines and no further", () => {
-    expect(fieldHeight(40, 21, 20)).toBe(40);
+    expect(fieldHeight(40, 21, 20)).toBe(41);
     expect(fieldHeight(600, 21, 20)).toBe(21 * MAX_ROWS + 20);
   });
 });
@@ -174,5 +175,35 @@ describe("the agent's questions", () => {
     expect(answersComplete(qs, [{ selected: ["x"], custom: "" }, { selected: [], custom: "" }])).toBe(false);
     expect(answersComplete(qs, [{ selected: ["x"], custom: "" }, { selected: [], custom: "y" }])).toBe(true);
     expect(answersComplete([], [])).toBe(false);
+  });
+});
+
+describe("the card layout", () => {
+  it("reserves three phone lines, grows, then scrolls after eight", () => {
+    expect(fieldHeight(0, 22.4, 16, 3)).toBe(84);
+    expect(fieldHeight(129, 22.4, 16, 3)).toBe(129);
+    expect(fieldHeight(900, 22.4, 16, 3)).toBe(195);
+  });
+
+  it("uses the physical Enter keys with either alphabet", () => {
+    for (const code of ["Enter", "NumpadEnter"]) {
+      expect(composerKey(key({ key: "Unidentified", code }), { enterSends: true, paletteOpen: false })).toBe("send");
+      expect(composerKey(key({ key: "Unidentified", code, shiftKey: true }), { enterSends: true, paletteOpen: false })).toBe("newline");
+    }
+  });
+
+  it("shows short project and distinct workspace names", () => {
+    expect(composerContext({ project: "Bakery", workspace: "projects/site/" })).toEqual([
+      { kind: "project", name: "Bakery" }, { kind: "workspace", name: "site" },
+    ]);
+    expect(composerContext({ workspace: "projects\\site" })).toEqual([{ kind: "workspace", name: "site" }]);
+  });
+
+  it("omits absent, duplicate, internal and opaque context", () => {
+    expect(composerContext()).toEqual([]);
+    expect(composerContext({ project: " ", workspace: "." })).toEqual([]);
+    expect(composerContext({ project: "Voice", workspace: "voice", system: true })).toEqual([]);
+    expect(composerContext({ project: "Bakery", workspace: "bakery" })).toEqual([{ kind: "project", name: "Bakery" }]);
+    expect(composerContext({ workspace: "a1b2c3d4e5f6" })).toEqual([]);
   });
 });
