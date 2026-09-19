@@ -392,6 +392,7 @@ class SessionManager:
         """Callbacks the transport layer installs: send_file, spawn_agent, schedule, self_*."""
         self.prompt_hooks: list[Callable[[str, str], Awaitable[str]]] = []
         """``(session_id, text) -> text`` applied to a message that starts a new run (fired reminders ride along)."""
+        self.idle_work = asyncio.Lock()
         self.run_started_hooks: list[Callable[[str, str], Awaitable[None]]] = []
         """``(session_id, run_id)`` after a run was actually created — the point where a prompt hook's side effects may be committed."""
         self.shutting_down = False
@@ -820,8 +821,8 @@ class SessionManager:
             for m in candidates
         ]
 
-    async def list_sessions(self, limit: int = 100) -> list[dict[str, Any]]:
-        rows = await self.sessions.list_sessions(TENANT, limit=limit)
+    async def list_sessions(self, limit: int = 100, *, ids: list[str] | None = None) -> list[dict[str, Any]]:
+        rows = await self.sessions.list_sessions(TENANT, limit=limit, ids=ids)
         projects = await self.projects.by_session()
         out: list[dict[str, Any]] = []
         for session in rows:
@@ -1025,7 +1026,8 @@ class SessionManager:
         history, tail = full[:cut], full[cut:]
         if not history:
             raise RuntimeError("nothing to compact: the whole history is inside the kept tail")
-        state.compacting = {"reason": reason, "stage": "summarising", "messages": len(history), "parts_done": 0, "parts_total": 0, "started_at": datetime.now(UTC).isoformat()}
+        async with self.idle_work:
+            state.compacting = {"reason": reason, "stage": "summarising", "messages": len(history), "parts_done": 0, "parts_total": 0, "started_at": datetime.now(UTC).isoformat()}
         await self._compaction_progress(state)
         try:
             return await self._compact_progressing(state, history, tail, instructions, reason, own_task_ok=own_task_ok)
@@ -2262,6 +2264,14 @@ class SessionManager:
     async def _start_run_locked(
         self, state: SessionState, message: Message | None, *, continue_turn: bool = False
     ) -> str:
+        # A bounded indexing chunk yields before an agent starts; the index checks busy again
+        # under this same lock, so background inference cannot overlap an active run.
+        async with self.idle_work:
+            return await self._start_run_ready(state, message, continue_turn=continue_turn)
+
+    async def _start_run_ready(
+        self, state: SessionState, message: Message | None, *, continue_turn: bool = False
+    ) -> str:
         if state.running and not continue_turn:
             raise RuntimeError("a run is already active in this session")
         state.run_active_since = time.monotonic()
@@ -3287,7 +3297,8 @@ class SessionManager:
             return
         if engine.state is not LoopState.RUNNING:
             engine.transition_to(LoopState.RUNNING)
-        state.task = asyncio.create_task(self._drive(state, engine, None, True), name=f"resume:{entry['run_id']}")
+        async with self.idle_work:
+            state.task = asyncio.create_task(self._drive(state, engine, None, True), name=f"resume:{entry['run_id']}")
         state.task.add_done_callback(_log_task_failure)
         resumed.append(entry["run_id"])
 

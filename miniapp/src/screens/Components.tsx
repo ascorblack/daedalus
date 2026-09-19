@@ -16,6 +16,7 @@
 //  * Progress is a live stream, not a spinner. A three-hundred-megabyte browser looks like one.
 
 import { useCallback, useEffect, useState } from "react";
+import { SearchComponent } from "../searchcomponent";
 import { api } from "../api";
 import { Icon } from "../icons";
 import { modelSize as size } from "../format";
@@ -283,6 +284,7 @@ export function ComponentsTab({ toast }: { toast: (t: string) => void }) {
       {problem && <div className="sub attn comp-line">{problem}</div>}
 
       <div className="comp-grid">
+        <SearchComponent />
         {view.components.map((entry) => (
           <Card key={entry.id} entry={entry} view={view} busy={busy} onInstall={install} onCancel={cancel} />
         ))}

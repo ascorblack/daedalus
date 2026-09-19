@@ -24,12 +24,12 @@ from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qsl, urlencode
 
 import httpx
 import uvicorn
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from protocore.contracts.memory import MemoryScope
@@ -63,6 +63,7 @@ from daedalus.host.session_runner import TENANT, Attachment
 from daedalus.host.transcript_view import message_view
 from daedalus.providers.llamacpp import discover_llamacpp
 from daedalus.providers.openai_compat import UsageRecord
+from daedalus.search.service import ConversationSearch, SearchBusy
 from daedalus.security import redact
 from daedalus.speech import catalog as speech_catalog
 from daedalus.speech import models as speech_models
@@ -456,6 +457,11 @@ class SettingsBody(BaseModel):
     ops: dict[str, Any] | None = None
     compaction: dict[str, Any] | None = None
     answer_language: str | None = None
+
+
+class ConversationSearchBody(BaseModel):
+    mode: Literal["off", "local"] = "off"
+    paused: bool = False
 
 
 class SttSelectBody(BaseModel):
@@ -1172,15 +1178,63 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     # -- sessions -------------------------------------------------------------------
 
+    async def conversation_search() -> ConversationSearch:
+        service = getattr(app, "search", None)
+        if service is None:
+            service = ConversationSearch(app.db, settings.state_dir, manager=manager)
+            app.search = service
+        await service.load()
+        return service
+
+    @api.get("/api/conversation-search/settings")
+    async def search_settings(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return await (await conversation_search()).status()
+
+    @api.put("/api/conversation-search/settings")
+    async def search_configure(body: ConversationSearchBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return await (await conversation_search()).configure(body.mode, body.paused)
+
+    @api.post("/api/conversation-search/model")
+    async def search_download(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        service = await conversation_search()
+        service.downloads.start("multilingual-e5-small")
+        return await service.status()
+
+    @api.post("/api/conversation-search/model/cancel")
+    async def search_cancel(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        service = await conversation_search()
+        service.downloads.cancel("multilingual-e5-small")
+        return await service.status()
+
+    @api.delete("/api/conversation-search/model")
+    async def search_delete(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        service = await conversation_search()
+        await service.configure("off", True)
+        await service.downloads.delete("multilingual-e5-small")
+        return await service.status()
+
+    @api.get("/api/sessions/search")
+    async def search_sessions(q: str = Query(min_length=1, max_length=500), project: str = Query(default="", max_length=128),
+                              limit: int = Query(default=30, ge=1, le=50), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        service = await conversation_search()
+        try:
+            found = await service.query(q, project=project, limit=limit)
+        except SearchBusy as exc:
+            raise HTTPException(429, str(exc)) from exc
+        hits = {h["session_id"]: h for h in found.pop("hits")}
+        listing = await session_listing(list(hits))
+        for row in listing["sessions"]:
+            row["match"] = hits[row["id"]]
+        listing["sessions"].sort(key=lambda row: -row["match"]["score"])
+        listing["projects"] = [p for p in listing["projects"] if any(s["project_id"] == p["id"] for s in listing["sessions"])]
+        return {**listing, **found, "indexing": service.settings["mode"] == "local" and bool((await service.status())["pending"])}
+
     @api.get("/api/sessions")
     async def list_sessions(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """One page of the agents, and the folders they are listed in.
+        return await session_listing()
 
-        The rows are a page (the newest 200); the per-project counts beside them are not — they come
-        from one aggregate over the sessions table, so a folder says how many agents are in it and
-        not how many of them fitted on this page. Nothing here reads a transcript.
-        """
-        rows = await manager.list_sessions(limit=200)
+    async def session_listing(ids: list[str] | None = None) -> dict[str, Any]:
+        rows = await manager.list_sessions(limit=200, ids=ids) if ids is not None else await manager.list_sessions(limit=200)
         projects = await manager.projects.list()
         names = {p.id: p.name for p in projects}
         default = app.config.default_preset()
@@ -1208,6 +1262,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         counts = await manager.projects.summary(active)
         empty = {"total": 0, "active": 0, "loops": 0, "last_message_at": ""}
         folders = [{**p.view(), **counts.get(p.id, empty)} for p in projects]
+        folders.sort(key=lambda p: (p["last_message_at"] or p["created_at"], p["id"]), reverse=True)
         return {"sessions": rows, "projects": folders}
 
     @api.post("/api/sessions")

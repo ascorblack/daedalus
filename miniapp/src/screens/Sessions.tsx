@@ -1,34 +1,53 @@
-import { memo, useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, Project, ProjectFolder, SessionList, SessionSummary, Settings } from "../api";
 import { Avatar, Dot, Skeleton, Status, ToolPicker, fmtInterval, statusWord } from "../components";
 import { Sheet } from "../dialogs";
 import { relTime, shortModel, untilShort } from "../format";
 import { Folder, Row as RowModel, agentName, arrange, folderOpen, rememberFolder } from "../grouping";
 import { Icon } from "../icons";
-import { ProjectChip, useProjects } from "../projects";
+import { ProjectChip, ProjectSettingsSheet, useProjects } from "../projects";
 import { PageHeader, screenTitle } from "../shell";
 import { useQuery } from "../store";
 import { WindowedRows } from "../virtual";
 import { errorText } from "../ui";
 import { plural, t } from "../i18n";
 
-type Filter = "all" | "working" | "loops";
+type SearchList = SessionList & { semantic: boolean; reason: string; partial: boolean; indexing: boolean };
 
 export function SessionsScreen({ onOpen, toast, current, compact, project = "", projects = [], onProjects }: { onOpen: (id: string) => void; toast: (t: string) => void; current?: string; compact?: boolean; project?: string; projects?: Project[]; onProjects?: () => void }) {
   const { data, error, loading } = useQuery<SessionList>("/api/sessions", { pollMs: 5000, staleMs: 3000 });
   const [creating, setCreating] = useState(() => new URLSearchParams(window.location.search).get("new") === "1");
   const [query, setQuery] = useState("");
-  const [searching, setSearching] = useState(false);
-  const [filter, setFilter] = useState<Filter>("all");
+  const [results, setResults] = useState<SearchList | null>(null);
+  const [pending, setPending] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const searching = !!query.trim();
+  useEffect(() => {
+    setResults(null);
+    setSearchError("");
+    setPending(searching);
+    if (!searching) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void fetch(`/api/sessions/search?q=${encodeURIComponent(query.trim())}&project=${encodeURIComponent(project)}`, { headers: api.authHeaders(), signal: controller.signal })
+        .then(async (response) => {
+          if (!response.ok) throw new Error(t("search.failed"));
+          const answer: SearchList = await response.json();
+          if (!controller.signal.aborted) setResults(answer);
+        })
+        .catch(() => { if (!controller.signal.aborted) setSearchError(t("search.failed")); })
+        .finally(() => { if (!controller.signal.aborted) setPending(false); });
+    }, 250);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [query, project, searching]);
+  const searchField = <input type="search" className="field search" placeholder={t("search.placeholder")} value={query} maxLength={500} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") setQuery(""); }} aria-label={t("search.label")} />;
   const inProject = projects.find((p) => p.id === project);
 
-  // The arrangement is a pure function of what came back: folders for the projects, one bucket for
-  // the agents that work in a directory of their own, and the nesting inside each. Memoised on the
-  // three things that can change it, so typing in the search box does not re-walk a list that did not.
-  const sessions = data?.sessions ?? [];
+  const listing = searching ? results : data;
+  const sessions = listing?.sessions ?? [];
   const folders = useMemo(
-    () => arrange(sessions, data?.projects ?? [], { project, filter, query }),
-    [data, project, filter, query],
+    () => arrange(sessions, listing?.projects ?? [], { project, results: searching }),
+    [listing, project, searching],
   );
 
   // In the sidebar the screen is the column: no page header, no filter chips, one row of controls
@@ -37,10 +56,9 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
     <>
       <div className="sidebar-head">
         {onProjects && <ProjectChip projects={projects} current={project} onOpen={onProjects} />}
-        <button className={`iconbtn small quiet ${searching ? "on" : ""}`} onClick={() => { setSearching((v) => !v); if (searching) setQuery(""); }} title={t("common.search")} aria-label={t("common.search")} aria-pressed={searching}><Icon name="search" size={16} /></button>
         <button className="iconbtn small quiet" onClick={() => setCreating(true)} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" size={16} /></button>
       </div>
-      {searching && <input className="field search" autoFocus placeholder={t("agents.search")} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") { setQuery(""); setSearching(false); } }} aria-label={t("agents.search.label")} />}
+      {searchField}
     </>
   ) : (
       <PageHeader
@@ -49,37 +67,35 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
         actions={
           <>
             {onProjects && <button className="iconbtn" onClick={onProjects} title={t("shell.projects")} aria-label={t("shell.projects")}><Icon name="skill" /></button>}
-            <button className={`iconbtn ${searching ? "on" : ""}`} onClick={() => { setSearching((v) => !v); if (searching) setQuery(""); }} title={t("common.search")} aria-label={t("common.search")} aria-pressed={searching}><Icon name="search" /></button>
             <button className="iconbtn primary" onClick={() => setCreating(true)} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" /></button>
           </>
         }
       >
-        {searching && <input className="field search" autoFocus placeholder={t("agents.search")} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") { setQuery(""); setSearching(false); } }} aria-label={t("agents.search.label")} />}
-        <div className="chips">
-          {(["all", "working", "loops"] as Filter[]).map((f) => (
-            <button key={f} className="chip select" aria-pressed={filter === f} onClick={() => setFilter(f)}>
-              {f === "all" ? t("agents.filter.all", { n: folders.total }) : f === "working" ? t("agents.filter.working", { n: folders.active }) : t("agents.filter.loops", { n: folders.loops })}
-            </button>
-          ))}
-        </div>
+        {searchField}
       </PageHeader>
   );
   return (
     <>
       {head}
       <div className="screen agents-screen">
+        {searching && <div className="search-notice sub" role="status">
+          {pending ? t("search.loading") : searchError || (results?.semantic ? t("search.semantic") : t("search.exact"))}
+          {!pending && !searchError && results && !results.semantic && <> <a href="/app/settings/components">{t("search.enable")}</a></>}
+          {results?.indexing && <span> {t("search.indexing")}</span>}
+          {results?.partial && <span> {t("search.partial")}</span>}
+        </div>}
         {loading && !error && <Skeleton rows={5} />}
         {error && !data && <div className="empty"><b>{t("agents.error")}</b><div>{error}</div></div>}
-        {data && folders.total === 0 && (
+        {data && !searching && folders.total === 0 && (
           <div className="empty">
             <b>{inProject ? t("agents.empty.project", { name: inProject.name }) : t("agents.empty")}</b>
             <div>{inProject ? t("agents.empty.project.sub", { root: inProject.root }) : t("agents.empty.sub")}</div>
             <button className="btn primary" onClick={() => setCreating(true)}>{t("agents.empty.create")}</button>
           </div>
         )}
-        {data && folders.total > 0 && folders.shown === 0 && <div className="empty">{t("common.nothing")}</div>}
+        {((results && !pending && folders.shown === 0) || (!searching && data && folders.total > 0 && folders.shown === 0)) && <div className="empty">{t("common.nothing")}</div>}
         {folders.folders.map((f) => (
-          <FolderSection key={f.key} folder={f} onOpen={onOpen} current={current} filtered={filter !== "all" || query.trim() !== ""} compact={compact} />
+          <FolderSection key={f.key} folder={f} onOpen={onOpen} current={current} filtered={searching} compact={compact} toast={toast} />
         ))}
       </div>
       {creating && <NewAgentSheet onClose={() => setCreating(false)} onCreated={onOpen} toast={toast} project={project} />}
@@ -99,7 +115,7 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
  * A search or a filter opens what it found: leaving a match behind a closed folder would be a screen
  * that answers "nothing" while holding the answer.
  */
-type FolderProps = { folder: Folder; onOpen: (id: string) => void; current?: string; filtered: boolean; compact?: boolean };
+type FolderProps = { toast: (text: string) => void; folder: Folder; onOpen: (id: string) => void; current?: string; filtered: boolean; compact?: boolean };
 
 /** One row per line the folder draws: an agent, then the forks taken from it, then their forks.
  *  The nesting is in the model and not in the DOM, so the rows can be windowed as one list. */
@@ -125,29 +141,46 @@ function holds(rows: RowModel[], id: string | undefined): boolean {
  *  once while the folders are arranged, so this costs a string comparison. */
 function sameFolder(a: FolderProps, b: FolderProps): boolean {
   const l = a.folder, r = b.folder;
+  if (l.single !== r.single || a.toast !== b.toast) return false;
   if (a.filtered !== b.filtered || a.current !== b.current || a.onOpen !== b.onOpen || a.compact !== b.compact) return false;
   if (l.key !== r.key || l.name !== r.name || l.total !== r.total || l.active !== r.active || l.loops !== r.loops || l.last_message_at !== r.last_message_at) return false;
   if (l.project?.root !== r.project?.root) return false;
   return l.sig === r.sig;
 }
 
-const FolderSection = memo(function FolderSection({ folder, onOpen, current, filtered, compact }: FolderProps) {
+export const FolderSection = memo(function FolderSection({ folder, onOpen, current, filtered, compact, toast }: FolderProps) {
   const [open, setOpen] = useState(() => folderOpen(folder.key));
+  const [editing, setEditing] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const wasSingle = useRef(folder.single);
+  useEffect(() => {
+    if (wasSingle.current && !folder.single) setOpen(true);
+    wasSingle.current = folder.single;
+  }, [folder.single]);
   const section = useRef<HTMLElement | null>(null);
+  const becomingFolder = wasSingle.current && !folder.single;
+  const focusedAgent = becomingFolder ? section.current?.querySelector<HTMLElement>(".erow:focus")?.dataset.session : undefined;
+  useLayoutEffect(() => {
+    if (focusedAgent) [...(section.current?.querySelectorAll<HTMLElement>(".erow") ?? [])].find((row) => row.dataset.session === focusedAgent)?.focus();
+  }, [focusedAgent]);
   const rows = useMemo(() => lines(folder.rows), [folder.rows]);
   const keys = useMemo(() => rows.map((line) => line.row.s.id), [rows]);
   // The folder holding the open session opens itself, without remembering it: a sidebar whose
   // current row is behind a closed folder answers "where am I" with nothing.
   const mine = holds(folder.rows, current);
-  const showing = open || mine || (filtered && folder.rows.length > 0);
+  const showing = open || becomingFolder || (!folder.single && mine) || (filtered && folder.rows.length > 0);
   const toggle = () => {
     const next = !open;
     setOpen(next);
     rememberFolder(folder.key, next);
   };
   return (
-    <section ref={section} className={`folder ${folder.system ? "system" : ""} ${showing ? "open" : ""}`}>
-      <button className="folder-head" onClick={toggle} aria-expanded={showing}>
+    <section ref={section} data-project={folder.key} className={`folder ${folder.single ? "single" : ""} ${folder.system ? "system" : ""} ${showing ? "open" : ""}`}>
+      <div className="folder-top">
+      {folder.single ? <>
+        <button className="iconbtn small quiet folder-expand" onClick={toggle} aria-expanded={showing} aria-label={t("search.expand", { name: folder.name })}><span className={`chev ${showing ? "down" : ""}`} aria-hidden>›</span></button>
+        <Row s={folder.rows[0].s} kids={[]} onOpen={onOpen} current={current === folder.rows[0].s.id} compact={compact} projectName={folder.name} />
+      </> : <button className="folder-head" onClick={toggle} aria-expanded={showing}>
         <span className={`chev ${showing ? "down" : ""}`} aria-hidden>›</span>
         <Icon name={folder.system ? "mic" : "folder"} size={16} />
         <span className="folder-name truncate">{folder.name}</span>
@@ -162,10 +195,12 @@ const FolderSection = memo(function FolderSection({ folder, onOpen, current, fil
           </span>
         )}
         {!compact && folder.last_message_at && <span className="folder-time sub num" title={new Date(folder.last_message_at).toLocaleString()}>{relTime(folder.last_message_at)}</span>}
-      </button>
+      </button>}
+      <button className="iconbtn small quiet folder-actions" onClick={() => setEditing(true)} aria-label={t("project.settings.for", { name: folder.name })}><Icon name="more" size={16} /></button>
+      </div>
       {showing && !compact && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
       {showing && folder.rows.length === 0 && <div className="folder-empty sub">{filtered ? t("common.nothing") : t("agents.folder.none")}</div>}
-      {showing && (
+      {showing && !folder.single && (
         <WindowedRows
           keys={keys}
           host={section}
@@ -183,6 +218,9 @@ const FolderSection = memo(function FolderSection({ folder, onOpen, current, fil
           )}
         />
       )}
+      {showing && <button className="btn small ghost folder-add" onClick={() => setAdding(true)}>{t("agents.new")}</button>}
+      {editing && <ProjectSettingsSheet project={{ ...folder.project, sessions: folder.rows.map((r) => ({ id: r.s.id, title: r.s.title })) }} onClose={() => setEditing(false)} onRemoved={() => setEditing(false)} toast={toast} />}
+      {adding && <NewAgentSheet project={folder.key} onClose={() => setAdding(false)} onCreated={onOpen} toast={toast} />}
     </section>
   );
 }, sameFolder);
@@ -206,19 +244,20 @@ function loopLine(s: SessionSummary): string {
 function sameRow(a: RowProps, b: RowProps): boolean {
   const l = a.s, r = b.s;
   if (l.id !== r.id || l.title !== r.title || l.status !== r.status || l.last_message_at !== r.last_message_at || l.model !== r.model || l.workspace_path !== r.workspace_path) return false;
+  if (a.projectName !== b.projectName || l.match?.snippet !== r.match?.snippet) return false;
   if (a.current !== b.current || a.compact !== b.compact || a.fork?.seq !== b.fork?.seq || a.fork?.of !== b.fork?.of) return false;
   if (JSON.stringify(l.metadata?.loop ?? null) !== JSON.stringify(r.metadata?.loop ?? null)) return false;
   if (a.kids.length !== b.kids.length) return false;
   return a.kids.every((k, i) => k.id === b.kids[i].id && k.status === b.kids[i].status && k.title === b.kids[i].title);
 }
 
-type RowProps = { s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number }; compact?: boolean };
+type RowProps = { projectName?: string; s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number }; compact?: boolean };
 
-const Row = memo(function Row({ s, kids, onOpen, current, fork, compact }: RowProps) {
+const Row = memo(function Row({ s, kids, onOpen, current, fork, compact, projectName }: RowProps) {
   const [showKids, setShowKids] = useState(false);
   const orphan = !!s.metadata?.subagent_of;
   const status = s.status as Status;
-  const spoken = status === "running" || status === "waiting" || status === "failed" || status === "compacting";
+  const spoken = !!projectName || status === "running" || status === "waiting" || status === "failed" || status === "compacting";
   const loop = loopLine(s);
   const visibleKids = showKids ? kids : kids.slice(0, 3);
   const open = () => onOpen(s.id);
@@ -227,27 +266,28 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, compact }: RowPr
     // carries something the reader needs now — a loop's next run, what a fork was taken from, a
     // leader that is gone. Never the model: it is in the open session, and in the tooltip here.
     const needs = status === "waiting" || status === "failed";
-    const second = fork ? t("agents.fork.at", { n: fork.seq }) : loop || (orphan ? t("agents.orphan") : "");
+    const second = projectName ? `${shortModel(s.model ?? "", 28)} · ${statusWord(status)}` : fork ? t("agents.fork.at", { n: fork.seq }) : loop || (orphan ? t("agents.orphan") : "");
     return (
-      <div className={`erow ${status} ${current ? "current" : ""} ${fork ? "fork" : ""}`} title={s.model ? `${s.model} · ${s.id}` : s.id} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
+      <div data-session={s.id} className={`erow ${status} ${current ? "current" : ""} ${fork ? "fork" : ""}`} title={s.model ? `${s.model} · ${s.id}` : s.id} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
         <Dot status={status} className="erow-dot" />
         <div className="erow-main">
           <div className="erow-head">
-            <span className="erow-title truncate">{agentName(s)}</span>
+            <span className="erow-title truncate">{projectName && <span className="erow-project">{projectName} · </span>}{agentName(s)}</span>
             {needs && <span className={`erow-state ${status}`}>{statusWord(status)}</span>}
             <span className="erow-time num" title={new Date(s.last_message_at).toLocaleString()}>{relTime(s.last_message_at)}</span>
           </div>
+          {s.match && <div className="search-passage truncate">{s.match.snippet}</div>}
           {second && <div className={`erow-meta ${s.metadata?.loop?.status === "paused" ? "waiting" : ""}`}>{fork && <Icon name="fork" size={11} />}{second}</div>}
         </div>
       </div>
     );
   }
   return (
-    <div className={`erow ${status} ${current ? "current" : ""} ${fork ? "fork" : ""}`} title={s.workspace_path} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
+    <div data-session={s.id} className={`erow ${status} ${current ? "current" : ""} ${fork ? "fork" : ""}`} title={s.workspace_path} role="link" aria-current={current ? "page" : undefined} tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
       <Avatar status={status} seed={s.id} />
       <div className="erow-main">
         <div className="erow-head">
-          <span className="erow-title clamp-2">{agentName(s)}</span>
+          <span className="erow-title clamp-2">{projectName && <span className="erow-project">{projectName} · </span>}{agentName(s)}</span>
           {s.workspace_own && !fork && <span className="chip tiny" title={s.workspace_path}>{t("agents.own.chip")}</span>}
           <span className="erow-time num" title={new Date(s.last_message_at).toLocaleString()}>{relTime(s.last_message_at)}</span>
         </div>
@@ -259,6 +299,7 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, compact }: RowPr
           {orphan && <span className="sep">·</span>}
           {orphan && <span>{t("agents.orphan")}</span>}
         </div>
+        {s.match && <div className="search-passage truncate">{s.match.snippet}</div>}
         {fork && <div className="erow-meta"><Icon name="fork" size={12} /> <span title={t("agents.fork.of", { name: fork.of, n: fork.seq })}>{t("agents.fork.at", { n: fork.seq })}</span></div>}
         {loop && <div className={`erow-meta ${s.metadata?.loop?.status === "paused" ? "waiting" : ""}`}>{loop}</div>}
         {kids.length > 0 && (

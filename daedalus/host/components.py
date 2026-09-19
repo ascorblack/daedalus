@@ -184,7 +184,7 @@ def engine_installed() -> bool:
     change without a restart for that to be worth anything.
     """
     importlib.invalidate_caches()
-    return importlib.util.find_spec("sherpa_onnx") is not None
+    return all(importlib.util.find_spec(name) is not None for name in ("sherpa_onnx", "onnxruntime", "tokenizers"))
 
 
 def _found(path: str | None) -> bool:

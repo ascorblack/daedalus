@@ -19,6 +19,7 @@ from daedalus.host.boot_guard import BootGuard
 from daedalus.host.component_install import Installer
 from daedalus.host.session_runner import SessionManager, SessionState
 from daedalus.providers.llamacpp import describe_discovery, discover_llamacpp
+from daedalus.search.service import ConversationSearch
 from daedalus.speech.service import LocalSpeech
 from daedalus.speech.tts_service import LocalTts
 from daedalus.stores.database import Database
@@ -43,6 +44,7 @@ class Application:
         self._shut_down = False
         # The local speech models: a directory listing and a configuration read, no engine and no
         # model until something actually asks for words.
+        self.search = ConversationSearch(self.db, settings.state_dir)
         self.speech = LocalSpeech(settings.state_dir, self.config)
         # And the voices it speaks with, on the same terms: a directory listing and a configuration
         # read, no engine and no voice until something actually asks to be heard.
@@ -78,6 +80,8 @@ class Application:
         await self.db.open()
         self.manager = SessionManager(self.settings, self.config, db=self.db)
         await self.manager.start()
+        self.search.manager = self.manager
+        self.search.task = asyncio.create_task(self.search.run(), name="conversation-index")
         await self._log_llamacpp_startup()
         if self.settings.telegram_bot_token and not self.settings.owner_user_id:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is set without OWNER_USER_ID: the bot would not know whose messages to answer")
@@ -212,6 +216,7 @@ class Application:
         try:
             for task in self.background:
                 task.cancel()
+            await self.search.close()
             await self.speech.downloads.close()
             if self.manager is not None:
                 await self.manager.close()

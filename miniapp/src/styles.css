@@ -2039,3 +2039,13 @@ input.field[type="range"] {
 /* Keep the newest-message shortcut above a card of any height. */
 .composer-jump-anchor { position:relative; flex:none; height:0; }
 .composer-jump-anchor .jump-down { bottom:var(--space-2); right:var(--space-3); width:var(--ctl-h); height:var(--ctl-h); }
+/* Project controls keep their place when a conversation gains a neighbour. */
+.folder-top { display: flex; align-items: center; gap: var(--space-1); }
+.folder-top > .folder-head, .folder-top > .erow { flex: 1; min-width: 0; }
+.folder-top > .erow { margin: 0; }
+.folder-expand, .folder-actions { flex-shrink: 0; }
+.erow-project { color: var(--muted); font-weight: 400; }
+.search-passage { font-size: var(--fs-12); color: var(--muted); margin-top: var(--space-1); }
+.search-notice { padding: var(--space-2) var(--space-3); }
+.folder-add { margin: var(--space-1) var(--space-3); }
+.search-component progress { width: 100%; accent-color: var(--accent); }
