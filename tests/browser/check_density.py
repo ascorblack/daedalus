@@ -214,10 +214,15 @@ def judge(m: dict) -> list[str]:
     if m["answerFs"] != (16 if phone else 15):
         problems.append(f"{m['vw']}: the answer is {m['answerFs']}px")
     if m["timeline"]:
-        if m["timeline"]["w"] > 920:
-            problems.append(f"{m['vw']}: the timeline is {m['timeline']['w']}px, over the 920 stripe")
-        if m["vw"] == 2560 and m["timeline"]["w"] != 920:
-            problems.append(f"2560: the timeline is {m['timeline']['w']}px, not the 920 stripe")
+        # The conversation and the field that answers it are one column. Two claims, both of them
+        # about what went wrong before: the field is exactly as wide as the conversation above it
+        # (they were offset against each other), and the stripe is never exceeded. How much room a
+        # panel leaves is not arithmetic worth pinning here; the widening claim is made below.
+        stripe = 920 if m["vw"] < 1600 else (1120 if m["vw"] < 2100 else 1320)
+        if m["timeline"]["w"] > stripe:
+            problems.append(f"{m['vw']}: the timeline is {m['timeline']['w']}px, over the {stripe} stripe")
+        if m["vw"] >= 1024 and m["composerBox"] and abs(m["composerBox"]["w"] - m["timeline"]["w"]) > 2:
+            problems.append(f"{m['vw']}: the composer is {m['composerBox']['w']}px against a {m['timeline']['w']}px timeline")
         # Beside the 42 % panel a 1440 window keeps a 677 px conversation column (the plan's own
         # figure): the timeline inside it is that minus the gutters.
         if m["vw"] == 1440 and m["timeline"]["w"] < 600:
@@ -264,6 +269,11 @@ def run() -> int:
         problems += judge_sidebar(measured["sidebar"])
     if MEASURE:
         Path(MEASURE).write_text(json.dumps(measured, indent=1) + "\n")
+    if ASSERT:
+        # A wider window must read wider, not pad the sides: the owner's standing complaint.
+        wide = {m["vw"]: m["timeline"]["w"] for n, m in measured.items() if n.startswith("session-") and m.get("timeline") and m["vw"] >= 1024}
+        if len(wide) > 1 and wide[max(wide)] <= wide[min(wide)]:
+            problems.append(f"the conversation does not widen with the window: {wide}")
     print("problems:", problems or "none")
     return 1 if problems else 0
 

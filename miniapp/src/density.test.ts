@@ -251,10 +251,22 @@ describe("rows and controls", () => {
     expect(decl(".act")).toContain("min-height: 28px");
   });
 
-  it("cap the conversation at the stripe and the prose at the reading width", () => {
+  it("keeps the conversation in one column with the field that answers it", () => {
+    // The defect this guards against is an offset: prose on one axis, the composer on another.
+    // Both take the stripe, and nothing in a turn is capped below it.
     const wide = all.filter((r) => r.media.includes("min-width: 1024px")).map((r) => `${r.selector}{${r.body}}`).join("\n");
     expect(wide).toMatch(/\.timeline, \.composer-box\{[^}]*var\(--chat-w\)/);
-    expect(wide).toMatch(/\.answer[^{]*\{[^}]*max-width: var\(--reading-w\)/);
+    expect(wide).toMatch(/\.composer-box,[^{]*\{[^}]*var\(--chat-w\)/);
+    expect(wide).toMatch(/\.answer[^{]*\{[^}]*max-width: 100%/);
+    expect(wide).not.toMatch(/\.answer[^{]*\{[^}]*max-width: var\(--reading-w\)/);
+  });
+
+  it("widens the stripe on a wide window rather than leaving margin", () => {
+    // A 2560 screen should read wider than a 1440 one; the owner's standing complaint is narrowness.
+    const stripes = all.filter((r) => r.selector === ":root" && /--chat-w/.test(r.body));
+    const widths = stripes.map((r) => Number(/--chat-w:\s*(\d+)px/.exec(r.body)?.[1] ?? 0));
+    expect(widths.length).toBeGreaterThan(1);
+    expect(Math.max(...widths)).toBeGreaterThan(Math.min(...widths));
   });
 });
 

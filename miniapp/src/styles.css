@@ -64,7 +64,7 @@
   --sidebar-strip: 48px;
   --panel-w: 42%; --panel-w-min: 360px;
   --reading-w: 760px;   /* prose max width: the answer and the user's card */
-  --chat-w: 920px;      /* the stripe the timeline and the composer share */
+  --chat-w: 920px;      /* the stripe the timeline, the turns and the composer share; it widens below */
   --head-h: 48px;
   --composer-h: 46px;
   /* Motion. */
@@ -470,7 +470,7 @@ a { color: var(--accent); text-decoration: none; }
 .sysnote-body p:last-child { margin-bottom:0; }
 
 /* ── the files a turn produced: cards under the answer ── */
-.artifacts { display:flex; flex-direction:column; gap:6px; margin-top:4px; max-width:var(--reading-w); }
+.artifacts { display:flex; flex-direction:column; gap:6px; margin-top:4px; }
 .artifact { position:relative; display:grid; grid-template-columns:minmax(0, 1fr) auto; align-items:center; min-height:48px; background:var(--surface-1); border:1px solid var(--line); border-radius:var(--radius-md); overflow:hidden; }
 .artifact:hover { background:var(--surface-2); }
 .artifact-main { display:flex; align-items:center; gap:10px; min-width:0; min-height:46px; padding:6px 10px; background:none; border:0; color:var(--fg); font:inherit; text-align:left; cursor:pointer; }
@@ -868,12 +868,19 @@ input.field, select.field, textarea.field {
   .timeline, .composer-box { width: min(100%, var(--chat-w)); margin-inline: auto; }
   .composer > .steers, .composer > .dock, .composer > .palette, .composer-foot { width: min(100%, var(--chat-w)); margin-inline: auto; }
   .codecard pre { white-space: pre; }
-  .answer, .msg-wrap, .thinking-head, .activity { max-width: var(--reading-w); }
-  .msg.user { max-width: min(86%, var(--reading-w)); }
+  /* One column. The prose, the operator's card, the step list, the files a turn produced and the
+     field they are answered in all take the same stripe, so nothing is offset against anything
+     else and the conversation uses the room the window gives it. */
+  .answer, .msg-wrap, .thinking-head, .activity, .artifacts { max-width: 100%; }
+  .msg.user { max-width: min(86%, var(--chat-w)); }
   /* A sheet on a wide screen is a dialog, not a full-width drawer. */
   .sheet-backdrop { align-items: center; justify-content: center; }
   .sheet { width: min(720px, 92vw); max-height: 86%; border-radius: var(--radius-lg); padding-bottom: 16px; }
   .sheet.narrow { width: min(480px, 92vw); }
+}
+/* A wide window is room to read in, not margin to look at. */
+@media (min-width: 1600px) { :root { --chat-w: 1120px; } }
+@media (min-width: 2100px) { :root { --chat-w: 1320px; }
   .sheet.wide { width: min(1100px, 94vw); }
   .sheet .grip { display: none; }
   .menu { right: 24px; }
@@ -2026,7 +2033,7 @@ input.field[type="range"] {
   .composer-box textarea { min-height:calc(var(--fs-prose) * 1.4 * 3 + var(--space-2) * 2); }
 }
 @media (min-width: 1024px) {
-  .composer-box, .composer > .steers, .composer > .dock, .composer > .palette, .composer-foot { width:min(100%, var(--reading-w)); margin-inline:auto; }
+  .composer-box, .composer > .steers, .composer > .dock, .composer > .palette, .composer-foot { width:min(100%, var(--chat-w)); margin-inline:auto; }
 }
 
 /* Keep the newest-message shortcut above a card of any height. */
