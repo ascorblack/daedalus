@@ -1560,9 +1560,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 ready, reason = False, str(exc)
         local = app.speech.state()
         if local["active"]:
-            # A local model answers before the endpoint is consulted, so "configured" must be true
-            # even on an installation that has no endpoint at all — otherwise the site hides the
-            # microphone from the one setup that needs nothing.
+            # A local model can still turn a recording into words when no endpoint is set, so the
+            # microphone stays on that installation. A configured Voice Notes endpoint is preferred
+            # for the file itself (see transcribe_recording).
             ready, reason = True, ""
         return {
             "configured": ready,

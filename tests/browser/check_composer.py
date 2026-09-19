@@ -189,10 +189,22 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
     ring = page.locator(".composer .ctx-ring").get_attribute("title") or ""
     if "21%" not in ring or "38" not in ring:
         problems.append(f"the ring's tooltip does not carry the numbers ({ring!r})")
-    if page.locator(".composer-effort button").count() != 4:
-        problems.append("the effort buttons are not in the pill")
-    if not page.locator(".composer-effort button.on").filter(has_text="high").count():
-        problems.append("the current effort is not marked")
+    if not page.locator(".composer .effort-select").count():
+        problems.append("the effort selector is not in the pill")
+    if "high" not in page.locator(".composer .effort-select").inner_text().lower():
+        problems.append("the current effort is not on the chip")
+
+    page.locator(".composer .plus").click()
+    page.wait_for_selector(".plus-menu", timeout=5000)
+    plus_menu = page.locator(".plus-menu").bounding_box()
+    plus_btn = page.locator(".composer .plus").bounding_box()
+    print("plus menu:", plus_menu)
+    if not plus_menu or plus_menu["width"] > 360:
+        problems.append(f"the plus menu is stretched ({plus_menu})")
+    if plus_menu and plus_btn and plus_menu["y"] + plus_menu["height"] > plus_btn["y"] + 4:
+        problems.append("the plus menu did not open upward")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(200)
 
     # Typing: Shift+Enter is a new line, Enter sends, the draft is remembered while it is being written.
     field(page).click()
@@ -356,12 +368,24 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
     if page.locator(".model-list").count():
         problems.append("Escape did not close the model list")
 
-    page.locator(".composer-effort button", has_text="xhigh").click()
-    page.wait_for_timeout(200)
+    page.locator(".composer .effort-select").click()
+    page.wait_for_selector(".effort-slider", timeout=5000)
+    effort_menu = page.locator(".effort-menu").bounding_box()
+    chip = page.locator(".composer .effort-select").bounding_box()
+    if effort_menu and chip and effort_menu["y"] + effort_menu["height"] > chip["y"] + 4:
+        problems.append("the effort menu did not open upward")
+    slider = page.locator(".effort-slider").bounding_box()
+    if not slider:
+        problems.append("the effort slider is missing")
+    else:
+        page.mouse.click(slider["x"] + slider["width"] - 4, slider["y"] + slider["height"] / 2)
+    page.wait_for_timeout(300)
     efforted = [p for p in posts("/model") if isinstance(p[2], dict) and p[2].get("reasoning_effort")]
     print("effort:", efforted[-1] if efforted else None)
     if not efforted or efforted[-1][2] != {"thinking": True, "reasoning_effort": "xhigh"}:
         problems.append(f"the effort pick did not reach the host ({efforted})")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(200)
 
     # The fallback state: the button is amber and names both models; the list offers the way back.
     HOST.fallback = {"from": CONFIGURED, "to": STANDBY, "reason": "rate_limit"}
@@ -393,8 +417,8 @@ def phone(browser) -> list[str]:  # type: ignore[no-untyped-def]
         problems.append(f"phone: the pill is outside the viewport ({pill})")
     if not page.locator(".composer .model-select").count():
         problems.append("phone: the model selector is not in the pill")
-    if page.locator(".composer-effort button").count() != 4:
-        problems.append("phone: the effort buttons are not in the pill")
+    if not page.locator(".composer .effort-select").count():
+        problems.append("phone: the effort selector is not in the pill")
     fs = page.evaluate("() => getComputedStyle(document.querySelector('.composer textarea')).fontSize")
     if fs != "16px":
         problems.append(f"phone: the field is {fs}, which Safari would zoom into")

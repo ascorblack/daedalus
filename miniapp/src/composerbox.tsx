@@ -8,7 +8,8 @@ import { Icon } from "./icons";
 import { fileGlyph, previewKind, canPreview } from "./preview";
 import { enterSends, errorText, fmtBytes, fmtTok, haptic } from "./ui";
 import { ModelChoice, ModelSelect } from "./modelselect";
-import { REASONING_EFFORTS } from "./models";
+import { EffortSelect } from "./effortselect";
+import { blobToWav } from "./wav";
 import {
   Approval,
   ComposerStatus,
@@ -425,22 +426,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           onKeyDown={onKeyDown}
           aria-label={t(placeholderKey(status, asking))}
         />
-        {props.onChooseEffort && (
-          <div className="composer-effort" role="group" aria-label={t("composer.effort")}>
-            {REASONING_EFFORTS.map((e) => (
-              <button
-                key={e}
-                type="button"
-                className={props.thinking && props.reasoningEffort === e ? "on" : ""}
-                aria-pressed={!!props.thinking && props.reasoningEffort === e}
-                title={t(`add.effort.${e}`)}
-                onClick={() => props.onChooseEffort?.(e)}
-              >
-                {t(`add.effort.${e}`)}
-              </button>
-            ))}
-          </div>
-        )}
         <div className="composer-row">
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => { addFiles(e.target.files ?? []); e.target.value = ""; }} />
           <input ref={photoInput} type="file" accept="image/*" capture="environment" hidden onChange={(e) => { addFiles(e.target.files ?? []); e.target.value = ""; }} />
@@ -457,6 +442,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <span className="composer-mode">{t("composer.mode.agent")}</span>
           <ModelSelect model={props.model} fallback={props.fallback} open={modelOpen} onOpenChange={setModelOpen} onChoose={props.onChooseModel} sheet={phone} />
           <div className="composer-tools">
+            {props.onChooseEffort && (
+              <EffortSelect effort={props.reasoningEffort} thinking={props.thinking} model={props.model} onChoose={props.onChooseEffort} />
+            )}
             {pct !== null && ctx && (
               <button type="button" className={`ctx-ring ${pct >= 90 ? "bad" : pct >= 60 ? "attn" : ""}`} onClick={props.onContext} title={t("composer.context", { pct, used: fmtTok(ctx.tokens), window: fmtTok(ctx.window), n: fmtInt(ctx.messages) })} aria-label={t("composer.context.label")}>
                 <Ring pct={pct} />
@@ -537,9 +525,9 @@ function MicButton({ sessionId, asr, onText, onAutosend, toast }: { sessionId: s
     }
     setBusy(true);
     try {
-      const ext = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
+      const wav = await blobToWav(blob);
       const form = new FormData();
-      form.append("audio", blob, `recording.${ext}`);
+      form.append("audio", wav, "recording.wav");
       const res = await fetch(`/api/sessions/${sessionId}/transcribe`, { method: "POST", headers: api.authHeaders(), body: form });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? `transcription failed (${res.status})`);
       const r = (await res.json()) as { transcript: string; text: string; autosend: boolean };

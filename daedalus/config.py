@@ -755,11 +755,11 @@ class AsrConfig(BaseModel):
 class SttConfig(BaseModel):
     """Speech recognition that runs here, with no endpoint and no key.
 
-    Empty ``local_model`` is the default and means nothing changes: the browser recognises speech
-    itself where it can, and a configured ``[asr]`` endpoint transcribes what it cannot. Naming a
-    model from the catalog puts it in front of both — the order is local model, then the configured
-    endpoint, then the browser — so one setting is the whole switch, and clearing it is the whole
-    way back.
+    Empty ``local_model`` is the default and means nothing changes: the voice page uses the
+    browser's own recognition, or the configured ``[asr]`` endpoint for a recorded utterance.
+    Naming a catalog model is the voice page's live listener. Voice notes in the composer and
+    Telegram still go to ``[asr]`` when that endpoint is set; the local model only transcribes a
+    file when no endpoint is.
     """
 
     local_model: str = ""

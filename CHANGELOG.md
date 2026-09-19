@@ -4,9 +4,12 @@ Notable changes, newest first. The repository's `main` is the released version.
 
 ## 2026-09-19
 
-- **A session can pick its reasoning effort.** The composer has buttons from **low** to **xhigh**;
-  the choice stays on that session until the model is cleared back to the global default. Slash
-  command `/thinking` accepts `xhigh` too.
+- **A session can pick its reasoning effort.** The composer has a chip that opens a slider
+  upward, from **low** to **xhigh**; the choice stays on that session until the model is cleared
+  back to the global default. Slash command `/thinking` accepts `xhigh` too.
+- **Voice notes use the transcription endpoint.** A local speech model is the voice page's live
+  listener; the composer microphone and a Telegram note follow Voice Notes in Settings. A browser
+  recording is sent as WAV so the local model can still read it when no endpoint is set.
 - **A local endpoint can pin sampling temperature.** llama.cpp, vLLM and a generic OpenAI-compatible
   client show the field; empty uses the host default.
 - **llama.cpp is told the session's thinking settings.** Sending nothing left Bonsai at xhigh even

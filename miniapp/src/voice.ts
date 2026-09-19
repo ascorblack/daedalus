@@ -7,6 +7,7 @@
 
 import { api } from "./api";
 import { t } from "./i18n";
+import { blobToWav } from "./wav";
 
 type RecognitionEvent = { resultIndex: number; results: { isFinal: boolean; 0: { transcript: string } }[] };
 type Recognition = {
@@ -909,8 +910,9 @@ export function createSpeaker(opts: {
 
 /** Post one recorded utterance for the server to transcribe; returns what it heard. */
 export async function sendUtterance(blob: Blob): Promise<string> {
+  const wav = await blobToWav(blob);
   const form = new FormData();
-  form.append("audio", blob, "utterance.webm");
+  form.append("audio", wav, "utterance.wav");
   const response = await fetch("/api/voice/audio", { method: "POST", headers: api.authHeaders(), body: form });
   if (!response.ok) throw new Error(response.status === 413 ? t("voice.error.recording.long") : t("voice.error.recording", { status: response.status }));
   return String(((await response.json()) as { transcript?: string }).transcript ?? "");

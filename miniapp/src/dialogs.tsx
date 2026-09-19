@@ -294,6 +294,7 @@ export function Popover({ anchor, onClose, children, className, align = "left", 
       onClose();
     };
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
       const buttons = Array.from(box.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
       if (!buttons.length) return;
@@ -305,7 +306,7 @@ export function Popover({ anchor, onClose, children, className, align = "left", 
     document.addEventListener("mousedown", onDown);
     document.addEventListener("touchstart", onDown);
     document.addEventListener("keydown", onKey);
-    const first = box.current?.querySelector<HTMLElement>("input, button:not(:disabled)");
+    const first = box.current?.querySelector<HTMLElement>("input, button:not(:disabled), [role='slider']");
     first?.focus();
     return () => {
       document.removeEventListener("mousedown", onDown);
@@ -316,7 +317,7 @@ export function Popover({ anchor, onClose, children, className, align = "left", 
   }, [anchor, onClose]);
   if (!pos) return null;
   return createPortal(
-    <div ref={box} className={`menu pop ${className ?? ""}`} role="menu" aria-label={label} style={{ position: "fixed", top: "auto", bottom: pos.bottom, left: pos.left, right: pos.right }} onClick={(e) => e.stopPropagation()}>
+    <div ref={box} className={`menu pop ${className ?? ""}`} role="menu" aria-label={label} style={{ position: "fixed", top: "auto", bottom: pos.bottom, left: pos.left ?? "auto", right: pos.right ?? "auto" }} onClick={(e) => e.stopPropagation()}>
       {children}
     </div>,
     document.body,

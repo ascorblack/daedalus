@@ -273,8 +273,8 @@ export const DICT: Record<string, Record<Lang, string>> = {
   // in English is the state this table exists to end.
   "stt.title": { en: "Speech recognition", ru: "Распознавание речи" },
   "stt.intro": {
-    en: "A model that runs here, on this machine's processor, with no endpoint and no key. Pick one, download it, and it is used for every voice note and everything said on the voice page — ahead of the transcription endpoint and ahead of the browser's own recognition. Nothing is downloaded until you ask for it, and deleting one puts the disk back.",
-    ru: "Модель, которая работает здесь, на процессоре этой машины, без адреса и без ключа. Выберите одну, скачайте — и она будет разбирать каждое голосовое сообщение и всё сказанное на голосовой странице, раньше эндпоинта расшифровки и раньше встроенного распознавания браузера. Ничего не скачивается, пока вы не попросите, а удаление возвращает место на диске.",
+    en: "A model that runs here, on this machine's processor, with no endpoint and no key. Pick one, download it, and the voice page listens with it instead of the browser. Voice notes in the chat still use the transcription endpoint when one is set; this model only transcribes a recording if that endpoint is empty. Nothing is downloaded until you ask for it, and deleting one puts the disk back.",
+    ru: "Модель, которая работает здесь, на процессоре этой машины, без адреса и без ключа. Выберите одну, скачайте — и голосовая страница будет слушать ею, а не браузером. Голосовые заметки в чате по-прежнему идут на эндпоинт расшифровки, если он задан; эта модель разбирает запись только когда эндпоинта нет. Ничего не скачивается, пока вы не попросите, а удаление возвращает место на диске.",
   },
   "stt.inuse": { en: "In use", ru: "Используется" },
   "stt.inuse.none": { en: "none — the endpoint or the browser listens", ru: "ничего — слушает сервер или браузер" },
@@ -1817,6 +1817,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "composer.context.label": { en: "Context in use", ru: "Занято контекста" },
   "composer.model.title": { en: "Model for this session (Ctrl M)", ru: "Модель этой сессии (Ctrl M)" },
   "composer.effort": { en: "Reasoning effort for this session", ru: "Глубина рассуждения этой сессии" },
+  "composer.effort.select": { en: "Select effort", ru: "Глубина" },
   "composer.model.fast": { en: "fast", ru: "быстрая" },
   "composer.model.thinking": { en: "thinking", ru: "думающая" },
   "composer.model.current": { en: "in use", ru: "выбрана" },

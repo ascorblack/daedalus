@@ -292,22 +292,26 @@ async def decode_file(path: Path) -> tuple[bytes, int]:
 
 
 async def transcribe_recording(speech: LocalSpeech, config: RuntimeConfig, manager: object, path: Path) -> str:
-    """The words in a recording, by the precedence the whole application shares.
+    """The words in a recording: Voice Notes endpoint first, local model only if none is set.
 
-    The local model first where one is installed and selected, and the configured endpoint otherwise.
-    A local model that fails is not silently replaced by the endpoint: the operator chose it, an
-    endpoint costs money and may not be configured at all, and a failure that hides itself behind a
-    fallback is a failure nobody fixes. The message says which half refused.
+    The composer microphone and a Telegram voice note are the Voice Notes setting (an
+    ``/audio/transcriptions`` endpoint). The local catalog model is the voice page's live listener;
+    using it here stole those notes from the endpoint the operator picked. It remains the fallback
+    so a machine with a zipformer and no key still has a microphone. A failure on the chosen route
+    is not hidden behind the other.
 
     Raises ``TranscriptionError`` either way, so every call site keeps the one exception it already
     catches.
     """
     from daedalus.transport.telegram.voice import (  # Lazy: the transport imports this module
         TranscriptionError,
+        asr_configured,
         effective_asr,
         transcribe,
     )
 
+    if asr_configured(config.asr):
+        return await transcribe(path, effective_asr(config.asr, manager))
     if speech.available():
         try:
             words = await speech.transcribe_file(path)
@@ -316,7 +320,7 @@ async def transcribe_recording(speech: LocalSpeech, config: RuntimeConfig, manag
         if not words:
             raise TranscriptionError("the local speech model heard nothing in this recording")
         return words
-    return await transcribe(path, effective_asr(config.asr, manager))
+    raise TranscriptionError("no speech-to-text endpoint is configured")
 
 
 def recogniser_available(speech: LocalSpeech, config: RuntimeConfig) -> bool:

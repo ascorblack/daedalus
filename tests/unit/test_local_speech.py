@@ -856,23 +856,54 @@ def test_an_id_that_left_the_catalog_is_treated_as_no_choice(tmp_path: Path) -> 
     assert app.speech.selected() is None and not app.speech.available()
 
 
-def test_the_precedence_prefers_the_local_model_and_does_not_fall_back_past_it(tmp_path: Path) -> None:
+def test_a_voice_notes_endpoint_is_used_even_when_a_local_model_is_installed(tmp_path: Path) -> None:
+    """The composer microphone and Telegram notes follow Voice Notes settings, not the voice-page model."""
     from daedalus.speech.service import recogniser_available, transcribe_recording
-    from daedalus.transport.telegram.voice import TranscriptionError
 
     app = FakeApp(tmp_path)
     assert not recogniser_available(app.speech, app.config)
     app.config = app.config.model_copy(update={"asr": app.config.asr.model_copy(update={"url": "http://asr.local/v1"})})
     assert recogniser_available(app.speech, app.config)
-
     _install_fake_model(app)
+    wav_bytes(tmp_path / "x.wav", tone(0.2))
 
     async def boom(path: Path) -> str:
-        raise SpeechError("the model would not load")
+        raise SpeechError("the local model must not be asked")
 
     app.speech.transcribe_file = boom  # type: ignore[method-assign]
-    with pytest.raises(TranscriptionError, match="the local speech model could not transcribe"):
-        asyncio.run(transcribe_recording(app.speech, app.config, app.manager, tmp_path / "x.wav"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/audio/transcriptions"
+        return httpx.Response(200, json={"text": "from the endpoint"})
+
+    from daedalus.transport.telegram import voice as transport_voice
+
+    original = transport_voice.transcribe
+
+    async def patched(path: Path, config: Any, **kw: Any) -> str:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await original(path, config, client=client)
+
+    transport_voice.transcribe = patched  # type: ignore[assignment]
+    try:
+        words = asyncio.run(transcribe_recording(app.speech, app.config, app.manager, tmp_path / "x.wav"))
+    finally:
+        transport_voice.transcribe = original  # type: ignore[assignment]
+    assert words == "from the endpoint"
+
+
+def test_the_local_model_transcribes_a_file_only_when_no_endpoint_is_set(tmp_path: Path) -> None:
+    from daedalus.speech.service import transcribe_recording
+
+    app = FakeApp(tmp_path)
+    _install_fake_model(app)
+
+    async def hear(path: Path) -> str:
+        return "from the local model"
+
+    app.speech.transcribe_file = hear  # type: ignore[method-assign]
+    words = asyncio.run(transcribe_recording(app.speech, app.config, app.manager, tmp_path / "x.wav"))
+    assert words == "from the local model"
 
 
 def test_an_endpoint_is_used_when_no_local_model_is_selected(tmp_path: Path) -> None:

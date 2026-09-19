@@ -4,7 +4,7 @@ export type IconName =
   | "back" | "more" | "plus" | "up" | "stop" | "model" | "terminal" | "file" | "pen" | "search" | "globe" | "attach" | "image"
   | "question" | "skill" | "spawn" | "bulb" | "wrench" | "clock" | "plug" | "dot" | "compact"
   | "folder" | "settings" | "bots" | "inbox" | "board" | "changes" | "chart" | "loop" | "pause" | "play" | "trash" | "check" | "close" | "send"
-  | "download" | "share" | "split" | "key" | "link" | "down" | "copy" | "columns" | "eye" | "mic" | "fork" | "undo" | "phone" | "expand" | "external" | "reload" | "forward" | "panel" | "chevron";
+  | "download" | "share" | "split" | "key" | "link" | "down" | "copy" | "columns" | "eye" | "mic" | "fork" | "undo" | "phone" | "expand" | "external" | "reload" | "forward" | "panel" | "chevron" | "bolt";
 
 const PATHS: Record<IconName, string> = {
   back: "M15 18l-6-6 6-6",
@@ -64,6 +64,7 @@ const PATHS: Record<IconName, string> = {
   forward: "M9 18l6-6-6-6",
   panel: "M3 5h18v14H3zM15 5v14",
   chevron: "M6 9l6 6 6-6",
+  bolt: "M13 3L6 13h6l-2 8 8-11h-6l1-7z",
 };
 
 export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {

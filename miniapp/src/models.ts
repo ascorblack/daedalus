@@ -24,6 +24,12 @@ export type ModelEntry = {
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
+/** Index on the effort slider; an unknown or empty value sits on medium, the preset default. */
+export function effortIndex(effort: string | undefined): number {
+  const i = REASONING_EFFORTS.indexOf(effort as ReasoningEffort);
+  return i >= 0 ? i : 1;
+}
+
 /** A preset with nothing of any model in it: the conservative answer, not an empty one. */
 export const BLANK: Preset = { provider: "", model: "", label: "", thinking: true, reasoning_effort: "medium", images: false, context_window: 128000, max_output_tokens: 32000 };
 
