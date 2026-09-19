@@ -1272,7 +1272,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             project = await manager.projects.get(body.project_id)
             if project is None:
                 raise HTTPException(404, "no such project")
-            if not project.reachable:
+            if not await manager.projects.ensure_reachable(project):
                 raise HTTPException(409, f"the folder of {project.name} ({project.root}) is not reachable from here yet; mount it and restart before starting an agent in it")
         try:
             create_args: dict[str, Any] = {"metadata": metadata or None, "project_id": body.project_id or None}
@@ -2417,7 +2417,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         project = await manager.projects.get(body.project_id)
         if project is None:
             raise HTTPException(404, "no such project")
-        if not project.reachable:
+        if not await manager.projects.ensure_reachable(project):
             raise HTTPException(409, f"the folder of {project.name} ({project.root}) is not reachable from here yet; mount it and restart")
         moved = await manager.attach_project(session_id, project, own_directory=body.own_directory)
         return {"id": session_id, "project_id": project.id, "project": project.name, "workspace": str(moved.workspace)}

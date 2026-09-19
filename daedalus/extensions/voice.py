@@ -600,7 +600,7 @@ class Voice:
                 raise ValueError(f"no project has the id {project_id!r}; Projects lists the ones there are")
             if workspace == "own":
                 raise ValueError(f"an agent in {project.name} works in the project's own folder; leave workspace out when you name a project")
-            if not project.reachable:
+            if not await manager.projects.ensure_reachable(project):
                 raise ValueError(f"the folder of {project.name} ({project.root}) is not reachable from here; it has to be mounted first")
         else:
             # Under the same lock the session takes: the concierge is told to fan several errands

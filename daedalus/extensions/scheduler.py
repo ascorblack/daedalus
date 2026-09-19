@@ -526,7 +526,7 @@ class Scheduler:
             if fired is not None:
                 return fired
         project = await self._project_of(schedule.get("target_session") or schedule.get("created_by_session"))
-        if project is not None and not project.reachable:
+        if project is not None and not await manager.projects.ensure_reachable(project):
             raise RuntimeError(f"the folder of the project {project.name} ({project.root}) is not reachable; the task cannot run in it")
         workspace = project.root if project is not None else Path(schedule["workspace"])
         if project is None and not workspace.is_dir():

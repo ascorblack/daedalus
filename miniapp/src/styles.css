@@ -770,6 +770,9 @@ input.field, select.field, textarea.field {
   .sidebar .empty b { font-size: var(--fs-14); }
   /* Folders are flat groups here, not cards: a 28 px label with the count, and the rows under it. */
   .sidebar .folder, .sidebar .folder.open { margin: 0 0 4px; border: 0; background: none; border-radius: 0; overflow: visible; }
+  .sidebar .folder-head.linked { padding: 0; gap: 0; }
+  .sidebar .folder-disclose { padding: 2px 2px 2px 8px; }
+  .sidebar .folder-go { gap: 6px; padding: 2px 8px 2px 4px; }
   .sidebar .folder-head { min-height: 28px; padding: 2px 8px; gap: 6px; background: none; border-radius: var(--radius-sm); font-size: var(--fs-12); font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--fg-2); }
   .sidebar .folder-head:hover { background: var(--surface-1); }
   .sidebar .folder.open .folder-head { border-bottom: 0; }
@@ -1207,6 +1210,12 @@ body.resizing iframe { pointer-events: none; }
 .folder.open { background: var(--surface-1); border-color: var(--line-strong); }
 .folder-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--row-h); padding: 4px 12px; background: var(--surface-2); border: 0; color: var(--fg); font: inherit; font-size: var(--fs-14); text-align: left; cursor: pointer; }
 .folder-head:hover { background: var(--surface-3); }
+/* A header that both goes somewhere and opens: the chevron is its own button with its own label,
+   and the rest of the row is the link. Nothing else about the row changes. */
+.folder-head.linked { padding: 0; gap: 0; }
+.folder-disclose { display: flex; align-items: center; align-self: stretch; padding: 4px 2px 4px 12px; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; }
+.folder-disclose:hover .chev { color: var(--fg); }
+.folder-go { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 4px 12px 4px 6px; color: inherit; text-decoration: none; }
 .folder.open .folder-head { border-bottom: 1px solid var(--line); }
 .folder-head .chev { display: inline-block; color: var(--fg-3); transition: transform .15s; }
 .folder-head .chev.down { transform: rotate(90deg); }
@@ -1594,6 +1603,17 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
 /* The transcript, in the room the orb was using. The card is the frame; the session view inside it
    takes the height it is given, which is what it has always done in a pane. */
 .voice-read { display: flex; flex-direction: column; overflow: hidden; padding: 0; min-height: min(72vh, 660px); }
+/* Reading is a pane, not a page. The session view takes the height it is given and scrolls inside
+   it — but only if something gives it one, and nothing did: the grid row sized itself to a six
+   hundred turn conversation, the page grew to whatever that came to, and the floating microphone and
+   the agents beside it went off the bottom of the window with it. So while a transcript is open the
+   page stops being the scroller and the transcript's own box starts. The phone block further down is
+   the same idea at that width; it only changes the padding and where the agents panel goes. */
+.main:has(.voice-grid.reading) { overflow: hidden; }
+.screen.voice:has(.voice-grid.reading) { display: flex; flex-direction: column; min-height: 0; }
+.voice-grid.reading { flex: 1; min-height: 0; }
+.voice-grid.reading .voice-centre, .voice-grid.reading .voice-agents { min-height: 0; }
+.voice-grid.reading .voice-read { height: 100%; min-height: 0; }
 .voice-read-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 /* The session brings its own head — a back arrow, the title, the model — and directly under the
    breadcrumb that says the same thing it is one row of chrome too many. Hidden rather than made
@@ -1673,11 +1693,9 @@ pre.diff .file { color: var(--fg); font-weight: 600; }
      and not through a letterbox. The panel has nowhere to stand beside it, so it becomes a sheet that
      rises over it from a key in the breadcrumb; and the microphone goes to the bottom centre, over
      both, where a thumb already is. */
-  .main:has(.voice-grid.reading) { overflow: hidden; }
-  .screen.voice:has(.voice-grid.reading) { display: flex; flex-direction: column; min-height: 0; padding: 6px 8px calc(66px + env(safe-area-inset-bottom)); }
-  .voice-grid.reading { flex: 1; min-height: 0; gap: 8px; }
-  .voice-grid.reading .voice-centre { min-height: 0; }
-  .voice-read { height: 100%; min-height: 0; border-radius: 12px; }
+  .screen.voice:has(.voice-grid.reading) { padding: 6px 8px calc(66px + env(safe-area-inset-bottom)); }
+  .voice-grid.reading { gap: 8px; }
+  .voice-grid.reading .voice-read { border-radius: 12px; }
   .voice-grid.reading .voice-agents {
     position: fixed; left: 0; right: 0; bottom: calc(64px + env(safe-area-inset-bottom)); z-index: 32;
     max-height: 62dvh; overflow-y: auto; animation: none;

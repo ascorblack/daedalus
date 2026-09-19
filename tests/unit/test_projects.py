@@ -299,6 +299,87 @@ async def test_an_unreachable_folder_is_reported_and_no_agent_is_started_in_it(s
         await manager.close()
 
 
+def _no_engine(manager: SessionManager) -> Any:
+    """Let submit run its guards and its bookkeeping without starting a model loop."""
+
+    async def start(state: Any, message: Any) -> str:
+        return "run-1"
+
+    return start
+
+
+async def test_a_folder_of_ours_is_made_on_demand_and_one_of_theirs_is_not(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    """The distinction the guard was missing.
+
+    A project created by name is anchored under the workspaces tree, which nothing outside this
+    installation ever writes to: a row there without its folder is our own bookkeeping having lost
+    a directory, and it is put back. A folder the operator pointed at is theirs, and a missing one
+    is the mount or the disk being absent, which no amount of mkdir fixes.
+    """
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    manager._start_run = _no_engine(manager)  # type: ignore[method-assign]
+    try:
+        ours = await manager.projects.create("Voice")
+        assert ours.managed is True and ours.root.parent == settings.workspaces_dir
+        assert ours.root.is_dir() and (ours.root / "inbox").is_dir()
+
+        state = await manager.create_session("Errand", project_id=ours.id)
+        shutil.rmtree(ours.root)
+        assert (await manager.projects.get(ours.id)).reachable is False
+        assert await manager.submit(state.session.id, "go") == "run-1"
+        assert ours.root.is_dir() and (ours.root / "inbox").is_dir()
+
+        chosen = tmp_path / "chosen"
+        chosen.mkdir()
+        theirs = await manager.projects.create("Elsewhere", str(chosen))
+        assert theirs.managed is False
+        gone = await manager.create_session("Theirs", project_id=theirs.id)
+        shutil.rmtree(chosen)
+        with pytest.raises(RuntimeError, match=str(chosen)):
+            await manager.submit(gone.session.id, "go")
+        assert not chosen.exists()
+    finally:
+        await manager.close()
+
+
+async def test_a_system_project_whose_folder_an_upgrade_never_made_gets_one(settings: Settings, config: RuntimeConfig, db: Database) -> None:
+    """The live failure: the migration writes the Voice row from the sessions it finds, and the root
+    it names is a per-session directory that may never have existed on disk. ``ensure_system`` found
+    the row, returned it, and made nothing — so every utterance was refused."""
+    settings.workspaces_dir.mkdir(parents=True, exist_ok=True)
+    store = ProjectStore(db, managed_root=settings.workspaces_dir)
+    root = settings.workspaces_dir / "abc123def456"
+    await db.execute(
+        "INSERT INTO projects(id, name, root, created_at, settings, system) VALUES ('p1', 'Voice', ?, '2020-01-01T00:00:00+00:00', '{\"system\":\"voice\"}', 'voice')",
+        (str(root),),
+    )
+    assert not root.exists()
+    project = await store.ensure_system("voice", name="Voice", root=settings.workspaces_dir / "unused")
+    assert project.id == "p1" and project.root == root
+    assert root.is_dir() and (root / "inbox").is_dir()
+
+
+async def test_the_folders_of_ours_are_put_back_when_the_manager_starts(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    try:
+        ours = await manager.projects.create("Ours")
+        (tmp_path / "theirs").mkdir()
+        theirs = await manager.projects.create("Theirs", str(tmp_path / "theirs"))
+        shutil.rmtree(ours.root)
+        (tmp_path / "theirs").rmdir()
+    finally:
+        await manager.close()
+    again = SessionManager(settings, config, db=db)
+    await again.start()
+    try:
+        assert (await again.projects.get(ours.id)).reachable is True
+        assert (await again.projects.get(theirs.id)).reachable is False
+    finally:
+        await again.close()
+
+
 # -- the prompt ----------------------------------------------------------------------------------
 
 

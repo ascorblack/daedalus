@@ -57,6 +57,24 @@ describe("project conversations", () => {
     await folder([agent], project, true);
     expect(host.textContent).toContain("Local model");
   });
+  it.each([false, true])("keeps a single Voice agent behind its mode link and disclosure (compact: %s)", async (compact) => {
+    await folder([agent], { ...project, name: "Voice", system: "voice" }, compact);
+    expect(host.querySelector(".folder.single")).toBeNull();
+    expect(host.querySelector(".folder-go")?.getAttribute("href")).toBe("/app/voice");
+    expect(host.querySelector(".folder-go")?.textContent).toContain("Voice");
+    expect(host.querySelector(".folder-disclose")?.getAttribute("aria-label")).toContain("Voice");
+    expect(host.querySelector(".folder-disclose")?.getAttribute("aria-expanded")).toBe("false");
+    expect(host.querySelectorAll(".erow")).toHaveLength(0);
+    await click(".folder-disclose");
+    expect(host.querySelector(".folder-disclose")?.getAttribute("aria-expanded")).toBe("true");
+    expect(host.querySelectorAll(".erow")).toHaveLength(1);
+    await click(".erow");
+    expect(onOpen).toHaveBeenCalledWith("a");
+    await click(".folder-disclose");
+    expect(host.querySelectorAll(".erow")).toHaveLength(0);
+    await click(".folder-actions");
+    expect(host.querySelector("[data-settings]")).not.toBeNull();
+  });
   it("becomes an open folder in the same section when the second agent appears", async () => {
     await folder();
     const section = host.querySelector("section");

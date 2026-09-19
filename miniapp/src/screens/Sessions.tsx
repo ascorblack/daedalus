@@ -6,7 +6,8 @@ import { relTime, shortModel, untilShort } from "../format";
 import { Folder, Row as RowModel, agentName, arrange, folderOpen, rememberFolder } from "../grouping";
 import { Icon } from "../icons";
 import { ProjectChip, ProjectSettingsSheet, useProjects } from "../projects";
-import { PageHeader, screenTitle } from "../shell";
+import { pathFor } from "../router";
+import { PageHeader, go, screenTitle } from "../shell";
 import { useQuery } from "../store";
 import { WindowedRows } from "../virtual";
 import { errorText } from "../ui";
@@ -141,7 +142,7 @@ function holds(rows: RowModel[], id: string | undefined): boolean {
  *  once while the folders are arranged, so this costs a string comparison. */
 function sameFolder(a: FolderProps, b: FolderProps): boolean {
   const l = a.folder, r = b.folder;
-  if (l.single !== r.single || a.toast !== b.toast) return false;
+  if (l.single !== r.single || l.system !== r.system || a.toast !== b.toast) return false;
   if (a.filtered !== b.filtered || a.current !== b.current || a.onOpen !== b.onOpen || a.compact !== b.compact) return false;
   if (l.key !== r.key || l.name !== r.name || l.total !== r.total || l.active !== r.active || l.loops !== r.loops || l.last_message_at !== r.last_message_at) return false;
   if (l.project?.root !== r.project?.root) return false;
@@ -149,16 +150,17 @@ function sameFolder(a: FolderProps, b: FolderProps): boolean {
 }
 
 export const FolderSection = memo(function FolderSection({ folder, onOpen, current, filtered, compact, toast }: FolderProps) {
+  const single = folder.single && !folder.system;
   const [open, setOpen] = useState(() => folderOpen(folder.key));
   const [editing, setEditing] = useState(false);
   const [adding, setAdding] = useState(false);
-  const wasSingle = useRef(folder.single);
+  const wasSingle = useRef(single);
   useEffect(() => {
-    if (wasSingle.current && !folder.single) setOpen(true);
-    wasSingle.current = folder.single;
-  }, [folder.single]);
+    if (wasSingle.current && !single) setOpen(true);
+    wasSingle.current = single;
+  }, [single]);
   const section = useRef<HTMLElement | null>(null);
-  const becomingFolder = wasSingle.current && !folder.single;
+  const becomingFolder = wasSingle.current && !single;
   const focusedAgent = becomingFolder ? section.current?.querySelector<HTMLElement>(".erow:focus")?.dataset.session : undefined;
   useLayoutEffect(() => {
     if (focusedAgent) [...(section.current?.querySelectorAll<HTMLElement>(".erow") ?? [])].find((row) => row.dataset.session === focusedAgent)?.focus();
@@ -168,39 +170,60 @@ export const FolderSection = memo(function FolderSection({ folder, onOpen, curre
   // The folder holding the open session opens itself, without remembering it: a sidebar whose
   // current row is behind a closed folder answers "where am I" with nothing.
   const mine = holds(folder.rows, current);
-  const showing = open || becomingFolder || (!folder.single && mine) || (filtered && folder.rows.length > 0);
+  const showing = open || becomingFolder || (!single && mine) || (filtered && folder.rows.length > 0);
   const toggle = () => {
     const next = !open;
     setOpen(next);
     rememberFolder(folder.key, next);
   };
+  // The Voice folder is the home of the voice agents, but the word in the list is the mode: the row
+  // goes to the voice screen and the chevron beside it — its own button, with its own label — is
+  // what opens the list of agents underneath, even when there is only one. Ordinary projects
+  // with one agent show its conversation row; larger projects use a single disclosure header.
+  const inside = (
+    <>
+      <Icon name={folder.system ? "mic" : "folder"} size={16} />
+      <span className="folder-name truncate">{folder.name}</span>
+      {folder.active > 0 && <span className="folder-live" title={t("agents.active", { n: folder.active })}><Dot status="running" /></span>}
+      {compact ? (
+        <span className="folder-counts sub num" title={plural("agents.count", folder.total)}>{folder.total}</span>
+      ) : (
+        <span className="folder-counts sub">
+          {plural("agents.count", folder.total)}
+          {folder.active > 0 && ` · ${t("agents.active", { n: folder.active })}`}
+          {folder.loops > 0 && ` · ${t("agents.filter.loops", { n: folder.loops })}`}
+        </span>
+      )}
+      {!compact && folder.last_message_at && <span className="folder-time sub num" title={new Date(folder.last_message_at).toLocaleString()}>{relTime(folder.last_message_at)}</span>}
+    </>
+  );
+  const chevron = <span className={`chev ${showing ? "down" : ""}`} aria-hidden>›</span>;
   return (
-    <section ref={section} data-project={folder.key} className={`folder ${folder.single ? "single" : ""} ${folder.system ? "system" : ""} ${showing ? "open" : ""}`}>
+    <section ref={section} data-project={folder.key} className={`folder ${single ? "single" : ""} ${folder.system ? "system" : ""} ${showing ? "open" : ""}`}>
       <div className="folder-top">
-      {folder.single ? <>
-        <button className="iconbtn small quiet folder-expand" onClick={toggle} aria-expanded={showing} aria-label={t("search.expand", { name: folder.name })}><span className={`chev ${showing ? "down" : ""}`} aria-hidden>›</span></button>
-        <Row s={folder.rows[0].s} kids={[]} onOpen={onOpen} current={current === folder.rows[0].s.id} compact={compact} projectName={folder.name} />
-      </> : <button className="folder-head" onClick={toggle} aria-expanded={showing}>
-        <span className={`chev ${showing ? "down" : ""}`} aria-hidden>›</span>
-        <Icon name={folder.system ? "mic" : "folder"} size={16} />
-        <span className="folder-name truncate">{folder.name}</span>
-        {folder.active > 0 && <span className="folder-live" title={t("agents.active", { n: folder.active })}><Dot status="running" /></span>}
-        {compact ? (
-          <span className="folder-counts sub num" title={plural("agents.count", folder.total)}>{folder.total}</span>
-        ) : (
-          <span className="folder-counts sub">
-            {plural("agents.count", folder.total)}
-            {folder.active > 0 && ` · ${t("agents.active", { n: folder.active })}`}
-            {folder.loops > 0 && ` · ${t("agents.filter.loops", { n: folder.loops })}`}
-          </span>
+        {folder.system ? (
+          <div className="folder-head linked">
+            <button className="folder-disclose" onClick={toggle} aria-expanded={showing} aria-label={t(showing ? "agents.folder.hide" : "agents.folder.show", { name: folder.name })} title={t(showing ? "agents.folder.hide" : "agents.folder.show", { name: folder.name })}>
+              {chevron}
+            </button>
+            <a className="folder-go" href={pathFor("voice")} onClick={(e) => go(e, pathFor("voice"))} title={t("agents.folder.tovoice")}>
+              {inside}
+            </a>
+          </div>
+        ) : single ? <>
+          <button className="iconbtn small quiet folder-expand" onClick={toggle} aria-expanded={showing} aria-label={t("search.expand", { name: folder.name })}>{chevron}</button>
+          <Row s={folder.rows[0].s} kids={[]} onOpen={onOpen} current={current === folder.rows[0].s.id} compact={compact} projectName={folder.name} />
+        </> : (
+          <button className="folder-head" onClick={toggle} aria-expanded={showing}>
+            {chevron}
+            {inside}
+          </button>
         )}
-        {!compact && folder.last_message_at && <span className="folder-time sub num" title={new Date(folder.last_message_at).toLocaleString()}>{relTime(folder.last_message_at)}</span>}
-      </button>}
-      <button className="iconbtn small quiet folder-actions" onClick={() => setEditing(true)} aria-label={t("project.settings.for", { name: folder.name })}><Icon name="more" size={16} /></button>
+        <button className="iconbtn small quiet folder-actions" onClick={() => setEditing(true)} aria-label={t("project.settings.for", { name: folder.name })}><Icon name="more" size={16} /></button>
       </div>
       {showing && !compact && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
       {showing && folder.rows.length === 0 && <div className="folder-empty sub">{filtered ? t("common.nothing") : t("agents.folder.none")}</div>}
-      {showing && !folder.single && (
+      {showing && !single && (
         <WindowedRows
           keys={keys}
           host={section}
