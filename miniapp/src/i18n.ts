@@ -2007,3 +2007,10 @@ export function useLang(): [Lang, (next: Lang) => void] {
 }
 
 markDocument();
+
+Object.assign(DICT, {
+  "composer.mode.agent": { en: "Agent", ru: "Агент" },
+  "composer.place": { en: "Working context", ru: "Рабочий контекст" },
+  "composer.place.project": { en: "Project: {name}", ru: "Проект: {name}" },
+  "composer.place.workspace": { en: "Workspace: {name}", ru: "Рабочая папка: {name}" },
+});

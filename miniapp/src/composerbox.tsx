@@ -1,9 +1,5 @@
-// The composer: one pill that grows to two rows, and one circle that means send, stop, queue or
-// reply. Above the pill, in the same stripe: the attachments waiting to go, the steers the host is
-// holding for the next step, and the dock where the agent's question or a refused tool call waits
-// for the operator. The composer owns its draft (kept per session across leaving and coming back)
-// and its files; what it does with them is handed in as functions, so the same pill serves the
-// session screen and anything that embeds one.
+// A growing full-width field above one row of controls. Drafts belong to the session;
+// actions are supplied by the parent so the card also works inside the voice page.
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, AsrStatus, ModelFallback, Question, SlashCommand } from "./api";
@@ -22,6 +18,8 @@ import {
   composerKey,
   dockKey,
   fieldHeight,
+  composerContext,
+  ComposerPlace,
   hintSeen,
   markHintSeen,
   placeholderKey,
@@ -56,6 +54,7 @@ export type ComposerProps = {
   model: string;
   fallback: ModelFallback | null;
   onChooseModel: (choice: ModelChoice) => void;
+  place?: ComposerPlace;
   context?: { tokens: number; window: number; messages: number } | null;
   onContext?: () => void;
   asr?: AsrStatus | null;
@@ -106,23 +105,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     [sessionId],
   );
 
-  // The field takes the height of its text, up to eight lines; then it scrolls.
+  // Measure the placeholder too, and refit when a panel or viewport changes the width.
   const fit = useCallback(() => {
     const el = textarea.current;
     if (!el) return;
     el.style.height = "auto";
-    // An empty field is one line whatever its placeholder does: a placeholder that wraps on a narrow
-    // pill would otherwise grow the field to hold it.
-    if (!el.value) {
-      el.style.height = "";
-      return;
-    }
     const cs = getComputedStyle(el);
-    const line = parseFloat(cs.lineHeight) || 21;
-    const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
-    el.style.height = `${fieldHeight(el.scrollHeight, line, pad)}px`;
-  }, []);
-  useLayoutEffect(fit, [draft, fit]);
+    const line = parseFloat(cs.lineHeight);
+    const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+    el.style.height = `${fieldHeight(el.scrollHeight, line, pad, phone ? 3 : 1)}px`;
+  }, [phone]);
+  useLayoutEffect(fit, [draft, fit, status, props.questions]);
+  useEffect(() => {
+    const el = textarea.current;
+    if (!el) return;
+    let width = 0;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width === width) return;
+      width = entry.contentRect.width;
+      fit();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [fit]);
 
   const addFiles = useCallback((incoming: Iterable<File>) => {
     const named = Array.from(incoming).map((f) => {
@@ -316,7 +321,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const pct = ctx && ctx.window > 0 ? Math.round((100 * ctx.tokens) / ctx.window) : null;
   const primaryLabel = action === "stop" ? t("session.stop") : action === "queue" ? t("composer.queue") : action === "reply" ? t("composer.reply") : t("session.send");
   const showHint = !phone && !hinted && !draft;
-  const twoRows = files.length > 0 || draft.includes("\n") || draft.length > 80;
+  const place = composerContext(props.place);
 
   return (
     <div className="composer" data-primary={action}>
@@ -390,7 +395,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ))}
         </div>
       )}
-      <div className={`composer-box ${twoRows ? "two" : "one"}`}>
+      <div className="composer-box">
+        {place.length > 0 && (
+          <div className="composer-place" aria-label={t("composer.place")}>
+            {place.map((chip) => <span key={chip.kind} className="composer-place-chip" title={t(`composer.place.${chip.kind}`, { name: chip.name })}>
+              <Icon name="folder" size={12} /><span className="truncate">{chip.name}</span>
+            </span>)}
+          </div>
+        )}
         {files.length > 0 && (
           <div className="attachments" aria-label={t("session.attachments")}>
             {files.map((f, i) => (
@@ -398,6 +410,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             ))}
           </div>
         )}
+        <textarea
+          ref={textarea}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder={t(placeholderKey(status, asking))}
+          rows={phone ? 3 : 1}
+          onPaste={onPaste}
+          onKeyDown={onKeyDown}
+          aria-label={t(placeholderKey(status, asking))}
+        />
         <div className="composer-row">
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => { addFiles(e.target.files ?? []); e.target.value = ""; }} />
           <input ref={photoInput} type="file" accept="image/*" capture="environment" hidden onChange={(e) => { addFiles(e.target.files ?? []); e.target.value = ""; }} />
@@ -411,23 +433,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <button type="button" role="menuitem" onClick={() => void pasteFromClipboard()}><Icon name="copy" size={16} />{t("composer.paste")}</button>
             </Popover>
           )}
-          <textarea
-            ref={textarea}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder={t(placeholderKey(status, asking))}
-            rows={1}
-            onPaste={onPaste}
-            onKeyDown={onKeyDown}
-            aria-label={t(placeholderKey(status, asking))}
-          />
+          <span className="composer-mode">{t("composer.mode.agent")}</span>
+          <ModelSelect model={props.model} fallback={props.fallback} open={modelOpen} onOpenChange={setModelOpen} onChoose={props.onChooseModel} sheet={phone} />
           <div className="composer-tools">
             {pct !== null && ctx && (
               <button type="button" className={`ctx-ring ${pct >= 90 ? "bad" : pct >= 60 ? "attn" : ""}`} onClick={props.onContext} title={t("composer.context", { pct, used: fmtTok(ctx.tokens), window: fmtTok(ctx.window), n: fmtInt(ctx.messages) })} aria-label={t("composer.context.label")}>
                 <Ring pct={pct} />
               </button>
             )}
-            <ModelSelect model={props.model} fallback={props.fallback} open={modelOpen} onOpenChange={setModelOpen} onChoose={props.onChooseModel} sheet={phone} />
             {props.asr?.configured && !draft.trim() && <MicButton sessionId={sessionId} asr={props.asr} onText={(text) => { setDraft(draft.trim() ? `${draft.trimEnd()}\n\n${text}` : text); textarea.current?.focus(); }} onAutosend={(text) => onSend(text, [])} toast={toast} />}
             {props.onVoice && !draft.trim() && (
               <button type="button" className="iconbtn flat voice" onClick={props.onVoice} aria-label={t("composer.voice")} title={t("composer.voice")}>

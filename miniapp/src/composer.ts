@@ -47,8 +47,8 @@ export type KeyIntent = "send" | "newline" | "complete" | "escape" | "model" | "
 type KeyLike = Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey">;
 
 /**
- * What a key press in the field asks for. `Enter` is read by name — it is the same key on a
- * Russian and an English layout — and the letter shortcuts by physical position (`code`), so
+ * What a key press in the field asks for. `Enter` and the letter shortcuts use physical position (`code`), with an Enter
+ * name fallback for embedded browsers that omit it, so
  * ⌘M opens the model list whichever alphabet the keyboard is on.
  */
 export function composerKey(e: KeyLike, opts: { enterSends: boolean; paletteOpen: boolean }): KeyIntent {
@@ -57,7 +57,7 @@ export function composerKey(e: KeyLike, opts: { enterSends: boolean; paletteOpen
   if (mod && !e.altKey && !e.shiftKey && e.code === "KeyM") return "model";
   if (e.key === "Tab" && opts.paletteOpen && !e.shiftKey) return "complete";
   if (e.key === "Escape") return "escape";
-  if (e.key !== "Enter") return null;
+  if (e.code !== "Enter" && e.code !== "NumpadEnter" && e.key !== "Enter") return null;
   if (mod) return "send";
   if (e.shiftKey || e.altKey) return "newline";
   return opts.enterSends ? "send" : "newline";
@@ -76,10 +76,11 @@ export function dockKey(e: KeyLike, typing: boolean): "approve" | "deny" | null 
 /** How many lines the field grows to before it scrolls. */
 export const MAX_ROWS = 8;
 
-/** The height the field should take for its content: its scroll height, capped at `MAX_ROWS` lines. */
-export function fieldHeight(scrollHeight: number, lineHeight: number, padding: number): number {
+/** Reserve the minimum rows, grow with content, then scroll after `MAX_ROWS` lines. */
+export function fieldHeight(scrollHeight: number, lineHeight: number, padding: number, minRows = 1): number {
+  const floor = Math.ceil(lineHeight * minRows + padding);
   const cap = Math.round(lineHeight * MAX_ROWS + padding);
-  return Math.min(scrollHeight, cap);
+  return Math.max(floor, Math.min(scrollHeight, cap));
 }
 
 // ── the draft, kept per session ──────────────────────────────────────────────────────────
@@ -236,4 +237,19 @@ function safeSession(): Storage | null {
   } catch {
     return null;
   }
+}
+
+/** Names only: context should orient the operator without repeating full filesystem paths. */
+export type ComposerPlace = { project?: string; workspace?: string; system?: boolean };
+export function composerContext(place?: ComposerPlace): { kind: "project" | "workspace"; name: string }[] {
+  if (!place || place.system) return [];
+  const short = (value = "") => value.trim().replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) ?? "";
+  const project = short(place.project);
+  const workspace = short(place.workspace);
+  const chips: { kind: "project" | "workspace"; name: string }[] = [];
+  if (project) chips.push({ kind: "project", name: project });
+  if (workspace && workspace !== "." && workspace.toLocaleLowerCase() !== project.toLocaleLowerCase() && !/^[a-f0-9-]{12,}$/i.test(workspace)) {
+    chips.push({ kind: "workspace", name: workspace });
+  }
+  return chips;
 }

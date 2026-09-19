@@ -619,7 +619,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     const el = scroller.current;
     if (!el) return;
     stick.current = true;
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    el.scrollTo({ top: el.scrollHeight, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
     setAtBottom(true);
   }
 
@@ -955,9 +955,11 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             </div>
           </div>
           {!atBottom && (
-            <button className="jump-down" onClick={jumpToBottom} aria-label={t("session.jump.label")} title={t("session.jump")}>
-              <Icon name="down" size={18} />
-            </button>
+            <div className="composer-jump-anchor">
+              <button className="jump-down" onClick={jumpToBottom} aria-label={t("session.jump.label")} title={t("session.jump")}>
+                <Icon name="down" size={18} />
+              </button>
+            </div>
           )}
           {!busy && !!detail?.error && (
             <div className="runerror" role="status" aria-label={t("session.runerror")}>
@@ -975,6 +977,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             model={detail?.model ?? ""}
             fallback={detail?.fallback ?? null}
             onChooseModel={chooseModel}
+            place={{ project: detail?.project?.name, workspace: detail?.workspace_name || detail?.workspace, system: !!(detail?.project?.system || detail?.project?.settings.system) }}
             context={detail?.context ?? null}
             onContext={() => { setDetailsFocus("context"); panel.open("details"); }}
             asr={asr}
