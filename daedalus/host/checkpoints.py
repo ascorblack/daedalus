@@ -11,14 +11,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 DIR_NAME = ".checkpoints"
-EXCLUDES = (DIR_NAME + "/", "node_modules/", ".venv/", "__pycache__/", "*.pyc")
-SKIP_DIRS = {DIR_NAME, "node_modules", ".venv", "__pycache__"}
+EXCLUDES = (DIR_NAME + "/", ".agents/", "node_modules/", ".venv/", "__pycache__/", "*.pyc")
+SKIP_DIRS = {DIR_NAME, ".agents", "node_modules", ".venv", "__pycache__"}
 NESTED_SCAN_DEPTH = 6
 
 
@@ -31,7 +32,7 @@ class Checkpoints:
         self.workspace = workspace
         self.git_dir = workspace / DIR_NAME
 
-    async def _git(self, *args: str) -> str:
+    async def _git(self, *args: str, index: Path | None = None) -> str:
         env = {
             **os.environ,
             "GIT_DIR": str(self.git_dir),
@@ -41,6 +42,8 @@ class Checkpoints:
             "GIT_COMMITTER_NAME": "daedalus",
             "GIT_COMMITTER_EMAIL": "daedalus@localhost",
         }
+        if index is not None:
+            env["GIT_INDEX_FILE"] = str(index)
         proc = await asyncio.create_subprocess_exec(
             "git", *args, cwd=str(self.workspace), env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
@@ -55,6 +58,11 @@ class Checkpoints:
             await self._git("init", "-q")
             await self.relocate()
         await self._write_excludes(scan)
+        await self._forget_private_files()
+
+    async def _forget_private_files(self, *, index: Path | None = None) -> None:
+        # Older snapshots may already track children. Ignore rules alone do not untrack them.
+        await self._git("rm", "-rf", "--cached", "--ignore-unmatch", "--", ".agents", ":(glob)**/.agents/**", index=index)
 
     async def relocate(self) -> None:
         """Forget the work-tree path ``git init`` recorded, so a copied ``.checkpoints`` never points back at its origin."""
@@ -99,7 +107,14 @@ class Checkpoints:
         await self.ensure()
         await self._git("add", "-A", "--", ".")
         await self._git("commit", "-q", "--allow-empty", "-m", f"before restore to {sha[:12]}")
-        await self._git("read-tree", "-u", "--reset", sha)
+        # Filter historical trees too, so restoring an older snapshot cannot resurrect or
+        # overwrite a child's files. The temporary index never changes the working directory.
+        with tempfile.TemporaryDirectory(dir=self.git_dir) as temporary:
+            index = Path(temporary) / "index"
+            await self._git("read-tree", sha, index=index)
+            await self._forget_private_files(index=index)
+            tree = (await self._git("write-tree", index=index)).strip()
+        await self._git("read-tree", "-u", "--reset", tree)
         await self._git("clean", "-qfd")
         nested = await self._write_excludes()
         await self._git("add", "-A", "--", ".")

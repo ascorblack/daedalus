@@ -307,7 +307,7 @@ def _steer_cards(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return cards
 
 
-SESSION_ARTEFACTS = ("inbox/", ".exec/", ".jobs/", ".services/", ".checkpoints/")
+SESSION_ARTEFACTS = ("inbox/", ".exec/", ".jobs/", ".services/", ".checkpoints/", ".agents/")
 _EXCLUDE_MARKER = "# daedalus: what an agent working in this folder writes into it"
 
 
@@ -1402,7 +1402,7 @@ class SessionManager:
                         f"{source.workspace} is {scan.size / 1e9:.1f} GB, over ops.checkpoint_max_gb={limit}; "
                         "a fork copies the whole directory, so this one is refused rather than written twice"
                     )
-                await asyncio.to_thread(shutil.copytree, source.workspace, target.workspace, dirs_exist_ok=True)
+                await asyncio.to_thread(shutil.copytree, source.workspace, target.workspace, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".agents"))
                 copied = True
                 checkpoints = Checkpoints(target.workspace)
                 await checkpoints.relocate()
@@ -1457,7 +1457,7 @@ class SessionManager:
         if not self.settings.workspaces_dir.exists():
             return out
         for entry in sorted(self.settings.workspaces_dir.iterdir()):
-            if not entry.is_dir() or entry.name in known or entry.resolve() in known_paths:
+            if not entry.is_dir() or entry.name in known or any(entry.resolve() == path or entry.resolve() in path.parents for path in known_paths):
                 continue
             out.append(entry)
         return out

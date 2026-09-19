@@ -80,11 +80,15 @@ async def test_fork_copies_history_before_the_turn_and_the_workspace(settings: S
     manager = await _manager(settings, db)
     source = await manager.create_session("origin")
     (source.workspace / "data.txt").write_text("v1")
+    private = source.workspace / ".agents" / "child"
+    private.mkdir(parents=True)
+    (private / "private.txt").write_text("private")
     seqs = await _seed(manager, source, [("ask one", "answer one"), ("ask two", "answer two")])
     target = await manager.create_session("fork")
     result = await manager.fork_into(source.session.id, seqs[1], target)
     assert result["messages"] == 2 and result["workspace_copied"] is True
     assert (target.workspace / "data.txt").read_text() == "v1"
+    assert not (target.workspace / ".agents").exists()
     working = await manager.sessions.list_messages(target.session.id, "daedalus", limit=100)
     assert [m.content_blocks[0].text for m in working] == ["ask one", "answer one"]  # type: ignore[attr-defined]
     refreshed = await manager.sessions.get(target.session.id, "daedalus")
@@ -325,3 +329,66 @@ async def test_one_walk_answers_both_the_size_cap_and_the_excludes(tmp_path: Pat
     assert sha and walks == 1
     excludes = (workspace / ".checkpoints" / "info" / "exclude").read_text(encoding="utf-8")
     assert "/vendor/clone/" in excludes and "node_modules/" in excludes
+
+
+async def test_project_revert_preserves_private_agent_files(settings: Settings, db: Database) -> None:
+    from daedalus.host.checkpoints import scan_workspace
+
+    manager = await _manager(settings, db)
+    try:
+        parent = await manager.create_session("project")
+        (parent.workspace / "notes.txt").write_text("before")
+        seqs = await _seed(manager, parent, [("first", "answer"), ("second", "answer")])
+        sha = await Checkpoints(parent.workspace).snapshot("before second")
+        await db.execute(
+            "INSERT INTO checkpoints(session_id, seq, kind, sha, at) VALUES (?, ?, 'before', ?, 'now')",
+            (parent.session.id, seqs[1], sha),
+        )
+        child = await manager.create_session("private", project_id=parent.project.id, own_directory=True)
+        (child.workspace / "work.txt").write_text("saved")
+        await Checkpoints(child.workspace).snapshot("child")
+        (child.workspace / "work.txt").write_text("unsaved changes")
+        (child.workspace / "new.txt").write_text("untracked")
+        assert scan_workspace(parent.workspace).size == len("before")
+        later = await Checkpoints(parent.workspace).snapshot("with child")
+        assert ".agents/" not in await Checkpoints(parent.workspace)._git("ls-tree", "-r", later)
+        (parent.workspace / "notes.txt").write_text("after")
+        result = await manager.revert(parent.session.id, seqs[1])
+        assert result["workspace_restored"]
+        assert (parent.workspace / "notes.txt").read_text() == "before"
+        assert (child.workspace / "work.txt").read_text() == "unsaved changes"
+        assert (child.workspace / "new.txt").read_text() == "untracked"
+        assert await Checkpoints(child.workspace).head()
+    finally:
+        await manager.close()
+
+
+async def test_restore_ignores_private_files_tracked_by_old_snapshots(tmp_path: Path) -> None:
+    cp = Checkpoints(tmp_path)
+    (tmp_path / "public.txt").write_text("before")
+    private = tmp_path / ".agents" / "child" / "private.txt"
+    private.parent.mkdir(parents=True)
+    private.write_text("old private work")
+    await cp.snapshot("initial")
+    await cp._git("add", "-f", "--", str(private))
+    await cp._git("commit", "-qm", "old snapshot")
+    old = await cp.head()
+    private.write_text("current private work")
+    await cp.restore(old)
+    assert private.read_text() == "current private work"
+    assert ".agents/" not in await cp._git("ls-files")
+
+
+async def test_orphan_sweep_keeps_ancestors_of_project_roots(settings: Settings, db: Database) -> None:
+    manager = await _manager(settings, db)
+    try:
+        container = settings.workspaces_dir / "container"
+        root = container / ".agents" / "child"
+        root.mkdir(parents=True)
+        (root / "work.txt").write_text("keep")
+        await manager.projects.create("nested", str(root))
+        assert container not in await manager.orphan_workspaces()
+        await manager.sweep_orphan_workspaces()
+        assert (root / "work.txt").read_text() == "keep"
+    finally:
+        await manager.close()
