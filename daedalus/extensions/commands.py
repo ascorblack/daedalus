@@ -443,7 +443,7 @@ async def run_command(app: Application, session_id: str, line: str) -> str:  # n
 
     # -- the installation itself ----------------------------------------------------
     if name == "doctor":
-        ctx = DoctorContext(settings=app.settings, config=app.config, db=app.db, manager=manager, front=front, extensions=dict(app.extensions), guard=app.guard, fix=args.lower() == "fix")
+        ctx = DoctorContext(settings=app.settings, config=app.config, db=app.db, manager=manager, front=front, extensions=dict(app.extensions), extension_failures=dict(app.extension_failures), guard=app.guard, fix=args.lower() == "fix")
         return redact.redact(render_text(await run_checks(ctx)))
     if name == "prompt":
         rules = app.config.prompt.rules.strip() or DEFAULT_RULES.strip()

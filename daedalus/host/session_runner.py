@@ -397,6 +397,10 @@ class SessionManager:
         self.shutting_down = False
         self.recovering = True
         """True from construction until boot recovery has decided the fate of every run the previous process left behind."""
+        self.unloadable_sessions: dict[str, str] = {}
+        """Sessions whose stored directory no longer resolves inside their project, by id, with the
+        reason. ``get_state`` puts one here instead of raising through whoever asked for it; the entry
+        is dropped the moment the session opens again, so what is here is what is broken now."""
         self.stale_runs: list[str] = []
         """Runs the previous process was driving that this one could not pick up — no snapshot to resume
         from, so the row is closed as cancelled. Empty on a clean stop; a line in the operator's inbox
@@ -722,8 +726,20 @@ class SessionManager:
         except Exception:
             return None
         project = await self.projects.for_session(session_id)
-        workspace = self.workspace_of(session_id, dict(session.metadata), project)
-        _ensure_inbox(workspace, project)
+        try:
+            workspace = self.workspace_of(session_id, dict(session.metadata), project)
+            _ensure_inbox(workspace, project)
+        except (RuntimeError, OSError) as exc:
+            # The session's stored directory no longer resolves inside the project that holds it, or
+            # the folder cannot be made. Loading a session happens on every path into this process —
+            # boot recovery, the scheduler restoring its in-flight runs, a service being reconciled —
+            # and most of those callers already treat "no such session" as an outcome. Raising here
+            # made one bad row in one session fatal to all of them; it is reported and skipped instead,
+            # and ``unloadable_sessions`` is what the doctor and the operator read afterwards.
+            self.unloadable_sessions[session_id] = str(exc)
+            logger.warning("session %s cannot be opened: %s", session_id, exc)
+            return None
+        self.unloadable_sessions.pop(session_id, None)
         state = SessionState(session=session, workspace=workspace, metadata=dict(session.metadata), project=project)
         self._states[session_id] = state
         self.register_services(state)

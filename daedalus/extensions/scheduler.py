@@ -529,6 +529,12 @@ class Scheduler:
         if project is not None and not project.reachable:
             raise RuntimeError(f"the folder of the project {project.name} ({project.root}) is not reachable; the task cannot run in it")
         workspace = project.root if project is not None else Path(schedule["workspace"])
+        if project is None and not workspace.is_dir():
+            # The stored folder of a schedule whose project is gone. ``mkdir(parents=True)`` would make
+            # the whole path and adopt the empty result as a project, so a task that used to run over the
+            # operator's files would quietly start running over nothing. The tick records this as a start
+            # failure and tells the operator, which is the only honest answer.
+            raise RuntimeError(f"the folder this task runs in ({workspace}) is not there; re-create it or point the task at a project")
         (workspace / "inbox").mkdir(parents=True, exist_ok=True)
         title = f"[cron] {schedule['name']}"
         if project is None:

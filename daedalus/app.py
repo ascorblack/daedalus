@@ -36,6 +36,9 @@ class Application:
         self.front: TelegramFront | None = None
         self.background: list[asyncio.Task[None]] = []
         self.extensions: dict[str, object] = {}
+        self.extension_failures: dict[str, str] = {}
+        """Subsystems that raised while installing, by name. Empty on a healthy start; see
+        :data:`daedalus.extensions.FATAL` for why a failure here is survivable."""
         self.stopping = asyncio.Event()
         self._shut_down = False
         # The local speech models: a directory listing and a configuration read, no engine and no
@@ -163,6 +166,11 @@ class Application:
         if last.exists():
             await self.notify("🔄 " + last.read_text(encoding="utf-8").strip()[-1500:], markdown=False, kind="rebuild", severity="notice")
             last.rename(last.with_suffix(".reported"))
+        if self.extension_failures:
+            # The inbox already holds one entry per subsystem; this is the line in the chat, because a
+            # bot that came up without its scheduler looks entirely healthy until something does not happen.
+            broken = ", ".join(f"{name} ({reason.split(':')[0]})" for name, reason in self.extension_failures.items())
+            await self.notify(f"⚠️ The bot started without {len(self.extension_failures)} subsystem(s): {broken}. The inbox has the error for each.", markdown=False, kind="extension", severity="error")
         exceeded = self.manager.budget_exceeded() if self.manager else None
         if exceeded:
             await self.notify(f"💸 Daily budget exceeded ({exceeded}). New runs are refused until tomorrow or /budget reset.", markdown=False, kind="budget", severity="warning")

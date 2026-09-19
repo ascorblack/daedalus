@@ -60,6 +60,7 @@ class DoctorContext:
     manager: Any = None
     front: Any = None
     extensions: dict[str, Any] = field(default_factory=dict)
+    extension_failures: dict[str, str] = field(default_factory=dict)
     guard: Any = None
     fix: bool = False
 
@@ -599,6 +600,14 @@ async def _runtime(ctx: DoctorContext) -> list[Check]:
         row = await ctx.db.fetchone("SELECT count(*) c FROM deliveries WHERE status = 'failed'")
         if row and row["c"]:
             out.append(Check("deliveries", False, f"{row['c']} answer(s) could not be delivered to Telegram", "warn", "they are in the Mini App transcript and answer.md in the workspace"))
+        stranded = await ctx.db.fetchall("SELECT session_id, name FROM services WHERE status = 'dead' AND note LIKE '%is outside%'")
+        if stranded:
+            out.append(Check("services", False, f"{len(stranded)} service(s) point at a folder their session may not reach: {', '.join(r['name'] for r in stranded[:5])}", "warn", "the note on each says both paths and how to bring it back; Services in the Mini App shows them"))
+    if ctx.extension_failures:
+        out.append(Check("extensions", False, f"{len(ctx.extension_failures)} subsystem(s) did not install: {', '.join(ctx.extension_failures)}", "fail", "the inbox holds the error for each; they come back on the next restart that fixes the cause"))
+    if ctx.manager is not None and getattr(ctx.manager, "unloadable_sessions", None):
+        broken = ctx.manager.unloadable_sessions
+        out.append(Check("sessions", False, f"{len(broken)} session(s) cannot be opened: {', '.join(f'{k} ({v})' for k, v in list(broken.items())[:3])}", "warn", "the session's directory is no longer inside its project; move the folder back or re-point the session's project"))
     return out
 
 

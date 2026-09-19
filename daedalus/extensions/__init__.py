@@ -47,16 +47,52 @@ def enabled(app: Application) -> tuple[str, ...]:
     return EXTENSIONS
 
 
+FATAL = ("daedalus.extensions.inbox",)
+"""The extensions a start may not do without, and why.
+
+Everything else is isolated: an extension that raises while installing is logged, reported to
+the operator and skipped, and the rest of the chain still installs. The reason is what a
+failure costs on each side. A bot that refuses to start says nothing to anyone — no chat, no
+Mini App, no inbox — and under a supervisor it says nothing repeatedly, so the one channel the
+operator has for finding out what is wrong is the channel the failure closed. A bot that starts
+without its board or its scheduler is diminished and says so, and the operator can decide.
+
+``inbox`` is the exception, and it is fatal deliberately: it is the channel every other
+failure is reported through. Starting without it would produce exactly the silent degradation
+the isolation exists to avoid — a bot running with subsystems missing and no way to say which.
+It is installed first for the same reason, so the failures below it have somewhere to go.
+
+An extension that fails partway may already have registered hooks; those stay registered. The
+alternative — unwinding a half-installed extension — needs an uninstall path per extension that
+nothing else would ever call, and a hook whose subsystem is missing fails at its own call site,
+where it is one tool's error rather than the whole start.
+"""
+
+
 async def install_all(app: Application) -> list[asyncio.Task[None]]:
     tasks: list[asyncio.Task[None]] = []
+    failures: dict[str, str] = {}
     for name in enabled(app):
+        short = name.rsplit(".", 1)[-1]
         try:
             module = importlib.import_module(name)
-        except ImportError:
-            logger.exception("extension %s failed to import", name)
-            continue
-        tasks.extend(await module.install(app))
+            tasks.extend(await module.install(app))
+        except Exception as exc:  # noqa: BLE001 — see FATAL: one subsystem must not cost the whole start
+            if name in FATAL:
+                raise
+            logger.exception("extension %s failed to install", name)
+            failures[short] = f"{type(exc).__name__}: {exc}"
+    app.extension_failures = failures
+    inbox = app.extensions.get("inbox")
+    if inbox is not None:
+        for short, reason in failures.items():
+            await inbox.post(  # type: ignore[attr-defined]
+                "extension",
+                f"The {short} subsystem did not start",
+                f"{reason}\n\nThe rest of the bot is running without it. Its tools and commands fail until the next restart fixes it.",
+                severity="error",
+            )
     return tasks
 
 
-__all__ = ["EXTENSIONS", "enabled", "install_all"]
+__all__ = ["EXTENSIONS", "FATAL", "enabled", "install_all"]

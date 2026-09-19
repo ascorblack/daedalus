@@ -3495,7 +3495,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     # -- doctor -------------------------------------------------------------------------
 
     def _doctor_context(fix: bool) -> DoctorContext:
-        return DoctorContext(settings=settings, config=app.config, db=app.db, manager=manager, front=app.front, extensions=dict(app.extensions), guard=app.guard, fix=fix)
+        return DoctorContext(settings=settings, config=app.config, db=app.db, manager=manager, front=app.front, extensions=dict(app.extensions), extension_failures=dict(app.extension_failures), guard=app.guard, fix=fix)
 
     @api.get("/api/doctor")
     async def doctor(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -4021,7 +4021,7 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
 
         async def cmd_doctor(message, command) -> None:  # type: ignore[no-untyped-def]
             fix = (command.args or "").strip().lower() == "fix"
-            ctx = DoctorContext(settings=app.settings, config=app.config, db=app.db, manager=app.manager, front=app.front, extensions=dict(app.extensions), guard=app.guard, fix=fix)
+            ctx = DoctorContext(settings=app.settings, config=app.config, db=app.db, manager=app.manager, front=app.front, extensions=dict(app.extensions), extension_failures=dict(app.extension_failures), guard=app.guard, fix=fix)
             checks = await run_checks(ctx)
             outbox = TelegramOutbox(app.front.bot, message.chat.id, message.message_thread_id if message.is_topic_message else None)  # type: ignore[union-attr]
             for chunk in split_message(redact.redact(render_text(checks))):

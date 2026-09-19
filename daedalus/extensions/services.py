@@ -316,6 +316,13 @@ class Services:
         if row is None:
             raise ValueError(f"no service named {name!r}")
         path = Path(row["log_path"])
+        manager = self.app.manager
+        services = manager.locator_services(session_id) if manager is not None else None
+        if services is not None and not services.contains(path):
+            # The stored log path is judged like every other path this session names. A row whose
+            # service ran before the session's folder became a project's can still carry a path
+            # outside it, and reading it here would be the one file read that skipped the wall.
+            return f"(the log is at {path}, outside {services.project_root}, the folder this session works in: it is not read from here)"
         if not path.exists():
             return "(no log yet)"
         try:
@@ -324,6 +331,39 @@ class Services:
             return f"(log unreadable: {exc})"
         text = data[-200_000:].decode("utf-8", "replace")
         return "\n".join(text.splitlines()[-max(1, lines):]) or "(empty)"
+
+    # -- containment ----------------------------------------------------------------
+
+    def directory_refusal(self, session_id: str, cwd: str) -> str:
+        """Why this session may not run a service in ``cwd`` any more, or ``""`` when it may.
+
+        A service outlives the turn that started it, so its directory is the one stored path here
+        that a later change of the session's own folder can leave pointing somewhere the session is
+        no longer allowed to go: a row written before the folder was a project's, a session moved
+        into a project, a directory that belonged to a sibling agent all along. ``SessionServices``
+        answers the containment question; this turns the answer into something an operator can act on.
+        """
+        manager = self.app.manager
+        services = manager.locator_services(session_id) if manager is not None else None
+        if services is None or services.project_root is None or services.contains(Path(cwd)):
+            return ""
+        directory, root = Path(cwd), services.project_root
+        same_name = root / directory.name
+        fix = (
+            f"a folder of that name is already at {same_name} — ServiceStart the service there"
+            if same_name.is_dir()
+            else f"move it into {root}, or open it as a project of its own and start the service from a session there"
+        )
+        return (
+            f"its working directory {directory} is outside {root}, the folder this session works in, so it was left as "
+            f"it is rather than started somewhere else: the same command in another folder serves different files under "
+            f"the same port and the same link. To bring it back, {fix}."
+        )
+
+    async def _mark_dead(self, session_id: str, name: str, note: str) -> None:
+        # 700, not the 400 a plain failure gets: a note that names two absolute paths and the way back
+        # is the whole point of the row, and a truncated one ends in the middle of the path it is about.
+        await self.app.db.execute("UPDATE services SET status = 'dead', note = ?, stopped_at = ? WHERE session_id = ? AND name = ?", (note[:700], _now(), session_id, name))
 
     # -- boot -----------------------------------------------------------------------
 
@@ -339,6 +379,14 @@ class Services:
                 continue  # survived the bot restart (reparented); the table is right
             sid, name = row["session_id"], row["name"]
             if row.get("restart") and await manager.get_state(sid) is not None:
+                # Asked before the restart rather than caught after it: a directory the session may no
+                # longer reach is not a broken service, and the operator needs both paths to fix it.
+                if refusal := self.directory_refusal(sid, row["cwd"]):
+                    await self._mark_dead(sid, name, f"not restarted after the rebuild: {refusal}")
+                    logger.warning("service %s/%s not restarted: %s", sid, name, refusal)
+                    if inbox is not None:
+                        await inbox.post("service", f"Service '{name}' was not restarted", refusal, severity="warning", session_id=sid)
+                    continue
                 try:
                     await self.start(sid, name=name, command=row["command"], cwd=row["cwd"], port=row.get("port") or None, restart=True)
                     logger.warning("service %s/%s restarted after the rebuild", sid, name)
@@ -347,7 +395,7 @@ class Services:
                     # Anything at all: a command that no longer exists, a port taken, a directory the
                     # session may no longer reach. The row is what the operator reads afterwards, and
                     # the remaining services still get their turn.
-                    await self.app.db.execute("UPDATE services SET status = 'dead', note = ?, stopped_at = ? WHERE session_id = ? AND name = ?", (f"could not restart after the rebuild: {exc}"[:400], _now(), sid, name))
+                    await self._mark_dead(sid, name, f"could not restart after the rebuild: {exc}")
                     if inbox is not None:
                         await inbox.post("service", f"Service '{name}' did not come back", str(exc)[:400], severity="warning", session_id=sid)
                     continue
