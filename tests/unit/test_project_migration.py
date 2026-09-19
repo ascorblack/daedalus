@@ -144,3 +144,26 @@ async def test_existing_project_preserves_effective_directory_and_cleans_metadat
         assert cleaned.get("directory", "") == ("private" if kind == "inside" else "")
     finally:
         await db.close()
+
+
+@pytest.mark.parametrize("existing", [False, True])
+async def test_voice_agents_keep_their_directories(tmp_path: Path, existing: bool) -> None:
+    path = tmp_path / "old.sqlite"
+    root, outside = tmp_path / "voice", tmp_path / "separate"
+    expected = {"voice-first": root, "delegate": root, "voice-nested": root / "child", "voice-second": outside}
+    with seed(path) as raw:
+        if existing:
+            project(raw, "existing", root)
+        for sid, directory in expected.items():
+            session(raw, sid, json.dumps({"voice": sid != "delegate", "workspace": str(directory)}))
+    raw.close()
+    db = Database(path)
+    try:
+        await db.open()
+        rows = await db.fetchall("SELECT s.id, s.metadata, p.root, p.system FROM sessions s JOIN projects p ON p.id = s.project_id")
+        assert {r["id"]: Path(r["root"]) / json.loads(r["metadata"]).get("directory", "") for r in rows} == expected
+        assert {r["id"] for r in rows if r["system"] == "voice"} == {"voice-first", "delegate", "voice-nested"}
+        assert all("workspace" not in json.loads(r["metadata"]) and "own_workspace" not in json.loads(r["metadata"]) for r in rows)
+        assert len(await db.fetchall("SELECT id FROM projects WHERE system = 'voice'")) == 1
+    finally:
+        await db.close()

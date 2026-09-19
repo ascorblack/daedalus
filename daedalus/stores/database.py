@@ -532,14 +532,6 @@ def _project_unification(workspaces_dir: Path) -> str:
         THEN CASE WHEN json_type(metadata) = 'object' THEN metadata ELSE '{{}}' END
         ELSE '{{}}' END;
 
-    CREATE TEMP TABLE duplicate_projects AS
-    SELECT p.id, (SELECT k.id FROM projects k WHERE k.root = p.root
-                  ORDER BY (k.system != '') DESC, k.created_at, k.rowid LIMIT 1) AS keeper
-    FROM projects p;
-    UPDATE sessions SET project_id = (SELECT keeper FROM duplicate_projects WHERE id = sessions.project_id)
-    WHERE project_id IN (SELECT id FROM duplicate_projects WHERE id != keeper);
-    DELETE FROM projects WHERE id IN (SELECT id FROM duplicate_projects WHERE id != keeper);
-    DROP TABLE duplicate_projects;
 
     INSERT INTO projects(id, name, root, created_at, settings, system)
     SELECT 'project-' || substr(min(id), 1, 12), 'Voice',
@@ -557,8 +549,15 @@ def _project_unification(workspaces_dir: Path) -> str:
     FROM sessions
     WHERE project_id IS NULL AND json_valid(metadata) AND json_extract(metadata, '$.voice') = 1
     HAVING count(*) > 0 AND NOT EXISTS (SELECT 1 FROM projects WHERE system = 'voice');
-    UPDATE sessions SET project_id = (SELECT id FROM projects WHERE system = 'voice')
-    WHERE project_id IS NULL AND json_valid(metadata) AND json_extract(metadata, '$.voice') = 1;
+
+    CREATE TEMP TABLE duplicate_projects AS
+    SELECT p.id, (SELECT k.id FROM projects k WHERE k.root = p.root
+                  ORDER BY (k.system != '') DESC, k.created_at, k.rowid LIMIT 1) AS keeper
+    FROM projects p;
+    UPDATE sessions SET project_id = (SELECT keeper FROM duplicate_projects WHERE id = sessions.project_id)
+    WHERE project_id IN (SELECT id FROM duplicate_projects WHERE id != keeper);
+    DELETE FROM projects WHERE id IN (SELECT id FROM duplicate_projects WHERE id != keeper);
+    DROP TABLE duplicate_projects;
 
     CREATE TEMP TABLE session_directories AS
     SELECT s.id,
