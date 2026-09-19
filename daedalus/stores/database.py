@@ -563,13 +563,17 @@ def _project_unification(workspaces_dir: Path) -> str:
     CREATE TEMP TABLE session_directories AS
     SELECT s.id,
            CASE
+             WHEN p.id IS NOT NULL AND NOT COALESCE((
+               COALESCE(json_extract(s.metadata, '$.own_workspace'), 0)
+               AND json_type(s.metadata, '$.workspace') = 'text'
+               AND trim(json_extract(s.metadata, '$.workspace')) != ''
+             ), 0) THEN p.root
              WHEN json_valid(s.metadata) AND json_type(s.metadata, '$.workspace') = 'text'
                AND trim(json_extract(s.metadata, '$.workspace')) != ''
              THEN rtrim(json_extract(s.metadata, '$.workspace'), '/')
              ELSE '{base}/' || s.id
            END AS directory
-    FROM sessions s
-    WHERE s.project_id IS NULL;
+    FROM sessions s LEFT JOIN projects p ON p.id = s.project_id;
 
     CREATE TEMP TABLE session_project_roots AS
     SELECT d.id, d.directory,
@@ -598,12 +602,11 @@ def _project_unification(workspaces_dir: Path) -> str:
         metadata = CASE
           WHEN (SELECT directory FROM session_project_roots WHERE id = sessions.id) =
                (SELECT root FROM session_project_roots WHERE id = sessions.id)
-          THEN json_remove(metadata, '$.workspace', '$.own_workspace')
-          ELSE json_set(json_remove(metadata, '$.workspace', '$.own_workspace'), '$.directory',
+          THEN json_remove(metadata, '$.workspace', '$.own_workspace', '$.directory')
+          ELSE json_set(json_remove(metadata, '$.workspace', '$.own_workspace', '$.directory'), '$.directory',
                substr((SELECT directory FROM session_project_roots WHERE id = sessions.id),
                       length((SELECT root FROM session_project_roots WHERE id = sessions.id)) + 2))
-        END
-    WHERE project_id IS NULL;
+        END;
 
     DROP TABLE session_project_roots;
     DROP TABLE session_directories;

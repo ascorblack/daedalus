@@ -114,3 +114,33 @@ async def test_directory_grouping_is_case_sensitive(tmp_path: Path, existing: bo
         assert len(await db.fetchall("SELECT id FROM projects")) == 2
     finally:
         await db.close()
+
+
+@pytest.mark.parametrize("kind", ["inside", "outside", "shared", "missing"])
+async def test_existing_project_preserves_effective_directory_and_cleans_metadata(tmp_path: Path, kind: str) -> None:
+    path = tmp_path / "old.sqlite"
+    root = tmp_path / "project"
+    named = root / "private" if kind == "inside" else tmp_path / "private"
+    metadata = {"workspace": str(named), "own_workspace": kind != "shared", "keep": "value", "directory": "obsolete"}
+    if kind == "missing":
+        del metadata["workspace"]
+    expected = root if kind in {"shared", "missing"} else named
+    with seed(path) as raw:
+        project(raw, "existing", root)
+        session(raw, "agent", json.dumps(metadata), "existing")
+    raw.close()
+    db = Database(path)
+    try:
+        await db.open()
+        row = await db.fetchone("SELECT s.project_id, s.metadata, p.root FROM sessions s JOIN projects p ON p.id = s.project_id")
+        cleaned = json.loads(row["metadata"])
+        assert Path(row["root"]) / cleaned.get("directory", "") == expected
+        assert "workspace" not in cleaned and "own_workspace" not in cleaned
+        assert cleaned["keep"] == "value"
+        if kind != "outside":
+            assert row["project_id"] == "existing"
+        else:
+            assert row["project_id"] != "existing"
+        assert cleaned.get("directory", "") == ("private" if kind == "inside" else "")
+    finally:
+        await db.close()
