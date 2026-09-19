@@ -770,6 +770,9 @@ input.field, select.field, textarea.field {
   .sidebar .empty b { font-size: var(--fs-14); }
   /* Folders are flat groups here, not cards: a 28 px label with the count, and the rows under it. */
   .sidebar .folder, .sidebar .folder.open { margin: 0 0 4px; border: 0; background: none; border-radius: 0; overflow: visible; }
+  .sidebar .folder-head.linked { padding: 0; gap: 0; }
+  .sidebar .folder-disclose { padding: 2px 2px 2px 8px; }
+  .sidebar .folder-go { gap: 6px; padding: 2px 8px 2px 4px; }
   .sidebar .folder-head { min-height: 28px; padding: 2px 8px; gap: 6px; background: none; border-radius: var(--radius-sm); font-size: var(--fs-12); font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--fg-2); }
   .sidebar .folder-head:hover { background: var(--surface-1); }
   .sidebar .folder.open .folder-head { border-bottom: 0; }
@@ -1207,6 +1210,12 @@ body.resizing iframe { pointer-events: none; }
 .folder.open { background: var(--surface-1); border-color: var(--line-strong); }
 .folder-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--row-h); padding: 4px 12px; background: var(--surface-2); border: 0; color: var(--fg); font: inherit; font-size: var(--fs-14); text-align: left; cursor: pointer; }
 .folder-head:hover { background: var(--surface-3); }
+/* A header that both goes somewhere and opens: the chevron is its own button with its own label,
+   and the rest of the row is the link. Nothing else about the row changes. */
+.folder-head.linked { padding: 0; gap: 0; }
+.folder-disclose { display: flex; align-items: center; align-self: stretch; padding: 4px 2px 4px 12px; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; }
+.folder-disclose:hover .chev { color: var(--fg); }
+.folder-go { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 4px 12px 4px 6px; color: inherit; text-decoration: none; }
 .folder.open .folder-head { border-bottom: 1px solid var(--line); }
 .folder-head .chev { display: inline-block; color: var(--fg-3); transition: transform .15s; }
 .folder-head .chev.down { transform: rotate(90deg); }

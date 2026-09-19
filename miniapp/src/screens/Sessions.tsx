@@ -6,7 +6,8 @@ import { relTime, shortModel, untilShort } from "../format";
 import { Folder, Row as RowModel, agentName, arrange, folderOpen, rememberFolder } from "../grouping";
 import { Icon } from "../icons";
 import { ProjectChip, useProjects } from "../projects";
-import { PageHeader, screenTitle } from "../shell";
+import { pathFor } from "../router";
+import { PageHeader, go, screenTitle } from "../shell";
 import { useQuery } from "../store";
 import { WindowedRows } from "../virtual";
 import { errorText } from "../ui";
@@ -145,24 +146,45 @@ const FolderSection = memo(function FolderSection({ folder, onOpen, current, fil
     setOpen(next);
     rememberFolder(folder.key, next);
   };
+  // The Voice folder is the home of the voice agents, but the word in the list is the mode: the row
+  // goes to the voice screen and the chevron beside it — its own button, with its own label — is
+  // what opens the list of agents underneath. An ordinary project has nowhere else to go, so its
+  // whole header stays the one control it always was.
+  const inside = (
+    <>
+      <Icon name={folder.system ? "mic" : "folder"} size={16} />
+      <span className="folder-name truncate">{folder.name}</span>
+      {folder.active > 0 && <span className="folder-live" title={t("agents.active", { n: folder.active })}><Dot status="running" /></span>}
+      {compact ? (
+        <span className="folder-counts sub num" title={plural("agents.count", folder.total)}>{folder.total}</span>
+      ) : (
+        <span className="folder-counts sub">
+          {plural("agents.count", folder.total)}
+          {folder.active > 0 && ` · ${t("agents.active", { n: folder.active })}`}
+          {folder.loops > 0 && ` · ${t("agents.filter.loops", { n: folder.loops })}`}
+        </span>
+      )}
+      {!compact && folder.last_message_at && <span className="folder-time sub num" title={new Date(folder.last_message_at).toLocaleString()}>{relTime(folder.last_message_at)}</span>}
+    </>
+  );
+  const chevron = <span className={`chev ${showing ? "down" : ""}`} aria-hidden>›</span>;
   return (
     <section ref={section} className={`folder ${folder.system ? "system" : ""} ${showing ? "open" : ""}`}>
-      <button className="folder-head" onClick={toggle} aria-expanded={showing}>
-        <span className={`chev ${showing ? "down" : ""}`} aria-hidden>›</span>
-        <Icon name={folder.system ? "mic" : "folder"} size={16} />
-        <span className="folder-name truncate">{folder.name}</span>
-        {folder.active > 0 && <span className="folder-live" title={t("agents.active", { n: folder.active })}><Dot status="running" /></span>}
-        {compact ? (
-          <span className="folder-counts sub num" title={plural("agents.count", folder.total)}>{folder.total}</span>
-        ) : (
-          <span className="folder-counts sub">
-            {plural("agents.count", folder.total)}
-            {folder.active > 0 && ` · ${t("agents.active", { n: folder.active })}`}
-            {folder.loops > 0 && ` · ${t("agents.filter.loops", { n: folder.loops })}`}
-          </span>
-        )}
-        {!compact && folder.last_message_at && <span className="folder-time sub num" title={new Date(folder.last_message_at).toLocaleString()}>{relTime(folder.last_message_at)}</span>}
-      </button>
+      {folder.system ? (
+        <div className="folder-head linked">
+          <button className="folder-disclose" onClick={toggle} aria-expanded={showing} aria-label={t(showing ? "agents.folder.hide" : "agents.folder.show", { name: folder.name })} title={t(showing ? "agents.folder.hide" : "agents.folder.show", { name: folder.name })}>
+            {chevron}
+          </button>
+          <a className="folder-go" href={pathFor("voice")} onClick={(e) => go(e, pathFor("voice"))} title={t("agents.folder.tovoice")}>
+            {inside}
+          </a>
+        </div>
+      ) : (
+        <button className="folder-head" onClick={toggle} aria-expanded={showing}>
+          {chevron}
+          {inside}
+        </button>
+      )}
       {showing && !compact && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
       {showing && folder.rows.length === 0 && <div className="folder-empty sub">{filtered ? t("common.nothing") : t("agents.folder.none")}</div>}
       {showing && (
