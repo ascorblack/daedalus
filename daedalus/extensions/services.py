@@ -343,7 +343,10 @@ class Services:
                     await self.start(sid, name=name, command=row["command"], cwd=row["cwd"], port=row.get("port") or None, restart=True)
                     logger.warning("service %s/%s restarted after the rebuild", sid, name)
                     continue
-                except (ValueError, RuntimeError, KeyError) as exc:
+                except Exception as exc:  # noqa: BLE001 - one service that cannot come back must not keep the bot from starting
+                    # Anything at all: a command that no longer exists, a port taken, a directory the
+                    # session may no longer reach. The row is what the operator reads afterwards, and
+                    # the remaining services still get their turn.
                     await self.app.db.execute("UPDATE services SET status = 'dead', note = ?, stopped_at = ? WHERE session_id = ? AND name = ?", (f"could not restart after the rebuild: {exc}"[:400], _now(), sid, name))
                     if inbox is not None:
                         await inbox.post("service", f"Service '{name}' did not come back", str(exc)[:400], severity="warning", session_id=sid)
