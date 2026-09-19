@@ -421,8 +421,9 @@ class SessionManager:
         await self.memory.load()
         await self.workspace_units.load()
         # The policy is built inside a tool call and cannot wait on a query; this is where the project
-        # roots it compares against are read.
-        await self.projects.list()
+        # roots it compares against are read — and where a folder of our own that is not on disk is
+        # put back, so the first run after a start is not the thing that discovers it missing.
+        await self.projects.ensure_roots()
         # New runs wait until resume_unfinished() has continued what the previous process left behind;
         # a process that finds nothing to resume (tests, a first start) opens the gate at once.
         self.recovering = recovering if recovering is not None else bool(await self.events.unfinished_snapshots())
@@ -1735,8 +1736,16 @@ class SessionManager:
             if self.recovering and not state.running:
                 raise RuntimeError("the bot is starting up and first continues the runs it left behind; try again in a moment")
             if not state.workspace.is_dir():
+                # One of ours is remade here: a folder under the managed tree is the installation's
+                # to create, and a run refused because our own bookkeeping lost a directory is an
+                # outage with nothing for the operator to do about it. A folder they pointed at is
+                # theirs, so that one still refuses, with the path in the message.
+                if state.project is not None:
+                    await self.projects.ensure_reachable(state.project)
+                    _ensure_inbox(state.workspace, state.project)
+            if not state.workspace.is_dir():
                 name = state.project.name if state.project is not None else state.session.title
-                raise RuntimeError(f"the working directory for {name} is not reachable; restore or mount it before starting a run")
+                raise RuntimeError(f"the working directory for {name} ({state.workspace}) is not reachable; restore or mount it before starting a run")
             if not os.access(state.workspace, os.W_OK):
                 raise RuntimeError(f"the working directory for {state.session.title} is not writable")
             body, image_refs = await self._ingest_attachments(state, text, attachments)

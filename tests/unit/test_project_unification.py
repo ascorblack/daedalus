@@ -53,10 +53,13 @@ async def test_a_name_creates_the_project_folder_and_every_session_has_a_project
             assert "free" not in listing
             assert all(row["project_id"] for row in listing["sessions"])
 
+            # The folder is under the workspaces tree, so it is the installation's to keep: moved
+            # away, it is simply made again rather than refused. A folder the operator pointed at is
+            # the opposite case and still refuses — tests/unit/test_projects.py has both sides.
             root = Path(project["root"])
             root.rename(root.with_name(root.name + "-away"))
-            with pytest.raises(RuntimeError, match="not reachable"):
-                await manager.submit(shared["id"], "continue")
+            assert await manager.projects.ensure_reachable(await manager.projects.get(project["id"])) is True
+            assert root.is_dir() and (root / "inbox").is_dir()
     finally:
         await manager.close()
 

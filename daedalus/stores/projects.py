@@ -51,6 +51,16 @@ class Project:
     root: Path
     created_at: datetime
     settings: ProjectSettings = field(default_factory=ProjectSettings)
+    managed: bool = False
+    """Whether the folder is one the installation chose for itself — a root under the managed
+    projects tree, made when the project was made — rather than a folder the operator pointed at.
+
+    The two are missing for opposite reasons, so they cannot share one answer. A managed folder that
+    is not there was never created or has been swept away, and nobody but this installation was ever
+    going to create it: it is remade on demand. A folder the operator named is theirs, and an empty
+    directory conjured at its path would shadow the real one when the mount or the disk comes back —
+    so that one stays the error it is, naming the path so they can restore or mount it.
+    """
 
     @property
     def reachable(self) -> bool:
@@ -70,18 +80,29 @@ class Project:
         }
 
 
-def _row(row: Any) -> Project:
+def _row(row: Any, managed_root: Path | None = None) -> Project:
     try:
         settings = json.loads(row["settings"] or "{}")
     except (TypeError, ValueError):
         settings = {}
+    root = Path(row["root"])
     return Project(
         id=row["id"],
         name=row["name"],
-        root=Path(row["root"]),
+        root=root,
         created_at=datetime.fromisoformat(row["created_at"]),
         settings=ProjectSettings.load(settings),
+        managed=_is_managed(root, managed_root),
     )
+
+
+def _is_managed(root: Path, managed_root: Path | None) -> bool:
+    """Whether this root is one of ours: a folder *inside* the managed projects tree.
+
+    The tree itself is not a project and never a root, so containment is the whole test — a path
+    equal to the tree is as foreign here as one outside it.
+    """
+    return managed_root is not None and managed_root in root.parents
 
 
 def _nested_under(session_id: str, metadata: dict[str, Any], known: set[str]) -> bool:
@@ -158,13 +179,13 @@ class ProjectStore:
 
     async def list(self) -> list[Project]:
         rows = await self._db.fetchall("SELECT * FROM projects ORDER BY name COLLATE NOCASE")
-        projects = [_row(r) for r in rows]
+        projects = [_row(r, self._managed_root) for r in rows]
         self._roots = tuple(p.root for p in projects)
         return projects
 
     async def get(self, project_id: str) -> Project | None:
         row = await self._db.fetchone("SELECT * FROM projects WHERE id = ?", (project_id,))
-        return _row(row) if row is not None else None
+        return _row(row, self._managed_root) if row is not None else None
 
     async def create(self, name: str, root: str | None = None, *, settings: ProjectSettings | None = None, project_id: str | None = None) -> Project:
         label = (name or "").strip()
@@ -181,9 +202,15 @@ class ProjectStore:
         async with self._write:
             await self._refuse_overlap(path)
             if root is None:
-                path.mkdir(parents=True, exist_ok=False)
-                (path / "inbox").mkdir()
-            project = Project(id=project_id, name=label, root=path, created_at=datetime.now(UTC), settings=settings or ProjectSettings())
+                self._make_root(path)
+            project = Project(
+                id=project_id,
+                name=label,
+                root=path,
+                created_at=datetime.now(UTC),
+                settings=settings or ProjectSettings(),
+                managed=_is_managed(path, self._managed_root),
+            )
             await self._insert(project)
             await self.list()
         return project
@@ -204,7 +231,14 @@ class ProjectStore:
             if existing is not None:
                 return existing
             await self._refuse_overlap(path)
-            project = Project(id=uuid.uuid4().hex[:12], name=label, root=path, created_at=datetime.now(UTC), settings=ProjectSettings(snapshots=True))
+            project = Project(
+                id=uuid.uuid4().hex[:12],
+                name=label,
+                root=path,
+                created_at=datetime.now(UTC),
+                settings=ProjectSettings(snapshots=True),
+                managed=_is_managed(path, self._managed_root),
+            )
             await self._insert(project)
             await self.list()
             return project
@@ -241,12 +275,23 @@ class ProjectStore:
         async with self._write:
             existing = await self.system(kind)
             if existing is not None:
+                # The row can outlive its folder — an upgrade that wrote the row from the sessions it
+                # found, a sweep, a restore of the database without the tree beside it. This is the
+                # one call every user of a system project already makes, so it is where the folder is
+                # put back rather than at each of them.
+                await self.ensure_reachable(existing)
                 return existing
             path = Path(os.path.normpath(Path(root).expanduser()))
             await self._refuse_overlap(path)
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "inbox").mkdir(exist_ok=True)
-            project = Project(id=uuid.uuid4().hex[:12], name=name, root=path, created_at=datetime.now(UTC), settings=ProjectSettings(system=kind))
+            self._make_root(path)
+            project = Project(
+                id=uuid.uuid4().hex[:12],
+                name=name,
+                root=path,
+                created_at=datetime.now(UTC),
+                settings=ProjectSettings(system=kind),
+                managed=_is_managed(path, self._managed_root),
+            )
             try:
                 await self._insert(project)
             except sqlite3.IntegrityError:
@@ -259,6 +304,74 @@ class ProjectStore:
                 return made
             await self.list()
         return project
+
+    async def ensure_reachable(self, project: Project) -> bool:
+        """Whether the folder can be worked in — making it first when it is one of ours.
+
+        Every guard that refuses to start something in a project asks this instead of reading
+        ``reachable`` directly. For a folder under the managed tree the answer is a folder: nothing
+        outside this installation was ever going to create it, and a row whose directory is missing
+        is a gap in our own bookkeeping, not news for the operator. For a folder they pointed at the
+        answer is the plain truth, and the caller raises with the path in it.
+        """
+        if project.managed and not project.root.is_dir():
+            await asyncio.to_thread(self._make_root, project.root)
+        return project.reachable
+
+    async def ensure_roots(self) -> list[Project]:
+        """Read the table and put back any of our own folders that are not on disk.
+
+        Called on the way up, so a run started straight after a start does not have to be the thing
+        that discovers the gap.
+        """
+        projects = await self.list()
+        for project in projects:
+            if project.managed and not project.root.is_dir():
+                await asyncio.to_thread(self._make_root, project.root)
+        return projects
+
+    def _make_root(self, path: Path) -> None:
+        """Create one of our own project folders the way the ones beside it were created.
+
+        Mode and ownership are copied from a sibling under the managed tree, or from the tree itself
+        when there is no sibling yet: a folder made by a process running as somebody else would
+        otherwise be a workspace the bot cannot write into, which is the same outage wearing a
+        different message. Both are best effort — a filesystem that will not take a chown is not a
+        reason to leave the folder unmade.
+        """
+        template = self._template_root(path)
+        fresh = [p for p in (path, *path.parents) if self._managed_root is not None and self._managed_root in p.parents and not p.exists()]
+        path.mkdir(parents=True, exist_ok=True)
+        inbox = path / "inbox"
+        if not inbox.exists():
+            inbox.mkdir()
+            fresh.append(inbox)
+        if template is None:
+            return
+        try:
+            stat = template.stat()
+        except OSError:
+            return
+        for made in fresh:
+            try:
+                os.chmod(made, stat.st_mode & 0o7777)
+            except OSError:
+                pass
+            try:
+                os.chown(made, stat.st_uid, stat.st_gid)
+            except (OSError, AttributeError):
+                pass
+
+    def _template_root(self, path: Path) -> Path | None:
+        """A folder already under the managed tree to copy mode and ownership from."""
+        root = self._managed_root
+        if root is None or not root.is_dir():
+            return None
+        try:
+            siblings = sorted(child for child in root.iterdir() if child.is_dir() and child != path)
+        except OSError:
+            siblings = []
+        return siblings[0] if siblings else root
 
     async def system(self, kind: str) -> Project | None:
         """The installation's project of this kind if it has been made; ``None`` before it is needed."""
