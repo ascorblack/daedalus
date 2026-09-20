@@ -44,6 +44,7 @@ GATES: dict[str, object] = {
     # Settings asks what the installation is missing before it draws its index.
     "/api/components": {"mode": "docker", "launcher": False, "components": [], "disk_bytes": 0, "missing": [], "busy": ""},
     "/api/dependencies": {"capability": {"mode": "docker", "python": True, "system": True, "manager": "apt", "reason": ""}, "tools": [{"name": "python", "available": True, "version": "Python 3.12"}, {"name": "gcc", "available": False, "version": ""}], "packages": [], "recipe": {"python": [], "system": []}, "models": [{"id": "default", "label": "Test model"}], "proposal": None, "job": None},
+    "/api/prompt-change": {"models": [{"id": "default", "label": "Test model"}], "proposal": None},
     "/api/auth/me": {"user": "operator"},
     "/api/auth/config": {"passkeys": 1},
     "/api/status": {"ok": True},

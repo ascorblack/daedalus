@@ -59,6 +59,7 @@ from daedalus.host import capabilities, component_install, launcher_bridge
 from daedalus.host import components as component_list
 from daedalus.host.dependencies import DependencyPlanner
 from daedalus.host.policy import sealed_root
+from daedalus.host.prompt_changes import PromptChangePlanner
 from daedalus.host.prompts import DEFAULT_RULES
 from daedalus.host.session_runner import TENANT, Attachment
 from daedalus.host.transcript_view import message_view
@@ -877,6 +878,7 @@ def _tool_group(name: str) -> str:
 
 def build_app(app: Application, api_token: str) -> FastAPI:
     dependency_planner = DependencyPlanner(app)
+    prompt_change_planner = PromptChangePlanner(app)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -884,6 +886,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             yield
         finally:
             await dependency_planner.close()
+            await prompt_change_planner.close()
 
     api = FastAPI(title="Daedalus", docs_url=None, redoc_url=None, lifespan=lifespan)
     # A session page is JSON and compresses about fivefold; over a phone connection that is the
@@ -2263,6 +2266,32 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         try:
             return await dependency_planner.approve(proposal_id)
         except (ValueError, RuntimeError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @api.get("/api/prompt-change")
+    async def prompt_change_view(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return await prompt_change_planner.view()
+
+    @api.post("/api/prompt-change/request")
+    async def prompt_change_request(body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            return await prompt_change_planner.start(str(body.get("instruction", "")), str(body.get("preset", "")))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @api.post("/api/prompt-change/{proposal_id}/cancel")
+    async def prompt_change_cancel(proposal_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            await prompt_change_planner.cancel(proposal_id)
+            return {"cancelled": True}
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @api.post("/api/prompt-change/{proposal_id}/approve")
+    async def prompt_change_approve(proposal_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            return await prompt_change_planner.approve(proposal_id)
+        except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
 
     def component_registry() -> component_list.Registry:

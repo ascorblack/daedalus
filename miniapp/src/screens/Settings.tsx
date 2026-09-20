@@ -13,6 +13,7 @@ import { TtsVoices } from "./Voices";
 import { VoiceSettings } from "./Voice";
 import { ComponentsTab } from "./Components";
 import { DependenciesTab } from "./Dependencies";
+import { PromptChange } from "./PromptChange";
 import { AddModel } from "./AddModel";
 import { REASONING_EFFORTS } from "../models";
 import { Sheet } from "../dialogs";
@@ -36,7 +37,7 @@ function RulesEditor({ rules, fallback, onSave }: { rules: string; fallback: str
     <div className="card">
       <div className="section-title" style={{ marginTop: 0 }}>{t("settings.rules.title")}</div>
       <div className="sub">{t("settings.rules.sub")} {t(rules ? "settings.rules.custom" : "settings.rules.default")}</div>
-      <textarea className="field" rows={14} value={text} onChange={(e) => (setText(e.target.value), setDirty(true))} style={{ fontFamily: "var(--mono)", fontSize: 12.5, marginTop: 8 }} />
+      <textarea className="field rules-editor-field" rows={10} value={text} onChange={(e) => (setText(e.target.value), setDirty(true))} style={{ fontFamily: "var(--mono)", fontSize: 12.5, marginTop: 8 }} />
       <div className="btnrow">
         <button className="btn primary" disabled={!dirty} onClick={() => (onSave(text.trim() === fallback.trim() ? "" : text), setDirty(false))}>
           {t("common.save")}
@@ -1107,6 +1108,7 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
       case "rules":
         return (
           <>
+            <PromptChange onApplied={(rules) => setS({ ...s, prompt: { ...s.prompt, rules } })} />
             <RulesEditor rules={s.prompt.rules} fallback={s.prompt.default_rules ?? ""} onSave={(rules) => save({ prompt: { rules } })} />
             <div className="card">
               <div className="section-title" style={{ marginTop: 0 }}>{t("settings.selfchange")}</div>

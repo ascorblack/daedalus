@@ -32,7 +32,7 @@ def run() -> None:
                             view["proposal"]["state"] = "cancelled"
                         elif path.endswith("/approve"):
                             view["proposal"]["state"] = "accepted"
-                            view["job"] = {"id": "request", "state": "installing", "error": ""}
+                            view["job"] = {"id": "request", "state": "installing", "stage": "building", "started_at": 1, "updated_at": 1, "progress": [], "error": ""}
                         else:
                             raise AssertionError(path)
                     route.fulfill(status=200, content_type="application/json", body=json.dumps(view))
@@ -41,6 +41,8 @@ def run() -> None:
                 page = context.new_page()
                 page.route("**/api/**", route_api)
                 page.goto(f"{BASE}/settings/dependencies?lang={language}")
+                if directory := os.environ.get("DEPENDENCY_SCREENSHOTS"):
+                    page.screenshot(path=f"{directory}/dependency-idle-{width}-{language}.png")
                 page.locator("#dependency-request").fill("Add Pillow")
                 prepare = "Prepare patch" if language == "en" else "Подготовить патч"
                 cancel = "Cancel" if language == "en" else "Отмена"
@@ -62,15 +64,16 @@ def run() -> None:
                 expect(dialog.get_by_role("button", name=install)).to_be_enabled()
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
                 if directory := os.environ.get("DEPENDENCY_SCREENSHOTS"):
+                    page.wait_for_timeout(300)
                     page.screenshot(path=f"{directory}/dependency-review-{width}-{language}.png")
                 dialog.get_by_role("button", name=install).click()
                 expect(dialog).to_have_count(0)
                 page.reload()
-                expect(page.locator(".comp-restart")).to_be_visible()
-                expect(page.locator("#dependency-request")).to_be_disabled()
+                expect(page.locator(".deps-job")).to_be_visible()
+                expect(page.locator("#dependency-request")).to_have_count(0)
                 view["job"]["state"] = "failed"
                 view["job"]["error"] = "The old image is still running."
-                expect(page.locator(".comp-restart")).to_contain_text("old image", timeout=8000)
+                expect(page.locator(".deps-job")).to_contain_text("old image", timeout=8000)
                 expect(page.locator("#dependency-request")).to_be_enabled()
                 assert sum(path.endswith("/approve") for path in requests) == 1
                 context.close()

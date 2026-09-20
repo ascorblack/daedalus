@@ -37,15 +37,17 @@ def run() -> None:
             page.goto(f"{BASE}/settings/dependencies?lang={language}")
             other.goto(f"{BASE}/settings?lang={language}")
             expect(other.locator("body")).not_to_contain_text("[settings.sec.dependencies.hint]")
+            expect(page.locator(".deps-progress-disclosures summary").first).to_contain_text("2")
+            page.locator(".deps-progress-disclosures summary").first.click()
             expect(page.locator(".deps-events li")).to_have_count(2)
             expect(page.locator("#dependency-request")).to_have_value("Add Pillow")
             expect(page.locator("#dependency-request")).to_be_disabled()
             page.reload()
-            expect(page.locator(".deps-events li")).to_have_count(2)
+            expect(page.locator(".deps-progress-disclosures summary").first).to_contain_text("2")
             view["proposal"]["state"] = "accepted"
             view["job"] = {"id": "progress", "state": "installing", "stage": "building", "detail_stage": "system", "started_at": started, "updated_at": time.time(), "progress": [{"at": started, "stage": "queued"}, {"at": started + 2, "stage": "building", "detail": "system"}], "log": "Setting up gcc\nSetting up cmake"}
-            expect(page.locator(".comp-restart .deps-events li")).to_have_count(2, timeout=8000)
-            page.locator(".comp-restart details").last.locator("summary").click()
+            expect(page.locator(".deps-job .deps-progress-disclosures summary").first).to_contain_text("2", timeout=8000)
+            page.locator(".deps-job details").last.locator("summary").click()
             expect(page.locator(".deps-live-log")).to_be_visible()
             expect(page.locator(".deps-live-log")).to_contain_text("Setting up cmake")
             if directory := os.environ.get("DEPENDENCY_SCREENSHOTS"):

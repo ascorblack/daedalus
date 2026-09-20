@@ -15,12 +15,17 @@ export function DependencyProgress({ value, active, installation = false }: { va
   const elapsed = started ? duration((active ? now : value.updated_at || now) - started) : null;
   const last = Math.max(value.updated_at || 0, value.last_output_at || 0);
   return <div className="deps-progress">
-    {stage && <div className="deps-progress-heading" role="status"><b>{t(`deps.stage.${stage}`)}</b>{elapsed && <span>{elapsed}</span>}</div>}
-    {active && last > 0 && <p className="sub">{t("deps.lastActivity", { n: duration(now - last) })}</p>}
-    {active && installation && <p className="sub">{stage === "restarting" ? t("deps.restartNow") : value.restart_at ? t("deps.restartIn", { n: String(Math.max(0, Math.ceil(value.restart_at - now))) }) : t("deps.estimate")}</p>}
-    {events.length > 0 && <details open={active}><summary>{t("deps.activity")}</summary><ol className="deps-events">
+    {stage && <div className="deps-progress-heading" role="status"><span><span className={active ? "live-dot" : "dot"} /><b>{t(`deps.stage.${stage}`)}</b></span>{elapsed && <time>{elapsed}</time>}</div>}
+    {active && <div className="deps-progress-rail" aria-hidden="true"><i /></div>}
+    <div className="deps-progress-meta">
+      {active && last > 0 && <span>{t("deps.lastActivity", { n: duration(now - last) })}</span>}
+      {active && installation && <span>{stage === "restarting" ? t("deps.restartNow") : value.restart_at ? t("deps.restartIn", { n: String(Math.max(0, Math.ceil(value.restart_at - now))) }) : t("deps.estimateShort")}</span>}
+    </div>
+    {(events.length > 0 || value.log) && <div className="deps-progress-disclosures">
+    {events.length > 0 && <details><summary>{t("deps.activityCount", { n: String(events.length) })}</summary><ol className="deps-events">
       {events.map((event, index) => <li key={index}><time>{duration(event.at - (started || event.at))}</time><span>{t(`deps.stage.${event.stage === "building" && event.detail ? event.detail : event.stage}`)}{event.detail && event.stage !== "building" && <small>{event.detail}</small>}</span></li>)}
     </ol></details>}
     {value.log && <details><summary>{t("deps.installLog")}</summary><pre className="deps-live-log">{value.log}</pre></details>}
+    </div>}
   </div>;
 }
