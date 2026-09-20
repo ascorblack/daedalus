@@ -3,10 +3,11 @@ import { api } from "../api";
 import { Sheet } from "../dialogs";
 import { t } from "../i18n";
 import { errorText } from "../ui";
+import { DependencyProgress, type Progress } from "./dependencyprogress";
 import "./dependencies.css";
 
 type Recipe = { python: string[]; system: string[] };
-type Proposal = { id: string; state: string; request: string; error?: string; explanation?: string; proposal?: { patch: string; recipe: Recipe } };
+type Proposal = Progress & { id: string; state: string; request: string; preset?: string; error?: string; explanation?: string; proposal?: { patch: string; recipe: Recipe } };
 type View = {
   capability: { mode: string; python: boolean; system: boolean; manager: string; reason: string };
   tools: { name: string; available: boolean; version: string }[];
@@ -14,7 +15,7 @@ type View = {
   recipe: Recipe;
   models: { id: string; label: string }[];
   proposal: Proposal | null;
-  job: { id: string; state: string; error: string } | null;
+  job: (Progress & { id: string; state: string; error: string }) | null;
 };
 
 export function DependenciesTab() {
@@ -27,6 +28,7 @@ export function DependenciesTab() {
   const [review, setReview] = useState(false);
   const [accepted, setAccepted] = useState(false);
   const opened = useRef("");
+  const hydrated = useRef(false);
   const sequence = useRef(0);
   const load = useCallback(async () => {
     const ticket = ++sequence.current;
@@ -35,7 +37,11 @@ export function DependenciesTab() {
       if (ticket !== sequence.current) return;
       setView(next);
       setOffline(false);
-      setPreset((current) => next.models.some((model) => model.id === current) ? current : next.models[0]?.id || "");
+      setPreset((current) => next.models.some((model) => model.id === current) ? current : next.models.find((model) => model.id === next.proposal?.preset)?.id || next.models[0]?.id || "");
+      if (!hydrated.current) {
+        hydrated.current = true;
+        setRequest(next.proposal?.request || "");
+      }
       if (next.proposal?.state === "ready" && next.proposal.id !== opened.current) {
         opened.current = next.proposal.id;
         setAccepted(false);
@@ -84,7 +90,13 @@ export function DependenciesTab() {
     {view && <>
       <p className="sub">{t(view.capability.mode === "native" ? "deps.native" : "deps.docker")}</p>
       {!view.capability.python && <p className="sub attn">{view.capability.reason}</p>}
-      {!view.capability.system && <p className="sub">{t("deps.noSystem")}</p>}
+      {!view.capability.system && view.capability.mode === "native" && <p className="sub">{t("deps.noSystem")}</p>}
+      {view.job && <section className="comp-restart" aria-label={t("deps.installProgress")}>
+        <b>{t(`deps.job.${view.job.state}`)}</b>
+        <DependencyProgress value={view.job} active={installing} installation />
+        {installing && <p className="sub">{t("deps.installingHint")}</p>}
+        {view.job.error && <p className="sub attn">{view.job.error}</p>}
+      </section>}
       <div className="deps-tools">
         {view.tools.map((tool) => <div className="kv" key={tool.name}>
           <code>{tool.name}</code><span className={tool.available ? "sub" : "sub faint"}>{tool.available ? tool.version : t("deps.missing")}</span>
@@ -107,11 +119,7 @@ export function DependenciesTab() {
         {proposal?.state === "ready" && <button className="btn" onClick={() => { setAccepted(false); setReview(true); }}>{t("deps.review")}</button>}
       </div>
       {proposal?.state === "failed" && <p className="sub attn" role="alert">{proposal.error}</p>}
-      {view.job && <div className="comp-restart" role="status">
-        <b>{t(`deps.job.${view.job.state}`)}</b>
-        {installing && <p className="sub">{t("deps.installingHint")}</p>}
-        {view.job.error && <p className="sub attn">{view.job.error}</p>}
-      </div>}
+      {proposal && <DependencyProgress value={proposal} active={planning} />}
     </>}
     {review && proposal?.state === "ready" && proposal.proposal && <Sheet title={t("deps.review")} onClose={() => !busy && setReview(false)}>
       <div className="dependencies">

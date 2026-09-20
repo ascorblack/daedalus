@@ -210,35 +210,6 @@ export function answersComplete(questions: readonly Question[], answers: readonl
   return questions.length > 0 && answers.every((a) => a.selected.length > 0 || a.custom.trim().length > 0);
 }
 
-// ── the footer hint ──────────────────────────────────────────────────────────────────────
-
-const HINT_KEY = "daedalus.composer.hinted";
-
-/** The "⇧↵ newline · / commands" line shows until the first send of the visit. */
-export function hintSeen(storage: Pick<Storage, "getItem"> | null = safeSession()): boolean {
-  try {
-    return storage?.getItem(HINT_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-export function markHintSeen(storage: Pick<Storage, "setItem"> | null = safeSession()): void {
-  try {
-    storage?.setItem(HINT_KEY, "1");
-  } catch {
-    /* ignore */
-  }
-}
-
-function safeSession(): Storage | null {
-  try {
-    return window.sessionStorage;
-  } catch {
-    return null;
-  }
-}
-
 /** Names only: context should orient the operator without repeating full filesystem paths. */
 export type ComposerPlace = { project?: string; workspace?: string; system?: boolean };
 export function composerContext(place?: ComposerPlace): { kind: "project" | "workspace"; name: string }[] {

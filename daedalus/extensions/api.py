@@ -2229,6 +2229,18 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except (RuntimeError, OSError) as exc:
             raise HTTPException(503, str(exc)) from None
 
+    @api.get("/api/maintenance")
+    async def maintenance_view(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            status = await dependency_planner.rpc("dependencies_status")
+        except (RuntimeError, OSError):
+            raise HTTPException(503, "maintenance status unavailable") from None
+        job = status.get("job") or {}
+        notice = None
+        if job.get("state") in ("installing", "restarting") and job.get("stage") in ("restart_pending", "restarting"):
+            notice = {"id": job["id"], "stage": job["stage"], "restart_at": job.get("restart_at", 0)}
+        return {"notice": notice, "server_time": time.time()}
+
     @api.post("/api/dependencies/request")
     async def dependencies_request(body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:

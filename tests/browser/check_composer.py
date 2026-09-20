@@ -193,6 +193,12 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
     print("card at rest:", box)
     if not box:
         problems.append("the composer card is missing")
+    field(page).fill("a")
+    page.wait_for_timeout(100)
+    typed_box = page.locator(".composer-box").bounding_box()
+    if box and typed_box and abs(box["y"] - typed_box["y"]) > 1:
+        problems.append("typing the first character moved the idle composer")
+    field(page).fill("")
     if not page.locator(".composer .model-select").count() or "Opus" not in page.locator(".composer .model-select").inner_text():
         problems.append("the model selector is not in the pill")
     if not page.locator(".composer .ctx-ring").count():
@@ -255,11 +261,18 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
     page.reload()
     page.wait_for_selector(".composer .roundbtn.primary[data-action='stop']", timeout=15000)
     print("running primary:", primary(page))
+    running_box = page.locator(".composer-box").bounding_box()
     field(page).click()
     field(page).type("also look at the log")
     if primary(page) != "queue":
         problems.append(f"a draft during a run is {primary(page)!r}, not queue")
-    hint = page.locator(".composer-foot").inner_text() if page.locator(".composer-foot").count() else ""
+    page.wait_for_timeout(100)
+    queue_box = page.locator(".composer-box").bounding_box()
+    if running_box and queue_box and abs(running_box["y"] - queue_box["y"]) > 1:
+        problems.append("typing a steer moved the composer")
+    if page.locator(".composer-foot").count():
+        problems.append("a dynamic footer still changes the composer's height")
+    hint = page.locator(".composer .roundbtn.primary").get_attribute("title") or ""
     if "next step" not in hint:
         problems.append(f"the queue state carries no hint ({hint!r})")
     page.locator(".composer .roundbtn.primary").click()

@@ -20,6 +20,7 @@ from protocore.contracts.types import (
 )
 
 from daedalus import supervisor_client
+from daedalus.security.redact import redact
 
 KEY = "dependency_proposal"
 TOOLS = [
@@ -65,6 +66,7 @@ class DependencyPlanner:
     async def proposal(self) -> dict[str, Any] | None:
         value = await self.app.db.kv_get(KEY)
         if value and value["state"] == "planning" and (self.task is None or self.task.done()):
+            await self._progress(value, "failed")
             value = {**value, "state": "failed", "error": "dependency planning was interrupted; submit the request again"}
             await self.app.db.kv_set(KEY, value)
         return value
@@ -77,6 +79,8 @@ class DependencyPlanner:
 
     async def view(self) -> dict[str, Any]:
         status = await self.rpc("dependencies_status")
+        if (status.get("job") or {}).get("log"):
+            status["job"]["log"] = redact(status["job"]["log"])
         if self.inventory_cache is None or time.monotonic() - self.inventory_cache[0] > 30:
             inventory = await self.rpc("dependencies_inventory")
             self.inventory_cache = time.monotonic(), inventory
@@ -101,7 +105,7 @@ class DependencyPlanner:
                 raise ValueError("dependency installation is running")
             if not status["capability"]["python"]:
                 raise ValueError(status["capability"]["reason"])
-            value = {"id": uuid.uuid4().hex, "state": "planning", "request": text.strip(), "preset": preset}
+            value = {"id": uuid.uuid4().hex, "state": "planning", "request": text.strip(), "preset": preset, "started_at": time.time(), "updated_at": time.time(), "progress": []}
             await self.app.db.kv_set(KEY, value)
             self.task = asyncio.create_task(self._plan(value))
             return value
@@ -114,6 +118,7 @@ class DependencyPlanner:
             if self.task and not self.task.done():
                 self.task.cancel()
                 await asyncio.gather(self.task, return_exceptions=True)
+            await self._progress(value, "cancelled")
             await self.app.db.kv_set(KEY, {**value, "state": "cancelled"})
 
     async def approve(self, proposal_id: str) -> dict[str, Any]:
@@ -148,11 +153,24 @@ class DependencyPlanner:
         try:
             async with asyncio.timeout(180):
                 result = await self._run(value)
+            await self._progress(value, "ready")
             await self.app.db.kv_set(KEY, {**value, "state": "ready", **result})
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            await self._progress(value, "failed")
             await self.app.db.kv_set(KEY, {**value, "state": "failed", "error": str(exc)[:2000] or type(exc).__name__})
+
+    async def _progress(self, value: dict[str, Any], stage: str, detail: str = "") -> None:
+        now = time.time()
+        value["updated_at"] = now
+        events = value.setdefault("progress", [])
+        if not events or (events[-1]["stage"], events[-1].get("detail", "")) != (stage, detail):
+            events.append({"at": now, "stage": stage, "detail": detail[:240]})
+            del events[:-40]
+        current = await self.app.db.kv_get(KEY)
+        if current and current["id"] == value["id"] and current["state"] == "planning":
+            await self.app.db.kv_set(KEY, dict(value))
 
     async def _run(self, value: dict[str, Any]) -> dict[str, Any]:
         manager = self.app.manager
@@ -161,6 +179,7 @@ class DependencyPlanner:
         messages = [Message(role=MessageRole.system, content_blocks=[TextBlock(text=PROMPT)]), Message(role=MessageRole.user, content_blocks=[TextBlock(text=value["request"])])]
         inspected = False
         for _ in range(5):
+            await self._progress(value, "model")
             if manager.budget_exceeded() and not manager.provider_costs_nothing(preset.provider):
                 raise ValueError("daily inference budget exceeded")
             request = LLMRequest(model=model, messages=messages, tools=TOOLS, max_tokens=2500, temperature=0.2, extra={"enable_thinking": False}, observability=LLMObservabilityContext(run_id=value["id"], call_category="dependency_planning", call_purpose="dependency_proposal"))
@@ -168,7 +187,12 @@ class DependencyPlanner:
             calls: list[tuple[str, str, dict[str, Any]]] = []
             thinking = ""
             stream_error = ""
+            last_progress = time.monotonic()
             async for delta in provider.stream_with_tools(request):
+                if time.monotonic() - last_progress >= 2:
+                    # Only operational activity is public, never the model's private reasoning.
+                    await self._progress(value, "model")
+                    last_progress = time.monotonic()
                 if not isinstance(delta, ProviderDelta):
                     raise ValueError("provider does not support normalized tool streams")
                 if delta.kind == "thinking":
@@ -199,9 +223,11 @@ class DependencyPlanner:
             for cid, name, args in calls:
                 try:
                     if name == "InspectEnvironment" and not args:
+                        await self._progress(value, "inspect")
                         outcome = await self.rpc("dependencies_inventory")
                         inspected = True
                     elif name == "ProposeDependencies" and inspected:
+                        await self._progress(value, "check")
                         if set(args) != {"python", "system", "explanation"} or not isinstance(args["explanation"], str) or not 1 <= len(args["explanation"]) <= 4000:
                             raise ValueError("provide package lists and a short explanation")
                         proposal = await self.rpc("dependencies_preview", additions={"python": args["python"], "system": args["system"]})
@@ -210,6 +236,7 @@ class DependencyPlanner:
                         raise ValueError("only InspectEnvironment and then ProposeDependencies are available")
                     results.append(ToolResultBlock(tool_call_id=cid, content=json.dumps(outcome)))
                 except (ValueError, RuntimeError) as exc:
+                    await self._progress(value, "correction", redact(str(exc)))
                     results.append(ToolResultBlock(tool_call_id=cid, content=str(exc), is_error=True))
             # Provider serialization only preserves tool results on tool-role messages;
             # a user-role wrapper silently drops them and leaves unanswered tool calls.

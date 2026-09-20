@@ -600,8 +600,6 @@ input.field, select.field, textarea.field {
 .model-select.attn { color:var(--warn); }
 .model-select .model-dot { width:6px; height:6px; border-radius:50%; background:var(--warn); flex:none; }
 .composer-box .chip.recording { align-self:center; margin:0 2px; }
-.composer-foot { font-size:var(--fs-12); color:var(--fg-3); text-align:right; padding:0 12px; min-height:16px; line-height:16px; }
-.composer[data-primary="queue"] .composer-foot { color:var(--accent); }
 .composer-box .attachments { margin:4px 6px 2px; width:auto; }
 
 /* the steers the host is holding, as small cards above the pill */
@@ -873,7 +871,7 @@ input.field, select.field, textarea.field {
   /* The conversation is one centred stripe, and running text inside it stops at a reading width:
      the shell takes the whole window, the prose does not. */
   .timeline, .composer-box { width: min(100%, var(--chat-w)); margin-inline: auto; }
-  .composer > .steers, .composer > .dock, .composer > .palette, .composer-foot { width: min(100%, var(--chat-w)); margin-inline: auto; }
+  .composer > .steers, .composer > .dock, .composer > .palette { width: min(100%, var(--chat-w)); margin-inline: auto; }
   .codecard pre { white-space: pre; }
   /* One column. The prose, the operator's card, the step list, the files a turn produced and the
      field they are answered in all take the same stripe, so nothing is offset against anything
@@ -2061,7 +2059,7 @@ input.field[type="range"] {
   .composer-box textarea { min-height:calc(var(--fs-prose) * 1.4 + var(--space-2) * 2); }
 }
 @media (min-width: 1024px) {
-  .composer-box, .composer > .steers, .composer > .dock, .composer > .palette, .composer-foot { width:min(100%, var(--chat-w)); margin-inline:auto; }
+  .composer-box, .composer > .steers, .composer > .dock, .composer > .palette { width:min(100%, var(--chat-w)); margin-inline:auto; }
 }
 
 /* Keep the newest-message shortcut above a card of any height. */

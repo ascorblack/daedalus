@@ -19,6 +19,7 @@ import shutil
 import signal
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +72,7 @@ def clear_maintenance(root: Path, job_id: str) -> None:
         marker.unlink(missing_ok=True)
 
 
-async def command(argv: list[str], *, limit: float = 1200, output_limit: int = 16000) -> str:
+async def command(argv: list[str], *, limit: float = 1200, output_limit: int = 16000, on_output: Callable[[str], None] | None = None) -> str:
     """Bound output and lifetime without ever passing a package name through a shell."""
     env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR"}}
     env.update(DEBIAN_FRONTEND="noninteractive", PIP_CONFIG_FILE=os.devnull, UV_NO_CONFIG="1", UV_PYTHON_DOWNLOADS="never", GIT_TERMINAL_PROMPT="0", NONINTERACTIVE="1", HOMEBREW_NO_AUTO_UPDATE="1")
@@ -81,6 +82,8 @@ async def command(argv: list[str], *, limit: float = 1200, output_limit: int = 1
         async with asyncio.timeout(limit):
             assert process.stdout is not None
             while chunk := await process.stdout.read(4096):
+                if on_output:
+                    on_output(chunk.decode("utf-8", errors="replace"))
                 output.extend(chunk)
                 del output[:-output_limit]
             await process.wait()
@@ -146,6 +149,21 @@ class Dependencies:
     def status(self) -> dict[str, Any]:
         job = read_json(self.root / "job.json", None)
         if job and not self.native and job["state"] in ("installing", "restarting"):
+            progress = read_json(self.trigger / f"dependencies-{job['id']}.progress", {})
+            if progress and progress.get("stage") != job.get("stage"):
+                self.advance(job, progress["stage"], restart_at=progress.get("restart_at", 0))
+            if job.get("stage") == "building":
+                log_path = self.trigger / f"dependencies-{job['id']}.log"
+                if log_path.exists():
+                    with log_path.open("rb") as stream:
+                        stream.seek(max(0, log_path.stat().st_size - 6000))
+                        tail = stream.read().decode("utf-8", errors="replace")
+                    markers = re.findall(r"DAEDALUS_DEPENDENCIES_STAGE=([a-z_]+)", tail)
+                    detail = "exporting" if "exporting layers" in tail else markers[-1] if markers else job.get("detail_stage", "building")
+                    if detail != job.get("detail_stage"):
+                        job["detail_stage"] = detail
+                        self.advance(job, "building", detail=detail)
+        if job and not self.native and job["state"] in ("installing", "restarting"):
             result = self.trigger / f"dependencies-{job['id']}.result"
             if result.exists():
                 outcome = result.read_text().strip()
@@ -157,14 +175,43 @@ class Dependencies:
                     outcome = "the rebuilt environment did not become active; inspect the rebuilder before retrying"
                 if outcome == "completed":
                     job = {**job, "state": "completed", "error": ""}
-                    write_json(self.root / "job.json", job)
+                    self.advance(job, "completed")
                 else:
                     job = self.fail(job, outcome)
         if job and self.native and job["state"] == "installing" and (self.task is None or self.task.done()):
             job = self.fail(job, "installation was interrupted; system packages already installed may remain")
+        if job and self.native and job["state"] == "restarting" and self.task is None:
+            # A supervisor can restart during the warning window. The next child already uses
+            # the published environment; do not leave every page counting down forever.
+            active = read_json(self.root / "active.json", {})
+            if self.current() == job["recipe"] and active.get("generation") == fingerprint(job["recipe"]):
+                job["state"] = "completed"
+                self.advance(job, "completed")
+            else:
+                job = self.fail(job, "the installed environment did not become active after restart")
         if job and job["state"] in ("completed", "failed"):
             clear_maintenance(self.root, job["id"])
+        if job:
+            path = self.root / "install.log" if self.native else self.trigger / f"dependencies-{job['id']}.log"
+            if path.exists():
+                with path.open("rb") as stream:
+                    stream.seek(max(0, path.stat().st_size - 6000))
+                    job = {**job, "log": stream.read().decode("utf-8", errors="replace"), "last_output_at": path.stat().st_mtime}
         return {"capability": self.capability(), "recipe": self.current(), "job": job}
+
+    def advance(self, job: dict[str, Any], stage: str, *, detail: str = "", restart_at: float = 0) -> None:
+        now = time.time()
+        job.update(stage=stage, updated_at=now, restart_at=restart_at)
+        events = job.setdefault("progress", [])
+        if not events or (events[-1]["stage"], events[-1].get("detail", "")) != (stage, detail):
+            events.append({"at": now, "stage": stage, "detail": detail})
+            del events[:-40]
+        write_json(self.root / "job.json", job)
+
+    def log_output(self, chunk: str) -> None:
+        path = self.root / "install.log"
+        previous = path.read_text(errors="replace") if path.exists() else ""
+        path.write_text((previous + chunk)[-12000:])
 
     def fail(self, job: dict[str, Any], error: str) -> dict[str, Any]:
         if self.current() == job["recipe"]:
@@ -172,7 +219,7 @@ class Dependencies:
         if self.native:
             write_json(self.root / "active.json", job["previous_active"])
         failed = {**job, "state": "failed", "error": error[:4000]}
-        write_json(self.root / "job.json", failed)
+        self.advance(failed, "failed")
         clear_maintenance(self.root, job["id"])
         return failed
 
@@ -262,10 +309,11 @@ class Dependencies:
             raise ValueError("dependency requests may only add packages")
         additions = {k: sorted(set(desired[k]) - set(current[k])) for k in EMPTY}
         self.preview(additions)
-        job = {"id": job_id, "state": "installing", "error": "", "recipe": desired, "previous": current}
+        job = {"id": job_id, "state": "installing", "error": "", "recipe": desired, "previous": current, "started_at": time.time(), "progress": []}
         if self.native:
             job["previous_active"] = read_json(self.root / "active.json", {})
-        write_json(self.root / "job.json", job)
+        self.advance(job, "queued")
+        (self.root / "install.log").write_text("")
         (self.root / "maintenance").write_text(job_id)
         return job
 
@@ -277,35 +325,49 @@ class Dependencies:
             pending.write_text(job["id"] + "\n")
             pending.replace(self.trigger / "dependencies-request")
             return
+        self.advance(job, "environment")
         generation = fingerprint(desired)
         environment = self.root / "python" / generation
         python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        await command(["uv", "venv", "--allow-existing", "--python", sys.executable, str(environment)])
+        await command(["uv", "venv", "--allow-existing", "--python", sys.executable, str(environment)], on_output=self.log_output)
         current = self.current()
         added = sorted(set(desired["system"]) - set(current["system"]))
         if added:
             if self.system_manager() == "apt":
-                await command(["apt-get", "update"])
-                await command(["apt-get", "install", "-y", "--no-install-recommends", "--", *added])
+                self.advance(job, "catalog")
+                await command(["apt-get", "update"], on_output=self.log_output)
+                self.advance(job, "system")
+                await command(["apt-get", "install", "-y", "--no-install-recommends", "--", *added], on_output=self.log_output)
             else:
-                await command(["brew", "install", "--formula", "--", *added])
+                self.advance(job, "system")
+                await command(["brew", "install", "--formula", "--", *added], on_output=self.log_output)
         # A source distribution may need the compiler or headers just approved above. Native
         # package managers are not transactional; that partial-install risk is shown at approval.
         if desired["python"]:
-            await command(["uv", "pip", "install", "--python", str(python), "--default-index", "https://pypi.org/simple", "--", *desired["python"]])
+            self.advance(job, "python")
+            await command(["uv", "pip", "install", "--python", str(python), "--default-index", "https://pypi.org/simple", "--", *desired["python"]], on_output=self.log_output)
         write_json(self.manifest, desired)
         write_json(self.root / "active.json", {"generation": generation})
-        write_json(self.root / "job.json", {**job, "state": "restarting"})
+        job["state"] = "restarting"
+        self.advance(job, "restart_pending", restart_at=time.time() + 30)
 
 
 async def build_image(manifest: Path) -> None:
+    def output(chunk: str) -> None:
+        print(chunk, end="", flush=True)
+
     desired = recipe(read_json(manifest, EMPTY))
     if desired["system"]:
-        await command(["apt-get", "update"])
-        await command(["apt-get", "install", "-y", "--no-install-recommends", "--", *desired["system"]])
-    await command(["uv", "venv", "--python", "/usr/bin/python3.12", "/opt/agent-python"])
+        print("DAEDALUS_DEPENDENCIES_STAGE=catalog", flush=True)
+        await command(["apt-get", "update"], on_output=output)
+        print("DAEDALUS_DEPENDENCIES_STAGE=system", flush=True)
+        await command(["apt-get", "install", "-y", "--no-install-recommends", "--", *desired["system"]], on_output=output)
+    print("DAEDALUS_DEPENDENCIES_STAGE=environment", flush=True)
+    await command(["uv", "venv", "--python", "/usr/bin/python3.12", "/opt/agent-python"], on_output=output)
     if desired["python"]:
-        await command(["uv", "pip", "install", "--python", "/opt/agent-python/bin/python", "--default-index", "https://pypi.org/simple", "--", *desired["python"]])
+        print("DAEDALUS_DEPENDENCIES_STAGE=python", flush=True)
+        await command(["uv", "pip", "install", "--python", "/opt/agent-python/bin/python", "--default-index", "https://pypi.org/simple", "--", *desired["python"]], on_output=output)
+    print("DAEDALUS_DEPENDENCIES_STAGE=image", flush=True)
     write_json(Path("/opt/agent-python/recipe.json"), desired)
 
 

@@ -11,3 +11,11 @@
 .deps-patch { padding: 12px; background: var(--bg); border-radius: 8px; max-height: 40vh; overflow: auto; }
 .deps-consent { display: flex; align-items: start; gap: 10px; min-height: 44px; margin: 16px 0; }
 .deps-consent input { flex-shrink: 0; margin-top: 4px; }
+.deps-progress { margin-top: 12px; min-width: 0; }
+.deps-progress-heading { display: flex; justify-content: space-between; gap: 12px; }
+.deps-progress-heading > span, .deps-events time { font-variant-numeric: tabular-nums; }
+.deps-events { padding: 0; list-style: none; max-height: 240px; overflow: auto; }
+.deps-events li { display: flex; align-items: baseline; gap: 12px; margin: 8px 0; }
+.deps-events time { color: var(--muted); flex-shrink: 0; }
+.deps-events small { display: block; overflow-wrap: anywhere; margin-top: 4px; }
+.deps-live-log { max-height: 260px; overflow: auto; padding: 12px; background: var(--bg); border-radius: 8px; }

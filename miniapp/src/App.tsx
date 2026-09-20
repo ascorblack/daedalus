@@ -14,6 +14,7 @@ import { readSidebar, rememberSidebar, usePaneWidth } from "./layout";
 import { Capabilities, SelfDevMode, visibleScreens } from "./capabilities";
 import { ProjectSwitcher, rememberProject, storedProject, useProjects } from "./projects";
 import { ChangeStrip } from "./change";
+import { MaintenanceNotice } from "./maintenance";
 import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
 import { t, useLang } from "./i18n";
@@ -407,6 +408,7 @@ export function App() {
       )}
       {wide && menu && <NavMenu screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMenu(false)} opener={menuButton.current} />}
       <div ref={main} className={`main ${sessionId ? "chat-open" : ""}`}>
+        <MaintenanceNotice />
         {offline && <div className="offline-strip" role="status">{t("app.offline")}</div>}
         <ChangeStrip caps={caps} />
         <PasskeyNudge />

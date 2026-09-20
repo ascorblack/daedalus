@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
 import signal
 import zipfile
@@ -236,9 +237,51 @@ async def test_model_only_gets_read_and_propose_tools_and_never_installs(tmp_pat
     await planner.task
     proposal = await planner.proposal()
     assert proposal["state"] == "ready" and proposal["id"] == result["id"]
+    assert [event["stage"] for event in proposal["progress"]] == ["model", "inspect", "model", "check", "ready"]
+    assert proposal["updated_at"] >= proposal["started_at"]
     assert set(calls) == {"dependencies_status", "dependencies_inventory", "dependencies_preview"}
     assert {tool.name for tool in provider.requests[0].tools} == {"InspectEnvironment", "ProposeDependencies"}
     assert not service.manifest.exists()
+
+
+def test_docker_status_preserves_stages_deadline_and_live_output(service: Any) -> None:
+    service.native = False
+    service.trigger.mkdir()
+    job = service.accept(service.preview({"python": [], "system": ["gcc"]}), "d" * 32)
+    progress = service.trigger / f"dependencies-{job['id']}.progress"
+    runtime.write_json(progress, {"stage": "building"})
+    (service.trigger / f"dependencies-{job['id']}.log").write_text("DAEDALUS_DEPENDENCIES_STAGE=system\nSetting up gcc\n")
+    current = service.status()["job"]
+    assert current["stage"] == "building" and current["detail_stage"] == "system"
+    assert "Setting up gcc" in current["log"]
+    deadline = runtime.time.time() + 30
+    runtime.write_json(progress, {"stage": "restart_pending", "restart_at": deadline})
+    current = service.status()["job"]
+    assert current["restart_at"] == deadline
+    assert current["progress"][-1]["stage"] == "restart_pending"
+    assert service.status()["job"]["restart_at"] == deadline
+    assert current["state"] == "installing"
+    assert not (service.trigger / f"dependencies-{job['id']}.result").exists()
+
+
+def test_restart_notice_is_authenticated_and_not_returned_for_completed_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from daedalus.extensions.api import build_app
+
+    app = FakeApp(tmp_path, native=True)
+    job = {"id": "notice", "state": "installing", "stage": "restart_pending", "restart_at": 100}
+
+    async def rpc(self: Any, op: str, **kwargs: Any) -> Any:
+        assert op == "dependencies_status"
+        return {"job": job}
+
+    monkeypatch.setattr(DependencyPlanner, "rpc", rpc)
+    with TestClient(build_app(app, "tok")) as client:
+        assert client.get("/api/maintenance").status_code == 401
+        response = client.get("/api/maintenance", headers={"X-Daedalus-Token": "tok"}).json()
+        assert response["notice"] == {"id": "notice", "stage": "restart_pending", "restart_at": 100}
+        assert response["server_time"] > 0
+        job["state"] = "completed"
+        assert client.get("/api/maintenance", headers={"X-Daedalus-Token": "tok"}).json()["notice"] is None
 
 
 @pytest.mark.asyncio
@@ -409,8 +452,12 @@ async def test_rebuilder_only_replaces_container_after_successful_build(tmp_path
     fake.write_text('#!/bin/sh\n[ "$DAEDALUS_SECRETS_FILE" = /dev/null ] || exit 99\nprintf "%s\\n" "$*" >> "$CALLS"\ncase "$*" in\n *" build "*) exit "$BUILD_RESULT";;\nesac\nexit 0\n')
     fake.chmod(0o755)
     job_id = "b" * 32
+    sleeper = tmp_path / "sleep"
+    sleeper.write_text('#!/bin/sh\nif [ "$1" = 30 ]; then cp "$PROGRESS" "$NOTICE"; /bin/sleep 0.1; else /bin/sleep "$@"; fi\n')
+    sleeper.chmod(0o755)
     (trigger / "dependencies-request").write_text(job_id + "\n")
     env = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", ""), "DAEDALUS_REBUILD_TRIGGER_DIR": str(trigger), "COMPOSE_FILE": "compose.yaml", "CALLS": str(tmp_path / "calls"), "BUILD_RESULT": "1" if failed else "0"}
+    env.update(PROGRESS=str(trigger / f"dependencies-{job_id}.progress"), NOTICE=str(tmp_path / "notice"))
     script = Path(__file__).resolve().parents[2] / "deploy" / "rebuild.sh"
     process = await asyncio.create_subprocess_exec("sh", str(script), env=env, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
     try:
@@ -422,9 +469,96 @@ async def test_rebuilder_only_replaces_container_after_successful_build(tmp_path
         assert ("up -d --no-build --no-deps daedalus" in calls) is not failed
         assert (result.strip() == "completed") is not failed
         assert (trigger / "dependencies-alive").exists()
+        if not failed:
+            notice = json.loads((tmp_path / "notice").read_text())
+            assert notice["stage"] == "restart_pending"
+            assert notice["restart_at"] - notice["at"] == 30
+        else:
+            assert not (tmp_path / "notice").exists()
     finally:
         os.killpg(process.pid, signal.SIGTERM)
         await process.wait()
+
+
+@pytest.mark.asyncio
+async def test_rebuilder_heartbeat_continues_during_a_blocked_build(tmp_path: Path) -> None:
+    if os.name == "nt":
+        pytest.skip("Docker sidecar uses a POSIX shell")
+    trigger = tmp_path / "trigger"
+    trigger.mkdir()
+    fake = tmp_path / "docker"
+    fake.write_text('#!/bin/sh\ntouch "$STARTED"\nwhile :; do /bin/sleep 1; done\n')
+    fake.chmod(0o755)
+    sleeper = tmp_path / "sleep"
+    sleeper.write_text('#!/bin/sh\n/bin/sleep 0.05\n')
+    sleeper.chmod(0o755)
+    (trigger / "dependencies-request").write_text("c" * 32)
+    env = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", ""), "DAEDALUS_REBUILD_TRIGGER_DIR": str(trigger), "COMPOSE_FILE": "compose.yaml", "STARTED": str(tmp_path / "started")}
+    script = Path(__file__).resolve().parents[2] / "deploy" / "rebuild.sh"
+    process = await asyncio.create_subprocess_exec("sh", str(script), env=env, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+    try:
+        async with asyncio.timeout(5):
+            while not (tmp_path / "started").exists():
+                await asyncio.sleep(0.02)
+            heartbeat = trigger / "dependencies-alive"
+            before = heartbeat.stat().st_mtime_ns
+            while heartbeat.stat().st_mtime_ns == before:
+                await asyncio.sleep(0.02)
+        assert not list(trigger.glob("*.result"))
+    finally:
+        os.killpg(process.pid, signal.SIGTERM)
+        await process.wait()
+
+
+@pytest.mark.asyncio
+async def test_native_supervisor_announces_before_stopping_the_app(service: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.unit.test_supervisor_local import _load
+
+    sup = _load()
+    supervisor = sup.Supervisor.__new__(sup.Supervisor)
+    supervisor.dependencies = service
+    service.task = asyncio.current_task()
+    supervisor.lock = asyncio.Lock()
+    supervisor.restart_requested = asyncio.Event()
+    job = service.accept(service.preview({"python": ["Pillow"], "system": []}), "e" * 32)
+    events = []
+
+    async def install(current: dict[str, Any]) -> None:
+        current["state"] = "restarting"
+        service.advance(current, "restart_pending", restart_at=sup.time.time() + 30)
+
+    async def wait(seconds: float) -> None:
+        assert 29 <= seconds <= 30
+        assert service.status()["job"]["stage"] == "restart_pending"
+        assert not supervisor.restart_requested.is_set()
+        events.append("warned")
+
+    async def stop() -> None:
+        assert events == ["warned"]
+        assert service.status()["job"]["stage"] == "restarting"
+        events.append("stopped")
+
+    monkeypatch.setattr(service, "install", install)
+    monkeypatch.setattr(sup.asyncio, "sleep", wait)
+    supervisor.stop_child = stop
+    await supervisor._install_dependencies(job)
+    assert events == ["warned", "stopped"]
+    assert supervisor.restart_requested.is_set()
+    assert service.status()["job"]["state"] == "completed"
+
+
+def test_native_restart_during_warning_recovers_without_another_install(service: Any) -> None:
+    desired = {"python": ["Pillow"], "system": []}
+    job = service.accept(service.preview(desired), "f" * 32)
+    runtime.write_json(service.manifest, desired)
+    runtime.write_json(service.root / "active.json", {"generation": runtime.fingerprint(desired)})
+    job["state"] = "restarting"
+    service.advance(job, "restart_pending", restart_at=runtime.time.time() + 30)
+    restored = runtime.Dependencies(service.repo, service.root.parent, service.trigger, native=True)
+    current = restored.status()["job"]
+    assert current["state"] == "completed"
+    assert current["restart_at"] == 0
+    assert not (service.root / "maintenance").exists()
 
 
 def test_dependency_routes_require_auth_and_approve_only_stored_proposal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

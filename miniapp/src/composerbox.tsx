@@ -22,8 +22,6 @@ import {
   fieldHeight,
   composerContext,
   ComposerPlace,
-  hintSeen,
-  markHintSeen,
   placeholderKey,
   primaryAction,
   readDraft,
@@ -86,7 +84,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [sending, setSending] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [plusOpen, setPlusOpen] = useState(false);
-  const [hinted, setHinted] = useState(() => hintSeen());
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const photoInput = useRef<HTMLInputElement>(null);
@@ -219,10 +216,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     try {
       await onSend(text, going);
       haptic("light");
-      if (!hinted) {
-        markHintSeen();
-        setHinted(true);
-      }
     } catch (e) {
       setDraft(text);
       setFiles(going);
@@ -326,7 +319,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const ctx = props.context ?? null;
   const pct = ctx && ctx.window > 0 ? Math.round((100 * ctx.tokens) / ctx.window) : null;
   const primaryLabel = action === "stop" ? t("session.stop") : action === "queue" ? t("composer.queue") : action === "reply" ? t("composer.reply") : t("session.send");
-  const showHint = !phone && !hinted && !draft;
   const place = composerContext(props.place);
 
   return (
@@ -464,11 +456,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </div>
         </div>
       </div>
-      {(showHint || action === "queue") && (
-        <div className="composer-foot sub" aria-hidden={action !== "queue"}>
-          {action === "queue" ? t("composer.queue.hint") : t("composer.hint")}
-        </div>
-      )}
     </div>
   );
 });

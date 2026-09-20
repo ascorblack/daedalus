@@ -1105,9 +1105,12 @@ class Supervisor:
             try:
                 await self.dependencies.install(job)
                 if self.dependencies.native:
+                    await asyncio.sleep(max(0, job["restart_at"] - time.time()))
+                    self.dependencies.advance(job, "restarting")
                     await self.stop_child()
                     self.restart_requested.set()
-                    dependency_runtime.write_json(self.dependencies.root / "job.json", {**job, "state": "completed"})
+                    job["state"] = "completed"
+                    self.dependencies.advance(job, "completed")
                     dependency_runtime.clear_maintenance(self.dependencies.root, job["id"])
                 else:
                     # The sidecar survives container replacement and owns the final outcome.
