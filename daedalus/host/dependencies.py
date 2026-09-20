@@ -31,6 +31,11 @@ TOOLS = [
 ]
 PROMPT = """You prepare dependency additions for Daedalus, not general programming tasks.
 InspectEnvironment first. Then propose the smallest set of packages satisfying the operator request.
+Include only explicitly requested tools or one necessary package-manager equivalent per tool.
+Do not enumerate transitive dependencies: the package manager resolves those. Do not add optional
+utilities, alternate implementations, related tool collections or packages for future tasks.
+Each package list has at most 64 entries. Keep the explanation below 2000 characters: briefly group
+the additions and name requested tools that cannot be installed through these package managers.
 Python packages come from PyPI into an isolated agent environment, never the application's environment.
 System packages come from the reported OS package manager. Respect installation capabilities.
 Never offer commands, repository edits, downloads, custom indexes, privilege elevation or removals.
@@ -159,21 +164,31 @@ class DependencyPlanner:
             names: dict[str, str] = {}
             calls: list[tuple[str, str, dict[str, Any]]] = []
             thinking = ""
+            stream_error = ""
             async for delta in provider.stream_with_tools(request):
                 if not isinstance(delta, ProviderDelta):
                     raise ValueError("provider does not support normalized tool streams")
                 if delta.kind == "thinking":
                     thinking += delta.content or ""
                     if len(thinking) > 32000:
-                        raise ValueError("dependency planner exceeded the reasoning limit")
+                        thinking = thinking[:32000]
+                        stream_error = "dependency planner exceeded the reasoning limit"
                 elif delta.kind == "tool_use_start":
                     names[delta.tool_call_id or ""] = delta.tool_name or ""
                 elif delta.kind == "tool_use_stop":
                     if delta.args_partial_truncated or delta.truncated_by_output_cap or delta.tool_input_final is None:
-                        raise ValueError("the model returned incomplete tool arguments")
+                        stream_error = "the model returned incomplete tool arguments; no proposal was accepted"
+                        if delta.truncated_by_output_cap:
+                            stream_error = "the model exhausted its 2500-token response limit before completing the package proposal; no proposal was accepted. Request a smaller package group or choose another model"
+                        continue
                     calls.append((delta.tool_call_id or "", names.get(delta.tool_call_id or "", delta.tool_name or ""), delta.tool_input_final))
                     if len(calls) > 4:
-                        raise ValueError("too many dependency tool calls")
+                        calls = calls[:4]
+                        stream_error = "too many dependency tool calls"
+            # Usage is emitted after tool stops. Rejecting inside the stream hides the cost of
+            # failed generations; drain it before rejecting, and never execute a partial batch.
+            if stream_error:
+                raise ValueError(stream_error)
             if not calls:
                 raise ValueError("the model did not prepare a dependency proposal")
             messages.append(Message(role=MessageRole.assistant, reasoning_content=thinking or None, content_blocks=[ToolUseBlock(tool_call_id=cid, name=name, arguments_json=json.dumps(args)) for cid, name, args in calls]))

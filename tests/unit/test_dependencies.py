@@ -19,6 +19,7 @@ from daedalus.host.dependencies import KEY, DependencyPlanner
 from daedalus.providers.wire import messages_to_wire
 from daedalus.tools.shell import shell_argv, shell_environment
 from tests.unit.test_components import HEAD, FakeApp
+from tests.unit.test_providers import RecordingSink, _chunk, _provider, _sse
 
 SPEC = importlib.util.spec_from_file_location("dependency_runtime_test", Path(__file__).resolve().parents[2] / "launcher" / "dependencies.py")
 assert SPEC and SPEC.loader
@@ -227,6 +228,34 @@ async def test_planner_serializes_every_result_in_a_mixed_tool_batch(tmp_path: P
     assert [message["tool_call_id"] for message in results] == ["0", "1"]
     assert "dependencies_inventory" in results[0]["content"]
     assert "only InspectEnvironment" in results[1]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish", ["length", "tool_calls"])
+async def test_planner_drains_usage_but_never_executes_an_incomplete_batch(tmp_path: Path, finish: str) -> None:
+    sink = RecordingSink()
+    body = _sse([
+        _chunk({"tool_calls": [
+            {"index": 0, "id": "inspect", "function": {"name": "InspectEnvironment", "arguments": "{}"}},
+            {"index": 1, "id": "proposal", "function": {"name": "ProposeDependencies", "arguments": '{"python": [], "system": ["gcc", "g'}},
+        ]}),
+        _chunk({}, finish=finish),
+        {"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 2500}},
+    ])
+    provider = _provider(body, sink=sink)
+    planner = planner_for(tmp_path, provider)
+
+    async def rpc(op: str, **kwargs: Any) -> Any:
+        pytest.fail("an incomplete batch must not execute even its complete calls")
+
+    planner.rpc = rpc
+    try:
+        with pytest.raises(ValueError, match="2500-token" if finish == "length" else "incomplete"):
+            await planner._run({"id": "a" * 32, "preset": "test", "request": "Compiler"})
+        assert len(sink.records) == 1
+        assert sink.records[0].normalized["output_tokens"] == 2500
+    finally:
+        await provider.aclose()
 
 
 @pytest.mark.asyncio
