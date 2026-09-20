@@ -814,11 +814,10 @@ class SessionManager:
         if candidates:
             persisted = await self.sessions.transcript_keys_present(session_id, [self.sessions.transcript_key(m) for m in candidates])
             candidates = [m for m in candidates if self.sessions.transcript_key(m) not in persisted]
-        # A queued steer or follow-up is written to the transcript when it is submitted; the core
-        # later places the same text into its history as a fresh user message with a timestamp of
-        # its own, which the key-based dedup cannot recognise. Marking live user messages the host
-        # did not write itself as the core's is what the persisted sync (from_history) does, and it
-        # keeps the operator's words from appearing twice while the run is still going.
+        for message in candidates:
+            message.metadata.setdefault("daedalus.run_id", state.run_id)
+        # Received queue messages are tagged at queue_update. Untagged user messages are core
+        # recovery notices, not operator input; the live view and persisted sync must hide both.
         return [
             m.model_copy(update={"metadata": {**m.metadata, "daedalus.origin": "core"}})
             if m.role is MessageRole.user and "daedalus.origin" not in m.metadata and not m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY)
@@ -1768,7 +1767,7 @@ class SessionManager:
                     return await self.answer(session_id, [{"custom": body}])
                 await self.live.enqueue(session_id, "follow_up", {**new_queued_prompt("follow_up", body).to_dict(), "queued_at": datetime.now(UTC).isoformat()})
                 await self.sessions.append_transcript(
-                    session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up", "daedalus.origin": origin})]
+                    session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up", "daedalus.origin": origin, "daedalus.queued": True})]
                 )
                 return state.run_id or ""
             provider_id: str | None = None
@@ -1798,7 +1797,7 @@ class SessionManager:
                 # The core folds queued prompts into the model's history later (and compaction may
                 # rewrite them); the transcript keeps the operator's words as sent.
                 await self.sessions.append_transcript(
-                    session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind, "daedalus.origin": origin})]
+                    session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind, "daedalus.origin": origin, "daedalus.queued": True})]
                 )
                 if kind == "steer":
                     await self.steer_changed(session_id, reason="queued")
@@ -2099,6 +2098,10 @@ class SessionManager:
             the round's messages were simply never written.
             """
             previous = state.history_keys
+            known = set(previous)
+            for message in fresh if fresh is not None else history:
+                if self.sessions.transcript_key(message) not in known:
+                    message.metadata.setdefault("daedalus.run_id", engine.config.run_id)
             state.history_keys = [self.sessions.transcript_key(m) for m in history]
             prior, gen, epoch = state.persist_chain, state.persist_gen, state.persist_epoch
 
@@ -2255,6 +2258,10 @@ class SessionManager:
         """The writes themselves, under the caller's lock: the transcript, then the working history."""
         session_id = state.session.id
         current = {self.sessions.transcript_key(m) for m in history}
+        known = set(previous_keys)
+        for message in fresh if fresh is not None else history:
+            if self.sessions.transcript_key(message) not in known:
+                message.metadata.setdefault("daedalus.run_id", state.run_id)
         removed = [k for k in previous_keys if k not in current]
         self._stamp_model(state, fresh if fresh is not None else history, previous_keys)
         unlabelled = [i for i, m in enumerate(history) if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY) and "daedalus.archived" not in m.metadata]
@@ -2332,6 +2339,9 @@ class SessionManager:
             run_id = state.run_id or uuid.uuid4().hex[:12]
             engine = state.engine
         state.run_id = run_id
+        if message is not None:
+            message.metadata["daedalus.run_id"] = run_id
+            await self.sessions.replace_transcript_message(state.session.id, self.sessions.transcript_key(message), message)
         if not continue_turn:
             await self.runs.create(Run(id=run_id, tenant_id=TENANT, session_id=state.session.id, status=RunStatus.running))
         else:
@@ -2757,6 +2767,16 @@ class SessionManager:
             state.model_stamps.pop(next(iter(state.model_stamps)))
 
     async def _dispatch_event(self, state: SessionState, event: TurnEvent) -> None:
+        if event.type is EventType.QUEUE_UPDATE and event.payload.get("placed") and state.engine is not None:
+            # The core yields immediately after appending the received prompt. Submission time
+            # belongs to the queue; this message's place in history is when the model received it.
+            message = state.engine.history[-1]
+            if message.role is MessageRole.user:
+                queued = await self.live.load(state.session.id)
+                placed = set(event.payload["placed"])
+                items = [item for kind in ("steer", "follow_up") for item in queued[kind] if item.get("id") in placed]
+                origin = str(items[0].get("origin") or "operator") if items else "operator"
+                message.metadata.update({"daedalus.origin": origin, "daedalus.delivery": event.payload.get("kind"), "daedalus.run_id": event.run_id})
         change = self._model_change(state, event)
         if change is not None:
             # Before the message it explains, not after it: the header says which model is speaking

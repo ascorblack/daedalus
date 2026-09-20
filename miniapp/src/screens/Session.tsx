@@ -178,6 +178,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   // network gives them. Only the newest one is allowed to land, so a slow older answer cannot put an
   // older status back on the screen.
   const readSeq = useRef(0);
+  const historyReadSeq = useRef(0);
   const load = useCallback(
     async (quiet = false) => {
       const mine = ++readSeq.current;
@@ -185,6 +186,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
         const next = await api.get<SessionDetail>(`/api/sessions/${id}`);
         if (mine !== readSeq.current) return;
         msgs.current = next.messages;
+        historyReadSeq.current = mine;
         setDetail(next);
         setOffline(false);
       } catch (e) {
@@ -200,7 +202,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   // and an answer still on its way belongs to the one that was left.
   useEffect(() => {
     msgs.current = [];
-    readSeq.current++;
+    historyReadSeq.current = ++readSeq.current;
     return () => forgetDisclosed(id);
   }, [id]);
 
@@ -212,7 +214,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
       const mine = ++readSeq.current;
       try {
         const next = await api.get<SessionDetail>(`/api/sessions/${id}?tail=${kind === "tail" ? TAIL_AFTER_EVENT : 1}`);
-        if (mine !== readSeq.current) return;
+        if (kind === "state" && mine !== readSeq.current) return;
+        if (kind === "tail" && mine < historyReadSeq.current) return;
         setOffline(false);
         if (kind === "state") {
           setDetail((prev) => (prev ? { ...next, messages: prev.messages } : next));
@@ -224,7 +227,10 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
           return;
         }
         msgs.current = merged.messages;
-        setDetail((prev) => (prev ? { ...next, messages: merged.messages } : next));
+        historyReadSeq.current = mine;
+        // A later status-only poll must not discard a completed history read: that used to
+        // leave the preceding run as the streaming base after a long run finished.
+        setDetail((prev) => (prev ? { ...(mine === readSeq.current ? next : prev), messages: merged.messages } : next));
       } catch (e) {
         setOffline(true);
         void e;
@@ -473,12 +479,15 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
       }
     })();
     function handle(event: string, p: Record<string, any>) {
+      const activeRun = live.get().runId;
+      if (event === "run_settled" && p.run_id && activeRun && p.run_id !== activeRun) return;
       live.update((s) => liveAfter(s, event, p));
       if (event === "message_start") {
         // The queue the last run left behind starts the next one without anybody pressing send:
         // the chip says so as the first token arrives, not at the next read.
         // A run that starts also clears the last one's failure: it is being answered, not explained.
-        setDetail((prev) => (prev ? { ...prev, status: (prev.status === "idle" || prev.status === "failed") ? "running" : prev.status, error: "" } : prev));
+        setDetail((prev) => (prev ? { ...prev, run_id: p.run_id || prev.run_id, status: (prev.status === "idle" || prev.status === "failed") ? "running" : prev.status, error: "" } : prev));
+        refreshSoon("tail");
       } else if (event === "error") {
         // Keep the provider's reason even when it failed before producing any reply.
         const message = String(p.message ?? "");
@@ -487,7 +496,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
         // The streamed copy is dropped only once the written one is on the screen, so the answer
         // never blinks out and back in. The cursor does not wait for that read — `liveAfter` has
         // already ended the turn — and so the read being slow costs nothing anybody can see.
-        void refresh("tail").then(() => live.update((s) => ({ ...s, text: "", thinking: "" })));
+        const stopped = live.get();
+        void refresh("tail").then(() => live.update((s) => s === stopped ? { ...s, text: "", thinking: "" } : s));
       } else if (event === "model_changed") {
         // The header must not wait for the next read to stop naming a model that is not answering:
         // a fallback is at its most confusing in the seconds right after it happens.
@@ -509,6 +519,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
       } else if (event === "steer_changed") {
         steerRoute.current = "ok";
         setSteers((q) => steersAfter(q, p));
+        if (p.reason === "consumed") refreshSoon("tail");
       } else if (event === "compaction_completed") refreshSoon("tail");
       else if (event === "state_changed" || event === "tool_call_pending") refreshSoon("state");
     }
@@ -526,7 +537,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     built.current = buildTurns(detail?.messages ?? [], built.current);
     return built.current;
   }, [detail?.messages]);
-  const tail = busy ? liveBase(turns) : null;
+  const tail = busy ? liveBase(turns, detail?.run_id) : null;
   const settled = useMemo(() => (tail ? turns.slice(0, -1) : turns), [turns, tail]);
   const turnKeys = useMemo(() => settled.map((t) => t.key), [settled]);
 
@@ -886,21 +897,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
               }}
             />
           ) : (
-            <OverflowMenu
-              label={t("session.title.menu")}
-              className="chat-title"
-              trigger={<><span className="truncate">{detail?.title ?? "…"}</span><Icon name="chevron" size={14} /></>}
-              items={[
-                { label: t("session.rename"), icon: "pen", onSelect: () => setEditingTitle(detail?.title ?? "") },
-                { label: t("session.project.move"), icon: "folder", onSelect: () => setMoving(true) },
-                ...(onSplit ? [{ label: t("session.split"), icon: "split" as IconName, onSelect: onSplit }] : []),
-                { label: t("session.export"), icon: "download", onSelect: exportMarkdown },
-                "-",
-                { label: t("session.compact"), icon: "compact", onSelect: compact, disabled: busy },
-                { label: t("session.clear"), icon: "trash", onSelect: clearHistory, disabled: busy, danger: true },
-                { label: t("session.delete"), icon: "trash", onSelect: remove, danger: true },
-              ]}
-            />
+            <span className="chat-title truncate">{detail?.title ?? "…"}</span>
           )}
           {detail?.subagent_of && (
             <button className="leader-link" onClick={() => onOpen?.(detail.subagent_of!)} title={t("session.leader")}>
@@ -923,6 +920,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
           <OverflowMenu
             label={t("session.actions")}
             items={[
+              { label: t("session.rename"), icon: "pen", onSelect: () => setEditingTitle(detail?.title ?? "") },
+              { label: t("session.project.move"), icon: "folder", onSelect: () => setMoving(true) },
+              "-",
               { label: t("panel.tab.details"), icon: "settings", onSelect: () => { setDetailsFocus("session"); panel.open("details"); } },
               { label: t("session.files"), icon: "folder", onSelect: () => panel.open("files") },
               { label: t("panel.tab.jobs"), icon: "terminal", onSelect: () => panel.open("jobs") },
@@ -930,6 +930,10 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
               ...(onSplit ? [{ label: t("session.split"), icon: "split" as IconName, onSelect: onSplit }] : []),
               "-",
               { label: t("session.export"), icon: "download", onSelect: exportMarkdown },
+              { label: t("session.compact"), icon: "compact", onSelect: compact, disabled: busy },
+              "-",
+              { label: t("session.clear"), icon: "trash", onSelect: clearHistory, disabled: busy, danger: true },
+              { label: t("session.delete"), icon: "trash", onSelect: remove, danger: true },
             ]}
           />
         </div>

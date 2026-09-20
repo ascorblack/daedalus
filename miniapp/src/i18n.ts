@@ -1507,7 +1507,6 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "session.reconnecting": { en: "reconnecting…", ru: "переподключаемся…" },
   "session.files": { en: "Project files", ru: "Файлы проекта" },
   "session.mcp": { en: "MCP servers", ru: "Серверы MCP" },
-  "session.title.menu": { en: "Session menu", ru: "Меню сессии" },
 
   // The right panel: the session's working directory beside the conversation.
   "panel.label": { en: "Project files panel", ru: "Панель файлов проекта" },

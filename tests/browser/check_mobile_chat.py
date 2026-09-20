@@ -13,7 +13,7 @@ def run() -> None:
         for width in (360, 390, 688):
             context = browser.new_context(viewport={"width": width, "height": 844}, is_mobile=True, has_touch=True)
             HOST.status = "running"
-            HOST.messages = [message(101, "user", "Build the tutorial."), message(102, "assistant", "Continuing the build…", thinking="Check the existing files first.")]
+            HOST.messages = [message(101, "user", "Build the tutorial.", run_id="r1"), message(102, "assistant", "Continuing the build…", thinking="Check the existing files first.", run_id="r1")]
             page = open_page(context, phone=True)
             assert page.locator(".thinking-head").last.get_attribute("aria-expanded") == "false"
             assert page.locator(".activity").count() == 0

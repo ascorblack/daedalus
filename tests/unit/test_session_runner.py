@@ -368,15 +368,16 @@ async def test_a_steer_the_core_placed_is_not_shown_twice_while_the_run_lasts(se
     state = await manager.create_session("busy")
     state.task = asyncio.create_task(asyncio.sleep(SETTLE))
     await manager.submit(state.session.id, "change of plan")
-    # What the core does with a placed queue item: a plain user message, no host metadata, new timestamp.
+    # queue_update tags the received copy, while the submitted copy remains an archive record.
     state.engine = SimpleNamespace(history=[Message(role=MessageRole.user, content_blocks=[TextBlock(text="change of plan")])])  # type: ignore[assignment]
+    queued = await manager.queued_steers(state.session.id)
+    await manager._dispatch_event(state, TurnEvent(type=EventType.QUEUE_UPDATE, run_id="received-run", payload={"placed": [queued[0]["id"]], "kind": "steer"}))
     shown = await manager.transcript(state.session.id)
     operator_said = [m for m in shown if m.role is MessageRole.user and m.metadata.get("daedalus.origin") == "operator"]
-    assert [m.content_blocks[0].text for m in operator_said] == ["change of plan"]  # type: ignore[union-attr]
-    # The core's copy is still carried, marked as the core's, and the Mini App's view hides it:
-    # exactly one of the two is shown as the operator's message.
+    assert [m.content_blocks[0].text for m in operator_said] == ["change of plan", "change of plan"]  # type: ignore[union-attr]
+    # Only the received copy is drawn, in the core history's position after the tool batch.
     views = [message_view(m) for m in shown if m.role is MessageRole.user]
-    assert [(v["origin"], v["internal"]) for v in views] == [("operator", False), ("core", True)]
+    assert [(v["origin"], v["internal"]) for v in views] == [("operator", True), ("operator", False)]
     state.engine = None
     state.task.cancel()
     await manager.close()

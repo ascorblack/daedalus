@@ -31,7 +31,7 @@ from daedalus.host import prompts
 from daedalus.host.prompts import split_headline
 from daedalus.security import redact
 
-VIEW_VERSION = 3
+VIEW_VERSION = 4
 """Bumped whenever the shape below changes; stored views from an older version are recomputed. It
 covers this file only — what the redactor masks is covered by the key, by value and by shape, so a
 new secret format does not depend on anyone remembering this number."""
@@ -90,7 +90,7 @@ def message_view(message: Message) -> dict[str, Any]:
     origin = message.metadata.get("daedalus.origin") if isinstance(message.metadata, dict) else None
     delivery = message.metadata.get("daedalus.delivery") if isinstance(message.metadata, dict) else None
     internal = message.role is MessageRole.user and not is_summary and (
-        origin == "core" or delivery == "drained" or (origin != "operator" and _looks_like_core_nudge(body))
+        origin == "core" or delivery == "drained" or message.metadata.get("daedalus.queued", False) or (origin != "operator" and _looks_like_core_nudge(body))
     )
     headline = ""
     if message.role is MessageRole.assistant:
@@ -104,6 +104,7 @@ def message_view(message: Message) -> dict[str, Any]:
     produced = produced if isinstance(produced, dict) else {}
     return {
         "role": message.role.value,
+        "run_id": message.metadata.get("daedalus.run_id"),
         "summary": is_summary,
         "internal": internal,
         "origin": origin or ("operator" if message.role is MessageRole.user and not internal else ""),

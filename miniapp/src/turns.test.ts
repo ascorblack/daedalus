@@ -16,6 +16,18 @@ const call = (seq: number, id: string, name = "Exec") => msg(seq, { tool_calls: 
 const result = (seq: number, id: string, content: string) => msg(seq, { role: "tool", tool_results: [{ id, content, is_error: false }] });
 
 describe("buildTurns", () => {
+  it("does not attach a new run to an old answer while its user row is still loading", () => {
+    const turns = buildTurns([{ ...user(1, "go"), run_id: "first" }, { ...answer(2, "done"), run_id: "first" }]);
+    expect(liveBase(turns, "second")).toBeNull();
+    const after = buildTurns([...turns.flatMap((t) => t.user ? [t.user] : []), { ...answer(2, "done"), run_id: "first" }, { ...answer(3, "new"), run_id: "second" }]);
+    expect(after).toHaveLength(2);
+    expect(after[0].answer).toBe("done");
+  });
+
+  it("keeps received steering between the tool batches it interrupted", () => {
+    const turns = buildTurns([user(1, "start"), call(2, "before"), result(3, "before", "ok"), user(4, "steer"), call(5, "after"), result(6, "after", "ok"), answer(7, "done")]);
+    expect(turns.map((t) => t.toolIds)).toEqual([["before"], ["after"]]);
+  });
   it("groups a user message with the work that followed it", () => {
     const turns = buildTurns([user(1, "go"), call(2, "c1"), result(3, "c1", "done"), answer(4, "finished")]);
     expect(turns).toHaveLength(1);
@@ -79,6 +91,21 @@ describe("buildTurns", () => {
 });
 
 describe("applyLive", () => {
+  it("does not demote the persisted final answer when its streamed copy overlaps", () => {
+    const base = buildTurns([user(1, "go"), answer(2, "done")])[0];
+    const turn = applyLive(base, { ...EMPTY_LIVE, text: "done", ended: true }, 5);
+    expect(turn.answer).toBe("done");
+    expect(turn.activity).toEqual([]);
+  });
+
+  it("drops the previous run's tools when a new run starts without an idle render", () => {
+    const previous = { ...EMPTY_LIVE, runId: "first", tools: [{ id: "old", name: "Exec", args: "{}" }], text: "done" };
+    const next = liveAfter(previous, "message_start", { run_id: "second" });
+    expect(next.tools).toEqual([]);
+    expect(next.text).toBe("");
+    expect(next.runId).toBe("second");
+    expect(liveAfter(next, "run_settled", { run_id: "first", housekeeping: false })).toBe(next);
+  });
   it("merges the streamed answer into the settled tail without touching it", () => {
     const turns = buildTurns([user(1, "go")]);
     const live = applyLive(liveBase(turns), { ...EMPTY_LIVE, text: "half a sen" }, 5);

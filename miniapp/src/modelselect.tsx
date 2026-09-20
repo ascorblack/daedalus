@@ -80,7 +80,7 @@ export function ModelSelect({ model, fallback, open, onOpenChange, onChoose, she
         </Sheet>
       )}
       {open && !sheet && (
-        <Popover anchor={trigger.current} onClose={() => onOpenChange(false)} className="model-menu" align="right" label={t("session.model.for")}>
+        <Popover anchor={trigger.current} onClose={() => onOpenChange(false)} className="model-menu" label={t("session.model.for")}>
           {list}
         </Popover>
       )}

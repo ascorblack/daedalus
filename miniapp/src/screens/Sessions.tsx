@@ -219,6 +219,7 @@ export const FolderSection = memo(function FolderSection({ folder, onOpen, curre
             {inside}
           </button>
         )}
+        <button className="btn small folder-add" onClick={() => setAdding(true)} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" size={16} /><span>{t("agents.new")}</span></button>
         <button className="iconbtn small quiet folder-actions" onClick={() => setEditing(true)} aria-label={t("project.settings.for", { name: folder.name })}><Icon name="more" size={16} /></button>
       </div>
       {showing && !compact && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
@@ -241,7 +242,6 @@ export const FolderSection = memo(function FolderSection({ folder, onOpen, curre
           )}
         />
       )}
-      {showing && <button className="btn small ghost folder-add" onClick={() => setAdding(true)}><Icon name="plus" size={16} />{t("agents.new")}</button>}
       {editing && <ProjectSettingsSheet project={{ ...folder.project, sessions: folder.rows.map((r) => ({ id: r.s.id, title: r.s.title })) }} onClose={() => setEditing(false)} onRemoved={() => setEditing(false)} toast={toast} />}
       {adding && <NewAgentSheet project={folder.key} onClose={() => setAdding(false)} onCreated={onOpen} toast={toast} />}
     </section>

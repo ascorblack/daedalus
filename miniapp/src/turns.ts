@@ -15,7 +15,7 @@ export type LiveTool = { id: string; name: string; args: string; result?: string
  * but nothing about the turn is live any more — no cursor under it, no dots over it — however long
  * the session takes to report itself idle afterwards.
  */
-export type LiveState = { text: string; thinking: string; tools: LiveTool[]; startedAt: number | null; ended: boolean; model: string; fallback: ModelFallback | null };
+export type LiveState = { runId?: string; text: string; thinking: string; tools: LiveTool[]; startedAt: number | null; ended: boolean; model: string; fallback: ModelFallback | null };
 export const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null, ended: false, model: "", fallback: null };
 
 export type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean; length?: number; clipped?: boolean; /** How long the step took, when both ends of it are known. */ ms?: number };
@@ -25,6 +25,7 @@ export type SummaryItem = { kind: "summary"; text: string; reason: string };
 export type Activity = ToolItem | NoteItem | ThinkItem | SummaryItem;
 
 export type Turn = {
+  runId?: string;
   key: string;
   user?: MessageView;
   /** The user message was not the operator's own words: a loop's wake-up, a schedule's prompt, a
@@ -108,20 +109,22 @@ export function buildTurns(messages: MessageView[], previous: readonly Turn[] = 
     }
     if (m.role === "user") {
       current = open(`u${m.seq ?? i}`, at);
+      current.runId = m.run_id || undefined;
       current.user = m;
       const note = systemNote(m);
       if (note) current.note = note;
-      mark(`${m.text.length}:${m.origin ?? ""}`);
+      mark(`${m.text.length}:${m.origin ?? ""}:${m.run_id ?? ""}`);
       return;
     }
     if (m.role === "system") return;
-    if (!current) current = open(`a${m.seq ?? i}`, at);
+    if (!current || (m.run_id && current.runId && m.run_id !== current.runId)) current = open(`a${m.seq ?? i}`, at);
+    current.runId = m.run_id || current.runId;
     current.endedAt = at;
     // The turn is named by the model of its latest assistant message: a turn that began on one model
     // and finished on another is answered by the one that finished it, which is the one the reader read.
     current.model = m.model || current.model;
     current.fallback = m.fallback ?? null;
-    mark(`m${m.seq ?? i}:${m.text.length}:${m.thinking.length}:${m.model ?? ""}:${m.fallback?.reason ?? ""}`);
+    mark(`m${m.seq ?? i}:${m.text.length}:${m.thinking.length}:${m.model ?? ""}:${m.fallback?.reason ?? ""}:${m.run_id ?? ""}`);
     if (current.answer) {
       // Text that turned out not to be final becomes a note.
       current.activity.push({ kind: "note", text: current.answer });
@@ -150,9 +153,9 @@ export function buildTurns(messages: MessageView[], previous: readonly Turn[] = 
 }
 
 /** The settled turn the streaming one continues, if there is one: a compaction block never is. */
-export function liveBase(turns: readonly Turn[]): Turn | null {
+export function liveBase(turns: readonly Turn[], runId?: string | null): Turn | null {
   const last = turns[turns.length - 1];
-  return last && !last.summary ? last : null;
+  return last && !last.summary && (!runId || last.runId === runId) ? last : null;
 }
 
 /** The streaming turn: the settled tail with what the event stream has said since merged into it. */
@@ -173,12 +176,12 @@ export function applyLive(base: Turn | null, live: LiveState, now: number): Turn
     });
   }
   const fresh = live.tools.filter((lt) => !t.toolIds.includes(lt.id));
-  if (t.answer && (live.text || live.thinking || fresh.length)) {
+  const thinkingKnown = t.activity.some((a) => a.kind === "thinking" && a.text === live.thinking);
+  if (t.answer && ((live.text && live.text !== t.answer) || (live.thinking && !thinkingKnown) || fresh.length)) {
     // Something newer is streaming, so the text before it was not the final answer.
     t.activity.push({ kind: "note", text: t.answer });
     t.answer = "";
   }
-  const thinkingKnown = t.activity.some((a) => a.kind === "thinking" && a.text === live.thinking);
   if (live.thinking && !thinkingKnown) t.activity.push({ kind: "thinking", text: live.thinking });
   for (const lt of fresh) {
     const running = lt.result === undefined;
@@ -305,7 +308,7 @@ export type Merge = {
 };
 
 const sameMessage = (a: MessageView, b: MessageView): boolean =>
-  a.text === b.text && a.thinking === b.thinking && a.tool_calls.length === b.tool_calls.length && a.tool_results.length === b.tool_results.length && !!a.summary === !!b.summary;
+  a.run_id === b.run_id && a.internal === b.internal && a.text === b.text && a.thinking === b.thinking && a.tool_calls.length === b.tool_calls.length && a.tool_results.length === b.tool_results.length && !!a.summary === !!b.summary;
 
 /**
  * Fold a freshly read tail into the messages already on screen, matching by `seq`.
@@ -377,6 +380,12 @@ export function isOlderPage(older: readonly MessageView[], oldestKnown: number |
  * finished answer. The text is kept: the written copy takes its place when the read lands.
  */
 export function liveAfter(state: LiveState, event: string, p: Record<string, any>): LiveState {
+  if (p.run_id && p.run_id !== state.runId) {
+    // Housekeeping from a finished run can arrive after the next run has started.
+    if (state.runId && event !== "message_start" && event !== "model_changed") return state;
+    state = { ...EMPTY_LIVE, runId: p.run_id };
+  }
+  if (event === "queue_update" && p.placed?.length) return { ...EMPTY_LIVE, runId: state.runId, model: state.model, fallback: state.fallback };
   if (event === "message_start") return { ...state, text: "", thinking: "", ended: false, startedAt: state.startedAt ?? Date.now() };
   // Which model is speaking, said before the message it belongs to. `fallback: false` is the run coming
   // back to the model it was configured with, and it takes the note away rather than leaving it standing.

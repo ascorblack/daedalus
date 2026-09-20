@@ -234,6 +234,14 @@ describe("every box", () => {
   });
 });
 
+describe("project hierarchy", () => {
+  it("gives multi-agent projects a full header and an always available creation action", () => {
+    expect(css).toContain(".folder-head { display: flex;");
+    expect(css).toContain("min-height: calc(var(--row-h-touch) + var(--space-3))");
+    expect(css).toContain(".sidebar .folder-add");
+  });
+});
+
 describe("rows and controls", () => {
   const decl = (selector: string) => all.filter((r) => r.selector === selector && !r.media).map((r) => r.body).join(" ");
 

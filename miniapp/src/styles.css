@@ -306,15 +306,12 @@ a { color: var(--accent); text-decoration: none; }
 
 /* ── chat: flat Grok-style timeline, fixed composer ─────────────────────────────────── */
 .chat { display:flex; flex-direction:column; height:100%; min-height:0; overflow:hidden; background:var(--bg); }
-/* One row of 48: title as a menu, the run's status beside it, the model as a muted label, two icons.
+/* The title stays passive: all session actions belong to the right-hand menu.
    A 2 px line along the bottom edge is the run's progress; nothing else in the row moves. */
 .chat-head { flex:none; position:relative; display:flex; align-items:center; gap:8px; padding:0 8px; border-bottom:1px solid var(--line); height:var(--head-h); min-height:var(--head-h); }
 .chat-head .title { font-weight:600; font-size:var(--fs-14); letter-spacing:-0.01em; }
 .chat-identity { display:flex; flex-direction:column; justify-content:center; align-items:flex-start; min-width:0; }
-.chat-title { display:inline-flex; align-items:center; gap:4px; max-width:100%; height:var(--ctl-h); padding:0 6px; margin-left:-6px; background:none; border:0; border-radius:var(--radius-sm); color:var(--fg); font:inherit; font-weight:600; font-size:var(--fs-14); letter-spacing:-0.01em; text-align:left; cursor:pointer; white-space:nowrap; }
-.chat-title:hover, .chat-title.on { background:var(--surface-2); }
-.chat-title .truncate { min-width:0; }
-.chat-title .ic { color:var(--fg-3); flex:none; }
+.chat-title { display:block; max-width:100%; color:var(--fg); font:inherit; font-weight:600; font-size:var(--fs-14); letter-spacing:-0.01em; text-align:left; white-space:nowrap; }
 .leader-link { background:none; border:0; padding:0 0 2px; color:var(--fg-2); font:inherit; font-size:var(--fs-12); line-height:1.2; text-align:left; cursor:pointer; }
 .leader-link:hover { color:var(--fg); }
 .head-status { display:inline-flex; align-items:center; gap:6px; flex:0 1 auto; min-width:0; max-width:44%; height:var(--ctl-h); padding:0 6px; background:none; border:0; border-radius:var(--radius-sm); color:var(--fg-2); font:inherit; font-size:var(--fs-13); white-space:nowrap; cursor:default; }
@@ -641,7 +638,7 @@ input.field, select.field, textarea.field {
 /* the + and the model list open upward from the pill */
 /* Popovers open upward from the composer. `.menu` itself is `right:10px` for the header overflow;
    without `right:auto` a left-anchored popover is stretched to the window's right edge. */
-.menu.pop { top:auto; right:auto; min-width:200px; width:max-content; max-width:min(340px, 92vw); }
+.menu.pop { top:auto; right:auto; z-index:35; overflow-y:auto; min-width:200px; width:max-content; max-width:min(340px, 92vw); }
 .menu.pop button { display:flex; align-items:center; gap:10px; min-height:var(--row-h); font-size:var(--fs-14); }
 .plus-menu { min-width: 200px; }
 .model-menu { width:min(340px, 92vw); max-height:70vh; overflow-y:auto; }
@@ -781,11 +778,10 @@ input.field, select.field, textarea.field {
   .sidebar .folder-head.linked { padding: 0; gap: 0; }
   .sidebar .folder-disclose { padding: 2px 2px 2px 8px; }
   .sidebar .folder-go { gap: 6px; padding: 2px 8px 2px 4px; }
-  .sidebar .folder-head { min-height: 28px; padding: 2px 8px; gap: 6px; background: none; border-radius: var(--radius-sm); font-size: var(--fs-12); font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--fg-2); }
+  .sidebar .folder-head { min-height: var(--row-h-touch); padding: 4px 8px; gap: 6px; background: var(--surface-1); border-radius: var(--radius-sm); font-size: var(--fs-13); font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--fg); }
   .sidebar .folder-head:hover { background: var(--surface-1); }
   .sidebar .folder.open .folder-head { border-bottom: 0; }
-  .sidebar .folder:not(.system) .folder-head .ic { display: none; }
-  .sidebar .folder-name { font-weight: 500; }
+  .sidebar .folder-name { font-weight: 600; }
   .sidebar .folder-counts { font-size: var(--fs-11); color: var(--fg-3); }
   .sidebar .folder-live { display: none; }
   .sidebar .folder-empty { padding: 4px 8px 6px; font-size: var(--fs-12); }
@@ -1216,7 +1212,7 @@ body.resizing iframe { pointer-events: none; }
 .agents-screen { width: 100%; }
 .folder { margin-bottom: 8px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-1); overflow: hidden; }
 .folder.open { background: var(--surface-1); border-color: var(--line-strong); }
-.folder-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--row-h); padding: 4px 12px; background: var(--surface-2); border: 0; color: var(--fg); font: inherit; font-size: var(--fs-14); text-align: left; cursor: pointer; }
+.folder-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: calc(var(--row-h-touch) + var(--space-3)); padding: 8px 12px; background: var(--surface-2); border: 0; color: var(--fg); font: inherit; font-size: var(--fs-14); text-align: left; cursor: pointer; }
 .folder-head:hover { background: var(--surface-3); }
 /* A header that both goes somewhere and opens: the chevron is its own button with its own label,
    and the rest of the row is the link. Nothing else about the row changes. */
@@ -2079,7 +2075,10 @@ input.field[type="range"] {
 .erow-project { color: var(--muted); font-weight: 400; }
 .search-passage { font-size: var(--fs-12); color: var(--muted); margin-top: var(--space-1); }
 .search-notice { padding: var(--space-2) var(--space-3); }
-.folder-add { margin: var(--space-1) var(--space-3); }
+.folder-add { margin: var(--space-1); flex-shrink:0; color:var(--accent); border-color:color-mix(in srgb, var(--accent) 40%, var(--line)); background:color-mix(in srgb, var(--accent) 10%, var(--surface-1)); }
+.sidebar .folder-add { min-width:32px; padding:4px; }
+.sidebar .folder-add span { display:none; }
+@media (max-width:600px) { .folder-top .folder-add { min-width:44px; min-height:var(--row-h-touch); padding:8px; } .folder-top .folder-add span { display:none; } }
 
 .effort-options { border:0; padding:0; margin:0 0 var(--space-3); min-width:0; }
 .effort-options legend { padding:var(--space-2) 0; font-weight:600; }

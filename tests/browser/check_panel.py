@@ -203,7 +203,7 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
     if not page.locator(".panel").count():
         problems.append("the header button did not open the panel")
     # A sheet over the panel takes Escape first.
-    page.locator(".chat-head .chat-title").click()
+    page.locator(".chat-head .head-actions button[aria-haspopup='menu']").click()
     page.wait_for_selector(".menu[role='menu']", timeout=5000)
     page.keyboard.press("Escape")
     page.wait_for_timeout(200)

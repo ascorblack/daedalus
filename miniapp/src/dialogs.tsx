@@ -281,12 +281,26 @@ function MenuLayer({ onClose }: { onClose: () => void }) {
 export function Popover({ anchor, onClose, children, className, align = "left", label }: { anchor: HTMLElement | null; onClose: () => void; children: ReactNode; className?: string; align?: "left" | "right"; label?: string }) {
   const box = useRef<HTMLDivElement>(null);
   useLayer(onClose);
-  const [pos, setPos] = useState<{ bottom: number; left?: number; right?: number } | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   useLayoutEffect(() => {
     if (!anchor) return;
-    const r = anchor.getBoundingClientRect();
-    const bottom = Math.max(8, window.innerHeight - r.top + 6);
-    setPos(align === "left" ? { bottom, left: Math.max(8, r.left) } : { bottom, right: Math.max(8, window.innerWidth - r.right) });
+    const place = () => {
+      const r = anchor.getBoundingClientRect();
+      const width = box.current?.getBoundingClientRect().width ?? 340;
+      const above = r.top - 14;
+      const below = window.innerHeight - r.bottom - 14;
+      const upward = above >= below;
+      const maxHeight = Math.max(40, upward ? above : below);
+      const height = Math.min(box.current?.scrollHeight ?? 0, maxHeight);
+      const left = Math.min(window.innerWidth - width - 8, Math.max(8, align === "left" ? r.left : r.right - width));
+      setPos({ left: Math.max(8, left), top: upward ? Math.max(8, r.top - height - 6) : r.bottom + 6, maxHeight });
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    if (box.current) observer.observe(box.current);
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => { observer.disconnect(); window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true); };
   }, [anchor, align]);
   useEffect(() => {
     const onDown = (e: MouseEvent | TouchEvent) => {
@@ -315,9 +329,8 @@ export function Popover({ anchor, onClose, children, className, align = "left", 
       if (document.activeElement === document.body || !document.activeElement) anchor?.focus();
     };
   }, [anchor, onClose]);
-  if (!pos) return null;
   return createPortal(
-    <div ref={box} className={`menu pop ${className ?? ""}`} role="menu" aria-label={label} style={{ position: "fixed", top: "auto", bottom: pos.bottom, left: pos.left ?? "auto", right: pos.right ?? "auto" }} onClick={(e) => e.stopPropagation()}>
+    <div ref={box} className={`menu pop ${className ?? ""}`} role="menu" aria-label={label} style={{ position: "fixed", top: pos?.top ?? 8, bottom: "auto", left: pos?.left ?? 8, right: "auto", maxHeight: pos?.maxHeight, visibility: pos ? "visible" : "hidden" }} onClick={(e) => e.stopPropagation()}>
       {children}
     </div>,
     document.body,

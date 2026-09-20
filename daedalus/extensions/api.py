@@ -1444,7 +1444,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
             async def sink(sid: str, event: Any) -> None:
                 if sid == session_id:
-                    queue.put_nowait((event.type.value, event.payload))
+                    queue.put_nowait((event.type.value, {**event.payload, "run_id": event.run_id}))
 
             manager.add_sink(sink)
             try:

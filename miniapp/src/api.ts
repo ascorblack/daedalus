@@ -199,6 +199,7 @@ export type SubagentView = { session_id: string; name: string | null; running: b
 export type ModelFallback = { from: string; to: string; reason: string };
 
 export type MessageView = {
+  run_id?: string | null;
   role: "system" | "user" | "assistant" | "tool";
   summary?: boolean;
   internal?: boolean;

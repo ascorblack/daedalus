@@ -20,6 +20,47 @@ from tests.unit.test_session_runner import ScriptedProvider
 H = {"X-Daedalus-Token": "tok"}
 
 
+async def test_successive_runs_keep_distinct_transcript_identity(settings: Settings, db: Database) -> None:
+    manager = await _manager(settings, db, ScriptedProvider([{"text": "first answer"}, {"text": "second answer"}]))
+    state = await manager.create_session("two runs")
+    first = await manager.submit(state.session.id, "first question")
+    await state.task
+    second = await manager.submit(state.session.id, "second question")
+    await state.task
+    views = [m for m in await manager.transcript_page(state.session.id) if not m.get("internal")]
+    assert first != second
+    assert [(m["text"], m["run_id"]) for m in views] == [
+        ("first question", first), ("first answer", first),
+        ("second question", second), ("second answer", second),
+    ]
+    await manager.close()
+
+
+async def test_steers_are_received_between_their_tool_batches(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([
+        {"tool": "Exec", "args": {"command": "sleep 0.2"}},
+        {"tool": "Exec", "args": {"command": "sleep 0.3"}},
+        {"text": "done"},
+    ])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("steering order")
+    batches = 0
+
+    async def steer_after_start(session_id: str, event: Any) -> None:
+        nonlocal batches
+        if event.type.value == "tool_use_start":
+            batches += 1
+            await manager.submit(session_id, f"instruction {batches}", steer=True)
+
+    manager.add_sink(steer_after_start)
+    await manager.submit(state.session.id, "start")
+    await state.task
+    views = [m for m in await manager.transcript_page(state.session.id) if not m.get("internal")]
+    order = ["tool" if m["tool_calls"] else m["text"] for m in views if m["role"] != "tool"]
+    assert order == ["start", "tool", "instruction 1", "tool", "instruction 2", "done"]
+    await manager.close()
+
+
 async def _manager(settings: Settings, db: Database, provider: ScriptedProvider) -> SessionManager:
     manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
@@ -104,6 +145,14 @@ async def test_a_steer_the_run_has_read_is_gone_from_the_queue_and_cannot_be_wit
         assert any("and also this" in t for t in texts)
         assert (await client.get(f"/api/sessions/{sid}/steer", headers=H)).json() == []
         assert [c["reason"] for c in changes] == ["queued", "consumed"]
+
+        views = await manager.transcript_page(sid)
+        visible = [m for m in views if not m.get("internal")]
+        received = [i for i, m in enumerate(visible) if m["role"] == "user" and m["text"] == "and also this"]
+        assert len(received) == 1
+        assert any(m["tool_calls"] for m in visible[:received[0]])
+        assert visible[received[0]]["run_id"] == state.run_id
+        assert all(m["run_id"] == state.run_id for m in visible if m["role"] == "assistant")
 
         late = await client.delete(f"/api/sessions/{sid}/steer/{item_id}", headers=H)
         assert late.status_code == 409 and "already reached" in late.json()["detail"]

@@ -34,7 +34,8 @@ def run() -> None:
                 assert ("Totals across all runs" if language == "en" else "Суммарно по всем запускам") in copy
                 assert not page.locator(".tool-timing").evaluate("el => el.open")
                 summary = page.locator(".tool-timing summary")
-                assert summary.bounding_box()["height"] >= 44
+                # The sheet's entry translation can round a 44px box to 43.999999px.
+                assert summary.evaluate("el => parseFloat(getComputedStyle(el).height)") >= 44
                 summary.click()
                 assert page.locator(".tool-timing .dt-row").count() == 2
                 assert ("9 calls" if language == "en" else "вызовов: 9") in panel.inner_text()
