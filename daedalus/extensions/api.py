@@ -20,7 +20,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -57,6 +57,7 @@ from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_a
 from daedalus.extensions.voice import model_options, tts_configured
 from daedalus.host import capabilities, component_install, launcher_bridge
 from daedalus.host import components as component_list
+from daedalus.host.dependencies import DependencyPlanner
 from daedalus.host.policy import sealed_root
 from daedalus.host.prompts import DEFAULT_RULES
 from daedalus.host.session_runner import TENANT, Attachment
@@ -875,7 +876,16 @@ def _tool_group(name: str) -> str:
 
 
 def build_app(app: Application, api_token: str) -> FastAPI:
-    api = FastAPI(title="Daedalus", docs_url=None, redoc_url=None)
+    dependency_planner = DependencyPlanner(app)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            await dependency_planner.close()
+
+    api = FastAPI(title="Daedalus", docs_url=None, redoc_url=None, lifespan=lifespan)
     # A session page is JSON and compresses about fivefold; over a phone connection that is the
     # difference the operator feels. The event stream is excluded by content type, so a token
     # still leaves the process the moment it arrives.
@@ -2212,6 +2222,37 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     # -- components ---------------------------------------------------------------------
 
+    @api.get("/api/dependencies")
+    async def dependencies_view(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            return await dependency_planner.view()
+        except (RuntimeError, OSError) as exc:
+            raise HTTPException(503, str(exc)) from None
+
+    @api.post("/api/dependencies/request")
+    async def dependencies_request(body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            return await dependency_planner.start(str(body.get("request", "")), str(body.get("preset", "")))
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @api.post("/api/dependencies/{proposal_id}/cancel")
+    async def dependencies_cancel(proposal_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            await dependency_planner.cancel(proposal_id)
+            return {"cancelled": True}
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @api.post("/api/dependencies/{proposal_id}/approve")
+    async def dependencies_approve(proposal_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        if installer.running_id():
+            raise HTTPException(409, "a component is being installed; wait for it to finish")
+        try:
+            return await dependency_planner.approve(proposal_id)
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from None
+
     def component_registry() -> component_list.Registry:
         """A registry over the configuration as it is now.
 
@@ -2235,6 +2276,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         """
         if component_id not in component_list.CATALOGUE:
             raise HTTPException(404, f"no such component: {component_id}")
+        if (settings.state_dir / "dependencies" / "maintenance").exists():
+            raise HTTPException(409, "dependencies are being installed; wait for the application to restart")
         status = component_registry().status(component_id)
         if status.state == "installed":
             return {"id": component_id, "state": "installed", "step": "", "error": "", "restart_required": False}

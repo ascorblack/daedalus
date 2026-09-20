@@ -138,7 +138,7 @@ def _runtime_paths() -> list[str]:
     return [str(Path(path)) for path in named if path.strip()]
 
 
-SYSTEM_NEVER_WRITABLE = ("/etc/ssl", "/usr/local", "/var/lib", "/opt/launcher", "/run/daedalus", "/run/daedalus-rebuild")
+SYSTEM_NEVER_WRITABLE = ("/etc/ssl", "/usr/local", "/var/lib", "/opt/launcher", "/opt/agent-python", "/opt/dependency-recipe", "/run/daedalus", "/run/daedalus-rebuild")
 """Directories of the machine or the image that a sandbox is never opened onto, whichever mode this is."""
 
 

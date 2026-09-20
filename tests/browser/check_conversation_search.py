@@ -57,7 +57,12 @@ def run() -> int:
         # The path is available in project settings; mobile navigation spends no row on it.
         expect(garden.locator('.folder-root')).to_be_hidden()
         expect(garden.locator('.folder-expand')).to_have_attribute('aria-expanded', 'true')
-        expect(garden.locator('.folder-actions')).to_be_visible()
+        # A single-agent project uses the session menu instead of a second overflow beside it.
+        expect(garden.locator('.folder-actions')).to_have_count(0)
+        garden.get_by_role('button', name='Planting plan: More').click()
+        page.get_by_role('menuitem', name='Settings for Garden').click()
+        expect(page.get_by_role('dialog', name='Garden', exact=True)).to_be_visible()
+        page.get_by_role('dialog').get_by_role('button', name='Close', exact=True).click()
         page.locator('[data-project="empty"] .folder-head').click()
         expect(page.locator('[data-project="empty"] .folder-add')).to_be_visible()
         search = page.get_by_role('searchbox', name='Search conversations')

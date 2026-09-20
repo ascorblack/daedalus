@@ -87,6 +87,8 @@ RUN printf '%s\n' /srv/daedalus /srv/protocore-exp > /srv/venv/lib/python3.12/si
 
 # The supervisor lives outside the repositories the agent can change.
 COPY launcher /opt/launcher
+COPY deploy/dependencies /opt/dependency-recipe
+RUN python3 /opt/launcher/dependencies.py /opt/dependency-recipe/local.json
 # The key proxy runs from this image as a second container with its own environment; see
 # deploy/compose.yaml. Its dependencies are already in the virtualenv above.
 COPY deploy/keyproxy /opt/keyproxy

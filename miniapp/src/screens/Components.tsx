@@ -263,6 +263,7 @@ export function ComponentsTab({ toast }: { toast: (t: string) => void }) {
         {t("comp.title")}
       </div>
       <div className="sub">{t("comp.intro")}</div>
+      <div className="btnrow"><a className="btn" href={pathFor("settings", "dependencies")} onClick={(event) => go(event, pathFor("settings", "dependencies"))}>{t("settings.sec.dependencies")}</a></div>
       <div className="comp-mode">
         <Icon name={view.mode === "native" ? "settings" : "inbox"} size={16} />
         <span className="sub">{t(`comp.mode.${view.mode === "native" ? "native" : "docker"}`)}</span>

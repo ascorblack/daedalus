@@ -205,16 +205,7 @@ services:
       - rebuild-trigger:/run/daedalus-rebuild
     # The heartbeat is what makes this a rebuild channel the bot may promise: the compose file always
     # names this service, so its presence in the file says nothing about whether anything is running.
-    command: >
-      sh -c 'while true; do
-        touch /run/daedalus-rebuild/alive;
-        if [ -f /run/daedalus-rebuild/rebuild ]; then
-          rm -f /run/daedalus-rebuild/rebuild;
-          echo "rebuilding daedalus image";
-          docker compose -f "$$COMPOSE_FILE" --env-file .env up -d --build daedalus || echo "rebuild failed";
-        fi;
-        sleep 5;
-      done'
+    command: [sh, deploy/rebuild.sh]
 
   # Files up to 2 GB, instead of Telegram's 20 MB. Only started with `--profile telegram`.
   telegram-bot-api:

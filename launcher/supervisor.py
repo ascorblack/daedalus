@@ -25,6 +25,7 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import secrets
@@ -105,6 +106,16 @@ CONFIGURED_MODE = os.environ.get("DAEDALUS_SELFDEV_MODE", "auto")
 """``server``, ``local``, ``off`` or ``auto``; the same value the bot resolves for itself. The supervisor
 resolves it again from what it can see, because it decides before the bot is running."""
 
+# Load beside the supervisor, including when this file is executed directly rather than imported.
+_dependency_spec = importlib.util.spec_from_file_location("daedalus_dependency_runtime", Path(__file__).with_name("dependencies.py"))
+assert _dependency_spec is not None and _dependency_spec.loader is not None
+dependency_runtime = importlib.util.module_from_spec(_dependency_spec)
+_dependency_spec.loader.exec_module(dependency_runtime)
+
+
+def dependency_service() -> Any:
+    return dependency_runtime.Dependencies(BOT_REPO, STATE, REBUILD_TRIGGER_DIR, native=os.environ.get("DAEDALUS_NATIVE", "").lower() in ("1", "true", "yes", "on"))
+
 HEALTHY_SECONDS = 120
 """A start that lasts this long is what ``record_good`` calls healthy; one that does not is a failed boot."""
 BOOT_WINDOW_SECONDS = 600
@@ -127,6 +138,8 @@ def bot_env() -> dict[str, str]:
     """Environment the bot (and its preflight) runs with: paths owned by the supervisor."""
     env = dict(os.environ)
     env.pop("VIRTUAL_ENV", None)
+    if agent_bin := dependency_service().active_bin():
+        env["DAEDALUS_AGENT_BIN"] = agent_bin
     env["GIT_TERMINAL_PROMPT"] = "0"
     # Commits the agent makes in its workspace carry its own identity; the repos' local config covers the self-development checkouts.
     for key, value in (("GIT_AUTHOR_NAME", "Daedalus"), ("GIT_AUTHOR_EMAIL", "daedalus@localhost"), ("GIT_COMMITTER_NAME", "Daedalus"), ("GIT_COMMITTER_EMAIL", "daedalus@localhost")):
@@ -656,6 +669,11 @@ class Supervisor:
         self.configured = CONFIGURED_MODE
         """What the operator asked for, ``auto`` by default. An explicit value wins over everything below."""
         self.restart_task: asyncio.Task[None] | None = None
+        self.dependencies = dependency_service()
+        try:
+            self.dependencies.status()
+        except (OSError, ValueError) as exc:
+            log(f"dependency state could not be read: {exc}")
         self.running_revision = ""
         self.running_core = ""
         """The commits the child was started on. Not the last known-good one: a revision becomes known-good
@@ -1075,6 +1093,29 @@ class Supervisor:
 
     # -- socket ---------------------------------------------------------------------
 
+    async def apply_dependencies(self, proposal: dict[str, Any], job_id: str) -> dict[str, Any]:
+        if self.lock.locked() or any(task is not None and not task.done() for task in (self.rebuild_task, self.restart_task, self.dependencies.task)):
+            raise ValueError("another supervisor operation is running")
+        job = self.dependencies.accept(proposal, job_id)
+        self.dependencies.task = asyncio.create_task(self._install_dependencies(job))
+        return job
+
+    async def _install_dependencies(self, job: dict[str, Any]) -> None:
+        async with self.lock:
+            try:
+                await self.dependencies.install(job)
+                if self.dependencies.native:
+                    await self.stop_child()
+                    self.restart_requested.set()
+                    dependency_runtime.write_json(self.dependencies.root / "job.json", {**job, "state": "completed"})
+                    dependency_runtime.clear_maintenance(self.dependencies.root, job["id"])
+                else:
+                    # The sidecar survives container replacement and owns the final outcome.
+                    while self.dependencies.status()["job"]["state"] == "installing":
+                        await asyncio.sleep(2)
+            except Exception as exc:
+                self.dependencies.fail(job, str(exc))
+
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             raw = await asyncio.wait_for(reader.readline(), timeout=30)
@@ -1082,8 +1123,18 @@ class Supervisor:
             if self.token and not hmac.compare_digest(str(request.get("token") or ""), self.token):
                 raise PermissionError("this supervisor listens on a loopback port, which anything on the machine can reach; a command has to carry the secret from the state directory")
             op = request.get("op")
+            if op in ("restart", "rebuild", "rollback") and (self.dependencies.status().get("job") or {}).get("state") in ("installing", "restarting"):
+                raise RuntimeError("dependencies are being installed; wait for that operation to finish")
             if op == "status":
                 result: Any = self.status()
+            elif op == "dependencies_status":
+                result = self.dependencies.status()
+            elif op == "dependencies_inventory":
+                result = await self.dependencies.inventory()
+            elif op == "dependencies_preview":
+                result = self.dependencies.preview(request.get("additions"))
+            elif op == "dependencies_apply":
+                result = await self.apply_dependencies(request.get("proposal", {}), str(request.get("id", "")))
             elif op == "rebuild":
                 result = await self.rebuild(str(request.get("reason") or ""))
             elif op == "rollback":

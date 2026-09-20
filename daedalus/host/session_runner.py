@@ -1304,7 +1304,7 @@ class SessionManager:
             if retry:
                 if not self.config.has_model:
                     raise NoModelConfigured
-                if self.shutting_down or self.recovering:
+                if self.shutting_down or self.recovering or (self.settings.state_dir / "dependencies" / "maintenance").exists():
                     raise RuntimeError("the bot is restarting; try again when it is ready")
                 if not state.workspace.is_dir() or not os.access(state.workspace, os.W_OK):
                     raise RuntimeError("the working directory is not writable")
@@ -1621,6 +1621,10 @@ class SessionManager:
         ``fork`` and ``compact`` wait on."""
         return {sid for sid, state in self._states.items() if state.running or state.pending is not None or self._settling(state)}
 
+    def dependency_installation_busy(self) -> bool:
+        """An input still preparing a run must finish before installation closes the run gate."""
+        return bool(self.busy_sessions()) or self.idle_work.locked() or any(state.submit_lock.locked() for state in self._states.values())
+
     def active_sessions(self) -> set[str]:
         """Sessions the operator would call working: a turn in flight or a question outstanding.
 
@@ -1774,6 +1778,8 @@ class SessionManager:
                 raise NoModelConfigured
             if self.shutting_down:
                 raise RuntimeError("the bot is stopping; the run starts after the restart")
+            if (self.settings.state_dir / "dependencies" / "maintenance").exists():
+                raise RuntimeError("dependencies are being installed; wait for the application to restart")
             if self.recovering and not state.running:
                 raise RuntimeError("the bot is starting up and first continues the runs it left behind; try again in a moment")
             if not state.workspace.is_dir():
@@ -2339,6 +2345,8 @@ class SessionManager:
         # A bounded indexing chunk yields before an agent starts; the index checks busy again
         # under this same lock, so background inference cannot overlap an active run.
         async with self.idle_work:
+            if (self.settings.state_dir / "dependencies" / "maintenance").exists():
+                raise RuntimeError("dependencies are being installed; wait for the application to restart")
             return await self._start_run_ready(state, message, continue_turn=continue_turn)
 
     async def _start_run_ready(

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -52,6 +53,10 @@ def shell_argv(command: str, *, windows: bool | None = None) -> list[str]:
     """
     if windows is None:
         windows = os.name == "nt"
+    if not windows and (agent_bin := os.environ.get("DAEDALUS_AGENT_BIN", "")):
+        # A login shell resets PATH after subprocess env was supplied. Activate only inside the
+        # tool shell, never in the host interpreter which must retain its own locked dependencies.
+        command = f"export PATH={shlex.quote(agent_bin)}:\"$PATH\"; {command}"
     if not windows:
         return ["bash", "-lc", command]
     return [windows_shell(), "-c", command]
@@ -209,6 +214,8 @@ def shell_environment(session_id: str, extra: dict[str, str] | None = None) -> d
     """
     env = {k: v for k, v in os.environ.items() if (k in _SAFE_ENV_BASE or k.startswith(_SAFE_ENV_PREFIXES)) and not _SECRET_ENV.match(k)}
     env.update(extra or {})
+    if agent_bin := os.environ.get("DAEDALUS_AGENT_BIN", ""):
+        env["PATH"] = agent_bin + os.pathsep + env.get("PATH", "")
     env["DAEDALUS_SESSION_ID"] = session_id
     return env
 

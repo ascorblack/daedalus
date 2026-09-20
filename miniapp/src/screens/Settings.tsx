@@ -12,6 +12,7 @@ import { SpeechModels } from "./Speech";
 import { TtsVoices } from "./Voices";
 import { VoiceSettings } from "./Voice";
 import { ComponentsTab } from "./Components";
+import { DependenciesTab } from "./Dependencies";
 import { AddModel } from "./AddModel";
 import { REASONING_EFFORTS } from "../models";
 import { Sheet } from "../dialogs";
@@ -935,7 +936,7 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
   );
 }
 
-type Section = "models" | "rules" | "limits" | "tools" | "voice" | "components" | "chat" | "security" | "heartbeat" | "about";
+type Section = "models" | "rules" | "limits" | "tools" | "voice" | "components" | "dependencies" | "chat" | "security" | "heartbeat" | "about";
 /** The sections, in the order they are listed; the words come from the table, not from here. */
 const SECTIONS: { id: Section; icon: IconName }[] = [
   { id: "models", icon: "model" },
@@ -944,6 +945,7 @@ const SECTIONS: { id: Section; icon: IconName }[] = [
   { id: "tools", icon: "wrench" },
   { id: "voice", icon: "mic" },
   { id: "components", icon: "plug" },
+  { id: "dependencies", icon: "wrench" },
   { id: "chat", icon: "inbox" },
   { id: "security", icon: "key" },
   { id: "heartbeat", icon: "loop" },
@@ -1158,6 +1160,8 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
         );
       case "components":
         return <ComponentsTab toast={toast} />;
+      case "dependencies":
+        return <DependenciesTab />;
       case "chat":
         return (
           <div className="card">

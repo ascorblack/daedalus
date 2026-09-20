@@ -1,0 +1,13 @@
+.dependencies { min-width: 0; }
+.dependencies .section-title { margin-top: 0; }
+.deps-tools { margin: 16px 0; }
+.deps-tools .kv { gap: 12px; align-items: baseline; }
+.deps-tools .kv > span { text-align: right; overflow-wrap: anywhere; }
+.dependencies details { margin: 12px 0; }
+.dependencies summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
+.dependencies pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.deps-label { display: block; margin: 16px 0 8px; }
+.deps-explanation { white-space: pre-wrap; overflow-wrap: anywhere; }
+.deps-patch { padding: 12px; background: var(--bg); border-radius: 8px; max-height: 40vh; overflow: auto; }
+.deps-consent { display: flex; align-items: start; gap: 10px; min-height: 44px; margin: 16px 0; }
+.deps-consent input { flex-shrink: 0; margin-top: 4px; }
