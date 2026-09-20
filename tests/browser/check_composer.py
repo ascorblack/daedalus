@@ -116,10 +116,21 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
             HOST.status = "running"
             return route.fulfill(status=200, content_type="application/json", body="{}")
         if rel == f"/api/sessions/{SESSION}/model":
+            if isinstance(data, dict) and "thinking" in data:
+                HOST.thinking = bool(data["thinking"])
             if isinstance(data, dict) and data.get("reasoning_effort"):
                 HOST.effort = str(data["reasoning_effort"])
                 HOST.thinking = bool(data.get("thinking", True))
             return route.fulfill(status=200, content_type="application/json", body=json.dumps({"model": "DeepSeek Flash", "thinking": HOST.thinking, "reasoning_effort": HOST.effort}))
+        if rel in (f"/api/sessions/{SESSION}/retry", f"/api/sessions/{SESSION}/revert"):
+            seq = int(data["seq"])
+            through = max(m["seq"] for m in HOST.messages)
+            before = len(HOST.messages)
+            HOST.messages = [m for m in HOST.messages if m["seq"] < seq]
+            dropped = before - len(HOST.messages)
+            if rel.endswith("/retry"):
+                HOST.messages.append(message(through + 1, "assistant", "Replacement answer"))
+            return route.fulfill(status=200, content_type="application/json", body=json.dumps({"seq": seq, "through": through, "dropped": dropped, "workspace_restored": False, "untouched": []}))
         return route.fulfill(status=200, content_type="application/json", body="{}")
     if rel == "/api/auth/me":
         body = {"user_id": 1, "via": "token"}

@@ -2464,6 +2464,17 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @api.post("/api/sessions/{session_id}/retry")
+    async def retry_session(session_id: str, body: RevertBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            return await manager.retry(session_id, body.seq)
+        except KeyError:
+            raise HTTPException(404, "no such session") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @api.post("/api/sessions/{session_id}/fork")
     async def fork_session(session_id: str, body: ForkBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         source = await manager.get_state(session_id)

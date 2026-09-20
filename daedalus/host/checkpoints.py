@@ -96,17 +96,19 @@ class Checkpoints:
         await self._git("commit", "-q", "--allow-empty", "-m", label[:200])
         return (await self._git("rev-parse", "HEAD")).strip()
 
-    async def restore(self, sha: str) -> list[str]:
+    async def restore(self, sha: str, *, record: bool = True) -> list[str]:
         """Put the work tree back to ``sha``: tracked files reset, untracked files removed.
 
         The branch only ever moves forward: the state before the restore is committed first
         and the restored tree is committed after, so every earlier snapshot stays reachable
-        and the restore itself can be undone. Returns the nested repositories the restore
+        and the restore itself can be undone. Destructive history edits use ``record=False``:
+        neither the discarded tree nor the restore is snapshotted. Returns the nested repositories the restore
         could not touch (their contents stay as they are).
         """
         await self.ensure()
-        await self._git("add", "-A", "--", ".")
-        await self._git("commit", "-q", "--allow-empty", "-m", f"before restore to {sha[:12]}")
+        if record:
+            await self._git("add", "-A", "--", ".")
+            await self._git("commit", "-q", "--allow-empty", "-m", f"before restore to {sha[:12]}")
         # Filter historical trees too, so restoring an older snapshot cannot resurrect or
         # overwrite a child's files. The temporary index never changes the working directory.
         with tempfile.TemporaryDirectory(dir=self.git_dir) as temporary:
@@ -117,8 +119,9 @@ class Checkpoints:
         await self._git("read-tree", "-u", "--reset", tree)
         await self._git("clean", "-qfd")
         nested = await self._write_excludes()
-        await self._git("add", "-A", "--", ".")
-        await self._git("commit", "-q", "--allow-empty", "-m", f"restored to {sha[:12]}")
+        if record:
+            await self._git("add", "-A", "--", ".")
+            await self._git("commit", "-q", "--allow-empty", "-m", f"restored to {sha[:12]}")
         return nested
 
     async def truncate(self, sha: str) -> bool:

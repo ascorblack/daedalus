@@ -16,6 +16,14 @@ const call = (seq: number, id: string, name = "Exec") => msg(seq, { tool_calls: 
 const result = (seq: number, id: string, content: string) => msg(seq, { role: "tool", tool_results: [{ id, content, is_error: false }] });
 
 describe("buildTurns", () => {
+  it("keeps the exact assistant row for retry, including answers demoted to activity", () => {
+    const [turn] = buildTurns([user(1, "go"), answer(2, "first note"), call(3, "tool"), result(4, "tool", "ok"), answer(5, "done")]);
+    expect(turn.answerSeq).toBe(5);
+    expect(turn.activity.find((item) => item.kind === "note")).toMatchObject({ seq: 2, text: "first note" });
+    const [replacement] = buildTurns([user(1, "go"), answer(6, "replacement")], [turn]);
+    expect(replacement.answerSeq).toBe(6);
+    expect(replacement.activity).toEqual([]);
+  });
   it("does not attach a new run to an old answer while its user row is still loading", () => {
     const turns = buildTurns([{ ...user(1, "go"), run_id: "first" }, { ...answer(2, "done"), run_id: "first" }]);
     expect(liveBase(turns, "second")).toBeNull();

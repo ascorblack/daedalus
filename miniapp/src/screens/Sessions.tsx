@@ -1,14 +1,14 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, Project, ProjectFolder, SessionList, SessionSummary, Settings } from "../api";
 import { Avatar, Dot, Skeleton, Status, ToolPicker, fmtInterval, statusWord } from "../components";
-import { Sheet } from "../dialogs";
+import { OverflowMenu, Sheet, confirmDialog, toast } from "../dialogs";
 import { relTime, shortModel, untilShort } from "../format";
 import { Folder, Row as RowModel, agentName, arrange, folderOpen, rememberFolder } from "../grouping";
 import { Icon } from "../icons";
-import { ProjectChip, ProjectSettingsSheet, useProjects } from "../projects";
-import { pathFor } from "../router";
+import { MoveSessionSheet, ProjectChip, ProjectSettingsSheet, useProjects } from "../projects";
+import { navigate, parse, pathFor } from "../router";
 import { PageHeader, go, screenTitle } from "../shell";
-import { useQuery } from "../store";
+import { invalidate, useQuery } from "../store";
 import { WindowedRows } from "../virtual";
 import { errorText } from "../ui";
 import { plural, t } from "../i18n";
@@ -150,10 +150,13 @@ function sameFolder(a: FolderProps, b: FolderProps): boolean {
 }
 
 export const FolderSection = memo(function FolderSection({ folder, onOpen, current, filtered, compact, toast }: FolderProps) {
-  const single = folder.single && !folder.system;
+  // The narrow sidebar always gives a project its own header: embedding its only session there
+  // made the session title compete with two independent sets of actions and disappear entirely.
+  const single = folder.single && !folder.system && !compact;
   const [open, setOpen] = useState(() => folderOpen(folder.key));
   const [editing, setEditing] = useState(false);
   const [adding, setAdding] = useState(false);
+  const editProject = useCallback(() => setEditing(true), []);
   const wasSingle = useRef(single);
   useEffect(() => {
     if (wasSingle.current && !single) setOpen(true);
@@ -212,7 +215,7 @@ export const FolderSection = memo(function FolderSection({ folder, onOpen, curre
           </div>
         ) : single ? <>
           <button className="iconbtn small quiet folder-expand" onClick={toggle} aria-expanded={showing} aria-label={t("search.expand", { name: folder.name })}>{chevron}</button>
-          <Row s={folder.rows[0].s} kids={[]} onOpen={onOpen} current={current === folder.rows[0].s.id} compact={compact} projectName={folder.name} />
+          <Row s={folder.rows[0].s} kids={[]} onOpen={onOpen} current={current === folder.rows[0].s.id} compact={compact} projectName={folder.name} onProject={editProject} />
         </> : (
           <button className="folder-head" onClick={toggle} aria-expanded={showing}>
             {chevron}
@@ -220,7 +223,7 @@ export const FolderSection = memo(function FolderSection({ folder, onOpen, curre
           </button>
         )}
         <button className="btn small folder-add" onClick={() => setAdding(true)} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" size={16} /><span>{t("agents.new")}</span></button>
-        <button className="iconbtn small quiet folder-actions" onClick={() => setEditing(true)} aria-label={t("project.settings.for", { name: folder.name })}><Icon name="more" size={16} /></button>
+        {!single && <button className="iconbtn small quiet folder-actions" onClick={editProject} aria-label={t("project.settings.for", { name: folder.name })}><Icon name="more" size={16} /></button>}
       </div>
       {showing && !compact && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
       {showing && folder.rows.length === 0 && <div className="folder-empty sub">{filtered ? t("common.nothing") : t("agents.folder.none")}</div>}
@@ -268,15 +271,16 @@ function sameRow(a: RowProps, b: RowProps): boolean {
   const l = a.s, r = b.s;
   if (l.id !== r.id || l.title !== r.title || l.status !== r.status || l.last_message_at !== r.last_message_at || l.model !== r.model || l.workspace_path !== r.workspace_path) return false;
   if (a.projectName !== b.projectName || l.match?.snippet !== r.match?.snippet) return false;
+  if (a.onProject !== b.onProject) return false;
   if (a.current !== b.current || a.compact !== b.compact || a.fork?.seq !== b.fork?.seq || a.fork?.of !== b.fork?.of) return false;
   if (JSON.stringify(l.metadata?.loop ?? null) !== JSON.stringify(r.metadata?.loop ?? null)) return false;
   if (a.kids.length !== b.kids.length) return false;
   return a.kids.every((k, i) => k.id === b.kids[i].id && k.status === b.kids[i].status && k.title === b.kids[i].title);
 }
 
-type RowProps = { projectName?: string; s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number }; compact?: boolean };
+type RowProps = { projectName?: string; onProject?: () => void; s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number }; compact?: boolean };
 
-const Row = memo(function Row({ s, kids, onOpen, current, fork, compact, projectName }: RowProps) {
+const Row = memo(function Row({ s, kids, onOpen, current, fork, compact, projectName, onProject }: RowProps) {
   const [showKids, setShowKids] = useState(false);
   const orphan = !!s.metadata?.subagent_of;
   const status = s.status as Status;
@@ -302,6 +306,7 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, compact, project
           {s.match && <div className="search-passage truncate">{s.match.snippet}</div>}
           {second && <div className={`erow-meta ${s.metadata?.loop?.status === "paused" ? "waiting" : ""}`}>{fork && <Icon name="fork" size={11} />}{second}</div>}
         </div>
+        <SessionRowMenu session={s} onProject={onProject} projectName={projectName} />
       </div>
     );
   }
@@ -342,9 +347,52 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, compact, project
           </div>
         )}
       </div>
+      <SessionRowMenu session={s} onProject={onProject} projectName={projectName} />
     </div>
   );
 }, sameRow);
+
+function SessionRowMenu({ session, onProject, projectName }: { session: SessionSummary; onProject?: () => void; projectName?: string }) {
+  const [editing, setEditing] = useState(false);
+  const [moving, setMoving] = useState(false);
+  const [title, setTitle] = useState(session.title);
+  const [saving, setSaving] = useState(false);
+  async function rename() {
+    if (!title.trim() || saving) return;
+    setSaving(true);
+    try {
+      await api.patch(`/api/sessions/${session.id}`, { title: title.trim() });
+      invalidate("/api/sessions");
+      setEditing(false);
+    } catch (error) { toast(errorText(error)); }
+    finally { setSaving(false); }
+  }
+  async function remove() {
+    if (!(await confirmDialog({ title: t("session.delete.title"), body: t("session.delete.body"), action: t("session.delete.action"), danger: true }))) return;
+    try {
+      await api.delete(`/api/sessions/${session.id}`);
+      invalidate("/api/sessions");
+      const route = parse();
+      if (route.session === session.id) navigate(pathFor("agents"));
+      else if (route.with === session.id) navigate(pathFor("agents", route.session));
+    } catch (error) { toast(errorText(error)); }
+  }
+  return <span className="session-row-menu" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+    <OverflowMenu small className="quiet" label={`${session.title}: ${t("dlg.menu")}`} items={[
+      { label: t("session.rename"), icon: "pen", onSelect: () => { setTitle(session.title); setEditing(true); } },
+      { label: t("session.project.move"), icon: "folder", onSelect: () => setMoving(true) },
+      ...(onProject ? [{ label: t("project.settings.for", { name: projectName ?? session.project }), onSelect: onProject }] : []),
+      { label: t("session.delete.action"), icon: "trash", danger: true, onSelect: () => void remove() },
+    ]} />
+    {moving && <MoveSessionSheet sessionId={session.id} current={session.project_id} currentOwn={!!session.workspace_own} onClose={() => setMoving(false)} onMoved={() => invalidate("/api/sessions")} toast={toast} />}
+    {editing && <Sheet title={t("session.rename")} onClose={() => setEditing(false)} size="narrow">
+      <form onSubmit={(event) => { event.preventDefault(); void rename(); }}>
+        <input className="field" aria-label={t("session.rename")} autoFocus value={title} maxLength={128} onChange={(event) => setTitle(event.target.value)} />
+        <button className="btn primary" type="submit" disabled={saving || !title.trim()}>{t("common.save")}</button>
+      </form>
+    </Sheet>}
+  </span>;
+}
 
 /** The form for a new agent: a name, a first task and where it works; the loop and the tools sit behind Advanced. */
 function NewAgentSheet({ onClose, onCreated, toast, project: initial = "" }: { onClose: () => void; onCreated: (id: string) => void; toast: (t: string) => void; project?: string }) {

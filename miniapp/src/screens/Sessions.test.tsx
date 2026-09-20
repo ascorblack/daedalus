@@ -50,12 +50,19 @@ describe("project conversations", () => {
     await click(".folder-expand");
     expect(host.textContent).toContain("/projects/garden");
     expect(host.querySelectorAll(".erow")).toHaveLength(1);
-    await click(".folder-actions");
+    await click(".session-row-menu button");
+    await act(async () => Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find((button) => button.textContent?.includes("Garden"))!.click());
     expect(host.querySelector("[data-settings]")).not.toBeNull();
   });
-  it("keeps the model visible in the compact hybrid", async () => {
+  it("separates a sidebar project header from its only session and its actions", async () => {
     await folder([agent], project, true);
-    expect(host.textContent).toContain("Local model");
+    expect(host.querySelector(".folder.single")).toBeNull();
+    expect(host.querySelector(".folder-head")?.textContent).toContain("Garden");
+    await click(".folder-head");
+    expect(host.querySelector(".erow-title")?.textContent).toBe("Plan the planting");
+    expect(host.querySelector(".erow")?.getAttribute("title")).toContain("Local model");
+    await click(".session-row-menu button");
+    expect(onOpen).not.toHaveBeenCalled();
   });
   it.each([false, true])("keeps a single Voice agent behind its mode link and disclosure (compact: %s)", async (compact) => {
     await folder([agent], { ...project, name: "Voice", system: "voice" }, compact);

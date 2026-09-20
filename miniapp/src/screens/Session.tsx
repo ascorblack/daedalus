@@ -116,9 +116,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     }
   }
 
-  // Which turns can still put the files back. Read once with the session and again after a revert
-  // (which takes a snapshot of its own); a session that never snapshots answers with an empty list,
-  // and then nothing about the undo changes.
+  // Existing snapshots describe which files can be restored; deleting history never creates one.
   const readSnapshots = useCallback(async () => {
     try {
       setSnapshots(await api.get<SessionCheckpoints>(`/api/sessions/${id}/checkpoints`));
@@ -131,14 +129,13 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     async (kind: "revert" | "fork" | "retry", seq: number) => {
       try {
         if (kind === "retry") {
-          // The operator's words again, as a new message: the answer that follows is a new turn.
-          const text = msgs.current.find((m) => m.seq === seq)?.text ?? "";
-          if (!text.trim()) return;
           if (busyRef.current) {
             toast(t("session.stopfirst"));
             return;
           }
-          await api.post(`/api/sessions/${id}/messages`, { text });
+          if (!(await confirmAsync(t("session.retry.title"), { body: t("session.retry.body"), action: t("turn.retry"), danger: true }))) return;
+          const result = await api.post<{ seq: number; through: number }>(`/api/sessions/${id}/retry`, { seq });
+          cutMessages(result.seq, result.through);
           stick.current = true;
           load();
           return;
@@ -148,8 +145,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
           // back from, and the operator should read that before clicking rather than in the toast after.
           const noSnapshots = detail?.project?.settings.snapshots === false;
           const body = t(noSnapshots ? "session.revert.body.nosnapshots" : "session.revert.body");
-          if (!(await confirmAsync(t("session.revert.title"), { body, action: t("session.revert.action") }))) return;
-          const r = await api.post<{ dropped: number; workspace_restored: boolean; untouched: string[] }>(`/api/sessions/${id}/revert`, { seq });
+          if (!(await confirmAsync(t("session.revert.title"), { body, action: t("session.revert.action"), danger: true }))) return;
+          const r = await api.post<{ seq: number; through: number; dropped: number; workspace_restored: boolean; untouched: string[] }>(`/api/sessions/${id}/revert`, { seq });
+          cutMessages(r.seq, r.through);
           const ws = r.workspace_restored
             ? r.untouched.length
               ? t("session.reverted.ws.nested", { n: r.untouched.length })
@@ -179,6 +177,12 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
   // older status back on the screen.
   const readSeq = useRef(0);
   const historyReadSeq = useRef(0);
+  function cutMessages(seq: number, through: number) {
+    // The upper bound matters: retry may already have persisted its new answer before HTTP returns.
+    historyReadSeq.current = ++readSeq.current;
+    msgs.current = msgs.current.filter((m) => m.seq == null || m.seq < seq || m.seq > through);
+    setDetail((previous) => previous ? { ...previous, messages: msgs.current } : previous);
+  }
   const load = useCallback(
     async (quiet = false) => {
       const mine = ++readSeq.current;
@@ -516,6 +520,10 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
         // triggers: the read says the same thing a round trip later.
         setDetail((prev) => (prev ? { ...prev, status: p.status === "awaiting" ? "waiting" : p.status === "failed" ? "failed" : "idle", housekeeping: !!p.housekeeping } : prev));
         refreshSoon("tail");
+      } else if (event === "history_cut") {
+        cutMessages(Number(p.seq), Number(p.through));
+        live.reset();
+        void load(true);
       } else if (event === "steer_changed") {
         steerRoute.current = "ok";
         setSteers((q) => steersAfter(q, p));
@@ -779,8 +787,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
 
   async function chooseEffort(effort: string) {
     try {
-      const r = await api.post<{ reasoning_effort?: string }>(`/api/sessions/${id}/model`, { thinking: true, reasoning_effort: effort });
-      toast(t("session.effort.picked", { effort: t(`add.effort.${r.reasoning_effort || effort}`) }));
+      const r = await api.post<{ reasoning_effort?: string }>(`/api/sessions/${id}/model`, effort === "off" ? { thinking: false } : { thinking: true, reasoning_effort: effort });
+      toast(t("session.effort.picked", { effort: t(`add.effort.${effort === "off" ? "off" : r.reasoning_effort || effort}`) }));
       load();
     } catch (e) {
       toast(errorText(e));
@@ -848,11 +856,8 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
       preview: openPreview,
       openJobs: () => panel.open("jobs"),
       toast,
-      // An empty list is a session that never snapshots (a project with them off, a workspace over
-      // the size cap): there is nothing retention took away and the undo behaves as it always did.
-      revertable: snapshots && snapshots.total > 0 ? new Set(snapshots.checkpoints.filter((c) => c.kind === "before" && c.seq != null).map((c) => c.seq as number)) : null,
     }),
-    [id, detail?.workspace, snapshots, openPreview, panel.open, toast],
+    [id, detail?.workspace, openPreview, panel.open, toast],
   );
 
   // What the answer cited, clicked: a file opens at the lines it named, a Verify receipt opens as a
@@ -1204,7 +1209,7 @@ function SystemNoteRow({ note, cacheKey, run }: { note: SystemNote; cacheKey?: s
 }
 
 const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Turn; live: boolean; onTurnAction?: (kind: "revert" | "fork" | "retry", seq: number) => void }) {
-  const { id: sessionId, revertable, preview, toast } = useContext(SessionContext);
+  const { id: sessionId, preview, toast } = useContext(SessionContext);
   const [open, setOpen] = useDisclosed(`${sessionId}:turn:${turn.key}`, false);
   const [folded, setFolded] = useDisclosed(`${sessionId}:run:${turn.key}`, false);
   const wasLive = useRef(live);
@@ -1219,10 +1224,8 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
   const steps = stepCount(turn.activity);
   const activeTool = live ? [...turn.activity].reverse().find((item) => item.kind === "tool" && item.running) as ToolItem | undefined : undefined;
   const activeAction = activeTool ? describe(activeTool) : null;
-  // Retention drops the oldest snapshots once a store passes its bounds. Where this turn's snapshot
-  // has gone, the undo is not offered: it would cut the history and leave the files as they are,
-  // which is not what "revert to here" reads as. A session that never snapshots keeps the offer.
-  const canRevert = revertable === null || (turn.user?.seq != null && revertable.has(turn.user.seq));
+  // History deletion is available even when the optional file checkpoint has expired.
+  const canRevert = turn.user?.seq != null;
   const seq = turn.user?.seq ?? null;
   const settled = !!seq && !!onTurnAction && !live;
   const inbound = turn.user?.origin?.startsWith("inbound:") ? turn.user.origin.slice(8) : "";
@@ -1272,7 +1275,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
       )}
       {open && (
         <div className="activity">
-          <ActivityList items={turn.activity} compact={false} />
+          <ActivityList items={turn.activity} compact={false} onRetry={!live && onTurnAction ? (seq) => onTurnAction("retry", seq) : undefined} />
           {live && !turn.answer && turn.pendingTools === 0 && turn.activity.length > 0 && <div className="working">{t("session.working")}</div>}
         </div>
       )}
@@ -1293,7 +1296,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
           text={turn.answer}
           actions={[
             ...(seq ? [{ icon: "link" as IconName, label: t("turn.link"), onSelect: copyLink }] : []),
-            ...(settled ? [{ icon: "reload" as IconName, label: t("turn.retry"), onSelect: () => onTurnAction!("retry", seq!) }] : []),
+            ...(turn.answerSeq && onTurnAction ? [{ icon: "reload" as IconName, label: t("turn.retry"), onSelect: () => onTurnAction("retry", turn.answerSeq!) }] : []),
           ]}
           more={
             settled
@@ -1546,7 +1549,7 @@ function describe(item: ToolItem, workspace?: string): { verb: string; family: s
   }
 }
 
-function ActivityList({ items, compact }: { items: Activity[]; compact: boolean }) {
+function ActivityList({ items, compact, onRetry }: { items: Activity[]; compact: boolean; onRetry?: (seq: number) => void }) {
   const out: ReactElement[] = [];
   let i = 0;
   while (i < items.length) {
@@ -1555,6 +1558,7 @@ function ActivityList({ items, compact }: { items: Activity[]; compact: boolean 
       out.push(
         <div key={i} className="note">
           <Md className="md" text={it.text} />
+          {it.seq && onRetry && <MessageActions text={it.text} actions={[{ icon: "reload", label: t("turn.retry"), onSelect: () => onRetry(it.seq!) }]} />}
         </div>,
       );
       i++;
@@ -1761,13 +1765,12 @@ function ReceiptDialog({ sessionId, receipt, onClose }: { sessionId: string; rec
   );
 }
 
-const SessionContext = createContext<{ id: string; workspace: string; preview: (src: PreviewSource) => void; openJobs: () => void; toast: (text: string) => void; revertable: Set<number> | null }>({
+const SessionContext = createContext<{ id: string; workspace: string; preview: (src: PreviewSource) => void; openJobs: () => void; toast: (text: string) => void }>({
   id: "",
   workspace: "",
   preview: () => undefined,
   openJobs: () => undefined,
   toast: () => undefined,
-  revertable: null,
 });
 
 /** A tool's path as the workspace knows it: absolute paths inside the workspace become relative, others stay unreachable. */

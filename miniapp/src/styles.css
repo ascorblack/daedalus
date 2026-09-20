@@ -2068,7 +2068,13 @@ input.field[type="range"] {
 .composer-jump-anchor { position:relative; flex:none; height:0; }
 .composer-jump-anchor .jump-down { bottom:var(--space-2); right:var(--space-3); width:var(--ctl-h); height:var(--ctl-h); }
 /* Project controls keep their place when a conversation gains a neighbour. */
-.folder-top { display: flex; align-items: center; gap: var(--space-1); }
+.folder-top { display: flex; align-items: center; gap: var(--space-1); background: var(--surface-2); border-radius: var(--radius-sm); }
+.folder-top > .folder-head { background: transparent; }
+.sidebar .folder-top { background: var(--surface-1); }
+.sidebar .folder-top > .folder-head { background: transparent; }
+.session-row-menu { flex: none; display: inline-flex; align-items: center; }
+.folder .erow { grid-template-columns: auto minmax(0, 1fr) auto; }
+@media (pointer: coarse) { .session-row-menu .iconbtn { min-width: var(--row-h-touch); min-height: var(--row-h-touch); } }
 .folder-top > .folder-head, .folder-top > .erow { flex: 1; min-width: 0; }
 .folder-top > .erow { margin: 0; }
 .folder-expand, .folder-actions { flex-shrink: 0; }

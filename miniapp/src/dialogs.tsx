@@ -244,7 +244,7 @@ export function OverflowMenu({ items, label, icon = "more", small, className, tr
         // pressing finger) is positioned against that element instead of the viewport. The menu then
         // jumps away between mousedown and mouseup, the release lands outside it, and no click ever
         // reaches the item — every action in the menu looked dead.
-        <div ref={menu} className="menu" role="menu" style={{ position: "fixed", top: pos.top ?? "auto", bottom: pos.bottom, right: pos.right }} onClick={(e) => e.stopPropagation()}>
+        <div ref={menu} className="menu" role="menu" style={{ position: "fixed", top: pos.top ?? "auto", bottom: pos.bottom, right: pos.right, left: pos.left }} onClick={(e) => e.stopPropagation()}>
           <MenuLayer onClose={() => setOpen(false)} />
           {items.map((it, i) =>
             it === "-" ? (

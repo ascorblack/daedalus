@@ -108,7 +108,7 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
     actions = page.locator(".turn").last.locator(".msg-actions").last
     labels = actions.locator("button").evaluate_all("(els) => els.map((el) => el.getAttribute('aria-label'))")
     print("answer actions:", labels)
-    if labels[:3] != ["Copy", "Copy a link to this turn", "Ask again"] or "More actions" not in labels:
+    if labels[:3] != ["Copy", "Copy a link to this turn", "Regenerate"] or "More actions" not in labels:
         problems.append(f"the answer's actions are not copy · link · retry · more ({labels})")
     actions.locator("button[aria-label='Copy']").click()
     page.wait_for_timeout(300)

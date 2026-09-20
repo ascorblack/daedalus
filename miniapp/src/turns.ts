@@ -19,7 +19,7 @@ export type LiveState = { runId?: string; text: string; thinking: string; tools:
 export const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null, ended: false, model: "", fallback: null };
 
 export type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean; length?: number; clipped?: boolean; /** How long the step took, when both ends of it are known. */ ms?: number };
-export type NoteItem = { kind: "note"; text: string };
+export type NoteItem = { kind: "note"; text: string; seq?: number };
 export type ThinkItem = { kind: "thinking"; text: string };
 export type SummaryItem = { kind: "summary"; text: string; reason: string };
 export type Activity = ToolItem | NoteItem | ThinkItem | SummaryItem;
@@ -34,6 +34,7 @@ export type Turn = {
   summary?: MessageView;
   activity: Activity[];
   answer: string;
+  answerSeq?: number;
   startedAt: number;
   endedAt: number;
   pendingTools: number;
@@ -100,8 +101,9 @@ export function buildTurns(messages: MessageView[], previous: readonly Turn[] = 
       // The core compacted mid-run: a step inside the turn, where the summarised work used to be.
       if (!current) current = open(`a${m.seq ?? i}`, at);
       if (current.answer) {
-        current.activity.push({ kind: "note", text: current.answer });
+        current.activity.push({ kind: "note", text: current.answer, seq: current.answerSeq });
         current.answer = "";
+        current.answerSeq = undefined;
       }
       current.activity.push({ kind: "summary", text: m.text, reason: "core" });
       mark(`x${m.seq ?? i}:${m.text.length}`);
@@ -127,12 +129,13 @@ export function buildTurns(messages: MessageView[], previous: readonly Turn[] = 
     mark(`m${m.seq ?? i}:${m.text.length}:${m.thinking.length}:${m.model ?? ""}:${m.fallback?.reason ?? ""}:${m.run_id ?? ""}`);
     if (current.answer) {
       // Text that turned out not to be final becomes a note.
-      current.activity.push({ kind: "note", text: current.answer });
+      current.activity.push({ kind: "note", text: current.answer, seq: current.answerSeq });
       current.answer = "";
+      current.answerSeq = undefined;
     }
     if (m.thinking) current.activity.push({ kind: "thinking", text: m.thinking });
-    if (m.text && m.tool_calls.length) current.activity.push({ kind: "note", text: m.text });
-    else if (m.text) current.answer = m.text;
+    if (m.text && m.tool_calls.length) current.activity.push({ kind: "note", text: m.text, seq: m.seq ?? undefined });
+    else if (m.text) { current.answer = m.text; current.answerSeq = m.seq ?? undefined; }
     for (const c of m.tool_calls) {
       const r = results.get(c.id);
       const running = r === undefined;
@@ -179,8 +182,9 @@ export function applyLive(base: Turn | null, live: LiveState, now: number): Turn
   const thinkingKnown = t.activity.some((a) => a.kind === "thinking" && a.text === live.thinking);
   if (t.answer && ((live.text && live.text !== t.answer) || (live.thinking && !thinkingKnown) || fresh.length)) {
     // Something newer is streaming, so the text before it was not the final answer.
-    t.activity.push({ kind: "note", text: t.answer });
+    t.activity.push({ kind: "note", text: t.answer, seq: t.answerSeq });
     t.answer = "";
+    t.answerSeq = undefined;
   }
   if (live.thinking && !thinkingKnown) t.activity.push({ kind: "thinking", text: live.thinking });
   for (const lt of fresh) {

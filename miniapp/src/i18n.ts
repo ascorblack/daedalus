@@ -1646,12 +1646,12 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "session.delete.action": { en: "Delete session", ru: "Удалить сессию" },
   "session.revert.title": { en: "Revert to this turn?", ru: "Вернуться к этому ходу?" },
   "session.revert.body": {
-    en: "Everything after it leaves the working history and the project files are restored where a snapshot exists (nested git repositories stay as they are). The transcript keeps everything.",
-    ru: "Всё, что после него, уйдёт из рабочей истории, а файлы вернутся к снимку там, где он есть (вложенные git-репозитории останутся как есть). Полная запись сохранит всё.",
+    en: "This message and all following messages will be permanently deleted, without a backup. Files are restored only where an existing snapshot is available; nested repositories stay unchanged.",
+    ru: "Это сообщение и все последующие будут удалены навсегда, без резервной копии. Файлы вернутся к существующему снимку, если он есть; вложенные репозитории останутся как есть.",
   },
   "session.revert.body.nosnapshots": {
-    en: "Everything after it leaves the working history. The files are NOT restored: this project has snapshots switched off, so only the history is undone. The transcript keeps everything.",
-    ru: "Всё, что после него, уйдёт из рабочей истории. Файлы НЕ вернутся: в этом проекте снимки выключены, отменится только история. Полная запись сохранит всё.",
+    en: "This message and all following messages will be permanently deleted, without a backup. Files will NOT be restored: snapshots are switched off for this project.",
+    ru: "Это сообщение и все последующие будут удалены навсегда, без резервной копии. Файлы НЕ вернутся: в этом проекте снимки выключены.",
   },
   "session.revert.action": { en: "Revert", ru: "Вернуться" },
   "session.reverted": { en: "reverted: {n} message removed{ws}|reverted: {n} messages removed{ws}", ru: "откат: убрано {n} сообщение{ws}|откат: убрано {n} сообщения{ws}|откат: убрано {n} сообщений{ws}" },
@@ -1817,7 +1817,11 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "turn.artifact.open": { en: "Open in the panel", ru: "Открыть в панели" },
   "turn.link": { en: "Copy a link to this turn", ru: "Скопировать ссылку на этот ход" },
   "turn.link.copied": { en: "link copied", ru: "ссылка скопирована" },
-  "turn.retry": { en: "Ask again", ru: "Спросить снова" },
+  "turn.retry": { en: "Regenerate", ru: "Перегенерировать" },
+  "session.retry.title": { en: "Regenerate this answer?", ru: "Перегенерировать этот ответ?" },
+  "session.retry.body": { en: "This answer and all following messages will be permanently deleted, without a backup or a branch. The agent will answer again in this session. Workspace files stay unchanged.", ru: "Этот ответ и все последующие сообщения будут удалены навсегда, без резервной копии и ветки. Агент ответит заново в этой сессии. Файлы рабочей папки останутся без изменений." },
+  "add.effort.off": { en: "Off", ru: "Выключено" },
+  "composer.effort.off.hint": { en: "Disable reasoning for models that support it", ru: "Отключить рассуждения у моделей, которые это поддерживают" },
   "turn.more": { en: "More actions", ru: "Ещё действия" },
 
   // ── the composer: one pill, one circle that means send, stop, queue or reply ──────────────

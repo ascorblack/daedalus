@@ -561,6 +561,23 @@ class SqliteSessionStore(ISessionStore):
         row = await self._db.fetchone("SELECT key, message FROM transcript WHERE session_id = ? AND seq = ?", (session_id, seq))
         return (row["key"], Message.model_validate_json(row["message"])) if row else None
 
+    async def truncate_history(self, session_id: str, tenant_id: str, seq: int, messages: Sequence[Message]) -> tuple[int, int]:
+        """Delete a transcript tail and replace working history atomically, without archiving it."""
+        rows = [(session_id, tenant_id, 1, self.transcript_key(m), m.model_dump_json()) for m in messages]
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute("SELECT count(*), coalesce(max(seq), 0), min(json_extract(message, '$.created_at')) FROM transcript WHERE session_id = ? AND seq >= ?", (session_id, seq))
+            count, through, cut_at = await cursor.fetchone()
+            # Snapshots and event payloads can contain the whole old prompt, not just the answer.
+            # Accounting remains: removing conversation text does not refund work already done.
+            await conn.execute("DELETE FROM snapshots WHERE session_id = ?", (session_id,))
+            await conn.execute("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?) AND julianday(created_at) >= julianday(?)", (session_id, cut_at))
+            await conn.execute("DELETE FROM checkpoints WHERE session_id = ? AND (seq >= ? OR julianday(at) >= julianday(?))", (session_id, seq, cut_at))
+            await conn.execute("DELETE FROM transcript_fts WHERE rowid IN (SELECT seq FROM transcript WHERE session_id = ? AND seq >= ?)", (session_id, seq))
+            await conn.execute("DELETE FROM transcript WHERE session_id = ? AND seq >= ?", (session_id, seq))
+            await conn.execute("DELETE FROM session_messages WHERE session_id = ? AND tenant_id = ?", (session_id, tenant_id))
+            await conn.executemany("INSERT INTO session_messages(session_id, tenant_id, gen, key, message) VALUES (?, ?, ?, ?, ?)", rows)
+        return int(count), int(through)
+
     async def replace_messages(self, session_id: str, tenant_id: str, messages: Sequence[Message]) -> None:
         """Start a new generation of the working history: the sequence itself changed.
 

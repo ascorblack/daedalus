@@ -64,14 +64,17 @@ async def test_revert_cuts_history_and_restores_files(settings: Settings, db: Da
     second_seq = more[-1]
     await db.execute("INSERT INTO checkpoints(session_id, seq, run_id, kind, sha, at) VALUES (?, ?, NULL, 'before', ?, ?)", (state.session.id, second_seq, await Checkpoints(state.workspace).snapshot("before second"), "now"))
     (state.workspace / "notes.md").write_text("draft 2 (after the second turn)")
+    checkpoint_head = await Checkpoints(state.workspace).head()
     result = await manager.revert(state.session.id, second_seq)
+    assert await Checkpoints(state.workspace).head() == checkpoint_head
     assert result["dropped"] == 2 and result["kept"] == 2 and result["workspace_restored"] is True
     assert (state.workspace / "notes.md").read_text() == "draft 1"
     working = await manager.sessions.list_messages(state.session.id, "daedalus", limit=100)
     assert [m.content_blocks[0].text for m in working] == ["first ask", "first answer"]  # type: ignore[attr-defined]
     transcript = await manager.sessions.list_transcript(state.session.id)
-    assert transcript[-1].metadata.get("daedalus.origin") == "revert" and "seq" in transcript[-1].content_blocks[0].text  # type: ignore[attr-defined]
-    with pytest.raises(ValueError, match="started a run"):
+    assert all(int(m.metadata["daedalus.seq"]) < second_seq for m in transcript)
+    assert not any(m.metadata.get("daedalus.origin") == "revert" for m in transcript)
+    with pytest.raises(ValueError, match="operator turn"):
         await manager.revert(state.session.id, seqs[0] + 1)  # an assistant row
     await manager.close()
 

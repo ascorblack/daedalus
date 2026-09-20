@@ -118,6 +118,7 @@ class HostEventType(StrEnum):
     """Event kinds the host raises beside the core's turn taxonomy."""
 
     STEER_CHANGED = "steer_changed"
+    HISTORY_CUT = "history_cut"
 
 
 @dataclass(slots=True)
@@ -1277,15 +1278,18 @@ class SessionManager:
         return await self.checkpoint_retention.run(RetentionBounds.from_ops(self.config.ops))
 
     async def revert(self, session_id: str, seq: int) -> dict[str, Any]:
-        """Undo everything from the operator turn at transcript ``seq`` on: history and workspace.
+        """Permanently remove this operator turn and its tail; restore existing file checkpoints."""
+        return await self._cut_history(session_id, seq, retry=False)
 
-        The turn must still be in the working history (not compacted away); the transcript
-        keeps the undone turns and a marker says where the history now ends.
-        """
+    async def retry(self, session_id: str, seq: int) -> dict[str, Any]:
+        """Replace an assistant message and its entire tail in the same session, without a backup."""
+        return await self._cut_history(session_id, seq, retry=True)
+
+    async def _cut_history(self, session_id: str, seq: int, *, retry: bool) -> dict[str, Any]:
         state = await self.get_state(session_id)
         if state is None:
             raise KeyError(session_id)
-        async with state.lock:
+        async with state.submit_lock, state.lock:
             await self._wait_until_quiet(state)
             pending = [t for t in state.persist_tasks if not t.done()]
             if pending:
@@ -1294,48 +1298,73 @@ class SessionManager:
             if row is None:
                 raise ValueError(f"no transcript turn {seq}")
             key, target = row
-            if target.role is not MessageRole.user or target.metadata.get("daedalus.origin") in ("core", "revert") or target.metadata.get(COMPACTION_SUMMARY_METADATA_KEY):
-                raise ValueError("revert points at a turn that started a run (an operator, schedule, inbound or peer message)")
+            expected = MessageRole.assistant if retry else MessageRole.user
+            if target.role is not expected or target.metadata.get("daedalus.origin") in ("core", "revert", "clear") or target.metadata.get(COMPACTION_SUMMARY_METADATA_KEY):
+                raise ValueError("retry requires an assistant message; revert requires an operator turn")
+            if retry:
+                if not self.config.has_model:
+                    raise NoModelConfigured
+                if self.shutting_down or self.recovering:
+                    raise RuntimeError("the bot is restarting; try again when it is ready")
+                if not state.workspace.is_dir() or not os.access(state.workspace, os.W_OK):
+                    raise RuntimeError("the working directory is not writable")
+                rungs, _ = self.resolve_model(await self.live.load(session_id))
+                provider_id = rungs[0][0].endpoint.id if rungs else None
+                exceeded = self.budget_exceeded()
+                if exceeded and not self.provider_costs_nothing(provider_id):
+                    raise RuntimeError(f"daily budget exceeded ({exceeded})")
+                breach = await self.cap_breach(state, provider_id)
+                if breach is not None:
+                    raise RuntimeError(breach[1])
             history = list(state.engine.history) if state.engine is not None else list(await self.sessions.list_messages(session_id, TENANT, limit=10_000))
             keys = [self.sessions.transcript_key(m) for m in history]
-            if key not in keys:
-                raise ValueError("that turn is no longer in the working history (compacted); fork from it instead")
-            cut = keys.index(key)
-            kept = history[:cut]
-            dropped = len(history) - cut
-            sha = await self.checkpoint_before(session_id, seq)
+            if key in keys:
+                kept = history[:keys.index(key)]
+            else:
+                # A newer summary may contain the deleted answer. Rebuild only from the prefix,
+                # including summaries that already existed there, never from the current summary.
+                prefix = await self.sessions.list_transcript(session_id, before_seq=seq)
+                cleared = max((int(m.metadata["daedalus.seq"]) for m in prefix if m.metadata.get("daedalus.origin") == "clear"), default=0)
+                excluded: set[int] = set()
+                for message in prefix:
+                    excluded.update(int(n) for n in (message.metadata.get("daedalus.archived") or {}).get("seqs", []))
+                    if message.metadata.get("daedalus.origin") == "revert":
+                        start = int((message.metadata.get("daedalus.revert") or {}).get("seq", 0))
+                        excluded.update(range(start, int(message.metadata["daedalus.seq"])))
+                kept = [m for m in prefix if int(m.metadata["daedalus.seq"]) > cleared and int(m.metadata["daedalus.seq"]) not in excluded and m.metadata.get("daedalus.origin") not in ("revert", "clear") and not m.metadata.get("daedalus.queued")]
+            if retry and not kept:
+                raise ValueError("there is no input before this assistant message")
+            sha = await self.checkpoint_before(session_id, seq) if not retry else None
             restored = False
             untouched: list[str] = []
             if sha:
                 try:
-                    untouched = await Checkpoints(state.workspace).restore(sha)
+                    untouched = await Checkpoints(state.workspace).restore(sha, record=False)
                     restored = True
                 except CheckpointError as exc:
                     logger.warning("workspace restore failed: %s", exc)
             state.persist_gen += 1
+            state.persist_epoch += 1
+            dropped, through = await self.sessions.truncate_history(session_id, TENANT, seq, kept)
             await self._reset_observed_prompt(state, before=history, after=kept)
             if state.engine is not None:
                 state.engine.history = kept
                 state.engine.last_observed_prompt_tokens = 0
                 state.engine.compaction_state = CompactionState()
             state.history_keys = [self.sessions.transcript_key(m) for m in kept]
-            await self.sessions.replace_messages(session_id, TENANT, kept)
             _forget_persisted(state)
             # Input queued during the undone turns and any run snapshot that could resume them are pre-revert by definition.
             await self.live.save_queues(session_id, [], [])
             await self.steer_changed(session_id, reason="cleared")
-            for run in await self.db.fetchall("SELECT id FROM runs WHERE session_id = ?", (session_id,)):
-                await self.events.delete_snapshot(run["id"])
-            workspace_note = ""
-            if restored:
-                workspace_note = "; workspace restored" + (f" ({len(untouched)} nested repositories untouched: {', '.join(untouched)[:200]})" if untouched else "")
-            marker = Message(
-                role=MessageRole.user,
-                content_blocks=[TextBlock(text=f"[reverted to before seq {seq}: {dropped} message(s) left the working history{workspace_note}]")],
-                metadata={"daedalus.origin": "revert", "daedalus.revert": {"seq": seq, "dropped": dropped, "workspace_restored": restored, "untouched": untouched}},
-            )
-            await self.sessions.append_transcript(session_id, [marker])
-            return {"dropped": dropped, "workspace_restored": restored, "untouched": untouched, "kept": len(kept)}
+            state.last_error_kind = ""
+            state.last_error_message = ""
+            state.soft_stop_cause = ""
+            state.soft_stop_detail = ""
+            result = {"seq": seq, "through": through, "dropped": dropped, "workspace_restored": restored, "untouched": untouched, "kept": len(kept)}
+            await self._notify_sinks(session_id, HostEvent(HostEventType.HISTORY_CUT, state.run_id or "", result))
+            if retry:
+                result["run_id"] = await self._start_run_locked(state, None)
+            return result
 
     async def clear_history(self, session_id: str) -> dict[str, Any]:
         """Start the session over with an empty working history: the workspace, the brief, the model, the

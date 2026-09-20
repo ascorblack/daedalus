@@ -45,7 +45,7 @@ def run() -> None:
             page.locator(".composer textarea").fill("")
             assert page.locator(".composer-box").bounding_box()["height"] <= 130
             page.locator(".composer .model-select").click()
-            assert page.locator('.sheet input[type="radio"]').count() == 4
+            assert page.locator('.sheet input[type="radio"]').count() == 5
             for label in page.locator(".effort-option").all():
                 assert label.bounding_box()["height"] >= 44
             page.locator('.sheet input[value="high"]').click()
