@@ -311,7 +311,7 @@ async def test_rebuilder_only_replaces_container_after_successful_build(tmp_path
     trigger = tmp_path / "trigger"
     trigger.mkdir()
     fake = tmp_path / "docker"
-    fake.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\ncase "$*" in\n *" build "*) exit "$BUILD_RESULT";;\nesac\nexit 0\n')
+    fake.write_text('#!/bin/sh\n[ "$DAEDALUS_SECRETS_FILE" = /dev/null ] || exit 99\nprintf "%s\\n" "$*" >> "$CALLS"\ncase "$*" in\n *" build "*) exit "$BUILD_RESULT";;\nesac\nexit 0\n')
     fake.chmod(0o755)
     job_id = "b" * 32
     (trigger / "dependencies-request").write_text(job_id + "\n")
@@ -324,7 +324,7 @@ async def test_rebuilder_only_replaces_container_after_successful_build(tmp_path
                 await asyncio.sleep(0.02)
         result = (trigger / f"dependencies-{job_id}.result").read_text()
         calls = (tmp_path / "calls").read_text()
-        assert ("up -d --no-build" in calls) is not failed
+        assert ("up -d --no-build --no-deps daedalus" in calls) is not failed
         assert (result.strip() == "completed") is not failed
         assert (trigger / "dependencies-alive").exists()
     finally:
