@@ -13,6 +13,7 @@ import difflib
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import signal
@@ -70,7 +71,7 @@ def clear_maintenance(root: Path, job_id: str) -> None:
         marker.unlink(missing_ok=True)
 
 
-async def command(argv: list[str], *, limit: float = 1200) -> str:
+async def command(argv: list[str], *, limit: float = 1200, output_limit: int = 16000) -> str:
     """Bound output and lifetime without ever passing a package name through a shell."""
     env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR"}}
     env.update(DEBIAN_FRONTEND="noninteractive", PIP_CONFIG_FILE=os.devnull, UV_NO_CONFIG="1", UV_PYTHON_DOWNLOADS="never", GIT_TERMINAL_PROMPT="0", NONINTERACTIVE="1", HOMEBREW_NO_AUTO_UPDATE="1")
@@ -81,7 +82,7 @@ async def command(argv: list[str], *, limit: float = 1200) -> str:
             assert process.stdout is not None
             while chunk := await process.stdout.read(4096):
                 output.extend(chunk)
-                del output[:-16000]
+                del output[:-output_limit]
             await process.wait()
     except BaseException:
         if process.returncode is None:
@@ -106,6 +107,7 @@ class Dependencies:
         self.native = native
         self.manifest = repo / "deploy" / "dependencies" / "local.json"
         self.task: asyncio.Task[None] | None = None
+        self.catalog_lock = asyncio.Lock()
 
     def current(self) -> dict[str, list[str]]:
         return recipe(read_json(self.manifest, EMPTY))
@@ -191,7 +193,42 @@ class Dependencies:
         if agent_python:
             raw = await command([agent_python, "-I", "-c", "import importlib.metadata,json; print(json.dumps(sorted((d.metadata.get('Name',''),d.version) for d in importlib.metadata.distributions())))"], limit=15)
             packages = json.loads(raw)
-        return {**self.status(), "tools": entries, "packages": packages}
+        return {**self.status(), "tools": entries, "packages": packages, "platform": self.platform_info()}
+
+    def platform_info(self) -> dict[str, str]:
+        try:
+            release = platform.freedesktop_os_release()
+        except OSError:
+            release = {}
+        return {"system": platform.system(), "architecture": platform.machine(), "distribution": release.get("PRETTY_NAME", ""), "id": release.get("ID", ""), "version": release.get("VERSION_ID", "")}
+
+    async def checked_preview(self, additions: Any) -> dict[str, Any]:
+        proposal = self.preview(additions)
+        packages = recipe(additions)["system"]
+        if packages and self.system_manager() == "apt":
+            # Apt exists on several distributions with incompatible package catalogues. Check the
+            # configured repositories before review, in a separate cache; never install here.
+            async with self.catalog_lock:
+                lists = self.root / "apt-lists"
+                (lists / "partial").mkdir(parents=True, exist_ok=True)
+                stamp = lists / "checked"
+                options = ["-o", f"Dir::State::lists={lists}"]
+                if not stamp.exists() or time.time() - stamp.stat().st_mtime > 3600:
+                    await command(["apt-get", *options, "-o", "APT::Update::Error-Mode=any", "update"], limit=60)
+                    stamp.touch()
+                output = await command(["env", "LC_ALL=C", "apt-cache", *options, "policy", "--", *packages], limit=15, output_limit=131072)
+                candidates = {}
+                package = ""
+                for line in output.splitlines():
+                    if line and not line[0].isspace() and line.endswith(":"):
+                        package = line[:-1].split(":", 1)[0]
+                    elif line.strip().startswith("Candidate:"):
+                        candidates[package] = line.split(":", 1)[1].strip()
+                missing = [name for name in packages if candidates.get(name, "(none)") == "(none)"]
+                if missing:
+                    distribution = self.platform_info()["distribution"] or "this system"
+                    raise ValueError(f"Unavailable in the configured apt repositories of {distribution}: {', '.join(missing)}. Omit these packages and explain the unsupported tools; do not substitute unrelated packages")
+        return proposal
 
     def preview(self, additions: Any) -> dict[str, Any]:
         additions = recipe(additions)

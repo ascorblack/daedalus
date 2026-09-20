@@ -38,6 +38,9 @@ Each package list has at most 64 entries. Keep the explanation below 2000 charac
 the additions and name requested tools that cannot be installed through these package managers.
 Python packages come from PyPI into an isolated agent environment, never the application's environment.
 System packages come from the reported OS package manager. Respect installation capabilities.
+Use the reported distribution and version, not the catalogue of another apt-based distribution.
+ProposeDependencies checks configured apt repositories and may reject unavailable packages.
+If rejected, remove those packages and explain which requested tools remain unsupported.
 Never offer commands, repository edits, downloads, custom indexes, privilege elevation or removals.
 Explain each addition in the user's language. Explain uncertainty and transitive dependencies;
 do not claim a package version or installation has been verified. Unpinned versions resolve at install.

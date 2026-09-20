@@ -57,6 +57,44 @@ def test_preview_never_writes_and_accept_checks_staleness(service: Any) -> None:
     runtime.write_json(service.manifest, {"python": ["numpy"], "system": []})
     with pytest.raises(ValueError, match="changed"):
         service.accept(proposal, "a" * 32)
+
+
+@pytest.mark.asyncio
+async def test_preview_checks_real_catalog_shape_without_installing(service: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    monkeypatch.setattr(service, "system_manager", lambda: "apt")
+
+    async def fake_command(argv: list[str], **kwargs: Any) -> str:
+        calls.append(argv)
+        if argv[0] == "apt-get":
+            assert argv[-1] == "update" and "install" not in argv
+            assert "APT::Update::Error-Mode=any" in argv
+            return ""
+        assert argv[:3] == ["env", "LC_ALL=C", "apt-cache"]
+        return "gcc:\n  Installed: (none)\n  Candidate: 13.2\nmissing:\n  Installed: (none)\n  Candidate: (none)\n"
+
+    monkeypatch.setattr(runtime, "command", fake_command)
+    with pytest.raises(ValueError, match="Unavailable.*absent, missing"):
+        await service.checked_preview({"python": [], "system": ["gcc", "missing", "absent"]})
+    result = await service.checked_preview({"python": [], "system": ["gcc"]})
+    assert result["recipe"]["system"] == ["gcc"]
+    assert sum(argv[0] == "apt-get" for argv in calls) == 1
+    assert not service.manifest.exists()
+    assert not (service.root / "job.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_failed_catalog_refresh_cannot_produce_a_ready_patch(service: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service, "system_manager", lambda: "apt")
+
+    async def failed(argv: list[str], **kwargs: Any) -> str:
+        raise RuntimeError("repository unavailable")
+
+    monkeypatch.setattr(runtime, "command", failed)
+    with pytest.raises(RuntimeError, match="repository unavailable"):
+        await service.checked_preview({"python": [], "system": ["gcc"]})
+    assert not (service.root / "apt-lists" / "checked").exists()
+    assert not service.manifest.exists()
     assert not (service.root / "job.json").exists()
 
 

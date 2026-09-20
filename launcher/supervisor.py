@@ -1132,7 +1132,7 @@ class Supervisor:
             elif op == "dependencies_inventory":
                 result = await self.dependencies.inventory()
             elif op == "dependencies_preview":
-                result = self.dependencies.preview(request.get("additions"))
+                result = await self.dependencies.checked_preview(request.get("additions"))
             elif op == "dependencies_apply":
                 result = await self.apply_dependencies(request.get("proposal", {}), str(request.get("id", "")))
             elif op == "rebuild":
