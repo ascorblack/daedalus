@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from protocore.contracts.llm import ProviderDelta
 
 from daedalus.host.dependencies import KEY, DependencyPlanner
+from daedalus.providers.wire import messages_to_wire
 from daedalus.tools.shell import shell_argv, shell_environment
 from tests.unit.test_components import HEAD, FakeApp
 
@@ -158,6 +159,15 @@ class Provider:
         self.requests: list[Any] = []
 
     async def stream_with_tools(self, request: Any) -> Any:
+        pending: set[str] = set()
+        for message in await messages_to_wire(request.messages):
+            if message["role"] == "tool":
+                assert message["tool_call_id"] in pending
+                pending.remove(message["tool_call_id"])
+            else:
+                assert not pending, "tool results must precede the next conversation message"
+                pending.update(call["id"] for call in message.get("tool_calls", []))
+        assert not pending, "every tool call must have a result before the next request"
         self.requests.append(request)
         for index, (name, arguments) in enumerate(next(self.turns)):
             yield ProviderDelta(kind="tool_use_start", tool_call_id=str(index), tool_name=name)
@@ -199,6 +209,24 @@ async def test_planner_rejects_unknown_tools_and_stops_after_five_turns(tmp_path
     with pytest.raises(ValueError, match="five-turn"):
         await planner._run({"id": "a" * 32, "preset": "test", "request": "images"})
     assert len(provider.requests) == 5
+
+
+@pytest.mark.asyncio
+async def test_planner_serializes_every_result_in_a_mixed_tool_batch(tmp_path: Path) -> None:
+    provider = Provider([[('InspectEnvironment', {}), ('Unknown', {})], [('ProposeDependencies', {"python": [], "system": ["gcc"], "explanation": "Compiler"})]])
+    planner = planner_for(tmp_path, provider)
+
+    async def rpc(op: str, **kwargs: Any) -> Any:
+        return {"operation": op}
+
+    planner.rpc = rpc
+    result = await planner._run({"id": "a" * 32, "preset": "test", "request": "Compiler"})
+    assert result["explanation"] == "Compiler"
+    wire = await messages_to_wire(provider.requests[1].messages)
+    results = [message for message in wire if message["role"] == "tool"]
+    assert [message["tool_call_id"] for message in results] == ["0", "1"]
+    assert "dependencies_inventory" in results[0]["content"]
+    assert "only InspectEnvironment" in results[1]["content"]
 
 
 @pytest.mark.asyncio

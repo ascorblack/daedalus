@@ -193,5 +193,7 @@ class DependencyPlanner:
                     results.append(ToolResultBlock(tool_call_id=cid, content=json.dumps(outcome)))
                 except (ValueError, RuntimeError) as exc:
                     results.append(ToolResultBlock(tool_call_id=cid, content=str(exc), is_error=True))
-            messages.append(Message(role=MessageRole.user, content_blocks=results))
+            # Provider serialization only preserves tool results on tool-role messages;
+            # a user-role wrapper silently drops them and leaves unanswered tool calls.
+            messages.append(Message(role=MessageRole.tool, content_blocks=results))
         raise ValueError("dependency planning reached its five-turn limit")
