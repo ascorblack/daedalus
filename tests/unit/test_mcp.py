@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from protocore.tests_support.adapters import InMemoryToolRegistry
 
 from daedalus.config import McpServerConfig, RuntimeConfig, Settings
 from daedalus.host.session_runner import SessionManager
-from daedalus.mcp.manager import McpManager, blocked_for, mcp_tool_name
+from daedalus.mcp.manager import McpConnection, McpManager, blocked_for, mcp_tool_name
 from daedalus.stores.database import Database
 
 SERVER = Path(__file__).resolve().parents[1] / "support" / "mcp_echo_server.py"
@@ -23,6 +24,8 @@ async def test_manager_connects_and_registers_proxies() -> None:
     manager = McpManager(_config(), registry)
     assert manager.status()[0]["connected"] is False
     await manager.ensure("echo")
+    assert manager.status()[0]["state"] == "ready"
+    assert manager.status()[0]["catalog_revision"] == 1
     names = manager.tool_names("echo")
     assert names == {mcp_tool_name("echo", "echo"), mcp_tool_name("echo", "add")}
     tool = registry.get(mcp_tool_name("echo", "add"))
@@ -31,6 +34,68 @@ async def test_manager_connects_and_registers_proxies() -> None:
     assert result.content.strip() == "5" and not result.is_error
     assert blocked_for(manager, []) == names and blocked_for(manager, ["echo"]) == set()
     await manager.close()
+
+
+async def test_concurrent_enable_is_single_flight() -> None:
+    registry = InMemoryToolRegistry()
+    manager = McpManager(_config(), registry)
+    connections = await asyncio.gather(*(manager.ensure("echo") for _ in range(10)))
+    assert len({id(connection) for connection in connections}) == 1
+    assert manager.status()[0]["catalog_revision"] == 1
+    await manager.close()
+
+
+async def test_changed_server_config_replaces_connection_and_catalog_proxy() -> None:
+    registry = InMemoryToolRegistry()
+    manager = McpManager(_config(), registry)
+    first = await manager.ensure("echo")
+    changed = _config()
+    changed["echo"] = changed["echo"].model_copy(update={"description": "changed"})
+    manager.reload(changed)
+    assert manager.status()[0]["state"] == "disabled"
+    second = await manager.ensure("echo")
+    assert second is not first and first.state == "disabled"
+    proxy = registry.get(mcp_tool_name("echo", "add"))
+    assert proxy is not None and proxy._connection is second
+    await manager.close()
+
+
+async def test_expired_token_refresh_is_single_flight() -> None:
+    from types import SimpleNamespace
+
+    class OAuth:
+        def __init__(self) -> None:
+            self.expired = True
+            self.refreshes = 0
+
+        def needs_refresh(self) -> bool:
+            return self.expired
+
+        async def refresh(self) -> None:
+            self.refreshes += 1
+            self.expired = False
+
+    class Session:
+        async def call_tool(self, tool: str, arguments: dict[str, object]) -> object:
+            return SimpleNamespace(content=[])
+
+    oauth = OAuth()
+    connection = McpConnection(
+        "remote", McpServerConfig(transport="http", url="https://example.test/mcp"), oauth=oauth
+    )
+    connection.session = Session()
+
+    async def stop() -> None:
+        connection.session = None
+
+    async def start() -> None:
+        connection.session = Session()
+
+    connection.stop = stop
+    connection.start = start
+    await asyncio.gather(*(connection.call("read", {}) for _ in range(10)))
+    assert oauth.refreshes == 1
+    assert connection.in_flight == 0
 
 
 async def test_call_reconnects_after_transport_drop() -> None:

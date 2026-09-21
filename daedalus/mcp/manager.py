@@ -196,18 +196,28 @@ class McpConnection:
         self.session: ClientSession | None = None
         self.tools: list[McpToolProxy] = []
         self._task: asyncio.Task[None] | None = None
+        self._start_lock = asyncio.Lock()
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_generation = 0
         self._ready = asyncio.Event()
         self._closing = asyncio.Event()
         self.error: str | None = None
+        self.state = "disabled"
+        self.last_error_code: str | None = None
+        self.in_flight = 0
+        self.catalog_revision = 0
+        self._catalog_digest = ""
+        self.config_digest = _config_digest(config)
 
     async def start(self) -> None:
-        if self._task is not None and not self._task.done():
-            await self._ready.wait()
-            return
-        self._ready.clear()
-        self._closing.clear()
-        self.error = None
-        self._task = asyncio.create_task(self._run(), name=f"mcp:{self.name}")
+        async with self._start_lock:
+            if self._task is None or self._task.done():
+                self._ready.clear()
+                self._closing.clear()
+                self.error = None
+                self.last_error_code = None
+                self.state = "connecting"
+                self._task = asyncio.create_task(self._run(), name=f"mcp:{self.name}")
         await self._ready.wait()
         if self.error:
             raise RuntimeError(self.error)
@@ -224,6 +234,8 @@ class McpConnection:
                     try:
                         token = await self.oauth.access_token()
                     except NeedsAuthorization:
+                        self.state = "auth_required"
+                        self.last_error_code = "authorization_required"
                         self.error = (
                             f"{self.name}: this MCP server needs an OAuth link before it can connect. "
                             "Ask the owner to run McpOAuthBegin(server=...) to get the authorization URL, open it, "
@@ -237,6 +249,8 @@ class McpConnection:
                         await self._serve(streams[0], streams[1])
         except BaseException as exc:  # noqa: BLE001 — anyio wraps transport failures in groups
             self.error = _describe(exc)
+            self.last_error_code = "authorization_required" if _looks_like_auth_failure(exc) else "connection_failed"
+            self.state = "auth_required" if self.last_error_code == "authorization_required" else "unavailable"
             logger.warning("mcp server %s failed: %s", self.name, self.error)
             if isinstance(exc, asyncio.CancelledError):
                 raise
@@ -248,8 +262,14 @@ class McpConnection:
         async with ClientSession(read, write) as session:
             await session.initialize()
             listing = await session.list_tools()
-            self.tools = [self._proxy(t) for t in listing.tools]
+            tools = [self._proxy(t) for t in listing.tools]
+            digest = hashlib.sha256(json.dumps([tool.definition.model_dump(mode="json") for tool in tools], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if digest != self._catalog_digest:
+                self.catalog_revision += 1
+                self._catalog_digest = digest
+            self.tools = tools
             self.session = session
+            self.state = "ready"
             self._ready.set()
             await self._closing.wait()
 
@@ -265,45 +285,70 @@ class McpConnection:
     async def call(self, tool: str, arguments: dict[str, Any]) -> Any:
         # An expired access token makes every call fail with a 401 that the remote may
         # report opaquely. Refresh and reconnect up front rather than after the fact.
-        if self.oauth is not None and self.oauth.needs_refresh():
-            await self._refresh_and_reconnect()
-        for attempt in (1, 2):
-            if self.session is None:
-                if attempt == 2:
-                    raise RuntimeError(f"MCP server {self.name} is not connected")
-                # The transport dropped (server restart, idle reset, prior stop):
-                # reconnect once transparently instead of failing every call.
-                try:
-                    await asyncio.wait_for(self.start(), timeout=10)
-                except (TimeoutError, asyncio.CancelledError):
-                    raise RuntimeError(f"MCP server {self.name}: reconnect timed out") from None
+        self.in_flight += 1
+        try:
+            refresh_generation = self._refresh_generation
+            if self.oauth is not None and self.oauth.needs_refresh():
+                await self._refresh_and_reconnect(refresh_generation)
+            for attempt in (1, 2):
                 if self.session is None:
-                    raise RuntimeError(f"MCP server {self.name} is not connected: {self.error or 'connection failed'}")
-            try:
-                return await asyncio.wait_for(self.session.call_tool(tool, arguments), timeout=self.config.timeout_seconds)
-            except (TimeoutError, asyncio.CancelledError):
-                raise
-            except Exception as exc:  # noqa: BLE001
-                if attempt == 1 and self.oauth is not None and _looks_like_auth_failure(exc):
-                    await self._refresh_and_reconnect()
-                    continue
-                raise
+                    if attempt == 2:
+                        raise RuntimeError(f"MCP server {self.name} is not connected")
+                    # The transport dropped before dispatch (server restart, idle reset, prior stop),
+                    # so reconnecting cannot repeat an effect whose outcome is unknown.
+                    try:
+                        await asyncio.wait_for(self.start(), timeout=10)
+                    except (TimeoutError, asyncio.CancelledError):
+                        raise RuntimeError(f"MCP server {self.name}: reconnect timed out during connect") from None
+                    if self.session is None:
+                        raise RuntimeError(f"MCP server {self.name} is not connected: {self.error or 'connection failed'}")
+                try:
+                    return await asyncio.wait_for(self.session.call_tool(tool, arguments), timeout=self.config.timeout_seconds)
+                except (TimeoutError, asyncio.CancelledError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    if attempt == 1 and self.oauth is not None and _looks_like_auth_failure(exc):
+                        await self._refresh_and_reconnect(refresh_generation)
+                        refresh_generation = self._refresh_generation
+                        continue
+                    raise
+            raise RuntimeError(f"MCP server {self.name}: call did not complete")
+        finally:
+            self.in_flight -= 1
 
-    async def _refresh_and_reconnect(self) -> None:
+    async def _refresh_and_reconnect(self, observed_generation: int) -> None:
         """The access token expired mid-session: refresh it and restart the transport."""
         if self.oauth is None:
             return
-        await self.oauth.refresh()
-        await self.stop()
-        await self.start()
+        async with self._refresh_lock:
+            if self._refresh_generation != observed_generation:
+                return
+            try:
+                await self.oauth.refresh()
+            except NeedsAuthorization:
+                self.state = "auth_required"
+                self.last_error_code = "authorization_required"
+                raise
+            self._refresh_generation += 1
+            await self.stop()
+            await self.start()
 
     async def stop(self) -> None:
+        self.state = "draining"
         self._closing.set()
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=10)
             except (TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
+                await asyncio.gather(self._task, return_exceptions=True)
+        self.session = None
+        self.state = "disabled"
+
+
+def _config_digest(config: McpServerConfig) -> str:
+    payload = json.dumps(config.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 class McpManager:
@@ -313,6 +358,7 @@ class McpManager:
         self._connections: dict[str, McpConnection] = {}
         self._token_dir = token_dir
         self._oauth_clients: dict[str, MCPOAuthClient] = {}
+        self._ensure_locks: dict[str, asyncio.Lock] = {}
 
     def reload(self, servers: dict[str, McpServerConfig]) -> None:
         self._configs = servers
@@ -360,7 +406,11 @@ class McpManager:
         oauth = self.oauth_client(name)
         if oauth is None:
             raise KeyError(f"MCP server {name!r} is not configured for OAuth")
-        return await oauth.finish_authorization(redirect_url)
+        result = await oauth.finish_authorization(redirect_url)
+        connection = self._connections.get(name)
+        if connection is not None:
+            await connection.stop()
+        return result
 
     async def oauth_disconnect(self, name: str) -> bool:
         oauth = self.oauth_client(name)
@@ -368,8 +418,11 @@ class McpManager:
             return False
         oauth.disconnect()
         connection = self._connections.get(name)
-        if connection is not None and connection.session is not None:
-            await connection.stop()
+        if connection is not None:
+            if connection.session is not None:
+                await connection.stop()
+            connection.state = "auth_required"
+            connection.last_error_code = "authorization_required"
         return True
 
     def all_tool_names(self) -> set[str]:
@@ -383,18 +436,27 @@ class McpManager:
         """Connect a configured server (idempotent) and register its tools."""
         if name not in self._configs:
             raise KeyError(f"unknown MCP server {name!r}; configured: {self.available()}")
-        connection = self._connections.get(name)
-        if connection is None:
-            connection = McpConnection(name, self._configs[name], oauth=self.oauth_client(name))
-            self._connections[name] = connection
-        if connection.error or (connection.session is None and connection._task is not None and not connection._task.done()):
-            # A connection that failed or wedged is rebuilt, not reused: McpEnable is the agent's way to recover.
-            await connection.stop()
-        await connection.start()
-        for proxy in connection.tools:
-            if self._registry.get(proxy.name) is None:
+        lock = self._ensure_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            expected_digest = _config_digest(self._configs[name])
+            connection = self._connections.get(name)
+            if connection is not None and connection.config_digest != expected_digest:
+                await connection.stop()
+                self._connections.pop(name, None)
+                oauth = self._oauth_clients.pop(name, None)
+                if oauth is not None:
+                    await oauth.http.aclose()
+                connection = None
+            if connection is None:
+                connection = McpConnection(name, self._configs[name], oauth=self.oauth_client(name))
+                self._connections[name] = connection
+            if connection.error or (connection.session is None and connection._task is not None and not connection._task.done()):
+                # A connection that failed or wedged is rebuilt, not reused: McpEnable is the agent's way to recover.
+                await connection.stop()
+            await connection.start()
+            for proxy in connection.tools:
                 self._registry.register(proxy)
-        return connection
+            return connection
 
     async def close(self) -> None:
         for connection in self._connections.values():
@@ -402,18 +464,24 @@ class McpManager:
         for client in self._oauth_clients.values():
             await client.http.aclose()
         self._oauth_clients.clear()
+        self._ensure_locks.clear()
 
     def status(self) -> list[dict[str, Any]]:
         out = []
         for name in self.available():
             connection = self._connections.get(name)
+            stale = bool(connection and connection.config_digest != _config_digest(self._configs[name]))
             out.append(
                 {
                     "name": name,
                     "description": self.describe(name),
-                    "connected": bool(connection and connection.session is not None),
+                    "connected": bool(connection and connection.session is not None and not stale),
                     "error": connection.error if connection else None,
                     "tools": sorted(t.name for t in connection.tools) if connection else [],
+                    "state": "disabled" if stale or connection is None else connection.state,
+                    "catalog_revision": connection.catalog_revision if connection and not stale else 0,
+                    "last_error_code": connection.last_error_code if connection and not stale else None,
+                    "in_flight": connection.in_flight if connection and not stale else 0,
                 }
             )
         return out
