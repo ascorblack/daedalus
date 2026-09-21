@@ -551,6 +551,7 @@ class SessionManager:
             if state.services is not None:
                 state.services.tool_timeout_seconds = config.limits.tool_timeout_seconds
                 state.services.max_tool_output_chars = config.tools.exec.max_output_chars
+        self._apply_tool_visibility_all()
 
     def _vision(self) -> tuple[Any, str, FileBlobStore, str] | None:
         found = self.config.vision_preset()
@@ -596,7 +597,7 @@ class SessionManager:
         state.metadata["mcp_enabled"] = current
         state.session.metadata["mcp_enabled"] = current
         await self.sessions.update_metadata(session_id, state.session.metadata)
-        self._apply_tool_visibility(state)
+        self._apply_tool_visibility_all()
         return current
 
     async def mcp_service(
@@ -2120,7 +2121,7 @@ class SessionManager:
             state.metadata.pop("mode", None)
             state.session.metadata.pop("mode", None)
         await self.sessions.update_metadata(session_id, state.session.metadata)
-        self._apply_tool_visibility(state)  # a running engine takes the mode's tool rules from the next call on
+        self._apply_tool_visibility_all()  # a running child also inherits a parent's narrower mode from the next call on
         return name
 
     def mode_for(self, state: SessionState) -> Any:
@@ -2188,6 +2189,7 @@ class SessionManager:
         return engine
 
     async def _assemble_engine(self, state: SessionState, run_id: str, overrides: dict[str, Any], rungs: list[Any], preset: Any) -> QueryEngine:
+        await self._load_capability_ancestors(state)
         if rungs and self.provider_costs_nothing(rungs[0][0].endpoint.id):
             # A local primary remains usable after a hosted-provider budget is exhausted. Paid
             # fallbacks do not inherit that exemption: when any applicable dollar guard is already
@@ -2256,7 +2258,7 @@ class SessionManager:
             context_window=state.context_window or preset.context_window,
             max_output_tokens=preset.max_output_tokens,
             extra_notes=self.notes_for(state),
-            blocked_tools=self.blocked_tools_for(state),
+            tool_visibility_policy=self.tool_policy_for(state),
             voice=self.is_voice(state),
         )
         self._attach_hooks(engine, state)
@@ -3161,10 +3163,8 @@ class SessionManager:
         """Whether this is the voice session: the operator's spoken conversation with the concierge."""
         return bool(state.metadata.get("voice"))
 
-    def blocked_tools_for(self, state: SessionState) -> set[str]:
-        """Everything this session may not call right now: disabled MCP servers' tools, the operator's switches,
-        and the mode's rules. One computation for the engine build and for every live update, so a toggle in
-        Settings cannot disarm a mode."""
+    def _local_blocked_tools_for(self, state: SessionState) -> set[str]:
+        """Restrictions selected directly for this session, before its parent narrows them."""
         known = {t.name for t in self.tools.list_all()}
         blocked = blocked_for(self.mcp, self.mcp_enabled(state)) | self.tools_off(state)
         # The concierge talks and hands work over; it may not read, write or run anything itself, and the
@@ -3180,12 +3180,55 @@ class SessionManager:
                 blocked |= {t for t in known if t.startswith(name[:-1])} if name.endswith("*") else {name}
         return blocked
 
+    def blocked_tools_for(self, state: SessionState) -> set[str]:
+        """Everything this session may not call under its own and every loaded parent's current rules.
+
+        A child stores the restrictions present when it was created so a missing parent cannot widen it.
+        Following the live parent chain additionally makes later revocations effective. A corrupt cycle is
+        denied completely: no ancestry that cannot be established is allowed to grant capabilities.
+        """
+        known = {t.name for t in self.tools.list_all()}
+        blocked: set[str] = set()
+        current: SessionState | None = state
+        seen: set[str] = set()
+        while current is not None:
+            current_id = current.session.id
+            if current_id in seen:
+                return known
+            seen.add(current_id)
+            blocked |= self._local_blocked_tools_for(current)
+            parent_id = str(current.metadata.get("subagent_of") or "")
+            current = self._states.get(parent_id) if parent_id else None
+        return blocked
+
+    async def _load_capability_ancestors(self, state: SessionState) -> None:
+        """Load a persisted parent chain before a child run resolves its effective policy."""
+        current = state
+        seen = {state.session.id}
+        while parent_id := str(current.metadata.get("subagent_of") or ""):
+            if parent_id in seen:
+                return
+            seen.add(parent_id)
+            parent = await self.get_state(parent_id)
+            if parent is None:
+                return
+            current = parent
+
+    def tool_policy_for(self, state: SessionState) -> ToolVisibilityPolicy:
+        """The one effective tool policy used for catalogue advertisement and dispatch admission."""
+        known = {t.name for t in self.tools.list_all()}
+        blocked = self.blocked_tools_for(state)
+        return ToolVisibilityPolicy(pinned=known - blocked, blocked=blocked)
+
     def _apply_tool_visibility(self, state: SessionState) -> None:
         if state.engine is None:
             return
-        known = {t.name for t in self.tools.list_all()}
-        blocked = self.blocked_tools_for(state)
-        state.engine.config = replace(state.engine.config, tool_visibility_policy=ToolVisibilityPolicy(pinned=known - blocked, blocked=blocked))
+        state.engine.config = replace(state.engine.config, tool_visibility_policy=self.tool_policy_for(state))
+
+    def _apply_tool_visibility_all(self) -> None:
+        """Refresh every loaded engine because registry and parent changes can narrow other sessions too."""
+        for state in self._states.values():
+            self._apply_tool_visibility(state)
 
     async def set_tools_off(self, session_id: str, names: list[str]) -> list[str]:
         """Switch tools off (or back on, by omission) for a session; applies from the next model call."""
@@ -3200,7 +3243,7 @@ class SessionManager:
             else:
                 meta.pop("tools_off", None)
         await self.sessions.update_metadata(session_id, state.session.metadata)
-        self._apply_tool_visibility(state)
+        self._apply_tool_visibility_all()
         return chosen
 
     def notes_for(self, state: SessionState) -> str:
@@ -3323,11 +3366,12 @@ class SessionManager:
 
     def policy_gate(self, session_id: str, run_id: str) -> Any:
         """The policy bound to one session: grants are the session's, the egress log names the run."""
-        state = self._states.get(session_id)
-        policy = self.policy(base_dir=state.workspace if state is not None else self.workspace_for(session_id))
 
         def decide(tool: str, arguments: dict[str, Any]) -> Decision:
             state = self._states.get(session_id)
+            if state is not None and tool in self.tool_policy_for(state).blocked:
+                return Decision("deny", "the tool is outside this session's effective capability set", "session.capabilities")
+            policy = self.policy(base_dir=state.workspace if state is not None else self.workspace_for(session_id))
             now = time.time()
             grants = {k for k, until in (state.metadata.get("policy_grants") or {}).items() if float(until) > now} if state is not None else set()
             decision = policy.evaluate(tool, arguments, grants=grants)

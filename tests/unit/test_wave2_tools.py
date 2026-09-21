@@ -117,6 +117,38 @@ async def test_plan_mode_is_an_allow_list_that_a_settings_toggle_cannot_disarm(s
         await manager.close()
 
 
+async def test_child_effective_policy_tracks_parent_revocation_for_advertisement_and_dispatch(settings, db) -> None:  # type: ignore[no-untyped-def]
+    from daedalus.host.session_runner import SessionManager
+
+    manager = SessionManager(settings, RuntimeConfig(), db=db)
+    await manager.start()
+    try:
+        leader = await manager.create_session("leader")
+        child = await manager.create_session("child", metadata={"subagent_of": leader.session.id})
+        grandchild = await manager.create_session("grandchild", metadata={"subagent_of": child.session.id})
+        advertised_before_revoke = manager.tool_policy_for(child)
+        assert "Exec" in advertised_before_revoke.pinned
+
+        await manager.set_mode(leader.session.id, "plan")
+        advertised = manager.tool_policy_for(child)
+        assert {"Exec", "Verify", "ServiceStart"} <= advertised.blocked
+        assert not ({"Exec", "Verify", "ServiceStart"} & advertised.pinned)
+        assert "Exec" in manager.tool_policy_for(grandchild).blocked
+        # The call was valid in the earlier advertisement, but dispatch reads the current policy.
+        denied = manager.policy_gate(child.session.id, "run-child").decide("Exec", {"command": "true"})
+        assert denied.action == "deny" and denied.rule == "session.capabilities" and denied.key == ""
+
+        # A task-local update may narrow the child, but cannot restore a capability its parent removed.
+        await manager.set_tools_off(child.session.id, [])
+        assert "Exec" in manager.tool_policy_for(child).blocked
+        await manager.set_mode(leader.session.id, "")
+        assert "Exec" not in manager.tool_policy_for(child).blocked
+        await manager.set_tools_off(child.session.id, ["Exec"])
+        assert manager.policy_gate(child.session.id, "run-child").decide("Exec", {"command": "true"}).action == "deny"
+    finally:
+        await manager.close()
+
+
 def test_run_budgets_are_configurable_and_off_by_default() -> None:
     limits = LimitsConfig()
     assert limits.max_run_minutes == 0 and limits.max_run_tokens == 0

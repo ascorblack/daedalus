@@ -65,6 +65,34 @@ async def test_session_toggle_changes_visibility(settings: Settings, db: Databas
     await manager.close()
 
 
+async def test_child_mcp_policy_cannot_outlive_parent_access(settings: Settings, db: Database) -> None:
+    config = RuntimeConfig()
+    config.mcp.servers = _config()
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    try:
+        leader = await manager.create_session("leader")
+        child = await manager.create_session("child", metadata={"subagent_of": leader.session.id})
+        await manager.set_mcp(leader.session.id, "echo", True)
+        await manager.set_mcp(child.session.id, "echo", True)
+        tool = mcp_tool_name("echo", "add")
+        assert tool in manager.tool_policy_for(child).pinned
+
+        await manager.set_mcp(leader.session.id, "echo", False)
+        await manager.set_mcp(child.session.id, "echo", True)  # a child refresh cannot widen past its parent
+        policy = manager.tool_policy_for(child)
+        assert tool in policy.blocked and tool not in policy.pinned
+        denied = manager.policy_gate(child.session.id, "run-child").decide(tool, {"a": 2, "b": 3})
+        assert denied.action == "deny" and denied.rule == "session.capabilities"
+
+        await manager.set_mcp(leader.session.id, "echo", True)
+        await manager.set_mode(leader.session.id, "plan")
+        assert tool in manager.tool_policy_for(child).blocked
+        assert manager.policy_gate(child.session.id, "run-child").decide(tool, {"a": 2, "b": 3}).action == "deny"
+    finally:
+        await manager.close()
+
+
 async def test_proxy_round_trips_a_server_token_through_the_vault() -> None:
     """A read returns an edit token; the model sees a placeholder; the edit call gets the token back."""
     from types import SimpleNamespace
