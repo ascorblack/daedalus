@@ -100,6 +100,23 @@ export function SessionDetails({ ids, id, detail, busy, modes, schedules, provid
             <span>{t(detail.context.estimated ? "session.context.estimated" : "session.context.measured")}</span>
           </div>
           <p className="sub">{t("session.context.messages", { n: detail.context.messages, s: detail.context.summaries, o: detail.context.operator_turns })}</p>
+          {detail.context.breakdown && (
+            <div className="context-breakdown">
+              {(["instructions", "tools", "conversation", "attachments", "reserved_response"] as const).map((key) => (
+                <div className="dt-row sub" key={key}>
+                  <span className="grow">{t(`session.context.part.${key}`)}</span>
+                  <span>{fmtTok(detail.context?.breakdown?.[key] ?? 0)}</span>
+                </div>
+              ))}
+              <p className="sub">{t("session.context.breakdown.estimated")}</p>
+            </div>
+          )}
+          {detail.context.recent_cache && (
+            <p className="sub">{t("session.context.cache", { percent: detail.context.recent_cache?.hit_percent ?? 0, tokens: fmtTok(detail.context.recent_cache?.read_tokens ?? 0) })}</p>
+          )}
+          {!!detail.context.prefix_changed?.length && (
+            <p className="sub">{t("session.context.prefix", { reasons: detail.context.prefix_changed?.map((reason: string) => t(`session.context.prefix.${reason}`)).join(", ") ?? "" })}</p>
+          )}
           <div className="btnrow">
             <button className="btn small" onClick={on.compact} disabled={busy}><Icon name="compact" size={14} /> {t("session.compact")}</button>
           </div>
@@ -447,7 +464,7 @@ function ToolTiming({ sessionId }: { sessionId: string }) {
   );
 }
 
-type McpServer = { name: string; description: string; connected: boolean; error: string | null; tools: string[] };
+type McpServer = { name: string; description: string; connected: boolean; error: string | null; tools: string[]; state: "disabled" | "connecting" | "ready" | "auth_required" | "unavailable" | "draining"; catalog_revision: number; last_error_code: string | null; in_flight: number };
 
 function McpPanel({ sessionId, toast }: { sessionId: string; toast: (t: string) => void }) {
   const [data, setData] = useState<{ enabled: string[]; servers: McpServer[] } | null>(null);
@@ -483,6 +500,7 @@ function McpPanel({ sessionId, toast }: { sessionId: string; toast: (t: string) 
             <div className="row">
               <div className="grow">
                 <div className="title">{s.name}</div>
+                <div className="sub">{t(`session.mcp.state.${s.state}`)}{s.in_flight > 0 ? ` · ${t("session.mcp.inflight", { n: s.in_flight })}` : ""}</div>
                 <div className="sub">{s.description || t("session.mcp.nodesc")}{s.error && t("session.mcp.error", { error: s.error })}</div>
                 {s.tools.length > 0 && <div className="sub">{s.tools.join(", ")}</div>}
               </div>

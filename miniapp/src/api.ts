@@ -285,7 +285,17 @@ export type SessionDetail = {
   subagent_name?: string | null;
   leader_title?: string | null;
   subagents?: SubagentView[];
-  context?: { tokens: number; estimated?: boolean; window: number; messages: number; summaries: number; operator_turns: number };
+  context?: {
+    tokens: number;
+    estimated?: boolean;
+    window: number;
+    messages: number;
+    summaries: number;
+    operator_turns: number;
+    breakdown?: { instructions: number; tools: number; conversation: number; attachments: number; reserved_response: number; source: string } | null;
+    recent_cache?: { read_tokens: number; prompt_tokens: number; hit_percent: number } | null;
+    prefix_changed?: string[];
+  };
   usage: { c?: number; i?: number; o?: number; ch?: number; usd?: number | null };
 };
 
@@ -421,6 +431,7 @@ export type Preset = {
 };
 
 export type Settings = {
+  revision: string;
   model: { preset: string; chain: string[] };
   presets: Record<string, Preset>;
   providers: Record<string, ProviderConf>;

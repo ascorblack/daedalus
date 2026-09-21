@@ -3180,11 +3180,17 @@ class SessionManager:
             system_bytes = int(latest["system_prompt"]["byte_length"])
             message_bytes = int(latest["messages"]["byte_length"])
             tool_bytes = int(latest["tools"]["byte_length"])
+            attachment_bytes = sum(
+                len(block.model_dump_json().encode("utf-8"))
+                for message in history
+                for block in message.content_blocks
+                if str(getattr(block, "type", "")).lower() in ("image", "file", "document", "audio", "video")
+            )
             breakdown = {
                 "instructions": (system_bytes + 3) // 4,
                 "tools": (tool_bytes + 3) // 4,
-                "conversation": (max(0, message_bytes - system_bytes) + 3) // 4,
-                "attachments": 0,
+                "conversation": (max(0, message_bytes - system_bytes - attachment_bytes) + 3) // 4,
+                "attachments": (attachment_bytes + 3) // 4,
                 "reserved_response": reserved_response,
                 "source": "request_bytes_estimate",
             }

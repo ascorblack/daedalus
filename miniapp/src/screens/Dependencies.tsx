@@ -79,7 +79,7 @@ export function DependenciesTab() {
   }
 
   const proposal = view?.proposal;
-  const planning = proposal?.state === "planning";
+  const planning = proposal?.state === "planning" || proposal?.state === "validating";
   const installing = view?.job?.state === "installing" || view?.job?.state === "restarting";
   const blocked = busy || planning || installing || offline;
   const available = view?.tools.filter((tool) => tool.available) ?? [];
@@ -111,7 +111,7 @@ export function DependenciesTab() {
         {view.models.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
       </select><div className="btnrow">
         <button className="btn primary" disabled={blocked || !view.capability.python || !request.trim() || !preset} onClick={() => void act("/api/dependencies/request", { request, preset })}><Icon name="bolt" size={15} /> {t(planning ? "deps.planning" : "deps.prepare")}</button>
-        {proposal && ["planning", "ready"].includes(proposal.state) && <button className="btn" disabled={busy || offline} onClick={() => void act(`/api/dependencies/${proposal.id}/cancel`)}>{t("common.cancel")}</button>}
+        {proposal && ["planning", "validating", "ready"].includes(proposal.state) && <button className="btn" disabled={busy || offline} onClick={() => void act(`/api/dependencies/${proposal.id}/cancel`)}>{t("common.cancel")}</button>}
         {proposal?.state === "ready" && <button className="btn" onClick={() => { setAccepted(false); setReview(true); }}>{t("deps.review")}</button>}
       </div></div>
       {proposal?.state === "failed" && <p className="sub attn" role="alert">{proposal.error}</p>}

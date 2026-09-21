@@ -969,8 +969,16 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
   }, [toast]);
 
   async function save(patch: Partial<Settings>) {
+    if (!s?.revision) return;
     try {
-      const next = await api.put<Settings>("/api/settings", patch);
+      const validation = await api.post<{ valid: boolean; stale: boolean; problems: { message: string }[] }>("/api/settings/validate", { base_revision: s.revision, candidate: patch });
+      if (validation.stale) {
+        const current = await api.get<Settings>("/api/settings");
+        setS(current);
+        throw new Error(t("settings.validation.stale"));
+      }
+      if (!validation.valid) throw new Error(validation.problems[0]?.message || t("settings.validation.invalid"));
+      const next = await api.put<Settings>("/api/settings", { ...patch, base_revision: s.revision });
       setS({ ...next, providers_available: next.providers_available ?? s?.providers_available ?? [] });
       toast(t("common.saved"));
     } catch (e) {

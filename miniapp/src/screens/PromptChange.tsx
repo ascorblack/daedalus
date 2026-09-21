@@ -9,7 +9,7 @@ import "./promptchange.css";
 
 type Proposal = {
   id: string;
-  state: "planning" | "ready" | "failed" | "cancelled" | "applied";
+  state: "planning" | "validating" | "ready" | "failed" | "cancelled" | "applied";
   instruction: string;
   preset: string;
   started_at: number;
@@ -42,7 +42,7 @@ export function PromptChange({ onApplied }: { onApplied: (rules: string) => void
     setPreset((current) => next.models.some((model) => model.id === current) ? current : next.models.find((model) => model.id === next.proposal?.preset)?.id || next.models[0]?.id || "");
     if (!hydrated.current) {
       hydrated.current = true;
-      if (next.proposal?.state === "planning") setInstruction(next.proposal.instruction);
+      if (["planning", "validating"].includes(next.proposal?.state ?? "")) setInstruction(next.proposal!.instruction);
     }
     if (next.proposal?.state === "ready" && next.proposal.id !== opened.current) {
       opened.current = next.proposal.id;
@@ -54,13 +54,13 @@ export function PromptChange({ onApplied }: { onApplied: (rules: string) => void
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try { await load(); } catch { /* the page-wide offline state owns connectivity */ }
-      if (alive) timer = setTimeout(poll, view?.proposal?.state === "planning" ? 2000 : 5000);
+      if (alive) timer = setTimeout(poll, ["planning", "validating"].includes(view?.proposal?.state ?? "") ? 2000 : 5000);
     };
     void poll();
     return () => { alive = false; clearTimeout(timer); };
   }, [load, view?.proposal?.state]);
   useEffect(() => {
-    if (view?.proposal?.state !== "planning") return;
+    if (!["planning", "validating"].includes(view?.proposal?.state ?? "")) return;
     const timer = setInterval(() => setClock((value) => value + 1), 1000);
     return () => clearInterval(timer);
   }, [view?.proposal?.state]);
@@ -112,7 +112,7 @@ export function PromptChange({ onApplied }: { onApplied: (rules: string) => void
   }
 
   const proposal = view?.proposal;
-  const planning = proposal?.state === "planning";
+  const planning = proposal?.state === "planning" || proposal?.state === "validating";
   const ready = proposal?.state === "ready";
   void clock;
   return <>
