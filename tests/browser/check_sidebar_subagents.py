@@ -103,7 +103,7 @@ def run() -> int:
         medium.goto(f"{BASE}/agents?token=t&lang=en&scheme=dark", wait_until="networkidle")
         medium_add = medium.locator(".folder-add").first
         expect(medium_add).to_be_visible()
-        expect(medium_add.locator("span")).to_be_hidden()
+        expect(medium_add.locator("span")).to_have_count(0)
         medium_plus_error = centres(medium, ".folder-add")
         if medium_plus_error > 1:
             problems.append(f"the 688px project plus is {medium_plus_error:.1f}px off centre")

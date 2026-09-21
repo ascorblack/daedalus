@@ -248,7 +248,7 @@ export const FolderSection = memo(function FolderSection({ folder, onOpen, curre
             {inside}
           </button>
         )}
-        <button className="btn small folder-add" onClick={() => setAdding(true)} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" size={16} /><span>{t("agents.new")}</span></button>
+        <button className="btn small folder-add" onClick={() => setAdding(true)} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" size={16} /></button>
         {!single && <button className="iconbtn small quiet folder-actions" onClick={editProject} aria-label={t("project.settings.for", { name: folder.name })}><Icon name="more" size={16} /></button>}
       </div>
       {showing && !compact && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
