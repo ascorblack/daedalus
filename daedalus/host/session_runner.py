@@ -2011,28 +2011,44 @@ class SessionManager:
                 # as idle, with nothing anywhere saying why. The turn starts; the cost is that an
                 # undo of the previous one may restore a tree a turn older, and the log says so.
                 logger.warning("session %s: the previous turn was still being written down after %.0f s; starting the next run anyway", session_id, self.config.ops.settle_wait_seconds)
-            # A new run starts: hooks may decorate the message (a fired reminder rides along); their
-            # side effects are committed only once the run exists, so a refused start loses nothing.
-            for hook in self.prompt_hooks:
-                try:
-                    body = await hook(session_id, body)
-                except Exception:  # noqa: BLE001
-                    logger.exception("prompt hook failed")
+            recorded_message: Message | None = None
             if client_message_id:
                 receipt, created = await self.live.accept(session_id, client_message_id, "input", receipt_payload)
                 if not created and receipt["status"] != "accepted":
                     return str(receipt["run_id"] or state.run_id or "")
-            message = Message(
-                role=MessageRole.user,
-                content_blocks=[TextBlock(text=body)],
-                metadata={"daedalus.origin": origin, **({"daedalus.client_message_id": client_message_id} if client_message_id else {}), **({"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {})},
-            )
-            # Only what cannot be sent at all is compacted here — a model whose window is smaller
-            # than the history was built for. The ratio-based compaction happens between runs
-            # (see _drive), because it is a summariser call of a minute or two and the operator's
-            # message used to queue behind it.
-            await self._maybe_auto_compact(state, required_only=True)
-            await self.sessions.append_transcript(session_id, [message])
+                if not created:
+                    # The acknowledgement may have been lost after the transcript append but before
+                    # the run acquired its id. Reuse that exact row: rerunning prompt hooks or adding
+                    # another user row would turn one browser submission into two instructions.
+                    recorded_message = next(
+                        (
+                            item
+                            for item in reversed(await self.sessions.list_transcript(session_id, limit=10_000))
+                            if item.metadata.get("daedalus.client_message_id") == client_message_id
+                        ),
+                        None,
+                    )
+            if recorded_message is None:
+                # Hooks may decorate the message (a fired reminder rides along). They run only for
+                # the first placement of a receipt, so a transport retry cannot repeat a side effect.
+                for hook in self.prompt_hooks:
+                    try:
+                        body = await hook(session_id, body)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("prompt hook failed")
+                message = Message(
+                    role=MessageRole.user,
+                    content_blocks=[TextBlock(text=body)],
+                    metadata={"daedalus.origin": origin, **({"daedalus.client_message_id": client_message_id} if client_message_id else {}), **({"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {})},
+                )
+                # Only what cannot be sent at all is compacted here — a model whose window is smaller
+                # than the history was built for. The ratio-based compaction happens between runs
+                # (see _drive), because it is a summariser call of a minute or two and the operator's
+                # message used to queue behind it.
+                await self._maybe_auto_compact(state, required_only=True)
+                await self.sessions.append_transcript(session_id, [message])
+            else:
+                message = recorded_message
             seqs = await self.sessions.transcript_seqs(session_id, [self.sessions.transcript_key(message)])
             await self.checkpoint(state, kind="before", seq=seqs[0] if seqs else None)
             run_id = await self._start_run(state, message)

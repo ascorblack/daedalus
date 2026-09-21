@@ -151,6 +151,33 @@ async def test_a_retried_input_returns_one_receipt_and_one_queue_item(settings: 
     await manager.close()
 
 
+async def test_a_retry_after_placement_reuses_the_transcript_row(settings: Settings, db: Database) -> None:
+    manager = await _manager(settings, db, ScriptedProvider([{"text": "done"}]))
+    state = await manager.create_session("retry after placement")
+    sid = state.session.id
+    start = manager._start_run
+    attempts = 0
+
+    async def interrupted(current: Any, message: Any, *, continue_turn: bool = False) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("start interrupted after transcript placement")
+        return await start(current, message, continue_turn=continue_turn)
+
+    manager._start_run = interrupted  # type: ignore[method-assign]
+    message_id = "f6459d4f-7760-4d23-b56f-bd11496dfd5e"
+    with pytest.raises(RuntimeError, match="start interrupted"):
+        await manager.submit(sid, "run this once", client_message_id=message_id)
+    run_id = await manager.submit(sid, "run this once", client_message_id=message_id)
+    await state.task
+    visible = [item for item in await manager.transcript_page(sid) if not item.get("internal")]
+    assert [item["text"] for item in visible] == ["run this once", "done"]
+    receipt = await manager.live.receipt(sid, message_id)
+    assert receipt is not None and receipt["status"] == "consumed" and receipt["run_id"] == run_id
+    await manager.close()
+
+
 async def test_a_steer_the_run_has_read_is_gone_from_the_queue_and_cannot_be_withdrawn(settings: Settings, db: Database) -> None:
     provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "sleep 1"}}, {"text": "first"}, {"text": "second"}])
     manager = await _manager(settings, db, provider)
