@@ -285,6 +285,8 @@ export type SessionDetail = {
   subagent_name?: string | null;
   leader_title?: string | null;
   subagents?: SubagentView[];
+  /** Whether this session currently sends to and receives from its own Telegram topic. */
+  telegram_linked?: boolean;
   context?: {
     tokens: number;
     estimated?: boolean;

@@ -28,7 +28,12 @@ def item(item_id: str, kind: str, filename: str, *, alt: str = "", caption: str 
 
 
 MEDIA = [
-    {"id": ALBUM, "layout": "album", "items": [item("image-one", "image", "one.png", alt="First chart", caption="Before"), item("image-two", "image", "two.png", alt="Second chart", caption="After")]},
+    {"id": ALBUM, "layout": "album", "items": [
+        item("image-one", "image", "one.png", alt="First chart", caption="Before"),
+        item("image-two", "image", "two.png", alt="Second chart", caption="After"),
+        item("image-three", "image", "three.png", alt="Third chart", caption="Detail"),
+        item("image-four", "image", "four.png", alt="Fourth chart", caption="Result"),
+    ]},
     {"id": VIDEO, "layout": "single", "items": [item("video-one", "video", "walkthrough.mp4", caption="Walkthrough")]},
     {"id": AUDIO, "layout": "single", "items": [item("audio-one", "audio", "summary.mp3", caption="Audio summary")]},
 ]
@@ -87,13 +92,16 @@ def run() -> int:
             players = (page.locator(".inline-media video").count(), page.locator(".inline-media audio").count())
             order = page.locator(".answer-with-media").evaluate("el => [...el.children].map(x => x.className.includes('inline-media') ? 'media' : x.textContent.trim()).filter(Boolean)")
             overflow = page.evaluate("() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
-            print(f"{name}: album={album_images}, players={players}, overflow={overflow}, order={order}")
-            if album_images != 2 or players != (1, 1):
-                problems.append(f"{name}: expected two album images, video and audio; got {album_images}, {players}")
+            geometry = page.locator(".inline-media.album").evaluate("el => { const box=el.getBoundingClientRect(), answer=el.closest('.answer').getBoundingClientRect(), rail=el.querySelector('.inline-media-track'), caption=el.querySelector('figcaption'); return { centre: Math.abs((box.left+box.right)/2-(answer.left+answer.right)/2), scroll: rail.scrollWidth-rail.clientWidth, caption: getComputedStyle(caption).position } }")
+            print(f"{name}: album={album_images}, players={players}, overflow={overflow}, geometry={geometry}, order={order}")
+            if album_images != 4 or players != (1, 1):
+                problems.append(f"{name}: expected four album images, video and audio; got {album_images}, {players}")
             if order[:3] != ["Before the album.", "media", "Between the album and video."] or order[-1] != "After every attachment.":
                 problems.append(f"{name}: media did not retain its position in prose ({order})")
             if overflow > 1:
                 problems.append(f"{name}: media made the page {overflow}px wider than the viewport")
+            if geometry["centre"] > 2 or geometry["scroll"] <= 0 or geometry["caption"] != "absolute":
+                problems.append(f"{name}: album is not centred, swipeable and overlaid ({geometry})")
 
             page.locator(".inline-media.album .inline-media-image").first.click()
             page.wait_for_selector(".media-viewer")
@@ -114,7 +122,7 @@ def run() -> int:
             page.locator(".turn").last.hover()
             page.locator(".msg-actions").last.get_by_role("button", name="Copy", exact=True).click()
             copied = page.evaluate("() => navigator.clipboard.readText()")
-            if "daedalus-media:" in copied or not all(label in copied for label in ("Before", "After", "Walkthrough", "Audio summary")):
+            if "daedalus-media:" in copied or not all(label in copied for label in ("Before", "After", "Detail", "Result", "Walkthrough", "Audio summary")):
                 problems.append(f"{name}: copy exposed internal references or lost labels ({copied!r})")
             context.close()
         browser.close()

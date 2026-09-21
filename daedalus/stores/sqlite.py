@@ -1326,6 +1326,24 @@ class LiveControlStore:
         assert created is not None
         return self._receipt(created), True
 
+    async def check_receipt(
+        self,
+        session_id: str,
+        client_message_id: str,
+        kind: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return matching prior input, rejecting id reuse before callers repeat file effects."""
+        row = await self._db.fetchone(
+            "SELECT * FROM input_receipts WHERE session_id = ? AND client_message_id = ?",
+            (session_id, client_message_id),
+        )
+        if row is None:
+            return None
+        if row["content_digest"] != self._receipt_digest(kind, payload) or row["kind"] != kind:
+            raise ReceiptConflict("client_message_id already belongs to different input")
+        return self._receipt(row)
+
     async def receipt(self, session_id: str, client_message_id: str) -> dict[str, Any] | None:
         row = await self._db.fetchone(
             "SELECT * FROM input_receipts WHERE session_id = ? AND client_message_id = ?",

@@ -156,6 +156,27 @@ async def test_call_reconnects_after_transport_drop() -> None:
     await manager.close()
 
 
+async def test_cancelling_a_call_while_it_reconnects_stays_cancelled() -> None:
+    connection = McpConnection("remote", McpServerConfig(transport="http", url="https://example.test/mcp"))
+    waiting = asyncio.Event()
+
+    async def start() -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    connection.start = start  # type: ignore[method-assign]
+    call = asyncio.create_task(connection.call("read", {}))
+    await waiting.wait()
+    call.cancel()
+    try:
+        await call
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("cancellation was converted into a reconnect timeout")
+    assert connection.in_flight == 0
+
+
 async def test_session_toggle_changes_visibility(settings: Settings, db: Database) -> None:
     config = RuntimeConfig()
     config.mcp.servers = _config()

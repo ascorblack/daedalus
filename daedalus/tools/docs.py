@@ -71,6 +71,21 @@ def _index(context: ToolContext) -> tuple[list[Page], str] | None:
     return _pages(root) if root is not None and root.is_dir() else None
 
 
+def _utf8_chunk(text: str, start: int, end: int, byte_limit: int) -> str:
+    """Take whole Unicode code points while keeping the encoded tool page within its byte budget."""
+    candidate = text[start:end]
+    if len(candidate.encode("utf-8")) <= byte_limit:
+        return candidate
+    low, high = 0, len(candidate)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(candidate[:middle].encode("utf-8")) <= byte_limit:
+            low = middle
+        else:
+            high = middle - 1
+    return candidate[:low]
+
+
 @tool(
     name="DocsSearch",
     description="Search the public documentation shipped with this installed Daedalus version. Returns page ids and headings; read a result with DocsRead.",
@@ -119,7 +134,7 @@ async def docs_read(context: ToolContext, page: str, section: str = "", cursor: 
         start = positions[0]
         end = next((position for _, position in found.headings if position > start), len(found.text))
     offset = max(0, int(cursor))
-    text = found.text[start + offset : min(end, start + offset + MAX_CHUNK)]
+    text = _utf8_chunk(found.text, start + offset, end, MAX_CHUNK)
     next_cursor = offset + len(text) if start + offset + len(text) < end else None
     return ok(context, text, page=found.id, source=found.source, version=version, next_cursor=next_cursor)
 

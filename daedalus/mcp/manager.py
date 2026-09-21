@@ -307,7 +307,7 @@ class McpConnection:
                     # so reconnecting cannot repeat an effect whose outcome is unknown.
                     try:
                         await asyncio.wait_for(self.start(), timeout=10)
-                    except (TimeoutError, asyncio.CancelledError):
+                    except TimeoutError:
                         raise RuntimeError(f"MCP server {self.name}: reconnect timed out during connect") from None
                     if self.session is None:
                         raise RuntimeError(f"MCP server {self.name} is not connected: {self.error or 'connection failed'}")
@@ -348,9 +348,15 @@ class McpConnection:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=10)
-            except (TimeoutError, asyncio.CancelledError):
+            except TimeoutError:
                 self._task.cancel()
                 await asyncio.gather(self._task, return_exceptions=True)
+            except asyncio.CancelledError:
+                self._task.cancel()
+                await asyncio.gather(self._task, return_exceptions=True)
+                self.session = None
+                self.state = "disabled"
+                raise
         self.session = None
         self.state = "disabled"
 

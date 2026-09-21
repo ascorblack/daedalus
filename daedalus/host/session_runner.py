@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -143,6 +144,17 @@ class Attachment:
     path: Path
     mime_type: str = "application/octet-stream"
     caption: str | None = None
+    name: str | None = None
+    content_sha256: str | None = None
+    stored_name: str | None = None
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _set_event() -> asyncio.Event:
@@ -1913,16 +1925,30 @@ class SessionManager:
                 raise RuntimeError(f"the working directory for {name} ({state.workspace}) is not reachable; restore or mount it before starting a run")
             if not os.access(state.workspace, os.W_OK):
                 raise RuntimeError(f"the working directory for {state.session.title} is not writable")
+            attachment_receipts: list[dict[str, str]] = []
+            for item in attachments:
+                name = Path(item.name or item.path.name).name
+                if client_message_id and not item.content_sha256:
+                    item.content_sha256 = await asyncio.to_thread(_file_sha256, item.path)
+                attachment_receipts.append(
+                    {
+                        "name": name,
+                        "mime_type": item.mime_type,
+                        "caption": item.caption or "",
+                        "sha256": item.content_sha256 or "",
+                    }
+                )
             receipt_payload = {
                 "text": text,
                 "steer": steer,
                 "as_answer": as_answer,
                 "origin": origin,
-                "attachments": [
-                    {"name": item.path.name, "mime_type": item.mime_type, "caption": item.caption or ""}
-                    for item in attachments
-                ],
+                "attachments": attachment_receipts,
             }
+            if client_message_id:
+                existing = await self.live.check_receipt(session_id, client_message_id, "input", receipt_payload)
+                if existing is not None and existing["status"] != "accepted":
+                    return str(existing["run_id"] or state.run_id or "")
             body, image_refs = await self._ingest_attachments(state, text, attachments)
             if state.pending is not None:
                 if as_answer:
@@ -2079,13 +2105,27 @@ class SessionManager:
         lines: list[str] = []
         image_refs: list[tuple[str, str]] = []
         for attachment in attachments:
-            target = inbox / attachment.path.name
+            name = Path(attachment.name or attachment.path.name).name
+            digest = attachment.content_sha256 or await asyncio.to_thread(_file_sha256, attachment.path)
+            attachment.content_sha256 = digest
+            target = inbox / name
             if attachment.path.resolve() != target.resolve():
-                counter = 1
-                while target.exists():
-                    target = inbox / f"{attachment.path.stem}-{counter}{attachment.path.suffix}"
-                    counter += 1
-                shutil.copy2(attachment.path, target)
+                if target.exists() and await asyncio.to_thread(_file_sha256, target) != digest:
+                    source_name = Path(name)
+                    target = inbox / f"{source_name.stem}-{digest[:8]}{source_name.suffix}"
+                    counter = 1
+                    while target.exists() and await asyncio.to_thread(_file_sha256, target) != digest:
+                        target = inbox / f"{source_name.stem}-{digest[:8]}-{counter}{source_name.suffix}"
+                        counter += 1
+                if not target.exists():
+                    # A crash during a copy must not leave a plausible-looking partial attachment.
+                    temporary = inbox / f".{target.name}.{uuid.uuid4().hex}.part"
+                    try:
+                        await asyncio.to_thread(shutil.copy2, attachment.path, temporary)
+                        os.replace(temporary, target)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+            attachment.stored_name = target.name
             lines.append(f"- {target} ({attachment.mime_type}, {target.stat().st_size} bytes)")
             if attachment.mime_type.startswith("image/"):
                 meta = await self.blobs.put(TENANT, target.read_bytes(), content_type=attachment.mime_type)

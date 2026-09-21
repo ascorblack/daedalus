@@ -30,5 +30,30 @@ async def test_search_and_read_are_bounded(monkeypatch, tmp_path):
     searched = await docs_search().invoke(context, {"query": "поиск", "limit": 99})
     assert "docs:guide" in searched.content
     read = await docs_read().invoke(context, {"page": "docs:guide", "section": "Поиск", "cursor": 0})
-    assert len(read.content) <= MAX_CHUNK
+    assert len(read.content.encode("utf-8")) <= MAX_CHUNK
     assert read.metadata["next_cursor"] is not None
+
+
+@pytest.mark.asyncio
+async def test_read_cursor_pages_multibyte_text_without_splitting_it(monkeypatch, tmp_path):
+    (tmp_path / "docs").mkdir()
+    source = "# Guide\n" + "данные 🧪 " * 4000
+    (tmp_path / "docs" / "guide.md").write_text(source, encoding="utf-8")
+    context = SimpleNamespace(metadata={})
+    manager = SimpleNamespace(settings=SimpleNamespace(bot_repo_dir=tmp_path))
+    services = SimpleNamespace(extra={"manager": manager}, max_tool_output_chars=60_000)
+    monkeypatch.setattr("daedalus.tools.docs.services_for", lambda _: services)
+    monkeypatch.setattr("daedalus.tools._common.services_for", lambda _: services)
+
+    chunks: list[str] = []
+    cursor = 0
+    while True:
+        read = await docs_read().invoke(context, {"page": "docs:guide", "cursor": cursor})
+        assert len(read.content.encode("utf-8")) <= MAX_CHUNK
+        chunks.append(read.content)
+        next_cursor = read.metadata["next_cursor"]
+        if next_cursor is None:
+            break
+        assert next_cursor > cursor
+        cursor = next_cursor
+    assert "".join(chunks) == source

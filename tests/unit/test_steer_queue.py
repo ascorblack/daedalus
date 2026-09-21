@@ -178,6 +178,36 @@ async def test_a_retry_after_placement_reuses_the_transcript_row(settings: Setti
     await manager.close()
 
 
+async def test_a_retried_upload_keeps_one_file_and_one_message(settings: Settings, db: Database) -> None:
+    manager = await _manager(settings, db, ScriptedProvider([{"text": "done"}]))
+    state = await manager.create_session("upload once")
+    sid = state.session.id
+    message_id = "35dfddbc-da81-46f0-abf7-56163ba2088d"
+    form = {"text": "inspect this", "client_message_id": message_id}
+    upload = {"files": ("notes.txt", b"same bytes", "text/plain")}
+    async with _client(settings, db, manager) as client:
+        first = await client.post(f"/api/sessions/{sid}/upload", data=form, files=upload, headers=H)
+        repeated = await client.post(f"/api/sessions/{sid}/upload", data=form, files=upload, headers=H)
+        assert first.status_code == repeated.status_code == 200
+        assert first.json()["run_id"] == repeated.json()["run_id"]
+        assert first.json()["receipt"] == repeated.json()["receipt"]
+        assert [path.name for path in (state.workspace / "inbox").iterdir()] == ["notes.txt"]
+
+        conflict = await client.post(
+            f"/api/sessions/{sid}/upload",
+            data=form,
+            files={"files": ("notes.txt", b"different bytes", "text/plain")},
+            headers=H,
+        )
+        assert conflict.status_code == 409
+        assert [path.name for path in (state.workspace / "inbox").iterdir()] == ["notes.txt"]
+    await state.task
+    visible = [item for item in await manager.transcript_page(sid) if not item.get("internal")]
+    assert [item["role"] for item in visible] == ["user", "assistant"]
+    assert not any((manager.settings.state_dir / "upload-staging").iterdir())
+    await manager.close()
+
+
 async def test_a_steer_the_run_has_read_is_gone_from_the_queue_and_cannot_be_withdrawn(settings: Settings, db: Database) -> None:
     provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "sleep 1"}}, {"text": "first"}, {"text": "second"}])
     manager = await _manager(settings, db, provider)

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import type { MediaItem, MediaPresentation } from "./api";
 import { api } from "./api";
 import { Sheet } from "./dialogs";
+import { Icon } from "./icons";
 import { t } from "./i18n";
 export { mediaCopyText, splitMediaAnswer } from "./mediaformat";
 
@@ -24,13 +25,26 @@ function requestMediaAccess(): Promise<void> {
 function MediaElement({ sessionId, presentation, item, onOpen }: { sessionId: string; presentation: MediaPresentation; item: MediaItem; onOpen: () => void }) {
   const src = source(sessionId, presentation.id, item.id);
   if (item.kind === "image" || item.kind === "animation") {
-    return <button type="button" className="inline-media-image" onClick={onOpen} aria-label={t("media.open", { name: item.alt || item.filename })}>
-      <img src={src} alt={item.alt || item.filename} loading="lazy" width={item.width || undefined} height={item.height || undefined} />
-      {item.caption && <span>{item.caption}</span>}
-    </button>;
+    return <figure className="inline-media-image">
+      <button type="button" className="inline-media-surface" onClick={onOpen} aria-label={t("media.open", { name: item.alt || item.filename })}>
+        <img src={src} alt={item.alt || item.filename} loading="lazy" width={item.width || undefined} height={item.height || undefined} />
+      </button>
+      <div className="inline-media-actions">
+        <button type="button" onClick={onOpen} aria-label={t("media.open", { name: item.alt || item.filename })}><Icon name="expand" /></button>
+        <a href={src} download={item.filename} aria-label={t("common.download")}><Icon name="download" /></a>
+      </div>
+      {item.caption && <figcaption>{item.caption}</figcaption>}
+    </figure>;
   }
-  if (item.kind === "video") return <figure className="inline-media-player"><video controls playsInline preload="metadata" src={src} />{item.caption && <figcaption>{item.caption}</figcaption>}</figure>;
-  return <figure className="inline-media-player audio"><audio controls preload="metadata" src={src} />{item.caption && <figcaption>{item.caption}</figcaption>}</figure>;
+  if (item.kind === "video") return <figure className="inline-media-player">
+    <div className="inline-media-player-head"><span><Icon name="play" />{item.filename}</span><a href={src} download={item.filename} aria-label={t("common.download")}><Icon name="download" /></a></div>
+    <video controls playsInline preload="metadata" src={src} />
+    {item.caption && <figcaption>{item.caption}</figcaption>}
+  </figure>;
+  return <figure className="inline-media-player audio">
+    <div className="inline-media-player-head"><span>{item.caption || item.filename}</span><a href={src} download={item.filename} aria-label={t("common.download")}><Icon name="download" /></a></div>
+    <audio controls preload="metadata" src={src} />
+  </figure>;
 }
 
 function Viewer({ sessionId, presentation, start, onClose }: { sessionId: string; presentation: MediaPresentation; start: number; onClose: () => void }) {
@@ -91,6 +105,7 @@ function Viewer({ sessionId, presentation, start, onClose }: { sessionId: string
 export function InlineMedia({ sessionId, presentation }: { sessionId: string; presentation: MediaPresentation }) {
   const [open, setOpen] = useState<number | null>(null);
   const [access, setAccess] = useState<"loading" | "ready" | "error">("loading");
+  const rail = useRef<HTMLDivElement>(null);
   const load = () => {
     setAccess("loading");
     requestMediaAccess().then(() => setAccess("ready")).catch(() => setAccess("error"));
@@ -99,8 +114,14 @@ export function InlineMedia({ sessionId, presentation }: { sessionId: string; pr
   if (access === "loading") return <div className="inline-media-loading" aria-label={t("media.loading")} />;
   if (access === "error") return <button type="button" className="inline-media-error" onClick={load}>{t("media.retry")}</button>;
   return <>
-    <div className={`inline-media ${presentation.layout}`}>
-      {presentation.items.map((item, index) => <MediaElement key={item.id} sessionId={sessionId} presentation={presentation} item={item} onOpen={() => item.kind === "image" || item.kind === "animation" ? setOpen(index) : undefined} />)}
+    <div className={`inline-media ${presentation.layout} items-${Math.min(4, presentation.items.length)}`}>
+      <div className="inline-media-track" ref={rail}>
+        {presentation.items.map((item, index) => <MediaElement key={item.id} sessionId={sessionId} presentation={presentation} item={item} onOpen={() => item.kind === "image" || item.kind === "animation" ? setOpen(index) : undefined} />)}
+      </div>
+      {presentation.layout === "album" && presentation.items.length > 3 && <>
+        <button type="button" className="inline-media-nav previous" onClick={() => rail.current?.scrollBy({ left: -rail.current.clientWidth * .8, behavior: "smooth" })} aria-label={t("media.previous")}><Icon name="back" /></button>
+        <button type="button" className="inline-media-nav next" onClick={() => rail.current?.scrollBy({ left: rail.current.clientWidth * .8, behavior: "smooth" })} aria-label={t("media.next")}><Icon name="forward" /></button>
+      </>}
     </div>
     {open !== null && <Viewer sessionId={sessionId} presentation={presentation} start={open} onClose={() => setOpen(null)} />}
   </>;

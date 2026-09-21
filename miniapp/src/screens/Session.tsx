@@ -828,6 +828,17 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     }
   }
 
+  async function detachTelegram() {
+    if (!(await confirmAsync(t("session.telegram.detach.title"), { body: t("session.telegram.detach.body"), action: t("session.telegram.detach.action") }))) return;
+    try {
+      await api.delete(`/api/sessions/${id}/telegram`);
+      setDetail((current) => current ? { ...current, telegram_linked: false } : current);
+      toast(t("session.telegram.detach.done"));
+    } catch (e) {
+      toast(errorText(e));
+    }
+  }
+
   async function exportMarkdown() {
     try {
       const res = await fetch(`/api/sessions/${id}/export/download`, { headers: api.authHeaders() });
@@ -959,6 +970,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
               "-",
               { label: t("session.export"), icon: "download", onSelect: exportMarkdown },
               { label: t("session.compact"), icon: "compact", onSelect: compact, disabled: busy },
+              ...(detail?.telegram_linked ? [{ label: t("session.telegram.detach"), icon: "unlink" as IconName, onSelect: detachTelegram }] : []),
               "-",
               { label: t("session.clear"), icon: "trash", onSelect: clearHistory, disabled: busy, danger: true },
               { label: t("session.delete"), icon: "trash", onSelect: remove, danger: true },

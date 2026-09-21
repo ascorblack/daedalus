@@ -54,7 +54,8 @@ Each forum topic is one agent session in a project. Write in a topic to talk to 
 
 /bind — (in a supergroup with topics) make it the session hub
 /new &lt;title&gt; — new session (new topic)
-/stop — stop the current run · /close — close this topic (asks whether to delete the agent)
+/stop — stop the current run · /detach — keep the agent on the site and close its topic
+/close — close this topic (asks whether to delete the agent)
 /sessions · /status — what exists, what is running
 """
 
@@ -521,7 +522,7 @@ class TelegramFront:
         return int(msg.message_id)
 
     async def binding_for_session(self, session_id: str) -> TopicBinding | None:
-        row = await self.manager.db.fetchone("SELECT * FROM topics WHERE session_id = ?", (session_id,))
+        row = await self.manager.db.fetchone("SELECT * FROM topics WHERE session_id = ? AND closed_at IS NULL", (session_id,))
         return TopicBinding(row["chat_id"], row["thread_id"], row["session_id"], row["title"]) if row else None
 
     async def binding_for_topic(self, chat_id: int, thread_id: int) -> TopicBinding | None:
@@ -535,16 +536,48 @@ class TelegramFront:
             "INSERT OR REPLACE INTO topics(chat_id, thread_id, session_id, title, created_at) VALUES (?, ?, ?, ?, ?)",
             (chat_id, thread_id, session_id, title, datetime.now(UTC).isoformat()),
         )
+        state = await self.manager.get_state(session_id)
+        if state is not None and state.session.metadata.pop("telegram_detached", None) is not None:
+            state.metadata.pop("telegram_detached", None)
+            await self.manager.sessions.update_metadata(session_id, state.session.metadata)
         return TopicBinding(chat_id, thread_id, session_id, title)
+
+    async def detach_session(self, session_id: str) -> bool:
+        """Make a topic-bound session web-only without removing its history or workspace."""
+        state = await self.manager.get_state(session_id)
+        if state is None:
+            raise KeyError(session_id)
+        binding = await self.binding_for_session(session_id)
+        if binding is None:
+            return False
+        if binding.thread_id:
+            try:
+                await tg_call(self.bot.close_forum_topic, binding.chat_id, binding.thread_id, flood_chat=binding.chat_id)
+            except TelegramAPIError as exc:
+                raise TelegramRefused(str(exc), session_id) from exc
+        state.session.metadata["telegram_detached"] = True
+        state.metadata["telegram_detached"] = True
+        await self.manager.sessions.update_metadata(session_id, state.session.metadata)
+        await self.manager.db.execute(
+            "UPDATE topics SET closed_at = ? WHERE chat_id = ? AND thread_id = ?",
+            (datetime.now(UTC).isoformat(), binding.chat_id, binding.thread_id),
+        )
+        task = self._topic_status_tasks.pop(session_id, None)
+        if task is not None:
+            task.cancel()
+        self._topic_status.pop(session_id, None)
+        return True
 
     async def outbox_for_session(self, session_id: str) -> TelegramOutbox | None:
         """Where this session's output goes: the one place that tells the two modes apart."""
         if self.private_mode():
             return await self._private_outbox(session_id)
+        state = await self.manager.get_state(session_id)
+        if state is not None and state.metadata.get("telegram_detached"):
+            return None
         binding = await self.binding_for_session(session_id)
         if binding is not None:
             return TelegramOutbox(self.bot, binding.chat_id, binding.thread_id)
-        state = await self.manager.get_state(session_id)
         title = state.session.title if state is not None else session_id
         try:
             binding = await self.ensure_topic(session_id, title)
@@ -705,6 +738,7 @@ class TelegramFront:
         r.message.register(self.cmd_usage, Command("usage"))
         r.message.register(self.cmd_settings, Command("settings"))
         r.message.register(self.cmd_bind, Command("bind"))
+        r.message.register(self.cmd_detach, Command("detach"))
         r.message.register(self.cmd_operator, Command("rebuild", "rollback", "panic", "schedules", "verbosity", "approval", "balance", "schedule", "inbox", "heartbeat", "doctor", "intents", "board", "peer", "allow"))
         r.message.register(self.cmd_mode, Command("mode"))
         r.message.register(
@@ -737,6 +771,22 @@ class TelegramFront:
             + (f"The {opened} session(s) that were already open have topics of their own now. " if opened else "")
             + "Mini App → Settings → Chat puts them back in the private chat if you prefer it."
         )
+
+    async def cmd_detach(self, message: Message) -> None:
+        """Leave this session available on the site while closing its Telegram topic."""
+        if not self._is_owner(message.from_user.id if message.from_user else None):
+            return
+        if self.private_mode() or self._is_general(message):
+            await message.answer("Use /detach inside the session topic you want to disconnect.")
+            return
+        binding = await self.binding_for_topic(message.chat.id, message.message_thread_id or 0)
+        if binding is None:
+            await message.answer("This topic is not connected to a session.")
+            return
+        # Telegram cannot acknowledge into a topic after it has been closed, so announce
+        # the transition without claiming success before the API call completes.
+        await message.answer("Disconnecting this topic. The agent and its history stay available in the Mini App.")
+        await self.detach_session(binding.session_id)
 
     async def cmd_new(self, message: Message, command: CommandObject) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):

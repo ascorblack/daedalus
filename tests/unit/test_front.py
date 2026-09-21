@@ -9,11 +9,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from aiogram.filters import CommandObject
 from aiogram.types import CallbackQuery, Message
 
 from daedalus.config import RuntimeConfig, Settings
+from daedalus.extensions.api import build_app
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.transport.telegram.front import TelegramFront
@@ -42,6 +44,10 @@ class RecordingBot:
     async def create_forum_topic(self, chat_id: int, name: str) -> SimpleNamespace:
         self.topics.append(name)
         return SimpleNamespace(message_thread_id=len(self.topics) * 10)
+
+    async def close_forum_topic(self, chat_id: int, thread_id: int) -> bool:
+        self.closed_topic = (chat_id, thread_id)
+        return True
 
     async def get_file(self, file_id: str) -> SimpleNamespace:
         return SimpleNamespace(file_path=f"documents/{file_id}")
@@ -160,6 +166,61 @@ async def test_new_in_forum_creates_topic_and_binding(front: TelegramFront) -> N
     await front.on_message(_message("go", chat_type="supergroup", chat_id=-100, thread=10))
     await grows_to(front.submitted, 1, "the message reached the manager")  # type: ignore[attr-defined]
     assert front.submitted[0][0] == binding.session_id  # type: ignore[attr-defined]
+
+
+async def test_detaching_a_topic_keeps_the_session_web_only(front: TelegramFront) -> None:
+    front.config.telegram.forum_chat_id = -100
+    state = await front.manager.create_session("local agent")
+    await front.bind_topic(-100, 42, state.session.id, state.session.title)
+
+    assert await front.detach_session(state.session.id)
+    assert front.bot.closed_topic == (-100, 42)  # type: ignore[attr-defined]
+    assert await front.binding_for_session(state.session.id) is None
+    assert await front.outbox_for_session(state.session.id) is None
+    kept = await front.manager.get_state(state.session.id)
+    assert kept is not None and kept.metadata["telegram_detached"] is True
+
+
+async def test_detach_command_disconnects_the_topic_it_was_sent_from(front: TelegramFront) -> None:
+    front.config.telegram.forum_chat_id = -100
+    state = await front.manager.create_session("local agent")
+    await front.bind_topic(-100, 42, state.session.id, state.session.title)
+    replies: list[str] = []
+    message = _message("/detach", chat_type="supergroup", chat_id=-100, thread=42)
+
+    async def answer(text: str, **kwargs: Any) -> None:
+        replies.append(text)
+
+    object.__setattr__(message, "answer", answer)
+    await front.cmd_detach(message)
+
+    assert replies and replies[0].startswith("Disconnecting") and "Mini App" in replies[0]
+    assert await front.binding_for_session(state.session.id) is None
+    assert await front.manager.get_state(state.session.id) is not None
+
+
+async def test_site_reports_and_disconnects_a_telegram_topic(front: TelegramFront) -> None:
+    front.config.telegram.forum_chat_id = -100
+    state = await front.manager.create_session("local agent")
+    await front.bind_topic(-100, 42, state.session.id, state.session.title)
+    app = SimpleNamespace(
+        settings=front.settings,
+        config=front.config,
+        db=front.manager.db,
+        manager=front.manager,
+        front=front,
+        extensions={},
+        guard=None,
+        create_session=front.manager.create_session,
+    )
+    transport = httpx.ASGITransport(app=build_app(app, "tok"))  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        detail = await client.get(f"/api/sessions/{state.session.id}", headers={"X-Daedalus-Token": "tok"})
+        assert detail.status_code == 200 and detail.json()["telegram_linked"] is True
+        detached = await client.delete(f"/api/sessions/{state.session.id}/telegram", headers={"X-Daedalus-Token": "tok"})
+        assert detached.status_code == 200 and detached.json() == {"detached": True}
+        detail = await client.get(f"/api/sessions/{state.session.id}", headers={"X-Daedalus-Token": "tok"})
+        assert detail.status_code == 200 and detail.json()["telegram_linked"] is False
 
 
 async def test_ask_user_keyboard_single_choice_resumes_run(front: TelegramFront) -> None:

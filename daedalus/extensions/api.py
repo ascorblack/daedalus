@@ -1472,6 +1472,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "subagent_name": state.metadata.get("subagent_name"),
             "leader_title": leader.session.title if leader is not None else None,
             "subagents": subagents,
+            "telegram_linked": bool(app.front is not None and await app.front.binding_for_session(session_id)),
             "verifications": dict(await app.db.fetchone("SELECT count(*) total, sum(passed) passed FROM verifications WHERE session_id = ?", (session_id,)) or {}),
             "messages": messages,
             "first_seq": first_seq,
@@ -1697,6 +1698,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def upload(
         session_id: str,
         text: str = Form(""),
+        client_message_id: str = Form("", max_length=64),
         files: list[UploadFile] = File(default=[]),
         _: dict[str, Any] = Depends(auth),
     ) -> dict[str, Any]:
@@ -1704,28 +1706,48 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         state = await manager.get_state(session_id)
         if state is None:
             raise HTTPException(404, "no such session")
-        inbox = state.workspace / "inbox"
-        inbox.mkdir(parents=True, exist_ok=True)
+        staging = manager.settings.state_dir / "upload-staging"
+        staging.mkdir(parents=True, exist_ok=True)
         attachments: list[Attachment] = []
-        for upload_file in files:
-            name = Path(upload_file.filename or "file").name
-            target = inbox / name
-            counter = 1
-            while target.exists():
-                target = inbox / f"{Path(name).stem}-{counter}{Path(name).suffix}"
-                counter += 1
-            with target.open("wb") as fh:
-                while chunk := await upload_file.read(1 << 20):
-                    fh.write(chunk)
-            attachments.append(Attachment(path=target, mime_type=upload_file.content_type or mimetypes.guess_type(name)[0] or "application/octet-stream"))
-        if not text.strip() and not attachments:
-            raise HTTPException(400, "nothing to send")
-        body = text.strip() or ("Files attached." if len(attachments) > 1 else "File attached.")
         try:
-            run_id = await manager.submit(session_id, body, attachments)
+            for upload_file in files:
+                name = Path(upload_file.filename or "file").name
+                target = staging / f"{secrets.token_hex(16)}.part"
+                digest = hashlib.sha256()
+                with target.open("wb") as fh:
+                    while chunk := await upload_file.read(1 << 20):
+                        digest.update(chunk)
+                        fh.write(chunk)
+                attachments.append(
+                    Attachment(
+                        path=target,
+                        name=name,
+                        content_sha256=digest.hexdigest(),
+                        mime_type=upload_file.content_type or mimetypes.guess_type(name)[0] or "application/octet-stream",
+                    )
+                )
+            if not text.strip() and not attachments:
+                raise HTTPException(400, "nothing to send")
+            body = text.strip() or ("Files attached." if len(attachments) > 1 else "File attached.")
+            run_id = await manager.submit(
+                session_id,
+                body,
+                attachments,
+                client_message_id=client_message_id or None,
+            )
+        except ReceiptConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
-        return {"run_id": run_id, "files": [a.path.name for a in attachments]}
+        finally:
+            for attachment in attachments:
+                attachment.path.unlink(missing_ok=True)
+        receipt = await manager.live.receipt(session_id, client_message_id) if client_message_id else None
+        return {
+            "run_id": run_id,
+            "files": [item.stored_name or item.name or item.path.name for item in attachments],
+            **({"receipt": receipt} if receipt is not None else {}),
+        }
 
     @api.get("/api/asr")
     async def asr_status(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2660,6 +2682,20 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             # read from rows that go with the session.
             await app.front.forget_session(session_id)
         return {"deleted": await manager.delete_session(session_id, delete_workspace=not keep_workspace)}
+
+    @api.delete("/api/sessions/{session_id}/telegram")
+    async def detach_session_telegram(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        if await manager.get_state(session_id) is None:
+            raise HTTPException(404, "no such session")
+        if app.front is None:
+            raise HTTPException(409, "Telegram is not configured")
+        try:
+            detached = await app.front.detach_session(session_id)
+        except TelegramRefused as exc:
+            raise HTTPException(502, f"Telegram did not close the topic: {exc}") from exc
+        if not detached:
+            raise HTTPException(409, "this session is not linked to an open Telegram topic")
+        return {"detached": True}
 
     @api.patch("/api/sessions/{session_id}")
     async def rename_session(session_id: str, body: RenameBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

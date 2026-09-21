@@ -4,7 +4,7 @@ export type IconName =
   | "back" | "more" | "plus" | "up" | "stop" | "model" | "terminal" | "file" | "pen" | "search" | "globe" | "attach" | "image"
   | "question" | "skill" | "spawn" | "bulb" | "wrench" | "clock" | "plug" | "dot" | "compact"
   | "folder" | "settings" | "bots" | "inbox" | "board" | "changes" | "chart" | "loop" | "pause" | "play" | "trash" | "check" | "close" | "send"
-  | "download" | "share" | "split" | "key" | "link" | "down" | "copy" | "columns" | "eye" | "mic" | "fork" | "undo" | "phone" | "expand" | "external" | "reload" | "forward" | "panel" | "chevron" | "bolt";
+  | "download" | "share" | "split" | "key" | "link" | "unlink" | "down" | "copy" | "columns" | "eye" | "mic" | "fork" | "undo" | "phone" | "expand" | "external" | "reload" | "forward" | "panel" | "chevron" | "bolt";
 
 const PATHS: Record<IconName, string> = {
   back: "M15 18l-6-6 6-6",
@@ -48,6 +48,7 @@ const PATHS: Record<IconName, string> = {
   split: "M4 5h16v14H4zM12 5v14",
   key: "M15 3a6 6 0 1 0 0 12 6 6 0 0 0 0-12zM10 14l-7 7M6 18l2 2M9 15l2 2",
   link: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
+  unlink: "M10 14a4 4 0 0 0 5.7 0l1.3-1.3M14 10a4 4 0 0 0-5.7 0l-1.3 1.3M4 4l16 16",
   down: "M12 5v14M5 12l7 7 7-7",
   copy: "M9 9h11v11H9zM15 9V4H4v11h5",
   // A branch leaving the line it came from: what forking a session from a turn does.
