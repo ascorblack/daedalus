@@ -468,7 +468,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                 break;
               }
               try {
-                handle(event, JSON.parse(data));
+                const decoded = JSON.parse(data) as Record<string, any>;
+                const envelope = decoded.kind && decoded.payload && typeof decoded.payload === "object" ? decoded : null;
+                handle(envelope ? String(envelope.kind) : event, envelope ? { ...envelope.payload, run_id: envelope.run_id, event_seq: envelope.event_seq, history_revision: envelope.history_revision } : decoded);
               } catch {
                 /* one malformed frame must not end the stream */
               }
@@ -709,16 +711,17 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
 
   // The message goes out; while a run is on the host holds it as a steer for the next step, and the
   // queue is re-read so the card is there before the stream says so.
-  async function send(text: string, files: File[]) {
+  async function send(text: string, files: File[], clientMessageId?: string) {
     const steer = busyRef.current && status === "running";
     if (files.length > 0) {
       const form = new FormData();
       form.append("text", text);
+      if (clientMessageId) form.append("client_message_id", clientMessageId);
       for (const f of files) form.append("files", f, f.name);
       const res = await fetch(`/api/sessions/${id}/upload`, { method: "POST", headers: api.authHeaders(), body: form });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? res.statusText);
     } else {
-      await api.post(`/api/sessions/${id}/messages`, steer ? { text, steer: true } : { text });
+      await api.post(`/api/sessions/${id}/messages`, steer ? { text, steer: true, client_message_id: clientMessageId } : { text, client_message_id: clientMessageId });
     }
     stick.current = true;
     if (steer) void loadSteers();

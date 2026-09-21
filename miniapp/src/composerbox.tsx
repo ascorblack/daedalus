@@ -46,7 +46,7 @@ export type ComposerProps = {
   sessionId: string;
   status: ComposerStatus;
   /** Send the text and the files; while a run is on, the host queues it as a steer. Rejects on failure. */
-  onSend: (text: string, files: File[]) => Promise<void>;
+  onSend: (text: string, files: File[], clientMessageId?: string) => Promise<void>;
   onStop: () => void;
   commands: SlashCommand[];
   /** Run a slash command. Rejects on failure, and the draft comes back. */
@@ -90,6 +90,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const plusButton = useRef<HTMLButtonElement>(null);
   const dock = useRef<HTMLDivElement>(null);
   const draftTimer = useRef(0);
+  const retryId = useRef<string | null>(null);
 
   // The draft is the session's: leaving and coming back finds it, another session does not.
   useEffect(() => {
@@ -208,13 +209,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     setSending(true);
+    const clientMessageId = retryId.current ?? crypto.randomUUID();
+    retryId.current = clientMessageId;
     setDraftState("");
     window.clearTimeout(draftTimer.current);
     clearDraft(sessionId);
     setFiles([]);
     if (fileInput.current) fileInput.current.value = "";
     try {
-      await onSend(text, going);
+      await onSend(text, going, clientMessageId);
+      retryId.current = null;
       haptic("light");
     } catch (e) {
       setDraft(text);
