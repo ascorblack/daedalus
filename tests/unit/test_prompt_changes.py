@@ -67,8 +67,19 @@ async def test_model_returns_reviewable_diff_and_cannot_apply_it() -> None:
 
     result = await instance.approve(started["id"])
     assert result == {"applied": True, "rules": revised}
+    assert await instance.approve(started["id"]) == result
     assert effective_rules(instance.app.config) == revised
     assert (await instance.app.db.kv_get(KEY))["state"] == "applied"
+
+
+@pytest.mark.asyncio
+async def test_stale_generation_cannot_replace_a_new_request() -> None:
+    instance = planner(Provider([("ProposeWorkingRules", {"rules": "Working rules:\n- New.", "summary": "New"})]))
+    value = await instance.start("new rule", "test")
+    replacement = {**value, "generation_id": "replacement", "instruction": "another request"}
+    await instance.app.db.kv_set(KEY, replacement)
+    await instance.task
+    assert await instance.app.db.kv_get(KEY) == replacement
 
 
 @pytest.mark.asyncio

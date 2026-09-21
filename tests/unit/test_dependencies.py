@@ -380,9 +380,8 @@ async def test_approval_is_exactly_once_and_persists_across_page_reload(tmp_path
     planner.rpc = rpc
     await planner.approve("a")
     other_page = DependencyPlanner(planner.app)
-    assert (await other_page.proposal())["state"] == "accepted"
-    with pytest.raises(ValueError):
-        await planner.approve("a")
+    assert (await other_page.proposal())["state"] == "applying"
+    assert await planner.approve("a") == {"id": "a", "state": "applying"}
     assert calls == ["dependencies_apply"]
 
 
@@ -396,8 +395,8 @@ async def test_supervisor_receipt_recovers_a_lost_approval_acknowledgement(tmp_p
         return {"job": {"id": "a", "state": "installing"}}
 
     planner.rpc = rpc
-    assert (await planner.view())["proposal"]["state"] == "accepted"
-    assert (await planner.proposal())["state"] == "accepted"
+    assert (await planner.view())["proposal"]["state"] == "applying"
+    assert (await planner.proposal())["state"] == "applying"
 
 
 @pytest.mark.asyncio
@@ -584,4 +583,5 @@ def test_dependency_routes_require_auth_and_approve_only_stored_proposal(tmp_pat
         response = client.post(f"/api/dependencies/{proposal_id}/approve", headers=HEAD, json={"proposal": {"recipe": {"python": ["unapproved"], "system": []}}})
         assert response.status_code == 200
         assert calls == [("dependencies_apply", {"proposal": stored, "id": proposal_id})]
-        assert client.post(f"/api/dependencies/{proposal_id}/approve", headers=HEAD).status_code == 409
+        assert client.post(f"/api/dependencies/{proposal_id}/approve", headers=HEAD).status_code == 200
+        assert calls == [("dependencies_apply", {"proposal": stored, "id": proposal_id})]

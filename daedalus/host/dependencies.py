@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-import uuid
 from typing import Any
 
 from protocore.contracts.llm import LLMObservabilityContext, LLMRequest, ProviderDelta
@@ -20,6 +19,7 @@ from protocore.contracts.types import (
 )
 
 from daedalus import supervisor_client
+from daedalus.host.proposals import new_proposal, same_generation, with_activity
 from daedalus.security.redact import redact
 
 KEY = "dependency_proposal"
@@ -65,7 +65,7 @@ class DependencyPlanner:
 
     async def proposal(self) -> dict[str, Any] | None:
         value = await self.app.db.kv_get(KEY)
-        if value and value["state"] == "planning" and (self.task is None or self.task.done()):
+        if value and value["state"] in ("planning", "validating") and (self.task is None or self.task.done()):
             await self._progress(value, "failed")
             value = {**value, "state": "failed", "error": "dependency planning was interrupted; submit the request again"}
             await self.app.db.kv_set(KEY, value)
@@ -88,7 +88,7 @@ class DependencyPlanner:
         if proposal and proposal["state"] == "ready" and (status.get("job") or {}).get("id") == proposal["id"]:
             # The supervisor may accept just before the HTTP connection is lost to the restart.
             # Its durable receipt wins over a browser which never saw the acknowledgement.
-            proposal = {**proposal, "state": "accepted"}
+            proposal = {**with_activity(proposal, "applying"), "state": "applying"}
             await self.app.db.kv_set(KEY, proposal)
         return {**self.inventory_cache[1], **status, "proposal": proposal, "models": [{"id": key, "label": preset.display(key)} for key, preset in self.app.config.presets.items()]}
 
@@ -105,7 +105,7 @@ class DependencyPlanner:
                 raise ValueError("dependency installation is running")
             if not status["capability"]["python"]:
                 raise ValueError(status["capability"]["reason"])
-            value = {"id": uuid.uuid4().hex, "state": "planning", "request": text.strip(), "preset": preset, "started_at": time.time(), "updated_at": time.time(), "progress": []}
+            value = new_proposal("dependencies", request=text.strip(), preset=preset)
             await self.app.db.kv_set(KEY, value)
             self.task = asyncio.create_task(self._plan(value))
             return value
@@ -113,7 +113,7 @@ class DependencyPlanner:
     async def cancel(self, proposal_id: str) -> None:
         async with self.lock:
             value = await self.proposal()
-            if not value or value["id"] != proposal_id or value["state"] not in ("planning", "ready", "failed"):
+            if not value or value["id"] != proposal_id or value["state"] not in ("planning", "validating", "ready", "failed"):
                 raise ValueError("this proposal is no longer cancellable")
             if self.task and not self.task.done():
                 self.task.cancel()
@@ -124,6 +124,8 @@ class DependencyPlanner:
     async def approve(self, proposal_id: str) -> dict[str, Any]:
         async with self.lock:
             value = await self.proposal()
+            if value and value["id"] == proposal_id and value["state"] == "applying":
+                return {"id": proposal_id, "state": "applying"}
             if not value or value["id"] != proposal_id or value["state"] != "ready":
                 raise ValueError("this proposal is no longer awaiting approval")
             # Close the new-run gate before checking existing runs: submit can await storage while
@@ -146,7 +148,7 @@ class DependencyPlanner:
                 except Exception:
                     pass
                 raise
-            await self.app.db.kv_set(KEY, {**value, "state": "accepted"})
+            await self.app.db.kv_set(KEY, {**with_activity(value, "applying"), "state": "applying"})
             return result
 
     async def _plan(self, value: dict[str, Any]) -> None:
@@ -154,22 +156,28 @@ class DependencyPlanner:
             async with asyncio.timeout(180):
                 result = await self._run(value)
             await self._progress(value, "ready")
-            await self.app.db.kv_set(KEY, {**value, "state": "ready", **result})
+            current = await self.app.db.kv_get(KEY)
+            if same_generation(current, value) and current["state"] in ("planning", "validating"):
+                await self.app.db.kv_set(KEY, {**value, "state": "ready", **result})
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             await self._progress(value, "failed")
-            await self.app.db.kv_set(KEY, {**value, "state": "failed", "error": str(exc)[:2000] or type(exc).__name__})
+            current = await self.app.db.kv_get(KEY)
+            if same_generation(current, value) and current["state"] in ("planning", "validating"):
+                await self.app.db.kv_set(KEY, {**value, "state": "failed", "error": str(exc)[:2000] or type(exc).__name__})
 
     async def _progress(self, value: dict[str, Any], stage: str, detail: str = "") -> None:
         now = time.time()
-        value["updated_at"] = now
+        value.update(with_activity(value, stage, detail))
         events = value.setdefault("progress", [])
         if not events or (events[-1]["stage"], events[-1].get("detail", "")) != (stage, detail):
             events.append({"at": now, "stage": stage, "detail": detail[:240]})
             del events[:-40]
         current = await self.app.db.kv_get(KEY)
-        if current and current["id"] == value["id"] and current["state"] == "planning":
+        if same_generation(current, value) and current["state"] in ("planning", "validating"):
+            if stage == "check":
+                value["state"] = "validating"
             await self.app.db.kv_set(KEY, dict(value))
 
     async def _run(self, value: dict[str, Any]) -> dict[str, Any]:

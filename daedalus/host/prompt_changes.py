@@ -6,13 +6,13 @@ import asyncio
 import difflib
 import hashlib
 import time
-import uuid
 from typing import Any
 
 from protocore.contracts.llm import LLMObservabilityContext, LLMRequest, ProviderDelta
 from protocore.contracts.types import Message, MessageRole, TextBlock, ToolDefinition, ToolParameterSchema
 
 from daedalus.host.prompts import DEFAULT_RULES
+from daedalus.host.proposals import new_proposal, same_generation, with_activity
 
 KEY = "prompt_change_proposal"
 MAX_RULES_CHARS = 40_000
@@ -64,7 +64,7 @@ class PromptChangePlanner:
 
     async def proposal(self) -> dict[str, Any] | None:
         value = await self.app.db.kv_get(KEY)
-        if value and value["state"] == "planning" and (self.task is None or self.task.done()):
+        if value and value["state"] in ("planning", "validating") and (self.task is None or self.task.done()):
             value = {**value, "state": "failed", "updated_at": time.time(), "error": "proposal generation was interrupted; submit the request again"}
             await self.app.db.kv_set(KEY, value)
         return value
@@ -91,16 +91,13 @@ class PromptChangePlanner:
             if not 1 <= len(instruction) <= 2000:
                 raise ValueError("describe the change in 1–2000 characters")
             before = effective_rules(self.app.config)
-            value = {
-                "id": uuid.uuid4().hex,
-                "state": "planning",
-                "instruction": instruction,
-                "preset": preset_id,
-                "base_digest": digest(before),
-                "started_at": time.time(),
-                "updated_at": time.time(),
-                "stage": "model",
-            }
+            value = new_proposal(
+                "working_rules",
+                instruction=instruction,
+                preset=preset_id,
+                stage="model",
+                base_digest=digest(before),
+            )
             await self.app.db.kv_set(KEY, value)
             self.task = asyncio.create_task(self._plan(value, before))
             return value
@@ -108,7 +105,7 @@ class PromptChangePlanner:
     async def cancel(self, proposal_id: str) -> None:
         async with self.lock:
             value = await self.proposal()
-            if not value or value["id"] != proposal_id or value["state"] not in ("planning", "ready", "failed"):
+            if not value or value["id"] != proposal_id or value["state"] not in ("planning", "validating", "ready", "failed"):
                 raise ValueError("this proposal is no longer cancellable")
             if self.task and not self.task.done():
                 self.task.cancel()
@@ -118,6 +115,9 @@ class PromptChangePlanner:
     async def approve(self, proposal_id: str) -> dict[str, Any]:
         async with self.lock:
             value = await self.proposal()
+            if value and value["id"] == proposal_id and value["state"] == "applied":
+                rules = self._validate(value.get("rules"))
+                return {"applied": True, "rules": "" if rules == DEFAULT_RULES.strip() else rules}
             if not value or value["id"] != proposal_id or value["state"] != "ready":
                 raise ValueError("this proposal is no longer awaiting review")
             if digest(effective_rules(self.app.config)) != value["base_digest"]:
@@ -126,7 +126,7 @@ class PromptChangePlanner:
             stored = "" if rules == DEFAULT_RULES.strip() else rules
             new_config = self.app.config.model_copy(update={"prompt": self.app.config.prompt.model_copy(update={"rules": stored})})
             await self.app.save_config(new_config)
-            applied = {**value, "state": "applied", "stage": "applied", "updated_at": time.time()}
+            applied = {**with_activity(value, "applied"), "state": "applied", "stage": "applied"}
             await self.app.db.kv_set(KEY, applied)
             return {"applied": True, "rules": stored}
 
@@ -134,13 +134,17 @@ class PromptChangePlanner:
         try:
             async with asyncio.timeout(180):
                 result = await self._run(value, before)
-            ready = {**value, **result, "state": "ready", "stage": "ready", "updated_at": time.time()}
-            await self.app.db.kv_set(KEY, ready)
+            current = await self.app.db.kv_get(KEY)
+            if same_generation(current, value) and current["state"] in ("planning", "validating"):
+                ready = {**with_activity(value, "ready"), **result, "state": "ready", "stage": "ready"}
+                await self.app.db.kv_set(KEY, ready)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            failed = {**value, "state": "failed", "stage": "failed", "updated_at": time.time(), "error": str(exc)[:2000] or type(exc).__name__}
-            await self.app.db.kv_set(KEY, failed)
+            current = await self.app.db.kv_get(KEY)
+            if same_generation(current, value) and current["state"] in ("planning", "validating"):
+                failed = {**with_activity(value, "failed"), "state": "failed", "stage": "failed", "error": str(exc)[:2000] or type(exc).__name__}
+                await self.app.db.kv_set(KEY, failed)
 
     async def _run(self, value: dict[str, Any], before: str) -> dict[str, str]:
         manager = self.app.manager
