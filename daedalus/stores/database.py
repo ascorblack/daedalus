@@ -695,6 +695,49 @@ CREATE INDEX media_items_by_blob ON media_items(blob_ref);
 """)
 
 
+# Session-wide cursors survive run changes, while input receipts make a client retry the same
+# submission instead of creating a second queue item after an acknowledgement is lost.
+MIGRATIONS.append("""
+CREATE TABLE session_stream_state (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    event_seq INTEGER NOT NULL DEFAULT 0,
+    history_revision INTEGER NOT NULL DEFAULT 0,
+    min_event_seq INTEGER NOT NULL DEFAULT 1,
+    runtime_epoch TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE session_events (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    event_seq INTEGER NOT NULL,
+    run_id TEXT,
+    history_revision INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, event_seq)
+);
+CREATE INDEX session_events_by_run ON session_events(run_id, event_seq);
+CREATE TABLE input_receipts (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    client_message_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    content_digest TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL,
+    run_id TEXT,
+    step_id TEXT,
+    message_seq INTEGER,
+    error TEXT,
+    queue_revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, client_message_id)
+);
+CREATE INDEX input_receipts_by_session_status
+    ON input_receipts(session_id, status, queue_revision);
+ALTER TABLE live_control ADD COLUMN queue_revision INTEGER NOT NULL DEFAULT 0;
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""

@@ -5,6 +5,7 @@ import hmac
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
 import pytest
@@ -16,7 +17,13 @@ from daedalus.extensions.api import validate_init_data
 from daedalus.host.skills import DirectorySkillStore
 from daedalus.stores.database import Database
 from daedalus.stores.persistent import PersistentMemory
-from daedalus.stores.sqlite import LiveControlStore, SqliteEventStream, SqliteRunStore, SqliteSessionStore
+from daedalus.stores.sqlite import (
+    LiveControlStore,
+    ReceiptConflict,
+    SqliteEventStream,
+    SqliteRunStore,
+    SqliteSessionStore,
+)
 
 
 async def test_session_and_run_stores_roundtrip(db: Database) -> None:
@@ -43,12 +50,77 @@ async def test_event_stream_keeps_latest_snapshot_apart_from_log(db: Database) -
     assert unfinished[0]["session_id"] == "s1"
 
 
+async def test_session_event_cursor_replays_through_an_atomic_watermark(db: Database) -> None:
+    sessions = SqliteSessionStore(db)
+    await sessions.create(Session(id="cursor", tenant_id="t", title="cursor"))
+    stream = SqliteEventStream(db)
+    first = await stream.publish_session(
+        "cursor",
+        SimpleNamespace(type=SimpleNamespace(value="message_start"), run_id="r1", payload={"model": "m"}),
+    )
+    cut = await stream.publish_session(
+        "cursor",
+        SimpleNamespace(type=SimpleNamespace(value="history_cut"), run_id="r1", payload={"through": 4}),
+        history_rewrite=True,
+    )
+    assert (first["event_seq"], first["history_revision"]) == (1, 0)
+    assert (cut["event_seq"], cut["history_revision"]) == (2, 1)
+    replay = await stream.session_replay("cursor", after=0, through=2)
+    assert [(item["event_seq"], item["kind"]) for item in replay["events"]] == [
+        (1, "message_start"),
+        (2, "history_cut"),
+    ]
+    assert replay["watermark"] == 2 and replay["history_revision"] == 1
+
+
+async def test_trimmed_session_cursor_requires_resync(db: Database) -> None:
+    sessions = SqliteSessionStore(db)
+    await sessions.create(Session(id="trimmed", tenant_id="t", title="trimmed"))
+    stream = SqliteEventStream(db)
+    for index in range(4):
+        await stream.publish_session(
+            "trimmed",
+            SimpleNamespace(type=SimpleNamespace(value="state_changed"), run_id="r", payload={"index": index}),
+        )
+    await stream.trim_session("trimmed", keep=2)
+    replay = await stream.session_replay("trimmed", after=1)
+    assert replay["resync_required"] is True
+    assert replay["reason"] == "cursor_trimmed"
+
+
 async def test_live_control_queues_and_overrides(db: Database) -> None:
     live = LiveControlStore(db)
     await live.enqueue("s", "follow_up", {"id": "q1", "kind": "follow_up", "text": "more", "attachments": []})
     await live.set_model("s", model_name="m2", thinking_enabled=False)
     state = await live.load("s")
     assert state["follow_up"][0]["text"] == "more" and state["model_name"] == "m2" and state["thinking_enabled"] is False
+
+
+async def test_input_receipt_deduplicates_queue_after_lost_ack(db: Database) -> None:
+    sessions = SqliteSessionStore(db)
+    await sessions.create(Session(id="receipt", tenant_id="t", title="receipt"))
+    live = LiveControlStore(db)
+    item = {"id": "client-1", "kind": "steer", "text": "more", "attachments": []}
+    first, created = await live.accept("receipt", "client-1", "steer", {"text": "more"}, queue_item=item)
+    repeated, created_again = await live.accept("receipt", "client-1", "steer", {"text": "more"}, queue_item=item)
+    assert created is True and created_again is False
+    assert repeated == first and first["status"] == "queued"
+    state = await live.load("receipt")
+    assert [entry["id"] for entry in state["steer"]] == ["client-1"]
+    assert state["queue_revision"] == 1
+    with pytest.raises(ReceiptConflict):
+        await live.accept("receipt", "client-1", "steer", {"text": "different"}, queue_item=item)
+
+
+async def test_input_receipt_withdraw_loses_race_to_consumed(db: Database) -> None:
+    sessions = SqliteSessionStore(db)
+    await sessions.create(Session(id="race", tenant_id="t", title="race"))
+    live = LiveControlStore(db)
+    item = {"id": "client-2", "kind": "steer", "text": "more", "attachments": []}
+    await live.accept("race", "client-2", "steer", {"text": "more"}, queue_item=item)
+    consumed = await live.consume("race", "client-2", run_id="run", step_id="step", message_seq=7)
+    returned = await live.withdraw("race", "client-2")
+    assert consumed["status"] == "consumed" and returned == consumed
 
 
 async def test_persistent_memory_survives_reload(db: Database) -> None:

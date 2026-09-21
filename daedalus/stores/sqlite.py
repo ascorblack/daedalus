@@ -761,6 +761,7 @@ class SqliteEventStream(IEventStream):
         self._db = db
         self._subscribers: dict[str, list[asyncio.Queue[Event | None]]] = {}
         self._session_of_run: dict[str, str] = {}
+        self._live_offsets: dict[tuple[str, str, str], int] = {}
 
     SUBSCRIBER_CAP = 512
 
@@ -929,6 +930,149 @@ class SqliteEventStream(IEventStream):
         )
         return [(int(r["seq"]), _row_to_event(r)) for r in rows]
 
+    async def publish_session(
+        self,
+        session_id: str,
+        event: Any,
+        *,
+        history_rewrite: bool = False,
+    ) -> dict[str, Any]:
+        """Persist one session envelope before it is offered to live listeners.
+
+        Token fragments remain live-only. They carry a bounded offset inside the current durable
+        boundary, while lifecycle events advance the session cursor in the same transaction that
+        stores their envelope. A reconnect can therefore replay through a watermark and then join
+        the reserved live tail without a database row per token.
+        """
+        kind = str(getattr(getattr(event, "type", None), "value", None) or getattr(event, "name", ""))
+        run_id = str(getattr(event, "run_id", "") or "")
+        payload = dict(getattr(event, "payload", {}) or {})
+        if kind in self.LIVE_ONLY:
+            row = await self._db.fetchone(
+                "SELECT event_seq, history_revision FROM session_stream_state WHERE session_id = ?",
+                (session_id,),
+            )
+            message_id = str(payload.get("message_id") or run_id)
+            block_id = str(payload.get("block_id") or payload.get("index") or kind)
+            key = (session_id, message_id, block_id)
+            offset = self._live_offsets.get(key, 0)
+            delta = str(payload.get("delta") or payload.get("text") or payload.get("content") or "")
+            self._live_offsets[key] = offset + len(delta.encode("utf-8"))
+            return {
+                "session_id": session_id,
+                "run_id": run_id or None,
+                "event_seq": int(row["event_seq"]) if row else 0,
+                "history_revision": int(row["history_revision"]) if row else 0,
+                "kind": kind,
+                "payload": payload,
+                "ephemeral": {
+                    "message_id": message_id,
+                    "block_id": block_id,
+                    "delta_offset": offset,
+                    "generation": run_id,
+                },
+            }
+        now = _now()
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT event_seq, history_revision FROM session_stream_state WHERE session_id = ?",
+                (session_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            event_seq = (int(row["event_seq"]) if row else 0) + 1
+            revision = (int(row["history_revision"]) if row else 0) + (1 if history_rewrite else 0)
+            await conn.execute(
+                "INSERT INTO session_stream_state(session_id, event_seq, history_revision) VALUES (?, ?, ?)"
+                " ON CONFLICT(session_id) DO UPDATE SET event_seq = excluded.event_seq,"
+                " history_revision = excluded.history_revision",
+                (session_id, event_seq, revision),
+            )
+            await conn.execute(
+                "INSERT INTO session_events(session_id, event_seq, run_id, history_revision, kind, payload, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, event_seq, run_id or None, revision, kind, json.dumps(payload, default=str), now),
+            )
+        return {
+            "session_id": session_id,
+            "run_id": run_id or None,
+            "event_seq": event_seq,
+            "history_revision": revision,
+            "kind": kind,
+            "payload": payload,
+        }
+
+    async def session_replay(
+        self,
+        session_id: str,
+        *,
+        after: int,
+        through: int | None = None,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        """Return a bounded cursor replay, explicitly naming a cursor lost to retention."""
+        state = await self._db.fetchone(
+            "SELECT event_seq, history_revision, min_event_seq, runtime_epoch"
+            " FROM session_stream_state WHERE session_id = ?",
+            (session_id,),
+        )
+        watermark = int(state["event_seq"]) if state else 0
+        revision = int(state["history_revision"]) if state else 0
+        minimum = int(state["min_event_seq"]) if state else 1
+        if after and after < minimum - 1:
+            return {
+                "resync_required": True,
+                "reason": "cursor_trimmed",
+                "watermark": watermark,
+                "history_revision": revision,
+                "runtime_epoch": str(state["runtime_epoch"] or "") if state else "",
+                "events": [],
+            }
+        upper = watermark if through is None else min(watermark, through)
+        rows = await self._db.fetchall(
+            "SELECT event_seq, run_id, history_revision, kind, payload FROM session_events"
+            " WHERE session_id = ? AND event_seq > ? AND event_seq <= ? ORDER BY event_seq LIMIT ?",
+            (session_id, after, upper, max(1, min(limit, 1000))),
+        )
+        return {
+            "resync_required": False,
+            "watermark": watermark,
+            "history_revision": revision,
+            "runtime_epoch": str(state["runtime_epoch"] or "") if state else "",
+            "events": [
+                {
+                    "session_id": session_id,
+                    "run_id": row["run_id"],
+                    "event_seq": int(row["event_seq"]),
+                    "history_revision": int(row["history_revision"]),
+                    "kind": row["kind"],
+                    "payload": json.loads(row["payload"] or "{}"),
+                }
+                for row in rows
+            ],
+        }
+
+    async def trim_session(self, session_id: str, *, keep: int) -> None:
+        """Trim only the replay projection; the materialized transcript remains authoritative."""
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT event_seq FROM session_events WHERE session_id = ? ORDER BY event_seq DESC LIMIT 1 OFFSET ?",
+                (session_id, max(0, keep - 1)),
+            )
+            boundary = await cursor.fetchone()
+            await cursor.close()
+            if boundary is None:
+                return
+            minimum = int(boundary["event_seq"])
+            await conn.execute(
+                "DELETE FROM session_events WHERE session_id = ? AND event_seq < ?",
+                (session_id, minimum),
+            )
+            await conn.execute(
+                "UPDATE session_stream_state SET min_event_seq = ? WHERE session_id = ?",
+                (minimum, session_id),
+            )
+
     async def load_snapshot(self, run_id: str) -> dict[str, Any] | None:
         row = await self._db.fetchone("SELECT snapshot FROM snapshots WHERE run_id = ?", (run_id,))
         return json.loads(row["snapshot"]) if row else None
@@ -1001,6 +1145,10 @@ def _merged_queue(kept: list[dict[str, Any]], stored: list[dict[str, Any]], seen
     return list(kept) + [item for item in stored if _queue_item_id(item) not in known]
 
 
+class ReceiptConflict(ValueError):
+    """One client message id was reused for different input."""
+
+
 class LiveControlStore:
     """Per-session steer / follow-up queues and live model overrides."""
 
@@ -1010,10 +1158,11 @@ class LiveControlStore:
     async def load(self, session_id: str) -> dict[str, Any]:
         row = await self._db.fetchone("SELECT * FROM live_control WHERE session_id = ?", (session_id,))
         if row is None:
-            return {"steer": [], "follow_up": [], "model_name": None, "provider": None, "preset": None, "thinking_enabled": None, "reasoning_effort": None}
+            return {"steer": [], "follow_up": [], "queue_revision": 0, "model_name": None, "provider": None, "preset": None, "thinking_enabled": None, "reasoning_effort": None}
         return {
             "steer": json.loads(row["steer_queue"] or "[]"),
             "follow_up": json.loads(row["follow_up_queue"] or "[]"),
+            "queue_revision": int(row["queue_revision"] or 0),
             "model_name": row["model_name"],
             "provider": row["provider"],
             "preset": row["preset"],
@@ -1088,10 +1237,179 @@ class LiveControlStore:
             current = json.loads(row[column] or "[]") if row else []
             current.append(item)
             await conn.execute(
-                f"INSERT INTO live_control(session_id, {column}, updated_at) VALUES (?, ?, ?)"
-                f" ON CONFLICT(session_id) DO UPDATE SET {column} = excluded.{column}, updated_at = excluded.updated_at",
+                f"INSERT INTO live_control(session_id, {column}, queue_revision, updated_at) VALUES (?, ?, 1, ?)"
+                f" ON CONFLICT(session_id) DO UPDATE SET {column} = excluded.{column},"
+                " queue_revision = live_control.queue_revision + 1, updated_at = excluded.updated_at",
                 (session_id, json.dumps(current), _now()),
             )
+
+    @staticmethod
+    def _receipt_digest(kind: str, payload: dict[str, Any]) -> str:
+        encoded = json.dumps({"kind": kind, "payload": payload}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _receipt(row: Any) -> dict[str, Any]:
+        return {
+            "client_message_id": row["client_message_id"],
+            "kind": row["kind"],
+            "status": row["status"],
+            "run_id": row["run_id"],
+            "step_id": row["step_id"],
+            "message_seq": row["message_seq"],
+            "error": row["error"],
+            "queue_revision": int(row["queue_revision"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    async def accept(
+        self,
+        session_id: str,
+        client_message_id: str,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        queue_item: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Accept input once; a repeated request returns the original receipt.
+
+        When ``queue_item`` is supplied, receipt creation and queue insertion share one transaction.
+        The boolean is true only for the request that created the receipt, so callers never repeat
+        transcript or run-start side effects after an acknowledgement is lost.
+        """
+        digest = self._receipt_digest(kind, payload)
+        now = _now()
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM input_receipts WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            )
+            existing = await cursor.fetchone()
+            await cursor.close()
+            if existing is not None:
+                if existing["content_digest"] != digest or existing["kind"] != kind:
+                    raise ReceiptConflict("client_message_id already belongs to different input")
+                return self._receipt(existing), False
+            cursor = await conn.execute(
+                "SELECT steer_queue, follow_up_queue, queue_revision FROM live_control WHERE session_id = ?",
+                (session_id,),
+            )
+            control = await cursor.fetchone()
+            await cursor.close()
+            revision = int(control["queue_revision"] or 0) if control else 0
+            status = "accepted"
+            if queue_item is not None:
+                column = "steer_queue" if kind == "steer" else "follow_up_queue"
+                current = json.loads(control[column] or "[]") if control else []
+                current.append(queue_item)
+                revision += 1
+                await conn.execute(
+                    f"INSERT INTO live_control(session_id, {column}, queue_revision, updated_at) VALUES (?, ?, ?, ?)"
+                    f" ON CONFLICT(session_id) DO UPDATE SET {column} = excluded.{column},"
+                    " queue_revision = excluded.queue_revision, updated_at = excluded.updated_at",
+                    (session_id, json.dumps(current), revision, now),
+                )
+                status = "queued"
+            await conn.execute(
+                "INSERT INTO input_receipts(session_id, client_message_id, kind, content_digest, payload,"
+                " status, queue_revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id, client_message_id, kind, digest, json.dumps(payload), status, revision, now, now),
+            )
+            cursor = await conn.execute(
+                "SELECT * FROM input_receipts WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            )
+            created = await cursor.fetchone()
+            await cursor.close()
+        assert created is not None
+        return self._receipt(created), True
+
+    async def receipt(self, session_id: str, client_message_id: str) -> dict[str, Any] | None:
+        row = await self._db.fetchone(
+            "SELECT * FROM input_receipts WHERE session_id = ? AND client_message_id = ?",
+            (session_id, client_message_id),
+        )
+        return self._receipt(row) if row is not None else None
+
+    async def consume(
+        self,
+        session_id: str,
+        client_message_id: str,
+        *,
+        run_id: str,
+        step_id: str,
+        message_seq: int | None,
+    ) -> dict[str, Any]:
+        """Fence a receipt at its durable context placement boundary."""
+        now = _now()
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM input_receipts WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                raise KeyError(client_message_id)
+            if row["status"] == "withdrawn":
+                raise ReceiptConflict("withdrawn input cannot be consumed")
+            if row["status"] != "consumed":
+                await conn.execute(
+                    "UPDATE input_receipts SET status = 'consumed', run_id = ?, step_id = ?,"
+                    " message_seq = ?, updated_at = ? WHERE session_id = ? AND client_message_id = ?",
+                    (run_id, step_id, message_seq, now, session_id, client_message_id),
+                )
+            cursor = await conn.execute(
+                "SELECT * FROM input_receipts WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            )
+            settled = await cursor.fetchone()
+            await cursor.close()
+        assert settled is not None
+        return self._receipt(settled)
+
+    async def withdraw(self, session_id: str, client_message_id: str) -> dict[str, Any] | None:
+        """Withdraw queued input, or return its consumed receipt without lying about removal."""
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM input_receipts WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None or row["status"] == "consumed":
+                return self._receipt(row) if row is not None else None
+            cursor = await conn.execute(
+                "SELECT steer_queue, follow_up_queue, queue_revision FROM live_control WHERE session_id = ?",
+                (session_id,),
+            )
+            control = await cursor.fetchone()
+            await cursor.close()
+            revision = int(control["queue_revision"] or 0) if control else int(row["queue_revision"])
+            if control is not None:
+                for column in ("steer_queue", "follow_up_queue"):
+                    current = json.loads(control[column] or "[]")
+                    kept = [item for item in current if _queue_item_id(item) != client_message_id]
+                    if len(kept) != len(current):
+                        revision += 1
+                        await conn.execute(
+                            f"UPDATE live_control SET {column} = ?, queue_revision = ?, updated_at = ? WHERE session_id = ?",
+                            (json.dumps(kept), revision, _now(), session_id),
+                        )
+            await conn.execute(
+                "UPDATE input_receipts SET status = 'withdrawn', queue_revision = ?, updated_at = ?"
+                " WHERE session_id = ? AND client_message_id = ?",
+                (revision, _now(), session_id, client_message_id),
+            )
+            cursor = await conn.execute(
+                "SELECT * FROM input_receipts WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            )
+            withdrawn = await cursor.fetchone()
+            await cursor.close()
+        assert withdrawn is not None
+        return self._receipt(withdrawn)
 
     async def remove(self, session_id: str, kind: str, item_id: str) -> bool:
         """Drop one queued item by its id; ``False`` when it is no longer there (consumed, or never was)."""
@@ -1156,6 +1474,7 @@ class LiveControlStore:
 
 __all__ = [
     "LiveControlStore",
+    "ReceiptConflict",
     "SqliteEventStream",
     "SqliteRunStore",
     "SqliteSessionStore",
