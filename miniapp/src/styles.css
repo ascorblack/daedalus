@@ -2200,7 +2200,8 @@ input.field[type="range"] {
   .folder-expand { order:2; min-width:var(--row-h-touch); min-height:var(--row-h-touch); }
   .folder-actions { order:3; min-width:var(--row-h-touch); min-height:var(--row-h-touch); }
   .folder-root { display:none; }
-  .folder-add { display:flex; align-items:center; gap:var(--space-2); min-height:var(--row-h-touch); }
+  .folder-add { display:grid; place-items:center; width:var(--row-h-touch); height:var(--row-h-touch); min-width:var(--row-h-touch); min-height:var(--row-h-touch); padding:0; }
+  .folder-add span { display:none; }
   .folder-head > .chev { order:2; margin-left:auto; }
 }
 .search-component progress { width: 100%; accent-color: var(--accent); }

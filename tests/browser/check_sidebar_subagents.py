@@ -98,6 +98,16 @@ def run() -> int:
         phone_plus_error = centres(phone, ".folder-add")
         if phone_plus_error > 1:
             problems.append(f"the phone project plus is {phone_plus_error:.1f}px off centre")
+        medium = browser.new_page(viewport={"width": 688, "height": 900}, is_mobile=True, has_touch=True)
+        medium.route("**/api/**", stub)
+        medium.goto(f"{BASE}/agents?token=t&lang=en&scheme=dark", wait_until="networkidle")
+        medium_add = medium.locator(".folder-add").first
+        expect(medium_add).to_be_visible()
+        expect(medium_add.locator("span")).to_be_hidden()
+        medium_plus_error = centres(medium, ".folder-add")
+        if medium_plus_error > 1:
+            problems.append(f"the 688px project plus is {medium_plus_error:.1f}px off centre")
+        medium.close()
         phone.goto(f"{BASE}/agents/{S1}?token=t&lang=en&scheme=dark", wait_until="networkidle")
         phone.locator(".subagents-trigger").click()
         phone_popover = phone.locator(".subagents-popover")
