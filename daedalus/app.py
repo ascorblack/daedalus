@@ -17,6 +17,7 @@ from typing import Any
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.host.boot_guard import BootGuard
 from daedalus.host.component_install import Installer
+from daedalus.host.config_validation import ConfigConflict, config_revision
 from daedalus.host.session_runner import SessionManager, SessionState
 from daedalus.providers.llamacpp import describe_discovery, discover_llamacpp
 from daedalus.search.service import ConversationSearch
@@ -42,6 +43,7 @@ class Application:
         :data:`daedalus.extensions.FATAL` for why a failure here is survivable."""
         self.stopping = asyncio.Event()
         self._shut_down = False
+        self._config_lock = asyncio.Lock()
         # The local speech models: a directory listing and a configuration read, no engine and no
         # model until something actually asks for words.
         self.search = ConversationSearch(self.db, settings.state_dir)
@@ -55,25 +57,34 @@ class Application:
         self.components = Installer(settings)
         self.guard = BootGuard(settings.state_dir, window_minutes=self.config.ops.boot_loop_window_minutes, threshold=self.config.ops.boot_loop_threshold)
 
-    async def save_config(self, config: RuntimeConfig) -> None:
-        was = self.config.stt
-        spoke = self.config.voice.tts
-        self.config = config
-        self.speech.config = config
-        self.tts.config = config
-        if (was.local_model, was.local_language, was.local_threads) != (config.stt.local_model, config.stt.local_language, config.stt.local_threads):
-            # A different model, language or thread count is a different recogniser; the loaded one
-            # is now the wrong one and holds most of a gigabyte while being it.
-            self.speech.forget()
-        now = config.voice.tts
-        if (spoke.local_voice, spoke.local_threads) != (now.local_voice, now.local_threads):
-            # A different voice or thread count is a different synthesiser. The speaker inside a
-            # multi-voice model is not, and neither is the speed: both are arguments to every call,
-            # so dropping a loaded model for either is a second of silence bought for nothing.
-            self.tts.forget()
-        config.save(self.settings.config_path)
-        if self.manager is not None:
-            self.manager.reload_config(config)
+    async def save_config(self, config: RuntimeConfig, *, expected_revision: str | None = None) -> None:
+        async with self._config_lock:
+            old = self.config
+            if expected_revision is not None and config_revision(old) != expected_revision:
+                raise ConfigConflict(config_revision(old))
+            config.save(self.settings.config_path)
+            try:
+                if self.manager is not None:
+                    self.manager.reload_config(config)
+            except BaseException:
+                old.save(self.settings.config_path)
+                if self.manager is not None:
+                    self.manager.reload_config(old)
+                raise
+            self.config = config
+            self.speech.config = config
+            self.tts.config = config
+            was = old.stt
+            if (was.local_model, was.local_language, was.local_threads) != (config.stt.local_model, config.stt.local_language, config.stt.local_threads):
+                # A different model, language or thread count is a different recogniser; the loaded one
+                # is now the wrong one and holds most of a gigabyte while being it.
+                self.speech.forget()
+            spoke, now = old.voice.tts, config.voice.tts
+            if (spoke.local_voice, spoke.local_threads) != (now.local_voice, now.local_threads):
+                # A different voice or thread count is a different synthesiser. The speaker inside a
+                # multi-voice model is not, and neither is the speed: both are arguments to every call,
+                # so dropping a loaded model for either is a second of silence bought for nothing.
+                self.tts.forget()
 
     async def start(self) -> None:
         self.guard.on_boot()

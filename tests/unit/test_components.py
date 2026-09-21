@@ -603,6 +603,10 @@ class FakeManager:
         def available() -> list[str]:
             return []
 
+        @staticmethod
+        async def close_retired() -> None:
+            return None
+
 
 class FakeApp:
     def __init__(self, tmp_path: Path, *, native: bool) -> None:
@@ -615,7 +619,7 @@ class FakeApp:
         self.tts = LocalTts(self.settings.state_dir, self.config)
         self.components = Installer(self.settings)
 
-    async def save_config(self, config: RuntimeConfig) -> None:
+    async def save_config(self, config: RuntimeConfig, *, expected_revision: str | None = None) -> None:
         self.config = config
 
 

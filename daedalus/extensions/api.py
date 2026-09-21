@@ -57,6 +57,7 @@ from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_a
 from daedalus.extensions.voice import model_options, tts_configured
 from daedalus.host import capabilities, component_install, launcher_bridge
 from daedalus.host import components as component_list
+from daedalus.host.config_validation import ConfigConflict, config_revision, validate_candidate
 from daedalus.host.dependencies import DependencyPlanner
 from daedalus.host.policy import sealed_root
 from daedalus.host.prompt_changes import PromptChangePlanner
@@ -446,6 +447,7 @@ class CompactBody(BaseModel):
 
 
 class SettingsBody(BaseModel):
+    base_revision: str | None = None
     model: dict[str, Any] | None = None
     prompt: dict[str, Any] | None = None
     vision: dict[str, Any] | None = None
@@ -463,6 +465,11 @@ class SettingsBody(BaseModel):
     ops: dict[str, Any] | None = None
     compaction: dict[str, Any] | None = None
     answer_language: str | None = None
+
+
+class SettingsValidationBody(BaseModel):
+    base_revision: str
+    candidate: SettingsBody
 
 
 class ConversationSearchBody(BaseModel):
@@ -3997,6 +4004,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     def _settings_view() -> dict[str, Any]:
         data = app.config.model_dump(mode="json")
+        data["revision"] = config_revision(app.config)
         data["providers_available"] = list(manager.providers.available())
         data["usd_per_day"] = settings.usd_per_day
         data["prompt"]["default_rules"] = DEFAULT_RULES.strip()
@@ -4124,6 +4132,31 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             entry["available"] = True if not entry["needs_key"] else (None if keyed is None else entry["id"] in keyed)
         return view
 
+    def _settings_candidate(body: SettingsBody) -> dict[str, Any]:
+        current = app.config.model_dump(mode="json")
+        dumped = body.model_dump(exclude_none=True)
+        dumped.pop("base_revision", None)
+        model_patch = dumped.pop("model", None)
+        if isinstance(model_patch, dict):
+            resolve_model_patch(current, model_patch)
+        if isinstance(dumped.get("mcp"), dict):
+            restore_masked_mcp(current, dumped["mcp"])
+        restore_masked_secrets(current, dumped)
+        for section in ("modes", "webhooks"):
+            if isinstance(dumped.get(section), dict):
+                current[section] = dumped.pop(section)
+        for section, value in dumped.items():
+            if isinstance(value, dict):
+                current[section] = _deep_merge(current.get(section, {}), value)
+            else:
+                current[section] = value
+        return current
+
+    @api.post("/api/settings/validate")
+    async def validate_settings(body: SettingsValidationBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        report, _candidate = validate_candidate(app.config, _settings_candidate(body.candidate), base_revision=body.base_revision)
+        return report.model_dump(mode="json")
+
     @api.post("/api/settings/search-check")
     async def search_check(body: SearchCheckBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Run one query through a search backend and report what came back; the Mini App's "check" button."""
@@ -4140,28 +4173,18 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     @api.put("/api/settings")
     async def put_settings(body: SettingsBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        current = app.config.model_dump(mode="json")
-        dumped = body.model_dump(exclude_none=True)
-        model_patch = dumped.pop("model", None)
-        if isinstance(model_patch, dict):
-            resolve_model_patch(current, model_patch)
-        if isinstance(dumped.get("mcp"), dict):
-            restore_masked_mcp(current, dumped["mcp"])
-        restore_masked_secrets(current, dumped)
-        for section in ("modes", "webhooks"):
-            if isinstance(dumped.get(section), dict):
-                current[section] = dumped.pop(section)  # whole-dict sections replace, so an entry can be removed
-        for section, value in dumped.items():
-            if isinstance(value, dict):
-                current[section] = _deep_merge(current.get(section, {}), value)
-            else:
-                current[section] = value
-        try:
-            new_config = type(app.config).model_validate(current)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(400, str(exc)) from exc
+        if body.base_revision is None:
+            raise HTTPException(409, "settings revision is required; reload and try again")
+        report, new_config = validate_candidate(app.config, _settings_candidate(body), base_revision=body.base_revision)
+        if report.stale:
+            raise HTTPException(409, {"message": "settings changed in another window", "current_revision": report.base_revision})
+        if not report.valid or new_config is None:
+            raise HTTPException(400, {"problems": [problem.model_dump(mode="json") for problem in report.problems]})
         switching_to_topics = app.front is not None and app.front.private_mode() and new_config.telegram.session_mode() == "topics"
-        await app.save_config(new_config)
+        try:
+            await app.save_config(new_config, expected_revision=body.base_revision)
+        except ConfigConflict as exc:
+            raise HTTPException(409, {"message": str(exc), "current_revision": exc.current_revision}) from exc
         await manager.providers.close_retired()
         if app.front is not None:
             app.front.config = new_config
