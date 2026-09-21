@@ -1065,6 +1065,12 @@ class SessionManager:
         writes to the durable log. What the host itself raises about a session — a compaction's
         progress, a change to the steer queue — has no place in that log and takes this door.
         """
+        envelope = await self.events.publish_session(
+            session_id,
+            event,
+            history_rewrite=getattr(event, "type", None) is HostEventType.HISTORY_CUT,
+        )
+        event.payload["_session_envelope"] = envelope
         for sink in self._sinks:
             try:
                 await sink(session_id, event)
@@ -2845,6 +2851,8 @@ class SessionManager:
         durable.payload.setdefault("tenant_id", TENANT)
         durable.payload.setdefault("event_type", event.type.value)
         await self.events.emit(durable)
+        envelope = await self.events.publish_session(state.session.id, event)
+        event.payload["_session_envelope"] = envelope
         for sink in self._sinks:
             try:
                 await sink(state.session.id, event)

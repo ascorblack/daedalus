@@ -1438,13 +1438,18 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.get("/api/sessions/{session_id}/events")
     async def session_events(session_id: str, after: int = 0, limit: int = 500, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         state = await manager.get_state(session_id)
-        if state is None or state.run_id is None:
-            return {"run_id": None, "events": [], "last_seq": after}
-        rows = await manager.events.list_events(state.run_id, after_seq=after, limit=limit)
+        if state is None:
+            raise HTTPException(404, "no such session")
+        replay = await manager.events.session_replay(session_id, after=after, limit=limit)
+        events = [
+            {**item, "seq": item["event_seq"], "type": item["kind"]}
+            for item in replay["events"]
+        ]
         return {
+            **replay,
             "run_id": state.run_id,
-            "events": [{"seq": seq, "type": e.name, "payload": e.payload} for seq, e in rows],
-            "last_seq": rows[-1][0] if rows else after,
+            "events": events,
+            "last_seq": events[-1]["event_seq"] if events else after,
         }
 
     @api.get("/api/sessions/{session_id}/stream")
@@ -1454,8 +1459,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such session")
 
         async def gen():  # type: ignore[no-untyped-def]
-            queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=512)
+            queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=512)
             overflowed = False
+            raw_after = request.query_params.get("after") or request.headers.get("last-event-id") or "0"
+            try:
+                after = max(0, int(raw_after))
+            except ValueError:
+                after = 0
 
             async def sink(sid: str, event: Any) -> None:
                 nonlocal overflowed
@@ -1463,25 +1473,51 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                     if overflowed:
                         return
                     try:
-                        queue.put_nowait((event.type.value, {**event.payload, "run_id": event.run_id}))
+                        envelope = dict(event.payload.get("_session_envelope") or {})
+                        if envelope:
+                            queue.put_nowait(envelope)
                     except asyncio.QueueFull:
                         overflowed = True
                         while not queue.empty():
                             queue.get_nowait()
-                        queue.put_nowait(("resync_required", {"reason": "slow_client"}))
+                        queue.put_nowait({"kind": "resync_required", "payload": {"reason": "slow_client"}})
 
             manager.add_sink(sink)
             try:
-                yield "event: hello\ndata: {}\n\n"
+                replay = await manager.events.session_replay(session_id, after=after)
+                watermark = int(replay["watermark"])
+                hello = {
+                    "session_id": session_id,
+                    "event_seq": watermark,
+                    "history_revision": replay["history_revision"],
+                    "runtime_epoch": replay["runtime_epoch"],
+                }
+                yield f"event: hello\ndata: {json.dumps(hello)}\n\n"
+                if replay["resync_required"]:
+                    payload = {k: v for k, v in replay.items() if k != "events"}
+                    yield f"event: resync_required\ndata: {json.dumps(payload)}\n\n"
+                    return
+                last_sent = after
+                for envelope in replay["events"]:
+                    last_sent = int(envelope["event_seq"])
+                    yield f"id: {last_sent}\nevent: {envelope['kind']}\ndata: {json.dumps(envelope, default=str)}\n\n"
                 while True:
                     if await request.is_disconnected():
                         return
                     try:
-                        name, payload = await asyncio.wait_for(queue.get(), timeout=15)
+                        envelope = await asyncio.wait_for(queue.get(), timeout=15)
                     except TimeoutError:
                         yield ": keepalive\n\n"
                         continue
-                    yield f"event: {name}\ndata: {json.dumps(payload, default=str)}\n\n"
+                    name = str(envelope.get("kind") or "")
+                    sequence = int(envelope.get("event_seq") or 0)
+                    ephemeral = "ephemeral" in envelope
+                    if not ephemeral and sequence <= max(last_sent, watermark):
+                        continue
+                    if not ephemeral:
+                        last_sent = sequence
+                    event_id = f"id: {sequence}\n" if not ephemeral else ""
+                    yield f"{event_id}event: {name}\ndata: {json.dumps(envelope, default=str)}\n\n"
                     if name == "resync_required":
                         return
             finally:

@@ -116,4 +116,8 @@ async def test_retry_api_and_reasoning_off(settings: Settings, db: Database) -> 
         cut = await client.post(f"{base}/revert", json={"seq": seqs[0]})
         assert cut.status_code == 200
         assert (await client.get(base)).json()["messages"] == []
+        replay = (await client.get(f"{base}/events", params={"after": 0})).json()
+        assert replay["history_revision"] == 2
+        assert replay["events"][-1]["kind"] == "history_cut"
+        assert replay["events"][-1]["event_seq"] == replay["last_seq"]
     await manager.close()
