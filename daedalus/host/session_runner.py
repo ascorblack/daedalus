@@ -60,6 +60,7 @@ from daedalus.providers.registry import ProviderRegistry
 from daedalus.security import redact
 from daedalus.stores.blobs import FileBlobStore
 from daedalus.stores.database import Database
+from daedalus.stores.media import MediaStore
 from daedalus.stores.persistent import PersistentMemory, PersistentWorkspace
 from daedalus.stores.projects import Project, ProjectSettings, ProjectStore
 from daedalus.stores.sqlite import (
@@ -348,7 +349,9 @@ class SessionManager:
         self.settings = settings
         self.config = config
         self.db = db
-        self.sessions = SqliteSessionStore(db, view=TranscriptViewBuilder())
+        self.blobs = FileBlobStore(settings.blobs_dir)
+        self.media = MediaStore(db, self.blobs)
+        self.sessions = SqliteSessionStore(db, view=TranscriptViewBuilder(), media=self.media)
         self.runs = SqliteRunStore(db)
         self.events = SqliteEventStream(db)
         self.usage = SqliteUsageSink(db)
@@ -362,7 +365,6 @@ class SessionManager:
             home=Path.home(),
         )
         self.checkpoint_retention = CheckpointRetention(db, workspaces_dir=settings.workspaces_dir, busy=self.busy_sessions, occupants=self.store_occupants)
-        self.blobs = FileBlobStore(settings.blobs_dir)
         self.memory = PersistentMemory(db)
         self.workspace_units = PersistentWorkspace(db)
         self.skills = DirectorySkillStore(settings.skills_dir)
@@ -1439,7 +1441,10 @@ class SessionManager:
                 if m.metadata.get("daedalus.archived"):
                     archived.update(int(x) for x in (m.metadata["daedalus.archived"].get("seqs") or []))
             before = [m for m in rows if int(m.metadata.get("daedalus.seq", 0)) < seq and int(m.metadata.get("daedalus.seq", 0)) not in reverted and m.metadata.get("daedalus.origin") != "revert"]
-            transcript = [m.model_copy(update={"metadata": {k: v for k, v in m.metadata.items() if k != "daedalus.seq"}}) for m in before]
+            transcript = []
+            for original in before:
+                copied = original.model_copy(update={"metadata": {k: v for k, v in original.metadata.items() if k != "daedalus.seq"}})
+                transcript.append(await self.media.clone_references(source_id, target.session.id, copied))
             await self.sessions.append_transcript(target.session.id, transcript)
             keys = [self.sessions.transcript_key(m) for m in transcript]
             new_seqs = await self.sessions.transcript_seqs(target.session.id, keys)
@@ -1658,6 +1663,7 @@ class SessionManager:
             tool_timeout_seconds=self.config.limits.tool_timeout_seconds,
             max_tool_output_chars=self.config.tools.exec.max_output_chars,
             send_file=_bind(hooks.get("send_file"), state.session.id),
+            attach_media=lambda items, layout: self.media.stage(state.session.id, state.run_id or "", items, layout=layout),
             spawn_agent=_bind(hooks.get("spawn_agent"), state.session.id),
             schedule=hooks.get("schedule"),
             self_propose=hooks.get("self_propose"),

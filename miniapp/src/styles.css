@@ -1057,6 +1057,37 @@ body.resizing iframe { pointer-events: none; }
 .preview-image { display: block; max-width: 100%; max-height: 78vh; margin: 0 auto; border-radius: var(--radius-sm); object-fit: contain; }
 .preview-frame { width: 100%; flex: 1; min-height: 60vh; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; }
 .preview-media { width: 100%; max-height: 70vh; border-radius: var(--radius-sm); }
+
+/* Media is part of the answer's reading order. The viewer alone escapes that column. */
+.answer-with-media { display:flex; flex-direction:column; gap:12px; }
+.answer-with-media > div:not(.inline-media) { min-width:0; }
+.inline-media { display:grid; gap:6px; max-width:760px; }
+.inline-media.album { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.inline-media.album > :only-child { grid-column:1/-1; }
+.inline-media-image { appearance:none; border:0; padding:0; margin:0; color:var(--fg); background:var(--surface-2); border-radius:var(--radius-md); overflow:hidden; text-align:left; cursor:zoom-in; min-height:var(--row-h-touch); }
+.inline-media-image img { display:block; width:100%; max-height:min(55dvh,420px); object-fit:contain; background:var(--bg); }
+.inline-media-image span,.inline-media-player figcaption { display:block; padding:7px 9px; color:var(--fg-2); font-size:var(--fs-12); line-height:1.35; }
+.inline-media-player { margin:0; max-width:760px; border:1px solid var(--line); border-radius:var(--radius-md); overflow:hidden; background:var(--surface-2); }
+.inline-media-player video { display:block; width:100%; max-height:min(60dvh,520px); background:#000; }
+.inline-media-player.audio { padding-top:8px; }
+.inline-media-player audio { display:block; width:calc(100% - 16px); margin:0 8px; }
+.inline-media-loading { min-height:var(--row-h-touch); aspect-ratio:16/9; border-radius:var(--radius-md); background:var(--surface-2); animation:media-pulse 1.2s ease-in-out infinite alternate; }
+.inline-media-error { min-height:var(--row-h-touch); width:100%; max-width:760px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--surface-2); color:var(--fg-2); cursor:pointer; }
+@keyframes media-pulse { to { opacity:.55; } }
+.sheet.media-viewer { width:min(1500px,100vw); height:min(100dvh,1000px); max-height:100dvh; border-radius:0; }
+.media-viewer .sheet-body { display:flex; flex-direction:column; min-height:0; padding:0; overflow:hidden; }
+.media-count { margin-left:auto; color:var(--fg-2); font-variant-numeric:tabular-nums; }
+.media-viewer-stage { flex:1; min-height:0; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#050607; touch-action:none; user-select:none; }
+.media-viewer-stage img { max-width:100%; max-height:100%; object-fit:contain; transform-origin:center; transition:transform 80ms linear; }
+.media-viewer-tools { min-height:var(--row-h-touch); display:flex; align-items:center; justify-content:center; gap:8px; padding:6px max(8px,env(safe-area-inset-right)) max(6px,env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left)); }
+.media-viewer-tools .btn { min-height:var(--row-h-touch); }
+@media (max-width:560px) {
+  .inline-media.album { gap:4px; }
+  .sheet.media-viewer { width:100vw; height:100dvh; }
+  .media-viewer-tools { justify-content:space-between; }
+  .media-viewer-tools .btn { padding-inline:9px; }
+}
+@media (prefers-reduced-motion:reduce) { .inline-media-loading { animation:none; } .media-viewer-stage img { transition:none; } }
 .preview-doc { font-size: var(--fs-prose); line-height: var(--lh-prose); }
 .preview-doc.docx img { max-width: 100%; height: auto; }
 .preview-doc.docx table { border-collapse: collapse; margin: 0 0 10px; }

@@ -110,9 +110,10 @@ class TranscriptView(Protocol):
 
 
 class SqliteSessionStore(ISessionStore):
-    def __init__(self, db: Database, *, view: TranscriptView | None = None) -> None:
+    def __init__(self, db: Database, *, view: TranscriptView | None = None, media: Any | None = None) -> None:
         self._db = db
         self._view = view
+        self._media = media
 
     async def create(self, session: Session, *, project_id: str | None = None) -> None:
         if project_id is None:
@@ -244,9 +245,8 @@ class SqliteSessionStore(ISessionStore):
         # here. Asking which keys are present is one indexed query; without it every round
         # serialised — and, since the view is built here, redacted — a history's worth of
         # messages to write one. INSERT OR IGNORE below still settles a race.
-        if len(candidates) > 1:
-            present = await self.transcript_keys_present(session_id, [key for key, _ in candidates])
-            candidates = [(key, message) for key, message in candidates if key not in present]
+        present = await self.transcript_keys_present(session_id, [key for key, _ in candidates])
+        candidates = [(key, message) for key, message in candidates if key not in present]
         if not candidates:
             return 0
         added = 0
@@ -254,6 +254,8 @@ class SqliteSessionStore(ISessionStore):
         async with self._db.transaction() as conn:
             # UNIQUE(session_id, key) + INSERT OR IGNORE is the dedup; rowcount says whether the row is new.
             for key, message in candidates:
+                if self._media is not None:
+                    message = await self._media.bind_message(conn, session_id, key, message)
                 cursor = await conn.execute(
                     "INSERT OR IGNORE INTO transcript(session_id, key, message, view, view_key) VALUES (?, ?, ?, ?, ?)",
                     (session_id, key, message.model_dump_json(), *self._view_of(message)),
@@ -572,6 +574,8 @@ class SqliteSessionStore(ISessionStore):
             await conn.execute("DELETE FROM snapshots WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?) AND julianday(created_at) >= julianday(?)", (session_id, cut_at))
             await conn.execute("DELETE FROM checkpoints WHERE session_id = ? AND (seq >= ? OR julianday(at) >= julianday(?))", (session_id, seq, cut_at))
+            if self._media is not None:
+                await self._media.drop_tail(conn, session_id, seq)
             await conn.execute("DELETE FROM transcript_fts WHERE rowid IN (SELECT seq FROM transcript WHERE session_id = ? AND seq >= ?)", (session_id, seq))
             await conn.execute("DELETE FROM transcript WHERE session_id = ? AND seq >= ?", (session_id, seq))
             await conn.execute("DELETE FROM session_messages WHERE session_id = ? AND tenant_id = ?", (session_id, tenant_id))
@@ -758,6 +762,8 @@ class SqliteEventStream(IEventStream):
         self._subscribers: dict[str, list[asyncio.Queue[Event | None]]] = {}
         self._session_of_run: dict[str, str] = {}
 
+    SUBSCRIBER_CAP = 512
+
     def bind_run(self, run_id: str, session_id: str) -> None:
         self._session_of_run[run_id] = session_id
 
@@ -802,7 +808,7 @@ class SqliteEventStream(IEventStream):
         tenant_id = str(event.payload.get("tenant_id") or "default")
         if event.name in self.LIVE_ONLY:
             for queue in list(self._subscribers.get(event.run_id, [])):
-                queue.put_nowait(event)
+                self._offer(queue, event)
             return
         if event.name == "state_snapshot":
             snapshot = event.payload.get("snapshot") or {}
@@ -833,12 +839,22 @@ class SqliteEventStream(IEventStream):
             ),
         )
         for queue in list(self._subscribers.get(event.run_id, [])):
+            self._offer(queue, event)
+
+    @staticmethod
+    def _offer(queue: asyncio.Queue[Event | None], event: Event) -> None:
+        """A slow observer resubscribes from durable events; it never backpressures the agent loop."""
+        try:
             queue.put_nowait(event)
+        except asyncio.QueueFull:
+            while not queue.empty():
+                queue.get_nowait()
+            queue.put_nowait(None)
 
     async def subscribe(
         self, run_id: str, tenant_id: str, *, from_event_id: str | None = None
     ) -> AsyncIterator[Event]:
-        queue: asyncio.Queue[Event | None] = asyncio.Queue()
+        queue: asyncio.Queue[Event | None] = asyncio.Queue(maxsize=self.SUBSCRIBER_CAP)
         self._subscribers.setdefault(run_id, []).append(queue)
         try:
             rows = await self._db.fetchall(

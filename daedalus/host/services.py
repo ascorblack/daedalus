@@ -19,6 +19,7 @@ from daedalus.host.policy import sealed_root
 
 ProgressFn = Callable[[str], Awaitable[None]]
 SendFileFn = Callable[[Path, str | None], Awaitable[str]]
+AttachMediaFn = Callable[[list[dict[str, str]], str], Awaitable[dict[str, Any]]]
 ScheduleFn = Callable[..., Awaitable[Any]]
 SelfDevFn = Callable[..., Awaitable[str]]
 
@@ -36,6 +37,7 @@ class SessionServices:
     max_tool_output_chars: int = 60_000
     progress: ProgressFn | None = None
     send_file: SendFileFn | None = None
+    attach_media: AttachMediaFn | None = None
     schedule: ScheduleFn | None = None
     self_propose: SelfDevFn | None = None
     self_apply: SelfDevFn | None = None

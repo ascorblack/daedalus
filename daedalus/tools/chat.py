@@ -35,6 +35,37 @@ async def send_file(context: ToolContext, path: str, caption: str | None = None)
 
 
 @tool(
+    name="AttachMedia",
+    description=(
+        "Attach images, a picture album, video, audio or a GIF inside the final answer. Each item is "
+        "{path, alt, caption}; paths are workspace-relative. Use layout=album only for 2-10 still images, "
+        "otherwise use single with one item. The result contains one Markdown line: copy that line into "
+        "the final answer exactly where the media should appear. This prepares the media; do not also SendFile it."
+    ),
+)
+async def attach_media(context: ToolContext, items: list[dict[str, str]], layout: str = "single") -> ToolResult:
+    services = services_for(context)
+    if services.attach_media is None:
+        return error(context, "inline media is not available in this session")
+    resolved: list[dict[str, str]] = []
+    for item in items:
+        raw = str(item.get("path") or "").strip()
+        if not raw:
+            return error(context, "every media item needs a path")
+        target = services.resolve(raw)
+        if refusal := refuse_protected(context, services, target, "attached"):
+            return refusal
+        if not target.is_file():
+            return error(context, f"no such file: {target}")
+        resolved.append({"path": str(target), "alt": str(item.get("alt") or ""), "caption": str(item.get("caption") or "")})
+    try:
+        attached = await services.attach_media(resolved, layout)
+    except (OSError, ValueError) as exc:
+        return error(context, str(exc))
+    return ok(context, f"media prepared ({attached['kind']}). Put this line in the final answer:\n\n{attached['markdown']}", presentation_id=attached["id"])
+
+
+@tool(
     name="SpawnAgent",
     description=(
         "Create an independent agent: a new session (its own chat topic and workspace) that keeps a brief "
@@ -87,6 +118,6 @@ async def spawn_agent(
     return ok(context, f"agent '{title}' created as session {session_id}" + extras, session_id=session_id)
 
 
-TOOLS = [send_file, spawn_agent]
+TOOLS = [send_file, attach_media, spawn_agent]
 
 __all__ = ["TOOLS"]

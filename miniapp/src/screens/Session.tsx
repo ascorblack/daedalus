@@ -13,6 +13,7 @@ import { Explorer } from "../explorerpanel";
 import { DiffView } from "../previewparts";
 import { looksLikeDiff } from "../diff";
 import { ArtifactCard } from "../artifact";
+import { InlineMedia, mediaCopyText, splitMediaAnswer } from "../media";
 import { Answer, Composer, ComposerHandle } from "../composerbox";
 import { Approval, QueuedSteer, pendingApproval, readSteers, steersAfter } from "../composer";
 import { ModelChoice } from "../modelselect";
@@ -457,15 +458,24 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             buffer += decoder.decode(value, { stream: true });
             const frames = buffer.split("\n\n");
             buffer = frames.pop() ?? "";
+            let resync = false;
             for (const frame of frames) {
               const event = /^event: (.*)$/m.exec(frame)?.[1];
               const data = /^data: (.*)$/m.exec(frame)?.[1];
               if (!event || !data) continue;
+              if (event === "resync_required") {
+                resync = true;
+                break;
+              }
               try {
                 handle(event, JSON.parse(data));
               } catch {
                 /* one malformed frame must not end the stream */
               }
+            }
+            if (resync) {
+              await reader.cancel();
+              break;
             }
           }
         } catch {
@@ -1224,6 +1234,11 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
   const steps = stepCount(turn.activity);
   const activeTool = live ? [...turn.activity].reverse().find((item) => item.kind === "tool" && item.running) as ToolItem | undefined : undefined;
   const activeAction = activeTool ? describe(activeTool) : null;
+  const currentAction = activeAction
+    ? `${activeAction.verb}${activeAction.detail ? ` · ${activeAction.detail}` : ""}`
+    : live
+      ? t(turn.answer ? "session.status.responding" : "session.status.preparing")
+      : "";
   // History deletion is available even when the optional file checkpoint has expired.
   const canRevert = turn.user?.seq != null;
   const seq = turn.user?.seq ?? null;
@@ -1267,7 +1282,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
             <i />
           </span>
           <span className="worked">{t(live ? "session.activity" : "session.worked", { t: duration(elapsed) })}</span>
-          {activeAction && <span className="activity-current truncate">{activeAction.verb}{activeAction.detail ? ` · ${activeAction.detail}` : ""}</span>}
+          {currentAction && <span className="activity-current truncate">{currentAction}</span>}
           {steps > 0 && <span className="steps">{plural("session.steps", steps)}</span>}
           {families && <span className="families truncate" title={families}>· {families}</span>}
           <Chevron open={open} />
@@ -1280,7 +1295,13 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
         </div>
       )}
       {turn.fallback && (turn.answer || live) && <FallbackChip fallback={turn.fallback} />}
-      {turn.answer && <Md className={`answer ${live ? "streaming" : ""}`} text={turn.answer} cacheKey={live ? undefined : `a${turn.key}`} />}
+      {turn.answer && (turn.media?.length ? (
+        <div className={`answer answer-with-media ${live ? "streaming" : ""}`}>
+          {splitMediaAnswer(turn.answer, turn.media).map((part, index) => part.kind === "text"
+            ? <Md key={`text-${index}`} text={part.text} cacheKey={live ? undefined : `a${turn.key}-${index}`} />
+            : <InlineMedia key={part.presentation.id} sessionId={sessionId} presentation={part.presentation} />)}
+        </div>
+      ) : <Md className={`answer ${live ? "streaming" : ""}`} text={turn.answer} cacheKey={live ? undefined : `a${turn.key}`} />)}
       {artifacts.length > 0 && (
         <div className="artifacts" aria-label={t("turn.artifacts")}>
           {artifacts.map((a) => {
@@ -1293,7 +1314,7 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
       )}
       {turn.answer && !live && (
         <MessageActions
-          text={turn.answer}
+          text={mediaCopyText(turn.answer, turn.media ?? [])}
           actions={[
             ...(seq ? [{ icon: "link" as IconName, label: t("turn.link"), onSelect: copyLink }] : []),
             ...(turn.answerSeq && onTurnAction ? [{ icon: "reload" as IconName, label: t("turn.retry"), onSelect: () => onTurnAction("retry", turn.answerSeq!) }] : []),
@@ -1496,6 +1517,8 @@ function describe(item: ToolItem, workspace?: string): { verb: string; family: s
       return { verb: verb("SendFile", r), family: "SendFile", detail: base(str("path")), icon: "attach" };
     case "ImageView":
       return { verb: verb("ImageView", r), family: "ImageView", detail: `${base(str("path"))}${str("task") ? " · " + str("task").slice(0, 60) : ""}`, icon: "image" };
+    case "AttachMedia":
+      return { verb: verb("AttachMedia", r), family: "media", detail: `${Array.isArray(a.items) ? a.items.length : 1}`, icon: "image" };
     case "AskUser":
       return { verb: t("tool.AskUser"), family: "AskUser", detail: "", icon: "question" };
     case "Skill":
@@ -1610,7 +1633,7 @@ function ToolGroup({ family, group }: { family: string; group: ToolItem[] }) {
 }
 
 /** "Read 3 files", "Прочитал 3 файла" — the whole line, because the count sits inside it. */
-const GROUPED = ["Exec", "Read", "Write", "Edit", "search", "WebFetch", "SendFile"];
+const GROUPED = ["Exec", "Read", "Write", "Edit", "search", "WebFetch", "SendFile", "media"];
 
 function groupVerb(family: string, running: boolean, n: number, name: string): string {
   if (!GROUPED.includes(family)) return plural(`tool.group.other${running ? "" : ".done"}`, n, { name });

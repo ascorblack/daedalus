@@ -15,6 +15,7 @@ class FakeOutbox:
         self.sent: list[tuple[str, bool]] = []
         self.edits: list[tuple[int, str]] = []
         self.documents: list[Path] = []
+        self.media: list[tuple[str, object, str | None]] = []
 
     async def send_text(self, text: str, *, markdown: bool = True) -> int:
         self.sent.append((text, markdown))
@@ -30,6 +31,26 @@ class FakeOutbox:
     async def send_document(self, path: Path, caption: str | None = None) -> int:
         self.documents.append(path)
         return 99
+
+    async def send_photo(self, path: Path, caption: str | None = None) -> int:
+        self.media.append(("photo", path, caption))
+        return 100
+
+    async def send_video(self, path: Path, caption: str | None = None) -> int:
+        self.media.append(("video", path, caption))
+        return 101
+
+    async def send_audio(self, path: Path, caption: str | None = None) -> int:
+        self.media.append(("audio", path, caption))
+        return 102
+
+    async def send_animation(self, path: Path, caption: str | None = None) -> int:
+        self.media.append(("animation", path, caption))
+        return 103
+
+    async def send_album(self, paths: list[Path], caption: str | None = None) -> list[int]:
+        self.media.append(("album", paths, caption))
+        return list(range(104, 104 + len(paths)))
 
     async def delete(self, message_id: int) -> None:
         return None
@@ -131,6 +152,7 @@ def test_evidence_tags_become_readable_text() -> None:
     assert flatten_evidence('<run id="v12" label="14 passed"/> now') == "14 passed (run v12) now"
     assert flatten_evidence('<run id="job-3-1"/>') == "run job-3-1"
     assert flatten_evidence("a <b>bold</b> tag and <file/> stay out of it") == "a <b>bold</b> tag and <file/> stay out of it"
+    assert flatten_evidence("before\n\n![screen](daedalus-media:11111111-1111-1111-1111-111111111111)\n\nafter") == "before\n\nafter"
 
 
 async def test_the_final_answer_carries_no_raw_evidence_tags(tmp_path: Path) -> None:

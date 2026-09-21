@@ -2,6 +2,7 @@
 
 from daedalus.stores.blobs import FileBlobStore
 from daedalus.stores.database import Database
+from daedalus.stores.media import MediaStore
 from daedalus.stores.sqlite import (
     SqliteEventStream,
     SqliteRunStore,
@@ -12,6 +13,7 @@ from daedalus.stores.sqlite import (
 __all__ = [
     "Database",
     "FileBlobStore",
+    "MediaStore",
     "SqliteEventStream",
     "SqliteRunStore",
     "SqliteSessionStore",

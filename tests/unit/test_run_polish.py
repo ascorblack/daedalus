@@ -84,6 +84,31 @@ async def test_delivery_failure_is_recorded_not_swallowed(tmp_path: Path) -> Non
     assert (tmp_path / "answer.md").exists()
 
 
+async def test_ready_inline_media_is_delivered_by_native_telegram_type(front: TelegramFront, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = [tmp_path / name for name in ("one.png", "two.png", "clip.mp4", "voice.mp3", "loop.gif")]
+    for path in files:
+        path.write_bytes(b"content")
+
+    async def ready_for_run(session_id: str, run_id: str) -> list[dict[str, Any]]:
+        assert (session_id, run_id) == ("session", "run")
+        return [
+            {"id": "album", "layout": "album", "items": [{"path": str(files[0]), "caption": "A"}, {"path": str(files[1]), "caption": "B"}]},
+            {"id": "video", "layout": "single", "items": [{"path": str(files[2]), "kind": "video", "caption": "V"}]},
+            {"id": "audio", "layout": "single", "items": [{"path": str(files[3]), "kind": "audio", "caption": "S"}]},
+            {"id": "animation", "layout": "single", "items": [{"path": str(files[4]), "kind": "animation", "caption": "G"}]},
+        ]
+
+    monkeypatch.setattr(front.manager.media, "ready_for_run", ready_for_run)
+    outbox = FakeOutbox()
+    assert await front._deliver_inline_media("session", "run", outbox)
+    assert outbox.media == [
+        ("album", files[:2], "A"),
+        ("video", files[2], "V"),
+        ("audio", files[3], "S"),
+        ("animation", files[4], "G"),
+    ]
+
+
 def test_flood_budget_is_per_chat() -> None:
     note_flood(-42, 0.2)
     assert flooded(-42) and not flooded(-43)

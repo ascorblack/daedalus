@@ -327,9 +327,10 @@ class Scheduler:
         self._maintained_at = now
         try:
             dropped = await self.app.manager.events.prune(keep_days=ops.events_keep_days, max_rows=ops.events_max_rows)
+            abandoned_media = await self.app.manager.media.prune_staged()
             pages = await self.app.db.reclaim()
-            if dropped or pages:
-                logger.warning("database maintenance: %d event rows dropped, %d pages reclaimed", dropped, pages)
+            if dropped or abandoned_media or pages:
+                logger.warning("database maintenance: %d event rows and %d abandoned media dropped, %d pages reclaimed", dropped, abandoned_media, pages)
             self._start_retention()
         except Exception:  # noqa: BLE001 — housekeeping must never take the tick down
             logger.exception("database maintenance failed")

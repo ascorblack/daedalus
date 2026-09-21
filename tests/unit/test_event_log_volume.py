@@ -19,6 +19,20 @@ def _event(name: str, run_id: str = "r1", **payload: object) -> Event:
     return Event(id=f"{name}-{id(payload)}", run_id=run_id, name=name, payload=dict(payload))
 
 
+def test_a_slow_live_subscriber_is_disconnected_instead_of_blocking_the_run() -> None:
+    queue: asyncio.Queue[Event | None] = asyncio.Queue(maxsize=2)
+    first = _event("content_block_delta", delta={"text": "one"})
+    second = _event("content_block_delta", delta={"text": "two"})
+    overflow = _event("content_block_delta", delta={"text": "three"})
+    SqliteEventStream._offer(queue, first)
+    SqliteEventStream._offer(queue, second)
+
+    SqliteEventStream._offer(queue, overflow)
+
+    assert queue.qsize() == 1
+    assert queue.get_nowait() is None
+
+
 async def test_streaming_fragments_reach_the_watcher_and_not_the_disk(db: Database) -> None:
     events = SqliteEventStream(db)
     seen: list[str] = []

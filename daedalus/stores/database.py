@@ -664,6 +664,37 @@ CREATE TABLE search_titles (
 """)
 
 
+MIGRATIONS.append("""
+CREATE TABLE media_presentations (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
+    layout TEXT NOT NULL CHECK(layout IN ('single', 'album')),
+    state TEXT NOT NULL CHECK(state IN ('staged', 'ready')),
+    message_key TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX media_presentations_by_session ON media_presentations(session_id, created_at);
+CREATE INDEX media_presentations_by_run ON media_presentations(session_id, run_id, state);
+CREATE TABLE media_items (
+    id TEXT PRIMARY KEY,
+    presentation_id TEXT NOT NULL REFERENCES media_presentations(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    blob_ref TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('image', 'animation', 'video', 'audio')),
+    mime_type TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    byte_size INTEGER NOT NULL,
+    width INTEGER,
+    height INTEGER,
+    alt TEXT NOT NULL DEFAULT '',
+    caption TEXT NOT NULL DEFAULT '',
+    UNIQUE(presentation_id, ordinal)
+);
+CREATE INDEX media_items_by_blob ON media_items(blob_ref);
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""

@@ -6,7 +6,7 @@
 // arriving re-renders one turn instead of six hundred. And the live turn is merged separately, so
 // the history is not rebuilt to show a word.
 
-import type { MessageView, ModelFallback } from "./api";
+import type { MediaPresentation, MessageView, ModelFallback } from "./api";
 
 export type LiveTool = { id: string; name: string; args: string; result?: string; error?: boolean; startedAt?: number; endedAt?: number };
 /**
@@ -45,6 +45,7 @@ export type Turn = {
   /** The model that wrote this turn's answer, and what it stood in for when it was not the configured one. */
   model?: string;
   fallback?: ModelFallback | null;
+  media?: MediaPresentation[];
 };
 
 /** The trailing retrieval headline ⟦…⟧ is for the transcript index, not for the reader; a half-streamed one is cut too. */
@@ -126,7 +127,8 @@ export function buildTurns(messages: MessageView[], previous: readonly Turn[] = 
     // and finished on another is answered by the one that finished it, which is the one the reader read.
     current.model = m.model || current.model;
     current.fallback = m.fallback ?? null;
-    mark(`m${m.seq ?? i}:${m.text.length}:${m.thinking.length}:${m.model ?? ""}:${m.fallback?.reason ?? ""}:${m.run_id ?? ""}`);
+    current.media = m.media?.length ? m.media : current.media;
+    mark(`m${m.seq ?? i}:${m.text.length}:${m.thinking.length}:${m.model ?? ""}:${m.fallback?.reason ?? ""}:${m.run_id ?? ""}:${m.media?.map((p) => p.id).join(",") ?? ""}`);
     if (current.answer) {
       // Text that turned out not to be final becomes a note.
       current.activity.push({ kind: "note", text: current.answer, seq: current.answerSeq });

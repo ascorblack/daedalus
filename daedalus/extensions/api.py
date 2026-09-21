@@ -79,6 +79,7 @@ from daedalus.speech.tts_engine import MAX_SPEED, MIN_SPEED, TtsError
 from daedalus.speech.tts_service import MEDIA_TYPE_HEADER, SEQUENCE_TYPE
 from daedalus.speech.tts_service import frame as speech_frame
 from daedalus.stores import pairing, passkeys
+from daedalus.stores.media import MEDIA_TENANT
 from daedalus.stores.projects import ProjectError, ProjectSettings
 from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
@@ -865,7 +866,7 @@ _TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("MCP", ("Mcp",)),
     ("Memory & history", ("Remember", "Recall", "Forget", "History", "Skill")),
     ("Web", ("Web",)),
-    ("Files & shell", ("Exec", "Job", "Read", "Write", "Edit", "MultiEdit", "Find", "Search", "SendFile", "ImageView", "Verify")),
+    ("Files & shell", ("Exec", "Job", "Read", "Write", "Edit", "MultiEdit", "Find", "Search", "SendFile", "AttachMedia", "ImageView", "Verify")),
 )
 
 
@@ -1453,11 +1454,21 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such session")
 
         async def gen():  # type: ignore[no-untyped-def]
-            queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+            queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=512)
+            overflowed = False
 
             async def sink(sid: str, event: Any) -> None:
+                nonlocal overflowed
                 if sid == session_id:
-                    queue.put_nowait((event.type.value, {**event.payload, "run_id": event.run_id}))
+                    if overflowed:
+                        return
+                    try:
+                        queue.put_nowait((event.type.value, {**event.payload, "run_id": event.run_id}))
+                    except asyncio.QueueFull:
+                        overflowed = True
+                        while not queue.empty():
+                            queue.get_nowait()
+                        queue.put_nowait(("resync_required", {"reason": "slow_client"}))
 
             manager.add_sink(sink)
             try:
@@ -1471,6 +1482,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                         yield ": keepalive\n\n"
                         continue
                     yield f"event: {name}\ndata: {json.dumps(payload, default=str)}\n\n"
+                    if name == "resync_required":
+                        return
             finally:
                 manager._sinks.remove(sink)
 
@@ -1515,6 +1528,36 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                         raise HTTPException(404, "the file is gone")
                     return FileResponse(target, media_type=mimetypes.guess_type(target.name)[0] or "application/octet-stream", filename=target.name, headers={"Access-Control-Allow-Origin": "https://web.telegram.org"})
         raise HTTPException(404, "no such call")
+
+    @api.post("/api/media/access")
+    async def media_access(request: Request, _: dict[str, Any] = Depends(auth)) -> JSONResponse:
+        """Give native audio/video elements the same authenticated browser session as API fetches."""
+        response = JSONResponse({"ok": True})
+        await sign_in(response, request)
+        return response
+
+    @api.get("/api/sessions/{session_id}/media/{presentation_id}/{item_id}/content")
+    async def media_content(
+        session_id: str,
+        presentation_id: str,
+        item_id: str,
+        _: dict[str, Any] = Depends(auth),
+    ) -> FileResponse:
+        if await manager.get_state(session_id) is None:
+            raise HTTPException(404, "no such session")
+        item = await manager.media.item(session_id, presentation_id, item_id)
+        if item is None:
+            raise HTTPException(404, "no such media")
+        path = manager.blobs.path_of(MEDIA_TENANT, str(item["blob_ref"]))
+        if not path.is_file():
+            raise HTTPException(410, "media bytes are gone")
+        return FileResponse(
+            path,
+            media_type=str(item["mime_type"]),
+            filename=str(item["filename"]),
+            content_disposition_type="inline",
+            headers={"Cache-Control": "private, max-age=31536000, immutable", "X-Content-Type-Options": "nosniff"},
+        )
 
     @api.post("/api/sessions/{session_id}/messages")
     async def send_message(session_id: str, body: SendMessageBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

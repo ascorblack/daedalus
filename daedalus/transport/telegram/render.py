@@ -38,6 +38,7 @@ _TOOL_ICONS = {
     "WebFetch": "🌐",
     "WebSearch": "🌐",
     "SendFile": "📎",
+    "AttachMedia": "🖼",
     "ImageView": "🖼",
     "AskUser": "❓",
     "Remember": "🧠",
@@ -50,6 +51,7 @@ _TOOL_ICONS = {
 
 _EVIDENCE_RE = re.compile(r"<\s*(file|run)\s+([^<>]*?)/?\s*>")
 _ATTR_RE = re.compile(r"([a-z_]+)\s*=\s*\"([^\"]*)\"")
+_MEDIA_RE = re.compile(r"!\[[^\]\n]{0,500}\]\(daedalus-media:[0-9a-f-]{36}\)")
 
 
 def flatten_evidence(text: str) -> str:
@@ -74,7 +76,7 @@ def flatten_evidence(text: str) -> str:
             return label
         return f"{label} (run {run_id})" if label else f"run {run_id}"
 
-    return _EVIDENCE_RE.sub(one, text)
+    return re.sub(r"\n{3,}", "\n\n", _MEDIA_RE.sub("", _EVIDENCE_RE.sub(one, text))).strip()
 
 
 DEFAULT_EDIT_TIERS: tuple[tuple[float, float], ...] = ((60, 1), (300, 2), (900, 5), (0, 10))
@@ -92,6 +94,11 @@ class Outbox(Protocol):
     async def edit_text(self, message_id: int, text: str, *, html: bool = False) -> None: ...
     """Edit a message; ``html`` marks rich HTML rather than plain text."""
     async def send_document(self, path: Path, caption: str | None = None) -> int: ...
+    async def send_photo(self, path: Path, caption: str | None = None) -> int: ...
+    async def send_video(self, path: Path, caption: str | None = None) -> int: ...
+    async def send_audio(self, path: Path, caption: str | None = None) -> int: ...
+    async def send_animation(self, path: Path, caption: str | None = None) -> int: ...
+    async def send_album(self, paths: list[Path], caption: str | None = None) -> list[int]: ...
     async def delete(self, message_id: int) -> None: ...
     async def send_draft(self, draft_id: int, text: str) -> bool: ...
     """Show ``text`` as a live draft; returns False when drafts are not possible here."""

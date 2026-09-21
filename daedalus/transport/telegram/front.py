@@ -29,6 +29,7 @@ from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     InputRichMessage,
     Message,
     ReactionTypeEmoji,
@@ -311,6 +312,24 @@ class TelegramOutbox(Outbox):
             parse_mode=None,
         )
         return msg.message_id
+
+    async def send_video(self, path: Path, caption: str | None = None) -> int:
+        msg = await tg_call(self.bot.send_video, self.chat_id, FSInputFile(path), caption=(self.attributed(caption or "").strip() or None), message_thread_id=self.thread_id, parse_mode=None)
+        return msg.message_id
+
+    async def send_audio(self, path: Path, caption: str | None = None) -> int:
+        msg = await tg_call(self.bot.send_audio, self.chat_id, FSInputFile(path), caption=(self.attributed(caption or "").strip() or None), message_thread_id=self.thread_id, parse_mode=None)
+        return msg.message_id
+
+    async def send_animation(self, path: Path, caption: str | None = None) -> int:
+        msg = await tg_call(self.bot.send_animation, self.chat_id, FSInputFile(path), caption=(self.attributed(caption or "").strip() or None), message_thread_id=self.thread_id, parse_mode=None)
+        return msg.message_id
+
+    async def send_album(self, paths: list[Path], caption: str | None = None) -> list[int]:
+        head = self.attributed(caption or "").strip() or None
+        media = [InputMediaPhoto(media=FSInputFile(path), caption=head[:1000] if index == 0 and head else None) for index, path in enumerate(paths)]
+        messages = await tg_call(self.bot.send_media_group, self.chat_id, media=media, message_thread_id=self.thread_id)
+        return [message.message_id for message in messages]
 
     async def delete(self, message_id: int) -> None:
         try:
@@ -1968,9 +1987,37 @@ class TelegramFront:
         if final:
             await self.ledger.begin(run_id, session_id, final)
         await renderer.finish(status, workspace=state.workspace if state else Path("/tmp"), quiet=quiet)
+        if not quiet and status != "interrupted":
+            renderer.view.delivery_failed = not await self._deliver_inline_media(session_id, run_id, renderer.outbox) or renderer.view.delivery_failed
         if final:
             await self.ledger.settle(run_id, delivered=not renderer.view.delivery_failed, error="delivery failed" if renderer.view.delivery_failed else "")
         self._renderers.pop(session_id, None)
+
+    async def _deliver_inline_media(self, session_id: str, run_id: str, outbox: Outbox) -> bool:
+        """Deliver the media whose placeholders the renderer removed from the text answer."""
+        presentations = await self.manager.media.ready_for_run(session_id, run_id)
+        delivered = True
+        for presentation in presentations:
+            try:
+                items = presentation["items"]
+                if presentation["layout"] == "album":
+                    await outbox.send_album([Path(item["path"]) for item in items], items[0].get("caption") or None)
+                    continue
+                item = items[0]
+                path = Path(item["path"])
+                caption = item.get("caption") or None
+                if item["kind"] == "video":
+                    await outbox.send_video(path, caption)
+                elif item["kind"] == "audio":
+                    await outbox.send_audio(path, caption)
+                elif item["kind"] == "animation":
+                    await outbox.send_animation(path, caption)
+                else:
+                    await outbox.send_photo(path, caption)
+            except Exception:  # noqa: BLE001 — the text answer still reaches the chat; the app keeps the original
+                delivered = False
+                logger.exception("could not deliver inline media %s for run %s", presentation["id"], run_id)
+        return delivered
 
     async def redeliver_pending(self) -> int:
         """After a restart, re-send answers the previous process generated but never confirmed sent.

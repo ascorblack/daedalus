@@ -31,7 +31,7 @@ from daedalus.host import prompts
 from daedalus.host.prompts import split_headline
 from daedalus.security import redact
 
-VIEW_VERSION = 4
+VIEW_VERSION = 5
 """Bumped whenever the shape below changes; stored views from an older version are recomputed. It
 covers this file only — what the redactor masks is covered by the key, by value and by shape, so a
 new secret format does not depend on anyone remembering this number."""
@@ -120,6 +120,7 @@ def message_view(message: Message) -> dict[str, Any]:
         "model": str(produced.get("model") or ""),
         "provider": str(produced.get("provider") or ""),
         "fallback": produced.get("fallback") if isinstance(produced.get("fallback"), dict) else None,
+        "media": message.metadata.get("daedalus.media", []) if isinstance(message.metadata, dict) else [],
     }
 
 

@@ -32,7 +32,7 @@ async def test_manager_starts_and_registers_tools(settings: Settings, db: Databa
     manager = SessionManager(settings, model_config(), db=db)
     await manager.start()
     names = {t.name for t in manager.tools.list_all()}
-    for required in ("Exec", "Read", "Write", "Edit", "Find", "Search", "AskUser", "SendFile", "ScheduleCreate", "Skill"):
+    for required in ("Exec", "Read", "Write", "Edit", "Find", "Search", "AskUser", "SendFile", "AttachMedia", "ScheduleCreate", "Skill"):
         assert required in names
     # The self-development tools depend on the installation, and this is the supervisor's preflight: it
     # runs in whatever installation is being checked. Naming one of them here would fail a desktop
