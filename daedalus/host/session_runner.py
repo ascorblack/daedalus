@@ -858,6 +858,32 @@ class SessionManager:
             )
         return out
 
+    async def session_catalog(self) -> list[dict[str, Any]]:
+        """Return the cheap session read model without opening any transcript.
+
+        The catalogue is deliberately assembled from the indexed session rows and live manager
+        state.  A large installation must not turn one list request into one history read per row.
+        """
+        rows = await self.list_sessions(limit=10_000)
+        children: dict[str, int] = {}
+        for row in rows:
+            parent = str(row["metadata"].get("subagent_of") or "")
+            if parent and row["status"] in ("running", "waiting", "compacting"):
+                children[parent] = children.get(parent, 0) + 1
+        for row in rows:
+            archived = bool(row["metadata"].get("archived"))
+            unread = bool(row["metadata"].get("unread_result"))
+            background = len(self._jobs.get(row["id"], {})) + children.get(row["id"], 0)
+            row.update(
+                {
+                    "archived": archived,
+                    "background_count": background,
+                    "unread_result": unread,
+                    "needs_attention": row["status"] in ("failed", "waiting") or unread,
+                }
+            )
+        return rows
+
     async def delete_session(self, session_id: str, *, delete_workspace: bool = True) -> bool:
         """Remove a session entirely: its run, records, events and (optionally) its workspace."""
         state = await self.get_state(session_id)

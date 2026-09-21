@@ -376,7 +376,8 @@ class HeartbeatBody(BaseModel):
 
 
 class RenameBody(BaseModel):
-    title: str
+    title: str | None = None
+    archived: bool | None = None
 
 
 class RevertBody(BaseModel):
@@ -1251,11 +1252,45 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return {**listing, **found, "indexing": service.settings["mode"] == "local" and bool((await service.status())["pending"])}
 
     @api.get("/api/sessions")
-    async def list_sessions(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        return await session_listing()
+    async def list_sessions(
+        cursor: str = Query(default="", max_length=512),
+        limit: int = Query(default=30, ge=1, le=100),
+        view: Literal["all", "attention", "working", "archive"] = "all",
+        _: dict[str, Any] = Depends(auth),
+    ) -> dict[str, Any]:
+        return await session_listing(cursor=cursor, limit=limit, view=view)
 
-    async def session_listing(ids: list[str] | None = None) -> dict[str, Any]:
-        rows = await manager.list_sessions(limit=200, ids=ids) if ids is not None else await manager.list_sessions(limit=200)
+    async def session_listing(
+        ids: list[str] | None = None,
+        *,
+        cursor: str = "",
+        limit: int = 30,
+        view: Literal["all", "attention", "working", "archive"] = "all",
+    ) -> dict[str, Any]:
+        if ids is not None:
+            rows = await manager.list_sessions(limit=200, ids=ids)
+            next_cursor = None
+        else:
+            catalog = await manager.session_catalog()
+            visible = [row for row in catalog if (
+                row["archived"] if view == "archive" else
+                row["needs_attention"] and not row["archived"] if view == "attention" else
+                row["status"] in ("running", "waiting", "compacting") and not row["archived"] if view == "working" else
+                not row["archived"]
+            )]
+            visible.sort(key=lambda row: (0 if row["needs_attention"] else 1, -datetime.fromisoformat(row["last_message_at"]).timestamp(), row["id"]))
+            start = 0
+            if cursor:
+                try:
+                    marker = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+                    start = next((i + 1 for i, row in enumerate(visible) if row["id"] == marker["id"] and row["last_message_at"] == marker["at"]), 0)
+                except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+                    raise HTTPException(400, "invalid session cursor") from None
+            rows = visible[start : start + limit]
+            next_cursor = None
+            if start + limit < len(visible) and rows:
+                tail = rows[-1]
+                next_cursor = base64.urlsafe_b64encode(json.dumps({"id": tail["id"], "at": tail["last_message_at"]}, separators=(",", ":")).encode()).decode().rstrip("=")
         projects = await manager.projects.list()
         names = {p.id: p.name for p in projects}
         default = app.config.default_preset()
@@ -1284,7 +1319,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         empty = {"total": 0, "active": 0, "loops": 0, "last_message_at": ""}
         folders = [{**p.view(), **counts.get(p.id, empty)} for p in projects]
         folders.sort(key=lambda p: (p["last_message_at"] or p["created_at"], p["id"]), reverse=True)
-        return {"sessions": rows, "projects": folders}
+        return {"sessions": rows, "projects": folders, "next_cursor": next_cursor}
 
     @api.post("/api/sessions")
     async def new_session(body: NewSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2586,15 +2621,22 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.patch("/api/sessions/{session_id}")
     async def rename_session(session_id: str, body: RenameBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:
-            if app.front is not None:
-                await app.front.rename_session(session_id, body.title)
-            else:
-                await manager.rename_session(session_id, body.title)
+            state = await manager.get_state(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            if body.title is not None:
+                if app.front is not None:
+                    await app.front.rename_session(session_id, body.title)
+                else:
+                    await manager.rename_session(session_id, body.title)
+            if body.archived is not None:
+                state.session.metadata["archived"] = body.archived
+                await manager.sessions.update_metadata(session_id, state.session.metadata)
         except KeyError as exc:
             raise HTTPException(404, "no such session") from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        return {"id": session_id, "title": body.title.strip()[:128]}
+        return {"id": session_id, "title": state.session.title, "archived": bool(state.session.metadata.get("archived"))}
 
     @api.post("/api/sessions/{session_id}/project")
     async def move_session(session_id: str, body: MoveSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
