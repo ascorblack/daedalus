@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MessageView } from "./api";
 import type { LiveState } from "./turns";
-import { applyLive, buildTurns, EMPTY_LIVE, isOlderPage, liveAfter, liveBase, prepend, reconcile } from "./turns";
+import { activitySummary, applyLive, buildTurns, EMPTY_LIVE, isOlderPage, liveAfter, liveBase, prepend, reconcile } from "./turns";
 
 let clock = 1_700_000_000_000;
 
@@ -16,6 +16,12 @@ const call = (seq: number, id: string, name = "Exec") => msg(seq, { tool_calls: 
 const result = (seq: number, id: string, content: string) => msg(seq, { role: "tool", tool_results: [{ id, content, is_error: false }] });
 
 describe("buildTurns", () => {
+  it("presents lifecycle state without reading reasoning and keeps keepalives out of its clock", () => {
+    const state = { ...EMPTY_LIVE, lastActivityAt: 1000, thinking: "hidden", tools: [{ id: "r", name: "Read", args: "{}", startedAt: 1000 }] };
+    const turn = applyLive(null, state, 32_000);
+    expect(activitySummary(turn, true, 32_000)).toEqual({ phase: "reading", steps: 1, lastActivityAt: 1000, staleSeconds: 31 });
+    expect(liveAfter(state, "keepalive", {})).toBe(state);
+  });
   it("keeps the exact assistant row for retry, including answers demoted to activity", () => {
     const [turn] = buildTurns([user(1, "go"), answer(2, "first note"), call(3, "tool"), result(4, "tool", "ok"), answer(5, "done")]);
     expect(turn.answerSeq).toBe(5);

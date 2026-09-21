@@ -15,8 +15,8 @@ export type LiveTool = { id: string; name: string; args: string; result?: string
  * but nothing about the turn is live any more — no cursor under it, no dots over it — however long
  * the session takes to report itself idle afterwards.
  */
-export type LiveState = { runId?: string; text: string; thinking: string; tools: LiveTool[]; startedAt: number | null; ended: boolean; model: string; fallback: ModelFallback | null };
-export const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null, ended: false, model: "", fallback: null };
+export type LiveState = { runId?: string; text: string; thinking: string; tools: LiveTool[]; startedAt: number | null; lastActivityAt: number | null; ended: boolean; model: string; fallback: ModelFallback | null };
+export const EMPTY_LIVE: LiveState = { text: "", thinking: "", tools: [], startedAt: null, lastActivityAt: null, ended: false, model: "", fallback: null };
 
 export type ToolItem = { kind: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; running: boolean; length?: number; clipped?: boolean; /** How long the step took, when both ends of it are known. */ ms?: number };
 export type NoteItem = { kind: "note"; text: string; seq?: number };
@@ -46,7 +46,28 @@ export type Turn = {
   model?: string;
   fallback?: ModelFallback | null;
   media?: MediaPresentation[];
+  /** Last meaningful stream event. Transport keepalives never update this clock. */
+  lastActivityAt?: number | null;
 };
+
+export type ActivityPhase = "preparing_call" | "reading" | "editing" | "testing" | "waiting_provider" | "waiting_user" | "compacting" | "responding";
+export type ActivitySummary = { phase: ActivityPhase; steps: number; lastActivityAt: number | null; staleSeconds: number };
+
+/** A stable, typed status from lifecycle data; it never reads hidden reasoning text. */
+export function activitySummary(turn: Turn, live: boolean, now: number): ActivitySummary {
+  const running = [...turn.activity].reverse().find((item) => item.kind === "tool" && item.running) as ToolItem | undefined;
+  let phase: ActivityPhase = "waiting_provider";
+  if (running) {
+    if (running.name === "Read" || running.name === "ImageView" || running.name.startsWith("Web")) phase = "reading";
+    else if (["Write", "Edit", "MultiEdit", "SendFile", "AttachMedia"].includes(running.name)) phase = "editing";
+    else if (running.name === "Verify" || running.name === "Exec") phase = "testing";
+    else if (running.name === "AskUser") phase = "waiting_user";
+    else phase = "preparing_call";
+  } else if (turn.activity.some((item) => item.kind === "summary")) phase = "compacting";
+  else if (turn.answer) phase = "responding";
+  const lastActivityAt = turn.lastActivityAt ?? null;
+  return { phase, steps: turn.activity.filter((item) => item.kind === "tool").length, lastActivityAt, staleSeconds: live && lastActivityAt ? Math.max(0, Math.floor((now - lastActivityAt) / 1000)) : 0 };
+}
 
 /** The trailing retrieval headline ⟦…⟧ is for the transcript index, not for the reader; a half-streamed one is cut too. */
 export function stripHeadline(text: string): string {
@@ -200,6 +221,7 @@ export function applyLive(base: Turn | null, live: LiveState, now: number): Turn
     t.fallback = live.fallback;
   }
   t.endedAt = now;
+  t.lastActivityAt = live.lastActivityAt;
   return t;
 }
 
@@ -386,27 +408,28 @@ export function isOlderPage(older: readonly MessageView[], oldestKnown: number |
  * finished answer. The text is kept: the written copy takes its place when the read lands.
  */
 export function liveAfter(state: LiveState, event: string, p: Record<string, any>): LiveState {
+  const meaningful = Date.now();
   if (p.run_id && p.run_id !== state.runId) {
     // Housekeeping from a finished run can arrive after the next run has started.
     if (state.runId && event !== "message_start" && event !== "model_changed") return state;
     state = { ...EMPTY_LIVE, runId: p.run_id };
   }
   if (event === "queue_update" && p.placed?.length) return { ...EMPTY_LIVE, runId: state.runId, model: state.model, fallback: state.fallback };
-  if (event === "message_start") return { ...state, text: "", thinking: "", ended: false, startedAt: state.startedAt ?? Date.now() };
+  if (event === "message_start") return { ...state, text: "", thinking: "", ended: false, startedAt: state.startedAt ?? meaningful, lastActivityAt: meaningful };
   // Which model is speaking, said before the message it belongs to. `fallback: false` is the run coming
   // back to the model it was configured with, and it takes the note away rather than leaving it standing.
-  if (event === "model_changed") return { ...state, model: String(p.to ?? p.model_name ?? ""), fallback: p.fallback ? { from: String(p.configured ?? p.from ?? ""), to: String(p.to ?? ""), reason: String(p.reason ?? "") } : null };
+  if (event === "model_changed") return { ...state, model: String(p.to ?? p.model_name ?? ""), fallback: p.fallback ? { from: String(p.configured ?? p.from ?? ""), to: String(p.to ?? ""), reason: String(p.reason ?? "") } : null, lastActivityAt: meaningful };
   if (event === "content_block_delta") {
     const d = p.delta ?? {};
-    if (d.type === "text_delta") return { ...state, text: state.text + (d.text ?? "") };
-    if (d.type === "thinking_delta") return { ...state, thinking: state.thinking + (d.text ?? "") };
+    if (d.type === "text_delta") return { ...state, text: state.text + (d.text ?? ""), lastActivityAt: meaningful };
+    if (d.type === "thinking_delta") return { ...state, thinking: state.thinking + (d.text ?? ""), lastActivityAt: meaningful };
     return state;
   }
-  if (event === "tool_use_start") return { ...state, tools: [...state.tools, { id: p.tool_call_id, name: p.tool_name, args: "", startedAt: Date.now() }] };
-  if (event === "tool_use_stop") return { ...state, tools: state.tools.map((t) => (t.id === p.tool_call_id ? { ...t, args: JSON.stringify(p.final_input ?? {}) } : t)) };
-  if (event === "tool_result") return { ...state, tools: state.tools.map((t) => (t.id === p.tool_call_id ? { ...t, result: String(p.content ?? p.output ?? ""), error: !!p.is_error, endedAt: Date.now() } : t)) };
+  if (event === "tool_use_start") return { ...state, tools: [...state.tools, { id: p.tool_call_id, name: p.tool_name, args: "", startedAt: meaningful }], lastActivityAt: meaningful };
+  if (event === "tool_use_stop") return { ...state, tools: state.tools.map((t) => (t.id === p.tool_call_id ? { ...t, args: JSON.stringify(p.final_input ?? {}) } : t)), lastActivityAt: meaningful };
+  if (event === "tool_result") return { ...state, tools: state.tools.map((t) => (t.id === p.tool_call_id ? { ...t, result: String(p.content ?? p.output ?? ""), error: !!p.is_error, endedAt: meaningful } : t)), lastActivityAt: meaningful };
   // A message that ended to make a tool call is not the end of the turn: the run goes on.
-  if (event === "message_stop" && (p.stop_reason === "end_turn" || p.stop_reason === "max_tokens")) return { ...state, ended: true };
+  if (event === "message_stop" && (p.stop_reason === "end_turn" || p.stop_reason === "max_tokens")) return { ...state, ended: true, lastActivityAt: meaningful };
   return state;
 }
 

@@ -8,7 +8,7 @@ import { EVIDENCE_EVENT, EvidenceRequest, codeBlock, renderCached, renderMarkdow
 import { confirmAsync, errorText, fmtBytes, haptic } from "../ui";
 import { Icon, IconName } from "../icons";
 import { AuthImg, FilePreview, PreviewSource, canPreview, downloadHref, fileGlyph, previewKind, sessionBase } from "../preview";
-import { Activity, LiveStore, SummaryItem, SystemNote, ToolItem, Turn, applyLive, buildTurns, createLiveStore, familyCounts, isOlderPage, liveAfter, liveBase, prepend, producedFiles, reconcile } from "../turns";
+import { Activity, LiveStore, SummaryItem, SystemNote, ToolItem, Turn, activitySummary, applyLive, buildTurns, createLiveStore, familyCounts, isOlderPage, liveAfter, liveBase, prepend, producedFiles, reconcile } from "../turns";
 import { Explorer } from "../explorerpanel";
 import { DiffView } from "../previewparts";
 import { looksLikeDiff } from "../diff";
@@ -1231,11 +1231,14 @@ const TurnView = memo(function TurnView({ turn, live, onTurnAction }: { turn: Tu
   if (turn.summary) return <SummaryBlock message={turn.summary} />;
   const hasWork = turn.activity.length > 0 || live;
   const elapsed = (live ? Date.now() : turn.endedAt) - turn.startedAt;
-  const steps = stepCount(turn.activity);
+  const summary = activitySummary(turn, live, Date.now());
+  const steps = summary.steps;
   const activeTool = live ? [...turn.activity].reverse().find((item) => item.kind === "tool" && item.running) as ToolItem | undefined : undefined;
   const activeAction = activeTool ? describe(activeTool) : null;
-  const currentAction = activeAction
-    ? `${activeAction.verb}${activeAction.detail ? ` · ${activeAction.detail}` : ""}`
+  const currentAction = summary.staleSeconds >= 30
+    ? t("session.status.stale", { n: summary.staleSeconds })
+    : activeAction
+      ? `${activeAction.verb}${activeAction.detail ? ` · ${activeAction.detail}` : ""}`
     : live
       ? t(turn.answer ? "session.status.responding" : "session.status.preparing")
       : "";
