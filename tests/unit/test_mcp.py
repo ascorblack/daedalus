@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from protocore.contracts.tools import ToolContext
 from protocore.tests_support.adapters import InMemoryToolRegistry
@@ -17,6 +18,10 @@ SERVER = Path(__file__).resolve().parents[1] / "support" / "mcp_echo_server.py"
 
 def _config() -> dict[str, McpServerConfig]:
     return {"echo": McpServerConfig(transport="stdio", command=sys.executable, args=[str(SERVER)], description="echo tools")}
+
+
+def _remote(name: str) -> SimpleNamespace:
+    return SimpleNamespace(name=name, description=name, input_schema={"type": "object", "properties": {}})
 
 
 async def test_manager_connects_and_registers_proxies() -> None:
@@ -49,14 +54,52 @@ async def test_changed_server_config_replaces_connection_and_catalog_proxy() -> 
     registry = InMemoryToolRegistry()
     manager = McpManager(_config(), registry)
     first = await manager.ensure("echo")
+    retired = first._proxy(_remote("retired"))
+    manager._replace_catalog("echo", [*first.tools, retired])
+    assert registry.get(retired.name) is retired
     changed = _config()
     changed["echo"] = changed["echo"].model_copy(update={"description": "changed"})
     manager.reload(changed)
     assert manager.status()[0]["state"] == "disabled"
+    assert registry.get(retired.name) is None
     second = await manager.ensure("echo")
     assert second is not first and first.state == "disabled"
     proxy = registry.get(mcp_tool_name("echo", "add"))
     assert proxy is not None and proxy._connection is second
+    await manager.close()
+
+
+async def test_catalog_shrink_unregisters_only_that_servers_removed_tools() -> None:
+    registry = InMemoryToolRegistry()
+    manager = McpManager({}, registry)
+    first = McpConnection("first", McpServerConfig(transport="stdio", command="first"))
+    other = McpConnection("other", McpServerConfig(transport="stdio", command="other"))
+    kept = first._proxy(_remote("kept"))
+    removed = first._proxy(_remote("removed"))
+    unrelated = other._proxy(_remote("unrelated"))
+    manager._replace_catalog("first", [kept, removed])
+    manager._replace_catalog("other", [unrelated])
+
+    manager._replace_catalog("first", [kept])
+
+    assert registry.get(kept.name) is kept
+    assert registry.get(removed.name) is None
+    assert registry.get(unrelated.name) is unrelated
+    assert manager.all_tool_names() == {kept.name, unrelated.name}
+    await manager.close()
+
+
+async def test_reload_removing_server_unregisters_its_catalog() -> None:
+    registry = InMemoryToolRegistry()
+    manager = McpManager(_config(), registry)
+    await manager.ensure("echo")
+    names = manager.tool_names("echo")
+
+    manager.reload({})
+
+    assert names
+    assert manager.all_tool_names() == set()
+    assert all(registry.get(name) is None for name in names)
     await manager.close()
 
 

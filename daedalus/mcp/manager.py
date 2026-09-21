@@ -13,7 +13,7 @@ import json
 import logging
 import re
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -188,7 +188,13 @@ def _safe_slug(name: str) -> str:
 class McpConnection:
     """One server; the transport and session live in a background task."""
 
-    def __init__(self, name: str, config: McpServerConfig, oauth: MCPOAuthClient | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        config: McpServerConfig,
+        oauth: MCPOAuthClient | None = None,
+        catalog_changed: Callable[[Sequence[McpToolProxy]], None] | None = None,
+    ) -> None:
         self.vault = SecretVault()
         self.name = name
         self.config = config
@@ -207,6 +213,7 @@ class McpConnection:
         self.in_flight = 0
         self.catalog_revision = 0
         self._catalog_digest = ""
+        self._catalog_changed = catalog_changed
         self.config_digest = _config_digest(config)
 
     async def start(self) -> None:
@@ -268,6 +275,8 @@ class McpConnection:
                 self.catalog_revision += 1
                 self._catalog_digest = digest
             self.tools = tools
+            if self._catalog_changed is not None:
+                self._catalog_changed(tools)
             self.session = session
             self.state = "ready"
             self._ready.set()
@@ -359,9 +368,34 @@ class McpManager:
         self._token_dir = token_dir
         self._oauth_clients: dict[str, MCPOAuthClient] = {}
         self._ensure_locks: dict[str, asyncio.Lock] = {}
+        self._registered_tools: dict[str, dict[str, McpToolProxy]] = {}
 
     def reload(self, servers: dict[str, McpServerConfig]) -> None:
+        previous = self._configs
         self._configs = servers
+        for name, config in previous.items():
+            replacement = servers.get(name)
+            if replacement is None or _config_digest(replacement) != _config_digest(config):
+                self._replace_catalog(name, ())
+
+    def _replace_catalog(self, server: str, tools: Sequence[McpToolProxy]) -> None:
+        """Publish one server's current catalogue without disturbing another server's bindings."""
+        previous = self._registered_tools.get(server, {})
+        current = {tool.name: tool for tool in tools}
+        if current:
+            self._registered_tools[server] = current
+        else:
+            self._registered_tools.pop(server, None)
+        for name in previous.keys() - current.keys():
+            self._registry.unregister(name)
+            # Sanitised server names can collide. Removing one owner must reveal the
+            # other live binding rather than erase a tool that server still publishes.
+            for other_server, catalog in self._registered_tools.items():
+                if other_server != server and name in catalog:
+                    self._registry.register(catalog[name])
+                    break
+        for tool in current.values():
+            self._registry.register(tool)
 
     def available(self) -> list[str]:
         return sorted(self._configs)
@@ -426,11 +460,10 @@ class McpManager:
         return True
 
     def all_tool_names(self) -> set[str]:
-        return {t.name for c in self._connections.values() for t in c.tools}
+        return {name for catalog in self._registered_tools.values() for name in catalog}
 
     def tool_names(self, server: str) -> set[str]:
-        connection = self._connections.get(server)
-        return {t.name for t in connection.tools} if connection else set()
+        return set(self._registered_tools.get(server, {}))
 
     async def ensure(self, name: str) -> McpConnection:
         """Connect a configured server (idempotent) and register its tools."""
@@ -441,6 +474,7 @@ class McpManager:
             expected_digest = _config_digest(self._configs[name])
             connection = self._connections.get(name)
             if connection is not None and connection.config_digest != expected_digest:
+                self._replace_catalog(name, ())
                 await connection.stop()
                 self._connections.pop(name, None)
                 oauth = self._oauth_clients.pop(name, None)
@@ -448,19 +482,25 @@ class McpManager:
                     await oauth.http.aclose()
                 connection = None
             if connection is None:
-                connection = McpConnection(name, self._configs[name], oauth=self.oauth_client(name))
+                connection = McpConnection(
+                    name,
+                    self._configs[name],
+                    oauth=self.oauth_client(name),
+                    catalog_changed=lambda tools, server=name: self._replace_catalog(server, tools),
+                )
                 self._connections[name] = connection
             if connection.error or (connection.session is None and connection._task is not None and not connection._task.done()):
                 # A connection that failed or wedged is rebuilt, not reused: McpEnable is the agent's way to recover.
                 await connection.stop()
             await connection.start()
-            for proxy in connection.tools:
-                self._registry.register(proxy)
+            self._replace_catalog(name, connection.tools)
             return connection
 
     async def close(self) -> None:
         for connection in self._connections.values():
             await connection.stop()
+        for name in tuple(self._registered_tools):
+            self._replace_catalog(name, ())
         for client in self._oauth_clients.values():
             await client.http.aclose()
         self._oauth_clients.clear()
