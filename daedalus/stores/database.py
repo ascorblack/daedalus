@@ -738,6 +738,23 @@ ALTER TABLE live_control ADD COLUMN queue_revision INTEGER NOT NULL DEFAULT 0;
 """)
 
 
+MIGRATIONS.append("""
+CREATE TABLE request_manifests (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    manifest_id TEXT NOT NULL UNIQUE,
+    run_id TEXT,
+    session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    model TEXT NOT NULL,
+    manifest TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX request_manifests_by_session ON request_manifests(session_id, seq);
+CREATE INDEX request_manifests_by_run ON request_manifests(run_id, seq);
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""

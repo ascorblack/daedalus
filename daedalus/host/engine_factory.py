@@ -48,6 +48,8 @@ class EngineDeps:
     """``off``/``local``/``server``, from the installation's capabilities: it decides which self-development
     section the prompt carries and how the environment describes the operator's repositories. The safe default
     is the one that promises nothing."""
+    request_manifest_sink: Any | None = None
+    """Host-owned durable request evidence; absent keeps the core instrumentation inert."""
 
 
 class PolicyAdapter:
@@ -191,6 +193,7 @@ def build_engine(
         rc=runtime_constants(config, context_window=context_window, max_output_tokens=max_output_tokens, thinking=thinking, mode=mode),
         thinking_enabled=thinking,
         reasoning_effort=reasoning_effort,
+        request_manifest_sink=deps.request_manifest_sink,
     )
     engine = QueryEngine(
         config=engine_config,

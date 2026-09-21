@@ -51,6 +51,7 @@ from daedalus.host.checkpoints import CheckpointError, Checkpoints, scan_workspa
 from daedalus.host.engine_factory import TENANT, EngineDeps, PolicyAdapter, build_engine
 from daedalus.host.hooks import DaedalusHookManager
 from daedalus.host.policy import Decision, Policy, Rule, canonical
+from daedalus.host.request_manifests import RequestManifestStore
 from daedalus.host.services import SessionServices, locator
 from daedalus.host.skills import DirectorySkillStore
 from daedalus.host.transcript_view import TranscriptViewBuilder, message_view
@@ -383,6 +384,7 @@ class SessionManager:
             settings, config, usage_sink=self.usage, image_loader=self._load_image
         )
         self.mcp = McpManager(config.mcp.servers, self.tools, token_dir=settings.state_dir / "mcp")
+        self.request_manifests = RequestManifestStore(db, self.blobs, tenant_id=TENANT)
         self.governance_path = governance_path or (settings.bot_repo_dir / "GOVERNANCE.md")
         self._states: dict[str, SessionState] = {}
         self._sinks: list[EventSink] = []
@@ -2231,6 +2233,7 @@ class SessionManager:
             ssh_config=Path.home() / ".ssh" / "config",
             policy_gate=self.policy_gate,
             selfdev_mode=self.capabilities.selfdev.mode,
+            request_manifest_sink=self.request_manifests,
         )
         mode_name = str(state.metadata.get("mode") or "")
         mode = self.config.modes.get(mode_name) if mode_name else None
@@ -3160,14 +3163,62 @@ class SessionManager:
             estimated = row is None
             if not tokens and rewritten_at:
                 tokens = history_tokens(history)
+        reserved_response = 0
         try:
             _, preset = self.resolve_model(await self.live.load(state.session.id))
             window = int(state.context_window or preset.context_window or 0)
+            reserved_response = int(preset.max_output_tokens or 0)
         except Exception:  # noqa: BLE001 — no usable model is reported elsewhere
             window = int(state.context_window or 0)
         summaries = sum(1 for m in history if m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY))
         operator = sum(1 for m in history if m.role is MessageRole.user and m.metadata.get("daedalus.origin") not in (None, "core") and not m.metadata.get(COMPACTION_SUMMARY_METADATA_KEY))
-        return {"tokens": tokens, "estimated": estimated, "window": window, "messages": len(history), "summaries": summaries, "operator_turns": operator}
+        manifests = await self.request_manifests.recent_for_session(state.session.id)
+        breakdown = None
+        prefix_changed: list[str] = []
+        if manifests:
+            latest = manifests[0]
+            system_bytes = int(latest["system_prompt"]["byte_length"])
+            message_bytes = int(latest["messages"]["byte_length"])
+            tool_bytes = int(latest["tools"]["byte_length"])
+            breakdown = {
+                "instructions": (system_bytes + 3) // 4,
+                "tools": (tool_bytes + 3) // 4,
+                "conversation": (max(0, message_bytes - system_bytes) + 3) // 4,
+                "attachments": 0,
+                "reserved_response": reserved_response,
+                "source": "request_bytes_estimate",
+            }
+            if len(manifests) > 1:
+                previous = manifests[1]
+                for name, key in (("rules", "system_prompt"), ("toolset", "tools")):
+                    if latest[key]["sha256"] != previous[key]["sha256"]:
+                        prefix_changed.append(name)
+                if latest["model"] != previous["model"]:
+                    prefix_changed.append("model")
+        recent_usage = await self.db.fetchone(
+            "SELECT input_tokens, cache_read_tokens FROM usage_events WHERE session_id = ? AND purpose = 'stream' ORDER BY seq DESC LIMIT 1",
+            (state.session.id,),
+        )
+        cache = None
+        if recent_usage:
+            prompt_tokens = int(recent_usage["input_tokens"] or 0)
+            cache_tokens = int(recent_usage["cache_read_tokens"] or 0)
+            cache = {
+                "read_tokens": cache_tokens,
+                "prompt_tokens": prompt_tokens,
+                "hit_percent": round(100 * cache_tokens / prompt_tokens) if prompt_tokens else 0,
+            }
+        return {
+            "tokens": tokens,
+            "estimated": estimated,
+            "window": window,
+            "messages": len(history),
+            "summaries": summaries,
+            "operator_turns": operator,
+            "breakdown": breakdown,
+            "recent_cache": cache,
+            "prefix_changed": prefix_changed,
+        }
 
     def tools_off(self, state: SessionState) -> set[str]:
         """Tools the operator switched off for this session (``metadata["tools_off"]``); unknown names are ignored."""
