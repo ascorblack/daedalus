@@ -1472,6 +1472,19 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "usage": dict(usage) if usage else {},
         }
 
+    @api.get("/api/sessions/{session_id}/tasks")
+    async def session_tasks(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        if await manager.get_state(session_id) is None:
+            raise HTTPException(404, "no such session")
+        tasks = await manager.task_views(session_id)
+        return {"tasks": tasks, "background_count": sum(task["state"] == "running" for task in tasks)}
+
+    @api.post("/api/sessions/{session_id}/tasks/{task_id}/stop")
+    async def stop_session_task(session_id: str, task_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        if not await manager.stop_task(session_id, task_id):
+            raise HTTPException(404, "no such task")
+        return {"id": task_id, "stopped": True}
+
     @api.get("/api/sessions/{session_id}/events")
     async def session_events(session_id: str, after: int = 0, limit: int = 500, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         state = await manager.get_state(session_id)

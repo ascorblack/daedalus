@@ -884,6 +884,77 @@ class SessionManager:
             )
         return rows
 
+    async def task_views(self, session_id: str) -> list[dict[str, Any]]:
+        """Project existing jobs and child sessions into one operator-facing task list."""
+        now = datetime.now(UTC)
+        out: list[dict[str, Any]] = []
+        for job in self._jobs.get(session_id, {}).values():
+            code = job.process.returncode
+            state = "running" if code is None else "cancelled" if code < 0 else "done" if code == 0 else "failed"
+            started = now.timestamp() - max(0.0, time.monotonic() - job.started)
+            try:
+                active = datetime.fromtimestamp(job.log.stat().st_mtime, UTC)
+            except OSError:
+                active = datetime.fromtimestamp(started, UTC)
+            out.append(
+                {
+                    "id": job.id,
+                    "owner_session_id": session_id,
+                    "parent_run_id": None,
+                    "kind": "job",
+                    "state": state,
+                    "title": job.command[:200],
+                    "started_at": datetime.fromtimestamp(started, UTC).isoformat(),
+                    "last_activity_at": active.isoformat(),
+                    "progress": None,
+                    "child_session_id": None,
+                    "result_ref": f".jobs/{job.log.name}",
+                    "stop_supported": code is None,
+                }
+            )
+        for row in await self.list_sessions(limit=10_000):
+            if row["metadata"].get("subagent_of") != session_id:
+                continue
+            state = "running" if row["status"] in ("running", "waiting", "compacting") else "failed" if row["status"] == "failed" else "done"
+            out.append(
+                {
+                    "id": f"agent:{row['id']}",
+                    "owner_session_id": session_id,
+                    "parent_run_id": None,
+                    "kind": "agent",
+                    "state": state,
+                    "title": str(row["metadata"].get("subagent_name") or row["title"]),
+                    "started_at": row["created_at"],
+                    "last_activity_at": row["last_message_at"],
+                    "progress": None,
+                    "child_session_id": row["id"],
+                    "result_ref": None,
+                    "stop_supported": state == "running",
+                }
+            )
+        out.sort(key=lambda item: (item["state"] not in ("running", "waiting"), item["last_activity_at"], item["id"]))
+        return out
+
+    async def stop_task(self, session_id: str, task_id: str) -> bool:
+        """Stop a task only when it belongs to the session named by the route."""
+        if task_id.startswith("agent:"):
+            child_id = task_id.removeprefix("agent:")
+            child = await self.get_state(child_id)
+            if child is None or child.metadata.get("subagent_of") != session_id:
+                return False
+            await self.stop(child_id)
+            return True
+        job = self._jobs.get(session_id, {}).get(task_id)
+        if job is None:
+            return False
+        if job.process.returncode is None:
+            try:
+                os.killpg(job.process.pid, 15)
+            except ProcessLookupError:
+                pass
+            await job.process.wait()
+        return True
+
     async def delete_session(self, session_id: str, *, delete_workspace: bool = True) -> bool:
         """Remove a session entirely: its run, records, events and (optionally) its workspace."""
         state = await self.get_state(session_id)
