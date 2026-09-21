@@ -75,6 +75,10 @@ def run() -> None:
                 view["job"]["error"] = "The old image is still running."
                 expect(page.locator(".deps-job")).to_contain_text("old image", timeout=8000)
                 expect(page.locator("#dependency-request")).to_be_enabled()
+                expect(page.locator("#dependency-request")).to_have_value("")
+                # The accepted receipt survives another reload, but must not masquerade as a draft.
+                page.reload()
+                expect(page.locator("#dependency-request")).to_have_value("")
                 assert sum(path.endswith("/approve") for path in requests) == 1
                 context.close()
                 print(f"{width} {language}: preview, consent, cancellation, reload, installation and failure passed")

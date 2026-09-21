@@ -41,7 +41,11 @@ export function DependenciesTab() {
       setPreset((current) => next.models.some((model) => model.id === current) ? current : next.models.find((model) => model.id === next.proposal?.preset)?.id || next.models[0]?.id || "");
       if (!hydrated.current) {
         hydrated.current = true;
-        setRequest(next.proposal?.request || "");
+        const proposalStillEditable = next.proposal && ["planning", "validating", "ready", "failed"].includes(next.proposal.state);
+        // An accepted recipe remains in the durable receipt across restarts. Restoring its request
+        // made a finished installation look like an unsent draft, while a reviewable proposal must
+        // still survive a reload.
+        setRequest(proposalStillEditable ? next.proposal!.request : "");
       }
       if (next.proposal?.state === "ready" && next.proposal.id !== opened.current) {
         opened.current = next.proposal.id;
@@ -63,11 +67,12 @@ export function DependenciesTab() {
     return () => { alive = false; ++sequence.current; clearTimeout(timer); };
   }, [load]);
 
-  async function act(path: string, body: object = {}) {
+  async function act(path: string, body: object = {}, clearRequest = false) {
     setBusy(true);
     setProblem("");
     try {
       await api.post(path, body);
+      if (clearRequest) setRequest("");
       setReview(false);
       setAccepted(false);
       await load();
@@ -138,7 +143,7 @@ export function DependenciesTab() {
         {problem && <p className="sub attn" role="alert">{problem}</p>}
         <label className="deps-consent"><input type="checkbox" checked={accepted} disabled={busy} onChange={(event) => setAccepted(event.target.checked)} />{t("deps.consent")}</label>
         <div className="btnrow">
-          <button className="btn primary" disabled={!accepted || busy || offline || installing} onClick={() => void act(`/api/dependencies/${proposal.id}/approve`)}>{t("deps.install")}</button>
+          <button className="btn primary" disabled={!accepted || busy || offline || installing} onClick={() => void act(`/api/dependencies/${proposal.id}/approve`, {}, true)}>{t("deps.install")}</button>
           <button className="btn" disabled={busy || offline} onClick={() => void act(`/api/dependencies/${proposal.id}/cancel`)}>{t("common.cancel")}</button>
         </div>
       </div>

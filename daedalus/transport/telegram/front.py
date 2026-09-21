@@ -575,11 +575,13 @@ class TelegramFront:
         # It must win over the global private-chat mode or background output leaks into DMs.
         if state is not None and state.metadata.get("telegram_detached"):
             return None
-        if self.private_mode():
-            return await self._private_outbox(session_id)
         binding = await self.binding_for_session(session_id)
         if binding is not None:
             return TelegramOutbox(self.bot, binding.chat_id, binding.thread_id)
+        # A mode change governs sessions without a destination. Existing topic bindings remain
+        # authoritative; otherwise changing one session must not reroute every other session to DM.
+        if self.private_mode():
+            return await self._private_outbox(session_id)
         title = state.session.title if state is not None else session_id
         try:
             binding = await self.ensure_topic(session_id, title)

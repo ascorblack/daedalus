@@ -2,7 +2,7 @@ import { Component, createContext, memo, useCallback, useContext, useEffect, use
 import type { ReactElement, ReactNode } from "react";
 import { api, ApiError, AsrStatus, ModelFallback, ProviderUsage, Schedule, SessionCheckpoints, SlashCommand, MessageView, SessionDetail, Compacting } from "../api";
 import { Chevron, Dot, Status, copyText, fmtInt, statusWord, timeAgo } from "../components";
-import { MenuItem, OverflowMenu, confirmDialog, Overlay } from "../dialogs";
+import { MenuItem, OverflowMenu, Popover, confirmDialog, Overlay } from "../dialogs";
 import { absDate, clock, commandPreview, duration, plainPreview, shortDateTime } from "../format";
 import { EVIDENCE_EVENT, EvidenceRequest, codeBlock, renderCached, renderMarkdown } from "../md";
 import { confirmAsync, errorText, fmtBytes, haptic } from "../ui";
@@ -857,8 +857,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     }
   }
 
-  const subRunning = (detail?.subagents ?? []).filter((x) => x.running).length;
-
   // A workspace file opens in the panel's Preview tab; a file waiting in the composer, which is
   // nowhere the panel can fetch it from, still opens in the dialog.
   const openPreview = useCallback(
@@ -953,6 +951,9 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
         ) : null}
         {offline && <span className="head-status offline">{t("session.reconnecting")}</span>}
         <div className="head-actions">
+          {detail && ((detail.subagents?.length ?? 0) > 0 || detail.subagent_of) && (
+            <SubagentsMenu detail={detail} onOpen={onOpen} />
+          )}
           {!phone && <button className={`iconbtn ${panel.state.tab ? "on" : ""}`} onClick={panel.toggle} aria-label={t("panel.toggle")} title={t("panel.toggle.title")} aria-pressed={!!panel.state.tab}>
             <Icon name="panel" />
           </button>}
@@ -1063,7 +1064,6 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
             downloadUrl={(e) => downloadHref(e.base, e.path)}
             sheet={phone}
             onDrag={(dx) => dragPanel(dx, body.current?.clientWidth ?? window.innerWidth)}
-            badges={{ details: subRunning }}
             details={(ids) =>
               <SessionDetails
                 ids={ids}
@@ -1120,6 +1120,53 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
 
     </div>
   );
+}
+
+function SubagentsMenu({ detail, onOpen }: { detail: SessionDetail; onOpen?: (id: string) => void }) {
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+  const children = detail.subagents ?? [];
+  const running = children.filter((child) => child.running).length;
+  const label = plural("session.subagents", children.length);
+  const open = (sessionId: string) => {
+    setAnchor(null);
+    onOpen?.(sessionId);
+  };
+  return <>
+    <button
+      className={`iconbtn subagents-trigger ${anchor ? "on" : ""}`}
+      onClick={(event) => setAnchor((current) => current ? null : event.currentTarget)}
+      aria-label={t("session.subagents.open")}
+      title={t("session.subagents.open")}
+      aria-haspopup="menu"
+      aria-expanded={!!anchor}
+    >
+      <Icon name="spawn" />
+      {children.length > 0 && <span className="subagents-count">{children.length}</span>}
+      {running > 0 && <span className="subagents-live" aria-label={t("session.subagents.working", { n: running }).replace(/^ · /, "")} />}
+    </button>
+    {anchor && <Popover anchor={anchor} onClose={() => setAnchor(null)} align="right" className="subagents-popover" label={t("session.subagents.title")}>
+      <div className="subagents-popover-head">
+        <b>{t("session.subagents.title")}</b>
+        {children.length > 0 && <span>{label}</span>}
+      </div>
+      {detail.subagent_of && (
+        <button role="menuitem" className="subagent-option" onClick={() => open(detail.subagent_of!)}>
+          <Icon name="back" size={16} />
+          <span className="subagent-option-copy"><b>{detail.leader_title ?? t("session.leader.word")}</b><small>{t("session.leader.word")}</small></span>
+        </button>
+      )}
+      {children.map((child) => (
+        <button key={child.session_id} role="menuitem" className="subagent-option" onClick={() => open(child.session_id)} title={`${child.model} · ${child.session_id}`}>
+          {child.running ? <span className="live-dot" /> : <Dot status={child.status === "failed" ? "failed" : "done"} />}
+          <span className="subagent-option-copy">
+            <b>{child.name || child.session_id}</b>
+            <small>{child.running ? statusWord("running") : child.status === "failed" ? statusWord("failed") : child.kept ? t("session.sub.kept") : statusWord("done")}{child.model ? ` · ${child.model}` : ""}</small>
+          </span>
+          <Icon name="forward" size={15} />
+        </button>
+      ))}
+    </Popover>}
+  </>;
 }
 
 class Safe extends Component<{ children: ReactNode }, { failed: boolean }> {

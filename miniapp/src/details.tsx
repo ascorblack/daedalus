@@ -69,7 +69,6 @@ export function SessionDetails({ ids, id, detail, busy, modes, schedules, provid
     const timer = window.setTimeout(() => { const section = container.current?.querySelector<HTMLDetailsElement>(`#${CSS.escape(`${ids}-info-${focus}`)}`); if (section) { section.open = true; section.scrollIntoView({ block: "start" }); } }, 30);
     return () => window.clearTimeout(timer);
   }, [focus, ids]);
-  const subRunning = (detail.subagents ?? []).filter((x) => x.running).length;
   return (
     <div ref={container} className="details">
       <Section ids={ids} id="session" label={t("session.card")}>
@@ -195,23 +194,6 @@ export function SessionDetails({ ids, id, detail, busy, modes, schedules, provid
           ))}
         </Section>
       )}
-
-      {(detail.subagents && detail.subagents.length > 0) || detail.subagent_of ? (
-        <Section ids={ids} id="subagents" label={t("session.subagents.title")} aside={subRunning ? t("session.subagents.working", { n: subRunning }).replace(/^ · /, "") : detail.subagents?.length ? String(detail.subagents.length) : undefined}>
-          {detail.subagent_of && (
-            <button className="aside-row link" onClick={() => onOpen?.(detail.subagent_of!)} title={t("session.leader")}>
-              <Icon name="back" size={16} /><span className="grow name">{t("session.leader.word")}: {detail.leader_title ?? detail.subagent_of}</span>
-            </button>
-          )}
-          {(detail.subagents ?? []).map((s) => (
-            <button key={s.session_id} className={`aside-row link sub-${s.status}`} onClick={() => onOpen?.(s.session_id)} title={`${s.model} · ${s.session_id}`}>
-              {s.running ? <span className="live-dot" /> : <Dot status={s.status === "failed" ? "failed" : "done"} />}
-              <span className="grow name">{s.name || s.session_id}</span>
-              <span className="sub">{s.running ? statusWord("running").toLowerCase() : s.status === "failed" ? statusWord("failed").toLowerCase() : s.kept ? t("session.sub.kept") : statusWord("done").toLowerCase()}</span>
-            </button>
-          ))}
-        </Section>
-      ) : null}
 
       <Section ids={ids} id="mcp" label={t("session.mcp")}>
         <McpPanel sessionId={id} toast={toast} />

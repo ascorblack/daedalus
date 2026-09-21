@@ -65,8 +65,11 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
   const head = compact ? (
     <>
       <div className="sidebar-head">
+        <button className="sidebar-new-agent" onClick={() => setCreating(true)}>
+          <Icon name="plus" size={17} />
+          <span>{t("agents.new")}</span>
+        </button>
         {onProjects && <ProjectChip projects={projects} current={project} onOpen={onProjects} />}
-        <button className="iconbtn small quiet" onClick={() => setCreating(true)} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" size={16} /></button>
       </div>
       {searchField}
     </>

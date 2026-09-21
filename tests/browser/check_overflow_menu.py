@@ -170,7 +170,8 @@ def check_title_menu_stays_on_screen(page) -> list[str]:  # type: ignore[no-unty
     """The session's title sits against the sidebar. A menu hung from its right edge ran under the
     sidebar and lost its first characters, so the side it hangs from is chosen, not assumed."""
     problems: list[str] = []
-    page.locator(".chat-head .head-actions button[aria-haspopup='menu']").click()
+    # The header also has a subagent roster now; this check belongs to the session actions menu.
+    page.get_by_role("button", name="Session actions", exact=True).click()
     page.wait_for_timeout(400)
     menu = page.locator(".menu, [role=menu]").first
     box = menu.bounding_box() if menu.count() else None

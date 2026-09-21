@@ -1607,6 +1607,7 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "session.subagents": { en: "{n} subagent|{n} subagents", ru: "{n} подагент|{n} подагента|{n} подагентов" },
   "session.subagents.working": { en: " · {n} working", ru: " · в работе: {n}" },
   "session.subagents.title": { en: "Subagents", ru: "Подагенты" },
+  "session.subagents.open": { en: "Session subagents", ru: "Подагенты сессии" },
   "session.leader": { en: "open the leader session", ru: "открыть сессию ведущего" },
   "session.leader.word": { en: "leader", ru: "ведущий" },
   "session.reconnecting": { en: "reconnecting…", ru: "переподключаемся…" },

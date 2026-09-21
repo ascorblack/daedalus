@@ -22,7 +22,7 @@ def main() -> None:
             if page.locator(".sidebar.collapsed").count():
                 page.locator(".sidebar button[aria-expanded='false']:not([aria-haspopup])").click()
             assert page.locator(".chat-title").get_attribute("aria-haspopup") is None
-            page.locator(".head-actions button[aria-haspopup='menu']").click()
+            page.get_by_role("button", name="Session actions", exact=True).click()
             for label in ("Rename", "Compact history", "Export as Markdown"):
                 expect(page.locator(".menu").get_by_role("menuitem", name=label, exact=True)).to_be_visible()
             page.keyboard.press("Escape")

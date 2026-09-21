@@ -171,7 +171,9 @@ async def test_new_in_forum_creates_topic_and_binding(front: TelegramFront) -> N
 async def test_detaching_a_topic_keeps_the_session_web_only(front: TelegramFront) -> None:
     front.config.telegram.forum_chat_id = -100
     state = await front.manager.create_session("local agent")
+    neighbour = await front.manager.create_session("still linked")
     await front.bind_topic(-100, 42, state.session.id, state.session.title)
+    await front.bind_topic(-100, 43, neighbour.session.id, neighbour.session.title)
 
     assert await front.detach_session(state.session.id)
     assert front.bot.closed_topic == (-100, 42)  # type: ignore[attr-defined]
@@ -184,6 +186,9 @@ async def test_detaching_a_topic_keeps_the_session_web_only(front: TelegramFront
     # that the operator explicitly detached from Telegram.
     front.config.telegram.mode = "private"
     assert await front.outbox_for_session(state.session.id) is None
+    neighbour_outbox = await front.outbox_for_session(neighbour.session.id)
+    assert neighbour_outbox is not None
+    assert (neighbour_outbox.chat_id, neighbour_outbox.thread_id) == (-100, 43)
 
 
 async def test_detach_command_disconnects_the_topic_it_was_sent_from(front: TelegramFront) -> None:
