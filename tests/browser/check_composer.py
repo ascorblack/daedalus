@@ -249,7 +249,8 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
     page.wait_for_timeout(500)
     sent = posts("/messages")
     print("sent:", sent)
-    if len(sent) != 1 or sent[0][2] != {"text": "first line\nsecond line"}:
+    first_id = sent[0][2].get("client_message_id") if len(sent) == 1 else None
+    if len(sent) != 1 or sent[0][2].get("text") != "first line\nsecond line" or not first_id or len(first_id) > 64:
         problems.append(f"Enter did not send the draft as a message ({sent})")
     if field(page).input_value() != "":
         problems.append("the field was not cleared after sending")
@@ -279,7 +280,8 @@ def desktop(browser) -> list[str]:  # type: ignore[no-untyped-def]
     page.wait_for_selector(".composer .steer", timeout=5000)
     steered = posts("/messages")[-1]
     print("steered:", steered)
-    if steered[2] != {"text": "also look at the log", "steer": True}:
+    steer_id = steered[2].get("client_message_id")
+    if steered[2].get("text") != "also look at the log" or steered[2].get("steer") is not True or not steer_id or len(steer_id) > 64 or steer_id == first_id:
         problems.append(f"the steer was not posted as one ({steered})")
     card = page.locator(".composer .steer")
     if card.count() != 1 or "also look at the log" not in card.inner_text():
