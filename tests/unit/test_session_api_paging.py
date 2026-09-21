@@ -9,6 +9,7 @@ import httpx
 import pytest
 from protocore.contracts.types import Message, MessageRole, TextBlock, ToolResultBlock, ToolUseBlock
 from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES
+from starlette.requests import Request
 
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions.api import build_app
@@ -82,3 +83,54 @@ async def test_the_page_goes_out_compressed_and_the_stream_does_not(client: http
     # The event stream is never compressed: a token must leave the process when it arrives and not
     # when a compression buffer fills. The middleware settles that by content type.
     assert "text/event-stream" in DEFAULT_EXCLUDED_CONTENT_TYPES
+
+
+async def test_session_stream_pages_to_its_watermark_and_a_fresh_page_skips_old_events(
+    settings: Settings,
+    db: Database,
+    manager: SessionManager,
+) -> None:
+    sid = await _session(manager, 1)
+    app = SimpleNamespace(settings=settings, config=manager.config, db=db, manager=manager, front=None, extensions={}, guard=None, create_session=manager.create_session)
+    api = build_app(app, "tok")
+    endpoint = next(route.endpoint for route in api.routes if getattr(route, "path", "") == "/api/sessions/{session_id}/stream")
+
+    async def replay(session_id: str, *, after: int, through: int | None = None, limit: int = 500) -> dict[str, Any]:
+        assert session_id == sid and limit == 1000
+        watermark = 1002
+        upper = min(watermark, through if through is not None else watermark, after + limit)
+        events = [
+            {
+                "session_id": sid,
+                "run_id": "run",
+                "event_seq": seq,
+                "history_revision": 0,
+                "kind": "tool_started",
+                "payload": {"seq": seq},
+            }
+            for seq in range(after + 1, upper + 1)
+        ]
+        return {"resync_required": False, "watermark": watermark, "history_revision": 0, "runtime_epoch": "", "events": events}
+
+    manager.events.session_replay = replay  # type: ignore[method-assign]
+
+    async def disconnected() -> dict[str, str]:
+        return {"type": "http.disconnect"}
+
+    resumed_request = Request(
+        {"type": "http", "method": "GET", "path": f"/api/sessions/{sid}/stream", "query_string": b"after=1", "headers": []},
+        disconnected,
+    )
+    resumed = await endpoint(session_id=sid, request=resumed_request, _={})
+    resumed_frames = [chunk async for chunk in resumed.body_iterator]
+    assert len(resumed_frames) == 1002  # hello plus every event from 2 through the fixed watermark
+    assert resumed_frames[1].startswith("id: 2\n")
+    assert resumed_frames[-1].startswith("id: 1002\n")
+
+    fresh_request = Request(
+        {"type": "http", "method": "GET", "path": f"/api/sessions/{sid}/stream", "query_string": b"", "headers": []},
+        disconnected,
+    )
+    fresh = await endpoint(session_id=sid, request=fresh_request, _={})
+    fresh_frames = [chunk async for chunk in fresh.body_iterator]
+    assert len(fresh_frames) == 1 and fresh_frames[0].startswith("event: hello\n")

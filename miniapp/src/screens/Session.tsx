@@ -438,14 +438,16 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
 
   // Live events while the screen is open.
   useEffect(() => {
-    const url = api.streamUrl(id);
+    const streamUrl = api.streamUrl(id);
     const headers = api.authHeaders();
     let stop = false;
+    let after: number | null = null;
     const controller = new AbortController();
     (async () => {
       let backoff = 1000;
       while (!stop) {
         try {
+          const url = after === null ? streamUrl : `${streamUrl}?after=${after}`;
           const res = await fetch(url, { headers, signal: controller.signal });
           if (!res.body) return;
           const reader = res.body.getReader();
@@ -464,12 +466,20 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
               const data = /^data: (.*)$/m.exec(frame)?.[1];
               if (!event || !data) continue;
               if (event === "resync_required") {
+                try {
+                  const boundary = JSON.parse(data) as { watermark?: number };
+                  if (typeof boundary.watermark === "number") after = boundary.watermark;
+                } catch {
+                  after = null;
+                }
                 resync = true;
                 break;
               }
               try {
                 const decoded = JSON.parse(data) as Record<string, any>;
+                if (event === "hello" && typeof decoded.event_seq === "number") after = decoded.event_seq;
                 const envelope = decoded.kind && decoded.payload && typeof decoded.payload === "object" ? decoded : null;
+                if (envelope && typeof envelope.event_seq === "number") after = Math.max(after ?? 0, envelope.event_seq);
                 handle(envelope ? String(envelope.kind) : event, envelope ? { ...envelope.payload, run_id: envelope.run_id, event_seq: envelope.event_seq, history_revision: envelope.history_revision } : decoded);
               } catch {
                 /* one malformed frame must not end the stream */

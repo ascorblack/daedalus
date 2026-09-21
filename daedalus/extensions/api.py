@@ -1511,9 +1511,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         async def gen():  # type: ignore[no-untyped-def]
             queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=512)
             overflowed = False
-            raw_after = request.query_params.get("after") or request.headers.get("last-event-id") or "0"
+            raw_after = request.query_params.get("after") or request.headers.get("last-event-id")
+            fresh = raw_after is None
             try:
-                after = max(0, int(raw_after))
+                after = max(0, int(raw_after or "0"))
             except ValueError:
                 after = 0
 
@@ -1534,7 +1535,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
             manager.add_sink(sink)
             try:
-                replay = await manager.events.session_replay(session_id, after=after)
+                replay = await manager.events.session_replay(session_id, after=after, limit=1000)
                 watermark = int(replay["watermark"])
                 hello = {
                     "session_id": session_id,
@@ -1543,14 +1544,36 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                     "runtime_epoch": replay["runtime_epoch"],
                 }
                 yield f"event: hello\ndata: {json.dumps(hello)}\n\n"
-                if replay["resync_required"]:
+                # A new page already loaded the materialized transcript, so it joins at the
+                # current boundary. Only reconnects ask for replay; treating a missing cursor as
+                # zero would replay the whole lifetime of every session whenever its page opens.
+                if fresh:
+                    replay = {**replay, "events": [], "resync_required": False}
+                    after = watermark
+                if replay["resync_required"] or after > watermark:
                     payload = {k: v for k, v in replay.items() if k != "events"}
+                    if after > watermark:
+                        payload.update({"resync_required": True, "reason": "cursor_ahead"})
                     yield f"event: resync_required\ndata: {json.dumps(payload)}\n\n"
                     return
                 last_sent = after
-                for envelope in replay["events"]:
-                    last_sent = int(envelope["event_seq"])
-                    yield f"id: {last_sent}\nevent: {envelope['kind']}\ndata: {json.dumps(envelope, default=str)}\n\n"
+                while True:
+                    for envelope in replay["events"]:
+                        last_sent = int(envelope["event_seq"])
+                        yield f"id: {last_sent}\nevent: {envelope['kind']}\ndata: {json.dumps(envelope, default=str)}\n\n"
+                    if last_sent >= watermark:
+                        break
+                    replay = await manager.events.session_replay(
+                        session_id,
+                        after=last_sent,
+                        through=watermark,
+                        limit=1000,
+                    )
+                    if replay["resync_required"] or not replay["events"]:
+                        payload = {k: v for k, v in replay.items() if k != "events"}
+                        payload.update({"resync_required": True, "reason": "replay_gap"})
+                        yield f"event: resync_required\ndata: {json.dumps(payload)}\n\n"
+                        return
                 while True:
                     if await request.is_disconnected():
                         return
@@ -1562,7 +1585,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                     name = str(envelope.get("kind") or "")
                     sequence = int(envelope.get("event_seq") or 0)
                     ephemeral = "ephemeral" in envelope
-                    if not ephemeral and sequence <= max(last_sent, watermark):
+                    if not ephemeral and sequence <= last_sent:
                         continue
                     if not ephemeral:
                         last_sent = sequence
