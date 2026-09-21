@@ -127,6 +127,30 @@ async def test_a_steer_is_listed_while_it_waits_and_can_be_taken_back(settings: 
     await manager.close()
 
 
+async def test_a_retried_input_returns_one_receipt_and_one_queue_item(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "sleep 3"}}, {"text": "done"}])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("deduplicated")
+    sid = state.session.id
+    async with _client(settings, db, manager) as client:
+        await manager.submit(sid, "start")
+        await asyncio.sleep(0.3)
+        body = {"text": "read this once", "steer": True, "client_message_id": "70a4b61b-cce4-4515-9100-f53340f9b01c"}
+        first = await client.post(f"/api/sessions/{sid}/messages", json=body, headers=H)
+        repeated = await client.post(f"/api/sessions/{sid}/messages", json=body, headers=H)
+        assert first.status_code == repeated.status_code == 200
+        assert first.json()["receipt"] == repeated.json()["receipt"]
+        assert first.json()["receipt"]["status"] == "queued"
+        assert [item["id"] for item in await manager.queued_steers(sid)] == [body["client_message_id"]]
+        conflict = await client.post(
+            f"/api/sessions/{sid}/messages",
+            json={**body, "text": "different"},
+            headers=H,
+        )
+        assert conflict.status_code == 409
+    await manager.close()
+
+
 async def test_a_steer_the_run_has_read_is_gone_from_the_queue_and_cannot_be_withdrawn(settings: Settings, db: Database) -> None:
     provider = ScriptedProvider([{"tool": "Exec", "args": {"command": "sleep 1"}}, {"text": "first"}, {"text": "second"}])
     manager = await _manager(settings, db, provider)

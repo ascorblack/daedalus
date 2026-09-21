@@ -1271,6 +1271,7 @@ class LiveControlStore:
         payload: dict[str, Any],
         *,
         queue_item: dict[str, Any] | None = None,
+        queue_kind: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Accept input once; a repeated request returns the original receipt.
 
@@ -1300,7 +1301,7 @@ class LiveControlStore:
             revision = int(control["queue_revision"] or 0) if control else 0
             status = "accepted"
             if queue_item is not None:
-                column = "steer_queue" if kind == "steer" else "follow_up_queue"
+                column = "steer_queue" if (queue_kind or kind) == "steer" else "follow_up_queue"
                 current = json.loads(control[column] or "[]") if control else []
                 current.append(queue_item)
                 revision += 1

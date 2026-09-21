@@ -81,6 +81,7 @@ from daedalus.speech.tts_service import frame as speech_frame
 from daedalus.stores import pairing, passkeys
 from daedalus.stores.media import MEDIA_TENANT
 from daedalus.stores.projects import ProjectError, ProjectSettings
+from daedalus.stores.sqlite import ReceiptConflict
 from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
@@ -224,6 +225,7 @@ class PasskeyLoginBody(BaseModel):
 class SendMessageBody(BaseModel):
     text: str
     steer: bool = False
+    client_message_id: str = Field(default="", max_length=64)
 
 
 class VoiceSayBody(BaseModel):
@@ -1598,12 +1600,20 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/sessions/{session_id}/messages")
     async def send_message(session_id: str, body: SendMessageBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:
-            run_id = await manager.submit(session_id, body.text, steer=body.steer)
+            run_id = await manager.submit(
+                session_id,
+                body.text,
+                steer=body.steer,
+                client_message_id=body.client_message_id or None,
+            )
         except KeyError as exc:
             raise HTTPException(404, "no such session") from exc
+        except ReceiptConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
-        return {"run_id": run_id}
+        receipt = await manager.live.receipt(session_id, body.client_message_id) if body.client_message_id else None
+        return {"run_id": run_id, **({"receipt": receipt} if receipt is not None else {})}
 
     @api.post("/api/sessions/{session_id}/upload")
     async def upload(

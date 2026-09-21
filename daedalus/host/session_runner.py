@@ -1737,7 +1737,12 @@ class SessionManager:
             if len(kept) != len(queue):
                 engine._steer_queue = kept  # type: ignore[attr-defined]
                 removed = True
-        if await self.live.remove(session_id, "steer", item_id):
+        receipt = await self.live.receipt(session_id, item_id)
+        if receipt is not None:
+            withdrawn = await self.live.withdraw(session_id, item_id)
+            if withdrawn is not None and withdrawn["status"] == "withdrawn":
+                removed = True
+        elif await self.live.remove(session_id, "steer", item_id):
             removed = True
         if removed and state is not None:
             # A reload that was already waiting on the database when this ran will be handed the row
@@ -1773,6 +1778,7 @@ class SessionManager:
         steer: bool = False,
         as_answer: bool = True,
         origin: str = "operator",
+        client_message_id: str | None = None,
     ) -> str:
         """Deliver input. Starts a run, or queues a follow-up when one is active.
 
@@ -1807,14 +1813,45 @@ class SessionManager:
                 raise RuntimeError(f"the working directory for {name} ({state.workspace}) is not reachable; restore or mount it before starting a run")
             if not os.access(state.workspace, os.W_OK):
                 raise RuntimeError(f"the working directory for {state.session.title} is not writable")
+            receipt_payload = {
+                "text": text,
+                "steer": steer,
+                "as_answer": as_answer,
+                "origin": origin,
+                "attachments": [
+                    {"name": item.path.name, "mime_type": item.mime_type, "caption": item.caption or ""}
+                    for item in attachments
+                ],
+            }
             body, image_refs = await self._ingest_attachments(state, text, attachments)
             if state.pending is not None:
                 if as_answer:
                     # Free-text reply to a pending question counts as a custom answer.
-                    return await self.answer(session_id, [{"custom": body}])
-                await self.live.enqueue(session_id, "follow_up", {**new_queued_prompt("follow_up", body).to_dict(), "queued_at": datetime.now(UTC).isoformat()})
+                    if client_message_id:
+                        receipt, created = await self.live.accept(session_id, client_message_id, "input", receipt_payload)
+                        if not created and receipt["status"] != "accepted":
+                            return str(receipt["run_id"] or state.run_id or "")
+                    run_id = await self.answer(session_id, [{"custom": body}])
+                    if client_message_id:
+                        await self.live.consume(session_id, client_message_id, run_id=run_id, step_id="answer", message_seq=None)
+                    return run_id
+                queued = {**new_queued_prompt("follow_up", body).to_dict(), "queued_at": datetime.now(UTC).isoformat()}
+                if client_message_id:
+                    queued["id"] = client_message_id
+                    receipt, created = await self.live.accept(
+                        session_id,
+                        client_message_id,
+                        "input",
+                        receipt_payload,
+                        queue_item=queued,
+                        queue_kind="follow_up",
+                    )
+                    if not created:
+                        return str(receipt["run_id"] or state.run_id or "")
+                else:
+                    await self.live.enqueue(session_id, "follow_up", queued)
                 await self.sessions.append_transcript(
-                    session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up", "daedalus.origin": origin, "daedalus.queued": True})]
+                    session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": "follow_up", "daedalus.origin": origin, "daedalus.queued": True, **({"daedalus.client_message_id": client_message_id} if client_message_id else {})})]
                 )
                 return state.run_id or ""
             provider_id: str | None = None
@@ -1840,11 +1877,25 @@ class SessionManager:
                 # A message sent while the agent works is a steer: the core places it before the
                 # next model call (after the current tool batch). follow_up would wait for the end.
                 kind = "follow_up" if not steer and state.metadata.get("queue_mode") == "follow_up" else "steer"
-                await self.live.enqueue(session_id, kind, {**new_queued_prompt(kind, body).to_dict(), "origin": origin, "queued_at": datetime.now(UTC).isoformat()})  # type: ignore[arg-type]
+                queued = {**new_queued_prompt(kind, body).to_dict(), "origin": origin, "queued_at": datetime.now(UTC).isoformat()}
+                if client_message_id:
+                    queued["id"] = client_message_id
+                    receipt, created = await self.live.accept(
+                        session_id,
+                        client_message_id,
+                        "input",
+                        receipt_payload,
+                        queue_item=queued,
+                        queue_kind=kind,
+                    )
+                    if not created:
+                        return str(receipt["run_id"] or state.run_id or "")
+                else:
+                    await self.live.enqueue(session_id, kind, queued)  # type: ignore[arg-type]
                 # The core folds queued prompts into the model's history later (and compaction may
                 # rewrite them); the transcript keeps the operator's words as sent.
                 await self.sessions.append_transcript(
-                    session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind, "daedalus.origin": origin, "daedalus.queued": True})]
+                    session_id, [Message(role=MessageRole.user, content_blocks=[TextBlock(text=body)], metadata={"daedalus.delivery": kind, "daedalus.origin": origin, "daedalus.queued": True, **({"daedalus.client_message_id": client_message_id} if client_message_id else {})})]
                 )
                 if kind == "steer":
                     await self.steer_changed(session_id, reason="queued")
@@ -1869,10 +1920,14 @@ class SessionManager:
                     body = await hook(session_id, body)
                 except Exception:  # noqa: BLE001
                     logger.exception("prompt hook failed")
+            if client_message_id:
+                receipt, created = await self.live.accept(session_id, client_message_id, "input", receipt_payload)
+                if not created and receipt["status"] != "accepted":
+                    return str(receipt["run_id"] or state.run_id or "")
             message = Message(
                 role=MessageRole.user,
                 content_blocks=[TextBlock(text=body)],
-                metadata={"daedalus.origin": origin, **({"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {})},
+                metadata={"daedalus.origin": origin, **({"daedalus.client_message_id": client_message_id} if client_message_id else {}), **({"image_refs": [{"ref": ref, "mime": mime} for ref, mime in image_refs]} if image_refs else {})},
             )
             # Only what cannot be sent at all is compacted here — a model whose window is smaller
             # than the history was built for. The ratio-based compaction happens between runs
@@ -1883,6 +1938,14 @@ class SessionManager:
             seqs = await self.sessions.transcript_seqs(session_id, [self.sessions.transcript_key(message)])
             await self.checkpoint(state, kind="before", seq=seqs[0] if seqs else None)
             run_id = await self._start_run(state, message)
+            if client_message_id:
+                await self.live.consume(
+                    session_id,
+                    client_message_id,
+                    run_id=run_id,
+                    step_id="start",
+                    message_seq=seqs[0] if seqs else None,
+                )
             for started in self.run_started_hooks:
                 try:
                     await started(session_id, run_id)
@@ -2826,6 +2889,15 @@ class SessionManager:
                 items = [item for kind in ("steer", "follow_up") for item in queued[kind] if item.get("id") in placed]
                 origin = str(items[0].get("origin") or "operator") if items else "operator"
                 message.metadata.update({"daedalus.origin": origin, "daedalus.delivery": event.payload.get("kind"), "daedalus.run_id": event.run_id})
+                for client_message_id in placed:
+                    if await self.live.receipt(state.session.id, str(client_message_id)) is not None:
+                        await self.live.consume(
+                            state.session.id,
+                            str(client_message_id),
+                            run_id=event.run_id,
+                            step_id=str(event.payload.get("step_id") or "queue"),
+                            message_seq=None,
+                        )
         change = self._model_change(state, event)
         if change is not None:
             # Before the message it explains, not after it: the header says which model is speaking
