@@ -169,6 +169,21 @@ export type SessionSummary = {
   metadata?: { subagent_of?: string; subagent_name?: string; loop?: LoopView; forked_from?: { session_id: string; seq: number }; [k: string]: unknown };
 };
 
+export type TaskView = {
+  id: string;
+  owner_session_id: string;
+  parent_run_id: string | null;
+  kind: "job" | "agent";
+  state: "running" | "done" | "failed" | "cancelled";
+  title: string;
+  started_at: string;
+  last_activity_at: string;
+  progress: number | null;
+  child_session_id: string | null;
+  result_ref: string | null;
+  stop_supported: boolean;
+};
+
 export type LoopView = {
   mode: "interval" | "dynamic";
   interval_seconds: number | null;

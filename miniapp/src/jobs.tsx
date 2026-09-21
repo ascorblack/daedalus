@@ -3,7 +3,7 @@
 // is where its outcome is.
 
 import { useEffect, useState } from "react";
-import { api, MessageView } from "./api";
+import { api, MessageView, TaskView } from "./api";
 import { timeAgo } from "./components";
 import { codeBlock } from "./md";
 import { Icon } from "./icons";
@@ -48,14 +48,17 @@ export function sentFiles(messages: MessageView[]): SentFile[] {
   return out.reverse();
 }
 
-export function JobsTab({ sessionId, messages, onOpen, onPreview }: { sessionId: string; messages: MessageView[]; onOpen: (entry: PanelEntry) => void; onPreview: (src: PreviewSource) => void }) {
+export function JobsTab({ sessionId, messages, onOpen, onPreview, onOpenSession }: { sessionId: string; messages: MessageView[]; onOpen: (entry: PanelEntry) => void; onPreview: (src: PreviewSource) => void; onOpenSession?: (id: string) => void }) {
   const [receipts, setReceipts] = useState<Verification[] | null>(null);
+  const [tasks, setTasks] = useState<TaskView[] | null>(null);
+  const loadTasks = () => api.get<{ tasks: TaskView[] }>(`/api/sessions/${sessionId}/tasks`).then((answer) => setTasks(answer.tasks)).catch(() => setTasks([]));
   useEffect(() => {
     let gone = false;
     api
       .get<Verification[]>(`/api/sessions/${sessionId}/verifications`)
       .then((rows) => !gone && setReceipts(Array.isArray(rows) ? rows : []))
       .catch(() => !gone && setReceipts([]));
+    void api.get<{ tasks: TaskView[] }>(`/api/sessions/${sessionId}/tasks`).then((answer) => !gone && setTasks(answer.tasks)).catch(() => !gone && setTasks([]));
     return () => {
       gone = true;
     };
@@ -66,6 +69,19 @@ export function JobsTab({ sessionId, messages, onOpen, onPreview }: { sessionId:
   const empty = jobs.length === 0 && sent.length === 0 && (receipts?.length ?? 0) === 0;
   return (
     <div className="jobs">
+      {tasks && tasks.length > 0 && (
+        <section className="dt-section task-list">
+          <div className="dt-label"><span>{t("panel.jobs.tasks")}</span><span className="dt-aside">{tasks.length}</span></div>
+          {tasks.map((task) => (
+            <div key={task.id} className="aside-row task-row">
+              <span className={`dot ${task.state}`} />
+              <button className="grow name task-open" onClick={() => task.child_session_id ? onOpenSession?.(task.child_session_id) : task.result_ref ? onOpen({ base, path: task.result_ref }) : undefined}>{task.title}</button>
+              <span className="sub">{t(`task.state.${task.state}`)}</span>
+              {task.stop_supported && <button className="iconbtn small quiet task-stop" aria-label={t("task.stop")} title={t("task.stop")} onClick={async () => { await api.post(`/api/sessions/${sessionId}/tasks/${encodeURIComponent(task.id)}/stop`, {}); await loadTasks(); }}><Icon name="stop" size={14} /></button>}
+            </div>
+          ))}
+        </section>
+      )}
       {empty && (
         <div className="empty">
           <b>{t("panel.jobs.empty.title")}</b>
