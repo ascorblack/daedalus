@@ -152,6 +152,10 @@ export type SessionSummary = {
   created_at: string;
   last_message_at: string;
   run_id: string | null;
+  needs_attention?: boolean;
+  background_count?: number;
+  unread_result?: boolean;
+  archived?: boolean;
   /** The preset label or provider/model the session's next call goes to. */
   model?: string;
   /** The name of the directory the session works in, and whether that directory is its own. */
@@ -316,6 +320,7 @@ export type ProjectFolder = ProjectRef & { members?: number; total: number; acti
 export type SessionList = {
   sessions: SessionSummary[];
   projects: ProjectFolder[];
+  next_cursor?: string | null;
 };
 
 export type AsrStatus = { configured: boolean; reason: string; provider: string; model: string; max_seconds: number; autosend: boolean };

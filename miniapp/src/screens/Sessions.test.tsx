@@ -109,7 +109,7 @@ describe("project conversations", () => {
   it("replaces the old chips with a real debounced search and shows exact-only fallback", async () => {
     const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ sessions: [{ ...agent, match: { snippet: "Grow tomatoes on the balcony", score: 1 } }], projects: [project], semantic: false, reason: "off", partial: false, indexing: false })));
     await act(async () => root.render(<SessionsScreen onOpen={onOpen} toast={toast} />));
-    expect(host.querySelector(".chips")).toBeNull();
+    expect(host.querySelectorAll(".agent-filters .chip")).toHaveLength(4);
     const input = host.querySelector('input[type="search"]') as HTMLInputElement;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "vegetables outside");

@@ -16,13 +16,22 @@ import { plural, t } from "../i18n";
 type SearchList = SessionList & { semantic: boolean; reason: string; partial: boolean; indexing: boolean };
 
 export function SessionsScreen({ onOpen, toast, current, compact, project = "", projects = [], onProjects }: { onOpen: (id: string) => void; toast: (t: string) => void; current?: string; compact?: boolean; project?: string; projects?: Project[]; onProjects?: () => void }) {
-  const { data, error, loading } = useQuery<SessionList>("/api/sessions", { pollMs: 5000, staleMs: 3000 });
+  const [view, setView] = useState<"all" | "attention" | "working" | "archive">("all");
+  const listUrl = `/api/sessions?view=${view}`;
+  const { data, error, loading } = useQuery<SessionList>(listUrl, { pollMs: 5000, staleMs: 3000 });
+  const [extra, setExtra] = useState<SessionSummary[]>([]);
+  const [next, setNext] = useState<string | null>(null);
+  const [paging, setPaging] = useState(false);
   const [creating, setCreating] = useState(() => new URLSearchParams(window.location.search).get("new") === "1");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchList | null>(null);
   const [pending, setPending] = useState(false);
   const [searchError, setSearchError] = useState("");
   const searching = !!query.trim();
+  useEffect(() => {
+    setExtra([]);
+    setNext(data?.next_cursor ?? null);
+  }, [data, view]);
   useEffect(() => {
     setResults(null);
     setSearchError("");
@@ -44,7 +53,7 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
   const searchField = <input type="search" className="field search" placeholder={t("search.placeholder")} value={query} maxLength={500} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") setQuery(""); }} aria-label={t("search.label")} />;
   const inProject = projects.find((p) => p.id === project);
 
-  const listing = searching ? results : data;
+  const listing = searching ? results : data ? { ...data, sessions: [...data.sessions, ...extra], next_cursor: next } : data;
   const sessions = listing?.sessions ?? [];
   const folders = useMemo(
     () => arrange(sessions, listing?.projects ?? [], { project, results: searching }),
@@ -79,6 +88,11 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
     <>
       {head}
       <div className="screen agents-screen">
+        {!compact && !searching && <div className="chips agent-filters" role="group" aria-label={t("agents.filter.label")}>
+          {(["all", "attention", "working", "archive"] as const).map((name) => (
+            <button key={name} className={`chip ${view === name ? "selected" : ""}`} aria-pressed={view === name} onClick={() => setView(name)}>{t(`agents.filter.${name}`)}</button>
+          ))}
+        </div>}
         {searching && <div className="search-notice sub" role="status">
           {pending ? t("search.loading") : searchError || (results?.semantic ? t("search.semantic") : t("search.exact"))}
           {!pending && !searchError && results && !results.semantic && <> <a href="/app/settings/components">{t("search.enable")}</a></>}
@@ -96,8 +110,17 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
         )}
         {((results && !pending && folders.shown === 0) || (!searching && data && folders.total > 0 && folders.shown === 0)) && <div className="empty">{t("common.nothing")}</div>}
         {folders.folders.map((f) => (
-          <FolderSection key={f.key} folder={f} onOpen={onOpen} current={current} filtered={searching} compact={compact} toast={toast} />
+          <FolderSection key={f.key} folder={f} onOpen={onOpen} current={current} filtered={searching || view !== "all"} compact={compact} toast={toast} />
         ))}
+        {!searching && next && <button className="btn ghost load-more" disabled={paging} onClick={async () => {
+          setPaging(true);
+          try {
+            const page = await api.get<SessionList>(`/api/sessions?view=${view}&cursor=${encodeURIComponent(next)}`);
+            setExtra((held) => [...held, ...page.sessions.filter((row) => !data?.sessions.some((first) => first.id === row.id) && !held.some((old) => old.id === row.id))]);
+            setNext(page.next_cursor ?? null);
+          } catch (e) { toast(errorText(e)); }
+          finally { setPaging(false); }
+        }}>{t(paging ? "agents.loading" : "agents.more")}</button>}
       </div>
       {creating && <NewAgentSheet onClose={() => setCreating(false)} onCreated={onOpen} toast={toast} project={project} />}
     </>
@@ -377,11 +400,18 @@ function SessionRowMenu({ session, onProject, projectName }: { session: SessionS
       else if (route.with === session.id) navigate(pathFor("agents", route.session));
     } catch (error) { toast(errorText(error)); }
   }
+  async function archive() {
+    try {
+      await api.patch(`/api/sessions/${session.id}`, { archived: !session.archived });
+      invalidate("/api/sessions");
+    } catch (error) { toast(errorText(error)); }
+  }
   return <span className="session-row-menu" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
     <OverflowMenu small className="quiet" label={`${session.title}: ${t("dlg.menu")}`} items={[
       { label: t("session.rename"), icon: "pen", onSelect: () => { setTitle(session.title); setEditing(true); } },
       { label: t("session.project.move"), icon: "folder", onSelect: () => setMoving(true) },
       ...(onProject ? [{ label: t("project.settings.for", { name: projectName ?? session.project }), onSelect: onProject }] : []),
+      { label: t(session.archived ? "agents.restore" : "agents.archive"), icon: "folder", onSelect: () => void archive() },
       { label: t("session.delete.action"), icon: "trash", danger: true, onSelect: () => void remove() },
     ]} />
     {moving && <MoveSessionSheet sessionId={session.id} current={session.project_id} currentOwn={!!session.workspace_own} onClose={() => setMoving(false)} onMoved={() => invalidate("/api/sessions")} toast={toast} />}
