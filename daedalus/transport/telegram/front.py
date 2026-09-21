@@ -570,11 +570,13 @@ class TelegramFront:
 
     async def outbox_for_session(self, session_id: str) -> TelegramOutbox | None:
         """Where this session's output goes: the one place that tells the two modes apart."""
-        if self.private_mode():
-            return await self._private_outbox(session_id)
         state = await self.manager.get_state(session_id)
+        # Detachment is a per-session delivery veto, not merely the absence of a topic.
+        # It must win over the global private-chat mode or background output leaks into DMs.
         if state is not None and state.metadata.get("telegram_detached"):
             return None
+        if self.private_mode():
+            return await self._private_outbox(session_id)
         binding = await self.binding_for_session(session_id)
         if binding is not None:
             return TelegramOutbox(self.bot, binding.chat_id, binding.thread_id)

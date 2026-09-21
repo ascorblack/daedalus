@@ -180,6 +180,11 @@ async def test_detaching_a_topic_keeps_the_session_web_only(front: TelegramFront
     kept = await front.manager.get_state(state.session.id)
     assert kept is not None and kept.metadata["telegram_detached"] is True
 
+    # Switching the installation to private-chat mode must not silently reconnect a session
+    # that the operator explicitly detached from Telegram.
+    front.config.telegram.mode = "private"
+    assert await front.outbox_for_session(state.session.id) is None
+
 
 async def test_detach_command_disconnects_the_topic_it_was_sent_from(front: TelegramFront) -> None:
     front.config.telegram.forum_chat_id = -100
