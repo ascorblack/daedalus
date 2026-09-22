@@ -69,6 +69,15 @@ Every session lives in this chat, which is a window onto one of them at a time. 
 /bind — (in a supergroup with topics) give every session a topic of its own instead
 """
 
+HELP_PRIVATE_FORUM = """<b>Daedalus</b>
+This chat is a window onto one session at a time. /new opens a topic in the bound group, and that session speaks there. A session started on the site stays on the site.
+
+/sessions · /status — the sessions, numbered; what is running
+/use &lt;n|title&gt; — write to that session from now on
+/new &lt;title&gt; — new session, in its own topic
+/stop — stop the current run · /close — put the current session away (asks whether to delete the agent)
+"""
+
 HELP_TAIL = """/rename &lt;title&gt; — rename this session (and its topic) · /compact [focus] — replace the history with a summary
 /delete &lt;id&gt; · /cleanup — delete a session; delete every session whose topic is already closed
 /model [provider/]&lt;name&gt;|default · /thinking on|off|low|medium|high — model settings (per session; in a group's General topic, the default)
@@ -647,6 +656,10 @@ class TelegramFront:
         """
         opened = 0
         for session in await self.manager.list_sessions():
+            # A session started on the site has no topic on purpose. Binding the group must
+            # not pull it into the forum: that is the leak the flag exists to stop.
+            if (session.get("metadata") or {}).get("telegram_detached"):
+                continue
             if await self.binding_for_session(session["id"]) is not None:
                 continue
             try:
@@ -673,18 +686,30 @@ class TelegramFront:
                 logger.warning("could not delete the topic of session %s: %s", session_id, exc)
         await self._release_current(session_id)
 
+    async def _keep_off_telegram(self, session_id: str) -> None:
+        """A session whose topic Telegram would not open must not fall through into the private chat."""
+        state = await self.manager.get_state(session_id)
+        if state is None:
+            return
+        state.metadata["telegram_detached"] = True
+        state.session.metadata["telegram_detached"] = True
+        await self.manager.sessions.update_metadata(session_id, state.session.metadata)
+
     async def create_session_topic(
-        self, title: str, *, metadata: dict[str, Any] | None = None, chat_id: int | None = None, topic: bool = True, project_id: str | None = None, own_directory: bool = False
+        self, title: str, *, metadata: dict[str, Any] | None = None, chat_id: int | None = None, topic: bool = True, project_id: str | None = None, own_directory: bool = False, force_topic: bool = False
     ) -> tuple[SessionState, TopicBinding]:
         """Create a session and, in topics mode, its topic.
 
         In private mode there is no topic and nothing to bind: the session is reachable from
         /sessions, /use and the Mini App, and speaks in the private chat under its own name.
+        ``force_topic`` is the exception a command asks for: the private chat stays a window,
+        and the new session speaks in a thread of the bound group.
         """
         state = await self.manager.create_session(title, metadata=metadata, project_id=project_id, own_directory=own_directory)
-        if self.private_mode():
+        forum_id = chat_id or self.config.telegram.forum_chat_id
+        if self.private_mode() and not (force_topic and forum_id):
             return state, TopicBinding(self.settings.owner_user_id, 0, state.session.id, title)
-        forum = (chat_id or self.config.telegram.forum_chat_id) if topic else 0
+        forum = forum_id if (topic or force_topic) else 0
         binding = await self.ensure_topic(state.session.id, title, chat_id=forum) if forum else None
         if binding is None:
             return state, await self.bind_topic(self.settings.owner_user_id, 0, state.session.id, title)
@@ -766,7 +791,13 @@ class TelegramFront:
     async def cmd_start(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
-        await message.answer((HELP_PRIVATE if self.private_mode() else HELP_TOPICS) + HELP_TAIL, parse_mode=ParseMode.HTML)
+        if self.private_mode() and self.config.telegram.forum_chat_id:
+            help_text = HELP_PRIVATE_FORUM
+        elif self.private_mode():
+            help_text = HELP_PRIVATE
+        else:
+            help_text = HELP_TOPICS
+        await message.answer(help_text + HELP_TAIL, parse_mode=ParseMode.HTML)
 
     async def cmd_bind(self, message: Message) -> None:
         """Bind this forum supergroup as the session hub."""
@@ -806,6 +837,19 @@ class TelegramFront:
         if not self._is_owner(message.from_user.id if message.from_user else None):
             return
         title = (command.args or "").strip() or datetime.now(UTC).strftime("session %m-%d %H:%M")
+        # A bound group is where a command-made session speaks, even while this chat is only a
+        # window. Leaving it in the private chat is how a session the operator did not ask to
+        # see there used to arrive as a message from the bot.
+        if self.private_mode() and self.config.telegram.forum_chat_id:
+            try:
+                state, _binding = await self.create_session_topic(title, chat_id=self.config.telegram.forum_chat_id, force_topic=True)
+            except (TelegramBusy, TelegramRefused) as exc:
+                if exc.session_id:
+                    await self._keep_off_telegram(exc.session_id)
+                await message.answer(f"Telegram did not open a topic: {exc}")
+                return
+            await message.answer(f"Created topic '{title}' (session {state.session.id}).")
+            return
         if self.private_mode():
             state, _ = await self.create_session_topic(title)
             await self.set_current_session(state.session.id)
@@ -2147,7 +2191,14 @@ class TelegramFront:
         if tools_off:
             metadata["tools_off"] = sorted(set(tools_off))
         project = await self.manager.project_of(session_id)
-        state, _ = await self.create_session_topic(title, metadata=metadata, project_id=project.id if project is not None else None)
+        parent = await self.manager.get_state(session_id)
+        # A site session's child stays on the site. Opening it a topic would put the bot's
+        # words back into Telegram for a chat the operator started in the Mini App.
+        if parent is not None and parent.metadata.get("telegram_detached"):
+            metadata["telegram_detached"] = True
+            state = await self.manager.create_session(title, metadata=metadata, project_id=project.id if project is not None else None)
+        else:
+            state, _ = await self.create_session_topic(title, metadata=metadata, project_id=project.id if project is not None else None)
         copied: list[str] = []
         for raw in files:
             source = Path(raw)

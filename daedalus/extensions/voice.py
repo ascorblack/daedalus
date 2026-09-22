@@ -377,7 +377,8 @@ class Voice:
             if not create:
                 return ""
             project = await self.project()
-            state = await self.app.create_session(TITLE, metadata={"voice": True}, project_id=project.id)
+            # The concierge is a page, not a Telegram command: its session does not speak in the private chat.
+            state = await manager.create_session(TITLE, metadata={"voice": True, "telegram_detached": True}, project_id=project.id)
             await self.app.db.kv_set(SESSION_KEY, state.session.id)
             self._id = state.session.id
             await self._point_at(state.session.id)
@@ -608,9 +609,9 @@ class Voice:
             async with self._lock:
                 project = await self.project()
             own = workspace == "own"
-        state = await self.app.create_session(
+        state = await manager.create_session(
             name,
-            metadata={"voice_parent": voice_id, "brief": body},
+            metadata={"voice_parent": voice_id, "brief": body, "telegram_detached": True},
             project_id=project.id,
             own_directory=own,
         )

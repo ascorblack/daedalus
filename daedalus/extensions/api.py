@@ -1334,6 +1334,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/sessions")
     async def new_session(body: NewSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         metadata: dict[str, Any] = {"tools_off": sorted(set(body.tools_off))} if body.tools_off else {}
+        # A session opened here is not a Telegram session. Without this, private-chat mode
+        # delivers the agent's replies into the operator's direct messages.
+        metadata["telegram_detached"] = True
         title = body.title.strip()
         if body.autotitle:
             # The operator typed the message instead of a name. A clip stands in until the model
@@ -1350,15 +1353,10 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 raise HTTPException(404, "no such project")
             if not await manager.projects.ensure_reachable(project):
                 raise HTTPException(409, f"the folder of {project.name} ({project.root}) is not reachable from here yet; mount it and restart before starting an agent in it")
-        try:
-            create_args: dict[str, Any] = {"metadata": metadata or None, "project_id": body.project_id or None}
-            if body.own_directory:
-                create_args["own_directory"] = True
-            state = await app.create_session(title, **create_args)
-        except TelegramBusy as exc:
-            raise HTTPException(429, f"Telegram asks to wait {exc.retry_after}s before creating another topic (session {exc.session_id} exists without a topic)") from exc
-        except TelegramRefused as exc:
-            raise HTTPException(502, f"Telegram refused to create the topic: {exc}") from exc
+        create_args: dict[str, Any] = {"metadata": metadata or None, "project_id": body.project_id or None}
+        if body.own_directory:
+            create_args["own_directory"] = True
+        state = await manager.create_session(title, **create_args)
         if body.preset:
             # Before the first run, so the session's opening task already goes to the chosen model.
             try:
@@ -2794,19 +2792,15 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if source is None:
             raise HTTPException(404, "no such session")
         title = (body.title or f"{re.sub(r'\s*\(fork @\d+\)$', '', source.session.title)} (fork @{body.seq})")[:128]
-        try:
-            # A fork of a project session stays in the project: the two sessions share the root, which
-            # is what "several agents work in one project" already means, and the fork keeps the wall.
-            target = await app.create_session(
-                title,
-                metadata={"forked_from": {"session_id": session_id, "seq": body.seq}},
-                project_id=source.project.id if source.project is not None else None,
-                own_directory=bool(source.metadata.get("directory")),
-            )
-        except TelegramBusy as exc:
-            raise HTTPException(429, str(exc)) from exc
-        except TelegramRefused as exc:
-            raise HTTPException(502, str(exc)) from exc
+        # A fork of a project session stays in the project: the two sessions share the root, which
+        # is what "several agents work in one project" already means, and the fork keeps the wall.
+        # It is opened on the site, so it does not grow a topic or speak in the private chat.
+        target = await manager.create_session(
+            title,
+            metadata={"forked_from": {"session_id": session_id, "seq": body.seq}, "telegram_detached": True},
+            project_id=source.project.id if source.project is not None else None,
+            own_directory=bool(source.metadata.get("directory")),
+        )
         try:
             result = await manager.fork_into(session_id, body.seq, target)
         except RuntimeError as exc:

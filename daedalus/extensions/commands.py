@@ -50,7 +50,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("usage", "", "spend today and in this session"),
     CommandSpec("status", "", "what is running", scope="global"),
     CommandSpec("sessions", "", "every session", scope="global"),
-    CommandSpec("new", "<title>", "a new session with its own topic", scope="global"),
+    CommandSpec("new", "<title>", "a new session on the site", scope="global"),
     CommandSpec("delete", "<id>", "delete a session; shared project files stay", scope="global", confirm=True),
     CommandSpec("cleanup", "[confirm]", "delete every session whose topic is closed", scope="global", confirm=True),
     CommandSpec("inbox", "[all|clear]", "the inbox", scope="global"),
@@ -238,10 +238,9 @@ async def run_command(app: Application, session_id: str, line: str) -> str:  # n
         return f"Renamed to: {title}"
     if name == "new":
         title = args.strip() or datetime.now(UTC).strftime("session %m-%d %H:%M")
-        created = await app.create_session(title)
-        if front is not None and front.private_mode():
-            # In the private chat a new session is the one the operator is now writing to, as /new does there.
-            await front.set_current_session(created.session.id)
+        # Typed on the site, not sent as a Telegram command: the session stays on the site.
+        # Pointing the private chat at it would deliver the answer somewhere the operator is not looking.
+        created = await manager.create_session(title, metadata={"telegram_detached": True})
         return f"New session '{title}' ({created.session.id})."
     if name == "delete":
         target = args.strip()

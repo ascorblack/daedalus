@@ -79,19 +79,45 @@ async def test_no_group_means_private_mode(front: TelegramFront) -> None:
     assert front.private_mode() is True  # …until the owner says otherwise
 
 
-async def test_new_creates_a_session_without_a_topic_and_writes_to_it(front: TelegramFront) -> None:
+async def test_new_with_a_bound_group_opens_a_topic_and_leaves_the_private_chat(front: TelegramFront) -> None:
+    """The private chat is a window. /new still opens a thread, and the answer goes there."""
     replies: list[str] = []
     front.config.telegram.forum_chat_id = -100
     front.config.telegram.mode = "private"
     await front.cmd_new(_said(_message("/new research"), replies), _command("new", "research"))
+    assert front.bot.topics == ["research"]  # type: ignore[attr-defined]
+    assert await front.current_session_id() == ""
+    binding = await front.binding_for_topic(-100, 10)
+    assert binding is not None and binding.title == "research"
+    outbox = await front.outbox_for_session(binding.session_id)
+    assert outbox is not None and (outbox.chat_id, outbox.thread_id) == (-100, 10)
+    assert replies[-1].startswith("Created topic 'research'")
+    banner = front.bot.sent[-1]  # type: ignore[attr-defined]
+    assert banner["chat_id"] == -100 and banner["message_thread_id"] == 10
+
+
+async def test_a_session_opened_on_the_site_does_not_speak_in_telegram(front: TelegramFront) -> None:
+    front.config.telegram.forum_chat_id = -100
+    front.config.telegram.mode = "private"
+    state = await front.manager.create_session("from the site", metadata={"telegram_detached": True})
+    assert await front.outbox_for_session(state.session.id) is None
+    assert await front.binding_for_session(state.session.id) is None
+    assert await front.adopt_sessions_into_topics() == 0
     assert front.bot.topics == []  # type: ignore[attr-defined]
-    current = await front.current_session_id()
-    state = await front.manager.get_state(current)
-    assert state is not None and state.session.title == "research"
-    assert await front.binding_for_session(current) is None
-    await front.on_message(_message("go"))
-    await grows_to(front.submitted, 1, "the message reached the manager")  # type: ignore[attr-defined]
-    assert front.submitted == [(current, "go", [])]  # type: ignore[attr-defined]
+    assert await front.binding_for_session(state.session.id) is None
+
+
+async def test_a_site_session_s_spawned_agent_stays_off_telegram(front: TelegramFront) -> None:
+    front.config.telegram.forum_chat_id = -100
+    front.config.telegram.mode = "private"
+    parent = await front.manager.create_session("from the site", metadata={"telegram_detached": True})
+    child_id = await front._service_spawn_agent(
+        parent.session.id, title="helper", brief="help", files=[], first_message=None, preset=None, mode=None, mcp=[], peer_name=None
+    )
+    child = await front.manager.get_state(child_id)
+    assert child is not None and child.metadata.get("telegram_detached") is True
+    assert await front.outbox_for_session(child_id) is None
+    assert front.bot.topics == []  # type: ignore[attr-defined]
 
 
 async def test_use_switches_the_chat_by_number_and_by_title(front: TelegramFront) -> None:

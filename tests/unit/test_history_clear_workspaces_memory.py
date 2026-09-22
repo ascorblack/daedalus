@@ -127,6 +127,8 @@ async def test_new_session_starts_on_the_chosen_model_preset(client: httpx.Async
     r = await client.post("/api/sessions", json={"title": "on grok", "preset": chosen}, headers=H)
     assert r.status_code == 200, r.text
     sid = r.json()["id"]
+    opened = await manager.get_state(sid)
+    assert opened is not None and opened.metadata.get("telegram_detached") is True
     # The preset is in place before any run of the session, and the answer names the model it will use.
     assert (await manager.live.load(sid)).get("preset") == chosen
     assert r.json()["model"] == manager.config.presets[chosen].display(chosen)

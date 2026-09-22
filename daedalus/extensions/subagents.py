@@ -177,6 +177,9 @@ class Subagents:
         }
         if withheld:
             metadata["tools_off"] = withheld
+        if leader.metadata.get("telegram_detached"):
+            # The leader never speaks in Telegram, so neither does a worker it starts.
+            metadata["telegram_detached"] = True
         for key in ("mode", "mcp"):
             if leader.metadata.get(key) is not None:
                 metadata[key] = leader.metadata[key]
