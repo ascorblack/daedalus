@@ -20,6 +20,7 @@ SESSION = "media-session"
 ALBUM = "11111111-1111-4111-8111-111111111111"
 VIDEO = "22222222-2222-4222-8222-222222222222"
 AUDIO = "33333333-3333-4333-8333-333333333333"
+IMAGE = "44444444-4444-4444-8444-444444444444"
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
 
 
@@ -36,8 +37,9 @@ MEDIA = [
     ]},
     {"id": VIDEO, "layout": "single", "items": [item("video-one", "video", "walkthrough.mp4", caption="Walkthrough")]},
     {"id": AUDIO, "layout": "single", "items": [item("audio-one", "audio", "summary.mp3", caption="Audio summary")]},
+    {"id": IMAGE, "layout": "single", "items": [item("image-single", "image", "result.png", caption="Full result")]},
 ]
-ANSWER = f"Before the album.\n\n![Charts](daedalus-media:{ALBUM})\n\nBetween the album and video.\n\n![Video](daedalus-media:{VIDEO})\n\n![Audio](daedalus-media:{AUDIO})\n\nAfter every attachment."
+ANSWER = f"Before the album.\n\n![Charts](daedalus-media:{ALBUM})\n\nBetween the album and video.\n\n![Video](daedalus-media:{VIDEO})\n\n![Audio](daedalus-media:{AUDIO})\n\n![Result](daedalus-media:{IMAGE})\n\nAfter every attachment."
 DETAIL = {
     "id": SESSION, "title": "Media answer", "status": "idle", "run_id": None,
     "workspace": "/workspace", "workspace_name": "ws", "workspace_own": True,
@@ -94,7 +96,7 @@ def run() -> int:
             players = (page.locator(".inline-media video").count(), page.locator(".inline-media audio").count())
             order = page.locator(".answer-with-media").evaluate("el => [...el.children].map(x => x.className.includes('inline-media') ? 'media' : x.textContent.trim()).filter(Boolean)")
             overflow = page.evaluate("() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
-            geometry = page.locator(".inline-media.album").evaluate("el => { const box=el.getBoundingClientRect(), answer=el.closest('.answer').getBoundingClientRect(), rail=el.querySelector('.inline-media-track'), caption=el.querySelector('figcaption'); return { centre: Math.abs((box.left+box.right)/2-(answer.left+answer.right)/2), scroll: rail.scrollWidth-rail.clientWidth, caption: getComputedStyle(caption).position } }")
+            geometry = page.locator(".inline-media.album").evaluate("el => { const box=el.getBoundingClientRect(), answer=el.closest('.answer').getBoundingClientRect(), rail=el.querySelector('.inline-media-track'), caption=el.querySelector('figcaption'), media=[...el.closest('.answer').querySelectorAll('.inline-media')], full=[...el.closest('.answer').querySelectorAll('.inline-media.single:has(.inline-media-image),.inline-media.single:has(.inline-media-player:not(.audio))')]; return { centre: Math.abs((box.left+box.right)/2-(answer.left+answer.right)/2), width: Math.abs(box.width-answer.width), siblings: media.map(item => Math.abs(item.getBoundingClientRect().width-answer.width)), content: full.map(item => Math.abs(item.firstElementChild.firstElementChild.getBoundingClientRect().width-answer.width)), scroll: rail.scrollWidth-rail.clientWidth, caption: getComputedStyle(caption).position } }")
             print(f"{name}: album={album_images}, players={players}, overflow={overflow}, geometry={geometry}, order={order}")
             if album_images != 3 or players != (2, 1):
                 problems.append(f"{name}: expected three album images, two videos and audio; got {album_images}, {players}")
@@ -103,8 +105,8 @@ def run() -> int:
                 problems.append(f"{name}: media did not retain its position in prose ({order})")
             if overflow > 1:
                 problems.append(f"{name}: media made the page {overflow}px wider than the viewport")
-            if geometry["centre"] > 2 or geometry["scroll"] <= 0 or geometry["caption"] != "absolute":
-                problems.append(f"{name}: album is not centred, swipeable and overlaid ({geometry})")
+            if geometry["centre"] > 2 or geometry["width"] > 2 or any(delta > 2 for delta in geometry["siblings"] + geometry["content"]) or geometry["scroll"] <= 0 or geometry["caption"] != "absolute":
+                problems.append(f"{name}: media does not fill the answer column or album is not swipeable and overlaid ({geometry})")
 
             page.locator(".inline-media.album .inline-media-image").first.click()
             page.wait_for_selector(".media-viewer")
@@ -134,7 +136,7 @@ def run() -> int:
             page.locator(".turn").last.hover()
             page.locator(".msg-actions").last.get_by_role("button", name="Copy", exact=True).click()
             copied = page.evaluate("() => navigator.clipboard.readText()")
-            if "daedalus-media:" in copied or not all(label in copied for label in ("Before", "After", "Detail", "Result", "Walkthrough", "Audio summary")):
+            if "daedalus-media:" in copied or not all(label in copied for label in ("Before", "After", "Detail", "Result", "Walkthrough", "Audio summary", "Full result")):
                 problems.append(f"{name}: copy exposed internal references or lost labels ({copied!r})")
             context.close()
         browser.close()
