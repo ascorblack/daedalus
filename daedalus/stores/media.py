@@ -14,6 +14,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from protocore.contracts.types import Message, MessageRole, TextBlock
 
@@ -89,6 +90,45 @@ def _probe(head: bytes) -> tuple[str, str, int | None, int | None]:
     raise ValueError("unsupported or damaged media file")
 
 
+# The link is not fetched. The extension is the only hint that does not require a download;
+# a link with none of these says its kind explicitly.
+_LINK_KINDS = {
+    ".png": ("image", "image/png"),
+    ".jpg": ("image", "image/jpeg"),
+    ".jpeg": ("image", "image/jpeg"),
+    ".webp": ("image", "image/webp"),
+    ".gif": ("animation", "image/gif"),
+    ".mp4": ("video", "video/mp4"),
+    ".webm": ("video", "video/webm"),
+    ".mov": ("video", "video/quicktime"),
+    ".ogg": ("audio", "audio/ogg"),
+    ".mp3": ("audio", "audio/mpeg"),
+    ".wav": ("audio", "audio/wav"),
+}
+_KIND_MIME = {"image": "image/jpeg", "animation": "image/gif", "video": "video/mp4", "audio": "audio/mpeg"}
+
+
+def _admit_link(url: str, kind_hint: str, alt: str, caption: str) -> dict[str, Any]:
+    """A remote item is stored as the URL itself. Nothing is downloaded."""
+    alt, caption = alt.strip(), caption.strip()
+    if len(alt) > 500 or len(caption) > 1000:
+        raise ValueError("alt or caption is too long")
+    if len(url) > 2000:
+        raise ValueError("media link is too long")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("a media link must be an http(s) address without credentials")
+    suffix = Path(unquote(parsed.path)).suffix.lower()
+    if suffix in _LINK_KINDS:
+        kind, mime_type = _LINK_KINDS[suffix]
+    elif kind_hint in _KIND_MIME:
+        kind, mime_type = kind_hint, _KIND_MIME[kind_hint]
+    else:
+        raise ValueError("a link needs a media extension, or a kind: image, video, animation, audio")
+    name = Path(unquote(parsed.path)).name or "media"
+    return {"blob_ref": "", "source_url": url, "kind": kind, "mime_type": mime_type, "filename": name[:200], "byte_size": 0, "width": None, "height": None, "alt": alt, "caption": caption}
+
+
 class MediaStore:
     """Stages immutable blobs, then binds referenced presentations to one persisted answer."""
 
@@ -122,13 +162,16 @@ class MediaStore:
         if not run_id:
             raise ValueError("inline media can only be prepared during an active run")
         if not items or len(items) > MAX_ITEMS:
-            raise ValueError(f"attach between 1 and {MAX_ITEMS} files")
+            raise ValueError(f"attach between 1 and {MAX_ITEMS} items")
         if layout == "single" and len(items) != 1:
-            raise ValueError("single layout accepts exactly one file")
+            raise ValueError("single layout accepts exactly one item")
         admitted = []
         for item in items:
-            path = Path(item["path"])
-            admitted.append(await asyncio.to_thread(self._admit, path, item.get("alt", ""), item.get("caption", "")))
+            url = str(item.get("url") or "").strip()
+            if url:
+                admitted.append(_admit_link(url, str(item.get("kind") or ""), item.get("alt", ""), item.get("caption", "")))
+            else:
+                admitted.append(await asyncio.to_thread(self._admit, Path(item["path"]), item.get("alt", ""), item.get("caption", "")))
         if layout == "album" and (len(admitted) < 2 or any(item["kind"] not in ("image", "video", "animation") for item in admitted)):
             raise ValueError("an album needs 2-10 images, videos or animations; audio must be attached separately")
         presentation_id = str(uuid.uuid4())
@@ -139,11 +182,11 @@ class MediaStore:
                 (presentation_id, session_id, run_id, layout, now),
             )
             await conn.executemany(
-                "INSERT INTO media_items(id, presentation_id, ordinal, blob_ref, kind, mime_type, filename, byte_size, width, height, alt, caption)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO media_items(id, presentation_id, ordinal, blob_ref, source_url, kind, mime_type, filename, byte_size, width, height, alt, caption)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
-                        str(uuid.uuid4()), presentation_id, index, item["blob_ref"], item["kind"], item["mime_type"],
+                        str(uuid.uuid4()), presentation_id, index, item["blob_ref"], item.get("source_url", ""), item["kind"], item["mime_type"],
                         item["filename"], item["byte_size"], item["width"], item["height"], item["alt"], item["caption"],
                     )
                     for index, item in enumerate(admitted)
@@ -194,7 +237,7 @@ class MediaStore:
                 os.replace(temporary, data_path)
             if not meta_path.exists():
                 meta_path.write_text(json.dumps({"ref": ref, "sha256": ref, "tenant_id": MEDIA_TENANT, "content_type": mime_type, "size_bytes": before.st_size, "created_at": datetime.now(UTC).isoformat(), "metadata": {"filename": path.name}}))
-            return {"blob_ref": ref, "kind": kind, "mime_type": mime_type, "filename": path.name, "byte_size": before.st_size, "width": width, "height": height, "alt": alt, "caption": caption}
+            return {"blob_ref": ref, "source_url": "", "kind": kind, "mime_type": mime_type, "filename": path.name, "byte_size": before.st_size, "width": width, "height": height, "alt": alt, "caption": caption}
         finally:
             os.close(fd)
 
@@ -235,9 +278,9 @@ class MediaStore:
         grouped: dict[str, dict[str, Any]] = {}
         for row in await cursor.fetchall():
             pid = str(row["presentation_id"])
-            grouped.setdefault(pid, {"id": pid, "layout": row["layout"], "items": []})["items"].append(
-                {key: row[key] for key in ("id", "kind", "mime_type", "filename", "byte_size", "width", "height", "alt", "caption")}
-            )
+            view = {key: row[key] for key in ("id", "kind", "mime_type", "filename", "byte_size", "width", "height", "alt", "caption")}
+            view["url"] = str(row["source_url"] or "")
+            grouped.setdefault(pid, {"id": pid, "layout": row["layout"], "items": []})["items"].append(view)
         return [grouped[item] for item in ids if item in grouped]
 
     async def item(self, session_id: str, presentation_id: str, item_id: str) -> dict[str, Any] | None:
@@ -261,8 +304,10 @@ class MediaStore:
             views = await self._views(conn, session_id, ids)
         for presentation in views:
             for item in presentation["items"]:
-                row = await self.db.fetchone("SELECT blob_ref FROM media_items WHERE id = ?", (item["id"],))
-                item["path"] = str(self.blobs.path_of(MEDIA_TENANT, str(row["blob_ref"]))) if row else ""
+                row = await self.db.fetchone("SELECT blob_ref, source_url FROM media_items WHERE id = ?", (item["id"],))
+                url = str(row["source_url"] or "") if row else ""
+                item["url"] = url
+                item["path"] = "" if url or not row else str(self.blobs.path_of(MEDIA_TENANT, str(row["blob_ref"])))
         return views
 
     async def prune_staged(self, *, keep_hours: int = 24) -> int:
@@ -282,6 +327,9 @@ class MediaStore:
             dropped = max(0, int(cursor.rowcount or 0))
         for row in rows:
             ref = str(row["blob_ref"])
+            # A link has no bytes. An empty ref is shared by every remote item, so it is not a blob.
+            if not ref:
+                continue
             if await self.db.fetchone("SELECT 1 FROM media_items WHERE blob_ref = ? LIMIT 1", (ref,)) is None:
                 await self.blobs.delete(MEDIA_TENANT, ref)
         return dropped
@@ -316,9 +364,9 @@ class MediaStore:
                 )
                 items = await (await conn.execute("SELECT * FROM media_items WHERE presentation_id = ? ORDER BY ordinal", (old_id,))).fetchall()
                 await conn.executemany(
-                    "INSERT INTO media_items(id, presentation_id, ordinal, blob_ref, kind, mime_type, filename, byte_size, width, height, alt, caption)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [(str(uuid.uuid4()), new_id, item["ordinal"], item["blob_ref"], item["kind"], item["mime_type"], item["filename"], item["byte_size"], item["width"], item["height"], item["alt"], item["caption"]) for item in items],
+                    "INSERT INTO media_items(id, presentation_id, ordinal, blob_ref, source_url, kind, mime_type, filename, byte_size, width, height, alt, caption)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [(str(uuid.uuid4()), new_id, item["ordinal"], item["blob_ref"], item["source_url"], item["kind"], item["mime_type"], item["filename"], item["byte_size"], item["width"], item["height"], item["alt"], item["caption"]) for item in items],
                 )
         if not replacements:
             return message

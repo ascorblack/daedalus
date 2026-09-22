@@ -1,14 +1,32 @@
 import { useEffect, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import type { MediaItem, MediaPresentation } from "./api";
 import { api } from "./api";
-import { Sheet } from "./dialogs";
+import { Overlay, useLayer } from "./dialogs";
 import { Icon } from "./icons";
 import { t } from "./i18n";
 export { mediaCopyText, splitMediaAnswer } from "./mediaformat";
 
-function source(sessionId: string, presentationId: string, itemId: string): string {
-  return `/api/sessions/${encodeURIComponent(sessionId)}/media/${encodeURIComponent(presentationId)}/${encodeURIComponent(itemId)}/content`;
+// A clip opened from a chat used to start at the browser's full volume. A tenth is loud enough
+// to hear and quiet enough that opening an album does not take over the room.
+const QUIET_VOLUME = 0.1;
+
+function source(sessionId: string, presentationId: string, item: MediaItem): string {
+  // A remote item is already a URL. Routing it through the content endpoint would only download
+  // it onto this machine, which is what attaching by link is there to avoid.
+  if (item.url) return item.url;
+  return `/api/sessions/${encodeURIComponent(sessionId)}/media/${encodeURIComponent(presentationId)}/${encodeURIComponent(item.id)}/content`;
+}
+
+function clock(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const whole = Math.floor(seconds);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor(whole / 60) % 60;
+  const rest = whole % 60;
+  const padded = String(rest).padStart(2, "0");
+  if (hours) return `${hours}:${String(minutes).padStart(2, "0")}:${padded}`;
+  return `${minutes}:${padded}`;
 }
 
 let accessRequest: Promise<void> | null = null;
@@ -22,8 +40,81 @@ function requestMediaAccess(): Promise<void> {
   return accessRequest;
 }
 
+function VideoPlayer({ src }: { src: string }) {
+  const video = useRef<HTMLVideoElement>(null);
+  const hide = useRef<number>(0);
+  const [playing, setPlaying] = useState(false);
+  const [time, setTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [volume, setVolume] = useState(QUIET_VOLUME);
+  const [muted, setMuted] = useState(false);
+  const [shown, setShown] = useState(true);
+
+  const reveal = (stay: boolean) => {
+    setShown(true);
+    window.clearTimeout(hide.current);
+    if (!stay) hide.current = window.setTimeout(() => setShown(false), 2200);
+  };
+  const toggle = () => {
+    const el = video.current;
+    if (!el) return;
+    if (el.paused) void el.play();
+    else el.pause();
+  };
+  useEffect(() => () => window.clearTimeout(hide.current), []);
+  return <div className={`video-player ${shown || !playing ? "shown" : ""}`} onMouseMove={() => reveal(!playing)} onMouseLeave={() => playing && setShown(false)}>
+    <video
+      ref={video}
+      src={src}
+      playsInline
+      preload="metadata"
+      onLoadedMetadata={(event) => {
+        event.currentTarget.volume = QUIET_VOLUME;
+        setVolume(QUIET_VOLUME);
+        setMuted(false);
+        setDuration(event.currentTarget.duration || 0);
+      }}
+      onTimeUpdate={(event) => setTime(event.currentTarget.currentTime)}
+      onPlay={() => { setPlaying(true); reveal(false); }}
+      onPause={() => { setPlaying(false); setShown(true); }}
+      onClick={toggle}
+    />
+    {!playing && <button type="button" className="video-player-play" onClick={toggle} aria-label={t("media.play")}><Icon name="play" size={28} /></button>}
+    <div className="video-player-bar">
+      <button type="button" onClick={toggle} aria-label={t(playing ? "media.pause" : "media.play")}><Icon name={playing ? "pause" : "play"} /></button>
+      <span className="video-player-time">{clock(time)}/{clock(duration)}</span>
+      <input className="video-player-seek" type="range" min={0} max={duration || 0} step={0.1} value={Math.min(time, duration || 0)} aria-label={t("media.seek")} onChange={(event) => {
+        const next = Number(event.target.value);
+        if (video.current) video.current.currentTime = next;
+        setTime(next);
+      }} />
+      <button type="button" onClick={() => {
+        const el = video.current;
+        if (!el) return;
+        el.muted = !el.muted;
+        setMuted(el.muted);
+      }} aria-label={t(muted ? "media.unmute" : "media.mute")}><Icon name={muted || volume === 0 ? "mute" : "volume"} /></button>
+      <input className="video-player-volume" type="range" min={0} max={1} step={0.05} value={muted ? 0 : volume} aria-label={t("media.volume")} onChange={(event) => {
+        const next = Number(event.target.value);
+        setVolume(next);
+        setMuted(next === 0);
+        if (video.current) {
+          video.current.volume = next;
+          video.current.muted = next === 0;
+        }
+      }} />
+      <button type="button" onClick={() => {
+        const shell = video.current?.parentElement;
+        if (!shell) return;
+        if (document.fullscreenElement) void document.exitFullscreen();
+        else void shell.requestFullscreen();
+      }} aria-label={t("media.fullscreen")}><Icon name="expand" /></button>
+    </div>
+  </div>;
+}
+
 function MediaElement({ sessionId, presentation, item, onOpen }: { sessionId: string; presentation: MediaPresentation; item: MediaItem; onOpen: () => void }) {
-  const src = source(sessionId, presentation.id, item.id);
+  const src = source(sessionId, presentation.id, item);
   if (item.kind === "image" || item.kind === "animation" || (item.kind === "video" && presentation.layout === "album")) {
     return <figure className="inline-media-image">
       <button type="button" className="inline-media-surface" onClick={onOpen} aria-label={t("media.open", { name: item.alt || item.filename })}>
@@ -37,8 +128,7 @@ function MediaElement({ sessionId, presentation, item, onOpen }: { sessionId: st
     </figure>;
   }
   if (item.kind === "video") return <figure className="inline-media-player">
-    <div className="inline-media-player-head"><span><Icon name="play" />{item.filename}</span><a href={src} download={item.filename} aria-label={t("common.download")}><Icon name="download" /></a></div>
-    <video controls playsInline preload="metadata" src={src} />
+    <VideoPlayer src={src} />
     {item.caption && <figcaption>{item.caption}</figcaption>}
   </figure>;
   return <figure className="inline-media-player audio">
@@ -51,10 +141,15 @@ function Viewer({ sessionId, presentation, start, onClose }: { sessionId: string
   const [index, setIndex] = useState(start);
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const root = useRef<HTMLDivElement>(null);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const drag = useRef<{ x: number; y: number; ox: number; oy: number; distance?: number } | null>(null);
   const item = presentation.items[index];
   const video = item.kind === "video";
+  const name = item.alt || item.filename;
+  const src = source(sessionId, presentation.id, item);
+  useLayer(onClose);
+  useEffect(() => { root.current?.focus(); }, []);
   useEffect(() => { setZoom(1); setOffset({ x: 0, y: 0 }); }, [index]);
   const changeZoom = (next: number) => {
     const bounded = Math.max(1, Math.min(4, next));
@@ -62,6 +157,7 @@ function Viewer({ sessionId, presentation, start, onClose }: { sessionId: string
     if (bounded === 1) setOffset({ x: 0, y: 0 });
   };
   const down = (event: ReactPointerEvent) => {
+    if ((event.target as HTMLElement).closest("button, a, input")) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
     drag.current = { x: event.clientX, y: event.clientY, ox: offset.x, oy: offset.y };
@@ -89,18 +185,34 @@ function Viewer({ sessionId, presentation, start, onClose }: { sessionId: string
     drag.current = null;
   };
   const wheel = (event: ReactWheelEvent) => { event.preventDefault(); changeZoom(zoom * (event.deltaY < 0 ? 1.15 : 0.87)); };
-  return <Sheet title={item.alt || item.filename} onClose={onClose} size="full" className="media-viewer" head={<span className="media-count">{index + 1}/{presentation.items.length}</span>}>
-    <div className={`media-viewer-stage ${video ? "video" : ""}`} onPointerDown={video ? undefined : down} onPointerMove={video ? undefined : move} onPointerUp={video ? undefined : up} onPointerCancel={video ? undefined : up} onWheel={video ? undefined : wheel} onDoubleClick={video ? undefined : () => changeZoom(zoom === 1 ? 2 : 1)}>
-      {video ? <video key={item.id} controls playsInline preload="metadata" src={source(sessionId, presentation.id, item.id)} /> : <img src={source(sessionId, presentation.id, item.id)} alt={item.alt || item.filename} draggable={false} style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})` }} />}
+  const onKey = (event: ReactKeyboardEvent) => {
+    if ((event.target as HTMLElement).closest("input")) return;
+    if (event.key === "ArrowRight" && index < presentation.items.length - 1) setIndex((value) => value + 1);
+    if (event.key === "ArrowLeft" && index > 0) setIndex((value) => value - 1);
+    if (event.key === " " && video) {
+      event.preventDefault();
+      const el = root.current?.querySelector("video");
+      if (!el) return;
+      if (el.paused) void el.play();
+      else el.pause();
+    }
+  };
+  return <Overlay>
+    <div ref={root} className="media-viewer lightbox" tabIndex={-1} role="dialog" aria-modal="true" aria-label={name} onKeyDown={onKey}>
+      <div className={`media-viewer-stage ${video ? "video" : ""}`} onPointerDown={video ? undefined : down} onPointerMove={video ? undefined : move} onPointerUp={video ? undefined : up} onPointerCancel={video ? undefined : up} onWheel={video ? undefined : wheel} onDoubleClick={video ? undefined : () => changeZoom(zoom === 1 ? 2 : 1)}>
+        {video ? <VideoPlayer key={item.id} src={src} /> : <img src={src} alt={name} draggable={false} style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})` }} />}
+      </div>
+      <div className="lightbox-top">
+        <span className="lightbox-title">{name}</span>
+        <span className="lightbox-count">{index + 1}/{presentation.items.length}</span>
+        {!video && zoom !== 1 && <button type="button" onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); }} aria-label={t("preview.fit")}><span className="lightbox-zoom">{Math.round(zoom * 100)}%</span></button>}
+        <a href={src} download={item.filename} aria-label={t("common.download")}><Icon name="download" /></a>
+        <button type="button" onClick={onClose} aria-label={t("common.close")}><Icon name="close" /></button>
+      </div>
+      {index > 0 && <button type="button" className="lightbox-edge previous" onClick={() => setIndex((value) => value - 1)} aria-label={t("media.previous")}><Icon name="back" /></button>}
+      {index < presentation.items.length - 1 && <button type="button" className="lightbox-edge next" onClick={() => setIndex((value) => value + 1)} aria-label={t("media.next")}><Icon name="forward" /></button>}
     </div>
-    <div className="media-viewer-tools">
-      <button className="btn ghost" type="button" disabled={index === 0} onClick={() => setIndex((v) => v - 1)}>{t("media.previous")}</button>
-      {!video && <><button className="btn ghost" type="button" onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); }}>{t("preview.fit")}</button>
-      <span>{Math.round(zoom * 100)}%</span></>}
-      <a className="btn ghost" href={source(sessionId, presentation.id, item.id)} download={item.filename}>{t("common.download")}</a>
-      <button className="btn ghost" type="button" disabled={index === presentation.items.length - 1} onClick={() => setIndex((v) => v + 1)}>{t("media.next")}</button>
-    </div>
-  </Sheet>;
+  </Overlay>;
 }
 
 export function InlineMedia({ sessionId, presentation }: { sessionId: string; presentation: MediaPresentation }) {

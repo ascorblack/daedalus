@@ -1659,12 +1659,18 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         presentation_id: str,
         item_id: str,
         _: dict[str, Any] = Depends(auth),
-    ) -> FileResponse:
+    ) -> Response:
         if await manager.get_state(session_id) is None:
             raise HTTPException(404, "no such session")
         item = await manager.media.item(session_id, presentation_id, item_id)
         if item is None:
             raise HTTPException(404, "no such media")
+        remote = str(item.get("source_url") or "")
+        if remote:
+            # The browser loads the link. This redirect is only for a download that still hits the content route.
+            if not remote.startswith(("https://", "http://")):
+                raise HTTPException(410, "media link is not usable")
+            return RedirectResponse(remote, status_code=302)
         path = manager.blobs.path_of(MEDIA_TENANT, str(item["blob_ref"]))
         if not path.is_file():
             raise HTTPException(410, "media bytes are gone")

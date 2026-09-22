@@ -108,6 +108,27 @@ async def test_explicit_fork_gets_scoped_media_references(db: Database, tmp_path
     assert await media.item("forked-session", forked["media"][0]["id"], forked["media"][0]["items"][0]["id"])
 
 
+async def test_an_album_can_be_links_and_does_not_fetch_them(db: Database, tmp_path) -> None:
+    media, sessions = await _stores(db, tmp_path)
+    staged = await media.stage(
+        "media-session",
+        "run-1",
+        [
+            {"url": "https://cdn.example/a.jpg", "alt": "one", "caption": ""},
+            {"url": "https://cdn.example/clip", "kind": "video", "alt": "two", "caption": "roll"},
+        ],
+        layout="album",
+    )
+    answer = Message(role=MessageRole.assistant, content_blocks=[TextBlock(text=staged["markdown"])], metadata={"daedalus.run_id": "run-1"})
+    await sessions.append_transcript("media-session", [answer])
+    saved = message_view((await sessions.list_transcript("media-session"))[0])["media"][0]
+    assert [item["kind"] for item in saved["items"]] == ["image", "video"]
+    assert [item["url"] for item in saved["items"]] == ["https://cdn.example/a.jpg", "https://cdn.example/clip"]
+    assert media.blobs.path_of(MEDIA_TENANT, "").exists() is False
+    with pytest.raises(ValueError, match="http"):
+        await media.stage("media-session", "run-1", [{"url": "file:///etc/passwd", "kind": "image", "alt": "", "caption": ""}, {"url": "https://cdn.example/b.png", "alt": "", "caption": ""}], layout="album")
+
+
 async def test_album_rejects_single_content(db: Database, tmp_path) -> None:
     media, _ = await _stores(db, tmp_path)
     source = tmp_path / "screen.png"

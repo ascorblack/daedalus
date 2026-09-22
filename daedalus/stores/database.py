@@ -755,6 +755,12 @@ CREATE INDEX request_manifests_by_run ON request_manifests(run_id, seq);
 """)
 
 
+# A link is not a blob. source_url holds it; blob_ref stays empty so pruning does not look for bytes.
+MIGRATIONS.append("""
+ALTER TABLE media_items ADD COLUMN source_url TEXT NOT NULL DEFAULT '';
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""

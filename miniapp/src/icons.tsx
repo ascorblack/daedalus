@@ -4,7 +4,7 @@ export type IconName =
   | "back" | "more" | "plus" | "up" | "stop" | "model" | "terminal" | "file" | "pen" | "search" | "globe" | "attach" | "image"
   | "question" | "skill" | "spawn" | "bulb" | "wrench" | "clock" | "plug" | "dot" | "compact"
   | "folder" | "settings" | "bots" | "inbox" | "board" | "changes" | "chart" | "loop" | "pause" | "play" | "trash" | "check" | "close" | "send"
-  | "download" | "share" | "split" | "key" | "link" | "unlink" | "down" | "copy" | "columns" | "eye" | "mic" | "fork" | "undo" | "phone" | "expand" | "external" | "reload" | "forward" | "panel" | "chevron" | "bolt";
+  | "download" | "share" | "split" | "key" | "link" | "unlink" | "down" | "copy" | "columns" | "eye" | "mic" | "fork" | "undo" | "phone" | "expand" | "external" | "reload" | "forward" | "panel" | "chevron" | "bolt" | "volume" | "mute";
 
 const PATHS: Record<IconName, string> = {
   back: "M15 18l-6-6 6-6",
@@ -66,6 +66,8 @@ const PATHS: Record<IconName, string> = {
   panel: "M3 5h18v14H3zM15 5v14",
   chevron: "M6 9l6 6 6-6",
   bolt: "M13 3L6 13h6l-2 8 8-11h-6l1-7z",
+  volume: "M4 10v4h3l5 4V6L7 10H4zM16 9.5a3.5 3.5 0 0 1 0 5",
+  mute: "M4 10v4h3l5 4V6L7 10H4zM16 9l5 6M21 9l-5 6",
 };
 
 export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {

@@ -217,7 +217,7 @@ export type SubagentView = { session_id: string; name: string | null; running: b
 /** A model answering in place of the configured one: what it replaced, what took over, and why. */
 export type ModelFallback = { from: string; to: string; reason: string };
 
-export type MediaItem = { id: string; kind: "image" | "animation" | "video" | "audio"; mime_type: string; filename: string; byte_size: number; width?: number | null; height?: number | null; alt: string; caption: string };
+export type MediaItem = { id: string; kind: "image" | "animation" | "video" | "audio"; mime_type: string; filename: string; byte_size: number; width?: number | null; height?: number | null; alt: string; caption: string; url?: string };
 export type MediaPresentation = { id: string; layout: "single" | "album"; items: MediaItem[] };
 
 export type MessageView = {

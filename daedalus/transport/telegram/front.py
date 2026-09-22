@@ -181,6 +181,16 @@ class TelegramRefused(RuntimeError):
         self.session_id = session_id
 
 
+def _telegram_media(source: Path | str) -> FSInputFile | str:
+    """Telegram fetches a link itself. A workspace file is still uploaded."""
+    return source if isinstance(source, str) else FSInputFile(source)
+
+
+def _delivery_source(item: dict[str, Any]) -> Path | str:
+    url = str(item.get("url") or "")
+    return url if url else Path(str(item.get("path") or ""))
+
+
 class TelegramOutbox(Outbox):
     """One chat (or topic) as seen by the renderer.
 
@@ -302,33 +312,33 @@ class TelegramOutbox(Outbox):
         )
         return msg.message_id
 
-    async def send_photo(self, path: Path, caption: str | None = None) -> int:
+    async def send_photo(self, path: Path | str, caption: str | None = None) -> int:
         caption = self.attributed(caption or "").strip() or None
         msg = await tg_call(
             self.bot.send_photo,
             self.chat_id,
-            FSInputFile(path),
+            _telegram_media(path),
             caption=(caption or "")[:1000] or None,
             message_thread_id=self.thread_id,
             parse_mode=None,
         )
         return msg.message_id
 
-    async def send_video(self, path: Path, caption: str | None = None) -> int:
-        msg = await tg_call(self.bot.send_video, self.chat_id, FSInputFile(path), caption=(self.attributed(caption or "").strip() or None), message_thread_id=self.thread_id, parse_mode=None)
+    async def send_video(self, path: Path | str, caption: str | None = None) -> int:
+        msg = await tg_call(self.bot.send_video, self.chat_id, _telegram_media(path), caption=(self.attributed(caption or "").strip() or None), message_thread_id=self.thread_id, parse_mode=None)
         return msg.message_id
 
-    async def send_audio(self, path: Path, caption: str | None = None) -> int:
-        msg = await tg_call(self.bot.send_audio, self.chat_id, FSInputFile(path), caption=(self.attributed(caption or "").strip() or None), message_thread_id=self.thread_id, parse_mode=None)
+    async def send_audio(self, path: Path | str, caption: str | None = None) -> int:
+        msg = await tg_call(self.bot.send_audio, self.chat_id, _telegram_media(path), caption=(self.attributed(caption or "").strip() or None), message_thread_id=self.thread_id, parse_mode=None)
         return msg.message_id
 
-    async def send_animation(self, path: Path, caption: str | None = None) -> int:
-        msg = await tg_call(self.bot.send_animation, self.chat_id, FSInputFile(path), caption=(self.attributed(caption or "").strip() or None), message_thread_id=self.thread_id, parse_mode=None)
+    async def send_animation(self, path: Path | str, caption: str | None = None) -> int:
+        msg = await tg_call(self.bot.send_animation, self.chat_id, _telegram_media(path), caption=(self.attributed(caption or "").strip() or None), message_thread_id=self.thread_id, parse_mode=None)
         return msg.message_id
 
-    async def send_album(self, paths: list[Path], caption: str | None = None) -> list[int]:
+    async def send_album(self, paths: list[Path | str], caption: str | None = None) -> list[int]:
         head = self.attributed(caption or "").strip() or None
-        media = [InputMediaPhoto(media=FSInputFile(path), caption=head[:1000] if index == 0 and head else None) for index, path in enumerate(paths)]
+        media = [InputMediaPhoto(media=_telegram_media(path), caption=head[:1000] if index == 0 and head else None) for index, path in enumerate(paths)]
         messages = await tg_call(self.bot.send_media_group, self.chat_id, media=media, message_thread_id=self.thread_id)
         return [message.message_id for message in messages]
 
@@ -2055,12 +2065,12 @@ class TelegramFront:
             try:
                 items = presentation["items"]
                 if presentation["layout"] == "album" and all(item["kind"] == "image" for item in items):
-                    await outbox.send_album([Path(item["path"]) for item in items], items[0].get("caption") or None)
+                    await outbox.send_album([_delivery_source(item) for item in items], items[0].get("caption") or None)
                     continue
                 # The photo-only transport album cannot carry a mixed presentation. Preserve
                 # every attachment and its order using the existing typed delivery methods.
                 for item in items:
-                    path = Path(item["path"])
+                    path = _delivery_source(item)
                     caption = item.get("caption") or None
                     if item["kind"] == "video":
                         await outbox.send_video(path, caption)

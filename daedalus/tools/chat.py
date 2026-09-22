@@ -38,9 +38,12 @@ async def send_file(context: ToolContext, path: str, caption: str | None = None)
     name="AttachMedia",
     description=(
         "Attach images, a picture album, video, audio or a GIF inside the final answer. Each item is "
-        "{path, alt, caption}; paths are workspace-relative. Use layout=album for 2-10 images, videos or GIFs in any order, "
-        "otherwise use single with one item. The result contains one Markdown line: copy that line into "
-        "the final answer exactly where the media should appear. This prepares the media; do not also SendFile it."
+        "{path, alt, caption} for a workspace file, or {url, alt, caption, kind} for an http(s) link. "
+        "Pass the link itself; do not download it first. kind is image, video, animation or audio, and is "
+        "only needed when the link has no filename extension. Use layout=album for 2-10 images, videos or "
+        "GIFs in any order, otherwise use single with one item. The result contains one Markdown line: "
+        "copy that line into the final answer exactly where the media should appear. This prepares the "
+        "media; do not also SendFile it."
     ),
 )
 async def attach_media(context: ToolContext, items: list[dict[str, str]], layout: str = "single") -> ToolResult:
@@ -49,9 +52,15 @@ async def attach_media(context: ToolContext, items: list[dict[str, str]], layout
         return error(context, "inline media is not available in this session")
     resolved: list[dict[str, str]] = []
     for item in items:
+        url = str(item.get("url") or "").strip()
         raw = str(item.get("path") or "").strip()
+        if url and raw:
+            return error(context, "a media item is a file or a link, not both")
+        if url:
+            resolved.append({"url": url, "kind": str(item.get("kind") or ""), "alt": str(item.get("alt") or ""), "caption": str(item.get("caption") or "")})
+            continue
         if not raw:
-            return error(context, "every media item needs a path")
+            return error(context, "every media item needs a path or a url")
         target = services.resolve(raw)
         if refusal := refuse_protected(context, services, target, "attached"):
             return refusal

@@ -615,6 +615,13 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "media.previous": { en: "Previous", ru: "Назад" },
   "media.next": { en: "Next", ru: "Далее" },
   "media.retry": { en: "Media could not be loaded · Retry", ru: "Медиа не загрузилось · Повторить" },
+  "media.play": { en: "Play", ru: "Смотреть" },
+  "media.pause": { en: "Pause", ru: "Пауза" },
+  "media.mute": { en: "Mute", ru: "Без звука" },
+  "media.unmute": { en: "Sound on", ru: "Со звуком" },
+  "media.volume": { en: "Volume", ru: "Громкость" },
+  "media.seek": { en: "Position", ru: "Позиция" },
+  "media.fullscreen": { en: "Full screen", ru: "На весь экран" },
 
   // ── one word for a state, the same word everywhere ─────────────────────────────────────
   "status.idle": { en: "Idle", ru: "Без дела" },

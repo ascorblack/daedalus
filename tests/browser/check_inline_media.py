@@ -100,7 +100,12 @@ def run() -> int:
             print(f"{name}: album={album_images}, players={players}, overflow={overflow}, geometry={geometry}, order={order}")
             if album_images != 3 or players != (2, 1):
                 problems.append(f"{name}: expected three album images, two videos and audio; got {album_images}, {players}")
-            assert page.locator(".inline-media.album .inline-media-image").first.bounding_box()["height"] >= 280
+            frame = page.locator(".inline-media.album").evaluate("el => { const rail = el.querySelector('.inline-media-track'); const box = rail.getBoundingClientRect(); const tiles = [...rail.querySelectorAll('.inline-media-image')].map(t => t.getBoundingClientRect()); const visible = tiles.filter(t => (t.left + t.right) / 2 > box.left && (t.left + t.right) / 2 < box.right).length; const first = tiles[0]; return { visible, ratio: first.width / first.height }; }")
+            print(f"{name}: frame={frame}")
+            # Three across on a desktop, one card on a phone, and the frame is landscape so a wide video is not cropped into a strip.
+            expected_visible = 3 if name == "desktop" else 1
+            if frame["visible"] != expected_visible or frame["ratio"] < 1.5:
+                problems.append(f"{name}: album frame is not {expected_visible} landscape tiles ({frame})")
             if order[:3] != ["Before the album.", "media", "Between the album and video."] or order[-1] != "After every attachment.":
                 problems.append(f"{name}: media did not retain its position in prose ({order})")
             if overflow > 1:
@@ -108,13 +113,13 @@ def run() -> int:
             if geometry["centre"] > 2 or geometry["width"] > 2 or any(delta > 2 for delta in geometry["siblings"] + geometry["content"]) or geometry["scroll"] <= 0 or geometry["caption"] != "absolute":
                 problems.append(f"{name}: media does not fill the answer column or album is not swipeable and overlaid ({geometry})")
 
-            page.locator(".inline-media.album .inline-media-image").first.click()
+            page.locator(".inline-media.album .inline-media-surface").first.click()
             page.wait_for_selector(".media-viewer")
             page.wait_for_timeout(300)
             viewer = page.locator(".media-viewer").bounding_box()
-            controls = page.locator(".media-viewer-tools .btn").evaluate_all("els => els.map(e => e.getBoundingClientRect().height)")
+            controls = page.locator(".media-viewer button, .media-viewer a").evaluate_all("els => els.map(e => e.getBoundingClientRect().height)")
             page.locator(".media-viewer-stage").dblclick()
-            zoom = page.locator(".media-viewer-tools span").last.text_content()
+            zoom = page.locator(".lightbox-zoom").text_content()
             print(f"{name}: viewer={viewer}, controls={controls}, zoom={zoom}")
             if not viewer or viewer["width"] < width * 0.9 or viewer["height"] < height * 0.8:
                 problems.append(f"{name}: viewer is not a full overlay ({viewer})")
@@ -122,13 +127,13 @@ def run() -> int:
                 problems.append(f"{name}: viewer has a touch target below 44px ({controls})")
             if zoom != "200%":
                 problems.append(f"{name}: double click did not zoom the image ({zoom})")
-            page.locator(".media-viewer-tools").get_by_role("button", name="Next", exact=True).click()
+            page.locator(".media-viewer").get_by_role("button", name="Next", exact=True).click()
             player = page.locator(".media-viewer-stage video")
             assert player.count() == 1
             if os.environ.get("MEDIA_TEST_VIDEO"):
                 player.evaluate("async video => { await video.play(); }")
                 page.wait_for_function("document.querySelector('.media-viewer-stage video').currentTime > 0")
-            page.locator(".media-viewer-tools").get_by_role("button", name="Next", exact=True).click()
+            page.locator(".media-viewer").get_by_role("button", name="Next", exact=True).click()
             assert page.locator(".media-viewer-stage video").count() == 0
             assert page.locator(".media-viewer-stage img").count() == 1
             page.keyboard.press("Escape")
