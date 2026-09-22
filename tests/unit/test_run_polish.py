@@ -92,7 +92,8 @@ async def test_ready_inline_media_is_delivered_by_native_telegram_type(front: Te
     async def ready_for_run(session_id: str, run_id: str) -> list[dict[str, Any]]:
         assert (session_id, run_id) == ("session", "run")
         return [
-            {"id": "album", "layout": "album", "items": [{"path": str(files[0]), "caption": "A"}, {"path": str(files[1]), "caption": "B"}]},
+            {"id": "album", "layout": "album", "items": [{"path": str(files[0]), "kind": "image", "caption": "A"}, {"path": str(files[1]), "kind": "image", "caption": "B"}]},
+            {"id": "mixed", "layout": "album", "items": [{"path": str(files[0]), "kind": "image", "caption": "A"}, {"path": str(files[2]), "kind": "video", "caption": "V"}, {"path": str(files[4]), "kind": "animation", "caption": "G"}]},
             {"id": "video", "layout": "single", "items": [{"path": str(files[2]), "kind": "video", "caption": "V"}]},
             {"id": "audio", "layout": "single", "items": [{"path": str(files[3]), "kind": "audio", "caption": "S"}]},
             {"id": "animation", "layout": "single", "items": [{"path": str(files[4]), "kind": "animation", "caption": "G"}]},
@@ -103,6 +104,9 @@ async def test_ready_inline_media_is_delivered_by_native_telegram_type(front: Te
     assert await front._deliver_inline_media("session", "run", outbox)
     assert outbox.media == [
         ("album", files[:2], "A"),
+        ("photo", files[0], "A"),
+        ("video", files[2], "V"),
+        ("animation", files[4], "G"),
         ("video", files[2], "V"),
         ("audio", files[3], "S"),
         ("animation", files[4], "G"),

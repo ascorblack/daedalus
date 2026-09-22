@@ -38,7 +38,7 @@ async def send_file(context: ToolContext, path: str, caption: str | None = None)
     name="AttachMedia",
     description=(
         "Attach images, a picture album, video, audio or a GIF inside the final answer. Each item is "
-        "{path, alt, caption}; paths are workspace-relative. Use layout=album only for 2-10 still images, "
+        "{path, alt, caption}; paths are workspace-relative. Use layout=album for 2-10 images, videos or GIFs in any order, "
         "otherwise use single with one item. The result contains one Markdown line: copy that line into "
         "the final answer exactly where the media should appear. This prepares the media; do not also SendFile it."
     ),

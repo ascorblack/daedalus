@@ -108,12 +108,30 @@ async def test_explicit_fork_gets_scoped_media_references(db: Database, tmp_path
     assert await media.item("forked-session", forked["media"][0]["id"], forked["media"][0]["items"][0]["id"])
 
 
-async def test_album_rejects_mixed_or_single_content(db: Database, tmp_path) -> None:
+async def test_album_rejects_single_content(db: Database, tmp_path) -> None:
     media, _ = await _stores(db, tmp_path)
     source = tmp_path / "screen.png"
     source.write_bytes(PNG)
     with pytest.raises(ValueError, match="2-10"):
         await media.stage("media-session", "run-1", [{"path": str(source), "alt": "", "caption": ""}], layout="album")
+
+
+async def test_mixed_album_preserves_media_order_in_answer(db: Database, tmp_path) -> None:
+    media, sessions = await _stores(db, tmp_path)
+    items = []
+    for filename, content in [("photo.png", PNG), ("clip.mp4", b"\x00\x00\x00\x18ftypisom"), ("loop.gif", b"GIF89a\x01\x00\x01\x00")]:
+        source = tmp_path / filename
+        source.write_bytes(content)
+        items.append({"path": str(source), "alt": filename, "caption": ""})
+    staged = await media.stage("media-session", "run-1", items, layout="album")
+    answer = Message(role=MessageRole.assistant, content_blocks=[TextBlock(text=staged["markdown"])], metadata={"daedalus.run_id": "run-1"})
+    await sessions.append_transcript("media-session", [answer])
+    saved = message_view((await sessions.list_transcript("media-session"))[0])["media"][0]
+    assert [item["kind"] for item in saved["items"]] == ["image", "video", "animation"]
+    source = tmp_path / "sound.mp3"
+    source.write_bytes(b"ID3audio")
+    with pytest.raises(ValueError, match="audio"):
+        await media.stage("media-session", "run-1", [items[0], {"path": str(source), "alt": "sound", "caption": ""}], layout="album")
 
 
 async def test_content_api_authenticates_native_media_and_serves_ranges(settings: Settings, db: Database, tmp_path) -> None:

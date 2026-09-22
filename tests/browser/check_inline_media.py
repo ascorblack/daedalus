@@ -30,8 +30,8 @@ def item(item_id: str, kind: str, filename: str, *, alt: str = "", caption: str 
 MEDIA = [
     {"id": ALBUM, "layout": "album", "items": [
         item("image-one", "image", "one.png", alt="First chart", caption="Before"),
-        item("image-two", "image", "two.png", alt="Second chart", caption="After"),
-        item("image-three", "image", "three.png", alt="Third chart", caption="Detail"),
+        item("album-video", "video", "clip.webm", alt="Clip", caption="After"),
+        item("image-three", "animation", "three.gif", alt="Third chart", caption="Detail"),
         item("image-four", "image", "four.png", alt="Fourth chart", caption="Result"),
     ]},
     {"id": VIDEO, "layout": "single", "items": [item("video-one", "video", "walkthrough.mp4", caption="Walkthrough")]},
@@ -57,6 +57,8 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     if path.endswith("/stream"):
         return route.fulfill(status=200, content_type="text/event-stream", body="event: hello\ndata: {}\n\n")
     if "/media/" in path and path.endswith("/content"):
+        if "album-video" in path and os.environ.get("MEDIA_TEST_VIDEO"):
+            return route.fulfill(status=200, content_type="video/webm", body=Path(os.environ["MEDIA_TEST_VIDEO"]).read_bytes())
         return route.fulfill(status=200, content_type="image/png", body=PNG)
     if path.endswith("/api/media/access"):
         return route.fulfill(status=200, content_type="application/json", body='{"ok":true}')
@@ -94,8 +96,9 @@ def run() -> int:
             overflow = page.evaluate("() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
             geometry = page.locator(".inline-media.album").evaluate("el => { const box=el.getBoundingClientRect(), answer=el.closest('.answer').getBoundingClientRect(), rail=el.querySelector('.inline-media-track'), caption=el.querySelector('figcaption'); return { centre: Math.abs((box.left+box.right)/2-(answer.left+answer.right)/2), scroll: rail.scrollWidth-rail.clientWidth, caption: getComputedStyle(caption).position } }")
             print(f"{name}: album={album_images}, players={players}, overflow={overflow}, geometry={geometry}, order={order}")
-            if album_images != 4 or players != (1, 1):
-                problems.append(f"{name}: expected four album images, video and audio; got {album_images}, {players}")
+            if album_images != 3 or players != (2, 1):
+                problems.append(f"{name}: expected three album images, two videos and audio; got {album_images}, {players}")
+            assert page.locator(".inline-media.album .inline-media-image").first.bounding_box()["height"] >= 280
             if order[:3] != ["Before the album.", "media", "Between the album and video."] or order[-1] != "After every attachment.":
                 problems.append(f"{name}: media did not retain its position in prose ({order})")
             if overflow > 1:
@@ -117,6 +120,15 @@ def run() -> int:
                 problems.append(f"{name}: viewer has a touch target below 44px ({controls})")
             if zoom != "200%":
                 problems.append(f"{name}: double click did not zoom the image ({zoom})")
+            page.locator(".media-viewer-tools").get_by_role("button", name="Next", exact=True).click()
+            player = page.locator(".media-viewer-stage video")
+            assert player.count() == 1
+            if os.environ.get("MEDIA_TEST_VIDEO"):
+                player.evaluate("async video => { await video.play(); }")
+                page.wait_for_function("document.querySelector('.media-viewer-stage video').currentTime > 0")
+            page.locator(".media-viewer-tools").get_by_role("button", name="Next", exact=True).click()
+            assert page.locator(".media-viewer-stage video").count() == 0
+            assert page.locator(".media-viewer-stage img").count() == 1
             page.keyboard.press("Escape")
 
             page.locator(".turn").last.hover()

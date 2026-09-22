@@ -129,8 +129,8 @@ class MediaStore:
         for item in items:
             path = Path(item["path"])
             admitted.append(await asyncio.to_thread(self._admit, path, item.get("alt", ""), item.get("caption", "")))
-        if layout == "album" and (len(admitted) < 2 or any(item["kind"] != "image" for item in admitted)):
-            raise ValueError("an album needs 2-10 still images")
+        if layout == "album" and (len(admitted) < 2 or any(item["kind"] not in ("image", "video", "animation") for item in admitted)):
+            raise ValueError("an album needs 2-10 images, videos or animations; audio must be attached separately")
         presentation_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
         async with self.db.transaction() as conn:

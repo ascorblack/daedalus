@@ -24,10 +24,10 @@ function requestMediaAccess(): Promise<void> {
 
 function MediaElement({ sessionId, presentation, item, onOpen }: { sessionId: string; presentation: MediaPresentation; item: MediaItem; onOpen: () => void }) {
   const src = source(sessionId, presentation.id, item.id);
-  if (item.kind === "image" || item.kind === "animation") {
+  if (item.kind === "image" || item.kind === "animation" || (item.kind === "video" && presentation.layout === "album")) {
     return <figure className="inline-media-image">
       <button type="button" className="inline-media-surface" onClick={onOpen} aria-label={t("media.open", { name: item.alt || item.filename })}>
-        <img src={src} alt={item.alt || item.filename} loading="lazy" width={item.width || undefined} height={item.height || undefined} />
+        {item.kind === "video" ? <><video src={src} muted playsInline preload="metadata" /><span className="inline-media-play"><Icon name="play" /></span></> : <img src={src} alt={item.alt || item.filename} loading="lazy" width={item.width || undefined} height={item.height || undefined} />}
       </button>
       <div className="inline-media-actions">
         <button type="button" onClick={onOpen} aria-label={t("media.open", { name: item.alt || item.filename })}><Icon name="expand" /></button>
@@ -54,6 +54,7 @@ function Viewer({ sessionId, presentation, start, onClose }: { sessionId: string
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const drag = useRef<{ x: number; y: number; ox: number; oy: number; distance?: number } | null>(null);
   const item = presentation.items[index];
+  const video = item.kind === "video";
   useEffect(() => { setZoom(1); setOffset({ x: 0, y: 0 }); }, [index]);
   const changeZoom = (next: number) => {
     const bounded = Math.max(1, Math.min(4, next));
@@ -89,13 +90,13 @@ function Viewer({ sessionId, presentation, start, onClose }: { sessionId: string
   };
   const wheel = (event: ReactWheelEvent) => { event.preventDefault(); changeZoom(zoom * (event.deltaY < 0 ? 1.15 : 0.87)); };
   return <Sheet title={item.alt || item.filename} onClose={onClose} size="full" className="media-viewer" head={<span className="media-count">{index + 1}/{presentation.items.length}</span>}>
-    <div className="media-viewer-stage" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onWheel={wheel} onDoubleClick={() => changeZoom(zoom === 1 ? 2 : 1)}>
-      <img src={source(sessionId, presentation.id, item.id)} alt={item.alt || item.filename} draggable={false} style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})` }} />
+    <div className={`media-viewer-stage ${video ? "video" : ""}`} onPointerDown={video ? undefined : down} onPointerMove={video ? undefined : move} onPointerUp={video ? undefined : up} onPointerCancel={video ? undefined : up} onWheel={video ? undefined : wheel} onDoubleClick={video ? undefined : () => changeZoom(zoom === 1 ? 2 : 1)}>
+      {video ? <video key={item.id} controls playsInline preload="metadata" src={source(sessionId, presentation.id, item.id)} /> : <img src={source(sessionId, presentation.id, item.id)} alt={item.alt || item.filename} draggable={false} style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})` }} />}
     </div>
     <div className="media-viewer-tools">
       <button className="btn ghost" type="button" disabled={index === 0} onClick={() => setIndex((v) => v - 1)}>{t("media.previous")}</button>
-      <button className="btn ghost" type="button" onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); }}>{t("preview.fit")}</button>
-      <span>{Math.round(zoom * 100)}%</span>
+      {!video && <><button className="btn ghost" type="button" onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); }}>{t("preview.fit")}</button>
+      <span>{Math.round(zoom * 100)}%</span></>}
       <a className="btn ghost" href={source(sessionId, presentation.id, item.id)} download={item.filename}>{t("common.download")}</a>
       <button className="btn ghost" type="button" disabled={index === presentation.items.length - 1} onClick={() => setIndex((v) => v + 1)}>{t("media.next")}</button>
     </div>
@@ -116,7 +117,7 @@ export function InlineMedia({ sessionId, presentation }: { sessionId: string; pr
   return <>
     <div className={`inline-media ${presentation.layout} items-${Math.min(4, presentation.items.length)}`}>
       <div className="inline-media-track" ref={rail}>
-        {presentation.items.map((item, index) => <MediaElement key={item.id} sessionId={sessionId} presentation={presentation} item={item} onOpen={() => item.kind === "image" || item.kind === "animation" ? setOpen(index) : undefined} />)}
+        {presentation.items.map((item, index) => <MediaElement key={item.id} sessionId={sessionId} presentation={presentation} item={item} onOpen={() => setOpen(index)} />)}
       </div>
       {presentation.layout === "album" && presentation.items.length > 3 && <>
         <button type="button" className="inline-media-nav previous" onClick={() => rail.current?.scrollBy({ left: -rail.current.clientWidth * .8, behavior: "smooth" })} aria-label={t("media.previous")}><Icon name="back" /></button>

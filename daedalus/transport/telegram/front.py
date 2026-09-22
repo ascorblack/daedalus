@@ -2054,20 +2054,22 @@ class TelegramFront:
         for presentation in presentations:
             try:
                 items = presentation["items"]
-                if presentation["layout"] == "album":
+                if presentation["layout"] == "album" and all(item["kind"] == "image" for item in items):
                     await outbox.send_album([Path(item["path"]) for item in items], items[0].get("caption") or None)
                     continue
-                item = items[0]
-                path = Path(item["path"])
-                caption = item.get("caption") or None
-                if item["kind"] == "video":
-                    await outbox.send_video(path, caption)
-                elif item["kind"] == "audio":
-                    await outbox.send_audio(path, caption)
-                elif item["kind"] == "animation":
-                    await outbox.send_animation(path, caption)
-                else:
-                    await outbox.send_photo(path, caption)
+                # The photo-only transport album cannot carry a mixed presentation. Preserve
+                # every attachment and its order using the existing typed delivery methods.
+                for item in items:
+                    path = Path(item["path"])
+                    caption = item.get("caption") or None
+                    if item["kind"] == "video":
+                        await outbox.send_video(path, caption)
+                    elif item["kind"] == "audio":
+                        await outbox.send_audio(path, caption)
+                    elif item["kind"] == "animation":
+                        await outbox.send_animation(path, caption)
+                    else:
+                        await outbox.send_photo(path, caption)
             except Exception:  # noqa: BLE001 — the text answer still reaches the chat; the app keeps the original
                 delivered = False
                 logger.exception("could not deliver inline media %s for run %s", presentation["id"], run_id)
