@@ -9,6 +9,7 @@ Anthropic ``/v1/messages`` using the CLI's identity headers and system prefix.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -27,9 +28,12 @@ logger = logging.getLogger("keyproxy.claude")
 CLAUDE_API = "https://api.anthropic.com"
 CLAUDE_TOKEN_URL = "https://claude.ai/v1/oauth/token"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-CLAUDE_CLI_VERSION = os.environ.get("KEYPROXY_CLAUDE_CLI_VERSION", "2.1.270")
-CLAUDE_VERSION_HASH = os.environ.get("KEYPROXY_CLAUDE_VERSION_HASH", "9d8")
+CLAUDE_CLI_VERSION = os.environ.get("KEYPROXY_CLAUDE_CLI_VERSION", "2.1.278")
 CLAUDE_ENTRYPOINT = os.environ.get("KEYPROXY_CLAUDE_ENTRYPOINT", "sdk-cli")
+# The CLI's attribution stamp: sha256(salt + three characters of the first user text + version)[:3].
+# A fixed "9d8" belonged to 2.1.270. KEYPROXY_CLAUDE_VERSION_HASH still pins one stamp for every call.
+_ATTRIBUTION_SALT = "59cf53e54c78"
+_ATTRIBUTION_INDEXES = (4, 7, 20)
 CLAUDE_BETAS = (
     "oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,"
     "context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219,"
@@ -63,8 +67,22 @@ def _cli_headers() -> dict[str, str]:
     }
 
 
-def _billing_header() -> str:
-    return f"x-anthropic-billing-header: cc_version={CLAUDE_CLI_VERSION}.{CLAUDE_VERSION_HASH}; cc_entrypoint={CLAUDE_ENTRYPOINT};"
+def attribution_hash(text: str) -> str:
+    """The three hex characters Claude Code writes after ``cc_version``.
+
+    Taken from the CLI (2.1.278): the salt, the characters at indexes 4, 7 and 20 of the
+    first user text (``0`` when the text is shorter), then the CLI version. A missing
+    character is ``0``, not omitted, which is what makes a short prompt still stamp.
+    """
+    pinned = os.environ.get("KEYPROXY_CLAUDE_VERSION_HASH", "").strip()
+    if pinned:
+        return pinned
+    chars = "".join(text[i] if i < len(text) else "0" for i in _ATTRIBUTION_INDEXES)
+    return hashlib.sha256(f"{_ATTRIBUTION_SALT}{chars}{CLAUDE_CLI_VERSION}".encode()).hexdigest()[:3]
+
+
+def _billing_header(user_text: str) -> str:
+    return f"x-anthropic-billing-header: cc_version={CLAUDE_CLI_VERSION}.{attribution_hash(user_text)}; cc_entrypoint={CLAUDE_ENTRYPOINT};"
 
 
 class ClaudeAuth:
@@ -287,8 +305,9 @@ def chat_to_messages(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, st
         budget = max(1024, EFFORT_BUDGET.get(effort, 8192))
         if max_tokens <= budget:
             max_tokens = min(MAX_OUTPUT, budget + 1024)
+    first_user = next((_text_of(item.get("content")) for item in items if item.get("role") == "user"), "")
     system: list[dict[str, Any]] = [
-        {"type": "text", "text": _billing_header()},
+        {"type": "text", "text": _billing_header(first_user)},
         {"type": "text", "text": CLAUDE_IDENTITY},
     ]
     if instructions:
@@ -462,6 +481,7 @@ __all__ = [
     "CLAUDE_API",
     "CLAUDE_FALLBACK_MODELS",
     "ClaudeAuth",
+    "attribution_hash",
     "chat_to_messages",
     "claude_usage_view",
     "messages_events_to_chunks",

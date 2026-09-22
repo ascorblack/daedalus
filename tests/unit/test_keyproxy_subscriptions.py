@@ -81,9 +81,26 @@ async def test_responses_events_become_chat_chunks() -> None:
     assert (await subs.collect_completion(subs.responses_events_to_chunks(_lines(failed), model="m"), model="m"))["error"]["message"] == "nope"
 
 
+def test_grok_version_is_the_mounted_cli_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "grok"
+    blob = home / "downloads" / "grok-1.2.3-linux-x86_64"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"")
+    (home / "bin").mkdir()
+    (home / "bin" / "grok").symlink_to(blob)
+    monkeypatch.setenv("KEYPROXY_GROK_AUTH", str(home / "auth.json"))
+    monkeypatch.delenv("KEYPROXY_GROK_CLIENT_VERSION", raising=False)
+    assert subs._installed_grok_version() == "1.2.3"
+    monkeypatch.setenv("KEYPROXY_GROK_CLIENT_VERSION", "9.9.9")
+    assert subs._installed_grok_version() == "9.9.9"
+
+
 def test_usage_views() -> None:
     codex = subs.codex_usage_view({"plan_type": "plus", "rate_limit": {"limit_reached": True, "primary_window": {"used_percent": 0, "reset_at": 1}, "secondary_window": {"used_percent": 100, "reset_at": 2}}, "model_usage": {"gpt-6-astra": {}, "gpt-5.6-terra": {}}})
     assert codex["limit_reached"] and [w["name"] for w in codex["windows"]] == ["5h", "weekly"] and codex["models"] == ["gpt-5.6-terra", "gpt-6-astra"]
+    # A single weekly window arrives in primary_window. Naming that slot "5h" told the Usage screen the wrong clock.
+    week = subs.codex_usage_view({"plan_type": "prolite", "rate_limit": {"limit_reached": False, "primary_window": {"used_percent": 86, "reset_at": 1, "limit_window_seconds": 604800}, "secondary_window": None}})
+    assert [w["name"] for w in week["windows"]] == ["weekly"] and week["windows"][0]["used_percent"] == 86.0
     grok = subs.grok_usage_view({"config": {"currentPeriod": {"end": "2026-09-10T02:13:38+00:00"}, "creditUsagePercent": 59.0, "productUsage": [{"product": "GrokBuild", "usagePercent": 59.0}]}})
     assert grok["windows"][0]["used_percent"] == 59.0 and grok["products"][0]["product"] == "GrokBuild" and not grok["limit_reached"]
     claude = claude_mod.claude_usage_view(
@@ -124,7 +141,9 @@ def test_claude_chat_body_becomes_messages() -> None:
     out, names = claude_mod.chat_to_messages(body)
     assert out["model"] == "claude-opus-5" and out["stream"] is True and out["thinking"]["type"] == "enabled" and out["thinking"]["budget_tokens"] >= 1024
     assert out["system"][0]["text"].startswith("x-anthropic-billing-header:") and "Claude Agent SDK" in out["system"][1]["text"]
-    assert "2.1.270" in out["system"][0]["text"]
+    assert "2.1.278" in out["system"][0]["text"] and claude_mod.attribution_hash("open x") in out["system"][0]["text"]
+    # Indexes 4, 7 and 20 of this sentence are o, w, s. The digest is the CLI's stamp for 2.1.278.
+    assert claude_mod.attribution_hash("hello world, this is long enough") == "f3c"
     assert out["system"][2]["text"] == "You are Daedalus." and "cache_control" not in out["system"][2]
     assert out["system"][1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     assert "cache_control" not in out["system"][0]
@@ -232,11 +251,15 @@ async def test_proxy_routes_codex_and_grok(monkeypatch: pytest.MonkeyPatch, tmp_
         text = await streamed.text()
         assert '"content": "PONG"' in text and text.strip().endswith("data: [DONE]")
         models = await (await client.get("/codex/v1/models")).json()
-        assert {m["id"] for m in models["data"]} >= {"gpt-5.6-luna", "gpt-5.6-terra"}
+        assert {m["id"] for m in models["data"]} >= {"gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra"}
         grok = await (await client.get("/grok/v1/models")).json()
         echoed = grok["echo"]
         assert echoed["authorization"] == "Bearer grok-token" and echoed["x-grok-client-identifier"] == "grok-shell" and echoed["x-xai-token-auth"] == "xai-grok-cli"
+        assert echoed["x-grok-client-version"] == subs.GROK_CLIENT_VERSION and subs.GROK_CLIENT_VERSION != "0.2.101"
         assert str([r for r in seen if "grok.com" in str(r.url)][0].url) == "https://cli-chat-proxy.grok.com/v1/models"
+        await client.post("/grok/v1/chat/completions", json={"model": "grok-4.7", "messages": [{"role": "user", "content": "hi"}]})
+        posted = [r for r in seen if str(r.url).endswith("/chat/completions")][0]
+        assert posted.headers["x-grok-model-override"] == "grok-4.7"
         usage = await (await client.get("/subscriptions/usage")).json()
         assert usage["codex"]["plan"] == "plus" and usage["grok"]["logged_in"] is True and usage["claude"]["logged_in"] is False
 

@@ -331,6 +331,20 @@ async def _sse_lines(response: httpx.Response) -> Any:
         yield line
 
 
+def _stamp_grok_model(headers: dict[str, str], body: bytes) -> None:
+    """Copy the JSON model onto ``x-grok-model-override`` when the caller did not set one."""
+    if any(key.lower() == "x-grok-model-override" for key in headers):
+        return
+    if not body:
+        return
+    try:
+        model = str(json.loads(body).get("model") or "")
+    except (ValueError, AttributeError, UnicodeError):
+        return
+    if model:
+        headers["x-grok-model-override"] = model
+
+
 def served_headers(upstream: str, model: str) -> dict[str, str]:
     """Which upstream, and which model name, this response was really produced against.
 
@@ -578,6 +592,10 @@ async def handle(request: web.Request) -> web.StreamResponse:
         if key:
             inject_key(headers, name, key)
     body = await request.read()
+    if name == "grok":
+        # The CLI chat proxy routes on this header. The JSON model is not what it documents
+        # as the route, and the current CLI sends the header on every completion.
+        _stamp_grok_model(headers, body)
     meter = bool(AGENT_API) and METERED_HEADER not in request.headers and request.method == "POST" and is_completion(rest)
     request_model = ""
     if meter:

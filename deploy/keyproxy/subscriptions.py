@@ -16,6 +16,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -32,19 +33,12 @@ CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_HEADERS = {"OpenAI-Beta": "responses=experimental", "originator": "codex_cli_rs"}
 GROK_BASE = "https://cli-chat-proxy.grok.com/v1"
 GROK_ISSUER = "https://auth.x.ai"
-GROK_CLIENT_VERSION = "0.2.101"
-GROK_HEADERS = {
-    "User-Agent": f"grok-shell/{GROK_CLIENT_VERSION} (linux)",
-    "x-grok-client-identifier": "grok-shell",
-    "x-grok-client-version": GROK_CLIENT_VERSION,
-    "x-grok-client-mode": "interactive",
-    "X-XAI-Token-Auth": "xai-grok-cli",
-    "x-authenticateresponse": "authenticate-response",
-}
 REFRESH_SKEW_SECONDS = 300
 USAGE_CACHE_SECONDS = 60
 MODELS_CACHE_SECONDS = 300
-CODEX_FALLBACK_MODELS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")
+# The usage table names only models already called. Astra is the CLI's current default and
+# was missing from this list, so a usage call that failed hid it.
+CODEX_FALLBACK_MODELS = ("gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")
 
 
 class SubscriptionError(RuntimeError):
@@ -59,6 +53,41 @@ def _jwt_claims(token: str) -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except (IndexError, ValueError):
         return {}
+
+
+def _installed_grok_version() -> str:
+    """The grok CLI version the chat proxy expects on ``x-grok-client-version``.
+
+    A constant here went stale at 0.2.101 while the CLI moved to 1.x, and this proxy has
+    already seen that host answer 426 "CLI version outdated" for a missing version. The
+    binary is mounted next to the login (``<grok home>/bin/grok`` → ``grok-<version>-…``),
+    so the version is read from that name. ``KEYPROXY_GROK_CLIENT_VERSION`` wins when set.
+    """
+    override = os.environ.get("KEYPROXY_GROK_CLIENT_VERSION", "").strip()
+    if override:
+        return override
+    auth = Path(os.environ.get("KEYPROXY_GROK_AUTH", os.path.expanduser("~/.grok/auth.json")))
+    try:
+        name = (auth.parent / "bin" / "grok").resolve().name
+    except OSError:
+        name = ""
+    found = re.search(r"(\d+\.\d+\.\d+)", name)
+    return found.group(1) if found else "1.0.40"
+
+
+def _grok_headers(version: str) -> dict[str, str]:
+    return {
+        "User-Agent": f"grok-shell/{version} (linux)",
+        "x-grok-client-identifier": "grok-shell",
+        "x-grok-client-version": version,
+        "x-grok-client-mode": "interactive",
+        "X-XAI-Token-Auth": "xai-grok-cli",
+        "x-authenticateresponse": "authenticate-response",
+    }
+
+
+GROK_CLIENT_VERSION = _installed_grok_version()
+GROK_HEADERS = _grok_headers(GROK_CLIENT_VERSION)
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
@@ -385,13 +414,37 @@ async def collect_completion(chunks: AsyncIterator[str], *, model: str) -> dict[
 # -- usage --------------------------------------------------------------------------------------------
 
 
+def _quota_window_name(key: str, window: dict[str, Any]) -> str:
+    """Name a Codex quota window from its length, not from which slot it sits in.
+
+    Plus used to put five hours in ``primary_window`` and the week in ``secondary_window``.
+    A plan with a single window puts that week in ``primary_window`` and leaves the other
+    null, so a fixed label reported the week as "5h".
+    """
+    fallback = {"primary_window": "5h", "secondary_window": "weekly"}.get(key, key)
+    raw = window.get("limit_window_seconds")
+    if raw is None:
+        return fallback
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError):
+        return fallback
+    if seconds <= 6 * 3600:
+        return "5h"
+    if seconds <= 8 * 86400:
+        return "weekly"
+    if seconds <= 32 * 86400:
+        return "monthly"
+    return fallback
+
+
 def codex_usage_view(data: dict[str, Any]) -> dict[str, Any]:
     limits = data.get("rate_limit") or {}
     windows = []
-    for name, key in (("5h", "primary_window"), ("weekly", "secondary_window")):
+    for key in ("primary_window", "secondary_window"):
         w = limits.get(key) or {}
-        if w:
-            windows.append({"name": name, "used_percent": float(w.get("used_percent") or 0), "resets_at": w.get("reset_at"), "window_seconds": w.get("limit_window_seconds")})
+        if isinstance(w, dict) and w:
+            windows.append({"name": _quota_window_name(key, w), "used_percent": float(w.get("used_percent") or 0), "resets_at": w.get("reset_at"), "window_seconds": w.get("limit_window_seconds")})
     models = sorted(k for k, v in (data.get("model_usage") or {}).items() if isinstance(v, dict))
     return {"provider": "codex", "plan": data.get("plan_type"), "limit_reached": bool(limits.get("limit_reached")), "windows": windows, "models": models}
 
