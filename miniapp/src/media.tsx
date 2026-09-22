@@ -10,6 +10,13 @@ export { mediaCopyText, splitMediaAnswer } from "./mediaformat";
 // A clip opened from a chat used to start at the browser's full volume. A tenth is loud enough
 // to hear and quiet enough that opening an album does not take over the room.
 const QUIET_VOLUME = 0.1;
+const SEEK_STEP_SECONDS = 5;
+
+function seekBy(el: HTMLVideoElement | null, delta: number) {
+  if (!el || el.readyState < 1) return;
+  const limit = Number.isFinite(el.duration) ? el.duration : Number.POSITIVE_INFINITY;
+  el.currentTime = Math.min(limit, Math.max(0, el.currentTime + delta));
+}
 
 function source(sessionId: string, presentationId: string, item: MediaItem): string {
   // A remote item is already a URL. Routing it through the content endpoint would only download
@@ -62,7 +69,32 @@ function VideoPlayer({ src }: { src: string }) {
     else el.pause();
   };
   useEffect(() => () => window.clearTimeout(hide.current), []);
-  return <div className={`video-player ${shown || !playing ? "shown" : ""}`} onMouseMove={() => reveal(!playing)} onMouseLeave={() => playing && setShown(false)}>
+  // In fullscreen the browser delivers keys to the fullscreen element, not to the dialog
+  // underneath, so the arrows never arrived there. This listener is that path only.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const shell = video.current?.parentElement;
+      const full = document.fullscreenElement;
+      if (!shell || !full || (full !== shell && !shell.contains(full))) return;
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if ((event.target as HTMLElement | null)?.closest("input.video-player-volume")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      seekBy(video.current, event.key === "ArrowRight" ? SEEK_STEP_SECONDS : -SEEK_STEP_SECONDS);
+      setShown(true);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+  const onKey = (event: ReactKeyboardEvent) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    if ((event.target as HTMLElement).closest("input.video-player-volume")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    seekBy(video.current, event.key === "ArrowRight" ? SEEK_STEP_SECONDS : -SEEK_STEP_SECONDS);
+    setShown(true);
+  };
+  return <div className={`video-player ${shown || !playing ? "shown" : ""}`} tabIndex={-1} onKeyDown={onKey} onMouseMove={() => reveal(!playing)} onMouseLeave={() => playing && setShown(false)}>
     <video
       ref={video}
       src={src}
@@ -186,16 +218,16 @@ function Viewer({ sessionId, presentation, start, onClose }: { sessionId: string
   };
   const wheel = (event: ReactWheelEvent) => { event.preventDefault(); changeZoom(zoom * (event.deltaY < 0 ? 1.15 : 0.87)); };
   const onKey = (event: ReactKeyboardEvent) => {
-    if ((event.target as HTMLElement).closest("input")) return;
+    if ((event.target as HTMLElement).closest("input.video-player-volume")) return;
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    // A video seeks. The arrows turn the page only for a still.
+    if (video) {
+      event.preventDefault();
+      seekBy(root.current?.querySelector("video") ?? null, event.key === "ArrowRight" ? SEEK_STEP_SECONDS : -SEEK_STEP_SECONDS);
+      return;
+    }
     if (event.key === "ArrowRight" && index < presentation.items.length - 1) setIndex((value) => value + 1);
     if (event.key === "ArrowLeft" && index > 0) setIndex((value) => value - 1);
-    if (event.key === " " && video) {
-      event.preventDefault();
-      const el = root.current?.querySelector("video");
-      if (!el) return;
-      if (el.paused) void el.play();
-      else el.pause();
-    }
   };
   return <Overlay>
     <div ref={root} className="media-viewer lightbox" tabIndex={-1} role="dialog" aria-modal="true" aria-label={name} onKeyDown={onKey}>

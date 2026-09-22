@@ -60,7 +60,22 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return route.fulfill(status=200, content_type="text/event-stream", body="event: hello\ndata: {}\n\n")
     if "/media/" in path and path.endswith("/content"):
         if "album-video" in path and os.environ.get("MEDIA_TEST_VIDEO"):
-            return route.fulfill(status=200, content_type="video/webm", body=Path(os.environ["MEDIA_TEST_VIDEO"]).read_bytes())
+            # Without a range response the element learns the duration and then refuses to seek.
+            body = Path(os.environ["MEDIA_TEST_VIDEO"]).read_bytes()
+            headers = {"Accept-Ranges": "bytes", "Content-Type": "video/mp4"}
+            requested = route.request.headers.get("range")
+            if requested and requested.startswith("bytes="):
+                spec = requested.split("=", 1)[1].split(",", 1)[0]
+                start_s, _, end_s = spec.partition("-")
+                start = int(start_s) if start_s else 0
+                end = int(end_s) if end_s else len(body) - 1
+                end = min(end, len(body) - 1)
+                chunk = body[start:end + 1]
+                headers["Content-Range"] = f"bytes {start}-{end}/{len(body)}"
+                headers["Content-Length"] = str(len(chunk))
+                return route.fulfill(status=206, headers=headers, body=chunk)
+            headers["Content-Length"] = str(len(body))
+            return route.fulfill(status=200, headers=headers, body=body)
         return route.fulfill(status=200, content_type="image/png", body=PNG)
     if path.endswith("/api/media/access"):
         return route.fulfill(status=200, content_type="application/json", body='{"ok":true}')
@@ -127,12 +142,22 @@ def run() -> int:
                 problems.append(f"{name}: viewer has a touch target below 44px ({controls})")
             if zoom != "200%":
                 problems.append(f"{name}: double click did not zoom the image ({zoom})")
-            page.locator(".media-viewer").get_by_role("button", name="Next", exact=True).click()
+            page.keyboard.press("ArrowRight")
             player = page.locator(".media-viewer-stage video")
             assert player.count() == 1
             if os.environ.get("MEDIA_TEST_VIDEO"):
-                player.evaluate("async video => { await video.play(); }")
-                page.wait_for_function("document.querySelector('.media-viewer-stage video').currentTime > 0")
+                page.wait_for_function("() => { const v = document.querySelector('.media-viewer-stage video'); return v && v.seekable.length > 0 && v.seekable.end(0) > 5; }")
+                page.keyboard.press("ArrowRight")
+                page.wait_for_function("() => document.querySelector('.media-viewer-stage video').currentTime >= 4.5")
+                page.locator(".media-viewer").get_by_role("button", name="Full screen", exact=True).click()
+                page.wait_for_function("() => document.fullscreenElement")
+                page.keyboard.press("ArrowRight")
+                page.wait_for_function("() => { const v = document.querySelector('.media-viewer-stage video'); return v && v.currentTime >= 9.5 && v.currentTime <= 10.5; }")
+                page.evaluate("() => document.exitFullscreen()")
+            else:
+                page.keyboard.press("ArrowRight")
+                if player.count() != 1:
+                    problems.append(f"{name}: arrow left the video instead of seeking")
             page.locator(".media-viewer").get_by_role("button", name="Next", exact=True).click()
             assert page.locator(".media-viewer-stage video").count() == 0
             assert page.locator(".media-viewer-stage img").count() == 1
