@@ -39,6 +39,9 @@ def run() -> int:
         if path == "/api/sessions":
             folders = [{**project, "total": 0, "active": 0, "loops": 0, "last_message_at": ""} for project in projects]
             return answer(route, {"sessions": [], "projects": folders})
+        if path == "/api/settings":
+            # The start canvas reads the default model before a chat exists.
+            return answer(route, {"presets": {}, "model": {}})
         if path == "/api/project-directories":
             query = parse_qs(url.query)
             if not query:

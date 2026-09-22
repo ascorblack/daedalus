@@ -4,8 +4,8 @@ The Voice project is where the voice agents live, so the list of agents draws it
 other — and clicking its name opened that folder, which is not what the word means to the operator
 reaching for it. The word is the mode. So the row is a link to the voice page and the chevron beside
 it is a disclosure button of its own, with its own label, for the sessions underneath. Two controls
-in one row only work if each says which it is, so that is what is asserted here, on the Agents screen
-and in the sidebar that carries the same list on every other screen.
+in one row only work if each says which it is, so that is what is asserted here, in the sidebar
+beside the start canvas and beside every other screen.
 
     cd miniapp && npm run build
     python3 tests/browser/serve_app.py 8203 /tmp/app-root &
@@ -97,12 +97,11 @@ def main() -> int:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(executable_path=shots.CHROMIUM, args=shots.FAKE_MEDIA)
-        check_the_row(browser, check, "the Agents screen", ".main", {"width": 1440, "height": 900}, "agents")
-        # The sidebar carries the same list beside every other screen, and is where the operator
-        # reaches for Voice most of the time. It has no column of its own beside Agents, which is the
-        # list itself, so it is checked from a screen that has one.
+        check_the_row(browser, check, "the Agents screen", ".sidebar", {"width": 1440, "height": 900}, "agents")
+        # The start canvas has no list of its own. The sidebar beside it is the list, on Agents
+        # and on every other screen.
         check_the_row(browser, check, "the sidebar", ".sidebar", {"width": 1680, "height": 1000}, "inbox")
-        check_the_row(browser, check, "one Voice agent on Agents", ".main", {"width": 1440, "height": 900}, "agents", single=True)
+        check_the_row(browser, check, "one Voice agent on Agents", ".sidebar", {"width": 1440, "height": 900}, "agents", single=True)
         check_the_row(browser, check, "one Voice agent in the sidebar", ".sidebar", {"width": 1680, "height": 1000}, "inbox", single=True)
         browser.close()
     return failures

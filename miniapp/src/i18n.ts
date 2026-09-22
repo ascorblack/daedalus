@@ -879,6 +879,8 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "agents.empty.sub": { en: "Create one here, or write to the bot in Telegram.", ru: "Создайте агента здесь или напишите боту в Telegram." },
   "agents.empty.project.sub": { en: "An agent started here works in {root}.", ru: "Агент, запущенный здесь, работает в {root}." },
   "agents.empty.create": { en: "Create agent", ru: "Создать агента" },
+  "start.greeting": { en: "What are we working on?", ru: "Чем займёмся?" },
+  "start.chats": { en: "Chats", ru: "Чаты" },
   "agents.orphan": { en: "subagent, leader gone", ru: "подагент, ведущего больше нет" },
   "agents.fork.at": { en: "forked at message {n}", ru: "ответвление на сообщении {n}" },
   "agents.fork.of": { en: "forked from {name} at message {n}", ru: "ответвление от «{name}» на сообщении {n}" },

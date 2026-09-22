@@ -350,6 +350,32 @@ def _exclude_artefacts(root: Path) -> None:
         logger.warning("could not write %s: %s", info / "exclude", exc)
 
 
+TITLE_PROMPT = (
+    "Write a short title for a chat that opens with the message below. "
+    "Use the same language as the message. Six words at most. "
+    "No quotes and no trailing punctuation.\n\nMessage:\n"
+)
+
+
+def clip_title(text: str) -> str:
+    """A title from the message itself, used until a model has named the chat.
+
+    A trailing period is not part of a title. A message that is only punctuation keeps those
+    characters: stripping them would leave the chat with nothing to be called.
+    """
+    line = " ".join(text.strip().split())
+    if not line:
+        return ""
+    short = line if len(line) <= 48 else (line[:48].rsplit(" ", 1)[0] or line[:48])
+    return short.rstrip(".!…") or line[:48]
+
+
+def _clean_title(raw: str) -> str:
+    line = raw.strip().splitlines()[0] if raw.strip() else ""
+    line = line.strip(" \"'`“”«»").rstrip(".!…")
+    return " ".join(line.split())[:80]
+
+
 class SessionManager:
     def __init__(
         self,
@@ -1060,6 +1086,57 @@ class SessionManager:
             if path.resolve() == target:
                 out.append({"id": row["id"], "title": row["title"]})
         return out
+
+    def _schedule_entitle(self, session_id: str, text: str, provisional: str) -> None:
+        """Name an auto-created chat from its first message, after the run has already started."""
+        self._spawn_background(self.entitle(session_id, text, provisional), f"entitle:{session_id}")
+
+    async def entitle(self, session_id: str, text: str, provisional: str) -> None:
+        """Replace the placeholder title when the operator has not named the chat themselves.
+
+        The model is asked once, in the language of the message. A failure leaves the placeholder,
+        which is already a clip of what they wrote, so the chat is never stuck untitled.
+        """
+        try:
+            invented = await self._invent_title(session_id, text)
+        except Exception:  # noqa: BLE001 — naming is a courtesy, not part of the run
+            logger.warning("could not name session %s", session_id, exc_info=True)
+            return
+        state = await self.get_state(session_id)
+        if state is None or state.session.title != provisional or not invented or invented == provisional:
+            return
+        await self.rename_session(session_id, invented)
+        project = state.project
+        if project is not None and project.name == provisional:
+            row = await self.db.fetchone("SELECT json_extract(settings, '$.auto_created') AS auto FROM projects WHERE id = ?", (project.id,))
+            if row is not None and row["auto"] in (1, True):
+                try:
+                    await self.projects.update(project.id, name=invented)
+                except Exception:  # noqa: BLE001 — the session title is the one the list shows
+                    logger.warning("could not rename the folder of session %s", session_id, exc_info=True)
+
+    async def _invent_title(self, session_id: str, text: str) -> str:
+        source = " ".join(text.split())
+        if not source:
+            return ""
+        try:
+            rungs, _ = self.resolve_model(await self.live.load(session_id))
+        except Exception:  # noqa: BLE001 — no model means the clip of the message stays
+            return ""
+        if not rungs:
+            return ""
+        provider, model = rungs[0]
+        request = LLMRequest(
+            model=model,
+            messages=[Message(role=MessageRole.user, content_blocks=[TextBlock(text=TITLE_PROMPT + source[:2000])])],
+            max_tokens=40,
+            temperature=0.2,
+            extra={"enable_thinking": False},
+            observability=LLMObservabilityContext(tenant_id=TENANT, session_id=session_id, call_purpose="session_title", call_category="session"),
+        )
+        response = await asyncio.wait_for(provider.complete_text(request), timeout=20)
+        raw = "".join(block.text for block in response.message.content_blocks if isinstance(block, TextBlock))
+        return _clean_title(raw)
 
     async def rename_session(self, session_id: str, title: str) -> SessionState:
         state = await self.get_state(session_id)
@@ -2040,6 +2117,20 @@ class SessionManager:
                 # undo of the previous one may restore a tree a turn older, and the log says so.
                 logger.warning("session %s: the previous turn was still being written down after %.0f s; starting the next run anyway", session_id, self.config.ops.settle_wait_seconds)
             recorded_message: Message | None = None
+            if state.metadata.pop("autotitle", None):
+                # The first message of a chat the operator started by typing, rather than by naming
+                # it first. The clip is already the title; the model may replace it once it answers.
+                # The session row and the live state each hold a copy, and a later write of either
+                # one would bring the flag back and name the chat a second time.
+                state.session.metadata.pop("autotitle", None)
+                provisional = state.session.title
+                await self.sessions.update_metadata(session_id, dict(state.metadata))
+                source = text
+                if attachments and text in {"File attached.", "Files attached."}:
+                    # Those two sentences are what an upload says when the operator typed nothing.
+                    # They are the same for every file, so a title taken from them would be too.
+                    source = ", ".join(Path(item.name or item.path.name).name for item in attachments)
+                self._schedule_entitle(session_id, source, provisional)
             if client_message_id:
                 receipt, created = await self.live.accept(session_id, client_message_id, "input", receipt_payload)
                 if not created and receipt["status"] != "accepted":

@@ -25,7 +25,7 @@ export type SidebarProps = {
   counts: Counts;
   selfdev: SelfDevMode;
   collapsed: boolean;
-  /** Absent where the column cannot be opened: beside the Agents screen, which is the list itself. */
+  /** Folds the column. The agents screen is the start canvas, so this column is the list of chats. */
   onToggle?: () => void;
   width: number;
   onWidth: (w: number) => void;

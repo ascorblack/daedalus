@@ -15,14 +15,14 @@ import { plural, t } from "../i18n";
 
 type SearchList = SessionList & { semantic: boolean; reason: string; partial: boolean; indexing: boolean };
 
-export function SessionsScreen({ onOpen, toast, current, compact, project = "", projects = [], onProjects }: { onOpen: (id: string) => void; toast: (t: string) => void; current?: string; compact?: boolean; project?: string; projects?: Project[]; onProjects?: () => void }) {
+export function SessionsScreen({ onOpen, toast, current, compact, bare, project = "", projects = [], onProjects }: { onOpen: (id: string) => void; toast: (t: string) => void; current?: string; compact?: boolean; bare?: boolean; project?: string; projects?: Project[]; onProjects?: () => void }) {
   const [view, setView] = useState<"all" | "attention" | "working" | "archive">("all");
   const listUrl = `/api/sessions?view=${view}`;
   const { data, error, loading } = useQuery<SessionList>(listUrl, { pollMs: 5000, staleMs: 3000 });
   const [extra, setExtra] = useState<SessionSummary[]>([]);
   const [next, setNext] = useState<string | null>(null);
   const [paging, setPaging] = useState(false);
-  const [creating, setCreating] = useState(() => new URLSearchParams(window.location.search).get("new") === "1");
+  const [creating, setCreating] = useState(false);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchList | null>(null);
   const [pending, setPending] = useState(false);
@@ -62,7 +62,11 @@ export function SessionsScreen({ onOpen, toast, current, compact, project = "", 
 
   // In the sidebar the screen is the column: no page header, no filter chips, one row of controls
   // with the project switcher in it, and the search field under that row when it is open.
-  const head = compact ? (
+  // Under the start canvas the phone has no column, so the same list is the page: search and the
+  // filters, without a second title and a second way to create a chat.
+  const head = bare ? (
+    searchField
+  ) : compact ? (
     <>
       <div className="sidebar-head">
         <button className="sidebar-new-agent" onClick={() => setCreating(true)}>
@@ -428,7 +432,7 @@ function SessionRowMenu({ session, onProject, projectName }: { session: SessionS
 }
 
 /** The form for a new agent: a name, a first task and where it works; the loop and the tools sit behind Advanced. */
-function NewAgentSheet({ onClose, onCreated, toast, project: initial = "" }: { onClose: () => void; onCreated: (id: string) => void; toast: (t: string) => void; project?: string }) {
+export function NewAgentSheet({ onClose, onCreated, toast, project: initial = "" }: { onClose: () => void; onCreated: (id: string) => void; toast: (t: string) => void; project?: string }) {
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [toolsOff, setToolsOff] = useState<string[]>([]);

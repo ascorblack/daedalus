@@ -62,7 +62,7 @@ from daedalus.host.dependencies import DependencyPlanner
 from daedalus.host.policy import sealed_root
 from daedalus.host.prompt_changes import PromptChangePlanner
 from daedalus.host.prompts import DEFAULT_RULES
-from daedalus.host.session_runner import TENANT, Attachment
+from daedalus.host.session_runner import TENANT, Attachment, clip_title
 from daedalus.host.transcript_view import message_view
 from daedalus.providers.llamacpp import discover_llamacpp
 from daedalus.providers.openai_compat import UsageRecord
@@ -278,7 +278,10 @@ class ProjectPatch(BaseModel):
 
 
 class NewSessionBody(BaseModel):
-    title: str
+    title: str = ""
+    """Empty when the chat is started by its first message; a clip of that message stands in."""
+    autotitle: bool = False
+    """Name the chat from its first message. A chat given a title here is left as the operator named it."""
     prompt: str | None = None
     project_id: str | None = None
     """The project to work in: its folder becomes the session's workspace and the limit of its reach."""
@@ -1331,6 +1334,16 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/sessions")
     async def new_session(body: NewSessionBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         metadata: dict[str, Any] = {"tools_off": sorted(set(body.tools_off))} if body.tools_off else {}
+        title = body.title.strip()
+        if body.autotitle:
+            # The operator typed the message instead of a name. A clip stands in until the model
+            # names the chat; a filename does when the first turn is only an attachment.
+            title = clip_title(title or body.prompt or "")
+            if not title:
+                raise HTTPException(400, "a chat started this way needs a first message")
+            metadata["autotitle"] = True
+        elif not title:
+            raise HTTPException(400, "a session needs a title")
         if body.project_id:
             project = await manager.projects.get(body.project_id)
             if project is None:
@@ -1341,7 +1354,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             create_args: dict[str, Any] = {"metadata": metadata or None, "project_id": body.project_id or None}
             if body.own_directory:
                 create_args["own_directory"] = True
-            state = await app.create_session(body.title, **create_args)
+            state = await app.create_session(title, **create_args)
         except TelegramBusy as exc:
             raise HTTPException(429, f"Telegram asks to wait {exc.retry_after}s before creating another topic (session {exc.session_id} exists without a topic)") from exc
         except TelegramRefused as exc:
@@ -1362,7 +1375,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
                 await loops.create(state.session.id, instruction=body.loop.instruction, mode=body.loop.mode, interval_seconds=(body.loop.interval_minutes or 0) * 60 or None, max_runs=body.loop.max_runs, start_now=body.loop.start_now)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
-        return {"id": state.session.id, "title": body.title, "model": await session_model_label(state)}
+        return {"id": state.session.id, "title": title, "model": await session_model_label(state)}
 
     async def session_model_label(state: Any) -> str:
         overrides = await manager.live.load(state.session.id)

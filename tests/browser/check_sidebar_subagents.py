@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -34,13 +35,37 @@ def run() -> int:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=CHROMIUM)
         page = browser.new_page(viewport={"width": 1440, "height": 900})
-        page.route("**/api/**", stub)
+        posted: list[dict] = []
+
+        def watch(route):  # type: ignore[no-untyped-def]
+            request = route.request
+            path = request.url.split("?", 1)[0]
+            if request.method == "POST" and path.rstrip("/").endswith("/api/sessions"):
+                posted.append(json.loads(request.post_data or "{}"))
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"id": S1, "title": "draft", "model": "Local model"}))
+                return
+            if request.method == "POST" and path.endswith("/messages"):
+                posted.append(json.loads(request.post_data or "{}"))
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"run_id": "r"}))
+                return
+            return stub(route)
+
+        page.route("**/api/**", watch)
 
         page.goto(f"{BASE}/agents?token=t&lang=en&scheme=dark", wait_until="networkidle")
-        expect(page.locator(".pagehead-actions .iconbtn.primary")).to_be_visible()
-        main_plus_error = centres(page, ".pagehead-actions .iconbtn.primary")
+        expect(page.locator(".start-greeting")).to_be_visible()
+        expect(page.locator(".start .composer-box")).to_be_visible()
+        expect(page.locator(".sidebar .folder").first).to_be_visible()
+        main_plus_error = centres(page, ".start .iconbtn.plus")
         if main_plus_error > 1:
-            problems.append(f"the main new-agent plus is {main_plus_error:.1f}px off centre")
+            problems.append(f"the start composer plus is {main_plus_error:.1f}px off centre")
+        page.locator(".start textarea").fill("The login form rejects a correct password")
+        page.locator(".start .roundbtn.primary").click()
+        page.wait_for_url(f"**/agents/{S1}")
+        if not posted or posted[0].get("autotitle") is not True or "login form" not in str(posted[0].get("title")):
+            problems.append(f"the first message did not open a chat: {posted[:1]}")
+        if len(posted) < 2 or posted[1].get("text") != "The login form rejects a correct password":
+            problems.append(f"the first message was not sent: {posted[1:]}")
 
         page.goto(f"{BASE}/agents/{S1}?token=t&lang=en&scheme=dark&panel=details", wait_until="networkidle")
         expect(page.locator(".sidebar-new-agent")).to_be_visible()

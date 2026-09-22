@@ -16,7 +16,7 @@ from protocore.runtime.events.types import EventType
 
 from daedalus.config import Settings
 from daedalus.extensions.api import message_view
-from daedalus.host.session_runner import SessionManager
+from daedalus.host.session_runner import SessionManager, clip_title
 from daedalus.stores.database import Database
 from tests.support.models import model_config
 from tests.support.waiting import SETTLE, until, until_await
@@ -396,4 +396,59 @@ async def test_two_inputs_at_once_start_one_run_and_queue_the_other(settings: Se
     queued = await manager.live.load(state.session.id)
     assert [q["text"] for q in queued["steer"]] == ["loop tick"]
     await waiter
+    await manager.close()
+
+
+def test_clip_title_keeps_a_short_line_and_cuts_a_long_one_on_a_word() -> None:
+    assert clip_title("  hello   there. ") == "hello there"
+    assert clip_title("") == ""
+    assert clip_title("...") == "..."
+    long = "one two three four five six seven eight nine ten eleven twelve thirteen"
+    clipped = clip_title(long)
+    assert long.startswith(clipped)
+    assert len(clipped) <= 48
+    assert long[len(clipped)] == " "
+
+
+async def test_an_auto_created_chat_is_named_from_its_first_message(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("draft title", metadata={"autotitle": True})
+    await manager.entitle(state.session.id, "The login form rejects a correct password", "draft title")
+    renamed = await manager.get_state(state.session.id)
+    assert renamed is not None and renamed.session.title == "summary"
+    project = await manager.projects.get(state.project.id)  # type: ignore[union-attr]
+    assert project is not None and project.name == "summary"
+    kept = await db.fetchone("SELECT json_extract(settings, '$.auto_created') AS auto FROM projects WHERE id = ?", (project.id,))
+    assert kept["auto"] in (1, True)
+    await manager.close()
+
+
+async def test_a_renamed_chat_keeps_the_name_the_operator_gave(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([])
+    manager = await _manager(settings, db, provider)
+    state = await manager.create_session("draft title", metadata={"autotitle": True})
+    await manager.rename_session(state.session.id, "Kept")
+    await manager.entitle(state.session.id, "The login form rejects a correct password", "draft title")
+    renamed = await manager.get_state(state.session.id)
+    assert renamed is not None and renamed.session.title == "Kept"
+    await manager.close()
+
+
+async def test_the_first_message_schedules_a_title_and_a_second_does_not(settings: Settings, db: Database) -> None:
+    provider = ScriptedProvider([{"text": "done"}, {"text": "again"}])
+    manager = await _manager(settings, db, provider)
+    seen: list[tuple[str, str, str]] = []
+    manager._schedule_entitle = lambda session_id, text, provisional: seen.append((session_id, text, provisional))  # type: ignore[method-assign]
+    state = await manager.create_session("draft title", metadata={"autotitle": True})
+    waiter = asyncio.create_task(_wait_finished(manager))
+    await manager.submit(state.session.id, "The login form rejects a correct password")
+    await waiter
+    assert seen == [(state.session.id, "The login form rejects a correct password", "draft title")]
+    assert "autotitle" not in state.metadata
+    assert "autotitle" not in state.session.metadata
+    waiter = asyncio.create_task(_wait_finished(manager))
+    await manager.submit(state.session.id, "and a follow-up")
+    await waiter
+    assert len(seen) == 1
     await manager.close()

@@ -45,7 +45,7 @@ function isChunkError(message: string): boolean {
   return /dynamically imported|Importing a module script failed|error loading dynamically imported/i.test(message);
 }
 
-const SessionsScreen = lazy(screen(() => import("./screens/Sessions").then((m) => ({ default: m.SessionsScreen }))));
+const StartScreen = lazy(screen(() => import("./screens/Start").then((m) => ({ default: m.StartScreen }))));
 const InboxScreen = lazy(screen(() => import("./screens/Inbox").then((m) => ({ default: m.InboxScreen }))));
 const BoardScreen = lazy(screen(() => import("./screens/Board").then((m) => ({ default: m.BoardScreen }))));
 const SessionScreen = lazy(screen(() => import("./screens/Session").then((m) => ({ default: m.SessionScreen }))));
@@ -358,7 +358,7 @@ export function App() {
   } else {
     content = (
       <ErrorBoundary key={route.screen}>
-        {route.screen === "agents" && <SessionsScreen onOpen={open} toast={showToast} project={project} projects={projectList} onProjects={wide ? undefined : () => setSwitching(true)} />}
+        {route.screen === "agents" && <StartScreen onOpen={open} toast={showToast} project={project} projects={projectList} onProjects={wide ? undefined : () => setSwitching(true)} />}
         {route.screen === "voice" && <VoiceScreen onOpen={open} toast={showToast} />}
         {route.screen === "inbox" && <InboxScreen onOpen={open} toast={showToast} />}
         {route.screen === "board" && <BoardScreen onOpen={open} toast={showToast} selected={route.detail} />}
@@ -381,8 +381,7 @@ export function App() {
     );
   }
 
-  const listRoute = route.screen === "agents" && !sessionId;
-  const strip = sidebarCollapsed || listRoute;
+  const strip = sidebarCollapsed;
   return (
     <div className="app" style={wide ? { ["--sidebar-w" as string]: `${strip ? 48 : sidebarWidth}px` } : undefined}>
       {wide && (
@@ -392,7 +391,7 @@ export function App() {
           counts={counts}
           selfdev={selfdev}
           collapsed={strip}
-          onToggle={listRoute ? undefined : toggleSidebar}
+          onToggle={toggleSidebar}
           width={sidebarWidth}
           onWidth={setSidebarWidth}
           onPalette={openPalette}
