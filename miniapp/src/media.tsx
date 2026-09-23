@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import type { MediaItem, MediaPresentation } from "./api";
 import { api } from "./api";
 import { Overlay, useLayer } from "./dialogs";
@@ -247,6 +247,11 @@ function Viewer({ sessionId, presentation, start, onClose }: { sessionId: string
   </Overlay>;
 }
 
+function albumRatio(items: MediaItem[]): string | undefined {
+  const photo = items.find((item) => (item.kind === "image" || item.kind === "animation") && item.width && item.height);
+  return photo?.width && photo.height ? `${photo.width} / ${photo.height}` : undefined;
+}
+
 export function InlineMedia({ sessionId, presentation }: { sessionId: string; presentation: MediaPresentation }) {
   const [open, setOpen] = useState<number | null>(null);
   const [access, setAccess] = useState<"loading" | "ready" | "error">("loading");
@@ -258,8 +263,9 @@ export function InlineMedia({ sessionId, presentation }: { sessionId: string; pr
   useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps -- one credential upgrade per mount
   if (access === "loading") return <div className="inline-media-loading" aria-label={t("media.loading")} />;
   if (access === "error") return <button type="button" className="inline-media-error" onClick={load}>{t("media.retry")}</button>;
+  const ratio = presentation.layout === "album" ? albumRatio(presentation.items) : undefined;
   return <>
-    <div className={`inline-media ${presentation.layout} items-${Math.min(4, presentation.items.length)}`}>
+    <div className={`inline-media ${presentation.layout} items-${Math.min(4, presentation.items.length)}`} style={ratio ? { "--album-ratio": ratio } as CSSProperties : undefined}>
       <div className="inline-media-track" ref={rail}>
         {presentation.items.map((item, index) => <MediaElement key={item.id} sessionId={sessionId} presentation={presentation} item={item} onOpen={() => setOpen(index)} />)}
       </div>

@@ -1085,9 +1085,13 @@ body.resizing iframe { pointer-events: none; }
 .inline-media-image { position:relative; margin:0; min-width:0; overflow:hidden; border-radius:var(--radius-lg); background:var(--surface-2); scroll-snap-align:start; }
 .inline-media.single .inline-media-image { width:100%; }
 .inline-media-surface { appearance:none; display:block; width:100%; height:100%; border:0; padding:0; margin:0; color:var(--fg); background:var(--bg); cursor:zoom-in; }
-.inline-media-image img { display:block; width:100%; max-height:min(70dvh,680px); object-fit:contain; background:var(--bg); }
-/* 16:9, not a tall clamp: a landscape video in a portrait tile was cropped into a vertical strip. */
-.inline-media.album .inline-media-image { aspect-ratio:16/9; height:auto; }
+/* height:auto, not the attribute's pixel height. A width and height on the tag otherwise become
+   a box as tall as max-height, and object-fit contain letterboxes a landscape photo inside it. */
+.inline-media-image img { display:block; width:100%; height:auto; max-height:min(70dvh,680px); object-fit:contain; background:var(--bg); }
+.inline-media.single .inline-media-surface { height:auto; }
+/* The row matches the photo. A fixed 16:9 made a wide picture sit in a tall frame with empty
+   bands, and the video beside it was that tall frame rather than the picture. */
+.inline-media.album .inline-media-image { aspect-ratio:var(--album-ratio, 16 / 9); height:auto; }
 .inline-media.album .inline-media-image img,.inline-media.album .inline-media-image video { display:block; width:100%; height:100%; max-height:none; object-fit:cover; }
 .inline-media-play { position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; }
 .inline-media-play .ic { width:var(--row-h-touch); height:var(--row-h-touch); padding:12px; border-radius:50%; background:rgba(8,9,10,.72); color:#fff; }
@@ -1144,7 +1148,7 @@ body.resizing iframe { pointer-events: none; }
   .answer-with-media { gap:12px; }
   .inline-media.album .inline-media-track, .inline-media.album.items-4 .inline-media-track { gap:5px; grid-template-columns:none; grid-auto-flow:column; grid-auto-columns:minmax(78%,1fr); justify-content:start; border-radius:var(--radius-md); }
   .inline-media-image,.inline-media-player { border-radius:var(--radius-md); }
-  .inline-media.album .inline-media-image { height:auto; aspect-ratio:16/9; }
+  .inline-media.album .inline-media-image { height:auto; aspect-ratio:var(--album-ratio, 16 / 9); }
   .inline-media-actions { opacity:1; right:7px; bottom:7px; }
   .inline-media-image:has(figcaption) .inline-media-actions { bottom:32px; }
   .inline-media-actions button,.inline-media-actions a,.inline-media-nav { width:var(--row-h-touch); height:var(--row-h-touch); }

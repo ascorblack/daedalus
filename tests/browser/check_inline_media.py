@@ -117,10 +117,16 @@ def run() -> int:
                 problems.append(f"{name}: expected three album images, two videos and audio; got {album_images}, {players}")
             frame = page.locator(".inline-media.album").evaluate("el => { const rail = el.querySelector('.inline-media-track'); const box = rail.getBoundingClientRect(); const tiles = [...rail.querySelectorAll('.inline-media-image')].map(t => t.getBoundingClientRect()); const visible = tiles.filter(t => (t.left + t.right) / 2 > box.left && (t.left + t.right) / 2 < box.right).length; const first = tiles[0]; return { visible, ratio: first.width / first.height }; }")
             print(f"{name}: frame={frame}")
-            # Three across on a desktop, one card on a phone, and the frame is landscape so a wide video is not cropped into a strip.
+            # Three across on a desktop, one card on a phone. The frame is the photo's own ratio
+            # (640/480 here), so a video in the album is that tall and a wide picture is not padded.
             expected_visible = 3 if name == "desktop" else 1
-            if frame["visible"] != expected_visible or frame["ratio"] < 1.5:
-                problems.append(f"{name}: album frame is not {expected_visible} landscape tiles ({frame})")
+            if frame["visible"] != expected_visible or abs(frame["ratio"] - 640 / 480) > 0.08:
+                problems.append(f"{name}: album frame is not {expected_visible} tiles at the photo's ratio ({frame})")
+            if name == "phone":
+                photo = page.locator(".inline-media.single .inline-media-image").evaluate("el => { const box = el.getBoundingClientRect(); return { w: box.width, h: box.height }; }")
+                # A landscape file used to be stretched to 70dvh and letterboxed. The box hugs the picture.
+                if photo["h"] > photo["w"] * 1.2:
+                    problems.append(f"phone: the photo box is taller than the picture ({photo})")
             if order[:3] != ["Before the album.", "media", "Between the album and video."] or order[-1] != "After every attachment.":
                 problems.append(f"{name}: media did not retain its position in prose ({order})")
             if overflow > 1:
