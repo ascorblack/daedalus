@@ -606,6 +606,8 @@ class SettingsBody(BaseModel):
     webhooks: dict[str, Any] | None = None
     ops: dict[str, Any] | None = None
     compaction: dict[str, Any] | None = None
+    orchestrator: dict[str, Any] | None = None
+    """The project orchestrator's defaults: its model preset, its wake-up batching and its limits."""
     answer_language: str | None = None
 
 
@@ -3940,6 +3942,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        orchestrators = app.extensions.get("orchestrator")
+        if orchestrators is not None and (body.get("preset") or body.get("clear")):
+            # The chip on an orchestrator's chat chooses the project's orchestrator model: the next
+            # orchestrator of the project, after a replacement, runs the same one.
+            await orchestrators.model_chosen(session_id, body.get("preset") or None, clear=bool(body.get("clear")))
         return {"ok": True, "model": await session_model_label(state), **(await session_thinking(state))}
 
     # -- MCP per session --------------------------------------------------------------
@@ -4804,6 +4811,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         data["usd_per_day"] = settings.usd_per_day
         data["prompt"]["default_rules"] = DEFAULT_RULES.strip()
         data["search_backends"] = websearch.catalogue()
+        # What an empty orchestrator preset means, so the setting can show it preselected.
+        data["orchestrator"]["strongest"] = app.config.strongest_preset() or ""
         return mask_provider_keys(data)
 
     def _keyproxy_origin() -> str:
@@ -5128,7 +5137,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         raw["model"]["chain"] = [c for c in raw["model"].get("chain", []) if c != preset_id]
         # Removing the last model is allowed: an installation with none is a state the app knows —
         # it asks for one — and refusing would leave a wrong entry no one can take out.
-        for section in ("model", "vision", "voice"):
+        for section in ("model", "vision", "voice", "orchestrator"):
             if raw[section].get("preset") == preset_id:
                 raw[section]["preset"] = ""
         return await _save_provider_config(type(app.config).model_validate(raw))

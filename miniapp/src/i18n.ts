@@ -1590,6 +1590,17 @@ export const DICT: Record<string, Record<Lang, string>> = {
   "settings.models.add.hint": { en: "the endpoint's own list, with its context window, modalities and prices", ru: "список самого адреса — с окном контекста, возможностями и ценами" },
   "settings.models.chain": { en: "Fallback order: {chain} (tried after the default when it fails).", ru: "Порядок запасных: {chain} (пробуются после основной, когда она не отвечает)." },
   "settings.models.chain.none": { en: "none", ru: "нет" },
+  "settings.orchestrator.title": { en: "Project orchestrator", ru: "Оркестратор проекта" },
+  "settings.orchestrator.sub": {
+    en: "The model a project's orchestrator runs when its project names none. It plans and decides for a whole team, so the strongest model pays for itself here.",
+    ru: "Модель, на которой работает оркестратор проекта, если в проекте не выбрана своя. Он планирует и решает за всю команду, поэтому здесь окупается самая сильная модель.",
+  },
+  "settings.orchestrator.model": { en: "Default model", ru: "Модель по умолчанию" },
+  "settings.orchestrator.strongest": { en: "strongest", ru: "самая сильная" },
+  "settings.orchestrator.hint": {
+    en: "A project's own choice overrides this; the model chip in an orchestrator's chat changes that project's choice.",
+    ru: "Выбор в самом проекте важнее этого; кнопка модели в чате оркестратора меняет выбор этого проекта.",
+  },
   "settings.providers.title": { en: "Providers (clients)", ru: "Клиенты (провайдеры)" },
   "settings.providers.sub": {
     en: "OpenAI-compatible endpoints the models run on. Keys stay in the key proxy where one is configured; a self-hosted vLLM needs none.",

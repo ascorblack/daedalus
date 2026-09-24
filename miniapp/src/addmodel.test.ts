@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Preset } from "./api";
-import { BLANK, prefilled, presetIdFor, priceFor, retyped } from "./models";
+import { BLANK, orchestratorPreset, prefilled, presetIdFor, priceFor, retyped } from "./models";
 
 const OPUS: Preset = {
   provider: "openrouter",
@@ -64,5 +64,23 @@ describe("the provider lookup prefill", () => {
     expect(out.context_window).toBe(128000);
     expect(out.images).toBe(true);
     expect(out.provider).toBe("local");
+  });
+});
+
+describe("the project orchestrator's default model in Settings", () => {
+  const presets = { fast: { ...OPUS, label: "Fast" }, opus: OPUS };
+
+  it("shows the chosen preset", () => {
+    expect(orchestratorPreset(presets, "fast", "opus")).toBe("fast");
+  });
+
+  it("shows the strongest preselected while none is chosen, as the host runs it", () => {
+    expect(orchestratorPreset(presets, "", "opus")).toBe("opus");
+  });
+
+  it("falls back to the strongest when the chosen preset was removed", () => {
+    expect(orchestratorPreset(presets, "gone", "opus")).toBe("opus");
+    expect(orchestratorPreset(presets, undefined, undefined)).toBe("fast");
+    expect(orchestratorPreset({}, "", "")).toBe("");
   });
 });

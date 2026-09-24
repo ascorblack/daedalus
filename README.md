@@ -573,6 +573,19 @@ session. What staff ask — a question, or a call the policy refused — is a re
 six-character short form) answers one; the first answer wins, and a second gets 409 naming who was
 first. A request the orchestrator leaves unanswered for ten minutes comes to you.
 
+**A project's orchestrator.** `POST /api/projects/{id}/orchestrator` (`{"model", "autonomy",
+"concurrency_cap"}`, each optional) switches it on: a chat of its own that runs the team and does none
+of the work — its tools are the brief, the folders, the journal, the team, the board, a read-only
+`Peek` into the files, `AskOperator` and `ProjectReport`, and nothing that writes a file or runs a
+command. `PATCH` the same address changes its model, autonomy or concurrency, `DELETE` switches it off
+(its chat stays), and `POST …/orchestrator/replace` (`{"reason"}`) gives it a fresh chat that names
+the one it replaces. It sleeps between turns and is woken by its project's events, gathered for twenty
+seconds (at once for a question, a permission, an error or a stuck report); every turn begins with the
+project as it is now, which `GET /api/projects/{id}/state` shows as it sees it. Its questions never
+pause it: they are requests you answer like a staff member's, and the answer wakes it. Its model is
+the project's own choice, else the default for project orchestrators in Settings → Models, else the
+strongest preset; the model chip in its chat changes the project's choice.
+
 ## Layout
 
 ```
