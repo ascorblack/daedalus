@@ -4,7 +4,7 @@ one variable that says where a host's Claude keeps its sign-in kept."""
 from __future__ import annotations
 
 from daedalus.harness.capabilities import CAPABILITIES
-from daedalus.harness.env import STRIP, launch_environment, terminal_environment
+from daedalus.harness.env import DAEMON_STRIP, launch_environment, terminal_environment
 
 BASE = {
     "PATH": "/usr/bin",
@@ -50,7 +50,8 @@ def test_the_updater_is_switched_off_and_the_launch_adds_its_identity() -> None:
 
 def test_the_daemon_is_given_patterns_to_strip_and_values_to_set() -> None:
     spec = terminal_environment({"DAEDALUS_LAUNCH_ID": "l-1"}, capabilities=CAPABILITIES["opencode"])
-    assert spec.strip == STRIP
+    # CLAUDE* is left to the daemon, whose list keeps CLAUDE_CONFIG_DIR; a pattern passed here would not.
+    assert spec.strip == DAEMON_STRIP and not any(p.startswith("CLAUDE") for p in spec.strip)
     assert spec.set == {"OPENCODE_DISABLE_AUTOUPDATE": "1", "DAEDALUS_LAUNCH_ID": "l-1"}
     # Terminal type and locale are the daemon's own rule, which keeps a UTF-8 locale the user chose.
     assert "LANG" not in spec.set and "TERM" not in spec.set

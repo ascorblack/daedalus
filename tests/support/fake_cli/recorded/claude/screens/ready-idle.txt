@@ -1,0 +1,12 @@
+ ▐▛███▛█   Claude Code v2.1.282
+▝▜██████▀  Haiku 4.5 · Claude subscription
+ ▝▝   ▝▝   /work/bakery
+
+⚠ Cross-session messaging is off: its socket directory could not be set up: '/' is group-writable without the sticky bit
+  (owner 0:0, mode 2775) — chmod g-w /, or pass --messaging-socket-path · restart with --debug-file <path> to write a
+  debug log explaining why
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ← for agents

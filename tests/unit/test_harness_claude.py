@@ -1,0 +1,666 @@
+"""The Claude Code adapter: its launch plan, its reading of Claude's screens, hooks and transcript —
+checked against what the real Claude Code showed and posted (``tests/support/fake_cli/recorded``) —
+and whole sessions through the staff runtime against the fake Claude in a real terminal, with the
+delivery pipeline and the permission and question relay in the loop.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import json
+import sys
+import urllib.error
+import urllib.request
+from collections.abc import AsyncIterator
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import httpx
+import pytest
+
+from daedalus.config import RuntimeConfig, Settings
+from daedalus.extensions.api import build_app
+from daedalus.extensions.harness import install as install_harness
+from daedalus.harness import ADAPTERS
+from daedalus.harness.claude import ClaudeCodeAdapter, composer, parse_transcript
+from daedalus.harness.contract import LAUNCH_DIR, EventKind, HookPost, Launch, LaunchSpec, ScreenClass, StaffEvent
+from daedalus.harness.runtime import CliStaffRuntime, RuntimeEnvironment
+from daedalus.harness.selfcheck import session_check
+from daedalus.harness.team import SKILL_PATH, looks_like_question
+from daedalus.staff_runtime import FakeStaffRuntime, ReadRequest
+from daedalus.stores.database import Database
+from daedalus.stores.harness import HarnessStore
+from tests.support.fake_cli.tui import read_log
+from tests.unit.test_cli_staff_runtime import Stand, eventually, stand, terminals_service, trust
+
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="pseudo-terminals and process groups as on Linux")
+
+RECORDED = Path(__file__).resolve().parents[1] / "support" / "fake_cli" / "recorded" / "claude"
+
+
+def screen(name: str) -> str:
+    return (RECORDED / "screens" / f"{name}.txt").read_text(encoding="utf-8")
+
+
+def spec(**changes: Any) -> LaunchSpec:
+    values: dict[str, Any] = {
+        "harness": "claude", "env": "container", "cwd": "/work/bakery", "launch_id": "l1", "first_prompt": "[team] line\n\n[task t1] Menu",
+        "title": "Ada · Menu page", "team_block": "You are Ada.", "team_skill": "---\nname: daedalus-team\n---\n", "model": "haiku",
+    }
+    values.update(changes)
+    return LaunchSpec(**values)
+
+
+# -- the plan -------------------------------------------------------------------------------------
+
+
+def test_the_adapter_is_registered_and_its_plan_puts_everything_in_the_launch() -> None:
+    assert ADAPTERS["claude"] is ClaudeCodeAdapter
+    plan = ClaudeCodeAdapter().launch_plan(spec())
+    argv = list(plan.argv)
+    # The prompt after "--": --mcp-config and --add-dir take every word after them otherwise.
+    assert argv[-2:] == ["--", "[team] line\n\n[task t1] Menu"] and argv[-6:-2] == ["--mcp-config", f"{LAUNCH_DIR}/mcp.json", "--add-dir", LAUNCH_DIR]
+    assert argv[1] == "--session-id" and argv[2] == plan.session_ref
+    assert argv[argv.index("--permission-mode") + 1] == "manual" and argv[argv.index("--model") + 1] == "haiku"
+    assert argv[argv.index("--append-system-prompt-file") + 1] == f"{LAUNCH_DIR}/system.md" and argv[argv.index("--name") + 1] == "Ada · Menu page"
+    assert plan.files["system.md"] == b"You are Ada." and plan.files[SKILL_PATH].startswith(b"---\nname: daedalus-team")
+    settings = json.loads(plan.files["settings.json"])
+    assert settings["permissions"]["allow"] == ["mcp__daedalus_team__Report", "mcp__daedalus_team__AskOrchestrator"]
+    held = settings["hooks"]["PermissionRequest"][0]["hooks"][0]
+    assert held["command"] == '"$DAEDALUS_PTYD_BIN" hook PermissionRequest --wait-ms 300000' and held["timeout"] > 300
+    [plain, question] = settings["hooks"]["PreToolUse"]
+    assert "matcher" not in plain and "--wait-ms" not in plain["hooks"][0]["command"]
+    assert question["matcher"] == "AskUserQuestion" and "--wait-ms 300000" in question["hooks"][0]["command"]
+    assert "skipDangerousModePermissionPrompt" not in settings
+    mcp = json.loads(plan.files["mcp.json"])["mcpServers"]["daedalus_team"]
+    assert mcp["command"] == "sh" and mcp["args"] == ["-c", 'exec "$DAEDALUS_PTYD_BIN" team-mcp']
+    assert mcp["env"] == {"DAEDALUS_ASK_HOLD_MS": "300000", "DAEDALUS_REPORT_HOLD_MS": "15000"}
+    # Claude's own timeout on a team call is above the longest hold, so it never cuts a question short.
+    assert int(plan.env["MCP_TOOL_TIMEOUT"]) > 300_000
+
+
+def test_modes_holds_and_resume() -> None:
+    adapter = ClaudeCodeAdapter()
+
+    def mode(**changes: Any) -> str:
+        argv = list(adapter.launch_plan(spec(**changes)).argv)
+        return argv[argv.index("--permission-mode") + 1]
+
+    assert mode(permission_mode="default") == "manual" and mode(permission_mode="plan") == "plan"
+    assert mode(permission_level="edits") == "acceptEdits" and mode(permission_level="ask") == "manual"
+    bypass = adapter.launch_plan(spec(permission_level="all"))
+    assert json.loads(bypass.files["settings.json"])["skipDangerousModePermissionPrompt"] is True
+    unheld = json.loads(adapter.launch_plan(spec(permission_hold_ms=0)).files["settings.json"])
+    assert "--wait-ms" not in unheld["hooks"]["PermissionRequest"][0]["hooks"][0]["command"] and len(unheld["hooks"]["PreToolUse"]) == 1
+    resumed = adapter.resume_plan(spec(first_prompt=None), "11111111-1111-4111-8111-111111111111")
+    assert list(resumed.argv[1:3]) == ["--resume", "11111111-1111-4111-8111-111111111111"] and "--" not in resumed.argv
+
+
+# -- the recorded screens -------------------------------------------------------------------------
+
+
+def test_the_readiness_gate_reads_the_real_screens() -> None:
+    adapter = ClaudeCodeAdapter()
+    trust_screen = screen("trust")
+    assert adapter.readiness(trust_screen).keys == ("Down",)  # "No, exit" is highlighted at first
+    chosen = trust_screen.replace(" ❯ No, exit", "   No, exit").replace("   Yes, I trust this folder", " ❯ Yes, I trust this folder")
+    step = adapter.readiness(chosen)
+    assert (step.action, step.keys, step.reason) == ("keys", ("Enter",), "folder trust")
+    assert adapter.readiness(screen("first-run-theme")).action == "fail"
+    login = adapter.readiness(screen("first-run-login"))
+    assert login.action == "fail" and "not signed in" in login.reason
+    assert adapter.readiness(screen("ready-idle")).action == "wait"
+
+
+def test_the_screen_is_classified_and_the_composer_found() -> None:
+    adapter = ClaudeCodeAdapter()
+    idle = screen("ready-idle")
+    assert adapter.classify_screen(idle) is ScreenClass.IDLE_COMPOSER and composer(idle) == ""
+    assert adapter.classify_screen(screen("permission-dialog")) is ScreenClass.DIALOG
+    assert adapter.classify_screen(screen("trust")) is ScreenClass.DIALOG
+    assert composer(screen("permission-dialog")) is None
+    typed = idle.replace("\n❯\n", "\n❯ [orchestrator] please write the menu\n")
+    assert adapter.composer_holds(typed, "[orchestrator] please write the menu") and not adapter.composer_holds(typed, "something else")
+    pasted = idle.replace("\n❯\n", "\n❯ [Pasted text #3 +11 lines]\n")
+    assert adapter.composer_holds(pasted, "a long message\n" * 12)
+
+
+def test_the_real_transcript_is_read_as_turns() -> None:
+    turns = parse_transcript((RECORDED / "transcript.jsonl").read_text(encoding="utf-8"))
+    roles = [t.role for t in turns]
+    assert roles[0] == "user" and "assistant" in roles and "system" in roles
+    assert any(t.role == "system" and t.text.startswith("[Request interrupted by user") for t in turns)
+    assert not any(t.text.startswith(("<task-notification>", "<command-name>")) for t in turns)
+    queued = [t for t in turns if t.text == "Reply with the single word queued."]
+    assert len(queued) == 1  # the queue's own records are not a second prompt
+    bash = [tool for t in turns for tool in t.tools if tool.name == "Bash"]
+    assert bash and bash[0].summary == "touch spike.txt" and bash[0].ok is True
+    # Usage is counted once per message, however many records share it.
+    records = [json.loads(line) for line in (RECORDED / "transcript.jsonl").read_text().splitlines()]
+    by_message = {r["message"]["id"]: r["message"]["usage"] for r in records if r.get("type") == "assistant"}
+    assert sum(t.usage.output_tokens for t in turns if t.usage) == sum(u["output_tokens"] for u in by_message.values())
+
+
+class Replay:
+    """A terminal port that replays recorded hook posts, for the adapter's reading of them."""
+
+    def __init__(self, posts: list[HookPost]) -> None:
+        self.posts = posts
+        self.replies: list[tuple[str, Any]] = []
+
+    @property
+    def id(self) -> str:
+        return "t-replay"
+
+    @property
+    def env(self) -> Any:
+        return "container"
+
+    async def hooks(self) -> AsyncIterator[HookPost]:
+        for post in self.posts:
+            yield post
+
+    async def reply(self, reply_id: str, body: Any) -> bool:
+        self.replies.append((reply_id, body))
+        return True
+
+
+async def test_the_real_hooks_become_events() -> None:
+    posts = []
+    for line in (RECORDED / "hooks.jsonl").read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line)
+        if "name" in entry and entry["name"] != "team":
+            posts.append(HookPost(entry["name"], entry["body"], reply_id=f"r{len(posts)}" if entry["name"] in ("PermissionRequest",) else None))
+    adapter = ClaudeCodeAdapter()
+    term = Replay(posts)
+    events: list[StaffEvent] = [e async for e in adapter.events(term, Launch("l1", "s1", "claude", "container", "t-replay", None, "/run/l1", "", "2.1.282", ""))]  # type: ignore[arg-type]
+    kinds = [e.kind for e in events]
+    assert kinds[:2] == [EventKind.TRANSCRIPT, EventKind.READY] and events[0].payload["session_ref"] == "11111111-1111-4111-8111-111111111111"
+    [permission, *_] = [e for e in events if e.kind is EventKind.PERMISSION_REQUESTED]
+    # The request names no tool use; the PreToolUse before it does.
+    started = next(e for e in events if e.kind is EventKind.TOOL_STARTED and e.payload["tool"] == "Bash")
+    assert permission.native_id == started.native_id.strip() and permission.native_id.startswith("toolu_")
+    assert permission.payload["summary"] == "touch spike.txt"
+    resolved = [e for e in events if e.kind is EventKind.REQUEST_RESOLVED and e.native_id == permission.native_id]
+    assert resolved, "the tool running settles the request"
+    assert EventKind.QUESTION_ASKED not in kinds  # AskUserQuestion's unheld PreToolUse is not the question
+    assert any(e.kind is EventKind.TURN_STARTED and e.payload.get("source") == "task-notification" for e in events)
+    stops = [e for e in events if e.kind is EventKind.TURN_COMPLETED]
+    assert stops[0].payload["last_message"] == "Done. Created `spike.txt`."
+    assert kinds[-1] is EventKind.SESSION_ENDED
+    notifications = [e for e in events if e.kind is EventKind.NOTIFICATION]
+    assert notifications and all(e.payload["type"] == "permission_prompt" for e in notifications)
+
+
+def test_a_question_to_the_terminal_is_recognised() -> None:
+    assert looks_like_question("I wrote the draft.\nShould I also translate it?")
+    assert looks_like_question("Done with the parser. Let me know which option you prefer.")
+    assert not looks_like_question("Wrote menu.md; the question \"euros?\" is settled by the brief.")
+    assert not looks_like_question("")
+
+
+# -- whole sessions through the runtime -------------------------------------------------------------
+
+
+def claude(**config: Any) -> dict[str, Any]:
+    return {"adapter": ClaudeCodeAdapter(), **config}
+
+
+def log(s: Stand, what: str) -> list[dict[str, Any]]:
+    return [e for e in read_log(s.log) if e["event"] == what]
+
+
+async def started(s: Stand, script: str, *, name: str = "Ada") -> Any:
+    """A member assigned a task whose brief ends with the fake model's script."""
+    member = await s.hire(name)
+    # The fake model reads ";"-separated directives: closed off, the brief after them is not part of the last one.
+    task_id = await s.task(f"Menu page;{script};")
+    assert (await s.team.assign(member, task_id))["state"] == "started"
+    return member
+
+
+async def test_a_claude_session_from_its_trust_question_to_its_release(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **claude()) as s:
+        ada = await started(s, "echo:the menu is written")
+        await s.status_event(ada, "turn_done_unseen")
+        row = await s.session_row(ada)
+        # The gate moved to the row that trusts the folder, then confirmed it: two keys, both audited.
+        writes = await db.fetchall("SELECT detail_json FROM terminal_audit WHERE terminal_id = ? AND action = 'write'", (row.terminal_id,))
+        assert [json.loads(w["detail_json"]).get("note") for w in writes] == ["readiness: folder trust: to the row that trusts it", "readiness: folder trust"]
+        # The protocol reached the CLI three ways: its system prompt, its skill, its first prompt.
+        [appended] = log(s, "system_prompt")
+        assert appended["text"].startswith("You are Ada, a staff member of the project Bakery") and "Report" in appended["text"]
+        assert log(s, "skills")[0]["names"] == ["daedalus-team"]
+        submitted = log(s, "submitted")[0]["text"]
+        assert submitted.startswith("[team] You are Ada, staff of Bakery") and "[task " in submitted
+        # The team tools said they loaded; the first message was acknowledged by the prompt's hook.
+        assert s.runtime.channel(await s.team.live(row.id))["team_tools"] == "connected"  # type: ignore[arg-type]
+        assert [m.state for m in await s.manager.staff.messages(ada.id)] == ["acknowledged"]
+        # The turn ended without a Report: the orchestrator hears of it anyway, from its last words.
+        [report] = await s.events("staff.report", staff_id=ada.id)
+        assert report.payload["kind"] == "turn_done" and report.payload["implicit"] is True and "the menu is written" in report.payload["text"]
+        assert "no report" in report.payload["text"]
+        assert row.transcript_ref.endswith(f"{row.cli_session_id}.jsonl")
+        last = await s.runtime.read(await s.team.live(row.id), ReadRequest("last"))  # type: ignore[arg-type]
+        assert last.text == "the menu is written"
+        assert await s.team.release(ada)
+        assert (await s.terminals.get(row.terminal_id))["exit_code"] == 0
+        assert [e["name"] for e in read_log(s.log) if e["event"] == "hook"][-1] == "SessionEnd"
+
+
+async def test_a_turn_ending_on_a_question_is_routed_as_needing_input_and_a_reported_turn_is_not_repeated(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:Should I price it in euros or dollars?")
+        await s.status_event(ada, "turn_done_unseen")
+        [report] = await s.events("staff.report", staff_id=ada.id)
+        assert (report.payload["kind"], report.payload["implicit"]) == ("needs_input", True)
+        bo = await started(s, "report:checkpoint:menu drafted;echo:done for now", name="Bo")
+        await s.status_event(bo, "turn_done_unseen")
+        reports = await s.events("staff.report", staff_id=bo.id)
+        assert [(r.payload["kind"], bool(r.payload.get("implicit"))) for r in reports] == [("checkpoint", False)]
+
+
+async def test_a_permission_is_answered_through_its_held_hook(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "perm:npm install grammy")
+        await s.status_event(ada, "permission")
+        [ask] = await s.manager.asks.open_for(s.project.id)
+        assert ask.request_ref.startswith("toolu_") and ask.text == "Bash: npm install grammy"
+        answered = await s.team.answer(ask.short_id, allow=True, by="operator")
+        assert answered["delivered"] is True
+        await s.status_event(ada, "turn_done_unseen")
+        assert await s.statuses(ada) == ["starting", "working", "permission", "working", "turn_done_unseen"]
+        row = await s.session_row(ada)
+        screen = "\n".join((await s.terminals.read_screen(row.terminal_id, scrollback=100))["lines"])
+        assert "Allowed by PermissionRequest hook" in screen and "Ran npm install grammy." in screen
+        # Answered by the held hook's reply: not one key was typed into the dialog.
+        writes = await db.fetchall("SELECT detail_json FROM terminal_audit WHERE terminal_id = ? AND action = 'write'", (row.terminal_id,))
+        assert all("readiness" in json.loads(w["detail_json"]).get("note", "") or "message" in json.loads(w["detail_json"]).get("note", "") or "submit" in json.loads(w["detail_json"]).get("note", "") for w in writes)
+        assert not log(s, "dialog_answered")
+        decision = next(r["body"] for r in s.ptyd.replies if isinstance(r.get("body"), dict) and "hookSpecificOutput" in r["body"])
+        assert decision["hookSpecificOutput"]["decision"] == {"behavior": "allow"}
+
+
+async def test_without_a_hold_the_answer_waits_for_the_dialog_before_its_key(settings: Settings, db: Database) -> None:
+    # The hook comes well before the dialog here: a key typed at once would land in the composer.
+    async with stand(settings, db, extra_env={"FAKE_CLAUDE_DIALOG_DELAY_MS": "1500"}, permission_hold_s=0, **claude()) as s:
+        trust(s)
+        ada = await started(s, "perm:make build")
+        await s.status_event(ada, "permission")
+        [ask] = await s.manager.asks.open_for(s.project.id)
+        answered = await s.team.answer(ask.short_id, allow=False, by="operator")
+        assert answered["delivered"] is True
+        await s.status_event(ada, "turn_done_unseen")
+        assert [(e["kind"], e["label"]) for e in log(s, "dialog_answered")] == [("permission", "No")]
+        assert not [e for e in log(s, "submitted") if e["text"].strip() in ("1", "3")]
+        row = await s.session_row(ada)
+        screen = "\n".join((await s.terminals.read_screen(row.terminal_id, scrollback=100))["lines"])
+        assert "I did not run make build" in screen
+
+
+async def test_a_permission_answered_in_the_terminal_lets_its_held_hook_go(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "perm:rm -rf build")
+        await s.status_event(ada, "permission")
+        row = await s.session_row(ada)
+        assert (await s.terminals.wait_for(row.terminal_id, regex="Do you want to proceed", timeout=10))["matched"] == "regex"
+        await s.ptyd.type_as_human(row.terminal_id, "1")
+        await s.status_event(ada, "turn_done_unseen")
+        [resolved] = await s.events("permission.resolved", staff_id=ada.id)
+        assert (resolved.payload["by"], resolved.payload["via"]) == ("operator", "terminal")
+        # The hook still held at the listener is let go with an empty answer, not left to its timeout.
+        assert any(r.get("body") in (None, "") for r in s.ptyd.replies)
+        assert await s.manager.asks.open_for(s.project.id) == []
+
+
+async def test_a_question_of_claudes_own_is_answered_without_its_dialog(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "ask:Tea or coffee?|Tea|Coffee")
+        await s.status_event(ada, "question")
+        [ask] = await s.manager.asks.open_for(s.project.id)
+        assert ask.kind == "question" and ask.text == "Tea or coffee?" and ask.detail["options"] == ["Tea", "Coffee"]
+        await s.team.answer(ask.short_id, selected=["Coffee"], by="orchestrator")
+        await s.status_event(ada, "turn_done_unseen")
+        assert not [e for e in log(s, "dialog_opened") if e["kind"] == "question"]
+        row = await s.session_row(ada)
+        assert "You chose: Coffee" in "\n".join((await s.terminals.read_screen(row.terminal_id, scrollback=100))["lines"])
+
+
+# -- delivery ---------------------------------------------------------------------------------------
+
+
+async def message(s: Stand, message_id: str, state: str, *, timeout: float = 30.0) -> Any:
+    async def reached() -> bool:
+        found = await s.manager.staff.message(message_id)
+        return found is not None and found.state == state
+
+    await eventually(reached, f"message {message_id} {state}", timeout=timeout)
+    return await s.manager.staff.message(message_id)
+
+
+async def test_a_queued_message_waits_for_the_turn_and_a_steer_goes_into_it(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "slow:1000")
+        await s.status_event(ada, "working")
+        queued = await s.team.tell(ada, "echo:after the turn", mode="queue", by="orchestrator")
+        steered = await s.team.tell(ada, "echo:steered in", mode="steer", by="orchestrator")
+        assert (queued["state"], steered["state"], steered["degraded_to"]) == ("queued", "queued", None)
+        # The steer goes into the running turn (Claude queues it and says so at once); the queued
+        # message waits behind it for the turn to end, and nothing ends the turn but an Esc.
+        await message(s, steered["message_id"], "acknowledged")
+        await asyncio.sleep(0.5)
+        assert (await s.manager.staff.message(queued["message_id"])).state == "queued"  # type: ignore[union-attr]
+        await s.team.interrupt(ada)
+        await message(s, queued["message_id"], "acknowledged")
+        texts = [e["text"] for e in log(s, "submitted")]
+        assert texts.count("[orchestrator] echo:steered in") == 1 and texts.count("[orchestrator] echo:after the turn") == 1
+        assert "idle" in await s.statuses(ada)  # the interrupt was seen on screen
+
+
+async def test_messages_never_merge_and_a_swallowed_enter_is_recovered_once(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, extra_env={"FAKE_CLI_FAULTS": "swallow_enter_once"}, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:ready")
+        await s.status_event(ada, "turn_done_unseen")
+        one, two = await asyncio.gather(s.team.tell(ada, "echo:one", by="operator"), s.team.tell(ada, "echo:two", by="operator"))
+        await message(s, one["message_id"], "acknowledged")
+        await message(s, two["message_id"], "acknowledged")
+        texts = [e["text"] for e in log(s, "submitted")][1:]
+        assert sorted(texts) == ["echo:one", "echo:two"]  # one submission each, never "echo:oneecho:two"
+        assert [e["reason"] for e in log(s, "enter_swallowed")] == ["fault"]
+        deliveries = await HarnessStore(db).deliveries([one["message_id"], two["message_id"]])
+        assert sorted(d.enters for d in deliveries.values()) == [1, 2]
+
+
+async def test_a_long_message_goes_as_a_file_in_the_launch(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, pointer_threshold_bytes=1024, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:ready")
+        await s.status_event(ada, "turn_done_unseen")
+        long = "echo:the long one " + "x" * 2000
+        told = await s.team.tell(ada, long, by="operator")
+        await message(s, told["message_id"], "acknowledged")
+        [pointer] = [e["text"] for e in log(s, "submitted") if e["text"].startswith("Read the message in")]
+        path = Path(pointer.removeprefix("Read the message in ").removesuffix(" and act on it."))
+        assert path.read_text() == long and path.name == f"message-{told['message_id']}.md"
+        launch = await HarnessStore(db).open_launch_for((await s.session_row(ada)).id)
+        assert launch is not None and path.parent == Path(launch.launch_dir)
+        assert (await HarnessStore(db).delivery(told["message_id"])).via == "pointer"  # type: ignore[union-attr]
+
+
+async def test_a_dialog_that_takes_a_paste_gets_no_enter_and_the_message_waits(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, extra_env={"FAKE_CLI_FAULTS": "dialog_during_paste"}, answer_confirm_s=1.0, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:ready")
+        await s.status_event(ada, "turn_done_unseen")
+        row = await s.session_row(ada)
+        told = await s.team.tell(ada, "echo:after the notice", by="orchestrator")
+        await s.terminals.wait_for(row.terminal_id, regex="a notice opened while you were pasting", timeout=10)
+        await asyncio.sleep(1.5)
+        assert not log(s, "enter_into_dialog")
+        await s.ptyd.type_as_human(row.terminal_id, "\x1b")  # the person dismisses the notice
+        await message(s, told["message_id"], "acknowledged")
+        assert not log(s, "enter_into_dialog")
+        assert [e["text"] for e in log(s, "submitted")].count("[orchestrator] echo:after the notice") == 1
+
+
+async def test_a_person_typing_holds_the_orchestrators_message_but_not_the_operators(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, input_idle_ms=1500, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:ready")
+        await s.status_event(ada, "turn_done_unseen")
+        row = await s.session_row(ada)
+
+        async def typing(seconds: float) -> None:
+            for _ in range(int(seconds / 0.25)):
+                await s.ptyd.type_as_human(row.terminal_id, "\x1b[A")  # an arrow: holds the keyboard, types nothing
+                await asyncio.sleep(0.25)
+
+        # The operator's own message is the person at the keyboard: it does not wait for them.
+        person = asyncio.create_task(typing(4))
+        await asyncio.sleep(0.3)
+        operators = await s.team.tell(ada, "echo:from the operator", by="operator")
+        await message(s, operators["message_id"], "acknowledged")
+        assert not person.done()
+        await person
+        await s.status_event(ada, "turn_done_unseen")
+        # Anyone else's words wait while a person types, and go once they have stopped.
+        person = asyncio.create_task(typing(3))
+        await asyncio.sleep(0.3)
+        orchestrators = await s.team.tell(ada, "echo:from the orchestrator", by="orchestrator")
+        await asyncio.sleep(1.5)
+        assert (await s.manager.staff.message(orchestrators["message_id"])).state == "queued"  # type: ignore[union-attr]
+        await person
+        await message(s, orchestrators["message_id"], "acknowledged")
+
+
+async def test_after_a_restart_a_submitted_message_found_in_the_transcript_is_not_sent_again(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:ready")
+        await s.status_event(ada, "turn_done_unseen")
+        told = await s.team.tell(ada, "echo:once only", by="operator")
+        await message(s, told["message_id"], "acknowledged")
+        await s.status_event(ada, "turn_done_unseen")
+        # The host went away after the CLI took the message and before it heard so.
+        await db.execute("UPDATE staff_messages SET state = 'submitted' WHERE id = ?", (told["message_id"],))
+        pending = await s.manager.staff.add_message(ada.id, "echo:still to go", origin="operator", staff_session_id=(await s.session_row(ada)).id)
+        runtime = s.restart_runtime(ClaudeCodeAdapter())
+        assert await runtime.reconcile(wait=5) == 1
+        await message(s, told["message_id"], "acknowledged")
+        await message(s, pending.id, "acknowledged")
+        texts = [e["text"] for e in log(s, "submitted")]
+        assert texts.count("echo:once only") == 1 and texts.count("echo:still to go") == 1
+
+
+# -- the team channel --------------------------------------------------------------------------------
+
+
+def post(s: Stand, launch_id: str, name: str, body: dict[str, Any], *, wait_ms: int = 0) -> tuple[int, Any]:
+    launch = s.ptyd.launches[launch_id]
+    url = f"http://127.0.0.1:{s.ptyd.hook_port}/hook/{launch_id}/{name}" + (f"?wait_ms={wait_ms}" if wait_ms else "")
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers={"Authorization": f"Bearer {launch.token}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read()
+            return response.status, json.loads(raw) if raw.strip() else None
+    except urllib.error.HTTPError as exc:
+        return exc.code, None
+
+
+async def test_a_team_call_seen_twice_is_acted_on_once(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:ready")
+        await s.status_event(ada, "turn_done_unseen")
+        launch = await HarnessStore(db).open_launch_for((await s.session_row(ada)).id)
+        assert launch is not None
+        body = {"tool": "report", "kind": "checkpoint", "note": "halfway", "artifacts": [], "call_id": f"{launch.launch_id}:cafe:1"}
+        first = await asyncio.to_thread(post, s, launch.launch_id, "team", body, wait_ms=5000)
+        again = await asyncio.to_thread(post, s, launch.launch_id, "team", body, wait_ms=5000)
+        assert first == again == (200, {"text": "reported checkpoint"})
+        assert [r.payload["kind"] for r in await s.events("staff.report", staff_id=ada.id) if not r.payload.get("implicit")] == ["checkpoint"]
+        # The same question asked twice while the first is open is one request, answered to the newest post.
+        ask = {"tool": "ask", "question": "Which oven?", "options": ["left", "right"]}
+        asks = [asyncio.create_task(asyncio.to_thread(post, s, launch.launch_id, "team", {**ask, "call_id": f"{launch.launch_id}:cafe:{n}"}, wait_ms=20_000)) for n in (2, 3)]
+        await s.status_event(ada, "question")
+
+        async def both_held() -> bool:
+            return sum(1 for e in s.ptyd.events if e["type"] == "hook" and e["data"].get("name") == "team" and e["data"]["body"].get("tool") == "ask") == 2
+
+        await eventually(both_held, "both questions reached the host")
+        await asyncio.sleep(0.3)
+        [open_ask] = await s.manager.asks.open_for(s.project.id)
+        await s.team.answer(open_ask.short_id, text="the left one", by="orchestrator")
+        answers = sorted([await t for t in asks], key=lambda r: str(r[1]))
+        assert answers[-1] == (200, {"text": "the left one"})
+
+
+async def test_a_cli_whose_team_tools_never_load_is_shown_so(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, extra_env={"FAKE_TEAM_MCP_SILENT": "1"}, team_hello_s=0.5, **claude()) as s:
+        trust(s)
+        ada = await started(s, "echo:ready")
+        await s.status_event(ada, "turn_done_unseen")
+
+        async def warned() -> bool:
+            return bool(await s.events("staff.channel", staff_id=ada.id))
+
+        await eventually(warned, "the missing team tools were reported")
+        [event] = await s.events("staff.channel", staff_id=ada.id)
+        assert event.payload["team_tools"] == "missing" and "no team tools" in event.payload["detail"]
+        assert s.runtime.channel(await s.team.live((await s.session_row(ada)).id))["team_tools"] == "missing"  # type: ignore[arg-type]
+
+
+# -- the team's side of a command-line member ---------------------------------------------------------
+
+
+async def test_a_pause_asked_for_during_a_turn_takes_effect_when_it_ends(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "slow:40")
+        await s.status_event(ada, "working")
+        assert (await s.team.pause(ada))["paused"] is False
+        await s.status_event(ada, "turn_done_unseen")
+
+        async def settled() -> bool:
+            last = (await s.events("staff.status", staff_id=ada.id))[-1].payload
+            return last["status"] == "idle" and "paused" in str(last.get("detail"))
+
+        await eventually(settled, "the pause took effect at the turn's end")
+        assert (await s.team.queue._free(SimpleNamespace(staff_id=ada.id, staff_name="Ada", task_id="other"))).endswith("a message or a new assignment resumes it")  # type: ignore[arg-type]
+
+
+async def test_an_answer_leaves_the_session_waiting_on_what_is_still_open(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **claude()) as s:
+        fake = FakeStaffRuntime(kind="claude")
+        s.team.runtimes["claude"] = fake
+        ada = await started(s, "echo:unused")
+        live = await s.team.live_of(ada)
+        assert live is not None
+        permission = await s.team.ingress.permission(live, "p1", "Bash", "npm test")
+        await s.team.ingress.question(live, "q1", "Which branch?", ["main", "dev"])
+        await s.team.answer(permission, allow=True, by="operator")
+        after = (await s.events("staff.status", staff_id=ada.id))[-1].payload
+        assert after["status"] == "question" and "Which branch?" in after["waiting_for"]
+        [question] = await s.manager.asks.open_for(s.project.id)
+        await s.team.answer(question.id, text="dev", by="operator")
+        assert (await s.events("staff.status", staff_id=ada.id))[-1].payload["status"] == "working"
+        # A request seen twice — a hook replayed after a restart — is the one already open.
+        again = await s.team.ingress.question(live, "q2", "Which oven?", [])
+        assert await s.team.ingress.question(live, "q2", "Which oven?", []) == again
+        assert len(await s.manager.asks.open_for(s.project.id)) == 1
+
+
+class ChannelFirst(ClaudeCodeAdapter):
+    """Claude driven as a CLI whose first prompt goes through its channel once it is ready (as
+    Codex's and OpenCode's do), to prove a restart during the start does not lose that prompt."""
+
+    capabilities = dataclasses.replace(ClaudeCodeAdapter.capabilities, first_prompt="channel")
+
+    def launch_plan(self, spec: LaunchSpec) -> Any:
+        plan = super().launch_plan(dataclasses.replace(spec, first_prompt=None))
+        return dataclasses.replace(plan, first_prompt=spec.first_prompt, first_prompt_via="channel")
+
+    async def after_spawn(self, term: Any, launch: Launch, plan: Any) -> None:
+        await term.write(paste=plan.first_prompt)
+        await asyncio.sleep(0.3)
+        await term.write(keys=["Enter"])
+
+
+async def test_a_restart_during_the_start_still_delivers_a_first_prompt_that_goes_by_channel(settings: Settings, db: Database) -> None:
+    ChannelFirst.name = "claude"
+    async with stand(settings, db, extra_env={"FAKE_CLI_FAULTS": "slow_ready:2500"}, adapter=ChannelFirst()) as s:
+        trust(s)
+        ada = await started(s, "echo:first things first")
+        await s.status_event(ada, "starting")
+        row = await s.session_row(ada)
+        # The host goes while the CLI is still starting; it gets ready with nobody listening.
+        s.runtime.close()
+        await s.terminals.close()
+
+        async def ready_meanwhile() -> bool:
+            return any(e["type"] == "hook" and e["data"].get("name") == "SessionStart" for e in s.ptyd.events)
+
+        await eventually(ready_meanwhile, "the CLI got ready while the host was away")
+        s.terminals = terminals_service(db, s.manager, s.root / "run", s.home)
+        s.team.app.extensions["terminals"] = s.terminals
+        await s.terminals.start()
+        assert await s.terminals.wait_available("container")
+        runtime = s.restart_runtime(ChannelFirst())
+        assert await runtime.reconcile(wait=5) == 1
+        [first] = await s.manager.staff.messages(ada.id)
+        await message(s, first.id, "acknowledged")
+        submitted = [e["text"] for e in log(s, "submitted")]
+        assert len(submitted) == 1 and submitted[0].startswith("[task ") and row.id
+
+
+# -- the self-check, the wiring and the staff view's routes ------------------------------------------
+
+
+async def test_the_self_check_runs_one_session_through_every_channel(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **claude()) as s:
+        env = RuntimeEnvironment(s.terminals, "container", home=str(s.home))
+        result = await session_check(ClaudeCodeAdapter(), s.terminals, lambda: s.harness, env, "haiku", True)
+        assert result.ok, result.steps
+        assert [step.name for step in result.steps] == ["launch", "ready", "team", "deliver", "reply", "exit"]
+        assert "Report came through the team channel" in result.steps[4].detail and result.steps[5].detail == "exit code 0"
+        # A stable folder of its own, trusted once: a second check is not asked again.
+        assert (s.home / ".cache" / "daedalus-selfcheck" / "claude").is_dir()
+        quiet = await session_check(ClaudeCodeAdapter(), s.terminals, lambda: s.harness, env, "haiku", False)
+        assert quiet.ok and [step.name for step in quiet.steps] == ["launch", "ready", "team", "exit"]
+        assert await HarnessStore(db).open_launches() == []
+
+
+async def test_installing_the_extension_registers_the_claude_runtime_and_its_self_check(settings: Settings, db: Database) -> None:
+    async with stand(settings, db, **claude()) as s:
+        app = SimpleNamespace(manager=s.manager, extensions={"terminals": s.terminals, "staff": s.team}, config=SimpleNamespace(harness=s.harness), db=db)
+        tasks = await install_harness(app)  # type: ignore[arg-type]
+        try:
+            assert isinstance(s.team.runtimes["claude"], CliStaffRuntime) and isinstance(s.team.runtimes["claude"].adapter, ClaudeCodeAdapter)  # type: ignore[attr-defined]
+            assert "claude" in app.extensions["harness"].self_checks
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_the_staff_views_routes(settings: Settings, db: Database, config: RuntimeConfig) -> None:
+    async with stand(settings, db, **claude()) as s:
+        trust(s)
+        ada = await started(s, "report:checkpoint:halfway;echo:the menu is written")
+        await s.status_event(ada, "turn_done_unseen")
+        app = SimpleNamespace(settings=settings, config=config, db=db, manager=s.manager, front=None, extensions=s.team.app.extensions, guard=None)
+        api = build_app(app, "tok")  # type: ignore[arg-type]
+        headers = {"X-Daedalus-Token": "tok"}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api), base_url="http://test") as client:  # type: ignore[arg-type]
+            view = (await client.get(f"/api/staff/{ada.id}/session", headers=headers)).json()
+            assert view["session"]["status"] == "turn_done_unseen" and view["capabilities"]["steer"] == "tui_queue"
+            assert view["launch"]["harness"] == "claude" and view["launch"]["launch_id"] and view["channel"]["team_tools"] == "connected"
+            told = await client.post(f"/api/staff/{ada.id}/messages", headers=headers, json={"text": "echo:and a footer", "mode": "queue"})
+            assert told.status_code == 200 and told.json()["state"] == "queued"
+            await message(s, told.json()["message_id"], "acknowledged")
+            page = (await client.get(f"/api/staff/{ada.id}/messages?limit=1", headers=headers)).json()
+            assert page["more"] is True and page["messages"][0]["state"] == "acknowledged" and page["messages"][0]["delivery"]["via"] == "paste"
+            older = (await client.get(f"/api/staff/{ada.id}/messages?before={page['messages'][0]['id']}", headers=headers)).json()
+            assert [m["state"] for m in older["messages"]] == ["acknowledged"]
+
+            async def second_turn_ended() -> bool:
+                return (await s.statuses(ada)).count("turn_done_unseen") == 2
+
+            await eventually(second_turn_ended, "the second turn ended")
+            turns = (await client.get(f"/api/staff/{ada.id}/transcript", headers=headers)).json()["turns"]
+            assert turns[0]["role"] == "user" and any(t["text"] == "and a footer" for t in turns if t["role"] == "assistant"), turns
+            events = (await client.get(f"/api/staff/{ada.id}/events?limit=50", headers=headers)).json()["events"]
+            assert {"staff.status", "staff.report", "staff.message"} <= {e["type"] for e in events}
+            assert (await client.post(f"/api/staff/{ada.id}/seen", headers=headers)).json() == {"ok": True}
+            assert (await s.session_row(ada)).status == "idle"
+            changes = (await client.get(f"/api/staff/{ada.id}/changes", headers=headers)).json()
+            assert changes["files"] == [] and changes["detail"] == "no worktree of its own"
+            assert (await client.get("/api/staff/st-none/session", headers=headers)).status_code == 404
