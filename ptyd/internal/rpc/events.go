@@ -3,9 +3,12 @@ package rpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 
+	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
+	"github.com/ascorblack/daedalus/ptyd/internal/wire"
 )
 
 func pidSelf() int { return os.Getpid() }
@@ -61,7 +64,14 @@ func (d *Daemon) pump(ctx context.Context, c *server.Conn, cursor int64) {
 			if ctx.Err() != nil {
 				return
 			}
-			if err := c.Notify("event", e); err != nil {
+			err := c.Notify("event", e)
+			if errors.Is(err, wire.ErrFrameTooLarge) {
+				// An event bigger than a frame must not end the subscription: every later event
+				// would be lost with it. It goes out as its envelope, marked, and the rest follow.
+				err = c.Notify("event", events.Event{Seq: e.Seq, At: e.At, Type: e.Type, TerminalID: e.TerminalID,
+					Data: map[string]any{"too_large": true}})
+			}
+			if err != nil {
 				return
 			}
 			cursor = e.Seq

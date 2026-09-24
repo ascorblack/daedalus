@@ -16,6 +16,13 @@ var strippedEnv = []string{
 	"CLAUDE*",
 }
 
+// keptEnv are inherited although a pattern above matches them; only the caller's strip_env removes
+// one. CLAUDE_CONFIG_DIR is where
+// a Claude Code whose configuration is not in ~/.claude keeps its login and settings: stripped with
+// the rest of CLAUDE*, that Claude starts signed out. The host cannot put it back, since it lives
+// in the daemon's own environment on the operator's machine.
+var keptEnv = map[string]bool{"CLAUDE_CONFIG_DIR": true}
+
 // matchEnv reports whether name matches pattern: an exact name, or a prefix followed by '*'.
 func matchEnv(pattern, name string) bool {
 	if p, ok := strings.CutSuffix(pattern, "*"); ok {
@@ -41,7 +48,13 @@ func BuildEnv(inherited []string, strip []string, extra map[string]string, termi
 			continue
 		}
 		dropped := false
-		for _, p := range append(strippedEnv, strip...) {
+		for _, p := range strippedEnv {
+			if matchEnv(p, k) && !keptEnv[k] {
+				dropped = true
+				break
+			}
+		}
+		for _, p := range strip {
 			if matchEnv(p, k) {
 				dropped = true
 				break

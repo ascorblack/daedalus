@@ -73,6 +73,19 @@ class FakePtyd:
         self.machine: dict[str, Any] = {"mem_total_bytes": 16 << 30, "mem_available_bytes": 8 << 30, "cpus": 8, "cpu_percent": 10.0, "load1": 1.0, "load5": 1.0, "load15": 1.0}
         self.rss: dict[str, int] = {}
         self.home = "/root"
+        # Side channels: scripted programs, real files under the roots the host sets, echoing byte
+        # streams, and launches whose hook posts a test makes with ``post_hook``.
+        self.exec_allow = {"claude", "codex", "opencode", "pi", "grok", "npm", "npx", "node", "git", "uname"}
+        self.exec_results: dict[str, dict[str, Any]] = {}
+        """Program basename → the exec.run result it gives; unknown ones exit 0 with no output."""
+        self.roots: list[str] = []
+        self.launches: dict[str, dict[str, Any]] = {}
+        self.pending_replies: dict[str, str] = {}
+        """reply_id → launch_id of a held post that waits."""
+        self.replies: list[dict[str, Any]] = []
+        self.dials: dict[int, str] = {}
+        """Channel → target of an open stream; what the host writes on one is echoed back."""
+        self._next_channel = 0
         self._server: asyncio.AbstractServer | None = None
         self._subscribers: list[tuple[asyncio.StreamWriter, asyncio.Queue[dict[str, Any] | None]]] = []
         self._writers: set[asyncio.StreamWriter] = set()
@@ -131,6 +144,21 @@ class FakePtyd:
         term.status, term.exit_code, term.exit_signal, term.exited_at = "exited", code, signal, stamp()
         self.emit("terminal.exited", terminal_id, {"exit_code": code, "signal": signal, "seq": len(term.output)})
 
+    def post_hook(self, launch_id: str, name: str, body: Any, *, hold_ms: int = 0) -> dict[str, Any]:
+        """A CLI of the launch posting a hook; with ``hold_ms`` the event carries a reply id."""
+        launch = self.launches[launch_id]
+        data: dict[str, Any] = {"launch_id": launch_id, "terminal_id": launch["terminal_id"], "name": name, "body": body, "size": len(json.dumps(body))}
+        if hold_ms:
+            reply_id = "r" + secrets.token_hex(8)
+            self.pending_replies[reply_id] = launch_id
+            data["reply_id"], data["hold_ms"] = reply_id, hold_ms
+        return self.emit("hook", launch["terminal_id"] or None, data)
+
+    def end_launch(self, launch_id: str, reason: str = "terminal_exited") -> None:
+        launch = self.launches.pop(launch_id)
+        self.pending_replies = {r: lid for r, lid in self.pending_replies.items() if lid != launch_id}
+        self.emit("launch.ended", launch["terminal_id"] or None, {"launch_id": launch_id, "reason": reason})
+
     def spawn(self, terminal_id: str, *, labels: dict[str, str] | None = None, cwd: str = "/tmp") -> FakeTerminal:
         """A terminal the host did not ask for (or whose row it lost)."""
         term = self.terminals[terminal_id] = FakeTerminal(terminal_id, ["/bin/bash", "-l"], cwd, labels or {})
@@ -155,6 +183,10 @@ class FakePtyd:
             while True:
                 channel, payload = await self._read(reader)
                 if channel != 0:
+                    if channel in self.dials:
+                        if not payload:
+                            del self.dials[channel]
+                        await self._send_frame(writer, channel, payload)  # an echo, or the answering close
                     continue
                 message = json.loads(payload)
                 method, params = message.get("method"), message.get("params") or {}
@@ -197,6 +229,10 @@ class FakePtyd:
         length, channel = struct.unpack(">II", await reader.readexactly(8))
         return channel, await reader.readexactly(length - 4)
 
+    async def _send_frame(self, writer: asyncio.StreamWriter, channel: int, payload: bytes) -> None:
+        writer.write(struct.pack(">II", 4 + len(payload), channel) + payload)
+        await writer.drain()
+
     async def _send(self, writer: asyncio.StreamWriter, message: dict[str, Any]) -> None:
         payload = json.dumps(message).encode()
         writer.write(struct.pack(">II", 4 + len(payload), 0) + payload)
@@ -216,6 +252,7 @@ class FakePtyd:
             running = sum(1 for t in self.terminals.values() if t.status == "running")
             return {"version": "fake", "protocol": self.protocol, "instance": self.instance, "env": self.env, "home": self.home, "shell": "/bin/bash",
                     "capabilities": {"sandbox": "not available in this build", "emulator": "fake@1", "stats": "ok"}, "hooks": {"listen": ""},
+                    "side_channels": {"exec_allow": sorted(self.exec_allow), "fs_roots": self.roots, "state_dir": f"{self.run_dir}-state"},
                     "counts": {"running": running, "exited": len(self.terminals) - running}, "machine": self.machine}
         if method == "events.unsubscribe":
             return {}
@@ -228,7 +265,10 @@ class FakePtyd:
             fallback = not Path(cwd).is_dir()
             term = FakeTerminal(params["id"], params.get("argv") or ["/bin/bash", "-l"], self.home if fallback else cwd, dict(params.get("labels") or {}), params.get("cols") or 80, params.get("rows") or 24, title=params.get("title") or "")
             self.terminals[term.id] = term
-            self.emit("terminal.created", term.id, {"pid": term.pid, "argv": term.argv, "cwd": term.cwd, "labels": term.labels, "launch_id": ""})
+            if params.get("launch_id") and params["launch_id"] not in self.launches:
+                del self.terminals[term.id]
+                raise _RpcFail(1008, "launch is not registered or has ended")
+            self.emit("terminal.created", term.id, {"pid": term.pid, "argv": term.argv, "cwd": term.cwd, "labels": term.labels, "launch_id": params.get("launch_id") or ""})
             return {"id": term.id, "pid": term.pid, "cwd": term.cwd, "cwd_fallback": fallback, "shell": "/bin/bash", "created_at": term.created_at}
         if method == "terminal.list":
             ids = params.get("ids")
@@ -275,7 +315,96 @@ class FakePtyd:
             running = [t for t in self.terminals.values() if t.status == "running"]
             return {"at": stamp(), "supported": True, "machine": self.machine,
                     "terminals": [{"id": t.id, "pid": t.pid, "processes": 1, "rss_bytes": self.rss.get(t.id, 50 << 20), "cpu_percent": 2.0} for t in running]}
+        side = self._side(method, params)
+        if side is not None:
+            return side
         raise _RpcFail(-32601, f"method not found: {method}")
+
+    def _under_root(self, path: str) -> Path:
+        target = Path(path)
+        if not target.is_absolute():
+            raise _RpcFail(-32602, "the path must be absolute")
+        real = target.resolve()
+        if not any(real == Path(r) or Path(r) in real.parents for r in self.roots):
+            raise _RpcFail(1004, f"{path} is not under an allowed root")
+        return real
+
+    def _side(self, method: str, params: dict[str, Any]) -> Any:
+        if method == "exec.run":
+            name = Path(params["argv"][0]).name
+            if name not in self.exec_allow:
+                raise _RpcFail(1004, f"{name} is not among the programs exec.run may run")
+            result = {"exit_code": 0, "signal": "", "stdout": "", "stderr": "", "truncated": False, "timed_out": False, "duration_ms": 1}
+            return {**result, **self.exec_results.get(name, {})}
+        if method == "fs.set_roots":
+            self.roots = [r for r in params.get("roots") or [] if r != "/"]
+            return {"roots": self.roots, "accepted": self.roots, "refused": [{"root": "/", "reason": "is the root of the filesystem"}] if "/" in (params.get("roots") or []) else []}
+        if method == "fs.stat":
+            real = self._under_root(params["path"])
+            if not real.exists():
+                return {"exists": False, "size": 0}
+            st = real.stat()
+            return {"exists": True, "type": "dir" if real.is_dir() else "file", "size": st.st_size, "mtime": stamp(), "mode": "0600", "file_id": f"{st.st_dev}:{st.st_ino}"}
+        if method == "fs.list":
+            real = self._under_root(params["path"])
+            names = sorted(p.name for p in real.iterdir())
+            return {"entries": [{"name": n, "type": "file", "size": 0, "mtime": stamp()} for n in names], "truncated": False}
+        if method in ("fs.read", "fs.tail"):
+            real = self._under_root(params["path"])
+            if not real.is_file():
+                raise _RpcFail(1001, f"no file {params['path']}")
+            data = real.read_bytes()
+            st = real.stat()
+            file_id = f"{st.st_dev}:{st.st_ino}"
+            if method == "fs.read":
+                offset = int(params.get("offset") or 0)
+                chunk = data[offset : offset + int(params.get("max") or 65536)]
+                return {"data_b64": base64.b64encode(chunk).decode(), "offset": offset, "size": len(data), "eof": offset + len(chunk) >= len(data), "file_id": file_id}
+            start = int(params.get("from_offset") or 0)
+            rotated = start > len(data) or bool(params.get("file_id") and params["file_id"] != file_id)
+            if rotated:
+                start = 0
+            chunk = data[start : start + int(params.get("max") or 65536)]
+            return {"data_b64": base64.b64encode(chunk).decode(), "next_offset": start + len(chunk), "size": len(data), "rotated": rotated, "file_id": file_id}
+        if method == "hooks.register_launch":
+            launch_id = params.get("launch_id") or "l" + secrets.token_hex(8)
+            if launch_id in self.launches:
+                raise _RpcFail(1004, "a launch with this id exists")
+            files = {name: base64.b64decode(data) for name, data in (params.get("files") or {}).items()}
+            token = secrets.token_hex(32)
+            directory = f"/state/launches/{launch_id}"
+            self.launches[launch_id] = {"terminal_id": params.get("terminal_id") or "", "files": files, "ports": set(params.get("ports") or []), "token": token}
+            env = {"DAEDALUS_LAUNCH_ID": launch_id, "DAEDALUS_HOOK_URL": f"http://127.0.0.1:1/hook/{launch_id}", "DAEDALUS_HOOK_TOKEN": token,
+                   "DAEDALUS_HOOK_CMD": "/state/bin/hook-post", "DAEDALUS_PTYD_BIN": "/usr/local/bin/ptyd", "DAEDALUS_DIAL_DIR": f"/state/dial/{launch_id}", "DAEDALUS_LAUNCH_DIR": directory}
+            return {"launch_id": launch_id, "hook_url": env["DAEDALUS_HOOK_URL"], "hook_token": token, "dir": directory, "dial_dir": env["DAEDALUS_DIAL_DIR"], "env": env, "files": sorted(files)}
+        if method == "hooks.unregister_launch":
+            removed = params["launch_id"] in self.launches
+            if removed:
+                self.end_launch(params["launch_id"], "unregistered")
+            return {"removed": removed}
+        if method == "hooks.reply":
+            launch_id = self.pending_replies.get(params["reply_id"])
+            if launch_id is None or (params.get("launch_id") and params["launch_id"] != launch_id):
+                raise _RpcFail(1001, "no request is waiting for this reply")
+            del self.pending_replies[params["reply_id"]]
+            self.replies.append(params)
+            return {"delivered": True}
+        if method == "net.allow":
+            if params["launch_id"] not in self.launches:
+                raise _RpcFail(1008, "no such launch")
+            self.launches[params["launch_id"]]["ports"].add(int(params["port"]))
+            return {}
+        if method == "net.dial":
+            launch = self.launches.get(params["launch_id"])
+            if launch is None:
+                raise _RpcFail(1008, "no such launch")
+            target = str(params["target"])
+            if target.startswith("tcp:") and int(target.rpartition(":")[2]) not in launch["ports"]:
+                raise _RpcFail(1004, "the port is not registered for this launch")
+            self._next_channel += 1
+            self.dials[self._next_channel] = target
+            return {"channel": self._next_channel}
+        return None
 
 
 class _RpcFail(Exception):

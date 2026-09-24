@@ -26,6 +26,7 @@ import (
 const usage = `usage:
   ptyd serve --env <name> --run-dir <dir> --state-dir <dir> [flags]
   ptyd version
+  ptyd hook-post <name> [--wait-ms N] < body   (inside a launch: post a hook, print the reply)
 
 serve flags:
   --listen unix|tcp:127.0.0.1:<port>   where to listen (default unix: <run-dir>/ptyd.sock)
@@ -37,6 +38,10 @@ serve flags:
 `
 
 func main() {
+	// Called through the hook command's link, the daemon is that command.
+	if filepath.Base(os.Args[0]) == "hook-post" {
+		os.Exit(hookPost(os.Args[1:]))
+	}
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -49,6 +54,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "ptyd:", err)
 			os.Exit(1)
 		}
+	case "hook-post":
+		os.Exit(hookPost(os.Args[2:]))
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -108,6 +115,12 @@ func serve(args []string) error {
 		Config: cfg, Instance: hex.EncodeToString(instance), StartedAt: time.Now().UTC(), Registry: registry,
 		Events: evlog, Log: log, EmulatorName: basic.Name, Environ: environ,
 	}
+	side, closeSide, err := startSide(cfg, evlog, environ, log)
+	if err != nil {
+		return fmt.Errorf("side channels: %w", err)
+	}
+	defer closeSide()
+	daemon.Side = side
 	srv := server.New(ep.Token, log, daemon.Hello)
 	daemon.Register(srv)
 

@@ -31,6 +31,7 @@ type Daemon struct {
 	Log          *slog.Logger
 	EmulatorName string
 	Environ      []string // the environment spawned processes inherit
+	Side         *Side    // the side channels; nil in builds and tests without them
 
 	sampler  *procstat.Sampler
 	statsMu  sync.Mutex
@@ -58,6 +59,7 @@ func (d *Daemon) Register(srv *server.Server) {
 	srv.Handle("terminal.forget", d.forget)
 	srv.Handle("terminal.read_output", d.readOutput)
 	srv.Handle("terminal.stats", d.stats)
+	d.registerSide(srv)
 }
 
 // decode reads params strictly: an unknown field is refused, because a misspelt option that is
@@ -124,7 +126,8 @@ func (d *Daemon) info(ctx context.Context, c *server.Conn, params json.RawMessag
 			"emulator":          d.EmulatorName,
 			"stats":             stats,
 		},
-		"hooks": map[string]any{"listen": ""},
+		"hooks":         d.hooksInfo(),
+		"side_channels": d.sideInfo(),
 		"limits": map[string]any{
 			"max_terminals":   d.Config.Limits.MaxTerminals,
 			"ring_bytes":      d.Config.Limits.RingBytes,

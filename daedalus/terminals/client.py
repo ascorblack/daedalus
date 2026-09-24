@@ -46,6 +46,8 @@ class Channel:
         self.id = channel_id
         self._queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._queued = 0
+        self.limit = CHANNEL_QUEUE_BYTES
+        """What the channel may hold unread; a byte stream sets its own, smaller one."""
         self.closed = False
         self.reason = ""
 
@@ -56,7 +58,7 @@ class Channel:
             self._finish("closed by the terminal service")
             return
         self._queued += len(payload)
-        if self._queued > CHANNEL_QUEUE_BYTES:
+        if self._queued > self.limit:
             self._finish("consumer too slow")
             self.client._send_nowait(self.id, b"")
             return

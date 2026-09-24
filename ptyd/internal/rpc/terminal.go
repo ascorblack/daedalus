@@ -126,6 +126,10 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 	for k, v := range p.Env {
 		extra[k] = v
 	}
+	// The launch's variables go last: the host's own env cannot replace a launch's token or URL.
+	if err := d.launchEnv(p.LaunchID, extra); err != nil {
+		return nil, err
+	}
 	env := term.BuildEnv(d.Environ, p.StripEnv, extra, p.ID)
 
 	argv := p.Argv
@@ -163,6 +167,7 @@ func (d *Daemon) create(ctx context.Context, c *server.Conn, params json.RawMess
 		Title: p.Title, RingBytes: ring, LogPath: logPath, InputIdle: idle, LaunchID: p.LaunchID, Labels: labels,
 		Shell: shell,
 	})
+	d.launchStarted(t, p.LaunchID, p.ID)
 	if err != nil {
 		if e := termError(err); e != err {
 			return nil, e
