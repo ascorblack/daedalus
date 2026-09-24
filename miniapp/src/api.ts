@@ -138,8 +138,27 @@ export const api = {
   killTerminal: (id: string) => call<TerminalView>("POST", `/api/terminals/${encodeURIComponent(id)}/kill`, {}),
   /** The same command in the same place under a new id; the old row stays as it ended. */
   restartTerminal: (id: string) => call<TerminalView>("POST", `/api/terminals/${encodeURIComponent(id)}/restart`, {}),
+  /** The commands the terminal's shell reported, oldest first; with `output`, the text each one printed. 501 when its program reports none. */
+  terminalCommands: (id: string, last: number, output: boolean) =>
+    call<{ commands: TerminalCommand[] }>("GET", `/api/terminals/${encodeURIComponent(id)}/commands?last=${last}&output=${output ? 1 : 0}`),
   /** Forgets an exited or lost terminal; refused (409) while it runs. */
   removeTerminal: (id: string) => call<unknown>("DELETE", `/api/terminals/${encodeURIComponent(id)}`),
+};
+
+/** One command a shell reported. Rows are absolute; a running command has no `end_row` yet. */
+export type TerminalCommand = {
+  n: number;
+  command: string;
+  cwd: string;
+  exit_code: number | null;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  prompt_row: number | null;
+  output_row: number;
+  end_row: number | null;
+  output?: string;
+  output_truncated?: boolean;
 };
 
 export type TerminalCreate = {

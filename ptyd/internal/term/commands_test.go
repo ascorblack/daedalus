@@ -258,5 +258,18 @@ func TestSnapshotIsFollowedByTheMarks(t *testing.T) {
 	}
 	// The command's start and end reach an attached client as they happen.
 	markAt(t, term, emu, prompt('C'), 0, 4, 5)
-	s.waitEvent(t, "command", func(m map[string]any) bool { return m["phase"] == "start" && m["n"] == float64(2) })
+	s.waitEvent(t, "command", func(m map[string]any) bool {
+		return m["phase"] == "start" && m["n"] == float64(2) && m["seq"] == float64(5)
+	})
+	markAt(t, term, emu, ended(7), 0, 6, 6)
+	end := s.waitEvent(t, "command", func(m map[string]any) bool { return m["phase"] == "end" })
+	if end["n"] != float64(2) || end["exit_code"] != float64(7) || end["abs_row"] != float64(4) ||
+		end["end_row"] != float64(6) || end["prompt_row"] != float64(3) || end["seq"] != float64(6) {
+		t.Fatalf("end %+v", end)
+	}
+	markAt(t, term, emu, prompt('A'), 0, 6, 7)
+	next := s.waitEvent(t, "command", func(m map[string]any) bool { return m["phase"] == "prompt" })
+	if next["abs_row"] != float64(6) || next["seq"] != float64(7) {
+		t.Fatalf("prompt %+v", next)
+	}
 }

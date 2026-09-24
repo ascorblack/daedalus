@@ -451,10 +451,12 @@ taken for the client answering too and dropped once; the same bytes later are ty
 
 **Other events**, as the terminal produces them: `title`, `cwd`, `bell`, `notify {title, body}`,
 `progress {state, value}`, `mode {alt_screen, mouse, bracketed_paste, app_cursor}`, and the command
-marks of Shell integration: `command {phase: "prompt", abs_row, at}` where a prompt starts,
+marks of Shell integration: `command {phase: "prompt", abs_row, seq, at}` where a prompt starts,
 `command {phase: "start", n, command, abs_row, prompt_row, seq, at}` and `command {phase: "end", n,
-exit_code, command, abs_row, end_row, …, seq}`. After every SNAPSHOT of a terminal whose shell reports
-commands comes `marks {list[{n, command, exit_code, prompt_row, output_row, end_row, running}],
+exit_code, command, abs_row, prompt_row, end_row, duration_ms, seq, at}`. `seq` is the output offset
+just after the mark: events go out ahead of output still waiting to be sent, so a client holds a
+`command` until it has drawn the bytes up to `seq`. After every SNAPSHOT of a terminal whose shell
+reports commands comes `marks {list[{n, command, exit_code, prompt_row, output_row, end_row, running}],
 first_abs_row, prompt_row}`: every command whose rows reach the snapshot's first row, as of the
 snapshot's own offset, so a client places its marks again. A `command` event queued before the
 snapshot may still arrive after `marks`; `n` identifies a command, so applying one twice is harmless. A client that
@@ -521,6 +523,18 @@ the command closes the race with a command that ends before the wait begins. It 
 `{matched: "command_done", seq: <end_seq>, command: Command}`, and `1007` where commands are unknown.
 `terminal.command` events go out at every end, and `daemon.info.capabilities.shell_integration`
 lists the shells integrated with.
+
+**In the app** (`miniapp/src/terminal/marks.ts`). Each command gets a dot beside its prompt, in the
+colour of how it ended (running, zero, non-zero, no status), and a session dock's tab takes the last
+command's colour. Ctrl+↑ and Ctrl+↓ scroll from prompt to prompt, outside the alternate screen and
+only in a terminal whose shell has marked something; anywhere else the keys reach the program. "Copy
+last command output" (the dock's toolbar, the full-screen header, and the terminal's own menu on a
+right click or a long press) copies the rows between the last finished command's start and end marks,
+and asks `GET /api/terminals/{id}/commands?last=5&output=1` when those rows have left the browser's
+history. Absolute rows are tied to xterm.js's lines by a marker whose row is known: line 0 after
+every snapshot (`first_abs_row`), moved down with the output so that trimming the history cannot take
+it. A reattach that continues from a tail brings no `marks`, so after one the app asks the host for
+the recent commands.
 
 ## The environment of a spawned program
 

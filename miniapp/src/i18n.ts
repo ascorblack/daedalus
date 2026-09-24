@@ -2499,6 +2499,23 @@ Object.assign(DICT, {
   },
 });
 
+// A shell's commands in its terminal: the marks beside prompts, the jumps, the last output.
+Object.assign(DICT, {
+  "term.copy": { en: "Copy", ru: "Копировать" },
+  "term.marks.menu": { en: "Terminal", ru: "Терминал" },
+  "term.marks.copy": { en: "Copy last command output", ru: "Копировать вывод последней команды" },
+  "term.marks.copied": { en: "Output copied", ru: "Вывод скопирован" },
+  "term.marks.none": { en: "No command has finished yet", ru: "Ни одна команда ещё не завершилась" },
+  "term.marks.copyFailed": { en: "Could not copy the output", ru: "Не удалось скопировать вывод" },
+  "term.marks.previous": { en: "Previous command", ru: "Предыдущая команда" },
+  "term.marks.next": { en: "Next command", ru: "Следующая команда" },
+  "term.marks.running": { en: "{command} is running", ru: "{command} выполняется" },
+  "term.marks.ok": { en: "{command} finished", ru: "{command} завершилась" },
+  "term.marks.failed": { en: "{command} failed · code {code}", ru: "{command} завершилась с ошибкой · код {code}" },
+  "term.marks.unknown": { en: "{command} ended", ru: "{command} закончилась" },
+  "term.marks.command": { en: "The command", ru: "Команда" },
+});
+
 // The terminal: its view, the session dock, the full-screen view and the phone's list.
 Object.assign(DICT, {
   "term.dock": { en: "Terminals", ru: "Терминалы" },
