@@ -19,7 +19,8 @@ from typing import Any
 
 import pytest
 
-import daedalus.harness.claude  # noqa: F401 — registers the one adapter there is, whichever test ran first
+import daedalus.harness.claude  # noqa: F401 — registers the adapters there are, whichever test ran first
+import daedalus.harness.codex  # noqa: F401
 from daedalus.config import HarnessConfig
 from daedalus.harness.contract import CheckResult, CheckStep, EnvironmentPort
 from daedalus.harness.manager import NODE, HarnessManager, HarnessRefused
@@ -186,7 +187,7 @@ async def test_a_check_finds_each_cli_with_its_version_sign_in_agents_and_models
         # Claude Code has an adapter; installed and signed in, nothing holds it back.
         assert claude["unavailable"] == "", claude["unavailable"]
 
-        assert (rows["codex"]["logged_in"], rows["codex"]["models"]) == ("no", ["gpt-5-codex", "gpt-5"])
+        assert (rows["codex"]["logged_in"], rows["codex"]["models"]) == ("no", ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.5"])
         assert rows["codex"]["unavailable"] == "Codex is not signed in in the container environment"
         assert [a["name"] for a in rows["opencode"]["agents"]] == ["build", "plan", "general"]
         assert (rows["opencode"]["logged_in"], rows["opencode"]["login_detail"]) == ("yes", "Anthropic, OpenAI")
@@ -258,14 +259,14 @@ async def test_an_update_runs_the_updater_then_the_self_check_with_one_prompt_on
 
 
 async def test_without_an_adapter_the_session_step_is_skipped_never_passed(db: Database) -> None:
-    async with bench(db, env={"FAKE_CODEX_LATEST": "0.156.1"}) as b:
-        b.make({**DEFAULT_FEEDS, npm_tags_url("@openai/codex"): {"latest": "0.156.1"}})
-        outcome = await b.manager.update("container", "codex")
-        assert (outcome["ok"], outcome["to"]) == (True, "0.156.1")
+    async with bench(db, env={"FAKE_PI_LATEST": "0.87.1"}) as b:
+        b.make({**DEFAULT_FEEDS, npm_tags_url("@earendil-works/pi-coding-agent"): {"latest": "0.87.1"}})
+        outcome = await b.manager.update("container", "pi")
+        assert (outcome["ok"], outcome["to"]) == (True, "0.87.1")
         steps = {s["name"]: s for s in outcome["check"]["steps"]}
         assert steps["session"]["skipped"] is True and steps["session"]["ok"] is True
         assert "no adapter" in steps["session"]["detail"]
-        stored = by_harness(await b.manager.harnesses("container"))["codex"]["self_check"]
+        stored = by_harness(await b.manager.harnesses("container"))["pi"]["self_check"]
         assert stored["steps"][-1] == {"name": "session", "ok": True, "skipped": True, "detail": "no adapter runs this CLI yet, so no session was started", "duration_ms": stored["steps"][-1]["duration_ms"]}
 
 

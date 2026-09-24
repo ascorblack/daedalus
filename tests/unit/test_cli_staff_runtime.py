@@ -254,7 +254,7 @@ class Stand:
     harness: HarnessConfig
 
     async def hire(self, name: str = "Ada") -> Staff:
-        return await self.manager.staff.hire(self.project.id, name=name, harness="claude", isolation="shared")
+        return await self.manager.staff.hire(self.project.id, name=name, harness=getattr(self.adapter, "name", "claude"), isolation="shared")
 
     async def task(self, title: str = "Menu page") -> str:
         task_id = f"t{uuid.uuid4().hex[:6]}"
@@ -288,7 +288,7 @@ class Stand:
         self.runtime.close()
         self.adapter = adapter or self.adapter
         self.runtime = CliStaffRuntime(self.adapter, terminals=self.terminals, store=HarnessStore(self.manager.db), ingress=self.team.ingress, lookup=self.team.live, config=lambda: self.harness)
-        self.team.runtimes["claude"] = self.runtime
+        self.team.runtimes[getattr(self.adapter, "name", "claude")] = self.runtime
         return self.runtime
 
 
@@ -329,7 +329,7 @@ async def stand(settings: Settings, db: Database, *, adapter: Any = None, extra_
         chosen = adapter or StubClaude()
         cfg = harness_config(**config)
         runtime = CliStaffRuntime(chosen, terminals=terminals, store=HarnessStore(db), ingress=team.ingress, lookup=team.live, config=lambda: cfg)
-        team.runtimes["claude"] = runtime
+        team.runtimes[getattr(chosen, "name", "claude")] = runtime
         made = Stand(root, home, work, log, ptyd, terminals, manager, team, runtime, chosen, project, cfg)
         yield made
     finally:

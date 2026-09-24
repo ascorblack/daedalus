@@ -14,7 +14,7 @@ import functools
 import logging
 from typing import TYPE_CHECKING, cast
 
-from daedalus.harness import ADAPTERS, claude  # noqa: F401 — importing an adapter registers it
+from daedalus.harness import ADAPTERS, claude, codex  # noqa: F401 — importing an adapter registers it
 from daedalus.harness.manager import HarnessManager
 from daedalus.harness.ports import TerminalRunner
 from daedalus.harness.runtime import CliStaffRuntime, RuntimeEnvironment, install_runtimes
