@@ -239,7 +239,7 @@ async def test_a_session_moves_between_projects_without_a_file_moving(settings: 
             assert moved["project"] == "Bakery" and moved["workspace"] == str(root)
             state = manager.live_state(sid)
             assert state is not None and state.project is not None and state.workspace == root
-            assert state.services is not None and state.services.project_root == root
+            assert state.services is not None and state.services.walls is not None and state.services.walls.readable == (root,)
             assert (own / "notes.md").read_text(encoding="utf-8") == "mine"
 
             private = (await client.post(f"/api/sessions/{sid}/project", headers=HEADERS, json={"project_id": project["id"], "own_directory": True})).json()
@@ -276,7 +276,7 @@ async def test_moving_to_an_own_directory_places_it_inside_the_destination(setti
             state = manager.live_state(sid)
             assert state is not None and state.workspace == Path(moved["workspace"])
             assert (bakery / "note.txt").read_text(encoding="utf-8") == "the recipe"
-            assert state.services is not None and state.services.project_root == state.workspace
+            assert state.services is not None and state.services.walls is not None and state.services.walls.readable == (state.workspace,)
     finally:
         await manager.close()
 
@@ -326,7 +326,7 @@ async def test_a_delegated_agent_shares_the_concierges_folder_unless_it_asks_for
     own_state = manager.live_state(mine["session_id"])
     assert own_state is not None and own_state.project is not None and own_state.project.id == project.id
     # Listed under Voice, and walled at its own directory rather than at the shared one.
-    assert own_state.services is not None and own_state.services.project_root == own_state.workspace
+    assert own_state.services is not None and own_state.services.walls is not None and own_state.services.walls.readable == (own_state.workspace,)
     # Both choices are contained: the shared agent by the project, the private one by its child.
     shared_state = manager.live_state(shared["session_id"])
     assert shared_state is not None and shared_state.workspace in own_state.workspace.parents

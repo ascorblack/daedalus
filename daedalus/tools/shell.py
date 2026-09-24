@@ -133,13 +133,16 @@ def bwrap_status() -> str:
     return _bwrap_state
 
 
-async def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config: Any, *, writable: Sequence[Path] = ()) -> tuple[list[str], bool]:
+async def sandbox_argv(command: str, exec_config: Any, *, writable: Sequence[Path]) -> tuple[list[str], bool]:
     """The argv to run ``command`` with: plain bash, or bash inside bubblewrap when the sandbox is on.
 
-    The sandbox binds the whole filesystem read-only, makes the session workspace (any
-    configured extra path, and the paths the host opened for this session — its own
-    worktrees) writable, gives the command a private /tmp and PID namespace, and dies with
-    the parent so a timeout kill cannot leave it behind. Everything else is entered read-only.
+    The sandbox binds the whole filesystem read-only, makes ``writable`` (the session's writable
+    walls and the paths the host opened for it, from ``SessionServices.sandbox_writable``) and any
+    configured extra path writable, gives the command a private /tmp and PID namespace, and dies
+    with the parent so a timeout kill cannot leave it behind. Everything else is entered read-only.
+
+    The session's workspace is not bound on its own account: a workspace in a folder marked
+    read-only must stay read-only here too, and whether it is writable is the walls' answer.
     """
     global _warned_missing_bwrap
     plain = shell_argv(command)
@@ -155,7 +158,7 @@ async def sandbox_argv(command: str, workdir: Path, workspace: Path, exec_config
         raise SandboxUnavailable(f"the sandbox is configured (tools.exec.sandbox=workspace) but unavailable: {status}. The operator can switch it off in Settings → Tools or {where}.")
     bwrap = shutil.which("bwrap") or "bwrap"
     argv = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--unshare-pid", "--die-with-parent", "--new-session"]
-    paths = [workspace, *[Path(p) for p in getattr(exec_config, "sandbox_extra_writable", [])], *writable]
+    paths = [*writable, *[Path(p) for p in getattr(exec_config, "sandbox_extra_writable", [])]]
     bound: set[str] = set()
     for path in paths:
         # A bind needs a real directory at both ends: a symlink or a file here makes bubblewrap refuse the
@@ -264,7 +267,7 @@ async def exec_command(
         return error(context, f"working directory does not exist: {workdir}")
     environment = shell_environment(context.session_id, env)
     try:
-        argv, sandboxed = await sandbox_argv(command, workdir, services.workspace_dir, tool_config(context).exec, writable=getattr(services, "writable", ()))
+        argv, sandboxed = await sandbox_argv(command, tool_config(context).exec, writable=services.sandbox_writable())
     except SandboxUnavailable as exc:
         return error(context, str(exc))
     proc = await asyncio.create_subprocess_exec(
@@ -429,7 +432,7 @@ async def _start_job(context: ToolContext, services: Any, command: str, workdir:
     log.parent.mkdir(parents=True, exist_ok=True)
     _prune_spills(log.parent)  # the same bound as the spill directory: the newest logs stay
     try:
-        argv, sandboxed = await sandbox_argv(command, workdir, services.workspace_dir, tool_config(context).exec, writable=getattr(services, "writable", ()))
+        argv, sandboxed = await sandbox_argv(command, tool_config(context).exec, writable=services.sandbox_writable())
     except SandboxUnavailable as exc:
         return error(context, str(exc))
     fh = log.open("wb")

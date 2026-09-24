@@ -19,6 +19,7 @@ port. It is checked once, in a sentence, rather than discovered as a selector th
 
 from __future__ import annotations
 
+import json
 import sys
 import urllib.error
 import urllib.request
@@ -80,6 +81,63 @@ GATES: dict[str, object] = {
 }
 
 
+SHARED_WRITES: dict[tuple[str, str], tuple[int, str, str]] = {
+    # Every signed-in window reports what it shows, whatever screen a harness drives; the host
+    # answers with no content.
+    ("POST", "/api/presence"): (204, "application/json", ""),
+}
+
+
+def answer_shared(method: str, path: str) -> tuple[int, str, str] | None:
+    """The answer every harness gives the same way: ``(status, content type, body)``, or ``None``.
+
+    ``path`` may be a whole URL; the query string and everything before ``/api/`` are ignored. A
+    harness asks this where it used to look ``GATES`` up, after its own routes, so what it invented
+    still wins.
+    """
+    path = path.split("?", 1)[0]
+    path = path[path.index("/api/"):] if "/api/" in path else path
+    write = SHARED_WRITES.get((method.upper(), path))
+    if write is not None:
+        return write
+    if path in GATES:
+        return 200, "application/json", json.dumps(GATES[path])
+    return None
+
+
+def fulfil_shared(route) -> bool:  # type: ignore[no-untyped-def]
+    """:func:`answer_shared` for a Playwright route: ``True`` when it answered."""
+    shared = answer_shared(route.request.method, route.request.url)
+    if shared is None:
+        return False
+    status, content_type, body = shared
+    route.fulfill(status=status, content_type=content_type, body=body)
+    return True
+
+
+def serve_shared_post(handler, unhandled: Unhandled) -> None:  # type: ignore[no-untyped-def]
+    """``do_POST`` for a harness built on ``http.server``, which otherwise answers every write 501.
+
+    The body is read whatever it is, so the connection stays usable; a write nobody here knows is
+    recorded like an unknown read and answered 404.
+    """
+    length = int(handler.headers.get("Content-Length") or 0)
+    if length:
+        handler.rfile.read(length)
+    shared = answer_shared("POST", handler.path)
+    if shared is None:
+        unhandled.record(handler.path.split("?", 1)[0])
+        shared = (404, "application/json", '{"detail": "Not Found"}')
+    status, content_type, body = shared
+    data = body.encode()
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    if data:
+        handler.wfile.write(data)
+
+
 class Unhandled:
     """Every ``/api/`` path a stub had no answer for, so a run can end by saying so."""
 
@@ -118,7 +176,7 @@ def expect_app(base: str) -> None:
         raise SystemExit(1)
 
 
-__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "GATES", "TeamStub", "Unhandled", "expect_app"]
+__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "GATES", "TeamStub", "Unhandled", "answer_shared", "expect_app", "fulfil_shared", "serve_shared_post"]
 
 # What the harness manager reports for the container: Claude Code installed and signed in, Codex
 # installed but signed out, the rest absent. Enough for the hiring form to show one command-line agent

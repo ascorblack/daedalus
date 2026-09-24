@@ -26,6 +26,7 @@ import { navigate, pathFor, useRoute } from "../router";
 import { useMedia } from "../shell";
 import { Windowed } from "../virtual";
 import { DICT, plural, t } from "../i18n";
+import { usePresenceScope } from "../presence";
 
 /**
  * Markdown parsed once per text. `cacheKey` names a message that will never change again, so its
@@ -57,6 +58,9 @@ export type SessionScreenProps = {
 };
 
 export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: SessionScreenProps) {
+  // Each pane says which session it shows, so a split view reports both and the voice screen's
+  // embedded session reports itself, without anybody reading the address.
+  usePresenceScope({ session: id || undefined });
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   // The streaming turn's state is not React state: a token must repaint the turn it belongs to,
   // not the screen. The components that show it subscribe; everything else never hears about it.
@@ -423,7 +427,18 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
     },
     [id, toast],
   );
-  const deny = useCallback((a: Approval) => setSeenKeys((k) => new Set(k).add(a.key)), []);
+  // Refusing tells the host too, so the request stops being open on every other front that shows it.
+  const deny = useCallback(
+    async (a: Approval) => {
+      setSeenKeys((k) => new Set(k).add(a.key));
+      try {
+        await api.post(`/api/sessions/${id}/policy/refuse`, { key: a.key });
+      } catch (e) {
+        toast(errorText(e));
+      }
+    },
+    [id, toast],
+  );
 
   // The event stream carries every change while a run is active; this is the safety net, not the
   // feed, and it asks what the session is doing — not for the conversation over again.
@@ -1094,7 +1109,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit }: Sess
                 }}
               />
             }
-            files={<Explorer key={id} base={sessionBase(id)} root={detail?.project?.name} uploadUrl={`${sessionBase(id)}/files/upload`} onPreview={openPreview} toast={toast} refresh={filesGeneration} written={producedFiles(turns.at(-1)?.activity ?? []).filter((f) => f.how === "wrote").map((f) => workspaceRelative(f.path, detail.workspace) ?? "")} />}
+            files={<Explorer key={id} base={sessionBase(id)} root={detail?.project?.name} upload folders={detail?.folders} home={detail?.folder_id} onPreview={openPreview} toast={toast} refresh={filesGeneration} written={producedFiles(turns.at(-1)?.activity ?? []).filter((f) => f.how === "wrote").map((f) => workspaceRelative(f.path, detail.workspace) ?? "")} />}
             jobs={<JobsTab sessionId={id} messages={detail.messages} onOpen={panel.openFile} onPreview={openPreview} onOpenSession={onOpen} />}
           />
         )}

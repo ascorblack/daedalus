@@ -241,7 +241,7 @@ class Services:
         env = shell_environment(session_id, {"PORT": str(chosen)} if chosen else None)
         env["HOST"] = "0.0.0.0"
         # The same wall Exec has: a service is a long-lived command, not a way around the sandbox.
-        argv, _sandboxed = await sandbox_argv(command, workdir, state.workspace, self.app.config.tools.exec, writable=getattr(session_services, "writable", ()))
+        argv, _sandboxed = await sandbox_argv(command, self.app.config.tools.exec, writable=session_services.sandbox_writable() if session_services is not None else [state.workspace])
         with open(log_path, "ab") as log:
             log.write(f"\n=== {_now()} start: {command}\n".encode())
             proc = subprocess.Popen(argv, cwd=str(workdir), env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)  # noqa: S603
@@ -322,7 +322,7 @@ class Services:
             # The stored log path is judged like every other path this session names. A row whose
             # service ran before the session's folder became a project's can still carry a path
             # outside it, and reading it here would be the one file read that skipped the wall.
-            return f"(the log is at {path}, outside {services.project_root}, the folder this session works in: it is not read from here)"
+            return f"(the log is at {path}, outside {services.where()}, the folders this session works in: it is not read from here)"
         if not path.exists():
             return "(no log yet)"
         try:
@@ -345,9 +345,9 @@ class Services:
         """
         manager = self.app.manager
         services = manager.locator_services(session_id) if manager is not None else None
-        if services is None or services.project_root is None or services.contains(Path(cwd)):
+        if services is None or services.walls is None or services.contains(Path(cwd)):
             return ""
-        directory, root = Path(cwd), services.project_root
+        directory, root = Path(cwd), services.workspace_dir
         same_name = root / directory.name
         fix = (
             f"a folder of that name is already at {same_name} — ServiceStart the service there"
@@ -355,7 +355,7 @@ class Services:
             else f"move it into {root}, or open it as a project of its own and start the service from a session there"
         )
         return (
-            f"its working directory {directory} is outside {root}, the folder this session works in, so it was left as "
+            f"its working directory {directory} is outside {services.where()}, the folders this session works in, so it was left as "
             f"it is rather than started somewhere else: the same command in another folder serves different files under "
             f"the same port and the same link. To bring it back, {fix}."
         )

@@ -213,7 +213,7 @@ async def run_command(app: Application, session_id: str, line: str) -> str:  # n
         return f"Session cap: ${cap:.2f} (spent so far ${spent:.2f})."
     if name == "allow":
         try:
-            result = await manager.grant(session_id, args)
+            result = await manager.grant(session_id, args, via="app")
         except ValueError as exc:
             return f"usage: /allow <key> — {exc}"
         approves = result.get("approves")

@@ -32,6 +32,8 @@ declare global {
     daedalus?: {
       /** Open the platform's folder chooser; resolves to the path, or null when the operator cancelled. */
       pickFolder?: () => Promise<string | null>;
+      /** Set by the desktop launcher's own window, so the page can say which kind of window it is in. */
+      window?: boolean;
     };
   }
 }
@@ -324,6 +326,11 @@ export type SessionDetail = {
   workspace_sessions?: { id: string; title: string }[];
   /** The project this session belongs to. */
   project: ProjectRef;
+  /** The folder of the project the session works in. */
+  folder_id?: string;
+  /** The folders of its project the session may read, which its file pane can switch between; empty
+   *  for a session with a directory of its own. */
+  folders?: SessionFolder[];
   pending: { questions: Question[] } | null;
   model: string;
   provider?: string;
@@ -382,6 +389,16 @@ export type SessionCheckpoints = {
 export type MemoryRecord = { id: string; scope: string; scope_key: string; kind: string; text: string; salience: number; version: number; created_at: string | null; last_accessed_at: string | null };
 export type MemoryBucket = { scope: string; scope_key: string; title: string | null; count: number };
 export type MemoryListing = { records: MemoryRecord[]; buckets: MemoryBucket[]; sessions: Record<string, string> };
+
+/** A folder a session's file pane may open, and whether the session may write there. */
+export type SessionFolder = {
+  id: string;
+  path: string;
+  label: string;
+  env: "container" | "host";
+  readonly: boolean;
+  writable: boolean;
+};
 
 /** One folder of a project, as the host stores it. */
 export type ProjectDir = {

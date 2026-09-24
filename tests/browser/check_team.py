@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import Page, expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, GATES, TeamStub, Unhandled, expect_app, folders  # noqa: E402
+from api_stub import DEFAULT_APP, TeamStub, Unhandled, expect_app, folders, fulfil_shared  # noqa: E402
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
@@ -60,8 +60,8 @@ def run_one(page: Page, lang: str, width: int, unhandled: Unhandled) -> None:
             return route.fulfill(status=200, content_type="application/json", body=json.dumps({"sessions": [], "projects": []}))
         if path == "/api/settings":
             return route.fulfill(status=200, content_type="application/json", body=json.dumps({"presets": {}, "model": {}}))
-        if path in GATES:
-            return route.fulfill(status=200, content_type="application/json", body=json.dumps(GATES[path]))
+        if fulfil_shared(route):
+            return None
         unhandled.record(path)
         route.fulfill(status=200, content_type="application/json", body="[]")
 

@@ -35,13 +35,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from api_stub import (  # noqa: E402
     DEFAULT_APP,
     FILE_TEXT,
-    GATES,
     TeamStub,
     Unhandled,
     expect_app,
     file_entries,
     file_search,
     folders,
+    fulfil_shared,
 )
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
@@ -614,6 +614,9 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         parts = rel.split("/")
         sid = parts[3]
         tail = "/".join(parts[4:])
+        if tail.startswith("folders/"):
+            # Another folder of the session's project answers under /folders/{id} with the same routes.
+            tail = "/".join(tail.split("/")[2:])
         if tail == "":
             return respond(route, detail(sid))
         if tail == "files":
@@ -703,8 +706,8 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, CAPABILITIES)
     if rel == "/api/status":
         return respond(route, {"ok": True})
-    if rel in GATES:
-        return respond(route, GATES[rel])
+    if fulfil_shared(route):
+        return None
     # A route nobody taught this stub about is answered with nothing and reported at the end: the
     # app grows gates (a model, the capabilities) that decide whether a screen is drawn at all, and
     # one harness knowing about them while another does not is how the pictures and the numbers

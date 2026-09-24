@@ -282,6 +282,10 @@ class Presence(TypedDict):
     terminals: list[str]
     projects: list[str]
     attended: bool
+    """Whether this window is visible and focused, so what it lists is being looked at."""
+    newly_attended: NotRequired[dict[str, list[str]]]
+    """``sessions`` / ``terminals`` / ``projects`` that no window attended before this change and
+    one does now, across every window: what a subscriber acts on when the operator opens something."""
 
 
 class HarnessUpdated(TypedDict):
@@ -862,6 +866,7 @@ async def event_stream(
             resync = "too_far"
     subscription = bus.subscribe(flt, after=None if resync else after, name=f"stream:{kind}:{client or 'anonymous'}")
     pending: asyncio.Future[AppEvent] | None = None
+    opened = False
     try:
         hello_head = subscription.last_seq if after is None or resync else bus.head
         yield _frame("hello", {"head": hello_head, "oldest": bus.oldest, "server_time": _now(), "client": client})
@@ -869,6 +874,7 @@ async def event_stream(
             yield _frame("resync", {"reason": resync, "head": subscription.last_seq})
         if on_open is not None:
             await on_open()
+        opened = True
         while True:
             if pending is None:
                 pending = asyncio.ensure_future(anext(subscription))
@@ -898,7 +904,9 @@ async def event_stream(
         if pending is not None and not pending.done():
             pending.cancel()
         subscription.close()
-        if on_close is not None:
+        # Only a stream that was opened is closed: a client gone before its first frame was read would
+        # otherwise take away a presence connection it never added.
+        if on_close is not None and opened:
             await on_close()
 
 

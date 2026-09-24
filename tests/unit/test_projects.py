@@ -20,7 +20,7 @@ from protocore.contracts.tools import ToolContext
 from daedalus.config import RuntimeConfig, Settings
 from daedalus.extensions.api import build_app
 from daedalus.host import prompts
-from daedalus.host.services import PathOutsideProject, SessionServices, locator
+from daedalus.host.services import PathOutsideProject, SessionServices, Walls, locator
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.stores.projects import ProjectError, ProjectSettings, ProjectStore, normalise_root
@@ -105,7 +105,7 @@ def test_the_kernels_own_filesystems_are_not_folders_of_work() -> None:
 
 
 def _services(root: Path, session_id: str = "p-contain") -> SessionServices:
-    return SessionServices(session_id=session_id, workspace_dir=root, project_root=root)
+    return SessionServices(session_id=session_id, workspace_dir=root, walls=Walls(readable=(root,), writable=(root,)))
 
 
 def test_resolve_refuses_every_way_out_of_the_root(tmp_path: Path) -> None:
@@ -280,7 +280,7 @@ async def test_a_session_created_without_a_project_choice_gets_a_project(setting
             assert "free" not in listing
         state = manager.live_state(sid)
         assert state is not None and state.project is not None
-        assert state.services is not None and state.services.project_root == state.workspace
+        assert state.services is not None and state.services.walls is not None and state.services.walls.readable == (state.workspace,)
         with pytest.raises(PathOutsideProject):
             state.services.resolve("/etc/hostname")
     finally:
@@ -454,7 +454,7 @@ async def test_a_subagent_of_a_project_session_is_in_the_project(settings: Setti
         child = await manager.get_state(result["session_id"])
         assert child is not None and child.workspace == root
         assert child.project is not None and child.project.id == project.id
-        assert child.services is not None and child.services.project_root == root
+        assert child.services is not None and child.services.walls is not None and child.services.walls.readable == (root,)
         with pytest.raises(PathOutsideProject):
             child.services.resolve("/etc/passwd")
         # And it is one of the project's agents in every list, not a session that merely names the folder.
@@ -481,7 +481,7 @@ async def test_a_subagent_of_a_plain_session_still_shares_its_directory(settings
         result = await Subagents(app).spawn(leader_id=leader.session.id, task="count", name="counter")
         child = await manager.get_state(result["session_id"])
         assert child is not None and child.workspace == leader.workspace and child.project == leader.project
-        assert child.services is not None and child.services.project_root == leader.workspace
+        assert child.services is not None and child.services.walls is not None and child.services.walls.readable == (leader.workspace,)
     finally:
         await manager.close()
 
@@ -507,7 +507,7 @@ async def test_a_fork_of_a_project_session_stays_in_it_and_copies_nothing(settin
             fork = await manager.get_state(body["id"])
             assert fork is not None and fork.workspace == root
             assert fork.project is not None and fork.project.id == project["id"]
-            assert fork.services is not None and fork.services.project_root == root
+            assert fork.services is not None and fork.services.walls is not None and fork.services.walls.readable == (root,)
             with pytest.raises(PathOutsideProject):
                 fork.services.resolve("/etc/passwd")
             # Not one byte of the folder was duplicated into the state directory.
@@ -964,7 +964,7 @@ async def test_a_session_works_in_the_folder_it_is_given(settings: Settings, con
         assert plain.workspace == tmp_path / "site"
         in_docs = await manager.create_session("docs", project_id=project.id, folder_id=docs.id, own_directory=True)
         assert in_docs.workspace == tmp_path / "docs" / ".agents" / in_docs.session.id
-        assert in_docs.services is not None and in_docs.services.project_root == in_docs.workspace
+        assert in_docs.services is not None and in_docs.services.walls is not None and in_docs.services.walls.readable == (in_docs.workspace,)
         with pytest.raises(ValueError, match="host folder"):
             await manager.create_session("host", project_id=project.id, folder_id=host.id)
         with pytest.raises(ValueError, match="not a folder of"):
