@@ -4502,8 +4502,12 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such notification")
         return {"deleted": entry_id, "summary": await service.summary()}
 
-    def push_service() -> PushService:
+    def installed_push() -> PushService | None:
         push = app.extensions.get("push")
+        return push if isinstance(push, PushService) else None
+
+    def push_service() -> PushService:
+        push = installed_push()
         if push is None:
             raise HTTPException(503, "push is not installed")
         return push
@@ -4518,12 +4522,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         try:
             await auth(request)
         except HTTPException as exc:
-            push = app.extensions.get("push")
+            push = installed_push()
             if exc.status_code != 401 or not body.token or push is None or not await push.verify_token(entry_id, body.token):
                 raise
             quick_only = True
-        if body.via == "push" and app.extensions.get("push") is not None:
-            push_service().note_actor(entry_id, body.endpoint)
+        push = installed_push()
+        if body.via == "push" and push is not None:
+            push.note_actor(entry_id, body.endpoint)
         try:
             resolution, view = await service.act(entry_id, body.action, body.value, via=body.via, quick_only=quick_only)
         except LookupError as exc:
