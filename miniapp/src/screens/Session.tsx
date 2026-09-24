@@ -1148,7 +1148,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus,
             project={focus ? {
               board: <ProjectBoard projectId={focus.projectId} toast={toast} embedded />,
               brief: <BriefPage projectId={focus.projectId} compact toast={toast} />,
-              wakeups: <WakeupsPage projectId={focus.projectId} compact />,
+              wakeups: <WakeupsPage projectId={focus.projectId} compact toast={toast} />,
               folders: <FoldersPage projectId={focus.projectId} compact toast={toast} />,
             } : undefined}
             details={hasDetails ? (ids) =>

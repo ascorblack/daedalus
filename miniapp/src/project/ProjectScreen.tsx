@@ -59,7 +59,7 @@ export function ProjectScreen({ projectId, page, inner, toast, wide }: { project
   } else if (view.page === "brief") {
     body = <BriefPage projectId={projectId} back={back} toast={toast} />;
   } else if (view.page === "wakeups") {
-    body = <WakeupsPage projectId={projectId} back={back} />;
+    body = <WakeupsPage projectId={projectId} back={back} toast={toast} />;
   } else if (view.page === "folders") {
     body = <FoldersPage projectId={projectId} back={back} toast={toast} />;
   } else {

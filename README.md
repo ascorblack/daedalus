@@ -671,6 +671,24 @@ such a project carries `orchestrator: {"enabled", "session_id", "staff", "workin
 (null for a project without one), and `GET /api/sessions/{id}` names what a session is to its
 project: `orchestrator_of` (the project's id) or `staff` (`{"id", "session_id"}`).
 
+It sets its own alarms with `WakeMe` (in some minutes, at a moment, or on a cron at most every ten
+minutes) and is woken with the note, even mid-turn; you can leave it one too. `GET|POST
+/api/projects/{id}/wakeups` (`{"note", "in_minutes" | "at" | "cron"}`) and `DELETE …/wakeups/{id}` are
+the Wake-ups panel of the project. A wake-up belongs to the project: a replaced orchestrator, or one
+switched off and on again, gets the ones set before.
+
+A watch is "when this happens, do that", set by the orchestrator (`Watch`) or by you from the same
+panel. It waits for a member to finish a turn, ask, need a permission, crash or go silent; a task to
+move; a terminal to print a pattern (matched by the terminal daemon, so it never polls); a new commit
+on a branch; or a webhook — a pull request, a CI result, or any payload matching a pattern. Then it
+wakes the orchestrator, tells a member something, or notifies you. Every watch has a cooldown (at
+least a minute), may be set to fire once, and switches itself off, with a journal entry, after twelve
+fires in an hour; nothing the orchestrator does itself fires one. `GET|POST
+/api/projects/{id}/watches` (`{"when", "then", "cooldown_minutes", "once", "note"}`), `PATCH …/{id}`
+(`{"enabled", "note", "cooldown_minutes"}`) and `DELETE …/{id}`. Every accepted webhook is published
+as `webhook.received`; a provider with `deliver = "events"` in its `[webhooks.<name>]` section starts no
+run of its own and is there only for the watches.
+
 A command-line member runs its CLI in a terminal of its own, which you can open like any other. The
 launch answers the CLI's folder-trust question on screen before the task is given, and a CLI that
 cannot get ready — signed out, or stuck on a screen it does not recognise within `ready_timeout_s` —

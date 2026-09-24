@@ -4,10 +4,10 @@
 // so there is one brief editor and not two that drift apart.
 
 import { useEffect, useState } from "react";
-import { api, type BriefSection, type JournalEntry, type Project, type Schedule } from "../api";
+import { api, type BriefSection, type JournalEntry, type Project } from "../api";
 import { Skeleton } from "../components";
 import { Sheet } from "../dialogs";
-import { absTime, describeSchedule, relTime } from "../format";
+import { absTime, relTime } from "../format";
 import { plural, t } from "../i18n";
 import { Icon } from "../icons";
 import { ProjectSettingsSheet } from "../projects";
@@ -94,7 +94,7 @@ function BriefCard({ projectId, section, toast }: { projectId: string; section: 
 // ── the journal ──────────────────────────────────────────────────────────────────────────────
 
 const JOURNAL_PAGE = 30;
-export const JOURNAL_KINDS = ["note", "decision", "plan", "answer", "reassignment", "report", "grant", "hire", "dismiss", "folder", "escalation", "replacement", "brief"];
+export const JOURNAL_KINDS = ["note", "decision", "plan", "answer", "reassignment", "report", "grant", "hire", "dismiss", "folder", "escalation", "replacement", "brief", "watch"];
 
 export function JournalPage({ projectId, back, toast }: { projectId: string; back?: string | null; toast: (text: string) => void }) {
   const { project } = useProject(projectId);
@@ -191,35 +191,7 @@ function JournalRefs({ projectId, refs, names, titles }: { projectId: string; re
 
 // ── the wake-ups ─────────────────────────────────────────────────────────────────────────────
 
-/** The alarms the orchestrator set itself: the schedules that wake its session. */
-export function WakeupsPage({ projectId, back, compact }: { projectId: string; back?: string | null; compact?: boolean }) {
-  const { project } = useProject(projectId);
-  const { schedules } = useFocus(projectId);
-  const orchestrator = project?.settings.orchestrator;
-  const mine = orchestrator?.session_id ? schedules.filter((s: Schedule) => s.target_session === orchestrator.session_id) : [];
-  const body = (
-    <div className="wakeups">
-      {mine.length === 0 && <div className="empty calm">{t("focus.wakeups.empty")}</div>}
-      {mine.map((s) => (
-        <div key={s.id} className={`wakeup-row ${s.enabled ? "" : "off"}`}>
-          <Icon name="clock" size={16} />
-          <div className="wakeup-main">
-            <div className="wakeup-name truncate">{s.name}</div>
-            <div className="wakeup-meta sub truncate">{describeSchedule(s)}{s.next_run_at ? ` · ${t("focus.wakeups.next", { when: relTime(s.next_run_at) })}` : ""}</div>
-            {s.prompt && <div className="wakeup-note sub">{s.prompt}</div>}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-  if (compact) return body;
-  return (
-    <>
-      <PageHeader title={t("focus.wakeups.title")} back={back ?? undefined} />
-      <div className="screen narrow">{body}</div>
-    </>
-  );
-}
+export { WakeupsPage } from "./wakeups";
 
 // ── the folders ──────────────────────────────────────────────────────────────────────────────
 
