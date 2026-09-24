@@ -6,9 +6,9 @@ import { useEffect, useState } from "react";
 
 export const BASE = "/app";
 
-export type Screen = "agents" | "voice" | "inbox" | "board" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings" | "project";
+export type Screen = "agents" | "voice" | "inbox" | "board" | "terminals" | "changes" | "schedules" | "services" | "memory" | "usage" | "health" | "settings" | "project";
 
-export const SCREENS: Screen[] = ["agents", "voice", "inbox", "board", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
+export const SCREENS: Screen[] = ["agents", "voice", "inbox", "board", "terminals", "changes", "schedules", "services", "memory", "usage", "health", "settings"];
 /** Screens reached from inside something else rather than from the navigation: a project's own pages. */
 const INNER: Screen[] = ["project"];
 
@@ -18,7 +18,7 @@ export type Route = {
   session: string | null;
   /** A second session beside the first (wide screens). */
   with: string | null;
-  /** The settings section, a board task, an inbox entry… */
+  /** The settings section, a board task, an inbox entry, the terminal shown full screen… */
   detail: string | null;
   /** The project a project screen is about: /app/project/<id>/<page>. */
   project: string | null;

@@ -92,6 +92,8 @@ class FakePtyd:
         self.fail: dict[str, tuple[int, str]] = {}
         """Method → the error its next call answers with, once."""
         self.machine: dict[str, Any] = {"mem_total_bytes": 16 << 30, "mem_available_bytes": 8 << 30, "cpus": 8, "cpu_percent": 10.0, "load1": 1.0, "load5": 1.0, "load15": 1.0}
+        # ptyd's own process, which holds every emulator: a real daemon reports it with each sample.
+        self.daemon: dict[str, Any] = {"pid": 1, "rss_bytes": 30 << 20, "cpu_percent": 0.5}
         self.rss: dict[str, int] = {}
         self.home = "/root"
         # Side channels: scripted programs, real files under the roots the host sets, echoing byte
@@ -383,7 +385,7 @@ class FakePtyd:
             return {"commands": list(self._term(params).commands or [])[-int(params.get("last") or 20):]}
         if method == "terminal.stats":
             running = [t for t in self.terminals.values() if t.status == "running"]
-            return {"at": stamp(), "supported": True, "machine": self.machine,
+            return {"at": stamp(), "supported": True, "machine": self.machine, "daemon": dict(self.daemon),
                     "terminals": [{"id": t.id, "pid": t.pid, "processes": 1, "rss_bytes": self.rss.get(t.id, 50 << 20), "cpu_percent": 2.0} for t in running]}
         side = self._side(method, params)
         if side is not None:

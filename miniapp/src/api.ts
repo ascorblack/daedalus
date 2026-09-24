@@ -205,11 +205,55 @@ export type TerminalView = {
   } | null;
   last_command?: { command: string; exit_code: number | null; at: string } | null;
   preview?: TerminalRun[][];
+  /** Who made it: "operator", or "agent:<actor>" for one an agent opened. */
+  created_by?: string;
   /** Filled by other parts of the app (a staff member's status, a pending permission); null otherwise. */
-  activity?: unknown;
+  activity?: TerminalActivity | null;
 };
 
+/** What another part of the app says a terminal is doing: a line for its card and, when something
+ *  waits on the operator, the button that answers it ("Answer" on a permission). Both are optional:
+ *  the Terminals screen falls back to its own status line and to Open. */
+export type TerminalActivity = { label?: string; level?: "ok" | "warn" | "bad"; action?: { label: string; path: string } };
+
 export type TerminalList = { envs: TerminalEnv[]; terminals: TerminalView[]; capacity?: { running: number; cap: number; queued: number } };
+
+/** One kind of terminal's average cost, as the host has measured it. `cpu_percent` is of one CPU. */
+export type TerminalCost = { rss_bytes: number; cpu_percent: number; samples: number };
+
+/** `GET /api/terminals/load`: what the running terminals cost now, and what the machine would carry
+ *  with the cap filled. The host writes no sentences here; the page composes them. */
+export type TerminalLoad = {
+  cap: number;
+  running: number;
+  queued: unknown[];
+  used: {
+    /** The terminals' process trees and the terminal daemon itself, which holds their emulators. */
+    rss_bytes: number;
+    daemon_rss_bytes?: number;
+    cpu_percent: number;
+    cpus?: number;
+    mem_total_bytes: number;
+    mem_available_bytes: number;
+    machine_cpu_percent: number;
+  };
+  profiles: Record<string, TerminalCost>;
+  /** What the next terminal is expected to cost, and what that guess rests on. */
+  likely: TerminalCost & { basis: "running" | "measured" | "default" };
+  projection: {
+    cap: number;
+    sessions: number;
+    terminals_rss_bytes: number;
+    machine_used_bytes: number;
+    mem_total_bytes: number;
+    mem_percent: number;
+    cpu_percent: number;
+    level: "ok" | "warn" | "bad";
+    cpu_level: "ok" | "warn" | "bad";
+  };
+  envs: { env: TerminalEnvName; terminals: number; rss_bytes: number; daemon_rss_bytes?: number; cpus: number }[];
+  thresholds: { warn: number; bad: number };
+};
 
 export type WebSearchConf = {
   backend: string;

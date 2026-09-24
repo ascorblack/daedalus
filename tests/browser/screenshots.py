@@ -853,8 +853,10 @@ PHONE = {"width": 390, "height": 844}
 # The handful of words these helpers click on, in the language the run is in. Everything else is
 # picked by class or by data, which no translation moves.
 WORDS = {
-    "en": {"steps": "8 steps", "panel": "Panel", "access": "Access", "actions": "Session actions", "details": "Details", "role": "Writes the delivery page"},
-    "ru": {"steps": "8 шагов", "panel": "Панель", "access": "Доступ", "actions": "Действия с сессией", "details": "Сведения", "role": "Пишет страницу доставки"},
+    "en": {"steps": "8 steps", "panel": "Panel", "access": "Access", "actions": "Session actions", "details": "Details", "role": "Writes the delivery page",
+           "permission": "waiting for permission · 1 min", "answer": "Answer", "checkout": "Checkout page"},
+    "ru": {"steps": "8 шагов", "panel": "Панель", "access": "Доступ", "actions": "Действия с сессией", "details": "Сведения", "role": "Пишет страницу доставки",
+           "permission": "ждёт разрешения · 1 мин", "answer": "Ответить", "checkout": "Оформление заказа"},
 }
 
 
@@ -942,7 +944,8 @@ def open_projects(page: Page) -> None:
 
 
 def open_hire(page: Page) -> None:
-    page.locator(".pagehead-actions .iconbtn").click()
+    # The primary one: the team header also carries a button to the project's board.
+    page.locator(".pagehead-actions .iconbtn.primary").click()
     page.wait_for_selector(".staff-sheet .executor")
     page.locator("#staff-name").fill("Mira")
     page.locator("#staff-role").fill(word("role"))
@@ -1251,6 +1254,69 @@ def dock_shots(context, prefix: str = "") -> None:  # type: ignore[no-untyped-de
     page.close()
 
 
+def terminals_fleet():  # type: ignore[no-untyped-def]
+    """The Terminals screen as the mock-up drew it: failing tests and a dev server in a conversation, two
+    staff members (one on the host, waiting for permission), htop nobody watches, and a psql that ended.
+    The rows are what the programs print, the same in both languages; the owners and the staff member's
+    status are the app's words, in the run's language."""
+    from terminal_stub import TerminalStub, run
+
+    term = TerminalStub(S1)
+    term.add("m1tests00000", title="bash · bakery-site", owner_kind="session", owner_label=word("checkout"), project_id=P1, created_at=ago(minutes=2),
+             preview=[[run(" ✗", 1), run(" promo code SPRING10")], [run("   Expected: "), run("1080", 2)], [run("   Received: "), run("1200", 1)],
+                      [run(" Tests: "), run("1 failed", 1), run(", "), run("2 passed", 2)], [run("bakery-site", 2), run(" $ ")]])
+    term.add("m2devsrv0000", title="npm run dev", owner_kind="session", owner_label=word("checkout"), project_id=P1, created_at=ago(minutes=38),
+             preview=[[run("14:02:11 ", 8), run("[vite]", 6), run(" hmr update /src/pages/checkout.tsx")], [run("14:02:19 ", 8), run("[vite]", 6), run(" hmr update /src/lib/cart.ts")],
+                      [run("14:03:40 ", 8), run("[vite]", 6), run(" page reload")], [run("14:05:02 ", 8), run("[vite]", 6), run(" hmr update /src/lib/cart.ts")]])
+    term.add("m3claude0000", title="Ira · Claude Code", owner_kind="staff", owner_id="st-ira", owner_label="Ira", project_id=P1, created_at=ago(minutes=64),
+             preview=[[run("⏺", 7), run(" Update(src/lib/cart.ts)")], [run("  ⎿ ", 8), run(" Updated with "), run("6 additions", 2)], [run("⏺", 7), run(" Bash(npm test -- checkout)")],
+                      [run("  ⎿ ", 8), run(" ✓ 3 passed", 2)], [run("✻ Thinking…", 3), run(" (esc to interrupt)", 8)]])
+    term.add("m4opencode00", title="Naya · OpenCode", env="host", owner_kind="staff", owner_id="st-naya", owner_label="Naya", project_id=P1, created_at=ago(minutes=12),
+             activity={"label": word("permission"), "level": "warn", "action": {"label": word("answer"), "path": "/app/inbox"}},
+             preview=[[run("△ Permission required", 3)], [run("  bash: "), run("npm install grammy", 7, b=True)], [run("  cwd ~/work/bakery-bot", 8)], [], [run(" Allow once ", inv=True), run("  Always  Reject")]])
+    term.add("m5htop000000", title="htop", env="host", owner_kind="free", owner_id="", cwd="~", clients=0, last_input_at=ago(hours=1), created_at=ago(hours=3),
+             preview=[[run("  1", 6), run("["), run("|||||||", 2), run("        34%]", 8)], [run("  2", 6), run("["), run("||||", 2), run("           18%]", 8)],
+                      [run("  Mem", 6), run("["), run("|||||||||", 2), run("||", 4), run("  9.1G/31G]", 8)], [run("  Load average: ", 8), run("3.12 2.80 2.41")]])
+    term.add("m6psql000000", title="psql · orders", owner_kind="project", owner_id=P1, owner_label="Bakery site", project_id=P1,
+             status="exited", exit_code=0, exited_at=ago(minutes=20), preview=[[run("orders=# \\q")], [run("[process exited · code 0]", 8)]])
+    return term
+
+
+def terminals_shots(context, prefix: str = "") -> None:  # type: ignore[no-untyped-def]
+    """The Terminals screen: cards by project with the load bar in the header (desktop), or its list (phone)."""
+    from terminal_stub import load_answer
+
+    term = terminals_fleet()
+    term.load = load_answer(total_gb=62, used_gb=21, terminals_gb=2.1, likely_mb=640)
+    page = context.new_page()
+    page.route("**/api/**", stub)
+    term.install(page)
+    page.goto(f"{BASE}/terminals?token=t&scheme=dark&lang={LANG}")
+    page.wait_for_selector(".term-card .term-card-line", timeout=15000)
+    page.wait_for_timeout(700)
+    page.screenshot(path=str(OUT / f"{prefix}terminals.png"))
+    print(f"wrote {prefix}terminals")
+    page.close()
+
+
+def run_terminals() -> int:
+    """Only the Terminals screen and the More sheet that leads to it on a phone (``ONLY=terminals``)."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        desk = browser.new_context(viewport=DESK, device_scale_factor=2, color_scheme="dark")
+        terminals_shots(desk)
+        desk.close()
+        phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
+        terminals_shots(phone, "phone-")
+        page = phone.new_page()
+        page.route("**/api/**", stub)
+        shot(page, "phone-more", "agents", before=open_more)
+        phone.close()
+        browser.close()
+    return UNHANDLED.report()
+
+
 def open_bell(page: Page) -> None:
     """The bell's popover over the agents: what needs you, with its buttons, and the day's feed."""
     page.locator(".sidebar .bell").click()
@@ -1310,6 +1376,7 @@ def run() -> int:
         shot(page, "dual", f"agents/{S1}?with={S2}", wait=".chat-scroll .timeline", settle=1500)
         shot(page, "session-share", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_share, settle=800)
         dock_shots(desk)
+        terminals_shots(desk)
         desk.add_init_script("try { localStorage.setItem('agents.groupBy', 'project'); } catch (e) {}")
         shot(page, "team", f"project/{P1}/team", wait=".staff-row")
         shot(page, "team-hire", f"project/{P1}/team", wait=".staff-row", before=open_hire, settle=700)
@@ -1349,6 +1416,7 @@ def run() -> int:
         shot(page, "phone-session", f"agents/{S1}", wait=".chat-scroll .timeline", settle=300)
         shot(page, "phone-session-panel", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_phone_panel, settle=600)
         dock_shots(phone, "phone-")
+        terminals_shots(phone, "phone-")
         shot(page, "phone-voice", "voice")
         shot(page, "phone-memory", "memory")
         shot(page, "phone-more", "agents", before=open_more)
@@ -1366,4 +1434,4 @@ if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
     only = os.environ.get("ONLY")
-    sys.exit(run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
+    sys.exit(run_terminals() if only == "terminals" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())

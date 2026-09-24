@@ -1,5 +1,5 @@
 import { Component, Suspense, lazy, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, SessionList, SessionSummary, telegram } from "./api";
+import { api, SessionList, SessionSummary, telegram, TerminalList } from "./api";
 import { StatusLabel } from "./components";
 import { ConfirmHost, Sheet, ToastHost, toast as showToast } from "./dialogs";
 import type { AuthConfig } from "./screens/Login";
@@ -63,6 +63,8 @@ const UsageScreen = lazy(screen(() => import("./screens/Usage").then((m) => ({ d
 const SettingsScreen = lazy(screen(() => import("./screens/Settings").then((m) => ({ default: m.SettingsScreen }))));
 const HealthScreen = lazy(screen(() => import("./screens/Settings").then((m) => ({ default: m.HealthScreen }))));
 const MemoryScreen = lazy(screen(() => import("./screens/Memory").then((m) => ({ default: m.MemoryScreen }))));
+const TerminalsScreen = lazy(screen(() => import("./screens/Terminals").then((m) => ({ default: m.TerminalsScreen }))));
+const TerminalFullScreen = lazy(screen(() => import("./screens/TerminalFull").then((m) => ({ default: m.TerminalFullScreen }))));
 const ServicesScreen = lazy(screen(() => import("./screens/Services").then((m) => ({ default: m.ServicesScreen }))));
 const LoginScreen = lazy(screen(() => import("./screens/Login").then((m) => ({ default: m.LoginScreen }))));
 const TeamPage = lazy(screen(() => import("./team/TeamPage").then((m) => ({ default: m.TeamPage }))));
@@ -324,6 +326,25 @@ export function App() {
   const closeSession = () => back(pathFor("agents"));
   const paletteItems = (): PaletteItem[] => {
     const sessions = peek<SessionList>("/api/sessions")?.sessions ?? [];
+    // The terminals as the last listing left them: the Terminals screen's (with previews) or the
+    // full view's. Nothing is fetched for the palette; a terminal opened a second ago may be missing.
+    const listing = peek<TerminalList>("/api/terminals?preview=6") ?? peek<TerminalList>("/api/terminals");
+    const termEnvs = listing?.envs ?? [];
+    const envUp = (name: string) => termEnvs.some((e) => e.env === name && e.available);
+    const lens = projectList.find((p) => p.id === project) ?? null;
+    const newTerminal = (env: "container" | "host") => async () => {
+      const { containerFolder, openFreeTerminal } = await import("./screens/Terminals");
+      const place = env === "container" ? containerFolder(lens, sessions) : null;
+      const home = termEnvs.find((e) => e.env === "host")?.home;
+      await openFreeTerminal(env, env === "container" ? place?.path : home || undefined, place?.projectId ?? null, showToast);
+    };
+    const terminalItems: PaletteItem[] = [
+      ...(listing?.terminals ?? []).filter((r) => r.status === "running").map((r) => ({ id: `t-${r.id}`, label: t("term.palette.open", { title: r.title }), hint: r.cwd, icon: "terminal" as const, run: () => navigate(pathFor("terminals", r.id)) })),
+      // Before the first listing nothing is known about the environments: offer the container one,
+      // which is the one an installation has; the host one only once it is known to answer.
+      ...(!listing || envUp("container") ? [{ id: "new-term-container", label: t("term.palette.container"), icon: "terminal" as const, run: () => void newTerminal("container")() }] : []),
+      ...(envUp("host") ? [{ id: "new-term-host", label: t("term.palette.host"), icon: "lock" as const, run: () => void newTerminal("host")() }] : []),
+    ];
     return [
       { id: "new-agent", label: t("shell.search.newagent"), icon: "plus", run: () => navigate(pathFor("agents", null, { new: "1" })) },
       { id: "projects", label: t("shell.projects"), hint: projectList.find((p) => p.id === project)?.name ?? t("shell.projects.all"), icon: "folder", run: () => setSwitching(true) },
@@ -332,6 +353,7 @@ export function App() {
       ...projectList.filter((p) => !p.system && !p.settings.ephemeral).map((p) => ({ id: `board-${p.id}`, label: t("shell.search.board", { name: p.name }), icon: "board" as const, run: () => navigate(projectPagePath(p.id, "board")) })),
       ...visibleScreens(SCREENS, selfdev).map((s) => ({ id: `go-${s}`, label: t("shell.search.goto", { name: screenTitle(s) }), icon: "back" as const, run: () => navigate(pathFor(s)) })),
       ...sessions.map((s) => ({ id: `s-${s.id}`, label: s.title, hint: s.model ?? "", icon: "bots" as const, run: () => open(s.id) })),
+      ...terminalItems,
     ];
   };
 
@@ -396,6 +418,8 @@ export function App() {
             <ProposalsScreen toast={showToast} selected={route.detail} />
           ))}
         {route.screen === "schedules" && <SchedulesScreen toast={showToast} onOpen={open} selected={route.detail} />}
+        {route.screen === "terminals" && !route.detail && <TerminalsScreen toast={showToast} project={project} projects={projectList} />}
+        {route.screen === "terminals" && route.detail && <TerminalFullScreen id={route.detail} beside={route.query.get("with")} toast={showToast} />}
         {route.screen === "services" && <ServicesScreen onOpen={open} toast={showToast} />}
         {route.screen === "memory" && <MemoryScreen toast={showToast} onOpen={open} />}
         {route.screen === "usage" && <UsageScreen onOpen={open} />}
@@ -415,6 +439,9 @@ export function App() {
   }
 
   const strip = sidebarCollapsed;
+  // A terminal full screen takes the column the way a conversation does: no scrolling page around it
+  // and, on a phone, no tab bar under it.
+  const terminalOpen = route.screen === "terminals" && !!route.detail;
   return (
     <div className="app" style={wide ? { ["--sidebar-w" as string]: `${strip ? 48 : sidebarWidth}px` } : undefined}>
       {wide && (
@@ -439,7 +466,7 @@ export function App() {
         />
       )}
       {wide && menu && <NavMenu screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMenu(false)} opener={menuButton.current} />}
-      <div ref={main} className={`main ${sessionId ? "chat-open" : ""}`}>
+      <div ref={main} className={`main ${sessionId || terminalOpen ? "chat-open" : ""}`}>
         <MaintenanceNotice />
         {offline && <div className="offline-strip" role="status">{t("app.offline")}</div>}
         <ChangeStrip caps={caps} />
@@ -448,7 +475,7 @@ export function App() {
       </div>
       {palette && <Palette items={paletteItems()} onClose={() => setPalette(false)} />}
       {switching && <ProjectSwitcher projects={projectList} current={project} onPick={pickProject} onClose={() => setSwitching(false)} toast={showToast} />}
-      {!wide && !sessionId && <TabBar screen={route.screen} counts={counts} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} />}
+      {!wide && !sessionId && !terminalOpen && <TabBar screen={route.screen} counts={counts} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} />}
       {more && <MoreSheet screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMore(false)} />}
       {picking && sessionId && <SessionPicker exclude={sessionId} onPick={(id) => { navigate(sessionPath(sessionId, id)); setPicking(false); }} onClose={() => setPicking(false)} />}
       <NotificationToasts />
