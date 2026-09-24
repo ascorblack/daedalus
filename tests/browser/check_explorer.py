@@ -7,10 +7,65 @@ from urllib.parse import urlsplit
 
 from api_stub import DEFAULT_APP, expect_app
 from playwright.sync_api import expect, sync_playwright
-from screenshots import S1, UNHANDLED, respond, stub
+from screenshots import S1, UNHANDLED, detail, respond, stub
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
+
+
+DOCS = {"id": "f-docs", "path": "/home/operator/work/bakery-docs", "label": "Docs", "env": "container", "readonly": True, "writable": False}
+HOME = {"id": "f-bakery", "path": "/home/operator/work/bakery", "label": "", "env": "container", "readonly": False, "writable": True}
+
+
+def folders(browser, width: int) -> None:  # type: ignore[no-untyped-def]
+    """A session whose project has two folders: the pane switches to the read-only one and back."""
+    phone = width < 600
+    context = browser.new_context(viewport={"width": width, "height": 844 if phone else 900}, is_mobile=phone, has_touch=phone)
+    page = context.new_page()
+    requests: list[str] = []
+
+    def route(r):  # type: ignore[no-untyped-def]
+        url = urlsplit(r.request.url)
+        requests.append(url.path + "?" + url.query)
+        if url.path == f"/api/sessions/{S1}":
+            return respond(r, detail(S1) | {"folder_id": HOME["id"], "folders": [HOME, DOCS]})
+        if url.path == f"/api/sessions/{S1}/folders/f-docs/files":
+            return respond(r, {"path": "", "kind": "dir", "entries": [{"name": "guide.md", "dir": False, "size": 42, "mtime": 0}]})
+        if url.path == f"/api/sessions/{S1}/folders/f-docs/download":
+            return respond(r, "# The guide\n\nHow the bakery site is put together.\n", content_type="text/markdown")
+        return stub(r)
+
+    page.route("**/api/**", route)
+    page.goto(f"{BASE}/agents/{S1}?token=t&lang=en&panel=files")
+    # On a phone the route opens the same pane as a full-height sheet.
+    switcher = page.get_by_role("combobox", name="Folder", exact=True)
+    expect(switcher).to_be_visible()
+    tree = page.locator(".explorer-tree")
+    expect(tree.locator('[data-path="src"]')).to_be_visible()
+    expect(page.get_by_role("button", name="upload", exact=True)).to_be_visible()
+    switcher.select_option("f-docs")
+    expect(tree.locator('[data-path="guide.md"]')).to_be_visible()
+    expect(tree.locator('[data-path="src"]')).to_have_count(0)
+    assert any(r.startswith(f"/api/sessions/{S1}/folders/f-docs/files") for r in requests), requests
+    lock = page.locator(".explorer-folders .chip", has_text="read-only")
+    expect(lock).to_be_visible()
+    expect(lock.locator("svg")).to_have_count(1)
+    expect(page.locator(".explorer-folders .chip", has_text="container")).to_be_visible()
+    # A folder the session may not write offers no upload.
+    expect(page.get_by_role("button", name="upload", exact=True)).to_have_count(0)
+    expect(page.locator(".explorer-crumbs .crumb").first).to_have_text("Docs")
+    tree.locator('[data-path="guide.md"]').click()
+    expect(page.locator(".preview-doc")).to_contain_text("How the bakery site is put together")
+    assert any(r.startswith(f"/api/sessions/{S1}/folders/f-docs/download") for r in requests), requests
+    overflow = page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
+    assert overflow <= 0, f"the page scrolls sideways by {overflow}px at {width}px"
+    page.locator('[data-tab="files"]').click()
+    switcher = page.get_by_role("combobox", name="Folder", exact=True)
+    switcher.select_option("f-bakery")
+    expect(tree.locator('[data-path="src"]')).to_be_visible()
+    expect(page.locator(".explorer-folders .chip", has_text="read-only")).to_have_count(0)
+    print(f"{width}px: the pane switched to the read-only folder, read and previewed it, offered no upload, and switched back")
+    context.close()
 
 
 def run() -> int:
@@ -159,6 +214,8 @@ def run() -> int:
         assert abs(page.locator(".panel-files").evaluate("e => e.getBoundingClientRect().width") - after) < 2
         print(f"tree width: {before} → {after}, restored after reload")
         context.close()
+        for width in (1440, 390):
+            folders(browser, width)
         browser.close()
     return UNHANDLED.report()
 

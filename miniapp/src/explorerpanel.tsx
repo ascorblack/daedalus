@@ -2,10 +2,11 @@
 // is the only thing that reads its children; searching never recursively downloads the workspace.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, ApiError } from "./api";
+import { api, ApiError, SessionFolder } from "./api";
 import { copyText } from "./components";
 import { OverflowMenu } from "./dialogs";
 import { fileIcon } from "./artifact";
+import { folderBase, folderName } from "./folders";
 import { Icon } from "./icons";
 import { PreviewSource, downloadHref } from "./preview";
 import { errorText, fmtBytes } from "./ui";
@@ -14,7 +15,17 @@ import { Entry, GrepHit, NameHit, Row, SearchMode, Tree, ancestorsOf, emptyTree,
 
 import { FileSkeleton } from "./feedback";
 
-export function Explorer({ base, root, uploadUrl, onPreview, toast, refresh = 0, written = [] }: { base: string; root?: string; uploadUrl?: string; onPreview: (src: PreviewSource) => void; toast?: (text: string) => void; refresh?: number; written?: string[] }) {
+/**
+ * A folder's files. `base` is the session's own address; with more than one entry in `folders` the
+ * pane offers a switch between them, and `home` is the one `base` already means.
+ */
+export function Explorer({ base: sessionBase, root, upload: canUpload = false, folders = [], home = "", onPreview, toast, refresh = 0, written = [] }: { base: string; root?: string; upload?: boolean; folders?: SessionFolder[]; home?: string; onPreview: (src: PreviewSource) => void; toast?: (text: string) => void; refresh?: number; written?: string[] }) {
+  const [folder, setFolder] = useState(home);
+  const shown = folders.find((f) => f.id === folder);
+  const base = folderBase(sessionBase, folder, home);
+  const athome = !folder || folder === home;
+  // The pane writes only where the agent could: a folder the session may not write offers no upload.
+  const uploadUrl = canUpload && (shown ? shown.writable : athome) ? `${base}/files/upload` : undefined;
   const [tree, setTree] = useState<Tree>(emptyTree);
   const current = useRef(tree);
   current.current = tree;
@@ -144,12 +155,19 @@ export function Explorer({ base, root, uploadUrl, onPreview, toast, refresh = 0,
   }
   return (
     <div className="files explorer">
+      {folders.length > 1 && <div className="explorer-folders">
+        <select className="field" aria-label={t("explorer.folder")} value={folder || home} onChange={(e) => { setFolder(e.target.value); setQuery(""); setSelected(""); }}>
+          {folders.map((f) => <option key={f.id} value={f.id}>{folderName(f)}</option>)}
+        </select>
+        {shown && <span className="chip" title={shown.path}>{t(shown.env === "host" ? "explorer.env.host" : "explorer.env.container")}</span>}
+        {shown && !shown.writable && <span className="chip" title={t("explorer.folder.readonly.title")}><Icon name="lock" size={14} />{t("project.readonly.short")}</span>}
+      </div>}
       <div className="explorer-search">
         <input className="field" type="search" aria-label={t("explorer.search")} placeholder={t("explorer.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
         <select className="field" aria-label={t("explorer.mode")} value={mode} onChange={(e) => setMode(e.target.value as SearchMode)}><option value="name">{t("explorer.names")}</option><option value="content">{t("explorer.contents")}</option></select>
       </div>
       <div className="crumbs explorer-crumbs">
-        <button className="crumb" onClick={() => { setQuery(""); setSelected(""); list.current?.scrollTo(0, 0); }}>{root || t("session.files.crumb")}</button>
+        <button className="crumb" onClick={() => { setQuery(""); setSelected(""); list.current?.scrollTo(0, 0); }}>{(!athome && shown ? folderName(shown) : root) || t("session.files.crumb")}</button>
         {crumbs.map((c, i) => <span key={i}> › <button className="crumb" onClick={() => void reveal(crumbs.slice(0, i + 1).join("/"))}>{c}</button></span>)}
       </div>
       <div className="explorer-tools">
@@ -166,7 +184,7 @@ export function Explorer({ base, root, uploadUrl, onPreview, toast, refresh = 0,
           <span className="tree-chevron" aria-hidden>{row.dir ? row.loading ? "…" : row.open ? "⌄" : "›" : ""}</span>
           <Icon name={row.dir ? "folder" : fileIcon(row.name)} size={16} />
           <span className="grow truncate"><span className="title">{row.name}{row.line ? `:${row.line}` : ""}</span>{row.snippet !== undefined && <span className="grep-snippet">{row.snippet}</span>}</span>
-          {written.includes(row.path) && <span className="written-badge" title={t("explorer.written")} aria-label={t("explorer.written")}>●</span>}
+          {athome && written.includes(row.path) && <span className="written-badge" title={t("explorer.written")} aria-label={t("explorer.written")}>●</span>}
           {!row.dir && <span className="file-size">{fmtBytes(row.size)}</span>}
           <span className="explorer-actions"><OverflowMenu small items={row.dir ? [{ label: t("panel.tab.files"), icon: "folder", onSelect: () => open(row) }, { label: t("explorer.copy"), icon: "copy", onSelect: () => void copyText(row.path).then((ok) => toast?.(t(ok ? "common.copied" : "svc.copyfail"))) }] : [
             { label: t("preview.open"), icon: "eye", onSelect: () => open(row) },
