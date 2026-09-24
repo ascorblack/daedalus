@@ -308,8 +308,8 @@ func TestDenyPatterns(t *testing.T) {
 	}
 	for p, want := range map[string]bool{
 		"/root/.claude/.credentials.json":                true,
-		"/home/u/.ssh":                                   true,
-		"/home/u/.ssh/config":                            true,
+		"/home/someone/.ssh":                             true,
+		"/home/someone/.ssh/config":                      true,
 		"/srv/p/.git-credentials":                        true,
 		"/root/.local/share/opencode/auth.json":          true,
 		"/root/.local/share/opencode/storage/x.json":     false,

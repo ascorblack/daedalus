@@ -93,14 +93,14 @@ async def test_roots_follow_the_project_folders_and_the_adapters(service: Termin
     (folder / "notes.md").write_text("hello")
     await db.execute("INSERT INTO projects(id, name, created_at) VALUES ('p1', 'Site', '2026-09-24T00:00:00Z')")
     await db.execute("INSERT INTO project_folders(id, project_id, path, env, created_at) VALUES ('f1', 'p1', ?, 'container', '2026-09-24T00:00:00Z')", (str(folder),))
-    await db.execute("INSERT INTO project_folders(id, project_id, path, env, created_at) VALUES ('f2', 'p1', '/home/op/elsewhere', 'host', '2026-09-24T00:00:00Z')")
+    await db.execute("INSERT INTO project_folders(id, project_id, path, env, created_at) VALUES ('f2', 'p1', '/home/someone/elsewhere', 'host', '2026-09-24T00:00:00Z')")
 
     async def has(root: str) -> bool:
         return root in daemon.roots
 
     # Within a housekeeping tick of the folder appearing; only the container's own folders.
     await eventually(lambda: has(str(folder)))
-    assert "/home/op/elsewhere" not in daemon.roots
+    assert "/home/someone/elsewhere" not in daemon.roots
     transcripts = tmp_path / "transcripts"
     transcripts.mkdir()
     service.set_extra_roots("container", "claude", [str(transcripts)])
