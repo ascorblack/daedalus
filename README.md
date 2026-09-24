@@ -234,7 +234,7 @@ What follows the mode: the `Self*` tools (absent in `off`, `SelfWorkspace` and `
 | Seeing | `ImageView` — a separate vision model answers questions about an image, so the main context never carries pixels |
 | Delegation | `SubAgent`, `SubAgentSend`, `SubAgentList`, `SpawnAgent`, `AskPeer` — helpers in the same workspace (a report wakes the leader when it is ready; an idle helper can be raised without a task; `tools_off` takes tools away from a helper, so a launch it must not make is impossible rather than discouraged), sibling sessions, named peers |
 | Time | `ScheduleCreate`, `LoopNext`, `IntentCreate` — cron, self-paced loops, standing intents on inbound events |
-| Hosting | `ServiceStart` / `ServiceStop` / `ServiceLogs` — processes that outlive the turn, on ports you can reach and share |
+| Hosting | `ServiceStart` / `ServiceStop` / `ServiceLogs` — processes that outlive the turn, on ports you can reach and share; `TerminalRead` — the screen, output and commands of the session's own terminals, read-only |
 | Memory | `Remember`, `Recall`, `Forget`, `HistorySearch`, `HistoryExpand` |
 | Quality | `Verify` — a check with a criterion, recorded as a receipt; `LearningReport` |
 | Self | `SelfWorkspace` plus either `SelfApply` (local: commit into the running checkout, restart to apply) or `SelfPropose`, `SelfRebuild`, `SelfRollback` (server: pull request, rebuild, roll back) — registered according to `[self_change] mode`; on an installation that does not change its own code there are none |
@@ -585,6 +585,17 @@ project as it is now, which `GET /api/projects/{id}/state` shows as it sees it. 
 pause it: they are requests you answer like a staff member's, and the answer wakes it. Its model is
 the project's own choice, else the default for project orchestrators in Settings → Models, else the
 strongest preset; the model chip in its chat changes the project's choice.
+
+Push reaches a phone or a browser with the app closed once the app is served from a public https
+address (`MINIAPP_PUBLIC_URL`). Turn it on per device in Settings → Notifications; inside Telegram the
+bot is the push instead, and an iPhone or iPad gets it only for the app added to the Home Screen.
+The host signs and encrypts every message itself (VAPID keys made once and kept in the database).
+`GET /api/push/config` gives the key a browser subscribes with, `POST /api/push/subscriptions` takes
+what `PushSubscription.toJSON()` returns plus a `device` name, `GET` lists the devices and
+`DELETE /api/push/subscriptions/{id}` removes one; a device that fails for a week is dropped. A
+permission request or a short question carries Allow/Deny (or its options) on the notification where
+the platform shows buttons; a host-level permission never does and is answered in the app. When a
+pushed request is answered anywhere else, the other devices are told to close it.
 
 ## Layout
 

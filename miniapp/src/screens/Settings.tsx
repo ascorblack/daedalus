@@ -21,6 +21,7 @@ import { t } from "../i18n";
 import { LangPicker } from "../components";
 import { useQuery } from "../store";
 import { Capabilities, componentsNeedAttention } from "../capabilities";
+import { PushCard } from "../pushui";
 
 const DEFAULT_KINDS = ["deepseek", "openrouter", "opencode", "vllm", "llamacpp", "openai_compat"];
 /** Self-hosted endpoints: temperature is a sampling pin, not a vendor default. */
@@ -937,7 +938,7 @@ function SecurityTab({ toast }: { toast: (t: string) => void }) {
   );
 }
 
-type Section = "models" | "rules" | "limits" | "tools" | "voice" | "components" | "dependencies" | "chat" | "security" | "heartbeat" | "about";
+type Section = "models" | "rules" | "limits" | "tools" | "voice" | "components" | "dependencies" | "chat" | "notifications" | "security" | "heartbeat" | "about";
 /** The sections, in the order they are listed; the words come from the table, not from here. */
 const SECTIONS: { id: Section; icon: IconName }[] = [
   { id: "models", icon: "model" },
@@ -948,6 +949,7 @@ const SECTIONS: { id: Section; icon: IconName }[] = [
   { id: "components", icon: "plug" },
   { id: "dependencies", icon: "wrench" },
   { id: "chat", icon: "inbox" },
+  { id: "notifications", icon: "inbox" },
   { id: "security", icon: "key" },
   { id: "heartbeat", icon: "loop" },
   { id: "about", icon: "settings" },
@@ -1246,6 +1248,8 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
             </div>
           </div>
         );
+      case "notifications":
+        return <PushCard toast={toast} />;
       case "security":
         return <SecurityTab toast={toast} />;
       case "heartbeat":

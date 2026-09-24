@@ -29,6 +29,7 @@ import {
 } from "./composer";
 import { fmtInt } from "./components";
 import { t } from "./i18n";
+import { insideTerminal } from "./terminal/keys";
 
 export type Answer = { question: string; selected: string[]; custom: string | null };
 
@@ -263,6 +264,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const approval = props.approval ?? null;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Ctrl+M is Enter in a terminal and Ctrl+Shift+S nothing the composer should hear.
+      if (insideTerminal(e.target)) return;
       const target = e.target as HTMLElement | null;
       const typing = !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
       if (typing && target === textarea.current) return;

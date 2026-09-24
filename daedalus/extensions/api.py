@@ -58,6 +58,7 @@ from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
 from daedalus.extensions.notifications import ActionConflict, ActionRefused, Draft, NotificationService
+from daedalus.extensions.push import PushRefused, PushService
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import model_options, tts_configured
 from daedalus.host import capabilities, component_install, launcher_bridge
@@ -466,11 +467,41 @@ class NotificationsSeenBody(BaseModel):
 
 
 class NotificationActBody(BaseModel):
-    """One of a notification's actions: ``allow``, ``deny``, ``answer:<i>``, ``open``, or ``answer`` with the words."""
+    """One of a notification's actions: ``allow``, ``deny``, ``answer:<i>``, ``open``, or ``answer`` with the words.
+
+    From a lock screen the service worker has no sign-in of its own; it sends the ``token`` that came
+    inside the pushed message instead, and names its own subscription ``endpoint`` so the
+    withdrawal that follows the answer skips the device that gave it.
+    """
 
     action: str = Field(min_length=1, max_length=64)
     value: str | None = Field(default=None, max_length=4000)
+    via: Literal["notification", "push"] = "notification"
+    token: str | None = Field(default=None, max_length=200)
+    endpoint: str | None = Field(default=None, max_length=1024)
     model_config = {"extra": "forbid"}
+
+
+class PushKeysBody(BaseModel):
+    p256dh: str = Field(min_length=1, max_length=200)
+    auth: str = Field(min_length=1, max_length=100)
+    model_config = {"extra": "ignore"}
+
+
+class PushSubscriptionBody(BaseModel):
+    """What ``PushSubscription.toJSON()`` gives, plus a name for the device. Unknown keys (``expirationTime``) are ignored."""
+
+    endpoint: str = Field(min_length=1, max_length=1024)
+    keys: PushKeysBody
+    device: str = Field(default="", max_length=80)
+    model_config = {"extra": "ignore"}
+
+
+class PushRenewBody(PushSubscriptionBody):
+    """A subscription the browser replaced by itself; the old one's secret proves who is asking."""
+
+    old_endpoint: str = Field(min_length=1, max_length=1024)
+    old_auth: str = Field(min_length=1, max_length=100)
 
 
 class NotificationPreferencesBody(BaseModel):
@@ -4643,11 +4674,35 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such notification")
         return {"deleted": entry_id, "summary": await service.summary()}
 
+    def installed_push() -> PushService | None:
+        push = app.extensions.get("push")
+        return push if isinstance(push, PushService) else None
+
+    def push_service() -> PushService:
+        push = installed_push()
+        if push is None:
+            raise HTTPException(503, "push is not installed")
+        return push
+
     @api.post("/api/notifications/{entry_id}/act")
-    async def notifications_act(entry_id: int, body: NotificationActBody, _: dict[str, Any] = Depends(auth)) -> Any:
+    async def notifications_act(entry_id: int, body: NotificationActBody, request: Request) -> Any:
         service = notifications_service()
+        # Signed in, any action the entry offers. Otherwise only a pushed message's token, and with
+        # it only the actions marked quick: what a lock screen may do, and a host-level permission
+        # is never among them.
+        quick_only = False
         try:
-            resolution, view = await service.act(entry_id, body.action, body.value, via="notification")
+            await auth(request)
+        except HTTPException as exc:
+            push = installed_push()
+            if exc.status_code != 401 or not body.token or push is None or not await push.verify_token(entry_id, body.token):
+                raise
+            quick_only = True
+        push = installed_push()
+        if body.via == "push" and push is not None:
+            push.note_actor(entry_id, body.endpoint)
+        try:
+            resolution, view = await service.act(entry_id, body.action, body.value, via=body.via, quick_only=quick_only)
         except LookupError as exc:
             raise HTTPException(404, "no such notification") from exc
         except ActionRefused as exc:
@@ -4685,6 +4740,47 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/notifications/test")
     async def notifications_test(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         return {"delivered": await notifications_service().test()}
+
+    # -- web push -----------------------------------------------------------------------
+
+    @api.get("/api/push/config")
+    async def push_config(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Whether this address can take push subscriptions, and the key a browser subscribes with."""
+        return await push_service().config()
+
+    @api.get("/api/push/subscriptions")
+    async def push_subscriptions(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return {"subscriptions": await push_service().devices()}
+
+    @api.post("/api/push/subscriptions")
+    async def push_subscribe(body: PushSubscriptionBody, request: Request, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        push = push_service()
+        if push.reason():
+            raise HTTPException(409, push.reason())
+        try:
+            view = await push.subscribe(body.endpoint, body.keys.p256dh, body.keys.auth, device=body.device, user_agent=request.headers.get("user-agent", ""))
+        except PushRefused as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"subscription": view}
+
+    @api.post("/api/push/subscriptions/renew")
+    async def push_renew(body: PushRenewBody) -> dict[str, Any]:
+        """Unauthenticated on purpose: the service worker renewing a subscription has no sign-in, and
+        the old subscription's secret is the proof. It can only replace a device, never add one."""
+        push = push_service()
+        try:
+            view = await push.renew(body.old_endpoint, body.old_auth, body.endpoint, body.keys.p256dh, body.keys.auth)
+        except PermissionError as exc:
+            raise HTTPException(403, "no such subscription") from exc
+        except PushRefused as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"subscription": {"id": view["id"]}}
+
+    @api.delete("/api/push/subscriptions/{subscription_id}")
+    async def push_unsubscribe(subscription_id: int, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        if not await push_service().remove(subscription_id):
+            raise HTTPException(404, "no such subscription")
+        return {"deleted": subscription_id}
 
     # -- heartbeat ------------------------------------------------------------------------
 

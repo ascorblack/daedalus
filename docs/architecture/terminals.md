@@ -538,6 +538,47 @@ or whose `launch_id` differs, is `1001`. The event's `body` is the post's JSON, 
 URL and token from its environment and prints a successful reply's body. It exits 0 on 2xx, 2 on
 401 or 410, and 1 on anything else, including no listener.
 
+`ptyd hook <source> [--wait-ms N]` is the same post for a CLI's **command hook**, and it always exits
+0: a wrong token, an ended launch, no listener or a bad argument are said on stderr, and stdout stays
+empty. Claude Code reads exit 2 from a command hook as a refusal and feeds stderr to the model, so a
+failing bridge would otherwise stop the work it only observes. It gives up ten seconds past its hold.
+
+### The team tools: `ptyd team-mcp`
+
+A Model Context Protocol server on stdio (one JSON object per line) that a CLI starts from its
+per-launch MCP entry, `{"command": "$DAEDALUS_PTYD_BIN", "args": ["team-mcp"]}`, under the server
+name `daedalus_team`. It answers `initialize` (echoing a revision it knows — 2024-11-05, 2025-03-26,
+2025-06-18, 2025-11-25 — and the newest for any other, logged on stderr), `ping`, `tools/list`,
+`tools/call` and `notifications/cancelled`; calls run concurrently (at most 16), and a cancelled
+call is not answered and releases its held post. Its two tools carry the names and arguments a
+Daedalus staff member has:
+
+- `Report {kind: checkpoint|needs_input|stuck|done, note, artifacts?[], remember?}`
+- `AskOrchestrator {question, options?[], context?}`
+
+Arguments are checked before anything is posted; a wrong one is a tool result marked as an error.
+The call is posted to the launch's hook listener as `team` with the body `{"tool": "report"|"ask",
+…the arguments}` (optional strings left out when empty, lists always present), held for the host's
+reply: `DAEDALUS_REPORT_HOLD_MS` (default 15 s) for a report, `DAEDALUS_ASK_HOLD_MS` (default 5 min)
+for a question, both capped by the launch's `hold_max_ms`. The host answers with `hooks.reply`:
+
+| Reply body | Tool result |
+|---|---|
+| `{"text": "…"}` | the text |
+| `{"text": "…", "error": true}` | the text, marked as an error (a report refused: "commit first") |
+| a JSON string, or plain text | that text |
+| none in time (204) | a report: `recorded` (it was published when posted); a question: "No answer yet. Continue with what the brief allows, or call Report with kind needs_input and stop." |
+
+401 or 410 tells the worker its session is no longer connected to its team. When the launch
+environment names `DAEDALUS_TEAM_URL` and `DAEDALUS_TEAM_TOKEN`, the calls go instead to
+`<DAEDALUS_TEAM_URL>/report|ask` with `X-Daedalus-Team-Token`, the host's own team route; that
+reaches the host only where the CLI can reach its port, which a CLI in the `terminals` container
+cannot.
+
+The server inherits its environment from the CLI. A CLI that gives its MCP servers a filtered
+environment (Codex) must be told to pass `DAEDALUS_HOOK_URL`, `DAEDALUS_HOOK_TOKEN` and the two
+holds through.
+
 ### `net.dial`
 
 `{target, launch_id}` → `{channel}`: a byte stream on its own channel. `unix:<name>` is a socket in
@@ -572,6 +613,28 @@ because the token in them is a shell.
   attach and detach of a host terminal. What a person types is never recorded, only how much.
 - **Load.** The daemons' `terminal.stats` events feed a rolling average cost per profile; `GET
   /api/terminals/load?cap=N` reports what runs now and the machine with the cap filled.
+- **The event bus.** Every terminal event on the bus carries `terminal_id`, `project_id`, and
+  `session_id` or `staff_id` from the owner. The host publishes `terminal.created` and
+  `terminal.exited` itself (`lost: true` when the daemon went with it), and retells the daemon's
+  (`daedalus/terminals/bus.py`) in the bus registry's shapes:
+
+  | Bus type | From the daemon's | Payload |
+  |---|---|---|
+  | `terminal.title` | `terminal.title`, only when the title changed | `{title}`, at most 500 characters |
+  | `terminal.cwd` | `terminal.cwd`, only when the directory changed | `{cwd}` |
+  | `terminal.command` | `terminal.command` | `{exit_code, command?, mark_seq?, duration_ms?}`; the command line at most 2000 characters |
+  | `terminal.bell` | `terminal.bell` | `{}` |
+  | `terminal.notify` | `terminal.notify` | `{title, body}`; OSC 9 has one text, which becomes the title |
+  | `terminal.progress` | `terminal.progress` | `{state: remove\|set\|error\|indeterminate\|pause, percent?}`; live only, never stored |
+
+  `terminal.mode`, `terminal.stats` and the harnesses' hook posts never reach the bus: they are
+  control traffic, and every subscriber would wake for them. A bell or a progress value more than
+  30 s old is dropped, because the host replays the daemon's events from its saved cursor after a
+  restart and an old bell would ring now for nothing.
+- **The agent's read.** A session's own agent reads its terminals with the `TerminalRead` tool:
+  the list, the screen, the recent output and the commands, never a write. It sees only terminals
+  its session owns, and host terminals only when `terminals.agent_reads_host` is on (it is off by
+  default). What it reads passes the redactor first and is bounded like every tool result.
 - **Side channels** (`daedalus/terminals/sidechannels.py`, methods of the same service): the file
   roots of each environment are its project folders plus the directories adapters name
   (`set_extra_roots`), sent on every connection and whenever they change. `hook_events(launch_id)`
