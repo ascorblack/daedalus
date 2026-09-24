@@ -585,7 +585,7 @@ def _under(path: str, roots: Iterable[str]) -> bool:
 class Policy:
     """The rule set: built-ins plus the operator's, evaluated per call."""
 
-    def __init__(self, *, protected_paths: Iterable[Path] = (), egress_allow: Iterable[str] = (), rules: Iterable[Rule] = (), workspace_roots: Iterable[Path] = (), operator_checkouts: Iterable[Path] = (), selfdev_mode: str = "server", native: bool = False, home_dir: Path | str = "", project_roots: Iterable[Path] = (), worktrees_root: Path | str = "", sealed_paths: Iterable[Path] = (), sealed_ports: Iterable[int] = (), base_dir: Path | str = "") -> None:
+    def __init__(self, *, protected_paths: Iterable[Path] = (), egress_allow: Iterable[str] = (), rules: Iterable[Rule] = (), workspace_roots: Iterable[Path] = (), operator_checkouts: Iterable[Path] = (), selfdev_mode: str = "server", native: bool = False, home_dir: Path | str = "", project_roots: Iterable[Path] = (), worktrees_root: Path | str = "", sealed_paths: Iterable[Path] = (), sealed_everywhere: Iterable[Path] = (), sealed_ports: Iterable[int] = (), base_dir: Path | str = "") -> None:
         self.protected = [str(p) for p in protected_paths]
         self.egress_allow = [e for e in egress_allow if e.strip()]
         # The installation's own doors on the loopback interface: the app's API and the launcher's
@@ -604,6 +604,10 @@ class Policy:
         agent makes to its own code are written there, and a home-folder question asked of every file
         of them would be a question about the agent's work rather than about the operator's."""
         self.sealed = [str(p) for p in sealed_paths]
+        self.sealed_everywhere = [str(p) for p in sealed_everywhere]
+        """The part of the sealed set a command may not name in a container either: the terminal
+        daemons' run directories, whose token is a shell on the machine — the host one outside the
+        container altogether. Everything else sealed is behind the container wall already."""
         self.base_dir = str(base_dir) if base_dir else ""
         """Where a relative path is resolved from when the call does not say: the session's own
         workspace, which is where the file tools resolve theirs and where Exec runs by default."""
@@ -663,7 +667,7 @@ class Policy:
 
         if (host := self._host_paths([cwd] if cwd else [])) is not None:
             escalate(host.action, host.reason, host.rule)
-        if self.native and (named := mentions_sealed(command, self.sealed)) is not None:
+        if (named := mentions_sealed(command, self.sealed if self.native else self.sealed_everywhere)) is not None:
             escalate(DENY, f"{named}: {INSTALLATION_REASON}", "host.installation")
         if re.search(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}", command):
             escalate(DENY, "a fork bomb", "shell.forkbomb")

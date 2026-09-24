@@ -87,6 +87,8 @@ from daedalus.stores.media import MEDIA_TENANT
 from daedalus.stores.projects import Project, ProjectError, ProjectSettings
 from daedalus.stores.sqlite import ReceiptConflict
 from daedalus.stores.staff import ACTIVE_STATUSES, HARNESSES, Staff, StaffBusy, StaffError
+from daedalus.terminals.model import Owner as TerminalOwner
+from daedalus.terminals.model import TerminalError, TerminalSpec
 from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
@@ -100,6 +102,7 @@ from daedalus.transport.telegram.voice import (
 if TYPE_CHECKING:
     from daedalus.app import Application
     from daedalus.config import RuntimeConfig
+    from daedalus.terminals.service import Terminals
 
 logger = logging.getLogger(__name__)
 
@@ -953,6 +956,37 @@ def _tool_group(name: str) -> str:
     return "Other"
 
 
+class TerminalCreateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    env: Literal["container", "host"]
+    owner_kind: Literal["session", "staff", "project", "free"]
+    owner_id: str | None = Field(default=None, max_length=128)
+    project_id: str | None = Field(default=None, max_length=128)
+    cwd: str | None = Field(default=None, max_length=4096)
+    title: str = Field(default="", max_length=200)
+    sandbox: bool = False
+    cols: int = Field(default=80, ge=20, le=500)
+    rows: int = Field(default=24, ge=4, le=300)
+    confirm: bool = False
+    """The operator's yes to "the machine already runs as many terminals as the cap allows"."""
+
+
+class TerminalPatchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = Field(default=None, max_length=200)
+    owner_kind: Literal["session", "staff", "project", "free"] | None = None
+    owner_id: str | None = Field(default=None, max_length=128)
+
+
+class TerminalSignalBody(BaseModel):
+    signal: Literal["INT", "TERM", "HUP", "KILL", "QUIT", "TSTP", "CONT", "WINCH", "USR1", "USR2"]
+
+
+class TerminalRestartBody(BaseModel):
+    sandbox: bool | None = None
+    confirm: bool = False
+
+
 def build_app(app: Application, api_token: str) -> FastAPI:
     dependency_planner = DependencyPlanner(app)
     prompt_change_planner = PromptChangePlanner(app)
@@ -970,6 +1004,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     # difference the operator feels. The event stream is excluded by content type, so a token
     # still leaves the process the moment it arrives.
     api.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_BYTES)
+
+    @api.exception_handler(TerminalError)
+    async def terminal_refusal(_: Request, exc: TerminalError) -> JSONResponse:
+        # ``detail`` stays the sentence the app already shows for any refusal; ``code`` and the
+        # details beside it are what a screen that acts on the refusal reads (the cap's confirmation).
+        return JSONResponse({"detail": exc.message, "code": exc.code, **exc.details}, status_code=exc.status)
+
     manager = app.manager
     assert manager is not None
     settings = app.settings
@@ -1263,6 +1304,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if sessions:
             one = len(sessions) == 1
             raise HTTPException(409, f"{len(sessions)} agent{'' if one else 's'} {'works' if one else 'work'} in {project.name}; move or remove {'it' if one else 'them'} first")
+        # What the project itself holds (its terminals) ends before the row goes, so nothing is left
+        # running for an owner that no longer exists.
+        for hook in manager.project_delete_hooks:
+            try:
+                await hook(project_id)
+            except Exception:  # noqa: BLE001 — a hook that fails must not keep the project
+                logger.exception("project delete hook failed for %s", project_id)
         try:
             await manager.projects.delete(project_id)
         except ProjectError as exc:
@@ -1491,6 +1539,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         default = app.config.default_preset()
         default_label = default[1].display(default[0]) if default else NO_MODEL_LABEL
         overrides_by_id = await manager.live.load_models([row["id"] for row in rows])
+        terminals = app.extensions.get("terminals")
+        running_terminals = await terminals.running_by_session([row["id"] for row in rows]) if terminals is not None else {}  # type: ignore[attr-defined]
         for row in rows:
             # The directory the session works in, for the tooltip on its row and the chip that says
             # it has one of its own. The list groups by project now, not by workspace.
@@ -1502,6 +1552,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             nothing about which folder it is, and the list no longer groups by it."""
             row["workspace_own"] = bool(row["metadata"].get("directory"))
             row["project"] = names[row["project_id"]]
+            row["terminals"] = running_terminals.get(row["id"], 0)
             overrides = overrides_by_id.get(row["id"], {})
             if overrides.get("preset") and overrides["preset"] in app.config.presets:
                 row["model"] = app.config.presets[overrides["preset"]].display(overrides["preset"])
@@ -2968,7 +3019,11 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             # Before the deletion: the topic to close and the private chat's pointer are both
             # read from rows that go with the session.
             await app.front.forget_session(session_id)
-        return {"deleted": await manager.delete_session(session_id, delete_workspace=not keep_workspace)}
+        # Ended here rather than only by the delete hook, so the answer can say how many — the
+        # dialog that asked has already told the operator the number.
+        terminals = app.extensions.get("terminals")
+        ended = await terminals.close_owned("session", session_id, actor="operator") if terminals is not None else 0  # type: ignore[attr-defined]
+        return {"deleted": await manager.delete_session(session_id, delete_workspace=not keep_workspace), "terminals_ended": ended}
 
     @api.delete("/api/sessions/{session_id}/telegram")
     async def detach_session_telegram(session_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -3108,6 +3163,94 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             desc = " ".join((t.definition.description or "").split())
             out.append({"name": t.name, "description": desc[:160], "group": _tool_group(t.name)})
         return out
+
+    # -- terminals: the terminal daemons' terminals, as the service mirrors them --------------
+
+    def terminal_service() -> Terminals:
+        service = app.extensions.get("terminals")
+        if service is None:
+            raise HTTPException(503, "the terminals subsystem is not running")
+        return service  # type: ignore[return-value]
+
+    @api.get("/api/terminals")
+    async def terminals_list(
+        env: Literal["container", "host"] | None = None,
+        owner_kind: Literal["session", "staff", "project", "free"] | None = None,
+        owner_id: str | None = Query(default=None, max_length=128),
+        project_id: str | None = Query(default=None, max_length=128),
+        status: Literal["running", "exited", "lost"] | None = None,
+        preview: int = Query(default=0, ge=0, le=12),
+        _: dict[str, Any] = Depends(auth),
+    ) -> dict[str, Any]:
+        service = terminal_service()
+        owner = TerminalOwner(owner_kind, owner_id) if owner_kind and (owner_id or owner_kind == "free") else None
+        views = await service.list(env=env, owner=owner, owner_kind=owner_kind if owner is None else None, project_id=project_id, status=status, preview_rows=preview)
+        by_env = await service.running_by_env()
+        return {
+            "envs": [e.view() for e in service.environments(by_env)],
+            "terminals": views,
+            "capacity": {"running": sum(by_env.values()), "cap": app.config.terminals.running_cap, "queued": len(service.queue())},
+        }
+
+    @api.get("/api/terminals/load")
+    async def terminals_load(cap: int | None = Query(default=None, ge=1, le=100_000), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """What the running terminals cost, and what the machine would carry at ``cap`` of them."""
+        return await terminal_service().load(cap=cap)
+
+    @api.post("/api/terminals", status_code=201)
+    async def terminals_create(body: TerminalCreateBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        spec = TerminalSpec(
+            env=body.env,
+            owner=TerminalOwner(body.owner_kind, body.owner_id or None),
+            project_id=body.project_id or None,
+            cwd=body.cwd or None,
+            title=body.title,
+            sandbox=body.sandbox,
+            cols=body.cols,
+            rows=body.rows,
+            created_by="operator",
+        )
+        return await terminal_service().create(spec, confirm_over_cap=body.confirm)
+
+    @api.get("/api/terminals/{terminal_id}")
+    async def terminals_get(terminal_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return await terminal_service().get(terminal_id)
+
+    @api.patch("/api/terminals/{terminal_id}")
+    async def terminals_patch(terminal_id: str, body: TerminalPatchBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        owner = TerminalOwner(body.owner_kind, body.owner_id or None) if body.owner_kind else None
+        return await terminal_service().update(terminal_id, title=body.title, owner=owner)
+
+    @api.post("/api/terminals/{terminal_id}/kill")
+    async def terminals_kill(terminal_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return await terminal_service().kill(terminal_id)
+
+    @api.post("/api/terminals/{terminal_id}/signal")
+    async def terminals_signal(terminal_id: str, body: TerminalSignalBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await terminal_service().signal(terminal_id, body.signal)
+        return {"ok": True}
+
+    @api.post("/api/terminals/{terminal_id}/restart")
+    async def terminals_restart(terminal_id: str, body: TerminalRestartBody | None = None, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        body = body or TerminalRestartBody()
+        return await terminal_service().restart(terminal_id, sandbox=body.sandbox, confirm_over_cap=body.confirm)
+
+    @api.delete("/api/terminals/{terminal_id}")
+    async def terminals_remove(terminal_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await terminal_service().remove(terminal_id)
+        return {"ok": True}
+
+    @api.get("/api/terminals/{terminal_id}/screen")
+    async def terminals_screen(terminal_id: str, format: Literal["text", "vt", "runs"] = "text", scrollback: int = Query(default=0, ge=0, le=10_000), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return await terminal_service().read_screen(terminal_id, format=format, scrollback=scrollback)
+
+    @api.get("/api/terminals/{terminal_id}/audit")
+    async def terminals_audit(terminal_id: str, limit: int = Query(default=200, ge=1, le=1000), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        # The audit outlives the row on purpose, so a removed terminal's history is still answered.
+        entries = await terminal_service().audit_log(terminal_id, limit=limit)
+        if not entries and await app.db.fetchone("SELECT 1 FROM terminals WHERE id = ?", (terminal_id,)) is None:
+            raise HTTPException(404, "no such terminal")
+        return {"entries": entries}
 
     @api.get("/api/services")
     async def all_services(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
