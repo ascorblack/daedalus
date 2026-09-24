@@ -7,13 +7,14 @@
 // visibility, and when the window gains focus.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
-import { confirmDialog } from "../dialogs";
+import { confirmDialog, Popover, toast } from "../dialogs";
 import { plural, t } from "../i18n";
-import { Icon } from "../icons";
+import { Icon, IconName } from "../icons";
 import { connectionText } from "./status";
+import { isMac } from "./keys";
 import { rememberPaste, TerminalBinding, TerminalInstance, TerminalRequest, TerminalState } from "./instance";
 import { TerminalSearch } from "./search";
-import { acquireTerminal, terminals } from "./terminals";
+import { acquireTerminal, instanceFor, terminals } from "./terminals";
 
 export type TerminalViewProps = {
   id: string;
@@ -41,6 +42,8 @@ export function TerminalView({ id, visible, readOnly, env, fileOpener, workspace
   const screen = useRef<HTMLDivElement>(null);
   const [instance, setInstance] = useState<TerminalInstance | null>(null);
   const [searching, setSearching] = useState(false);
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<HTMLSpanElement | null>(null);
   const state = useInstanceState(instance);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
@@ -120,6 +123,11 @@ export function TerminalView({ id, visible, readOnly, env, fileOpener, workspace
     });
   }, [instance]);
 
+  const closeMenu = useCallback(() => {
+    setMenuAt(null);
+    instance?.focus();
+  }, [instance]);
+
   const closeSearch = useCallback(() => {
     setSearching(false);
     instance?.focus();
@@ -147,7 +155,15 @@ export function TerminalView({ id, visible, readOnly, env, fileOpener, workspace
       {state?.agentTyping && <div className="term-strip agent" role="status">{t("term.keyboard.agent", { actor: state.agentTyping })}</div>}
       {!state?.agentTyping && state?.keyboard.owner === "agent" && <div className="term-strip agent" role="status">{t("term.keyboard.held")}</div>}
       </div>
-      <div className="term-screen" ref={screen} />
+      {/* The terminal's own menu, on a right click or a long press: the browser's would offer to paste
+          into a hidden text field, and nothing a terminal can do with its commands. */}
+      <div className="term-screen" ref={screen} onContextMenu={(e) => { if (!instance?.terminal) return; e.preventDefault(); setMenuAt({ x: e.clientX, y: e.clientY }); }} />
+      {menuAt && instance && state && (
+        <>
+          <span ref={setMenuAnchor} className="term-menu-anchor" style={{ left: menuAt.x, top: menuAt.y }} />
+          <TerminalMenu anchor={menuAnchor} instance={instance} state={state} onClose={closeMenu} onSearch={() => setSearching(true)} />
+        </>
+      )}
       {searching && instance?.search && <TerminalSearch search={instance.search} onClose={closeSearch} />}
       {exited && (
         <div className="term-exit" role="status">
@@ -157,6 +173,45 @@ export function TerminalView({ id, visible, readOnly, env, fileOpener, workspace
         </div>
       )}
     </div>
+  );
+}
+
+/** Copies the last command's output and says how it went. */
+export async function copyLastOutput(instance: TerminalInstance): Promise<void> {
+  const outcome = await instance.copyLastOutput();
+  toast(outcome === "copied" ? t("term.marks.copied") : outcome === "none" ? t("term.marks.none") : t("term.marks.copyFailed"));
+}
+
+/** The toolbar's "copy last command output": shown only for a shell that marks its commands. */
+export function CopyOutputButton({ id, state }: { id: string | null; state: TerminalState | undefined }) {
+  if (!id || !state?.commands.active) return null;
+  return (
+    <button className="iconbtn small flat term-copy-output" onClick={() => { const instance = instanceFor(id); if (instance) void copyLastOutput(instance); }} aria-label={t("term.marks.copy")} title={t("term.marks.copy")} disabled={!state.commands.ended}>
+      <Icon name="copy" size={16} />
+    </button>
+  );
+}
+
+function TerminalMenu({ anchor, instance, state, onClose, onSearch }: { anchor: HTMLElement | null; instance: TerminalInstance; state: TerminalState; onClose: () => void; onSearch: () => void }) {
+  const selection = !!instance.terminal?.hasSelection();
+  const commands = state.commands;
+  const mod = isMac() ? "⌘" : "Ctrl+Shift+";
+  const item = (label: string, shortcut: string, icon: IconName, disabled: boolean, run: () => void) => (
+    <button role="menuitem" disabled={disabled} onClick={() => { onClose(); run(); }}>
+      <Icon name={icon} size={16} />
+      <span className="grow">{label}</span>
+      {shortcut && <span className="term-menu-key sub">{shortcut}</span>}
+    </button>
+  );
+  return (
+    <Popover anchor={anchor} onClose={onClose} className="term-menu" label={t("term.marks.menu")}>
+      {item(t("term.copy"), `${mod}C`, "copy", !selection, () => void instance.copySelection())}
+      {commands.active && item(t("term.marks.copy"), "", "copy", !commands.ended, () => void copyLastOutput(instance))}
+      {commands.active && item(t("term.marks.previous"), "Ctrl+↑", "up", commands.prompts === 0, () => instance.jumpToCommand(-1))}
+      {commands.active && item(t("term.marks.next"), "Ctrl+↓", "down", commands.prompts === 0, () => instance.jumpToCommand(1))}
+      <div className="menu-sep" />
+      {item(t("term.search"), "Ctrl+Shift+F", "search", false, onSearch)}
+    </Popover>
   );
 }
 
