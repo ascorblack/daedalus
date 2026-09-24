@@ -35,6 +35,26 @@ removed. `SIGHUP` is ignored. The daemon owns its terminals' processes: when it 
 Restarting the Daedalus host is the case that matters, and it leaves the daemon and its terminals
 running.
 
+### In a compose install
+
+The `container` environment is the `terminals` service of `deploy/compose.yaml`: the agent's own
+image with `ptyd` as its entrypoint (`serve --env container --run-dir /run/daedalus-terminals
+--state-dir /var/lib/ptyd --home /root`), root, `init: true`, on a network of its own. The run
+directory is a volume both containers mount; the agent's container is told it as
+`TERMINALS_CONTAINER_DIR`. The workspaces volume and every project folder are mounted into both at
+the same paths. `/root` is the `terminals-home` volume, which the agent's container never mounts.
+Servers started in a terminal listen in `TERMINALS_PORT_RANGE` (`8120-8139`), which the service
+publishes.
+
+The service is never recreated by a deploy or by the agent's restart, which is what lets terminals
+outlive both. So the image can hold a newer daemon than the one running: the image's build stamps
+`ptyd` with a digest of its sources (`src-<12 hex>`), the agent's container reads that version from
+its own `/usr/local/bin/ptyd`, and `EnvStatus` reports `image_version` and `update_available` when
+it differs from the running daemon's. Updating is the operator's: the route below asks the rebuilder
+(`deploy/rebuild.sh`, the `selfdev` profile) to run `docker compose up -d --no-build --no-deps
+terminals`, which ends every container terminal, and refuses with the count until the operator
+confirms. Without a rebuilder the refusal names the command to run on the server.
+
 ## Run directory and handshake
 
 ```
@@ -653,6 +673,8 @@ because the token in them is a shell.
 | `POST /api/terminals/{id}/kill`, `/signal`, `/restart` | end; `{signal}`; the same program as a new terminal |
 | `GET /api/terminals/{id}/screen`, `/audit` | the screen (with the emulator); the audit, newest first |
 | `POST /api/terminals/{id}/ticket` | `{read_only?}` → `{ticket, expires_in}` for the WebSocket |
+| `POST /api/terminals/envs/container/update` | `{confirm?}` → `{job, running, image_version}` (202): recreate the terminals service from the image; `409 {"code": "live_terminals", "running"}` until confirmed while any run, `503 {"code": "no_rebuilder", "command"}` without a rebuilder |
+| `GET /api/terminals/envs/container/update/{job}` | `{state: pending\|completed\|failed, detail}` |
 | `WS /ws/terminals/{id}?ticket=` | the attachment, below |
 
 ### The WebSocket
