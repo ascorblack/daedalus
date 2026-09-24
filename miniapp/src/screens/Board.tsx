@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { api, SessionList, SessionSummary } from "../api";
+import { api, Project, SessionList, SessionSummary } from "../api";
 import { Skeleton, copyText } from "../components";
 import { OverflowMenu, Sheet } from "../dialogs";
 import { absTime, relTime } from "../format";
 import { Icon } from "../icons";
-import { navigate, pathFor } from "../router";
+import { navigate, pathFor, projectPagePath } from "../router";
 import { PageHeader, screenTitle } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { confirmAsync, errorText } from "../ui";
@@ -34,9 +34,10 @@ const FINISHED: Status[] = ["done", "dropped"];
 const columnLabel = (s: Status) => t(`board.col.${s}`);
 const NEXT: Record<Status, Status[]> = { todo: ["doing", "blocked", "dropped"], doing: ["review", "done", "blocked", "todo"], review: ["done", "doing"], blocked: ["todo", "doing"], done: ["todo"], dropped: ["todo"] };
 
-export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) => void; onOpen: (id: string) => void; selected?: string | null }) {
+export function BoardScreen({ toast, onOpen, selected, project }: { toast: (t: string) => void; onOpen: (id: string) => void; selected?: string | null; project?: Project | null }) {
   const [showDone, setShowDone] = useState(false);
-  const key = `/api/board?include_done=${showDone ? 1 : 0}`;
+  // The shell's project lens narrows this board as it narrows the list of agents.
+  const key = `/api/board?include_done=${showDone ? 1 : 0}${project ? `&project=${encodeURIComponent(project.id)}` : ""}`;
   const { data: tasks, error, loading, refresh } = useQuery<Task[]>(key, { pollMs: 20000, staleMs: 5000 });
   const titles = useSessionTitles();
   const [creating, setCreating] = useState(false);
@@ -117,8 +118,12 @@ export function BoardScreen({ toast, onOpen, selected }: { toast: (t: string) =>
         actions={<button className="iconbtn primary" onClick={() => setCreating(true)} title={t("board.new")} aria-label={t("board.new")}><Icon name="plus" /></button>}
       >
         <div className="chips">
+          {project && <span className="chip accent">{t("board.lens", { name: project.name })}</span>}
           <button className="chip select" aria-pressed={!showDone} onClick={() => setShowDone(false)}>{t("board.filter.open")}</button>
           <button className="chip select" aria-pressed={showDone} onClick={() => setShowDone(true)}>{t("board.filter.done")}</button>
+          {project && !project.system && !project.settings.ephemeral && (
+            <button className="chip select" onClick={() => navigate(projectPagePath(project.id, "board"))}>{t("board.lens.project")}</button>
+          )}
         </div>
       </PageHeader>
       <div className="screen wide board">
