@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from daedalus.extensions import orchestrator_ops, orchestrator_team, wakeups
 from daedalus.extensions.notifications import Draft, ProjectNotifyPolicy
+from daedalus.extensions.watches import describe as describe_watch
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.host.peek import FolderAccess, LocalFolderAccess, UnreachableFolder
 from daedalus.host.wake_queue import Batch, TargetState, Wake, WakeQueue
@@ -549,9 +550,10 @@ class Orchestrators:
         for wakeup in (await wakeups.wakeups(self.app, project.id))[:10]:
             when = f"cron {wakeup['cron']} UTC" if wakeup["cron"] else self._moment(wakeup["next_run_at"] or "")
             alarms.append(f"[{wakeup['id']}] {when} \"{_one_line(wakeup['note'], 80)}\"")
+        keeper = self.app.extensions.get("watches")
         watches = [
-            f"[{row['id']}] {_one_line(row['note'] or row['pattern_json'], 80)}"
-            for row in await self.manager.db.fetchall("SELECT id, note, pattern_json FROM watches WHERE project_id = ? AND enabled = 1 ORDER BY created_at LIMIT 10", (project.id,))
+            f"[{w.id}] {_one_line(describe_watch(w), 120)}" + (f" ({_one_line(w.note, 60)})" if w.note else "")
+            for w in (keeper.of_project(project.id, enabled_only=True) if keeper is not None else [])[:10]
         ]
 
         journal = [f"{self._clock(e.at)} {e.kind}: {_one_line(e.text, 160)}" for e in await self.manager.projects.journal(project.id, limit=JOURNAL_LINES)]
@@ -853,7 +855,8 @@ class Orchestrators:
         if kind == "schedule.fired":
             return f"your wake-up [{p.get('schedule_id')}] fired: {_one_line(str(p.get('note') or p.get('name') or ''), 200)}"
         if kind == "watch.fired":
-            return f"watch [{p.get('watch_id')}] fired{': ' + _one_line(str(p.get('note')), 200) if p.get('note') else ''}"
+            said = " — ".join(_one_line(str(p[key]), 240) for key in ("detail", "note") if p.get(key))
+            return f"watch [{p.get('watch_id')}] fired{': ' + said if said else ''}"
         if kind in ("dispatch.created", "dispatch.message"):
             title = str(p.get("title") or "")
             text = _one_line(str(p.get("text") or ""), 600)

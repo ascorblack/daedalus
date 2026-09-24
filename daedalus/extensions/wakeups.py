@@ -121,7 +121,7 @@ async def set_wakeup(
 ) -> dict[str, Any]:
     """Set a wake-up for the project's orchestrator. ``by_session`` is the orchestrator that set it
     itself; without it the operator did. Returns the wake-up as :func:`view` shows it."""
-    scheduler = app.extensions.get("scheduler")
+    scheduler: Any = app.extensions.get("scheduler")
     if scheduler is None:
         raise WakeupRefused("the scheduler is not running on this installation")
     orchestrator = project.settings.orchestrator
@@ -186,7 +186,7 @@ async def cancel(app: Application, project_id: str, wakeup_id: str) -> bool:
     )
     if row is None:
         return False
-    scheduler = app.extensions.get("scheduler")
+    scheduler: Any = app.extensions.get("scheduler")
     if scheduler is not None:
         return bool(await scheduler.delete(wakeup_id))
     await app.db.execute("DELETE FROM schedules WHERE id = ?", (wakeup_id,))

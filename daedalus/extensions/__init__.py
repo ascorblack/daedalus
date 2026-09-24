@@ -37,6 +37,7 @@ EXTENSIONS = (
     "daedalus.extensions.voice",
     "daedalus.extensions.terminals",
     "daedalus.extensions.harness",
+    "daedalus.extensions.watches",
     "daedalus.extensions.api",
 )
 

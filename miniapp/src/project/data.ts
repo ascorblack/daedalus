@@ -2,7 +2,7 @@
 // member hired in the sidebar shows on the team page and a task moved on the board moves in the panel
 // without a second request. One subscription to the event stream keeps all of it current.
 
-import type { Ask, Project, SessionList, TerminalList, Wakeup } from "../api";
+import type { Ask, Project, SessionList, TerminalList, Wakeup, WatchList } from "../api";
 import type { ProjectBoardData } from "../board/board";
 import { useMemo } from "react";
 import { useEvent, useStreamUp } from "../events";
@@ -19,6 +19,7 @@ export const asksKey = (projectId: string) => `/api/asks?project=${enc(projectId
 export const briefKey = (projectId: string) => `/api/projects/${enc(projectId)}/brief`;
 export const journalKey = (projectId: string) => `/api/projects/${enc(projectId)}/journal`;
 export const wakeupsKey = (projectId: string) => `/api/projects/${enc(projectId)}/wakeups`;
+export const watchesKey = (projectId: string) => `/api/projects/${enc(projectId)}/watches`;
 
 type Board = ProjectBoardData & { project: { id: string; name: string } };
 
@@ -39,6 +40,7 @@ export function useFocus(projectId: string) {
   const terminals = useQuery<TerminalList>(terminalsKey(projectId), { pollMs: live ? 60000 : 10000, staleMs: 5000 });
   const sessions = useQuery<SessionList>("/api/sessions?view=all", { pollMs: live ? 60000 : 5000, staleMs: 3000 });
   const wakeups = useQuery<{ wakeups: Wakeup[] }>(wakeupsKey(projectId), { pollMs: live ? 120000 : 30000, staleMs: 15000 });
+  const watches = useQuery<WatchList>(watchesKey(projectId), { pollMs: live ? 120000 : 30000, staleMs: 15000 });
   useProjectEvents(projectId);
   // An answer of the wrong shape (a proxy's page, an older host) is no answer: the column draws
   // without that part rather than taking the shell down with it.
@@ -48,6 +50,7 @@ export function useFocus(projectId: string) {
     terminals: terminals.data && Array.isArray(terminals.data.terminals) ? terminals.data : null,
     sessions: sessions.data ?? null,
     wakeups: wakeups.data && Array.isArray(wakeups.data.wakeups) ? wakeups.data.wakeups : [],
+    watches: watches.data && Array.isArray(watches.data.watches) ? watches.data.watches : [],
   };
 }
 
@@ -58,6 +61,7 @@ export function useProjectEvents(projectId: string): void {
     if (event.type === "schedule.fired" || event.type === "watch.fired") {
       // A one-off that fired is done, a recurring one moved on, and a watch counted a fire.
       invalidate(wakeupsKey(projectId));
+      invalidate(watchesKey(projectId));
       return;
     }
     if (event.type.startsWith("terminal.")) {
@@ -72,6 +76,7 @@ export function useProjectEvents(projectId: string): void {
       invalidate(`/api/projects/${enc(projectId)}/brief`);
       invalidate(`/api/projects/${enc(projectId)}/journal`);
       invalidate(wakeupsKey(projectId));
+      invalidate(watchesKey(projectId));
     }
   }, [projectId]);
 }

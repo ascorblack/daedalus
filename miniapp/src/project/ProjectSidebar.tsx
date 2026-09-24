@@ -37,7 +37,7 @@ export type ProjectSidebarProps = {
 
 export function ProjectSidebar(p: ProjectSidebarProps) {
   const { project } = useProject(p.projectId);
-  const { team, board, terminals, sessions, wakeups: alarms } = useFocus(p.projectId);
+  const { team, board, terminals, sessions, wakeups: alarms, watches } = useFocus(p.projectId);
   const [hiring, setHiring] = useState(false);
   const orchestrator = project?.settings.orchestrator;
   const orchestratorId = orchestrator?.enabled ? orchestrator.session_id : "";
@@ -45,7 +45,8 @@ export function ProjectSidebar(p: ProjectSidebarProps) {
   const { team: members, oneOff } = splitTeam(team?.staff ?? []);
   const tasks = new Map((board?.tasks ?? []).map((task) => [task.id, task]));
   const openTasks = (board?.tasks ?? []).filter((task) => task.status !== "done" && task.status !== "dropped").length;
-  const wakeups = orchestratorId ? alarms.filter((w) => w.enabled).length : 0;
+  // The page holds both: the orchestrator's alarms and the project's watches that are switched on.
+  const wakeups = (orchestratorId ? alarms.filter((w) => w.enabled).length : 0) + watches.filter((w) => w.enabled).length;
   const here = (page: string) => p.view.kind === "page" && p.view.page === page;
   const toggle = (
     <button className="iconbtn quiet" onClick={p.onToggle} title={t(p.collapsed ? "shell.sidebar.expand" : "shell.sidebar.collapse")} aria-label={t(p.collapsed ? "shell.sidebar.expand" : "shell.sidebar.collapse")} aria-expanded={!p.collapsed}>

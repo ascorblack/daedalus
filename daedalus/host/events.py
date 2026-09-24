@@ -232,6 +232,12 @@ class WatchFired(TypedDict):
     fire_count: NotRequired[int]
     pattern: NotRequired[dict[str, Any]]
     actor: NotRequired[str]
+    action: NotRequired[str]
+    """``wake`` · ``tell`` · ``notify``: only a ``wake`` is for the orchestrator's queue."""
+    note: NotRequired[str]
+    detail: NotRequired[str]
+    """What happened, in one line: "Max finished a turn", "CI failure in shop/web on main"."""
+    error: NotRequired[str]
 
 
 class WebhookReceived(TypedDict):
@@ -239,6 +245,12 @@ class WebhookReceived(TypedDict):
     event: str
     delivery_id: NotRequired[str]
     summary: NotRequired[str]
+    repo: NotRequired[str]
+    action: NotRequired[str]
+    conclusion: NotRequired[str]
+    """A pull request's outcome (``opened``, ``merged`` …) or a CI run's (``success``, ``failure`` …)."""
+    branch: NotRequired[str]
+    title: NotRequired[str]
 
 
 class ProjectChanged(TypedDict):

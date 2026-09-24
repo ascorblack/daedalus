@@ -17,6 +17,12 @@ from protocore.tools.decorator import tool
 
 from daedalus.tools._common import error, ok, services_for
 
+WATCH_EVENTS = (
+    "staff_finished", "staff_question", "staff_permission", "staff_crashed", "staff_silent",
+    "task_moved", "terminal_output", "git_commit", "pr", "ci", "webhook",
+)
+"""The kinds of event a watch waits for, as the extension knows them (a tool may not import it)."""
+
 
 def _hook(context: ToolContext):  # type: ignore[no-untyped-def]
     manager = services_for(context).extra.get("manager")
@@ -394,6 +400,74 @@ async def wake_me(context: ToolContext, note: str, at: str | None = None, in_min
     return await _call(context, "wake_me", note=note, at=at, in_minutes=in_minutes, cron=cron)
 
 
+class Watch(Tool):
+    """Written out rather than decorated: ``when`` and ``then`` are objects whose shape the model has to
+    be shown, and the decorator describes a dict as nothing more than an object."""
+
+    @property
+    def name(self) -> str:
+        return "Watch"
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description=(
+                "When something happens in the project, do something — without polling. when.event is one of: "
+                "staff_finished, staff_question, staff_permission, staff_crashed (each with an optional staff); "
+                "staff_silent (staff, minutes: silent that long while working); task_moved (task, to — both optional); "
+                "terminal_output (terminal id or title, or a command-line staff member; regex, at most 200 characters, "
+                "no lookarounds); git_commit (folder, branch — optional: a new commit on a branch of that folder); pr "
+                "(provider, repo, conclusion such as opened or merged); ci (provider, repo, conclusion such as failure); "
+                "webhook (provider, regex over the payload). then.action is wake (you are woken with the note), tell "
+                "(staff, text, mode) or notify (title, text, level: quiet, normal or urgent). A watch fires at most once "
+                "per cooldown, once=true removes it after the first fire, and one that fires twelve times in an hour "
+                "switches itself off. Nothing you do yourself fires a watch. Unwatch(id) removes it."
+            ),
+            parameters=ToolParameterSchema(
+                properties={
+                    "when": {
+                        "type": "object",
+                        "description": "What to wait for, e.g. {\"event\": \"staff_finished\", \"staff\": \"Max\"} or {\"event\": \"ci\", \"provider\": \"github\", \"conclusion\": \"failure\"}.",
+                        "properties": {
+                            "event": {"type": "string", "enum": list(WATCH_EVENTS)},
+                            "staff": {"type": "string"}, "minutes": {"type": "integer"}, "task": {"type": "string"}, "to": {"type": "string"},
+                            "terminal": {"type": "string"}, "regex": {"type": "string"}, "folder": {"type": "string"}, "branch": {"type": "string"},
+                            "provider": {"type": "string"}, "repo": {"type": "string"}, "conclusion": {"type": "string"},
+                        },
+                        "required": ["event"],
+                    },
+                    "then": {
+                        "type": "object",
+                        "description": "What to do, e.g. {\"action\": \"wake\"} or {\"action\": \"tell\", \"staff\": \"Max\", \"text\": \"…\"}.",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["wake", "tell", "notify"]},
+                            "note": {"type": "string"}, "staff": {"type": "string"}, "text": {"type": "string"},
+                            "mode": {"type": "string", "enum": ["queue", "steer", "interrupt"]}, "title": {"type": "string"},
+                            "level": {"type": "string", "enum": ["quiet", "normal", "urgent"]},
+                        },
+                        "required": ["action"],
+                    },
+                    "cooldown_minutes": {"type": "number", "description": "Least time between two fires; at least 1, default 10."},
+                    "once": {"type": "boolean", "description": "Remove the watch after it fires once."},
+                    "note": {"type": "string", "description": "Why you set it, for you and the operator."},
+                },
+                required=["when", "then"],
+            ),
+        )
+
+    async def invoke(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+        return await _call(
+            context,
+            "watch",
+            when=arguments.get("when"),
+            then=arguments.get("then"),
+            cooldown_minutes=arguments.get("cooldown_minutes", 10),
+            once=bool(arguments.get("once")),
+            note=str(arguments.get("note") or ""),
+        )
+
+
 @tool(
     name="Unwatch",
     description="Cancel a wake-up or remove a watch, by the id the state block or WakeMe/Watch gave you.",
@@ -405,7 +479,7 @@ async def unwatch(context: ToolContext, id: str) -> ToolResult:
 TOOLS = [
     brief, folders, journal, team, tasks, peek, AskOperator, project_report,
     hire, staff_edit, dismiss, assign, tell, read_staff, answer, interrupt, pause, release, harnesses,
-    wake_me, unwatch,
+    wake_me, Watch, unwatch,
 ]
 
 __all__ = ["TOOLS"]

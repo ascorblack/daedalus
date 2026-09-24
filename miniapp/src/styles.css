@@ -2720,6 +2720,9 @@ button.staff-row:hover { background: var(--surface-2); }
 .wakeup-section-head { display: flex; align-items: center; gap: 8px; min-height: var(--ctl-h-sm); }
 .wakeup-section-title { font-size: var(--fs-12); font-weight: 600; color: var(--fg-2); text-transform: uppercase; letter-spacing: 0.04em; }
 .wakeup-row > .iconbtn { flex: none; margin: -4px -6px -4px 0; }
+.watch-stopped { color: var(--warn); font-size: var(--fs-12); overflow-wrap: anywhere; }
+.watch-sheet .watch-once { align-self: end; display: flex; align-items: center; gap: 8px; min-height: var(--ctl-h); }
+.watch-sheet .chips, .wakeup-sheet .chips { margin-top: 6px; flex-wrap: wrap; overflow: visible; }
 /* A finger needs the full touch row to hit "cancel" and not the row beside it. */
 @media (pointer: coarse) { .wakeup-row > .iconbtn { min-width: var(--row-h-touch); min-height: var(--row-h-touch); margin: -10px -10px -10px 0; } }
 .focus-folders { display: grid; gap: 8px; align-content: start; padding: 4px 0; }

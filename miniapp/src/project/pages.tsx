@@ -94,7 +94,7 @@ function BriefCard({ projectId, section, toast }: { projectId: string; section: 
 // ── the journal ──────────────────────────────────────────────────────────────────────────────
 
 const JOURNAL_PAGE = 30;
-export const JOURNAL_KINDS = ["note", "decision", "plan", "answer", "reassignment", "report", "grant", "hire", "dismiss", "folder", "escalation", "replacement", "brief"];
+export const JOURNAL_KINDS = ["note", "decision", "plan", "answer", "reassignment", "report", "grant", "hire", "dismiss", "folder", "escalation", "replacement", "brief", "watch"];
 
 export function JournalPage({ projectId, back, toast }: { projectId: string; back?: string | null; toast: (text: string) => void }) {
   const { project } = useProject(projectId);

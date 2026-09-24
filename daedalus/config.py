@@ -1101,6 +1101,9 @@ class WebhookConfig(BaseModel):
     prompt: str = ""
     """What to do with an event; the flattened payload follows it."""
     enabled: bool = True
+    deliver: Literal["session", "events"] = "session"
+    """``session`` runs the event in its session as before; ``events`` only publishes it, for the
+    projects' watches (a pull request, a CI result) to act on, and starts no run."""
 
 
 class BoardConfig(BaseModel):
@@ -1175,6 +1178,22 @@ class OrchestratorConfig(BaseModel):
     wake_cron_min_minutes: int = Field(default=10, ge=1, le=1440)
     """The shortest gap a recurring wake-up may have. A fired wake-up is urgent and passes the hourly
     cap, so this is what keeps a cron from buying a turn every minute."""
+
+
+class WatchesConfig(BaseModel):
+    """What bounds a project's watches ("when X, do Y"), so none can cost more than it is worth."""
+
+    tick_seconds: int = Field(default=30, ge=5, le=600)
+    """How often silences are measured and the watched folders' branches are due for a look."""
+    git_poll_seconds: int = Field(default=60, ge=15, le=3600)
+    """How often a folder named by a commit watch has its branch heads read; only those folders are read."""
+    min_cooldown_seconds: int = Field(default=60, ge=10, le=86_400)
+    """The shortest time a watch may be set to wait between two fires."""
+    max_fires_per_hour: int = Field(default=12, ge=1, le=120)
+    """Past this a watch switches itself off and the journal says so: a watch whose action causes its
+    own event would otherwise go round for as long as the cooldown lets it."""
+    max_per_project: int = Field(default=50, ge=1, le=500)
+    regex_max_chars: int = Field(default=200, ge=10, le=1000)
 
 
 class HarnessConfig(BaseModel):
@@ -1477,6 +1496,7 @@ class RuntimeConfig(BaseModel):
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
     staff: StaffConfig = Field(default_factory=StaffConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
+    watches: WatchesConfig = Field(default_factory=WatchesConfig)
     harness: HarnessConfig = Field(default_factory=HarnessConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
     terminals: TerminalsConfig = Field(default_factory=TerminalsConfig)

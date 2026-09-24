@@ -515,7 +515,7 @@ class FocusStub:
     orchestrator stay in English, as the host writes them.
     """
 
-    def __init__(self, *, projects: list[dict], listing: dict, details: dict[str, dict], team: TeamStub, board: BoardStub, others: list[TeamStub | BoardStub] | None = None, asks: list[dict], brief: list[dict], journal: list[dict], schedules: list[dict], wakeups: list[dict] | None = None, terminals: list[dict], messages: dict[str, list[dict]]) -> None:
+    def __init__(self, *, projects: list[dict], listing: dict, details: dict[str, dict], team: TeamStub, board: BoardStub, others: list[TeamStub | BoardStub] | None = None, asks: list[dict], brief: list[dict], journal: list[dict], schedules: list[dict], wakeups: list[dict] | None = None, watches: list[dict] | None = None, terminals: list[dict], messages: dict[str, list[dict]]) -> None:
         self.projects = projects
         self.listing = listing
         self.details = details
@@ -528,6 +528,8 @@ class FocusStub:
         self.schedules = schedules
         self.wakeups = wakeups or []
         self.woken: list[dict] = []
+        self.watches = watches or []
+        self.watched: list[tuple[str, dict]] = []
         self.terminals = terminals
         self.messages = messages
         self.answers: list[tuple[str, dict]] = []
@@ -599,6 +601,32 @@ class FocusStub:
             return 200, {"entries": rows, "next_before": rows[-1]["id"] if len(rows) == limit else None}
         if path == "/api/schedules" and method == "GET":
             return 200, self.schedules
+        if path.startswith("/api/projects/") and "/watches" in path:
+            parts = path.split("/")
+            pid = parts[3]
+            if len(parts) == 5 and method == "GET":
+                return 200, {"watches": [w for w in self.watches if w["project_id"] == pid], "max": 50, "min_cooldown_minutes": 1, "providers": ["github"]}
+            if len(parts) == 5 and method == "POST":
+                payload = dict(body or {})
+                self.watched.append(("create", payload))
+                row = {"id": f"w{len(self.watches) + 1}", "project_id": pid, "when": payload.get("when", {}), "then": payload.get("then", {}), "cooldown_minutes": payload.get("cooldown_minutes", 10), "once": bool(payload.get("once")), "note": payload.get("note", ""),
+                       "created_by": "operator", "created_at": "2026-09-24T10:00:00Z", "last_fired_at": None, "fire_count": 0, "enabled": True, "stopped": "", "last_error": "", "describe": ""}
+                self.watches.append(row)
+                return 200, row
+            found = next((w for w in self.watches if w["project_id"] == pid and len(parts) == 6 and w["id"] == parts[5]), None)
+            if found is None:
+                return 404, {"detail": "no such watch"}
+            if method == "PATCH":
+                payload = dict(body or {})
+                self.watched.append(("update", {"id": found["id"], **payload}))
+                found.update({k: v for k, v in payload.items() if v is not None})
+                if payload.get("enabled"):
+                    found["stopped"] = ""
+                return 200, found
+            if method == "DELETE":
+                self.watched.append(("delete", {"id": found["id"]}))
+                self.watches.remove(found)
+                return 200, {"deleted": True}
         if path.startswith("/api/projects/") and "/wakeups" in path:
             parts = path.split("/")
             pid = parts[3]
@@ -768,6 +796,12 @@ class FocusStub:
         wakeups = [
             {"id": "wk1", "project_id": pid, "note": words["wake.note"], "cron": None, "at": "2026-09-24T12:00:00Z", "next_run_at": "2026-09-24T12:00:00Z", "last_run_at": None, "enabled": True, "set_by": "orchestrator", "created_at": "2026-09-24T09:40:00Z"},
         ]
+        watches = [
+            {"id": "w1", "project_id": pid, "when": {"event": "staff_finished", "staff": "Max", "staff_id": "st-max"}, "then": {"action": "wake"}, "cooldown_minutes": 10, "once": False, "note": words["watch.note"],
+             "created_by": "orchestrator", "created_at": "2026-09-24T09:40:12Z", "last_fired_at": "2026-09-24T09:51:00Z", "fire_count": 1, "enabled": True, "stopped": "", "last_error": "", "describe": "when Max finishes a turn → wake the orchestrator"},
+            {"id": "w2", "project_id": pid, "when": {"event": "ci", "provider": "github", "repo": "bakery/api", "conclusion": "failure"}, "then": {"action": "notify", "title": "CI", "level": "urgent"}, "cooldown_minutes": 30, "once": False, "note": "",
+             "created_by": "operator", "created_at": "2026-09-23T18:00:00Z", "last_fired_at": None, "fire_count": 0, "enabled": False, "stopped": "budget", "last_error": "", "describe": ""},
+        ]
         terminals = [
             {"id": "tm-api", "env": "container", "title": "bash · bakery-api", "owner": {"kind": "project", "id": pid}, "project_id": pid, "profile": "shell", "sandbox": False, "cwd": "/home/operator/work/bakery-api", "status": "running", "exit_code": None, "exit_signal": None, "created_at": "2026-09-24T09:00:00Z", "exited_at": None, "last_output_at": "2026-09-24T09:50:00Z", "last_input_at": None, "cols": 120, "rows": 30},
             {"id": "tm-psql", "env": "container", "title": "psql · orders", "owner": {"kind": "project", "id": pid}, "project_id": pid, "profile": "shell", "sandbox": False, "cwd": "/home/operator/work/bakery-api", "status": "exited", "exit_code": 0, "exit_signal": None, "created_at": "2026-09-24T08:00:00Z", "exited_at": "2026-09-24T08:30:00Z", "last_output_at": None, "last_input_at": None, "cols": 120, "rows": 30},
@@ -789,7 +823,7 @@ class FocusStub:
         listing = {"sessions": sessions, "projects": folders_listed}
         # The project without an orchestrator has a team and a board of its own, both empty.
         others: list[TeamStub | BoardStub] = [TeamStub(garden_project), BoardStub(garden_project)]
-        return cls(projects=projects, listing=listing, details=details, team=team, board=board, others=others, asks=asks, brief=brief, journal=journal, schedules=schedules, wakeups=wakeups, terminals=terminals, messages=messages)
+        return cls(projects=projects, listing=listing, details=details, team=team, board=board, others=others, asks=asks, brief=brief, journal=journal, schedules=schedules, wakeups=wakeups, watches=watches, terminals=terminals, messages=messages)
 
 
 FOCUS_WORDS: dict[str, dict[str, str]] = {
