@@ -301,12 +301,25 @@ function loopLine(s: SessionSummary): string {
 function sameRow(a: RowProps, b: RowProps): boolean {
   const l = a.s, r = b.s;
   if (l.id !== r.id || l.title !== r.title || l.status !== r.status || l.last_message_at !== r.last_message_at || l.model !== r.model || l.workspace_path !== r.workspace_path) return false;
+  if ((l.terminals ?? 0) !== (r.terminals ?? 0)) return false;
   if (a.projectName !== b.projectName || l.match?.snippet !== r.match?.snippet) return false;
   if (a.onProject !== b.onProject) return false;
   if (a.current !== b.current || a.compact !== b.compact || a.fork?.seq !== b.fork?.seq || a.fork?.of !== b.fork?.of) return false;
   if (JSON.stringify(l.metadata?.loop ?? null) !== JSON.stringify(r.metadata?.loop ?? null)) return false;
   if (a.kids.length !== b.kids.length) return false;
   return a.kids.every((k, i) => k.id === b.kids[i].id && k.status === b.kids[i].status && k.title === b.kids[i].title);
+}
+
+/** The session's running terminals, as a pill beside the time; nothing when it has none. */
+function TerminalCount({ n }: { n?: number }) {
+  if (!n) return null;
+  const label = plural("term.count", n);
+  return (
+    <span className="erow-terms num" title={label} aria-label={label}>
+      <Icon name="terminal" size={11} />
+      {n}
+    </span>
+  );
 }
 
 type RowProps = { projectName?: string; onProject?: () => void; s: SessionSummary; kids: SessionSummary[]; onOpen: (id: string) => void; current?: boolean; fork?: { of: string; seq: number }; compact?: boolean };
@@ -332,6 +345,7 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, compact, project
           <div className="erow-head">
             <span className="erow-title truncate">{projectName && projectName !== agentName(s) && <span className="erow-project">{projectName} · </span>}{agentName(s)}</span>
             {needs && <span className={`erow-state ${status}`}>{statusWord(status)}</span>}
+            <TerminalCount n={s.terminals} />
             <span className="erow-time num" title={new Date(s.last_message_at).toLocaleString()}>{relTime(s.last_message_at)}</span>
           </div>
           {s.match && <div className="search-passage truncate">{s.match.snippet}</div>}
@@ -348,6 +362,7 @@ const Row = memo(function Row({ s, kids, onOpen, current, fork, compact, project
         <div className="erow-head">
           <span className="erow-title clamp-2">{projectName && projectName !== agentName(s) && <span className="erow-project">{projectName} · </span>}{agentName(s)}</span>
           {s.workspace_own && !fork && <span className="chip tiny" title={s.workspace_path}>{t("agents.own.chip")}</span>}
+          <TerminalCount n={s.terminals} />
           <span className="erow-time num" title={new Date(s.last_message_at).toLocaleString()}>{relTime(s.last_message_at)}</span>
         </div>
         <div className={`erow-meta ${spoken ? status : ""}`}>

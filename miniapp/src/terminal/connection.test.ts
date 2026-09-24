@@ -96,7 +96,7 @@ async function settle() {
   for (let i = 0; i < 5; i++) await Promise.resolve();
 }
 
-function start(options: { readOnly?: boolean; ticketError?: Error } = {}): Harness {
+function start(options: { readOnly?: boolean; ticketError?: Error; resumeSeq?: number } = {}): Harness {
   const h = { sockets: [], states: [], events: [], tickets: 0, ticketError: options.ticketError ?? null, wake: () => undefined } as unknown as Harness;
   const deps: ConnectionDeps = {
     ticket: async () => {
@@ -118,7 +118,7 @@ function start(options: { readOnly?: boolean; ticketError?: Error } = {}): Harne
   };
   h.sink = new FakeSink();
   h.last = () => h.sockets[h.sockets.length - 1];
-  h.connection = new TerminalConnection(h.sink, { id: "t1", readOnly: options.readOnly, onState: (s) => h.states.push(s), onEvent: (e) => h.events.push(e) }, deps);
+  h.connection = new TerminalConnection(h.sink, { id: "t1", readOnly: options.readOnly, resumeSeq: options.resumeSeq, onState: (s) => h.states.push(s), onEvent: (e) => h.events.push(e) }, deps);
   return h;
 }
 
@@ -137,6 +137,20 @@ afterEach(() => {
 });
 
 describe("the terminal connection", () => {
+  it("takes over a terminal that already holds the stream, asking for the tail after it", async () => {
+    // A terminal shown again after its socket was closed still has its screen; a snapshot would
+    // reset it for nothing, and its reset would wipe the scrollback the reader was looking at.
+    const h = start({ resumeSeq: 4096 });
+    await settle();
+    h.last().open();
+    expect(h.last().attaches()).toEqual([{ lastSeq: 4096, haveState: true, readOnly: false }]);
+    h.last().receive(hello(4));
+    h.last().receive(output(4090, "0123456789"));
+    // The overlap with what it already had is trimmed, and acknowledgements count from the resume point.
+    expect(h.sink.log).toEqual(["write:6789"]);
+    expect(h.last().acks()).toEqual([4100]);
+  });
+
   it("opens the socket with the ticket and attaches with nothing to resume", async () => {
     const h = start();
     await settle();

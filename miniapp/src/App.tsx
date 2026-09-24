@@ -20,6 +20,7 @@ import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
 import { t, useLang } from "./i18n";
 import { startPresence } from "./presence";
+import { insideTerminal } from "./terminal/keys";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -155,6 +156,8 @@ export function App() {
   useEffect(() => {
     if (!wide) return;
     const onKey = (e: KeyboardEvent) => {
+      // Ctrl+\ quits a program in a terminal; the sidebar waits until the terminal loses focus.
+      if (insideTerminal(e.target)) return;
       const which = shortcutFor(e);
       if (!which) return;
       e.preventDefault();
