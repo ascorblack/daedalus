@@ -527,6 +527,20 @@ removes one. Each new or repeated notification is also a `notify` event on `/api
 change of what was seen a `notify.seen` event, so a client can keep its badge without polling. A
 quiet notification is kept as a record and never counts as unseen.
 
+Where a notification goes is decided once, on the host, from the `[notifications]` section of
+`config.toml`: a matrix of categories against the channels (the app, push, the desktop launcher,
+Telegram; each cell `on`, `off` or `urgent`), quiet hours in your time zone, muted projects, and what
+you are looking at — nothing buzzes for the session on your screen, and nothing is pushed while a
+window has your attention. What Telegram already delivered is not pushed again; a session kept off
+Telegram stays off it; with no bot bound, Telegram plays no part. The reason for each channel is kept
+in the entry's `delivered`. A question or a permission request can be answered from its notification:
+`POST /api/notifications/{id}/act` with `{"action": "allow" | "deny" | "answer:<n>" | "open"}` (or
+`{"action": "answer", "value": "..."}`); the first answer wins and a second one gets 409 with the
+first one's outcome. `GET /api/notifications/preferences` returns the section with the configuration
+revision, `PUT` saves it (`{"preferences", "base_revision"}`, 409 when stale), and
+`POST /api/notifications/test` sends one notification through every channel there is and reports
+each outcome.
+
 ## Layout
 
 ```

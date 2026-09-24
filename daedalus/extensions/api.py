@@ -20,7 +20,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, closing
+from contextlib import asynccontextmanager, closing, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -34,15 +34,18 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from protocore.contracts.memory import MemoryScope
 from protocore.contracts.types import ToolResultBlock, ToolUseBlock
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from daedalus.config import (
     NO_MODEL_MESSAGE,
+    NOTIFICATION_CATEGORIES,
     PROVIDER_KINDS,
     HeartbeatConfig,
     ModelPresetConfig,
+    NotificationsConfig,
     ProviderConfig,
     is_keyproxy_url,
     keyproxy_base,
@@ -53,7 +56,7 @@ from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
-from daedalus.extensions.notifications import Draft, NotificationService
+from daedalus.extensions.notifications import ActionConflict, ActionRefused, Draft, NotificationService
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import model_options, tts_configured
 from daedalus.host import capabilities, component_install, launcher_bridge
@@ -87,8 +90,9 @@ from daedalus.stores.media import MEDIA_TENANT
 from daedalus.stores.projects import Project, ProjectError, ProjectSettings
 from daedalus.stores.sqlite import ReceiptConflict
 from daedalus.stores.staff import ACTIVE_STATUSES, HARNESSES, Staff, StaffBusy, StaffError
+from daedalus.terminals.gateway import TERMINAL_WS_MAX_BYTES, Gateway, SocketGone, ticket_who
+from daedalus.terminals.model import EnvUnavailable, TerminalError, TerminalSpec
 from daedalus.terminals.model import Owner as TerminalOwner
-from daedalus.terminals.model import TerminalError, TerminalSpec
 from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
@@ -469,6 +473,22 @@ class NotificationsSeenBody(BaseModel):
     ids: list[int] | None = Field(default=None, max_length=1000)
     all: bool = False
     session_id: str | None = Field(default=None, max_length=64)
+    model_config = {"extra": "forbid"}
+
+
+class NotificationActBody(BaseModel):
+    """One of a notification's actions: ``allow``, ``deny``, ``answer:<i>``, ``open``, or ``answer`` with the words."""
+
+    action: str = Field(min_length=1, max_length=64)
+    value: str | None = Field(default=None, max_length=4000)
+    model_config = {"extra": "forbid"}
+
+
+class NotificationPreferencesBody(BaseModel):
+    """The whole ``[notifications]`` section, and the revision of the configuration it was read from."""
+
+    preferences: dict[str, Any]
+    base_revision: str
     model_config = {"extra": "forbid"}
 
 
@@ -1022,6 +1042,39 @@ class TerminalSignalBody(BaseModel):
     signal: Literal["INT", "TERM", "HUP", "KILL", "QUIT", "TSTP", "CONT", "WINCH", "USR1", "USR2"]
 
 
+class TerminalTicketBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    read_only: bool = False
+
+
+class TerminalSocket:
+    """The framework's WebSocket as the terminal relay's ``FrameSocket``."""
+
+    def __init__(self, websocket: WebSocket) -> None:
+        self.websocket = websocket
+
+    async def receive(self) -> bytes | str | None:
+        try:
+            message = await self.websocket.receive()
+        except (WebSocketDisconnect, RuntimeError):
+            return None
+        if message["type"] == "websocket.disconnect":
+            return None
+        if message.get("bytes") is not None:
+            return bytes(message["bytes"])
+        return str(message.get("text") or "")
+
+    async def send(self, frame: bytes) -> None:
+        try:
+            await self.websocket.send_bytes(frame)
+        except (WebSocketDisconnect, RuntimeError, OSError) as exc:
+            raise SocketGone(str(exc)) from None
+
+    async def close(self, code: int, reason: str = "") -> None:
+        with suppress(WebSocketDisconnect, RuntimeError, OSError):
+            await self.websocket.close(code, reason)
+
+
 class TerminalRestartBody(BaseModel):
     sandbox: bool | None = None
     confirm: bool = False
@@ -1119,12 +1172,12 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             user = data.get("user") or {}
             if int(user.get("id", 0)) != settings.owner_user_id:
                 raise HTTPException(403, "not the owner")
-            return {"user_id": settings.owner_user_id}
+            return {"user_id": settings.owner_user_id, "via": "telegram"}
         token = request.headers.get("x-daedalus-token")
         if not token and request.url.path.endswith("/download"):
             token = request.query_params.get("token")  # browser navigation cannot set headers
         if token and secrets.compare_digest(token, api_token):
-            return {"user_id": settings.owner_user_id}
+            return {"user_id": settings.owner_user_id, "via": "token"}
         # A browser that paired, signed in with a passkey or used Telegram's widget holds a signed cookie.
         cookie = request.cookies.get(SESSION_COOKIE)
         if cookie and verify_session_cookie(await session_secret(), cookie) == settings.owner_user_id:
@@ -3307,6 +3360,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
 
     # -- terminals: the terminal daemons' terminals, as the service mirrors them --------------
 
+    terminal_gateway = Gateway(
+        service=lambda: app.extensions.get("terminals"),  # type: ignore[arg-type, return-value]
+        public_url=lambda: settings.miniapp_public_url,
+        ticket_ttl=lambda: app.config.terminals.ticket_ttl_seconds,
+    )
+    api.state.terminal_gateway = terminal_gateway  # the tests reach its ticket book's clock through this
+
     def terminal_service() -> Terminals:
         service = app.extensions.get("terminals")
         if service is None:
@@ -3392,6 +3452,30 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if not entries and await app.db.fetchone("SELECT 1 FROM terminals WHERE id = ?", (terminal_id,)) is None:
             raise HTTPException(404, "no such terminal")
         return {"entries": entries}
+
+    @api.post("/api/terminals/{terminal_id}/ticket")
+    async def terminals_ticket(terminal_id: str, request: Request, body: TerminalTicketBody | None = None, who: dict[str, Any] = Depends(auth)) -> Any:
+        """A single-use ticket for the terminal's WebSocket, which cannot carry the auth headers."""
+        read_only = body.read_only if body is not None else False
+        caller = ticket_who(str(who.get("via") or "token"), request.headers.get("user-agent", ""), request.client.host if request.client else "")
+        try:
+            return await terminal_gateway.issue(terminal_id, read_only=read_only, who=caller)
+        except EnvUnavailable as exc:
+            # 409, not the 503 of the other routes: the app reads this answer as "the environment is
+            # down, keep trying" rather than as the whole host failing.
+            return JSONResponse({"detail": exc.message, "code": exc.code, **exc.details}, status_code=409)
+
+    @api.websocket("/ws/terminals/{terminal_id}")
+    async def terminals_socket(websocket: WebSocket, terminal_id: str) -> None:
+        await websocket.accept()
+        await terminal_gateway.serve(
+            TerminalSocket(websocket),
+            terminal_id,
+            ticket=websocket.query_params.get("ticket", ""),
+            origin=websocket.headers.get("origin"),
+            host=websocket.headers.get("host"),
+            address=websocket.client.host if websocket.client else "",
+        )
 
     @api.get("/api/services")
     async def all_services(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
@@ -4528,6 +4612,49 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(404, "no such notification")
         return {"deleted": entry_id, "summary": await service.summary()}
 
+    @api.post("/api/notifications/{entry_id}/act")
+    async def notifications_act(entry_id: int, body: NotificationActBody, _: dict[str, Any] = Depends(auth)) -> Any:
+        service = notifications_service()
+        try:
+            resolution, view = await service.act(entry_id, body.action, body.value, via="notification")
+        except LookupError as exc:
+            raise HTTPException(404, "no such notification") from exc
+        except ActionRefused as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except ActionConflict as exc:
+            # The first answer wins; the second is shown what it was, with the entry as it now stands.
+            return JSONResponse({"resolution": exc.resolution, "notification": await service.get(entry_id)}, status_code=409)
+        return {"resolution": resolution, "notification": view}
+
+    def _notification_preferences() -> dict[str, Any]:
+        return {
+            "preferences": app.config.notifications.model_dump(mode="json"),
+            "revision": config_revision(app.config),
+            "categories": list(NOTIFICATION_CATEGORIES),
+            "zone": manager.presence.locale()[1],
+        }
+
+    @api.get("/api/notifications/preferences")
+    async def notification_preferences(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return _notification_preferences()
+
+    @api.put("/api/notifications/preferences")
+    async def put_notification_preferences(body: NotificationPreferencesBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            preferences = NotificationsConfig.model_validate(body.preferences)
+        except ValidationError as exc:
+            raise HTTPException(400, {"problems": [{"path": ".".join(str(p) for p in e["loc"]), "message": e["msg"]} for e in exc.errors()]}) from exc
+        new_config = app.config.model_copy(update={"notifications": preferences})
+        try:
+            await app.save_config(new_config, expected_revision=body.base_revision)
+        except ConfigConflict as exc:
+            raise HTTPException(409, {"message": str(exc), "current_revision": exc.current_revision}) from exc
+        return _notification_preferences()
+
+    @api.post("/api/notifications/test")
+    async def notifications_test(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return {"delivered": await notifications_service().test()}
+
     # -- heartbeat ------------------------------------------------------------------------
 
     @api.get("/api/heartbeat")
@@ -5006,7 +5133,9 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
         token = secrets.token_urlsafe(24)
         await app.db.kv_set("api_token", token)
     api = build_app(app, token)
-    config = uvicorn.Config(api, host=app.settings.api_host, port=app.settings.api_port, log_level="warning", access_log=False)
+    # uvicorn's own 20 s WebSocket pings stay on: they are what notices a phone that dropped off the
+    # network while a terminal was open. The size cap is the largest frame a terminal socket takes.
+    config = uvicorn.Config(api, host=app.settings.api_host, port=app.settings.api_port, log_level="warning", access_log=False, ws_max_size=TERMINAL_WS_MAX_BYTES)
     server = uvicorn.Server(config)
     app.extensions["api_token"] = token
     base = app.settings.miniapp_public_url or f"http://127.0.0.1:{app.settings.api_port}"

@@ -34,6 +34,7 @@ EXTENSIONS = (
     "daedalus.extensions.balance",
     "daedalus.extensions.voice",
     "daedalus.extensions.terminals",
+    "daedalus.extensions.harness",
     "daedalus.extensions.api",
 )
 
