@@ -33,4 +33,3 @@
 
   /work/proj      ⊙ 1 MCP /status    1.18.23
   work/proj:main
-

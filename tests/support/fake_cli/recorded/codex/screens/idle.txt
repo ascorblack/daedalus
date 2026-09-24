@@ -21,16 +21,3 @@
 › Ask Codex to do anything
 
   gpt-6-astra default · /work/proj
-
-
-
-
-
-
-
-
-
-
-
-
-

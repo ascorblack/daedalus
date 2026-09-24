@@ -27,10 +27,3 @@ Disconnected from this task. Any running work continues.
 Reconnect: codex --remote unix:///run/dial/codex.sock resume 01a0d59e-aee3-7fa2-81c5-60ccc0b5d05c
 Stop the current turn: run codex --remote unix:///run/dial/codex.sock agents, select this task, and press ctrl + x.
 EXIT 0
-
-
-
-
-
-
-
