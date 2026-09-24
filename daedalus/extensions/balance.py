@@ -89,7 +89,7 @@ class BalanceMonitor:
                         " ON CONFLICT(threshold) DO UPDATE SET fired_at = excluded.fired_at",
                         (key, datetime.now(UTC).isoformat()),
                     )
-                    await self.app.notice(f"💸 {provider} balance is ${balance:.2f}, below the ${threshold:.2f} threshold.", kind="balance", tone="warning")
+                    await self.app.notice(f"💸 {provider} balance is ${balance:.2f}, below the ${threshold:.2f} threshold.", kind="balance", tone="warning", category="spend")
                 elif balance >= threshold and fired:
                     await db.execute("UPDATE balance_alerts SET fired_at = NULL WHERE threshold = ?", (key,))
 

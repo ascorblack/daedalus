@@ -349,16 +349,20 @@ class Loops:
         await self._fire_if_due(session_id)
 
     async def _notify(self, session_id: str, text: str) -> None:
-        if self.app.notifications is not None:
-            await self.app.notifications.post(Draft("agent_notify", "Loop", text, kind="loop", session_id=session_id, source="loop"))
+        sent = False
         front = self.app.front
         if front is not None:
             try:
                 outbox = await front.outbox_for_session(session_id)
                 if outbox is not None:
                     await outbox.send_text("🔁 " + text, markdown=False)
+                    sent = True
             except Exception:  # noqa: BLE001
                 logger.warning("loop notice not posted", exc_info=True)
+        if self.app.notifications is not None:
+            # Posted after the topic line, so the entry knows it went there and nothing buzzes twice for it.
+            handled = frozenset({"telegram"}) if sent else frozenset()
+            await self.app.notifications.post(Draft("agent_notify", "Loop", text, kind="loop", session_id=session_id, source="loop", handled=handled))
 
     # -- service for the tools --------------------------------------------------------
 
