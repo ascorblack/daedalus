@@ -15,6 +15,7 @@ import (
 
 	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/production"
+	"github.com/ascorblack/daedalus/ptyd/internal/ptyproc"
 	"github.com/ascorblack/daedalus/ptyd/internal/scan/scantest"
 )
 
@@ -177,6 +178,47 @@ func TestProbeCorpus(t *testing.T) {
 		peak>>10, peakRSSAbove>>20, slowest.Round(time.Millisecond), m.HeapSys>>20)
 }
 
+// throughputScript is the output the throughput benchmarks run: ordinary coloured build lines, or
+// with PTYD_BENCH_SHORT_LINES set, `yes` itself (two-byte lines, the worst case per byte: every line
+// is a scroll).
+func throughputScript(total int) []string {
+	line := `"$(printf '\033[32mok\033[0m  build step with a path /usr/lib/x.so and some words')"`
+	if os.Getenv("PTYD_BENCH_SHORT_LINES") != "" {
+		line = ""
+	}
+	return []string{"sh", "-c", `yes ` + line + ` | head -c ` + strconv.Itoa(total)}
+}
+
+// BenchmarkPTYAlone is the floor the daemon is measured against: the same program and PTY with the
+// output read and thrown away, no scanner, ring or emulator.
+func BenchmarkPTYAlone(b *testing.B) {
+	const total = 100_000_000
+	env := BuildEnv(os.Environ(), nil, nil, "bench")
+	sh, _ := LookPath("sh", env, "/")
+	b.SetBytes(total)
+	buf := make([]byte, readBytes)
+	for i := 0; i < b.N; i++ {
+		argv := throughputScript(total)
+		p, err := ptyproc.Start(ptyproc.Spec{Path: sh, Argv: argv, Dir: "/", Env: env, Cols: 120, Rows: 40})
+		if err != nil {
+			b.Fatal(err)
+		}
+		n := 0
+		for {
+			k, err := p.Master.Read(buf)
+			n += k
+			if err != nil {
+				break
+			}
+		}
+		p.Wait()
+		_ = p.Close()
+		if n < total {
+			b.Fatalf("only %d bytes arrived", n)
+		}
+	}
+}
+
 // BenchmarkThroughput measures how fast output goes from a program through the PTY, the scanner,
 // the ring and the production emulator: 100 MB of ordinary coloured lines per iteration.
 func BenchmarkThroughput(b *testing.B) {
@@ -191,8 +233,7 @@ func BenchmarkThroughput(b *testing.B) {
 	b.SetBytes(total)
 	for i := 0; i < b.N; i++ {
 		id := "bench" + strconv.Itoa(i)
-		term, err := reg.Create(Spec{ID: id, Path: sh, Argv: []string{"sh", "-c",
-			`yes "$(printf '\033[32mok\033[0m  build step with a path /usr/lib/x.so and some words')" | head -c ` + strconv.Itoa(total)},
+		term, err := reg.Create(Spec{ID: id, Path: sh, Argv: throughputScript(total),
 			Cwd: "/", Env: env, Cols: 120, Rows: 40, RingBytes: 8 << 20})
 		if err != nil {
 			b.Fatal(err)

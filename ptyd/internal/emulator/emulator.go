@@ -33,12 +33,11 @@ type Emulator interface {
 // Options are what a new emulator is created with.
 type Options struct {
 	Cols, Rows int
-	// ScrollbackLines bounds the history. Lines, not bytes: a byte cap silently holds a few hundred
-	// lines of coloured output.
+	// ScrollbackLines is the history to keep, in lines of the terminal's width. An emulator may
+	// enforce it as the memory those lines take, so it is about this many lines.
 	ScrollbackLines int
-	// ScrollbackBytes bounds the memory the history may take, so that the lines of a 500-column
-	// terminal full of distinct styles cannot grow one terminal without limit. It is set well above
-	// what ScrollbackLines of ordinary output needs, so the line count is what normally applies.
+	// ScrollbackBytes is the most memory the history may take whatever the lines hold: the
+	// terminal's memory budget.
 	ScrollbackBytes int
 	// GraphemeClusters starts the emulator with grapheme clustering on (mode 2027), which is how the
 	// browser's width provider measures text. With it off, the two would disagree about the width of

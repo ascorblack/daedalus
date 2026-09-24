@@ -16,6 +16,10 @@ import (
 // was built from.
 const Name = "libghostty-vt@27e8b3fa"
 
+// bytesPerCell is what a cell of history costs the library, page overhead included: about 9 bytes
+// for ordinary output, measured at 80, 200 and 500 columns.
+const bytesPerCell = 10
+
 // Cell size handed to the library on resize. It only feeds pixel reports, which the daemon answers
 // itself from what the browser measured, so any plausible value does.
 const cellWidthPx, cellHeightPx = 8, 16
@@ -23,8 +27,9 @@ const cellWidthPx, cellHeightPx = 8, 16
 // Emulator is libghostty-vt behind the daemon's emulator interface. Like every emulator it belongs
 // to one goroutine.
 type Emulator struct {
-	t  *gh.Terminal
-	rs *gh.RenderState
+	t    *gh.Terminal
+	rs   *gh.RenderState
+	opts emulator.Options
 
 	// Absolute rows. The library knows how many rows its history holds, not how many ever passed
 	// through it, so the count is kept here: total is the number of rows that ever entered the
@@ -52,6 +57,17 @@ func New(o emulator.Options) emulator.Emulator {
 // Factory is New as an emulator.Factory.
 var Factory emulator.Factory = New
 
+// historyBytes is the byte bound of the history at a width: the lines asked for, at what a cell
+// costs, and never more than the terminal's memory budget. Always set explicitly: the library's own
+// default is 10 000 bytes, which holds a page or two.
+func historyBytes(o emulator.Options, cols int) uint {
+	want := max(0, o.ScrollbackLines) * max(1, cols) * bytesPerCell
+	if o.ScrollbackBytes > 0 {
+		want = min(want, o.ScrollbackBytes)
+	}
+	return uint(max(want, 64<<10))
+}
+
 func clampSize(cols, rows int) (uint16, uint16) {
 	return uint16(max(1, min(cols, 65535))), uint16(max(1, min(rows, 65535)))
 }
@@ -60,9 +76,13 @@ func newEmulator(o emulator.Options) (*Emulator, error) {
 	cols, rows := clampSize(o.Cols, o.Rows)
 	opts := []gh.TerminalOption{
 		gh.WithSize(cols, rows),
-		gh.WithMaxScrollbackLines(uint(max(0, o.ScrollbackLines))),
-		// Explicit, always: the library's default is 10 000 bytes, which holds a page or two.
-		gh.WithMaxScrollbackBytes(uint(max(1<<20, o.ScrollbackBytes))),
+		// The history is bounded by bytes, sized for the lines asked for at this width, and the line
+		// cap is only a backstop well above that. The library drops whole pages when the byte
+		// bound is reached, but trims row by row when the line bound is: with the line bound in
+		// charge, output of short lines (`yes`, `seq`) ran at 2.7 MB/s; with the bytes in charge
+		// at 8 to 26.
+		gh.WithMaxScrollbackLines(uint(max(0, o.ScrollbackLines) * 4)),
+		gh.WithMaxScrollbackBytes(historyBytes(o, int(cols))),
 		// When rows are added, history comes back down into them, as xterm.js does.
 		gh.WithResizePullScrollback(true),
 		// A snapshot taken while a sequence is half-written carries the half, so replaying the
@@ -87,7 +107,7 @@ func newEmulator(o emulator.Options) (*Emulator, error) {
 	// No kitty graphics: the browser cannot show them, and stored images are memory no clamp bounds.
 	var noImages uint64
 	_ = t.SetKittyImageStorageLimit(&noImages)
-	e := &Emulator{t: t, rs: rs}
+	e := &Emulator{t: t, rs: rs, opts: o}
 	e.SetTheme(emulator.DefaultTheme)
 	return e, nil
 }
@@ -143,6 +163,8 @@ func (e *Emulator) primary() bool {
 
 func (e *Emulator) Resize(cols, rows int) {
 	c, r := clampSize(cols, rows)
+	limit := historyBytes(e.opts, int(c))
+	_ = e.t.SetScrollbackMaxBytes(&limit)
 	_ = e.t.Resize(c, r, cellWidthPx, cellHeightPx)
 	e.count()
 }

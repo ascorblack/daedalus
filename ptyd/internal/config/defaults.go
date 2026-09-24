@@ -38,12 +38,13 @@ const (
 	DefaultCols = 80
 	DefaultRows = 24
 
-	// ScrollbackLines is the history each terminal's emulator keeps. Lines, not bytes: the emulator's
-	// memory per terminal is bounded by this times the width, whatever the output.
+	// ScrollbackLines is the history each terminal's emulator keeps: about 10 000 lines at any
+	// width. The emulator holds it as the memory those lines take (about 10 bytes a cell), so a
+	// narrow terminal of short lines costs little and a wide one more.
 	ScrollbackLines = 10000
-	// ScrollbackBytes is the memory the history may take whatever its lines hold: 10 000 lines of a
-	// 200-column terminal take about 15 MB, and of a 500-column one full of distinct styles several
-	// times that. The emulator's own default is 10 000 bytes, a page or two, so it is always set.
+	// ScrollbackBytes is the most a terminal's history may take: the per-terminal memory budget. At
+	// about 10 bytes a cell it is 10 000 lines of 500 columns with room to spare, and it also bounds
+	// output whose cells cost more (many distinct styles, long grapheme clusters, links).
 	ScrollbackBytes = 64 << 20
 
 	// DefaultInputIdle is how long an agent's write waits after the last human keystroke.

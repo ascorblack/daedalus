@@ -90,7 +90,7 @@ Parameters are decoded strictly: an unknown field is `-32602`.
 |---|---|---|
 | `daemon.info` | → `{version, protocol, instance, env, os, arch, pid, started_at, uptime_s, home, shell, capabilities{sandbox, shells[], shell_integration[], emulator, stats}, hooks{listen}, limits{…}, counts{running, exited}, machine}` | |
 | `terminal.create` | see below → `{id, pid, cwd, cwd_fallback, shell, created_at}` | |
-| `terminal.list` | `{ids?, preview_rows? 0..12}` → `{terminals:[Info]}` | previews *not yet* |
+| `terminal.list` | `{ids?, preview_rows? 0..12}` → `{terminals:[Info]}` | see The screen |
 | `terminal.get` | `{id}` → `Info` | |
 | `terminal.write` | see below → `{bytes, seq_before, queued_ms, delivered_at}` | |
 | `terminal.resize` | `{id, cols, rows, px_w?, px_h?}` → `{cols, rows}`; the host becomes the size owner | |
@@ -104,7 +104,10 @@ Parameters are decoded strictly: an unknown field is `-32602`.
 | `terminal.attach` | `{id, client{kind? = "human" \| "viewer", label?, via?, read_only?}}` → `{channel, client_id}` | see Attachments |
 | `terminal.detach` | `{channel}`; the daemon closes the channel | |
 | `terminal.keyboard` | `{id, owner: "auto" \| "human" \| "agent", ttl_ms? ≤ 86 400 000}` → `{owner, until?}` | |
-| `terminal.snapshot`, `terminal.read_screen`, `terminal.wait_for`, `terminal.commands` | the screen | *not yet* |
+| `terminal.snapshot` | `{id, scrollback? ≤ 10000 = 2000}` → `{cols, rows, seq, first_abs_row, data_b64}` | see The screen |
+| `terminal.read_screen` | `{id, format? "text" \| "runs" \| "vt", scrollback? ≤ 10000, tail_rows?}` → `{cols, rows, cursor{x, y, visible, abs_row}, alt_screen, title, cwd, seq, first_abs_row, lines[] \| runs[][] \| data_b64, truncated?}` | |
+| `terminal.wait_for` | `{id, regex?, scope? "screen" \| "output", since_seq?, idle_ms?, timeout_ms}` → `{matched: "regex" \| "idle" \| "exited" \| "timeout", seq, match?}` | |
+| `terminal.commands`, `wait_for {command_done}` | shell integration | *not yet* |
 | `exec.run`, `fs.*`, `net.dial`, `net.allow`, `hooks.*` | side channels for CLI adapters | *not yet* |
 
 ### `terminal.create`
@@ -229,6 +232,57 @@ the last 20 000.
 
 `seq` inside `data` is the output offset at which the mark occurred.
 
+## The screen
+
+Every answer about the screen is taken at one output offset, `seq`: the screen shows every byte
+before it and none after. Rows have absolute numbers counted from the terminal's start, so a row
+keeps its number while older ones leave the history (`first_abs_row` is the number of the first row
+returned). The numbering is exact between resizes; a resize reflows the history and can shift it.
+
+- `terminal.snapshot` returns VT bytes that rebuild the screen, its history (`scrollback` lines of
+  it), both screens, the cursor, the pen, the modes, the scroll region, the tab stops, the character
+  sets, the links and the colours the program set, when written into a freshly reset terminal of the
+  same size. The stream continues at `seq`. A snapshot that would not fit in one frame (700 KiB) is
+  taken again with less history.
+- `terminal.read_screen` returns the visible screen and `scrollback` lines above it (only the last
+  `tail_rows`, when given). `text`: one string per line, soft-wrapped rows joined, trailing spaces
+  and trailing blank lines dropped; when the text would not fit in a frame the oldest lines go and
+  `truncated` is true. `runs`: per row, `[{t, fg?, bg?, b?, i?, u?, d?, inv?}]` (a colour is 1–256 for
+  palette entries 0–255, `0x1000000 + RGB` for true colour, absent for the default), at most 1000
+  rows. `vt`: a snapshot. Under the alternate screen there is no history.
+- `terminal.wait_for` ends at the first condition met: `regex` (RE2) found in the visible screen's
+  text, re-evaluated at most every 50 ms and only after new output, or with `scope: "output"` in the
+  output since `since_seq` (default: the call), escape sequences removed; `idle_ms` of no output,
+  counted from the call at the earliest; the program's exit; or `timeout_ms` (at most 30 minutes).
+- `terminal.list {preview_rows}` fills `preview` with that many rows as runs: under a shell the rows
+  ending at the cursor, on the alternate screen its bottom rows.
+
+## Terminal queries
+
+A program asks its terminal questions and waits for the answer on its input. The daemon answers all
+of them, with nobody attached as with three, at the exact point of the stream where they were asked
+and ahead of any queued input; every browser swallows them. The answers are the ones xterm.js gives,
+since xterm.js draws the terminal and encodes the keys and the mouse, so a program is never told
+about a feature the browser lacks:
+
+| Query | Answer |
+|---|---|
+| DA1 `CSI c`, DA2 `CSI > c` | `CSI ? 1 ; 2 c`, `CSI > 0 ; 276 ; 0 c` |
+| XTVERSION `CSI > q` | `DCS > \| xterm.js(<the app's xterm.js version>) ST` |
+| DSR `CSI 5 n`, CPR `CSI 6 n`, `CSI ? 6 n` | `CSI 0 n`; the cursor, from the top left whatever DECOM says |
+| `CSI ? 996 n` | `CSI ? 997 ; 1 n` when the viewer's background is darker than its foreground, else `; 2` |
+| DECRQM, both forms | the modes xterm.js knows, with its values (`0` for the rest), plus 2027 (grapheme clustering, on) |
+| kitty `CSI ? u` | the current flags |
+| DECRQSS `m`, `r`, `SP q`, `" q`, `" p` | the pen, the margins, the cursor shape, `0`, `61 ; 1` |
+| OSC 4/10/11/12 when every slot is `?` | the colour, `rgb:rrrr/gggg/bbbb`, one reply per slot: the one the program set, else the size owner's theme (from ATTACH), else the app's dark palette |
+| XTWINOPS 14, 15, 16, 18, 19 | the text area in pixels and cells, once a browser has measured it (18 and 19 always) |
+
+Other `CSI n` requests and XTWINOPS reports get no answer; the title reports (20, 21) never do,
+because echoing a title a program wrote back as input is a way to type into a shell. Where xterm.js
+reports an option rather than the state (the cursor shape, cursor blink, the pen) or a column past
+the margin while a wrap is pending, the daemon reports the state and the last column. At most 64 KiB
+of answers wait for a program that does not read its input; beyond that they are dropped.
+
 ## What every consumer of the output may rely on
 
 The output is scanned before anything else sees it, and the same clamped bytes go to the ring, to
@@ -249,7 +303,8 @@ to a parameter, or buffer an unterminated string without limit, so:
 
 A sequence split across reads is held until complete; the result does not depend on how the output
 was chunked. Per terminal, the daemon's memory is bounded by the ring, 64 KiB of pending sequence,
-the emulator's queue and the emulator's scrollback of 10 000 lines.
+the emulator's queue and the emulator's history: about 10 000 lines at the terminal's width, at most
+64 MiB.
 
 ## The emulator
 
@@ -259,9 +314,35 @@ one Go interface (`ptyd/internal/emulator`): `Feed`, `Resize`, `Size`, `Cursor`,
 served in order, so every answer corresponds to an exact output offset. Emulators start with
 grapheme clustering (mode 2027) on, which is how the browser's width provider measures text.
 
-The current build's emulator tracks only the size and the modes (bracketed paste, cursor-key mode,
-the alternate screen, mouse reporting, the kitty keyboard stack), which is what writes need. It
-answers no terminal queries and keeps no screen; `daemon.info` names it as `basic@1`.
+The emulator is libghostty-vt, Ghostty's terminal core, linked statically into the daemon and built
+from pinned sources (`ptyd/libghostty`). It was chosen by measurement against xterm.js headless,
+alacritty_terminal and charmbracelet/x/vt:
+
+- It was the only one to survive every unclamped hostile stream (32 of them, up to 20 MB each) with
+  no crash and no hang, at most 92 MB. Behind the daemon's clamps the same corpus peaks at 38 MB
+  above the daemon's own memory.
+- Its snapshots, replayed into a fresh xterm.js, reproduce the live xterm.js screen at 162 of 192
+  checkpoints of recorded programs and synthetic cases, and at 59 of the 68 checkpoints of real
+  programs (vim, less, htop, top, git, rich, Textual, bash, and five coding agents), with 3 cells
+  wrong. The differences left are policies (below).
+- It parses 75–186 MB/s on an idle machine and holds a 200×50 terminal with 10 000 lines of history
+  in about 15 MB. A snapshot of 2000 lines of history takes about 7 ms, of 10 000 about 30 ms.
+
+The daemon's snapshot layer puts right what the library's formatter leaves out or gets wrong: rows
+the formatter trims, the primary screen under an alternate one, the cursor's shape, the title,
+mouse modes a program already turned off, colours a program set, and the cursor position under
+origin mode. A patch carried against the pinned commit fixes three formatter defects (rows of only
+background colour, blanks after a styled cell, links).
+
+The width of every character is Ghostty's with grapheme clustering (mode 2027) on, and the app's
+xterm.js measures with a width provider generated from the same tables; the two are held together by
+recorded grids both sides test against. Where the library and xterm.js differ by policy, the library
+is kept: lines scrolled out of a scroll region that starts at the top go into the history (as in
+xterm; Codex keeps its conversation this way), the cursor's line reflows on resize, invalid UTF-8
+becomes U+FFFD, left and right margins (DECSLRM) exist, and a soft reset keeps bracketed paste.
+
+A build without cgo has no screen emulator: it tracks only the size and the modes, answers only the
+queries that need no screen, and `daemon.info` names it `basic@1` instead of `libghostty-vt@…`.
 
 ## Browser frames
 
