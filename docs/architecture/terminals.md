@@ -400,6 +400,10 @@ because the token in them is a shell.
   control traffic, and every subscriber would wake for them. A bell or a progress value more than
   30 s old is dropped, because the host replays the daemon's events from its saved cursor after a
   restart and an old bell would ring now for nothing.
+- **The agent's read.** A session's own agent reads its terminals with the `TerminalRead` tool:
+  the list, the screen, the recent output and the commands, never a write. It sees only terminals
+  its session owns, and host terminals only when `terminals.agent_reads_host` is on (it is off by
+  default). What it reads passes the redactor first and is bounded like every tool result.
 
 | Route | |
 |---|---|

@@ -1,6 +1,6 @@
 """The terminals service against the real daemon: a shell started, written to, read, ended, and the
 two restarts that matter — the host's, which leaves the terminal running, and the daemon's, which
-loses it.
+loses it — then a program's marks on the event bus, and a session's agent reading its terminal.
 
 Needs a built daemon: ``DAEDALUS_INTEGRATION=1 DAEDALUS_PTYD_BIN=<path to ptyd>``.
 """
@@ -15,16 +15,20 @@ import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Iterable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from protocore.contracts.tools import ToolContext
 
 from daedalus.config import TerminalsConfig
 from daedalus.host.events import EventBus, EventFilter
+from daedalus.host.services import SessionServices, locator
 from daedalus.stores.database import Database
 from daedalus.terminals.bus import BusBridge
 from daedalus.terminals.model import Origin, Owner, TerminalSpec
 from daedalus.terminals.service import Terminals
+from daedalus.tools.terminal import terminal_read
 
 BINARY = os.environ.get("DAEDALUS_PTYD_BIN", "")
 
@@ -183,3 +187,34 @@ async def test_a_real_programs_marks_reach_the_event_bus(db: Database, base: Pat
     finally:
         await service.close()
         await bus.close()
+
+
+class OneSession(FreeOnly):
+    async def exists(self, owner: Owner) -> bool:
+        return owner.kind == "free" or owner == Owner("session", "s-real")
+
+
+async def test_a_sessions_agent_reads_a_real_terminal(db: Database, base: Path, daemon: subprocess.Popen[bytes]) -> None:
+    cfg = TerminalsConfig()
+    service = Terminals(db, run_dirs={"container": base / "run", "host": None}, config=lambda: cfg, owners=OneSession())
+    await service.start()
+    locator.register(SessionServices(session_id="s-real", workspace_dir=base, extra={"manager": SimpleNamespace(service_hooks={"terminals": service.agent_service})}))
+    ctx = ToolContext(tenant_id="t", run_id="r", session_id="s-real", metadata={"tool_call_id": "c"})
+    try:
+        assert await service.wait_available("container", timeout=15)
+        view = await service.create(TerminalSpec(env="container", owner=Owner("session", "s-real"), cwd=str(base), argv=["/bin/sh", "-c", "echo 3 failing; sleep 30"], title="tests"))
+
+        async def output() -> str:
+            return str((await terminal_read().invoke(ctx, {"what": "output", "terminal": "tests"})).content)
+
+        async with asyncio.timeout(20):
+            while "3 failing" not in await output():
+                await asyncio.sleep(0.1)
+        # With or without an emulator in the daemon, "screen" answers with what the terminal says.
+        screen = await terminal_read().invoke(ctx, {"what": "screen"})
+        assert not screen.is_error and "3 failing" in str(screen.content)
+        listed = await terminal_read().invoke(ctx, {"what": "list"})
+        assert view["id"] in str(listed.content)
+    finally:
+        locator.unregister("s-real")
+        await service.close()

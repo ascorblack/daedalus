@@ -42,6 +42,11 @@ class FakeTerminal:
     signals: list[str] = field(default_factory=list)
     title: str = ""
     preview: list[Any] | None = None
+    screen: list[str] | None = None
+    """The screen's lines, once a test gives it one; without, ``read_screen`` is unknown to the daemon,
+    as it is to a daemon without an emulator."""
+    commands: list[dict[str, Any]] | None = None
+    """The shell's commands, likewise; without, ``terminal.commands`` is unknown."""
     pid: int = field(default_factory=lambda: 1000 + secrets.randbelow(30000))
 
     def info(self, preview_rows: int = 0) -> dict[str, Any]:
@@ -333,6 +338,13 @@ class FakePtyd:
             else:
                 out["data_b64"] = base64.b64encode(chunk).decode()
             return out
+        if method == "terminal.read_screen" and self._term(params).screen is not None:
+            term = self._term(params)
+            assert term.screen is not None
+            return {"cols": term.cols, "rows": term.rows, "cursor": {"x": 0, "y": len(term.screen) - 1, "visible": True, "abs_row": len(term.screen) - 1},
+                    "alt_screen": False, "title": term.title, "cwd": term.cwd, "seq": len(term.output), "lines": list(term.screen)}
+        if method == "terminal.commands" and self._term(params).commands is not None:
+            return {"commands": list(self._term(params).commands or [])[-int(params.get("last") or 20):]}
         if method == "terminal.stats":
             running = [t for t in self.terminals.values() if t.status == "running"]
             return {"at": stamp(), "supported": True, "machine": self.machine,

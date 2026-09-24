@@ -196,6 +196,7 @@ stale_hours = 6            # a 'doing' task whose session went quiet this long i
 # exited_retention_hours = 72  # how long an ended terminal stays listed with its last screen
 # audit_retention_days = 90
 # shell = ""                   # empty = the environment's login shell
+# agent_reads_host = false     # whether a session's agent may read the host terminals of its own session
 
 [harness]
 # no_signal_after_s = 300          # a working CLI staff member silent this long has its screen checked
