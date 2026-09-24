@@ -186,6 +186,9 @@ describe("the keys the code asks for", () => {
       ["pboard.none.", listed("./board/board.ts", "COLUMNS")],
       ["pboard.brief.", listed("./board/board.ts", "BRIEF_FIELDS")],
       ["pboard.need.kind.", ["question", "permission", "folder"]],
+      // A notification's category and the way its request ended come from the host by name.
+      ["notice.cat.", listed("./notifications.tsx", "NOTICE_CATEGORIES")],
+      ["notice.resolution.", listed("./notifications.tsx", "NOTICE_RESOLUTIONS")],
     ];
     const missing = families.flatMap(([prefix, names]) => names.map((n) => prefix + n)).filter((key) => !(key in DICT));
     // The section hints sit beside the section names, and a hint nobody wrote is a blank line.

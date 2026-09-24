@@ -253,14 +253,15 @@ func TestBuildEnv(t *testing.T) {
 		k, v, _ := stringsCut(kv, '=')
 		got[k] = v
 	}
-	for _, gone := range []string{"DAEDALUS_PTYD_TOKEN", "CLAUDECODE", "CLAUDE_CONFIG_DIR", "TMUX", "TERM_PROGRAM",
+	for _, gone := range []string{"DAEDALUS_PTYD_TOKEN", "CLAUDECODE", "TMUX", "TERM_PROGRAM",
 		"VSCODE_PID", "KITTY_WINDOW_ID", "STY", "LC_ALL", "SECRET_KEEP"} {
 		if _, ok := got[gone]; ok {
 			t.Errorf("%s survived", gone)
 		}
 	}
 	want := map[string]string{"TERM": "xterm-256color", "COLORTERM": "truecolor", "LANG": "C.UTF-8",
-		"DAEDALUS_TERMINAL_ID": "abc", "EXTRA": "1", "PATH": "/usr/bin", "CLAUDE_CODE_NO_FLICKER": "1"}
+		"DAEDALUS_TERMINAL_ID": "abc", "EXTRA": "1", "PATH": "/usr/bin", "CLAUDE_CODE_NO_FLICKER": "1",
+		"CLAUDE_CONFIG_DIR": "/c"}
 	for k, v := range want {
 		if got[k] != v {
 			t.Errorf("%s = %q, want %q", k, got[k], v)

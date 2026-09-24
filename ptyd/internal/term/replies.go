@@ -17,8 +17,8 @@ import (
 // maxAnswers bounds the recent answers kept per terminal, and the pending ones per client.
 const maxAnswers = 32
 
-// answer is a reply the daemon wrote for a query that ends at output offset seq.
-type answer struct {
+// recentAnswer is a reply the daemon wrote for a query that ends at output offset seq.
+type recentAnswer struct {
 	seq   int64
 	reply []byte
 	at    time.Time
@@ -38,12 +38,12 @@ func (t *Terminal) answered(seq int64, reply []byte) {
 	a := &t.att
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.answers = slices.DeleteFunc(a.answers, func(x answer) bool { return now.Sub(x.at) > config.ReplyEchoWindow })
+	a.answers = slices.DeleteFunc(a.answers, func(x recentAnswer) bool { return now.Sub(x.at) > config.ReplyEchoWindow })
 	if len(a.answers) >= maxAnswers {
 		a.answers = a.answers[1:]
 	}
 	r := append([]byte(nil), reply...)
-	a.answers = append(a.answers, answer{seq: seq, reply: r, at: now})
+	a.answers = append(a.answers, recentAnswer{seq: seq, reply: r, at: now})
 	for _, c := range a.clients {
 		if c.attached && c.sent.Load() >= seq {
 			c.addPendingLocked(seq, r, now)

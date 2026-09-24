@@ -2,53 +2,46 @@ import { useState } from "react";
 import { api, Notification, NotificationPage, NotificationSummary, Proposal } from "../api";
 import { Skeleton } from "../components";
 import { OverflowMenu, Sheet, deleteWithUndo } from "../dialogs";
-import { absTime, dayLabel, relTime } from "../format";
-import { Icon, IconName } from "../icons";
+import { absTime, relTime } from "../format";
+import { Icon } from "../icons";
 import { navigate, pathFor } from "../router";
 import { PageHeader, screenTitle } from "../shell";
 import { hold, invalidate, prime, release, useQuery } from "../store";
-import { useStreamUp } from "../events";
+import { SUMMARY_KEY } from "../events";
+import { useProjects } from "../projects";
+import { ActionButtons, NeedsYou, NotificationList, NotificationRow, byDay, byProject, entryPath, listKey, projectNames, useNotifications } from "../notifications";
 import { PushNudge } from "../pushui";
 import { errorText } from "../ui";
 import { plural, t } from "../i18n";
 
-type Filter = "all" | "unseen" | "problems";
+type Filter = "all" | "unseen" | "problems" | "projects";
 
-const SUMMARY = "/api/notifications/summary";
-
-const KIND_ICON: Record<string, IconName> = { rebuild: "wrench", run_failed: "stop", run_cap: "stop", schedule: "clock", schedule_run: "clock", reminder: "clock", service: "globe", loop: "loop", loop_paused: "pause", heartbeat: "dot", inbound: "inbox", board_stale: "board", webhook_failed: "globe", learning_digest: "bulb", boot_guard: "wrench", change_proposal: "changes" };
-
-function kindIcon(kind: string): IconName {
-  if (KIND_ICON[kind]) return KIND_ICON[kind];
-  if (kind.includes("fail") || kind.includes("error")) return "stop";
-  if (kind.includes("schedule")) return "clock";
-  if (kind.includes("service")) return "globe";
-  return "inbox";
-}
-
-const kindLabel = (kind: string) => kind.replace(/_/g, " ");
-
-/** The colour of the icon: the entry's tone, except that a quiet record stays grey whatever it says. */
-const toneClass = (e: Notification) => (e.level === "quiet" && e.tone === "info" ? "quiet" : e.tone);
-
+/**
+ * The notification centre, and on a phone the only one: what needs the operator first, with its
+ * buttons; the change proposals waiting for a decision; then everything else, by day or by project.
+ */
 export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onOpen: (id: string) => void }) {
   const [filter, setFilter] = useState<Filter>("all");
-  const key = `/api/notifications?view=${filter}&limit=200`;
-  // A new or seen notification arrives as an event while the stream is up; only without it does the list poll.
-  const live = useStreamUp();
-  const { data, error, loading, refresh } = useQuery<NotificationPage>(key, { pollMs: live ? 0 : 15000, staleMs: 5000 });
+  const view = filter === "projects" ? "all" : filter;
+  const key = listKey(view, null, 200);
+  const { data, error, loading, refresh } = useNotifications(view, null, 200);
   const proposals = useQuery<Proposal[]>("/api/proposals", { pollMs: 60000, staleMs: 30000 });
+  const projects = useProjects();
+  const names = projectNames(projects.data);
   const [open, setOpen] = useState<number | null>(null);
   const unseen = data?.summary.unseen ?? 0;
-  const entries = data?.entries ?? [];
+  const needs = data?.summary.needs_you ?? 0;
+  // What needs the operator is drawn above, with its buttons; the list below is the rest.
+  const entries = (data?.entries ?? []).filter((e) => !e.needs_you);
   const pending = (proposals.data ?? []).filter((p) => p.status === "pending");
+  const groups = filter === "projects" ? byProject(entries, names) : byDay(entries);
 
   /** Show a change before the server has confirmed it; the badge follows from the same summary. */
   function patch(fn: (list: Notification[]) => Notification[], summary?: NotificationSummary) {
     if (!data) return;
     const next = summary ?? data.summary;
-    prime(key, { ...data, entries: fn(data.entries), summary: next });
-    prime(SUMMARY, next);
+    prime<NotificationPage>(key, { ...data, entries: fn(data.entries), summary: next });
+    prime(SUMMARY_KEY, next);
   }
 
   async function markAll() {
@@ -66,7 +59,7 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
     patch((l) => l.map((e) => (e.id === entry.id ? { ...e, seen: true } : e)));
     try {
       const r = await api.post<{ marked: number; summary: NotificationSummary }>("/api/notifications/seen", { ids: [entry.id] });
-      prime(SUMMARY, r.summary);
+      prime(SUMMARY_KEY, r.summary);
     } catch (e) {
       toast(errorText(e));
     }
@@ -91,7 +84,7 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
         } finally {
           release(key);
           refresh();
-          invalidate(SUMMARY);
+          invalidate(SUMMARY_KEY);
         }
       },
       () => {
@@ -102,8 +95,34 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
     );
   }
 
-  // Day headings between the cards.
-  let lastDay = "";
+  const row = (entry: Notification) => (
+    <NotificationRow key={entry.id} entry={entry} names={names} card expanded={open === entry.id} onActivate={() => toggle(entry)}>
+      {open === entry.id && (
+        <div className="inbox-body" onClick={(e) => e.stopPropagation()}>
+          {entry.body && <pre className="inbox-text">{entry.body}</pre>}
+          <ActionButtons entry={entry} />
+          <div className="btnrow">
+            {(entry.link || entry.session_id) && (
+              <button className="btn small" onClick={() => (entry.session_id && !entry.link ? onOpen(entry.session_id) : navigate(entryPath(entry)))}>
+                <Icon name={entry.session_id ? "bots" : "forward"} size={14} /> {t(entry.session_id ? "inbox.open.session" : "notice.open")}
+              </button>
+            )}
+            <span className="grow" />
+            <OverflowMenu
+              small
+              label={t("inbox.actions")}
+              items={[
+                { label: t("inbox.markunread"), icon: "inbox", onSelect: () => patch((l) => l.map((e) => (e.id === entry.id ? { ...e, seen: false } : e))) },
+                "-",
+                { label: t("common.delete"), icon: "trash", danger: true, onSelect: () => remove(entry) },
+              ]}
+            />
+          </div>
+        </div>
+      )}
+    </NotificationRow>
+  );
+
   return (
     <>
       <PageHeader
@@ -115,10 +134,12 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
           <button className="chip select" aria-pressed={filter === "all"} onClick={() => setFilter("all")}>{t("common.all")}</button>
           <button className="chip select" aria-pressed={filter === "unseen"} onClick={() => setFilter("unseen")}>{t("inbox.filter.unread")}{unseen > 0 ? ` · ${unseen}` : ""}</button>
           <button className="chip select" aria-pressed={filter === "problems"} onClick={() => setFilter("problems")}>{t("inbox.filter.problems")}</button>
+          <button className="chip select" aria-pressed={filter === "projects"} onClick={() => setFilter("projects")}>{t("centre.projects")}</button>
         </div>
       </PageHeader>
       <div className="screen narrow">
         <PushNudge />
+        <NeedsYou names={names} card />
         {pending.length > 0 && filter !== "problems" && (
           <section>
             <div className="section-title">{t("inbox.waiting")} <span className="n">{pending.length}</span></div>
@@ -129,66 +150,14 @@ export function InboxScreen({ toast, onOpen }: { toast: (t: string) => void; onO
         )}
         {loading && !error && <Skeleton rows={6} />}
         {error && !data && <div className="empty"><b>{t("inbox.error")}</b><div>{error}</div><button className="btn" onClick={refresh}>{t("common.retry")}</button></div>}
-        {data && entries.length === 0 && pending.length === 0 && (
+        {data && entries.length === 0 && pending.length === 0 && needs === 0 && (
           <div className="empty">
             <b>{t(filter === "unseen" ? "inbox.empty.unread" : filter === "problems" ? "inbox.empty.problems" : "inbox.empty")}</b>
           </div>
         )}
-        {entries.map((entry) => {
-          const day = dayLabel(entry.updated_at);
-          const heading = day !== lastDay ? day : null;
-          lastDay = day;
-          return (
-            <div key={entry.id}>
-              {heading && <div className="section-title">{heading}</div>}
-              <InboxRow entry={entry} open={open === entry.id} onToggle={() => toggle(entry)} onOpen={onOpen} onRemove={() => remove(entry)} onUnseen={() => patch((l) => l.map((e) => (e.id === entry.id ? { ...e, seen: false } : e)))} />
-            </div>
-          );
-        })}
+        <NotificationList groups={groups} row={row} />
       </div>
     </>
-  );
-}
-
-function InboxRow({ entry, open, onToggle, onOpen, onRemove, onUnseen }: { entry: Notification; open: boolean; onToggle: () => void; onOpen: (id: string) => void; onRemove: () => void; onUnseen: () => void }) {
-  const tone = toneClass(entry);
-  return (
-    <div className={`erow inbox ${entry.seen ? "" : "unread"}`} role="button" tabIndex={0} aria-expanded={open} onClick={onToggle} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}>
-      <span className={`kind ${tone}`} aria-label={entry.tone}>
-        <Icon name={kindIcon(entry.kind)} size={16} />
-      </span>
-      <div className="erow-main">
-        <div className="erow-head">
-          <span className={`erow-title ${open ? "" : "clamp-2"}`}>{entry.count > 1 ? `${entry.count} × ${entry.title}` : entry.title}</span>
-          <span className="erow-time num" title={absTime(entry.updated_at)}>{relTime(entry.updated_at)}</span>
-        </div>
-        <div className="erow-meta">
-          <span>{kindLabel(entry.kind)}</span>
-        </div>
-        {open && (
-          <div className="inbox-body" onClick={(e) => e.stopPropagation()}>
-            {entry.body && <pre className="inbox-text">{entry.body}</pre>}
-            <div className="btnrow">
-              {entry.session_id && (
-                <button className="btn small" onClick={() => onOpen(entry.session_id!)}>
-                  <Icon name="bots" size={14} /> {t("inbox.open.session")}
-                </button>
-              )}
-              <span className="grow" />
-              <OverflowMenu
-                small
-                label={t("inbox.actions")}
-                items={[
-                  { label: t("inbox.markunread"), icon: "inbox", onSelect: onUnseen },
-                  "-",
-                  { label: t("common.delete"), icon: "trash", danger: true, onSelect: onRemove },
-                ]}
-              />
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
   );
 }
 

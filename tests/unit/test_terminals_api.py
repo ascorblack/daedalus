@@ -19,6 +19,7 @@ from daedalus.host.policy import DENY
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.stores.projects import FolderSpec
+from daedalus.terminals import endpoint
 from daedalus.terminals.model import Owner
 from daedalus.terminals.owners import ManagerOwners
 from daedalus.terminals.service import Terminals
@@ -183,6 +184,17 @@ async def test_the_run_directory_is_sealed_from_the_agent(manager: SessionManage
     assert run_dir in manager.settings.sealed_paths and run_dir in manager.protected_paths()
     policy = manager.policy()
     assert policy.evaluate("Exec", {"command": f"cat {run_dir}/token"}).action == DENY
+
+
+async def test_a_daemons_state_directory_joins_the_sealed_set(manager: SessionManager, run_dir: Path, tmp_path: Path) -> None:
+    # Reported by the daemon in daemon.info: its launches' overlay files and dial sockets live there.
+    state = tmp_path / "ptyd-state"
+    endpoint.remember_state_dir(run_dir, str(state))
+    try:
+        assert str(state) in manager.policy().sealed
+    finally:
+        endpoint.remember_state_dir(run_dir, "")
+    assert str(state) not in manager.policy().sealed
 
 
 async def test_a_host_terminal_of_a_container_session_starts_in_a_host_folder_or_at_home(manager: SessionManager, tmp_path: Path) -> None:

@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 from daedalus.terminals import load as load_math
 from daedalus.terminals import wire
 from daedalus.terminals.client import Channel, PtydClient, Unavailable
-from daedalus.terminals.endpoint import remember_hook_port
+from daedalus.terminals.endpoint import remember_hook_port, remember_state_dir
 from daedalus.terminals.model import (
     ENVS,
     STATUSES,
@@ -46,6 +46,7 @@ from daedalus.terminals.model import (
     OutputChunk,
     OverCap,
     Owner,
+    StaleLaunch,
     TerminalError,
     TerminalEvent,
     TerminalSpec,
@@ -54,6 +55,7 @@ from daedalus.terminals.model import (
     WriteReceipt,
 )
 from daedalus.terminals.owners import Owners
+from daedalus.terminals.sidechannels import SideChannels
 
 if TYPE_CHECKING:
     from daedalus.config import TerminalsConfig
@@ -125,6 +127,8 @@ def rpc_failure(exc: wire.RpcError, what: str) -> TerminalError:
         return Unsupported(f"{what}: not available in this terminal service yet ({exc.message})")
     if code in (wire.INVALID_PARAMS, wire.INVALID_SIZE):
         return InvalidRequest(f"{what}: {exc.message}")
+    if code == wire.STALE_LAUNCH:
+        return StaleLaunch(f"{what}: {exc.message}")
     return TerminalError(f"{what}: {exc.message} ({code})")
 
 
@@ -186,7 +190,7 @@ class Attachment:
 Subscriber = Callable[[TerminalEvent], Awaitable[None]]
 
 
-class Terminals:
+class Terminals(SideChannels):
     def __init__(
         self,
         db: Database,
@@ -220,6 +224,7 @@ class Terminals:
         self._subscribers: list[Subscriber] = []
         self._tasks: list[asyncio.Task[None]] = []
         self._closing = False
+        self._init_side()
 
     # -- lifecycle --------------------------------------------------------------------------
 
@@ -272,6 +277,7 @@ class Terminals:
                 link.reason, link.detail = "", ""
                 hooks = str((link.info.get("hooks") or {}).get("listen") or "")
                 remember_hook_port(link.run_dir, int(hooks.rpartition(":")[2]) if hooks.rpartition(":")[2].isdigit() else 0)
+                remember_state_dir(link.run_dir, str((link.info.get("side_channels") or {}).get("state_dir") or ""))
                 await self._resume(link)
                 link.connected_once.set()
                 delay = RECONNECT_FIRST
@@ -308,6 +314,8 @@ class Terminals:
         # once in the listing and once as itself, rather than not at all. Both are idempotent.
         await link.client.call("events.subscribe", {"after_seq": after})
         await self._reconcile(link)
+        # A daemon starts with no roots, and one that restarted has forgotten them.
+        await self._push_roots(link.env, link.client, force=True)
 
     async def _housekeeping(self) -> None:
         last_sync = last_prune = time.monotonic()
@@ -317,6 +325,9 @@ class Terminals:
                 await self._flush_cursors()
                 await self._save_costs()
                 self._wake_waiters()
+                for link in self.links.values():
+                    if link.available and link.client is not None:
+                        await self._push_roots(link.env, link.client)
                 now = time.monotonic()
                 if now - last_sync >= SYNC_SECONDS:
                     last_sync = now
@@ -673,6 +684,8 @@ class Terminals:
             self._wake_waiters()
             raise
         actual = str(result.get("cwd") or cwd)
+        if spec.launch_id:
+            self._launch_terminals.setdefault(spec.launch_id, terminal_id)
         await self.db.execute("UPDATE terminals SET cwd = ?, ptyd_instance = ? WHERE id = ?", (actual, link.instance, terminal_id))
         detail: dict[str, Any] = {"owner": {"kind": spec.owner.kind, "id": spec.owner.id}, "cwd": actual, "profile": spec.profile, "sandbox": spec.sandbox}
         if spec.argv:
@@ -955,6 +968,7 @@ class Terminals:
         elif terminal_id:
             await self._on_terminal_event(link, kind, str(terminal_id), data)
         event = TerminalEvent(env=env, seq=seq, type=kind, terminal_id=str(terminal_id) if terminal_id else None, at=iso(params.get("at")) or now_iso(), data=data)
+        self._on_side_event(event)
         for subscriber in list(self._subscribers):
             try:
                 await subscriber(event)

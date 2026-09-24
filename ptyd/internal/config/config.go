@@ -9,9 +9,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,6 +32,15 @@ type Config struct {
 	LogLevel    string
 
 	Limits Limits
+	Side   Side
+}
+
+// Side is what the configuration file adds to the side channels' compiled-in lists. It only ever
+// adds: the deny list in particular cannot be shortened, from the file or over the socket.
+type Side struct {
+	ExecAllow []string // program names exec.run may run, beyond the built-in ones
+	FSRoots   []string // directories fs.* may read, beside the ones the host sets
+	FSDeny    []string // patterns fs.* refuses, beside the built-in ones
 }
 
 // Limits are the numbers a deployment may tune from the JSON file.
@@ -49,6 +60,13 @@ type file struct {
 		InputIdleMs  *int64 `json:"input_idle_ms"`
 		KillGraceMs  *int64 `json:"kill_grace_ms"`
 	} `json:"limits"`
+	Exec struct {
+		Allow []string `json:"allow"`
+	} `json:"exec"`
+	FS struct {
+		Roots []string `json:"roots"`
+		Deny  []string `json:"deny"`
+	} `json:"fs"`
 }
 
 // Parse reads the arguments of `serve`.
@@ -89,6 +107,9 @@ func Parse(args []string) (*Config, error) {
 		// Only loopback: the token is the whole of the authentication, and it is not meant to cross a
 		// network.
 		return nil, fmt.Errorf("--listen must be unix or tcp:127.0.0.1:<port>, not %q", c.Listen)
+	}
+	if err := checkLoopback(c.HooksListen); err != nil {
+		return nil, fmt.Errorf("--hooks-listen: %w", err)
 	}
 	if c.Home == "" {
 		c.Home, _ = os.UserHomeDir()
@@ -147,6 +168,41 @@ func (c *Config) load(path string) error {
 			return fmt.Errorf("limits.kill_grace_ms %d is outside 0..%d", *v, MaxKillGrace.Milliseconds())
 		}
 		c.Limits.KillGrace = time.Duration(*v) * time.Millisecond
+	}
+	for _, name := range f.Exec.Allow {
+		// A name, not a path: the allowlist is matched against the basename of what PATH resolves.
+		if name == "" || strings.ContainsAny(name, "/\\") {
+			return fmt.Errorf("exec.allow %q is not a program name", name)
+		}
+	}
+	c.Side.ExecAllow = f.Exec.Allow
+	for _, root := range f.FS.Roots {
+		if !filepath.IsAbs(root) {
+			return fmt.Errorf("fs.roots %q is not an absolute path", root)
+		}
+	}
+	c.Side.FSRoots = f.FS.Roots
+	for _, pattern := range f.FS.Deny {
+		if pattern == "" {
+			return errors.New("fs.deny holds an empty pattern")
+		}
+	}
+	c.Side.FSDeny = f.FS.Deny
+	return nil
+}
+
+// checkLoopback refuses a hook listener address off the loopback interface. The listener speaks
+// for running CLIs with nothing but a bearer token, and that token is not meant to cross a network.
+func checkLoopback(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return fmt.Errorf("port %q", port)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("%q is not a loopback address", addr)
 	}
 	return nil
 }

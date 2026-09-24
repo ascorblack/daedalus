@@ -416,6 +416,20 @@ export type ProjectDir = {
   /** Whether the bot can reach the folder from where it runs. False in Docker until the folder is mounted. */
   reachable: boolean;
   writable: boolean;
+  /** Who could ever work in it: every agent, only what runs in a host terminal, or nothing yet.
+   *  Sent by /api/projects; a session's own copy of its project leaves it out. */
+  reach?: FolderReach;
+};
+
+export type FolderReach = "agents" | "terminals" | "none";
+
+/** Where a folder of this installation may live, from /api/project-environments. */
+export type ProjectEnvironments = {
+  /** The environment the bot itself runs in: its agents work in folders of this one. */
+  local: "container" | "host";
+  available: ("container" | "host")[];
+  host_bridge: boolean;
+  docker: boolean;
 };
 
 export type OrchestratorSettings = {
@@ -490,6 +504,8 @@ export type Notification = {
   terminal_id: string | null;
   source: string;
   dedupe_key: string | null;
+  /** What answers it (`ask:…`, `policy:…`); an entry with one is open until it is resolved. */
+  request_ref: string | null;
   count: number;
   actions: NotificationAction[];
   seen: boolean;

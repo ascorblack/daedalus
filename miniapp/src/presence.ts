@@ -105,6 +105,17 @@ export function usePresenceScope(scope: PresenceScope): void {
   }, [session, terminal, project]);
 }
 
+/** Everything this window shows right now, uncut: a toast about a session on screen is not raised. */
+export function shownScopes(): { sessions: Set<string>; terminals: Set<string>; projects: Set<string> } {
+  const shown = { sessions: new Set<string>(), terminals: new Set<string>(), projects: new Set<string>() };
+  for (const scope of scopes.values()) {
+    if (scope.session) shown.sessions.add(scope.session);
+    if (scope.terminal) shown.terminals.add(scope.terminal);
+    if (scope.project) shown.projects.add(scope.project);
+  }
+  return shown;
+}
+
 function timeZone(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "";

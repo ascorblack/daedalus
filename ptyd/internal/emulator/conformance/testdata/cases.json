@@ -1,0 +1,550 @@
+[
+ {
+  "name": "wrapping",
+  "cols": 10,
+  "rows": 5,
+  "writes": [
+   "abcdefghijKLM"
+  ],
+  "text": [
+   "abcdefghijKLM"
+  ],
+  "cursor": [
+   3,
+   1
+  ]
+ },
+ {
+  "name": "pending wrap stays on the last column",
+  "cols": 10,
+  "rows": 5,
+  "writes": [
+   "0123456789"
+  ],
+  "text": [
+   "0123456789"
+  ],
+  "cursor": [
+   9,
+   0
+  ]
+ },
+ {
+  "name": "pending wrap then a character",
+  "cols": 10,
+  "rows": 5,
+  "writes": [
+   "0123456789A"
+  ],
+  "text": [
+   "0123456789A"
+  ],
+  "cursor": [
+   1,
+   1
+  ]
+ },
+ {
+  "name": "carriage return and line feed",
+  "cols": 20,
+  "rows": 5,
+  "writes": [
+   "a\r\nb\rc\n"
+  ],
+  "text": [
+   "a",
+   "c"
+  ],
+  "cursor": [
+   1,
+   2
+  ]
+ },
+ {
+  "name": "cursor movement",
+  "cols": 20,
+  "rows": 6,
+  "writes": [
+   "\u001b[5;10Hx\u001b[2Ay\u001b[3Dz\u001b[Bw\u001b[Ge"
+  ],
+  "text": [
+   "",
+   "",
+   "        z y",
+   "e        w",
+   "         x"
+  ],
+  "cursor": [
+   1,
+   3
+  ]
+ },
+ {
+  "name": "graphic rendition",
+  "cols": 20,
+  "rows": 3,
+  "writes": [
+   "\u001b[1;31mR\u001b[0;4;38;2;1;2;3mU\u001b[7m \u001b[0m"
+  ],
+  "text": [
+   "RU"
+  ],
+  "runs": [
+   [
+    {
+     "t": "R",
+     "fg": 2,
+     "b": true
+    },
+    {
+     "t": "U",
+     "fg": 16843267,
+     "u": true
+    },
+    {
+     "t": " ",
+     "fg": 16843267,
+     "u": true,
+     "inv": true
+    }
+   ]
+  ]
+ },
+ {
+  "name": "256 colours and background erase",
+  "cols": 6,
+  "rows": 2,
+  "writes": [
+   "\u001b[38;5;200m\u001b[48;5;17mab\u001b[K\u001b[0m"
+  ],
+  "text": [
+   "ab"
+  ],
+  "runs": [
+   [
+    {
+     "t": "ab",
+     "fg": 201,
+     "bg": 18
+    },
+    {
+     "t": "    ",
+     "bg": 18
+    }
+   ]
+  ]
+ },
+ {
+  "name": "alternate screen, inside",
+  "cols": 20,
+  "rows": 5,
+  "writes": [
+   "main\u001b[?1049halt"
+  ],
+  "text": [
+   "    alt"
+  ],
+  "cursor": [
+   7,
+   0
+  ],
+  "modes": {
+   "AltScreen": true
+  }
+ },
+ {
+  "name": "alternate screen, left again",
+  "cols": 20,
+  "rows": 5,
+  "writes": [
+   "main\u001b[?1049halt\u001b[?1049l"
+  ],
+  "text": [
+   "main"
+  ],
+  "cursor": [
+   4,
+   0
+  ],
+  "modes": {
+   "AltScreen": false
+  }
+ },
+ {
+  "name": "scroll region",
+  "cols": 10,
+  "rows": 5,
+  "writes": [
+   "1\r\n2\r\n3\r\n4\r\n5\u001b[2;4r\u001b[4;1H\n"
+  ],
+  "text": [
+   "1",
+   "3",
+   "4",
+   "",
+   "5"
+  ],
+  "cursor": [
+   0,
+   3
+  ],
+  "history": 0
+ },
+ {
+  "name": "scroll region at the top feeds the history",
+  "cols": 10,
+  "rows": 4,
+  "writes": [
+   "a\r\nb\r\nc\r\nd\u001b[1;3r\u001b[3;1H\n\n"
+  ],
+  "text": [
+   "a",
+   "b",
+   "c",
+   "",
+   "",
+   "d"
+  ],
+  "history": 2
+ },
+ {
+  "name": "insert and delete characters",
+  "cols": 20,
+  "rows": 3,
+  "writes": [
+   "abcdef\u001b[1;3H\u001b[2@XY\u001b[1;1H\u001b[P"
+  ],
+  "text": [
+   "bXYcdef"
+  ],
+  "cursor": [
+   0,
+   0
+  ]
+ },
+ {
+  "name": "insert and delete lines",
+  "cols": 10,
+  "rows": 5,
+  "writes": [
+   "1\r\n2\r\n3\r\n4\r\n5\u001b[2;1H\u001b[L\u001b[4;1H\u001b[2M"
+  ],
+  "text": [
+   "1",
+   "",
+   "2"
+  ],
+  "cursor": [
+   0,
+   3
+  ]
+ },
+ {
+  "name": "erase in line",
+  "cols": 20,
+  "rows": 3,
+  "writes": [
+   "abcdef\u001b[1;4H\u001b[K\r\nxyz\u001b[1K"
+  ],
+  "text": [
+   "abc"
+  ],
+  "cursor": [
+   3,
+   1
+  ]
+ },
+ {
+  "name": "erase in display",
+  "cols": 20,
+  "rows": 4,
+  "writes": [
+   "a\r\nb\r\nc\u001b[2;1H\u001b[J"
+  ],
+  "text": [
+   "a"
+  ],
+  "cursor": [
+   0,
+   1
+  ]
+ },
+ {
+  "name": "tab stops",
+  "cols": 20,
+  "rows": 3,
+  "writes": [
+   "a\tb\u001b[5G\u001bHc\r\t\tX"
+  ],
+  "text": [
+   "a   c   X"
+  ],
+  "cursor": [
+   9,
+   0
+  ]
+ },
+ {
+  "name": "saved cursor",
+  "cols": 10,
+  "rows": 4,
+  "writes": [
+   "\u001b[3;3H\u001b7\u001b[1;1Hx\u001b8y"
+  ],
+  "text": [
+   "x",
+   "",
+   "  y"
+  ],
+  "cursor": [
+   3,
+   2
+  ]
+ },
+ {
+  "name": "origin mode",
+  "cols": 10,
+  "rows": 5,
+  "writes": [
+   "\u001b[2;4r\u001b[?6h\u001b[1;1Hx"
+  ],
+  "text": [
+   "",
+   "x"
+  ],
+  "cursor": [
+   1,
+   1
+  ],
+  "modes": {
+   "Origin": true
+  }
+ },
+ {
+  "name": "line drawing character set",
+  "cols": 10,
+  "rows": 2,
+  "writes": [
+   "\u001b(0qx\u001b(Bq"
+  ],
+  "text": [
+   "─│q"
+  ]
+ },
+ {
+  "name": "grapheme clusters",
+  "cols": 20,
+  "rows": 2,
+  "writes": [
+   "👍🏻|🇺🇸|é|👩‍💻|"
+  ],
+  "text": [
+   "👍🏻|🇺🇸|é|👩‍💻|"
+  ],
+  "cursor": [
+   11,
+   0
+  ]
+ },
+ {
+  "name": "grapheme cluster split across writes",
+  "cols": 20,
+  "rows": 2,
+  "writes": [
+   "\ufffd\ufffd\ufffd",
+   "\ufffd\ufffd\ufffd",
+   "\ufffd\ufffd|"
+  ],
+  "text": [
+   "👍🏻|"
+  ],
+  "cursor": [
+   3,
+   0
+  ]
+ },
+ {
+  "name": "wide character at the margin",
+  "cols": 5,
+  "rows": 3,
+  "writes": [
+   "abcd中"
+  ],
+  "text": [
+   "abcd中"
+  ],
+  "cursor": [
+   2,
+   1
+  ]
+ },
+ {
+  "name": "history",
+  "cols": 10,
+  "rows": 3,
+  "writes": [
+   "1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10\r\n"
+  ],
+  "text": [
+   "1",
+   "2",
+   "3",
+   "4",
+   "5",
+   "6",
+   "7",
+   "8",
+   "9",
+   "10"
+  ],
+  "cursor": [
+   0,
+   2
+  ],
+  "history": 8
+ },
+ {
+  "name": "cursor-key mode",
+  "cols": 10,
+  "rows": 2,
+  "writes": [
+   "\u001b[?1h"
+  ],
+  "text": [],
+  "modes": {
+   "AppCursor": true
+  }
+ },
+ {
+  "name": "bracketed paste and focus events",
+  "cols": 10,
+  "rows": 2,
+  "writes": [
+   "\u001b[?2004h\u001b[?1004h"
+  ],
+  "text": [],
+  "modes": {
+   "BracketedPaste": true,
+   "FocusEvents": true
+  }
+ },
+ {
+  "name": "mouse tracking with SGR reports",
+  "cols": 10,
+  "rows": 2,
+  "writes": [
+   "\u001b[?1002h\u001b[?1006h"
+  ],
+  "text": [],
+  "modes": {
+   "Mouse": {
+    "Mode": 1002,
+    "Encoding": 1006
+   }
+  }
+ },
+ {
+  "name": "mouse tracking turned off keeps nothing on",
+  "cols": 10,
+  "rows": 2,
+  "writes": [
+   "\u001b[?1000h\u001b[?1003h\u001b[?1006h\u001b[?1003l"
+  ],
+  "text": [],
+  "modes": {
+   "Mouse": {
+    "Mode": 0,
+    "Encoding": 0
+   }
+  }
+ },
+ {
+  "name": "kitty keyboard push and pop",
+  "cols": 10,
+  "rows": 2,
+  "writes": [
+   "\u001b[\u003e1u\u001b[\u003e3u\u001b[\u003cu"
+  ],
+  "text": [],
+  "modes": {
+   "KittyFlags": 1
+  }
+ },
+ {
+  "name": "cursor shape and visibility",
+  "cols": 10,
+  "rows": 2,
+  "writes": [
+   "\u001b[5 q\u001b[?25l"
+  ],
+  "text": [],
+  "modes": {
+   "CursorStyle": 5
+  }
+ },
+ {
+  "name": "autowrap and insert mode",
+  "cols": 10,
+  "rows": 2,
+  "writes": [
+   "\u001b[?7l\u001b[4h"
+  ],
+  "text": [],
+  "modes": {
+   "Insert": true,
+   "Wrap": false
+  }
+ },
+ {
+  "name": "reflow when widened",
+  "cols": 10,
+  "rows": 5,
+  "writes": [
+   "abcdefghijklmno"
+  ],
+  "resize_to": [
+   20,
+   5
+  ],
+  "text": [
+   "abcdefghijklmno"
+  ],
+  "cursor": [
+   15,
+   0
+  ]
+ },
+ {
+  "name": "reflow when narrowed",
+  "cols": 10,
+  "rows": 5,
+  "writes": [
+   "abcdefghijklmno\r\n$ "
+  ],
+  "resize_to": [
+   5,
+   5
+  ],
+  "text": [
+   "abcdefghijklmno",
+   "$"
+  ]
+ },
+ {
+  "name": "full reset",
+  "cols": 10,
+  "rows": 3,
+  "writes": [
+   "abc\u001b[?1h\u001b[?2004h\u001bc"
+  ],
+  "text": [],
+  "cursor": [
+   0,
+   0
+  ],
+  "modes": {
+   "AppCursor": false,
+   "BracketedPaste": false
+  }
+ }
+]
