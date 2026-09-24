@@ -1221,16 +1221,30 @@ def open_first_kind(page: Page) -> None:
 # The session's terminal dock, as the mock-up drew it: the tests failing in one pane, the dev server in
 # the other. The terminal's own text is what the programs print, the same in both languages.
 ESC = "\x1b["
-DOCK_TESTS = (
-    f"{ESC}32m●{ESC}0m {ESC}36mbakery-site{ESC}0m {ESC}34m(main){ESC}0m $ git status -s\r\n"
-    f" {ESC}33mM{ESC}0m src/pages/checkout.tsx\r\n {ESC}33mM{ESC}0m src/lib/cart.ts\r\n{ESC}31m??{ESC}0m src/pages/checkout.test.tsx\r\n"
-    f"{ESC}32m●{ESC}0m {ESC}36mbakery-site{ESC}0m {ESC}34m(main){ESC}0m $ npm test -- checkout\r\n\r\n"
-    f" {ESC}32m✓{ESC}0m the cart adds up the total {ESC}2m(4 ms){ESC}0m\r\n"
-    f" {ESC}32m✓{ESC}0m an empty cart leads back to the menu {ESC}2m(2 ms){ESC}0m\r\n"
-    f" {ESC}31m✗ promo code SPRING10{ESC}0m\r\n   Expected: {ESC}32m1080{ESC}0m\r\n   Received: {ESC}31m1200{ESC}0m\r\n\r\n"
-    f" Tests: {ESC}31m1 failed{ESC}0m, {ESC}32m2 passed{ESC}0m, 3 total\r\n"
-    f"{ESC}31m●{ESC}0m {ESC}36mbakery-site{ESC}0m {ESC}34m(main){ESC}0m $ "
-)
+def dock_prompt(ok: bool) -> str:
+    """The bakery shell's prompt: its dot says how the last command went, as a themed prompt does."""
+    return f"{ESC}{32 if ok else 31}m●{ESC}0m {ESC}36mbakery-site{ESC}0m {ESC}34m(main){ESC}0m $ "
+
+
+def dock_tests(term, id_: str) -> None:  # type: ignore[no-untyped-def]
+    """The tests terminal as a shell with integration prints it: each prompt and command marked, so the
+    dock shows a dot beside every command and the tab takes the last one's colour."""
+    term.shell_prompt(id_, dock_prompt(True))
+    term.shell_command(id_, "git status -s", [f" {ESC}33mM{ESC}0m src/pages/checkout.tsx", f" {ESC}33mM{ESC}0m src/lib/cart.ts", f"{ESC}31m??{ESC}0m src/pages/checkout.test.tsx"], 0)
+    term.shell_prompt(id_, dock_prompt(True))
+    term.shell_command(id_, "npm test -- checkout", [
+        "",
+        f" {ESC}32m✓{ESC}0m the cart adds up the total {ESC}2m(4 ms){ESC}0m",
+        f" {ESC}32m✓{ESC}0m an empty cart leads back to the menu {ESC}2m(2 ms){ESC}0m",
+        f" {ESC}31m✗ promo code SPRING10{ESC}0m",
+        f"   Expected: {ESC}32m1080{ESC}0m",
+        f"   Received: {ESC}31m1200{ESC}0m",
+        "",
+        f" Tests: {ESC}31m1 failed{ESC}0m, {ESC}32m2 passed{ESC}0m, 3 total",
+    ], 1)
+    term.shell_prompt(id_, dock_prompt(False))
+
+
 DOCK_DEV = (
     f"\r\n  {ESC}1;32mVITE{ESC}0m {ESC}32mv7.1.4{ESC}0m  ready in {ESC}1m412{ESC}0m ms\r\n\r\n"
     f"  {ESC}32m➜{ESC}0m  {ESC}1mLocal{ESC}0m:   {ESC}36mhttp://127.0.0.1:8124/{ESC}0m\r\n"
@@ -1245,9 +1259,9 @@ def dock_shots(context, prefix: str = "") -> None:  # type: ignore[no-untyped-de
     from terminal_stub import TerminalStub, dock_state
 
     term = TerminalStub(S1)
-    term.add("d1tests00000", title="bash · bakery-site", busy=True)
+    term.add("d1tests00000", title="bash · bakery-site")
     term.add("d2devsrv0000", title="npm run dev", busy=True)
-    term.emit("d1tests00000", DOCK_TESTS)
+    dock_tests(term, "d1tests00000")
     term.emit("d2devsrv0000", DOCK_DEV)
     page = context.new_page()
     page.route("**/api/**", stub)

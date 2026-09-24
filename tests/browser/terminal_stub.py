@@ -99,6 +99,12 @@ class Term:
     snapshot: bytes | None = None
     busy: bool = False
     size_owner: str = "host"
+    # Shell integration, as the daemon keeps it: the commands the shell marked, with absolute rows
+    # (counted from the terminal's start by line feeds: the stub's output is line-oriented), and the
+    # row of the prompt being typed at. None: the shell has not marked a prompt.
+    commands: list[dict[str, Any]] = field(default_factory=list)
+    prompt_row: int | None = None
+    row: int = 0
 
     def view(self) -> dict[str, Any]:
         return {
@@ -156,9 +162,81 @@ class TerminalStub:
         """The program in terminal ``id_`` printed ``data``: every client gets it inside its window."""
         with self.lock:
             term = self.terms[id_]
-            term.stream += data.encode() if isinstance(data, str) else data
+            chunk = data.encode() if isinstance(data, str) else data
+            term.stream += chunk
+            term.row += chunk.count(b"\n")
             for client in self.live(id_):
                 self.pump(client)
+
+    # -- shell integration --------------------------------------------------------------------
+
+    def mark(self, id_: str, letter: str, event: dict[str, Any], *, early: bool = False) -> None:
+        """Print a shell mark and tell the attached clients, as the daemon does: the event carries the
+        offset just after the mark. ``early`` sends the event ahead of the bytes, which the daemon does
+        whenever output is still batched for a client."""
+        with self.lock:
+            term = self.terms[id_]
+            data = f"\x1b]133;{letter}\x07".encode()
+            body = {"type": "command", **event, "seq": len(term.stream) + len(data), "at": "2026-09-24T09:00:00Z"}
+            if early:
+                self.broadcast(id_, body)
+            self.emit(id_, data)
+            if not early:
+                self.broadcast(id_, body)
+
+    def broadcast(self, id_: str, body: dict[str, Any]) -> None:
+        for client in self.live(id_):
+            if client.attached:
+                self.send(client, enc_event(body))
+
+    def shell_prompt(self, id_: str, text: str = "$ ", *, early: bool = False) -> None:
+        """A prompt: its start marked, then its text."""
+        term = self.terms[id_]
+        term.prompt_row = term.row
+        self.mark(id_, "A", {"phase": "prompt", "abs_row": term.row}, early=early)
+        self.emit(id_, text)
+
+    def shell_command(self, id_: str, command: str, output: list[str], exit_code: int | None = 0, *, finish: bool = True, early: bool = False) -> dict[str, Any]:
+        """The operator typed ``command`` at the prompt; it prints ``output`` and, with ``finish``, ends."""
+        term = self.terms[id_]
+        self.emit(id_, f"{command}\r\n")
+        record = {"n": len(term.commands) + 1, "command": command, "cwd": term.cwd, "exit_code": None, "started_at": "2026-09-24T09:00:00Z",
+                  "finished_at": None, "duration_ms": None, "prompt_row": term.prompt_row, "output_row": term.row, "end_row": None, "lines": []}
+        term.commands.append(record)
+        term.busy = True
+        self.mark(id_, "C", {"phase": "start", "n": record["n"], "command": command, "abs_row": record["output_row"], "prompt_row": record["prompt_row"]}, early=early)
+        self.print_lines(id_, record, output)
+        if finish:
+            self.finish_command(id_, exit_code, early=early)
+        return record
+
+    def print_lines(self, id_: str, record: dict[str, Any], lines: list[str]) -> None:
+        record["lines"].extend(lines)
+        if lines:
+            self.emit(id_, "".join(f"{line}\r\n" for line in lines))
+
+    def finish_command(self, id_: str, exit_code: int | None = 0, *, early: bool = False) -> None:
+        term = self.terms[id_]
+        record = term.commands[-1]
+        record.update(exit_code=exit_code, end_row=term.row, finished_at="2026-09-24T09:00:01Z", duration_ms=1000)
+        term.busy = False
+        self.mark(id_, "D", {"phase": "end", "n": record["n"], "exit_code": exit_code, "command": record["command"], "abs_row": record["output_row"],
+                             "prompt_row": record["prompt_row"], "end_row": record["end_row"], "duration_ms": 1000}, early=early)
+
+    def marks_event(self, term: Term, first: int) -> dict[str, Any]:
+        """What follows a snapshot: every command whose rows reach its first row, and the current prompt."""
+        listed = [{"n": c["n"], "command": c["command"], "exit_code": c["exit_code"], "prompt_row": c["prompt_row"], "output_row": c["output_row"],
+                   "end_row": c["end_row"], "running": c["end_row"] is None} for c in term.commands if c["end_row"] is None or c["end_row"] >= first]
+        return {"type": "marks", "list": listed, "first_abs_row": first, "prompt_row": term.prompt_row}
+
+    def command_records(self, term: Term, last: int, output: bool) -> list[dict[str, Any]]:
+        out = []
+        for c in term.commands[-last:]:
+            record = {k: v for k, v in c.items() if k != "lines"}
+            if output:
+                record["output"] = "\n".join(c["lines"])[-64 * 1024:]
+            out.append(record)
+        return out
 
     def resize_by_other(self, id_: str, cols: int, rows: int) -> None:
         """Another screen took the size: the PTY is resized and every client hears who owns it."""
@@ -255,8 +333,13 @@ class TerminalStub:
             client.sent = client.acked = last
         else:
             screen = term.snapshot if term.snapshot is not None else bytes(term.stream[-4096:])
-            self.send(client, enc_event({"type": "resync", "reason": "attach", "first_abs_row": 0}))
+            # The snapshot's first line is the row its first byte is on: a cut in the middle of a line
+            # leaves that line's end as the first row, numbered by the line feeds before it.
+            first = 0 if term.snapshot is not None else bytes(term.stream[:-4096]).count(b"\n")
+            self.send(client, enc_event({"type": "resync", "reason": "attach", "first_abs_row": first}))
             self.send(client, enc_snapshot(term.cols, term.rows, len(term.stream), screen))
+            if term.commands or term.prompt_row is not None:
+                self.send(client, enc_event(self.marks_event(term, first)))
             client.sent = client.acked = len(term.stream)
         if term.status != "running":
             self.send(client, enc_event({"type": "exit", "code": term.exit_code, "signal": None}))
@@ -333,6 +416,11 @@ class TerminalStub:
                 return 409, {"detail": "the terminal is running"}
             del self.terms[term.id]
             return 200, {"ok": True}
+        if action == "commands" and method == "GET":
+            if not term.commands and term.prompt_row is None:
+                return 501, {"detail": "its commands are not recorded (it is not a shell started with its integration)"}
+            last = max(1, min(500, int(query.get("last", ["20"])[0] or 20)))
+            return 200, {"commands": self.command_records(term, last, query.get("output", ["0"])[0] in ("1", "true"))}
         if action == "ticket":
             return 200, {"ticket": f"tk-{term.id}", "expires_in": 30}
         if action == "kill":
