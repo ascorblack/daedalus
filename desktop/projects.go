@@ -5,7 +5,8 @@ package main
 // user and the folders are simply there. In a container they are not — the agent sees only what is
 // mounted — so a folder that is not mounted is one the app reports with "reachable": false, and this
 // is what closes that gap. Only folders of the container environment are mounted: a host folder is
-// reached through the host terminal bridge, never through the container's filesystem.
+// reached through the host terminal bridge, never through the container's filesystem. Each folder is
+// mounted into the terminals service as well, so a container terminal sees what the agent sees.
 //
 // The entry written is the folder mapped to itself, the same absolute path inside the container as
 // outside, because the project stores the path the operator gave and that one string has to name the
@@ -137,11 +138,11 @@ func (a *App) mountProjects(ctx context.Context) {
 // entry, in the file the launcher would have put it in.
 func explainByHand(p Paths, roots []string, log func(string, ...any)) {
 	if len(roots) == 0 {
-		log("a project folder the container cannot see is mounted by adding it to %s under services.daedalus.volumes, as \"/your/folder:/your/folder\" — the same path on both sides — and starting the stack again", mountsFile(p))
+		log("a project folder the container cannot see is mounted by adding it to %s under services.daedalus.volumes and services.terminals.volumes, as \"/your/folder:/your/folder\" — the same path on both sides — and starting the stack again", mountsFile(p))
 		return
 	}
 	for _, root := range roots {
-		log("add %q to %s (one path per line), or put \"%s:%s\" under services.daedalus.volumes in %s, then start the stack again", root, mountsFile(p), root, root, p.Override)
+		log("add %q to %s (one path per line), or put \"%s:%s\" under services.daedalus.volumes and services.terminals.volumes in %s, then start the stack again", root, mountsFile(p), root, root, p.Override)
 	}
 }
 
@@ -198,9 +199,13 @@ func addMounts(p Paths, roots []string) ([]string, error) {
 	return added, nil
 }
 
+// mountedServices are the services a project folder is mounted into: the agent, and the terminals
+// service, whose shells and CLIs work in the same folders and must find them at the same paths.
+var mountedServices = []string{"daedalus", "terminals"}
+
 // withProjectMounts puts the mount list into the override the launcher writes. It is spliced into
-// the agent service rather than appended to the document because a YAML file has one `services` key,
-// and compose merges the volumes of an override into the ones the compose file already declares.
+// each service rather than appended to the document because a YAML file has one `services` key, and
+// compose merges the volumes of an override into the ones the compose file already declares.
 func withProjectMounts(p Paths, body string) string {
 	roots := readMounts(p)
 	if len(roots) == 0 {
@@ -213,11 +218,14 @@ func withProjectMounts(p Paths, body string) string {
 		// gave, and that is the path the agent has to find it at.
 		entries.WriteString(fmt.Sprintf("      - %s:%s\n", root, root))
 	}
-	const anchor = "  daedalus:\n"
-	at := strings.Index(body, anchor)
-	if at < 0 {
-		return body
+	for _, service := range mountedServices {
+		anchor := "  " + service + ":\n"
+		at := strings.Index(body, anchor)
+		if at < 0 {
+			continue
+		}
+		at += len(anchor)
+		body = body[:at] + entries.String() + body[at:]
 	}
-	at += len(anchor)
-	return body[:at] + entries.String() + body[at:]
+	return body
 }

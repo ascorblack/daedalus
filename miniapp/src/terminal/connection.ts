@@ -74,6 +74,12 @@ export type ConnectionOptions = {
   readOnly?: boolean;
   scrollback?: number;
   theme?: () => AttachRequest["theme"];
+  /**
+   * The stream offset the terminal already holds, when a new connection takes over a terminal whose
+   * previous connection was closed (a detached terminal put to sleep and shown again). The attach then
+   * asks for the tail after it instead of a snapshot, which would reset a screen that is still right.
+   */
+  resumeSeq?: number | null;
   onState?: (state: ConnectionState) => void;
   onEvent?: (event: EventMessage) => void;
 };
@@ -152,6 +158,9 @@ export class TerminalConnection {
   private generation = 0;
 
   constructor(private readonly sink: TerminalSink, private readonly options: ConnectionOptions, private readonly deps: ConnectionDeps = browserDeps()) {
+    if (options.resumeSeq !== undefined && options.resumeSeq !== null && Number.isSafeInteger(options.resumeSeq) && options.resumeSeq >= 0) {
+      this.receivedSeq = this.parsedSeq = this.ackedSeq = options.resumeSeq;
+    }
     this.unwake = deps.wake(() => this.wake());
     void this.connect();
   }

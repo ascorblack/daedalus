@@ -255,6 +255,17 @@ describe("rows and controls", () => {
     expect(decl(".erow .avatar")).toContain("var(--avatar)");
   });
 
+  it("give the terminal dock a dense tab row and the conversation's whole column", () => {
+    // The tab row is a row like any other; the dock's own height is the operator's (dragged, then a
+    // token). It is deliberately not held to the reading stripe: a terminal wants every column, and
+    // the stripe is the rule for the conversation and its composer, which keep it above the dock.
+    expect(decl(".term-bar")).toContain("height: var(--row-h-dense)");
+    expect(decl(".term-dock")).toContain("height: var(--dock-h)");
+    const wide = all.filter((r) => r.media.includes("min-width: 1024px")).map((r) => `${r.selector}{${r.body}}`).join("\n");
+    expect(wide).not.toMatch(/\.term-dock[^{]*\{[^}]*--chat-w/);
+    expect(decl(".term-dock")).not.toContain("--chat-w");
+  });
+
   it("fold a step of the run into 28 px", () => {
     expect(decl(".act")).toContain("min-height: 28px");
   });

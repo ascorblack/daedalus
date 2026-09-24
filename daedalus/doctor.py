@@ -27,6 +27,7 @@ from daedalus.providers.pricing import pricing_table
 from daedalus.providers.registry import _is_vendor_host
 from daedalus.security.redact import redact as redact_text
 from daedalus.terminals.client import PtydClient, Unavailable
+from daedalus.terminals.update import BY_HAND
 from daedalus.terminals.wire import RpcError
 from daedalus.tools.shell import bwrap_status, native_sandbox_note
 
@@ -552,6 +553,9 @@ async def _native(ctx: DoctorContext) -> list[Check]:
 
 TERMINAL_FIXES = {
     "not_installed": "bash deploy/setup.sh offers to install it",
+    # An empty run directory in a compose install: the stack predates the terminals service, which a
+    # restart of the agent's container does not create, and its image may predate the daemon.
+    "not_installed_container": "create the terminals service: docker compose -f deploy/compose.yaml --env-file .env up -d --build",
     "not_running": "start the terminal service: docker compose up -d terminals, or the host bridge's systemd unit",
     "refused": "the token changed under the connection; it retries on its own — if it persists, restart the terminal service",
     "unreachable": "read the terminal service's log; the host keeps retrying",
@@ -571,9 +575,11 @@ async def _terminals(ctx: DoctorContext) -> list[Check]:
         if run_dir is None:
             continue
         name = f"terminals ({env})"
+        update_to = ""
         if service is not None:
             status = next(e for e in service.environments(await service.running_by_env()) if e.env == env)
             available, reason, detail, info, running = status.available, status.reason, status.detail, service.links[env].info, status.running
+            update_to = status.image_version if status.update_available else ""
         else:
             client = PtydClient(env, run_dir)
             try:
@@ -589,10 +595,21 @@ async def _terminals(ctx: DoctorContext) -> list[Check]:
         if not available:
             label = {"not_installed": "not installed", "not_running": "not running", "protocol_mismatch": "protocol mismatch"}.get(reason, reason or "unreachable")
             severity = "info" if reason == "not_installed" and env == "host" else "warn"
-            out.append(Check(name, False, f"{label}: {detail}", severity, TERMINAL_FIXES.get(reason, "")))
+            fix = TERMINAL_FIXES.get(f"{reason}_{env}") or TERMINAL_FIXES.get(reason, "")
+            out.append(Check(name, False, f"{label}: {detail}", severity, fix))
             continue
         sandbox = (info.get("capabilities") or {}).get("sandbox")
         out.append(Check(name, True, f"ptyd {info.get('version')} (protocol {info.get('protocol')}), {running} running", "ok"))
+        if update_to:
+            out.append(
+                Check(
+                    f"terminals update ({env})",
+                    False,
+                    f"the image holds ptyd {update_to}; the service still runs {info.get('version')}",
+                    "info",
+                    f"update it from the Terminals screen, or run {BY_HAND} — either ends the {running} running terminal(s)",
+                )
+            )
         out.append(Check(f"terminal sandbox ({env})", sandbox == "ok", "available" if sandbox == "ok" else f"not available: {sandbox}", "ok" if sandbox == "ok" else "info", "terminals open unsandboxed until it is"))
     if ctx.settings.telegram_bot_token and not ctx.settings.miniapp_public_url.strip():
         # A terminal's socket is refused unless it comes from the app's own origin, and Telegram's
@@ -647,6 +664,15 @@ async def _runtime(ctx: DoctorContext) -> list[Check]:
         summary = await notifications.summary()
         open_requests = f", {summary['needs_you']} waiting for an answer" if summary["needs_you"] else ""
         out.append(Check("notifications", True, f"{summary['unseen']} unseen{open_requests}", "ok" if summary["unseen"] == 0 else "info"))
+    push = ctx.extensions.get("push")
+    if push is not None:
+        state = await push.status()
+        if state["reason"]:
+            out.append(Check("push", True, "off: the public address is not https, and browsers subscribe only from a secure one", "info", "set the public https address to reach phones with the app closed"))
+        else:
+            failing = f", {state['failing']} failing" if state["failing"] else ""
+            keys = "keys made" if state["keys"] else "keys made on first use"
+            out.append(Check("push", not state["failing"], f"{state['devices']} device(s){failing}; {keys}", "warn" if state["failing"] else "ok", "a device that fails for a week is dropped; turn push on again from its Settings → Notifications"))
     if ctx.db is not None:
         row = await ctx.db.fetchone("SELECT count(*) c FROM schedules WHERE enabled = 0 AND failure_count > 0")
         if row and row["c"]:
