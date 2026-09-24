@@ -53,13 +53,13 @@ async def test_a_token_without_an_owner_id_is_still_refused(tmp_path: Path) -> N
 
 async def test_a_notice_is_recorded_when_there_is_no_chat(app: Application) -> None:
     assert app.notifications is not None
-    await app.notice("💸 Daily budget exceeded (openrouter).\nNew runs are refused until tomorrow.", kind="budget", tone="warning")
+    await app.notice("💸 Daily budget exceeded (openrouter).\nNew runs are refused until tomorrow.", kind="budget", tone="warning", category="spend")
     entries = (await app.notifications.list(limit=10))["entries"]
     entry = next(e for e in entries if e["kind"] == "budget")
     assert entry["title"].startswith("💸 Daily budget exceeded")
     assert entry["body"] == "New runs are refused until tomorrow."
-    assert (entry["category"], entry["level"], entry["tone"]) == ("system", "normal", "warning")
-    assert entry["delivered"] == {}  # no chat, so nothing was sent anywhere
+    assert (entry["category"], entry["level"], entry["tone"]) == ("spend", "normal", "warning")
+    assert entry["delivered"]["telegram"] == "skipped: no bot"  # no chat, so nothing was sent there
 
 
 async def test_create_session_makes_a_plain_session(app: Application) -> None:

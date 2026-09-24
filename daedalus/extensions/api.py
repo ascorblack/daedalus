@@ -34,15 +34,17 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from protocore.contracts.memory import MemoryScope
 from protocore.contracts.types import ToolResultBlock, ToolUseBlock
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
 from daedalus.config import (
     NO_MODEL_MESSAGE,
+    NOTIFICATION_CATEGORIES,
     PROVIDER_KINDS,
     HeartbeatConfig,
     ModelPresetConfig,
+    NotificationsConfig,
     ProviderConfig,
     is_keyproxy_url,
     keyproxy_base,
@@ -53,7 +55,7 @@ from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
-from daedalus.extensions.notifications import Draft, NotificationService
+from daedalus.extensions.notifications import ActionConflict, ActionRefused, Draft, NotificationService
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import model_options, tts_configured
 from daedalus.host import capabilities, component_install, launcher_bridge
@@ -429,6 +431,22 @@ class NotificationsSeenBody(BaseModel):
     ids: list[int] | None = Field(default=None, max_length=1000)
     all: bool = False
     session_id: str | None = Field(default=None, max_length=64)
+    model_config = {"extra": "forbid"}
+
+
+class NotificationActBody(BaseModel):
+    """One of a notification's actions: ``allow``, ``deny``, ``answer:<i>``, ``open``, or ``answer`` with the words."""
+
+    action: str = Field(min_length=1, max_length=64)
+    value: str | None = Field(default=None, max_length=4000)
+    model_config = {"extra": "forbid"}
+
+
+class NotificationPreferencesBody(BaseModel):
+    """The whole ``[notifications]`` section, and the revision of the configuration it was read from."""
+
+    preferences: dict[str, Any]
+    base_revision: str
     model_config = {"extra": "forbid"}
 
 
@@ -4475,6 +4493,49 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         if not await service.delete(entry_id):
             raise HTTPException(404, "no such notification")
         return {"deleted": entry_id, "summary": await service.summary()}
+
+    @api.post("/api/notifications/{entry_id}/act")
+    async def notifications_act(entry_id: int, body: NotificationActBody, _: dict[str, Any] = Depends(auth)) -> Any:
+        service = notifications_service()
+        try:
+            resolution, view = await service.act(entry_id, body.action, body.value, via="notification")
+        except LookupError as exc:
+            raise HTTPException(404, "no such notification") from exc
+        except ActionRefused as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except ActionConflict as exc:
+            # The first answer wins; the second is shown what it was, with the entry as it now stands.
+            return JSONResponse({"resolution": exc.resolution, "notification": await service.get(entry_id)}, status_code=409)
+        return {"resolution": resolution, "notification": view}
+
+    def _notification_preferences() -> dict[str, Any]:
+        return {
+            "preferences": app.config.notifications.model_dump(mode="json"),
+            "revision": config_revision(app.config),
+            "categories": list(NOTIFICATION_CATEGORIES),
+            "zone": manager.presence.locale()[1],
+        }
+
+    @api.get("/api/notifications/preferences")
+    async def notification_preferences(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return _notification_preferences()
+
+    @api.put("/api/notifications/preferences")
+    async def put_notification_preferences(body: NotificationPreferencesBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        try:
+            preferences = NotificationsConfig.model_validate(body.preferences)
+        except ValidationError as exc:
+            raise HTTPException(400, {"problems": [{"path": ".".join(str(p) for p in e["loc"]), "message": e["msg"]} for e in exc.errors()]}) from exc
+        new_config = app.config.model_copy(update={"notifications": preferences})
+        try:
+            await app.save_config(new_config, expected_revision=body.base_revision)
+        except ConfigConflict as exc:
+            raise HTTPException(409, {"message": str(exc), "current_revision": exc.current_revision}) from exc
+        return _notification_preferences()
+
+    @api.post("/api/notifications/test")
+    async def notifications_test(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return {"delivered": await notifications_service().test()}
 
     # -- heartbeat ------------------------------------------------------------------------
 
