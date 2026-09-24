@@ -1,6 +1,7 @@
-"""The production environment port and the visible runner, over a stand-in for the terminals
-service: which refusals mean "not installed" and which mean "the environment is down", reads that
-continue by offset, and a run in a terminal that ends, fails, or outlasts its time."""
+"""The production environment port (the staff runtime's, which the manager shares) and the visible
+runner, over a stand-in for the terminals service: which refusals mean "not installed" and which
+mean "the environment is down", reads that continue by offset, the home the daemon reports, and a
+run in a terminal that ends, fails, or outlasts its time."""
 
 from __future__ import annotations
 
@@ -10,8 +11,17 @@ import pytest
 
 from daedalus.harness import ports
 from daedalus.harness.contract import EnvironmentUnavailable, ProgramNotFound
-from daedalus.harness.ports import ServiceEnvironmentPort, TerminalRunner
-from daedalus.terminals.model import EnvUnavailable, ExecResult, FileChunk, NotFound, OutputChunk, TerminalSpec
+from daedalus.harness.ports import TerminalRunner
+from daedalus.harness.runtime import RuntimeEnvironment
+from daedalus.terminals.model import (
+    EnvStatus,
+    EnvUnavailable,
+    ExecResult,
+    FileChunk,
+    NotFound,
+    OutputChunk,
+    TerminalSpec,
+)
 
 
 class Service:
@@ -22,6 +32,9 @@ class Service:
         self.statuses: list[str] = ["running", "running", "exited"]
         self.exit_code: int | None = 0
         self.output = "downloading\ninstalled 2.1.281\n"
+
+    def environments(self) -> list[EnvStatus]:
+        return [EnvStatus(env="container", available=True, home="/root"), EnvStatus(env="host", available=False)]
 
     async def exec_run(self, env: str, argv: list[str], **kw: Any) -> ExecResult:
         self.runs.append((env, argv, kw))
@@ -56,7 +69,7 @@ class Service:
 
 async def test_the_port_tells_a_missing_program_from_an_environment_that_is_down() -> None:
     service = Service()
-    port = ServiceEnvironmentPort(service, "container", home="/home/operator")  # type: ignore[arg-type]
+    port = RuntimeEnvironment(service, "container", home="/home/operator", actor="harness")  # type: ignore[arg-type]
     result = await port.run(["claude", "--version"], cwd="/srv", env={"A": "1"}, timeout=5)
     assert (result.stdout, result.path) == ("2.1.281 (Claude Code)\n", "/home/operator/.local/bin/claude")
     assert service.runs[0] == ("container", ["claude", "--version"], {"cwd": "/srv", "env_vars": {"A": "1"}, "timeout": 5, "actor": "harness"})
@@ -65,11 +78,14 @@ async def test_the_port_tells_a_missing_program_from_an_environment_that_is_down
     with pytest.raises(EnvironmentUnavailable):
         await port.run(["down"])
     assert (port.name, port.home) == ("container", "/home/operator")
+    # Not given, the home is the one the environment's daemon reports.
+    assert RuntimeEnvironment(service, "container").home == "/root"  # type: ignore[arg-type]
+    assert RuntimeEnvironment(service, "host").home == ""  # type: ignore[arg-type]
 
 
 async def test_a_read_continues_by_offset_up_to_its_limit() -> None:
     service = Service()
-    port = ServiceEnvironmentPort(service, "host")  # type: ignore[arg-type]
+    port = RuntimeEnvironment(service, "host")  # type: ignore[arg-type]
     assert await port.read("/f") == service.data
     assert await port.read("/f", offset=100, limit=500) == service.data[100:600]
     assert await port.stat("/is/there") == {"exists": True} and await port.stat("/is/not") is None

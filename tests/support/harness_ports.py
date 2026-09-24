@@ -18,11 +18,11 @@ import contextlib
 import secrets
 import shutil
 import tempfile
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 
-from daedalus.harness.contract import Environment, EnvironmentUnavailable, ExecResult, ProgramNotFound
+from daedalus.harness.contract import Environment, EnvironmentUnavailable, ExecResult, HookPost, ProgramNotFound
 from daedalus.terminals import wire
 from daedalus.terminals.client import PtydClient, Unavailable
 from tests.support import fake_cli
@@ -32,12 +32,13 @@ from tests.support.live_ptyd import LivePtyd
 class PtydTerminalPort:
     """``TerminalPort`` for one terminal: every write names its origin, as the host's writes do."""
 
-    def __init__(self, client: PtydClient, terminal_id: str, *, env: Environment = "container", actor: str = "adapter", launch_id: str = "") -> None:
+    def __init__(self, client: PtydClient, terminal_id: str, *, env: Environment = "container", actor: str = "adapter", launch_id: str = "", hooks: asyncio.Queue[HookPost | None] | None = None) -> None:
         self.client = client
         self._id = terminal_id
         self._env = env
         self.actor = actor
         self.launch_id = launch_id
+        self._hooks: asyncio.Queue[HookPost | None] = hooks if hooks is not None else asyncio.Queue()
 
     @property
     def id(self) -> str:
@@ -76,6 +77,23 @@ class PtydTerminalPort:
             params["idle_ms"] = idle_ms
         result = await self.client.call("terminal.wait_for", params, timeout=timeout + 10)
         return result.get("matched") in ("regex", "idle")
+
+    async def hooks(self) -> AsyncIterator[HookPost]:
+        """The launch's hook posts, as ``Rig`` routes them here; the team's included, since no
+        runtime stands between an adapter test and the daemon."""
+        while True:
+            post = await self._hooks.get()
+            if post is None:
+                self._hooks.put_nowait(None)
+                return
+            yield post
+
+    async def reply(self, reply_id: str, body: Any) -> bool:
+        try:
+            await self.client.call("hooks.reply", {"reply_id": reply_id, "status": 200, "body": body, "launch_id": self.launch_id})
+        except Exception:  # noqa: BLE001 — the daemon's refusal is "nothing waits any more"
+            return False
+        return True
 
 
 class PtydEnvironmentPort:
@@ -152,6 +170,7 @@ class Rig:
         self.ptyd = LivePtyd(self.root / "run", home=self.home, bin_dir=self.bin, base_env=env, input_idle_ms=input_idle_ms, launch_grace_s=launch_grace_s)
         self.events: list[dict[str, Any]] = []
         self._event = asyncio.Event()
+        self._launch_hooks: dict[str, list[asyncio.Queue[HookPost | None]]] = {}
         self.client = PtydClient("container", self.root / "run", on_notification=self._on_event)
         self.env_port = PtydEnvironmentPort(self.client, home=str(self.home))
 
@@ -171,6 +190,14 @@ class Rig:
     async def _on_event(self, method: str, params: dict[str, Any]) -> None:
         if method == "event":
             self.events.append(params)
+            data = params.get("data") or {}
+            if params.get("type") == "hook":
+                post = HookPost(name=str(data.get("name") or ""), body=data.get("body"), at=str(params.get("at") or ""), reply_id=data.get("reply_id"), hold_ms=int(data.get("hold_ms") or 0))
+                for queue in self._launch_hooks.get(str(data.get("launch_id") or ""), []):
+                    queue.put_nowait(post)
+            elif params.get("type") == "launch.ended":
+                for queue in self._launch_hooks.pop(str(data.get("launch_id") or ""), []):
+                    queue.put_nowait(None)
             self._event.set()
             self._event = asyncio.Event()
 
@@ -202,8 +229,11 @@ class Rig:
         params: dict[str, Any] = {"id": terminal_id, "argv": argv, "cwd": str(cwd or self.work), "cols": cols, "rows": rows, "env": dict(env or {})}
         if launch_id:
             params["launch_id"] = launch_id
+        hooks: asyncio.Queue[HookPost | None] = asyncio.Queue()
+        if launch_id:
+            self._launch_hooks.setdefault(launch_id, []).append(hooks)
         await self.client.call("terminal.create", params)
-        return PtydTerminalPort(self.client, terminal_id, launch_id=launch_id)
+        return PtydTerminalPort(self.client, terminal_id, launch_id=launch_id, hooks=hooks)
 
     async def screen_until(self, term: PtydTerminalPort, regex: str, *, timeout: float = 30.0) -> str:
         """The screen once ``regex`` is on it; fails with the screen as it was."""

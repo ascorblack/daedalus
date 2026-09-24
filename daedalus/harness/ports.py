@@ -1,74 +1,23 @@
-"""The adapter's environment port, and the manager's visible runs, over the terminals service.
-
-``ServiceEnvironmentPort`` is the production ``EnvironmentPort``: every program run and file read
-goes through the terminals service, so it is audited and fenced by the daemon's lists like any other
-side-channel call. ``TerminalRunner`` runs a program in a terminal the operator can open — installs
-and sign-ins, which print progress, ask questions and take minutes.
+"""The harness manager's visible runs: a program in a terminal the operator can open — installs
+and sign-ins, which print progress, ask questions and take minutes. (The environment port both the
+manager and the staff runtime use is ``runtime.RuntimeEnvironment``.)
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from daedalus.harness.contract import Environment, EnvironmentUnavailable, ExecResult, ProgramNotFound
-from daedalus.terminals.model import EnvUnavailable, NotFound, Owner, TerminalSpec
+from daedalus.terminals.model import Owner, TerminalSpec
 
 if TYPE_CHECKING:
     from daedalus.terminals.service import Terminals
 
-READ_CHUNK = 640 << 10
-"""The most one ``fs.read`` reply carries; a longer read continues by offset."""
 EXIT_POLL_S = 1.0
 OUTPUT_TAIL_BYTES = 8 << 10
 """What of a finished run's output is kept for the record: its last lines are where an installer
 says why it failed."""
-
-
-class ServiceEnvironmentPort:
-    """``EnvironmentPort`` for one environment of the terminals service."""
-
-    def __init__(self, terminals: Terminals, env: Environment, *, home: str = "", actor: str = "harness") -> None:
-        self.terminals = terminals
-        self._env = env
-        self._home = home
-        self.actor = actor
-
-    @property
-    def name(self) -> Environment:
-        return self._env
-
-    @property
-    def home(self) -> str:
-        return self._home
-
-    async def run(self, argv: list[str], *, cwd: str | None = None, env: Mapping[str, str] | None = None, timeout: float = 30.0) -> ExecResult:
-        try:
-            result = await self.terminals.exec_run(self._env, list(argv), cwd=cwd, env_vars=dict(env) if env else None, timeout=timeout, actor=self.actor)
-        except NotFound as exc:
-            raise ProgramNotFound(exc.message) from None
-        except EnvUnavailable as exc:
-            raise EnvironmentUnavailable(exc.message) from None
-        return ExecResult(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr, timed_out=result.timed_out, path=result.path)
-
-    async def read(self, path: str, *, offset: int = 0, limit: int = 1 << 20) -> bytes:
-        out = bytearray()
-        while len(out) < limit:
-            chunk = await self.terminals.fs_read(self._env, path, offset=offset + len(out), max_bytes=min(limit - len(out), READ_CHUNK))
-            out += chunk.data
-            if chunk.eof or not chunk.data:
-                break
-        return bytes(out)
-
-    async def stat(self, path: str) -> Mapping[str, Any] | None:
-        result = await self.terminals.fs_stat(self._env, path)
-        return result if result.get("exists") else None
-
-    async def list(self, path: str) -> list[str]:
-        result = await self.terminals.fs_list(self._env, path)
-        return [str(entry.get("name") or "") for entry in result.get("entries") or [] if entry.get("name")]
 
 
 class TerminalRunner:
@@ -109,4 +58,4 @@ class TerminalRunner:
         return (int(code) if code is not None else None), tail
 
 
-__all__ = ["ServiceEnvironmentPort", "TerminalRunner"]
+__all__ = ["TerminalRunner"]

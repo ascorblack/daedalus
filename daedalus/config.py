@@ -1165,6 +1165,11 @@ class HarnessConfig(BaseModel):
     screen checked; what the screen cannot settle is shown as silent, never as failed."""
     reconcile_gap_ms: int = Field(default=1500, ge=200, le=10_000)
     """Between the two screen readings that must agree before a turn end is inferred from the screen."""
+    ready_timeout_s: float = Field(default=30.0, ge=5, le=600)
+    """How long a launched CLI may take to say it is ready before the session is shown as failed,
+    with the screen it was stuck on; the terminal is left running for the operator to look at."""
+    ready_poll_ms: int = Field(default=300, ge=50, le=5000)
+    """How often the readiness gate reads the screen for a dialog it answers."""
     ack_timeout_s: float = Field(default=8.0, ge=1, le=120)
     """How long a submitted message may go unacknowledged before it is looked for on screen and in
     the transcript."""

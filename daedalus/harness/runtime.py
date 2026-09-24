@@ -1,0 +1,1015 @@
+"""The staff runtime of a command-line agent: one CLI, run as a staff member inside a terminal.
+
+The team decides who works on what, keeps the rows and runs the launch queue; this runs the CLI. For
+each staff session it registers a launch with the terminal daemon (the overlay files, the ports, the
+hook token), starts the CLI's terminals as an agent's — so a launch at the machine's cap waits for a
+place instead of being refused — takes the CLI through its readiness gate, and turns what the CLI
+does into the one status machine's transitions. Every change it sees goes to the team's ingress,
+which writes the row and publishes the event; nothing here writes a staff table.
+
+Three sources feed a session, all into one serialised ``_apply``: the adapter's ``events`` (the CLI's
+hooks or its structured channel, normalised), the daemon's terminal events (the CLI or its companion
+exiting), and a quiet timer that reads the screen when a working session has said nothing for a
+while. The team tools' posts (``Report``, ``AskOrchestrator``) arrive on the same hook listener and
+are answered here, since they mean the same for every CLI.
+
+A restarted host finds its CLIs still running — the daemon owns them — and ``reconcile`` takes each
+open launch up again: the adapter re-attaches, the daemon replays the hook posts made meanwhile, and
+the status continues from the row.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import secrets
+import time
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
+
+from daedalus.config import HarnessConfig
+from daedalus.harness.contract import (
+    LAUNCH_DIR,
+    Answer,
+    EnvironmentUnavailable,
+    EventKind,
+    ExecResult,
+    HarnessAdapter,
+    HookPost,
+    Launch,
+    LaunchPlan,
+    LaunchSpec,
+    ProgramNotFound,
+    ScreenClass,
+    StaffEvent,
+    Turn,
+)
+from daedalus.harness.env import terminal_environment
+from daedalus.harness.state import OpenRequest, StaffState, StateContext, next_state
+from daedalus.staff_runtime import (
+    AskRef,
+    Availability,
+    Decision,
+    LiveSession,
+    OutgoingMessage,
+    ReadPage,
+    ReadRequest,
+    Receipt,
+    Started,
+    StartRequest,
+    TeamIngress,
+    UsageSnapshot,
+)
+from daedalus.stores.harness import HarnessStore
+from daedalus.terminals.model import EnvUnavailable, NotFound, Origin, Owner, TerminalError, TerminalEvent, TerminalSpec
+from daedalus.terminals.model import LaunchSpec as DaemonLaunch
+from daedalus.terminals.service import Terminals
+
+logger = logging.getLogger(__name__)
+
+LAUNCH_COLS = 120
+LAUNCH_ROWS = 36
+"""The size a CLI's terminal starts at. A TUI lays itself out once for the size it sees first, and
+the operator attaching later takes the size over anyway; this one fits a CLI's dialogs unwrapped."""
+GATE_ANSWERS_MAX = 4
+"""Dialogs the readiness gate answers in one launch (folder trust, then perhaps a mode warning).
+More than that is a CLI asking something the adapter misreads, and typing on would be guessing."""
+HOLD_MARGIN_MS = 30_000
+"""What a launch's longest hold exceeds the ask hold by, so the listener never cuts a question short."""
+READ_TRANSCRIPT_TURNS = 400
+DIFF_TIMEOUT = 30.0
+SCREEN_TAIL_CHARS = 1200
+"""How much of a stuck screen the failure keeps: enough to see the dialog, not a page of scrollback."""
+
+Lookup = Callable[[str], Awaitable[LiveSession | None]]
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _substitute(value: str, directory: str) -> str:
+    return value.replace(LAUNCH_DIR, directory)
+
+
+def _seconds_since(stamp: str | None) -> float | None:
+    if not stamp:
+        return None
+    try:
+        then = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    then = then if then.tzinfo else then.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - then).total_seconds()
+
+
+class RuntimeTerminal:
+    """``TerminalPort`` over the terminals service: every write carries the launch and is audited
+    there, and waits for the human's quiet time. The hook posts come from the runtime, which keeps
+    the team's posts for itself."""
+
+    def __init__(self, terminals: Terminals, terminal_id: str, env: str, *, actor: str, launch_id: str, hooks: asyncio.Queue[HookPost | None]) -> None:
+        self.terminals = terminals
+        self._id = terminal_id
+        self._env = env
+        self.actor = actor
+        self.launch_id = launch_id
+        self._hooks = hooks
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    @property
+    def env(self) -> Any:
+        return self._env
+
+    async def write(self, *, text: str | None = None, paste: str | None = None, keys: list[str] | None = None, note: str = "") -> None:
+        await self.terminals.write(self._id, text=text, paste=paste, keys=keys, origin=Origin(self.actor, self.launch_id, note))
+
+    async def screen(self, *, scrollback: int = 0) -> str:
+        result = await self.terminals.read_screen(self._id, format="text", scrollback=scrollback)
+        lines = [str(line) for line in result.get("lines") or []]
+        while lines and not lines[-1].strip():
+            lines.pop()
+        return "\n".join(lines)
+
+    async def modes(self) -> Mapping[str, bool]:
+        # The daemon brackets a paste by itself when the program asked for it; the one mode the
+        # host's view carries is the alternate screen.
+        view = await self.terminals.get(self._id)
+        live = view.get("live") or {}
+        return {"alt_screen": bool(live.get("alt_screen"))}
+
+    async def wait_for(self, *, regex: str | None = None, idle_ms: int | None = None, timeout: float) -> bool:
+        result = await self.terminals.wait_for(self._id, regex=regex, idle_ms=idle_ms, timeout=timeout)
+        return result.get("matched") in ("regex", "idle")
+
+    async def hooks(self) -> AsyncIterator[HookPost]:
+        while True:
+            post = await self._hooks.get()
+            if post is None:
+                self._hooks.put_nowait(None)  # the end stays visible to a reader that comes back
+                return
+            yield post
+
+    async def reply(self, reply_id: str, body: Any) -> bool:
+        try:
+            await self.terminals.reply_hook(self._env, reply_id, body=body, launch_id=self.launch_id, actor=self.actor)
+        except NotFound:
+            return False
+        return True
+
+
+class RuntimeEnvironment:
+    """``EnvironmentPort`` over the terminals service's side channels of one environment: the one
+    implementation, for the staff runtime and the harness manager alike, so every program run and
+    file read is audited and fenced by the daemon's lists the same way."""
+
+    def __init__(self, terminals: Terminals, env: str, *, home: str = "", actor: str = "agent:harness") -> None:
+        self.terminals = terminals
+        self._env = env
+        self._home = home
+        self.actor = actor
+
+    @property
+    def name(self) -> Any:
+        return self._env
+
+    @property
+    def home(self) -> str:
+        """As the environment's daemon reported it; asked again while unknown, because a daemon that
+        was not connected when the port was made reports it once it is."""
+        if not self._home:
+            self._home = next((s.home for s in self.terminals.environments() if s.env == self._env), "")
+        return self._home
+
+    async def run(self, argv: list[str], *, cwd: str | None = None, env: Mapping[str, str] | None = None, timeout: float = 30.0) -> ExecResult:
+        try:
+            result = await self.terminals.exec_run(self._env, list(argv), cwd=cwd, env_vars=dict(env) if env else None, timeout=timeout, actor=self.actor)
+        except NotFound as exc:
+            # "Not installed" and "the environment is down" are different answers to a version check;
+            # the contract names them so a caller never has to know the terminals' error classes.
+            raise ProgramNotFound(exc.message) from None
+        except EnvUnavailable as exc:
+            raise EnvironmentUnavailable(exc.message) from None
+        return ExecResult(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr, timed_out=result.timed_out, path=result.path)
+
+    async def read(self, path: str, *, offset: int = 0, limit: int = 1 << 20) -> bytes:
+        out = bytearray()
+        while len(out) < limit:
+            chunk = await self.terminals.fs_read(self._env, path, offset=offset + len(out), max_bytes=min(limit - len(out), 512 << 10))
+            out += chunk.data
+            if chunk.eof or not chunk.data:
+                break
+        return bytes(out)
+
+    async def stat(self, path: str) -> Mapping[str, Any] | None:
+        try:
+            result = await self.terminals.fs_stat(self._env, path)
+        except NotFound:
+            return None
+        return result if result.get("exists") else None
+
+    async def list(self, path: str) -> list[str]:
+        result = await self.terminals.fs_list(self._env, path)
+        return [str(entry["name"]) for entry in result.get("entries") or []]
+
+
+@dataclass(eq=False)
+class CliSession:
+    """What the runtime holds for one live staff session while its CLI runs."""
+
+    staff_session_id: str
+    launch: Launch
+    term: RuntimeTerminal
+    env_port: RuntimeEnvironment
+    cwd: str
+    companions: dict[str, str] = field(default_factory=dict)
+    """Companion terminal id → its role."""
+    plan: LaunchPlan | None = None
+    """The plan it was launched with; ``None`` for a session taken up after a restart."""
+    first_message_id: str = ""
+    first_prompt_pending: bool = False
+    transcript_ref: str = ""
+    open: dict[str, OpenRequest] = field(default_factory=dict)
+    """Requests the CLI has open, by the reference the adapter gave them."""
+    hooks: asyncio.Queue[HookPost | None] = field(default_factory=asyncio.Queue)
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    exited: asyncio.Event = field(default_factory=asyncio.Event)
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+    """Set once the runtime has let the session go, whichever way it ended."""
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    tasks: list[asyncio.Task[None]] = field(default_factory=list)
+    last_signal: float = 0.0
+    quiet_checked: float = 0.0
+    stopping: bool = False
+    finished: bool = False
+
+
+class CliStaffRuntime:
+    """:class:`daedalus.staff_runtime.StaffRuntime` for one command-line agent, over its adapter.
+
+    ``lookup`` is the team's view of a live session (``None`` once it has ended), read afresh for
+    every change, because the team moves a session too — an answer sets it working, a reader sets a
+    finished turn seen — and the machine must start from where the row is, not where this left it.
+    """
+
+    def __init__(
+        self,
+        adapter: HarnessAdapter,
+        *,
+        terminals: Terminals,
+        store: HarnessStore,
+        ingress: TeamIngress,
+        lookup: Lookup,
+        config: Callable[[], HarnessConfig],
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.adapter = adapter
+        self.kind = adapter.name
+        self.terminals = terminals
+        self.store = store
+        self.ingress = ingress
+        self.lookup = lookup
+        self.config = config
+        self.clock = clock
+        self.sessions: dict[str, CliSession] = {}
+        self._by_terminal: dict[str, CliSession] = {}
+        self._unsubscribe = terminals.subscribe(self._on_terminal_event)
+        self._background: set[asyncio.Task[Any]] = set()
+
+    def close(self) -> None:
+        """Let go of the sessions without touching them: the CLIs keep running in the daemon for the
+        next host to take up. What a host does when it shuts down."""
+        self._unsubscribe()
+        for session in list(self.sessions.values()):
+            for task in session.tasks:
+                task.cancel()
+        for task in list(self._background):
+            task.cancel()
+        self.sessions.clear()
+        self._by_terminal.clear()
+
+    def _spawn(self, awaitable: Awaitable[Any], name: str) -> asyncio.Task[Any]:
+        task = asyncio.ensure_future(awaitable)
+        task.set_name(name)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        return task
+
+    @staticmethod
+    def _actor(staff_session_id: str) -> str:
+        return f"staff:{staff_session_id}"
+
+    # -- availability ----------------------------------------------------------------------------
+
+    async def available(self, env: str) -> Availability:
+        label = self.adapter.capabilities.label
+        status = next((e for e in self.terminals.environments() if e.env == env), None)
+        if status is None:
+            return Availability(False, f"there is no {env} environment")
+        if not status.available:
+            return Availability(False, f"the {env} terminal service is not available: {status.detail or status.reason}")
+        row = await self.store.catalog_row(env, self.kind)
+        if row is not None and row.checked_at and not row.installed:
+            return Availability(False, f"{label} is not installed in the {env} environment")
+        if row is not None and row.logged_in == "no":
+            return Availability(False, f"{label} is not signed in in the {env} environment")
+        return Availability(True)
+
+    # -- starting --------------------------------------------------------------------------------
+
+    async def start(self, req: StartRequest) -> Started:
+        return await self._launch(req, resume_ref="")
+
+    async def resume(self, req: StartRequest, prior: LiveSession) -> Started:
+        """The same CLI session in a new launch, when the CLI can take one up again; a fresh one told
+        what ended otherwise."""
+        return await self._launch(req, resume_ref=prior.cli_session_id or "")
+
+    def _spec(self, req: StartRequest, launch_id: str, resume_ref: str) -> LaunchSpec:
+        return LaunchSpec(
+            harness=self.kind,
+            env=req.env,  # type: ignore[arg-type]
+            cwd=str(req.cwd),
+            launch_id=launch_id,
+            first_prompt=req.first_message or None,
+            brief_text=req.brief_text,
+            model=req.model,
+            effort=req.effort,
+            agent=req.agent,
+            permission_mode=req.permission_mode,
+            permission_level=req.permission_level,
+            session_ref=resume_ref,
+        )
+
+    async def _launch(self, req: StartRequest, *, resume_ref: str) -> Started:
+        actor = self._actor(req.staff_session_id)
+        launch_id = "l" + secrets.token_hex(8)
+        spec = self._spec(req, launch_id, resume_ref)
+        plan = self.adapter.resume_plan(spec, resume_ref) if resume_ref else self.adapter.launch_plan(spec)
+        row = await self.store.catalog_row(req.env, self.kind)
+        record = Launch(
+            launch_id=launch_id,
+            staff_session_id=req.staff_session_id,
+            harness=self.kind,
+            env=req.env,  # type: ignore[arg-type]
+            terminal_id=None,
+            companion_terminal_id=None,
+            launch_dir="",
+            session_ref=plan.session_ref,
+            harness_version=row.installed_version if row is not None else "",
+            started_at=_now(),
+        )
+        # Written before the daemon hears of it: a launch the database does not know is one a
+        # restarted host could never take up or end.
+        await self.store.open_launch(record)
+        cfg = self.config()
+        hold = max([cfg.ask_hold_s * 1000 + HOLD_MARGIN_MS, *plan.hooks.hold_ms.values()])
+        registered = False
+        created: list[str] = []
+        try:
+            daemon_launch = await self.terminals.register_launch(req.env, DaemonLaunch(launch_id=launch_id, files=dict(plan.files), ports=list(plan.ports), hold_max_ms=hold), actor=f"agent:{actor}")
+            registered = True
+            directory = daemon_launch.dir
+            cwd = _substitute(plan.cwd, directory) or str(req.cwd)
+            title = f"{req.staff.name} · {req.task.title}" if req.task is not None else req.staff.name
+            companions: dict[str, str] = {}
+            for companion in plan.companions:
+                view = await self._create(req, actor, launch_id, [_substitute(a, directory) for a in companion.argv], {k: _substitute(v, directory) for k, v in companion.env.items()}, cwd, f"{title} · {companion.role}")
+                created.append(view["id"])
+                companions[view["id"]] = companion.role
+                if companion.ready_pattern and not (await self.terminals.wait_for(view["id"], regex=companion.ready_pattern, timeout=cfg.ready_timeout_s)).get("matched") == "regex":
+                    raise RuntimeError(f"the {companion.role} of {self.adapter.capabilities.label} did not start within {cfg.ready_timeout_s:g} s")
+            view = await self._create(req, actor, launch_id, [_substitute(a, directory) for a in plan.argv], {k: _substitute(v, directory) for k, v in plan.env.items()}, cwd, title)
+            created.append(view["id"])
+            launch = await self.store.update_launch(launch_id, terminal_id=view["id"], companion_terminal_id=next(iter(companions), None), launch_dir=directory)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                for terminal_id in created:
+                    await self.terminals.kill(terminal_id, actor=f"agent:{actor}")
+                if registered:
+                    await self.terminals.unregister_launch(req.env, launch_id, actor=f"agent:{actor}")
+                await self.store.end_launch(launch_id)
+            raise
+        hooks: asyncio.Queue[HookPost | None] = asyncio.Queue()
+        session = CliSession(
+            staff_session_id=req.staff_session_id,
+            launch=launch,
+            term=RuntimeTerminal(self.terminals, view["id"], req.env, actor=actor, launch_id=launch_id, hooks=hooks),
+            env_port=RuntimeEnvironment(self.terminals, req.env, actor=f"agent:{actor}"),
+            cwd=cwd,
+            companions=companions,
+            plan=plan,
+            first_message_id=req.first_message_id,
+            first_prompt_pending=bool(plan.first_prompt),
+            transcript_ref=plan.transcript_hint or "",
+            hooks=hooks,
+            last_signal=self.clock(),
+        )
+        self._run(session)
+        return Started(terminal_id=view["id"], cli_session_id=plan.session_ref or None, transcript_ref=plan.transcript_hint)
+
+    async def _create(self, req: StartRequest, actor: str, launch_id: str, argv: list[str], env: dict[str, str], cwd: str, title: str) -> dict[str, Any]:
+        environment = terminal_environment(env, capabilities=self.adapter.capabilities)
+        spec = TerminalSpec(
+            env=req.env,
+            owner=Owner("staff", req.staff.id),
+            project_id=req.project.id,
+            cwd=cwd,
+            argv=argv,
+            env_vars=environment.set,
+            strip_env=list(environment.strip),
+            title=title,
+            cols=LAUNCH_COLS,
+            rows=LAUNCH_ROWS,
+            profile=f"harness:{self.kind}",
+            launch_id=launch_id,
+            # An agent's launch: at the machine's cap it waits in the service's line for a place.
+            created_by=f"agent:{actor}",
+        )
+        view: dict[str, Any] = dict(await self.terminals.create(spec))
+        return view
+
+    def _run(self, session: CliSession, *, gate: bool = True) -> None:
+        self.sessions[session.staff_session_id] = session
+        self._by_terminal[session.term.id] = session
+        for terminal_id in session.companions:
+            self._by_terminal[terminal_id] = session
+        name = f"harness-{self.kind}-{session.staff_session_id}"
+        session.tasks = [
+            asyncio.create_task(self._pump_hooks(session), name=f"{name}-hooks"),
+            asyncio.create_task(self._consume(session), name=f"{name}-events"),
+            asyncio.create_task(self._watch_quiet(session), name=f"{name}-quiet"),
+        ]
+        if gate:
+            session.tasks.append(asyncio.create_task(self._gate(session), name=f"{name}-gate"))
+
+    # -- the readiness gate ----------------------------------------------------------------------
+
+    async def _gate(self, session: CliSession) -> None:
+        """Read the screen until the CLI says it is ready, answering the dialogs the adapter
+        recognises, and hand over to ``after_spawn``. Every key typed here is one the adapter chose
+        for a screen it recognised; a screen it does not recognise is waited on, never guessed at."""
+        cfg = self.config()
+        deadline = self.clock() + cfg.ready_timeout_s
+        answered = 0
+        last_answered = ""
+        screen = ""
+        try:
+            while not session.ready.is_set():
+                if session.exited.is_set() or session.finished:
+                    return
+                screen = await session.term.screen()
+                step = self.adapter.readiness(screen)
+                if step.action == "fail":
+                    await self._failed(session, step.reason or "the command-line agent will not start", screen)
+                    return
+                if step.action == "keys" and step.keys and screen != last_answered:
+                    if answered >= GATE_ANSWERS_MAX:
+                        await self._failed(session, "it kept asking questions before it was ready", screen)
+                        return
+                    await session.term.write(keys=list(step.keys), note=f"readiness: {step.reason or 'dialog'}")
+                    answered += 1
+                    last_answered = screen
+                if self.clock() >= deadline:
+                    await self._failed(session, f"not ready after {cfg.ready_timeout_s:g} s", screen)
+                    return
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(session.ready.wait(), cfg.ready_poll_ms / 1000)
+            if session.plan is not None:
+                await self.adapter.after_spawn(session.term, session.launch, session.plan)
+        except asyncio.CancelledError:
+            raise
+        except TerminalError as exc:
+            if not session.exited.is_set():
+                await self._failed(session, f"the terminal could not be read: {exc.message}", screen)
+        except Exception as exc:  # noqa: BLE001 — a broken gate is this session's failure, shown on it
+            logger.exception("the readiness gate of %s failed", session.staff_session_id)
+            await self._failed(session, f"the readiness gate failed: {exc}", screen)
+
+    async def _failed(self, session: CliSession, reason: str, screen: str) -> None:
+        tail = screen[-SCREEN_TAIL_CHARS:].strip()
+        await self._apply(session, StaffEvent(EventKind.TURN_FAILED, _now(), {"failure": reason, "screen": tail}, launch_id=session.launch.launch_id))
+
+    # -- what the CLI does -----------------------------------------------------------------------
+
+    async def _pump_hooks(self, session: CliSession) -> None:
+        """The launch's hook posts in order: the team's are answered here, the rest go to the adapter."""
+        try:
+            async for hook in self.terminals.hook_events(session.launch.launch_id):
+                post = HookPost(name=hook.name, body=hook.body, at=hook.at, reply_id=hook.reply_id, hold_ms=hook.hold_ms)
+                if hook.name == "team":
+                    try:
+                        await self._team(session, post)
+                    except Exception:  # noqa: BLE001 — one bad team post must not stop the CLI's hooks
+                        logger.exception("a team post of %s failed", session.staff_session_id)
+                else:
+                    session.hooks.put_nowait(post)
+        finally:
+            session.hooks.put_nowait(None)
+
+    async def _consume(self, session: CliSession) -> None:
+        try:
+            async for event in self.adapter.events(session.term, session.launch):
+                await self._apply(session, event)
+                if session.finished:
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — the adapter's failure is the session's error, not the host's
+            logger.exception("the events of %s stopped", session.staff_session_id)
+            if not session.finished:
+                await self._apply(session, StaffEvent(EventKind.TURN_FAILED, _now(), {"failure": f"its events stopped: {exc}"}, launch_id=session.launch.launch_id))
+
+    async def _on_terminal_event(self, event: TerminalEvent) -> None:
+        if event.type != "terminal.exited" or not event.terminal_id:
+            return
+        session = self._by_terminal.get(event.terminal_id)
+        if session is None or session.finished:
+            return
+        code = event.data.get("exit_code")
+        if event.terminal_id == session.term.id:
+            session.exited.set()
+            if not session.stopping:
+                await self._apply(session, StaffEvent(EventKind.PROCESS_EXITED, event.at, {"exit_code": code}, launch_id=session.launch.launch_id))
+            return
+        role = session.companions.get(event.terminal_id, "companion")
+        if not session.stopping:
+            # Without its companion the CLI has no channel to report through: an error the operator
+            # sees, not a silence that looks like thinking.
+            await self._apply(session, StaffEvent(EventKind.TURN_FAILED, event.at, {"failure": f"side channel lost: the {role} exited"}, launch_id=session.launch.launch_id))
+
+    async def _apply(self, session: CliSession, event: StaffEvent) -> None:
+        """One event through the status machine, and what it changed to the ingress. Serialised per
+        session, so the machine always starts from the state the previous event left."""
+        async with session.lock:
+            if session.finished:
+                return
+            live = await self.lookup(session.staff_session_id)
+            if live is None:
+                await self._finish(session, "", end=False)
+                return
+            await self._apply_locked(session, live, event)
+
+    async def _apply_locked(self, session: CliSession, live: LiveSession, event: StaffEvent) -> None:
+        kind = event.kind
+        if kind in (EventKind.READY, EventKind.PROMPT_ACKNOWLEDGED, EventKind.TURN_STARTED, EventKind.TOOL_STARTED, EventKind.PERMISSION_REQUESTED, EventKind.QUESTION_ASKED, EventKind.TURN_COMPLETED):
+            session.ready.set()
+        if kind is EventKind.TRANSCRIPT:
+            await self._located(session, live, event)
+        if kind is EventKind.PROMPT_ACKNOWLEDGED:
+            await self._acknowledged(session, event)
+        if kind in (EventKind.PERMISSION_REQUESTED, EventKind.QUESTION_ASKED) and event.native_id:
+            summary = str(event.payload.get("summary") or event.payload.get("text") or "")
+            session.open[event.native_id] = OpenRequest("permission" if kind is EventKind.PERMISSION_REQUESTED else "question", summary[:200])
+        withdrawn: list[str] = []
+        if kind is EventKind.REQUEST_RESOLVED:
+            # From the adapter it names no ``via``: the CLI saw the request settled where the team did
+            # not, on its own screen. The team's own answers come back through ``answer`` with theirs.
+            if session.open.pop(event.native_id, None) is not None and (event.payload.get("via") or "terminal") == "terminal":
+                await self.ingress.resolved(live, event.native_id, by="operator", via="terminal")
+        elif kind in (EventKind.TURN_CANCELLED, EventKind.SESSION_ENDED, EventKind.PROCESS_EXITED):
+            withdrawn = list(session.open)
+            session.open.clear()
+        try:
+            current = StaffState(live.session.status)
+        except ValueError:
+            current = StaffState.WORKING
+        context = StateContext(first_prompt_pending=session.first_prompt_pending, open_requests=tuple(session.open.values()), waiting_for=live.session.waiting_for)
+        step = next_state(current, event, context)
+        if kind in (EventKind.PROMPT_ACKNOWLEDGED, EventKind.TURN_STARTED, EventKind.TOOL_STARTED):
+            session.first_prompt_pending = False
+        if step.signal:
+            session.last_signal = self.clock()
+        for ref in withdrawn:
+            if kind is EventKind.TURN_CANCELLED:
+                await self.ingress.resolved(live, ref, by="system", via="withdrawn")
+        if kind is EventKind.PERMISSION_REQUESTED and event.native_id:
+            await self.ingress.permission(live, event.native_id, str(event.payload.get("tool") or ""), str(event.payload.get("summary") or ""))
+        elif kind is EventKind.QUESTION_ASKED and event.native_id:
+            options = [str(o) for o in event.payload.get("options") or []]
+            await self.ingress.question(live, event.native_id, str(event.payload.get("text") or event.payload.get("summary") or ""), options)
+            if step.state is StaffState.PERMISSION:
+                # The question is recorded, but the permission still holds the process.
+                await self.ingress.status(live, StaffState.PERMISSION.value, step.waiting_for)
+        elif step.state is StaffState.EXITED:
+            await self._finish(session, self._ending(event), end=True, live=live)
+            return
+        elif step.changed:
+            detail = "read from the screen" if step.inferred else ""
+            if step.state is StaffState.ERROR:
+                # The store keeps words only for the waiting statuses, so the failure travels as the
+                # detail, with the screen it was stuck on when there is one.
+                screen = str(event.payload.get("screen") or "")
+                detail = step.waiting_for + (f"\n\n{screen}" if screen else "")
+            await self.ingress.status(live, step.state.value, step.waiting_for, detail=detail)
+        elif step.signal:
+            await self.ingress.signal(live)
+        if kind is EventKind.TURN_COMPLETED and step.state is StaffState.TURN_DONE_UNSEEN:
+            self._spawn(self._record_usage(session), f"harness-usage-{session.staff_session_id}")
+        if step.reconcile:
+            self._spawn(self._reconcile_screen(session), f"harness-reconcile-{session.staff_session_id}")
+
+    def _ending(self, event: StaffEvent) -> str:
+        label = self.adapter.capabilities.label
+        if event.kind is EventKind.SESSION_ENDED:
+            return f"{label} ended its session"
+        code = event.payload.get("exit_code")
+        return f"{label} exited" + (f" with code {code}" if isinstance(code, int) and code != 0 else "")
+
+    async def _located(self, session: CliSession, live: LiveSession, event: StaffEvent) -> None:
+        ref = str(event.payload.get("ref") or "")
+        cli_session = str(event.payload.get("session_ref") or "")
+        if ref and ref != session.transcript_ref:
+            session.transcript_ref = ref
+        if cli_session and cli_session != session.launch.session_ref:
+            session.launch = await self.store.update_launch(session.launch.launch_id, session_ref=cli_session)
+        if (ref and ref != live.session.transcript_ref) or (cli_session and cli_session != live.session.cli_session_id):
+            await self.ingress.located(live, cli_session_id=cli_session or None, transcript_ref=ref or None)
+
+    async def _acknowledged(self, session: CliSession, event: StaffEvent) -> None:
+        message_id = str(event.payload.get("message_id") or "")
+        if not message_id and session.first_prompt_pending and session.first_message_id:
+            # The first prompt went on the command line; the CLI taking a prompt before anything else
+            # was sent is that one.
+            message_id = session.first_message_id
+        if message_id:
+            await self.ingress.message_state(message_id, "acknowledged")
+
+    async def _record_usage(self, session: CliSession) -> None:
+        live = await self.lookup(session.staff_session_id)
+        if live is None:
+            return
+        try:
+            snapshot = await self.usage(live)
+        except Exception:  # noqa: BLE001 — spend is reported when it can be read, and a turn is not failed for it
+            logger.info("the usage of %s could not be read", session.staff_session_id, exc_info=True)
+            return
+        if snapshot is not None:
+            await self.ingress.usage(live, snapshot)
+
+    # -- silence ---------------------------------------------------------------------------------
+
+    async def _watch_quiet(self, session: CliSession) -> None:
+        """A working session that has said nothing and printed nothing for ``no_signal_after_s`` has
+        its screen read. Only the screen reconcile may then call the turn over; what it cannot tell
+        is shown as silence, never as a failure."""
+        while not session.finished:
+            cfg = self.config()
+            await asyncio.sleep(max(0.05, min(5.0, cfg.no_signal_after_s / 10)))
+            try:
+                await self._check_quiet(session, cfg)
+            except asyncio.CancelledError:
+                raise
+            except TerminalError as exc:
+                logger.info("the quiet check of %s could not read the terminal: %s", session.staff_session_id, exc.message)
+            except Exception:  # noqa: BLE001 — the watch goes on; the next check may succeed
+                logger.exception("the quiet check of %s failed", session.staff_session_id)
+
+    async def _check_quiet(self, session: CliSession, cfg: HarnessConfig) -> None:
+        live = await self.lookup(session.staff_session_id)
+        if live is None or live.session.status not in (StaffState.WORKING.value, StaffState.NO_SIGNAL.value):
+            return
+        now = self.clock()
+        if now - max(session.last_signal, session.quiet_checked) < cfg.no_signal_after_s:
+            return
+        view = await self.terminals.get(session.term.id)
+        printed = _seconds_since(view.get("last_output_at"))
+        if printed is not None and printed < cfg.no_signal_after_s:
+            session.quiet_checked = now - printed
+            return
+        session.quiet_checked = now
+        if live.session.status == StaffState.WORKING.value:
+            await self._apply(session, StaffEvent(EventKind.QUIET, _now(), {"after_s": cfg.no_signal_after_s}, launch_id=session.launch.launch_id))
+        else:
+            await self._reconcile_screen(session)
+
+    async def _reconcile_screen(self, session: CliSession) -> None:
+        """Two readings ``reconcile_gap_ms`` apart. A turn end is inferred only from two identical
+        screens that both show an idle composer: one reading can catch a TUI between two frames."""
+        gap = self.config().reconcile_gap_ms / 1000
+        first = await session.term.screen()
+        await asyncio.sleep(gap)
+        second = await session.term.screen()
+        one, two = self.adapter.classify_screen(first), self.adapter.classify_screen(second)
+        if one is ScreenClass.IDLE_COMPOSER:
+            verdict = ScreenClass.IDLE_COMPOSER if two is ScreenClass.IDLE_COMPOSER and first == second else ScreenClass.UNKNOWN
+        else:
+            verdict = one if one == two else ScreenClass.UNKNOWN
+        await self._apply(session, StaffEvent(EventKind.RECONCILED, _now(), {"screen": verdict.value}, launch_id=session.launch.launch_id))
+
+    # -- the team tools --------------------------------------------------------------------------
+
+    async def _team(self, session: CliSession, post: HookPost) -> None:
+        """``Report`` and ``AskOrchestrator`` from the team bridge. A report is answered with what the
+        team made of it (a refusal as an error the worker reads); a question is held open and answered
+        when someone answers it, with the ask carrying the held post's id as its reference."""
+        body = post.body if isinstance(post.body, dict) else {}
+        tool = str(body.get("tool") or "")
+        live = await self.lookup(session.staff_session_id)
+        if live is None:
+            if post.reply_id:
+                await session.term.reply(post.reply_id, {"text": "this session is no longer connected to its team", "error": True})
+            return
+        if tool == "report":
+            try:
+                told = await self.ingress.report(live, str(body.get("kind") or ""), str(body.get("note") or ""), [str(a) for a in body.get("artifacts") or []], str(body.get("remember") or "") or None)
+                reply: dict[str, Any] = {"text": told}
+            except (ValueError, RuntimeError) as exc:
+                reply = {"text": str(exc), "error": True}
+            await self._apply(session, StaffEvent(EventKind.ACTIVITY, post.at, {"team": "report"}, launch_id=session.launch.launch_id))
+            if post.reply_id:
+                await session.term.reply(post.reply_id, reply)
+        elif tool == "ask":
+            question = str(body.get("question") or "").strip()
+            context = str(body.get("context") or "").strip()
+            text = question + (f"\n\nContext: {context}" if context else "")
+            # The reference names the held post, so the answer finds its way back even after the
+            # host restarted; an ask nobody holds gets a reference of its own and goes as a message.
+            ref = f"team:{post.reply_id}" if post.reply_id else f"team-message:{uuid.uuid4().hex[:12]}"
+            await self._apply(session, StaffEvent(EventKind.QUESTION_ASKED, post.at, {"summary": question, "text": text, "options": [str(o) for o in body.get("options") or []]}, native_id=ref, launch_id=session.launch.launch_id))
+        elif post.reply_id:
+            await session.term.reply(post.reply_id, {"text": f"the team has no tool {tool!r}", "error": True})
+
+    # -- the team's calls ------------------------------------------------------------------------
+
+    def _session(self, live: LiveSession) -> CliSession:
+        session = self.sessions.get(live.id)
+        if session is None or session.finished:
+            raise RuntimeError(f"{live.staff.name}'s {self.adapter.capabilities.label} is not running here")
+        return session
+
+    async def send(self, live: LiveSession, msg: OutgoingMessage) -> Receipt:
+        """Hand a message to the adapter and report how far it got. The adapter's own delivery (the
+        paste, the Enter, the acknowledgement it waits for) decides the receipt; a later
+        acknowledgement arrives as an event and moves the message on."""
+        session = self._session(live)
+        text = msg.text if msg.origin == "operator" else f"[orchestrator] {msg.text}"
+        delivery = await self.adapter.send(session.term, msg.id, text, msg.mode)
+        with contextlib.suppress(Exception):
+            await self.store.record_delivery(session.launch.launch_id, delivery)
+        return Receipt(delivery.state, delivery.error, degraded_to=delivery.degraded_to or None)
+
+    async def interrupt(self, live: LiveSession) -> None:
+        await self.adapter.interrupt(self._session(live).term)
+
+    async def answer(self, live: LiveSession, ask: AskRef, decision: Decision) -> None:
+        """Deliver an answer the team has already recorded. A team question is answered on its held
+        post, or — once the hold has expired and the worker was told to carry on — as a message; a
+        CLI's own request through the adapter, which must confirm it or the delivery fails."""
+        session = self._session(live)
+        ref = ask.request_ref
+        text = (decision.text or "").strip() or ", ".join(decision.selected)
+        if ref.startswith(("team:", "team-message:")):
+            words = text or ("yes" if decision.allow else "no" if decision.allow is False else "")
+            held = ref.startswith("team:") and await session.term.reply(ref.removeprefix("team:"), {"text": words})
+            if not held:
+                await self.adapter.send(session.term, "", f"[the {decision.by} answers your question] {words}", "queue")
+        else:
+            if ask.kind == "permission":
+                choice = "allow_once" if decision.allow else "deny_with_note" if text else "deny"
+            else:
+                choice = decision.selected[0] if decision.selected else "text"
+            if not await self.adapter.answer(session.term, ref, Answer(choice, note=text)):
+                raise RuntimeError(f"the answer could not be confirmed in {self.adapter.capabilities.label}; answer it in the terminal")
+        await self._apply(session, StaffEvent(EventKind.REQUEST_RESOLVED, _now(), {"via": decision.by}, native_id=ref, launch_id=session.launch.launch_id))
+
+    async def read(self, live: LiveSession, req: ReadRequest) -> ReadPage:
+        if req.what == "screen":
+            session = self._session(live)
+            return _clip(await session.term.screen(scrollback=200), req.max_chars, None)
+        if req.what == "diff":
+            return await self._diff(live, req)
+        turns = await self._turns(live)
+        after = int(req.cursor) if req.cursor and req.cursor.isdigit() else -1
+        fresh = [t for t in turns if t.index > after]
+        cursor = str(max(t.index for t in fresh)) if fresh else req.cursor
+        if req.what == "last":
+            for turn in reversed(fresh):
+                if turn.role == "assistant" and turn.text.strip():
+                    return _clip(turn.text.strip(), req.max_chars, cursor)
+            return ReadPage("(no reply yet)", cursor, False)
+        return _clip(_render(fresh, max(1, req.turns)), req.max_chars, cursor)
+
+    async def _turns(self, live: LiveSession) -> list[Turn]:
+        session = self.sessions.get(live.id)
+        ref = (session.transcript_ref if session is not None else "") or live.session.transcript_ref or live.cli_session_id or ""
+        if not ref:
+            return []
+        port = session.env_port if session is not None else RuntimeEnvironment(self.terminals, await self._env_of(live), actor=f"agent:{self._actor(live.id)}")
+        turns = await self.adapter.transcript(port, ref)
+        return turns[-READ_TRANSCRIPT_TURNS:]
+
+    async def _env_of(self, live: LiveSession) -> str:
+        launch = await self.store.open_launch_for(live.id)
+        return launch.env if launch is not None else "container"
+
+    async def _diff(self, live: LiveSession, req: ReadRequest) -> ReadPage:
+        session = self.sessions.get(live.id)
+        cwd = live.session.worktree_path or (session.cwd if session is not None else "")
+        if not cwd:
+            return ReadPage("no diff: the session's folder is not known here", None, False)
+        env = session.launch.env if session is not None else await self._env_of(live)
+        base = live.session.base_ref or "HEAD"
+        port = RuntimeEnvironment(self.terminals, env, actor=f"agent:{self._actor(live.id)}")
+        try:
+            stat = await port.run(["git", "-C", cwd, "diff", "--stat", base], timeout=DIFF_TIMEOUT)
+            patch = await port.run(["git", "-C", cwd, "diff", base], timeout=DIFF_TIMEOUT)
+            untracked = await port.run(["git", "-C", cwd, "ls-files", "--others", "--exclude-standard"], timeout=DIFF_TIMEOUT)
+        except TerminalError as exc:
+            return ReadPage(f"no diff: {exc.message}", None, False)
+        except (ProgramNotFound, EnvironmentUnavailable) as exc:
+            return ReadPage(f"no diff: {exc}", None, False)
+        if stat.exit_code != 0:
+            return ReadPage(f"no diff: {stat.stderr.strip() or 'git failed'}", None, False)
+        text = (stat.stdout.strip() or "(no changes against the base)") + (f"\n\nnew files not yet added:\n{untracked.stdout.strip()}" if untracked.stdout.strip() else "") + (f"\n\n{patch.stdout}" if patch.stdout.strip() else "")
+        return _clip(text, req.max_chars, None, keep="head")
+
+    async def usage(self, live: LiveSession) -> UsageSnapshot | None:
+        """What the session's turns cost, from the CLI's own transcript. A CLI on a subscription
+        reports tokens; the cost, when it gives one, is what the same use would cost metered."""
+        turns = [t for t in await self._turns(live) if t.usage is not None]
+        if not turns:
+            return None
+        spent = [t.usage for t in turns if t.usage is not None]
+        costs = [u.cost_usd for u in spent if u.cost_usd is not None]
+        return UsageSnapshot(
+            input_tokens=sum(u.input_tokens + u.cache_read_tokens for u in spent),
+            output_tokens=sum(u.output_tokens for u in spent),
+            cost_usd=sum(costs) if costs else None,
+            window_used_pct=None,
+            source="subscription",
+        )
+
+    # -- stopping --------------------------------------------------------------------------------
+
+    async def stop(self, live: LiveSession) -> None:
+        """Ask the CLI to exit, kill its terminal after the grace, and end the launch. The team ends
+        the session row; the worktree is the team's as well."""
+        session = self.sessions.get(live.id)
+        if session is None:
+            launch = await self.store.open_launch_for(live.id)
+            if launch is not None:
+                await self._end_launch(launch, [t for t in (launch.terminal_id, launch.companion_terminal_id) if t], actor=f"agent:{self._actor(live.id)}")
+            return
+        session.stopping = True
+        grace = self.config().stop_grace_s
+        if not session.exited.is_set():
+            try:
+                await self.adapter.stop(session.term)
+            except Exception:  # noqa: BLE001 — a CLI that will not be asked is killed instead
+                logger.info("%s did not take the request to exit", live.staff.name, exc_info=True)
+            # The CLI's own goodbye (a session-end hook) may let the session go before the terminal's
+            # exit is reported; either ends the wait.
+            waits = [asyncio.ensure_future(session.exited.wait()), asyncio.ensure_future(session.done.wait())]
+            try:
+                await asyncio.wait(waits, timeout=grace, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for wait in waits:
+                    wait.cancel()
+        async with session.lock:
+            await self._finish(session, "stopped", end=False)
+
+    async def _finish(self, session: CliSession, reason: str, *, end: bool, live: LiveSession | None = None) -> None:
+        """Let a session go: its tasks, its terminals and its launch. ``end`` reports to the team
+        that the CLI ended by itself; a stop or a session the team already ended reports nothing."""
+        if session.finished:
+            return
+        session.finished = True
+        session.done.set()
+        current = asyncio.current_task()
+        for task in session.tasks:
+            if task is not current:
+                task.cancel()
+        self.sessions.pop(session.staff_session_id, None)
+        for terminal_id in (session.term.id, *session.companions):
+            self._by_terminal.pop(terminal_id, None)
+        if end and not session.stopping and live is not None:
+            await self.ingress.ended(live, reason)
+        await self._end_launch(session.launch, [session.term.id, *session.companions], actor=f"agent:{session.term.actor}", grace=self.config().stop_grace_s if end else 0.0)
+
+    async def _end_launch(self, launch: Launch, terminals: list[str], *, actor: str, grace: float = 0.0) -> None:
+        """Kill what still runs, end the launch at the daemon and in the store. ``grace`` is for a CLI
+        that said goodbye and is on its way out: killed in the middle of it, it leaves half a
+        transcript and an exit code that looks like a crash."""
+        deadline = self.clock() + grace
+        for terminal_id in terminals:
+            try:
+                view = await self.terminals.get(terminal_id)
+                while view["status"] == "running" and self.clock() < deadline:
+                    await asyncio.sleep(0.1)
+                    view = await self.terminals.get(terminal_id)
+                if view["status"] == "running":
+                    await self.terminals.kill(terminal_id, actor=actor)
+            except TerminalError as exc:
+                logger.info("terminal %s of launch %s not ended: %s", terminal_id, launch.launch_id, exc.message)
+        try:
+            await self.terminals.unregister_launch(launch.env, launch.launch_id, actor=actor)
+        except TerminalError as exc:
+            # A daemon that restarted has forgotten the launch already; one that is away forgets it
+            # when its terminal goes. The row is ended either way.
+            logger.info("launch %s not unregistered: %s", launch.launch_id, exc.message)
+        await self.store.end_launch(launch.launch_id)
+
+    # -- after a restart -------------------------------------------------------------------------
+
+    async def reconcile(self, *, wait: float = 60.0) -> int:
+        """Take up the launches a previous host left open; returns how many run on.
+
+        A launch whose session has ended is ended too, its terminals with it. One whose terminal is
+        gone ended while no host was watching, and its session ends with that reason. The rest are
+        attached: the adapter re-dials what it needs, the daemon replays the hook posts made while the
+        host was away, and the machine goes on from the status in the row.
+        """
+        attached = 0
+        for launch in await self.store.open_launches():
+            if launch.harness != self.kind or launch.staff_session_id in self.sessions:
+                continue
+            if not await self.terminals.wait_available(launch.env, timeout=wait):
+                logger.warning("launch %s left as it is: the %s terminal service is not available", launch.launch_id, launch.env)
+                continue
+            actor = self._actor(launch.staff_session_id)
+            live = await self.lookup(launch.staff_session_id)
+            terminals = [t for t in (launch.terminal_id, launch.companion_terminal_id) if t]
+            if live is None:
+                await self._end_launch(launch, terminals, actor=f"agent:{actor}")
+                continue
+            running = False
+            if launch.terminal_id:
+                with contextlib.suppress(NotFound):
+                    running = (await self.terminals.get(launch.terminal_id))["status"] == "running"
+            if not running:
+                await self._end_launch(launch, terminals, actor=f"agent:{actor}")
+                await self.ingress.ended(live, f"{self.adapter.capabilities.label} ended while the host was away")
+                continue
+            assert launch.terminal_id is not None
+            view = await self.terminals.get(launch.terminal_id)
+            hooks: asyncio.Queue[HookPost | None] = asyncio.Queue()
+            session = CliSession(
+                staff_session_id=launch.staff_session_id,
+                launch=launch,
+                term=RuntimeTerminal(self.terminals, launch.terminal_id, launch.env, actor=actor, launch_id=launch.launch_id, hooks=hooks),
+                env_port=RuntimeEnvironment(self.terminals, launch.env, actor=f"agent:{actor}"),
+                cwd=str(view.get("cwd") or ""),
+                companions={launch.companion_terminal_id: "companion"} if launch.companion_terminal_id else {},
+                transcript_ref=live.session.transcript_ref or "",
+                hooks=hooks,
+                last_signal=self.clock(),
+            )
+            await self.adapter.attach(session.term, launch)
+            # A session still starting when the host went has its gate run again: the dialog it was
+            # stuck on may still be on screen, and reading a screen twice is harmless.
+            self._run(session, gate=live.session.status == StaffState.STARTING.value)
+            attached += 1
+        return attached
+
+
+def _render(turns: list[Turn], count: int) -> str:
+    """The last ``count`` turns: what started each, the replies in full, every tool as one line."""
+    starts = [i for i, t in enumerate(turns) if t.role in ("user", "orchestrator")]
+    begin = starts[-count] if len(starts) >= count else 0
+    lines: list[str] = []
+    for turn in turns[begin:]:
+        if turn.role in ("user", "orchestrator"):
+            text = " ".join(turn.text.split())
+            if text:
+                lines.append(f"» {text[:300]}")
+            continue
+        lines.extend(f"· {tool.name} {tool.summary[:160]}" for tool in turn.tools)
+        if turn.text.strip():
+            lines.append(turn.text.strip())
+    return "\n".join(lines) or "(nothing yet)"
+
+
+def _clip(text: str, limit: int, cursor: str | None, *, keep: str = "tail") -> ReadPage:
+    if len(text) <= limit:
+        return ReadPage(text, cursor, False)
+    return ReadPage(text[:limit] if keep == "head" else text[-limit:], cursor, True)
+
+
+def install_runtimes(
+    adapters: Mapping[str, Callable[[], HarnessAdapter]],
+    runtimes: dict[str, Any],
+    *,
+    terminals: Terminals,
+    store: HarnessStore,
+    ingress: TeamIngress,
+    lookup: Lookup,
+    config: Callable[[], HarnessConfig],
+) -> list[CliStaffRuntime]:
+    """One runtime per registered adapter, put into the team's ``runtimes`` under the harness name."""
+    made = []
+    for name, factory in adapters.items():
+        runtime = CliStaffRuntime(factory(), terminals=terminals, store=store, ingress=ingress, lookup=lookup, config=config)
+        runtimes[name] = runtime
+        made.append(runtime)
+    return made
+
+
+__all__ = ["CliSession", "CliStaffRuntime", "RuntimeEnvironment", "RuntimeTerminal", "install_runtimes"]
