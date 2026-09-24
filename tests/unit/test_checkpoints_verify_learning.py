@@ -12,12 +12,12 @@ from protocore.contracts.tools import ToolContext
 from protocore.contracts.types import COMPACTION_SUMMARY_METADATA_KEY, Message, MessageRole, TextBlock
 
 from daedalus.config import RuntimeConfig, Settings
-from daedalus.extensions.inbox import Inbox
 from daedalus.extensions.learning import Learning
 from daedalus.host.checkpoints import Checkpoints
 from daedalus.host.session_runner import SessionManager
 from daedalus.stores.database import Database
 from daedalus.tools.verify import verify
+from tests.support.notifications import RecordingNotifications
 
 
 async def test_checkpoints_snapshot_and_restore(tmp_path: Path) -> None:
@@ -116,7 +116,7 @@ async def test_verify_records_a_receipt(settings: Settings, db: Database) -> Non
 async def test_learning_record_and_digest(settings: Settings, db: Database) -> None:
     manager = await _manager(settings, db)
     app = SimpleNamespace(settings=settings, config=RuntimeConfig(), db=db, manager=manager, front=None, extensions={})
-    app.extensions["inbox"] = Inbox(app)  # type: ignore[arg-type]
+    app.notifications = RecordingNotifications()
     learning = Learning(app)  # type: ignore[arg-type]
     state = await manager.create_session("learn")
     await db.execute("INSERT INTO runs(id, tenant_id, session_id, status, created_at, updated_at) VALUES ('run-a', 'daedalus', ?, 'completed', '2026-09-06T10:00:00+00:00', '2026-09-06T10:00:00+00:00')", (state.session.id,))
@@ -134,8 +134,8 @@ async def test_learning_record_and_digest(settings: Settings, db: Database) -> N
     assert any("deploy the thing" in c for c in report["candidates"])
     assert await learning.maybe_digest() is True
     assert await learning.maybe_digest() is False  # once a week
-    entries = await app.extensions["inbox"].list()
-    assert entries and entries[0]["kind"] == "learning_digest" and "improvement candidates" in entries[0]["body"]
+    [draft] = app.notifications.drafts
+    assert draft.kind == "learning_digest" and "improvement candidates" in draft.body
     await manager.close()
 
 

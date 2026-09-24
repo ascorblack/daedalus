@@ -67,7 +67,8 @@ GATES: dict[str, object] = {
     "/api/auth/me": {"user": "operator"},
     "/api/auth/config": {"passkeys": 1},
     "/api/status": {"ok": True},
-    "/api/inbox/unread": {"unread": 0},
+    # The badge on the Inbox entry of the navigation.
+    "/api/notifications/summary": {"unseen": 0, "needs_you": 0},
     "/api/modes": {},
     "/api/commands": [],
     "/api/asr": {"configured": False, "reason": "", "provider": "", "model": "", "max_seconds": 120, "autosend": False},

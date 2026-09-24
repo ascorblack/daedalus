@@ -194,14 +194,16 @@ func TestWatchAnnouncesOnlyWhatIsNew(t *testing.T) {
 	base := "http://127.0.0.1:8765"
 	waiting := map[string]bool{}
 	unread := -1
-	first := stackStatus{InboxUnread: 3}
+	first := stackStatus{}
+	first.Notifications.Unseen = 3
 	first.Sessions = append(first.Sessions, sessionLine("s1", "Reading the logs", "waiting"))
 	// The first answer is a baseline: an installation that was already waiting does not announce it
 	// the moment the launcher starts.
 	if got := changes(first, &unread, waiting, base); len(got) != 0 {
 		t.Fatalf("the first poll announced %+v", got)
 	}
-	second := stackStatus{InboxUnread: 5}
+	second := stackStatus{}
+	second.Notifications.Unseen = 5
 	second.Sessions = append(second.Sessions, sessionLine("s1", "Reading the logs", "waiting"), sessionLine("s2", "Rewriting the parser", "waiting"))
 	got := changes(second, &unread, waiting, base)
 	if len(got) != 2 {
@@ -214,14 +216,18 @@ func TestWatchAnnouncesOnlyWhatIsNew(t *testing.T) {
 		t.Fatalf("the waiting line reads %+v", got[1])
 	}
 	// Reading the inbox is not news, and a session that is still waiting is not news twice.
-	if got := changes(stackStatus{InboxUnread: 1, Sessions: second.Sessions}, &unread, waiting, base); len(got) != 0 {
+	read := stackStatus{Sessions: second.Sessions}
+	read.Notifications.Unseen = 1
+	if got := changes(read, &unread, waiting, base); len(got) != 0 {
 		t.Fatalf("nothing happened and it announced %+v", got)
 	}
 	// Once it has stopped waiting and waits again, it is news again.
-	running := stackStatus{InboxUnread: 1}
+	running := stackStatus{}
+	running.Notifications.Unseen = 1
 	running.Sessions = append(running.Sessions, sessionLine("s2", "Rewriting the parser", "running"))
 	changes(running, &unread, waiting, base)
-	again := stackStatus{InboxUnread: 1}
+	again := stackStatus{}
+	again.Notifications.Unseen = 1
 	again.Sessions = append(again.Sessions, sessionLine("s2", "Rewriting the parser", "waiting"))
 	if got := changes(again, &unread, waiting, base); len(got) != 1 {
 		t.Fatalf("a session waiting again announced %+v", got)

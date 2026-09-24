@@ -976,6 +976,67 @@ def _projects_with_folders(db: Database) -> str:
 
 MIGRATIONS.append(_projects_with_folders)
 
+# The inbox becomes notifications, rows kept and ids continued: one table for everything that wants
+# the operator's attention, whatever channel it later goes out on. The old severity splits in two —
+# how loud (level: an "info" entry was a record, never worth a badge) and what colour (tone) — and
+# "read" becomes the moment it was seen. The counter is carried over as well as the rows: an entry
+# deleted from the top of the inbox left its number used, and a client still holding it must not
+# find a different notification under it. The request, hold and resolution columns are used once
+# notifications can be answered; they are here so the table is reshaped once.
+MIGRATIONS.append("""
+CREATE TABLE notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    category TEXT NOT NULL,
+    level TEXT NOT NULL DEFAULT 'normal' CHECK (level IN ('quiet', 'normal', 'urgent')),
+    tone TEXT NOT NULL DEFAULT 'info' CHECK (tone IN ('ok', 'info', 'warning', 'error')),
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    link TEXT NOT NULL DEFAULT '',
+    session_id TEXT,
+    run_id TEXT,
+    project_id TEXT,
+    staff_id TEXT,
+    terminal_id TEXT,
+    source TEXT NOT NULL DEFAULT 'system',
+    dedupe_key TEXT,
+    count INTEGER NOT NULL DEFAULT 1,
+    actions_json TEXT NOT NULL DEFAULT '[]',
+    request_ref TEXT,
+    held_until TEXT,
+    seen_at TEXT,
+    resolved_at TEXT,
+    resolution TEXT,
+    delivered_json TEXT NOT NULL DEFAULT '{}',
+    event_seq INTEGER
+);
+INSERT INTO notifications(id, at, updated_at, kind, category, level, tone, title, body,
+                          session_id, run_id, source, seen_at)
+SELECT id, at, at, kind,
+       CASE WHEN kind IN ('run_failed', 'run_cap') THEN 'run_failed'
+            WHEN kind IN ('reminder', 'schedule_run', 'heartbeat') THEN 'reminder'
+            WHEN kind = 'loop_paused' THEN 'question'
+            WHEN kind = 'loop' THEN 'agent_notify'
+            ELSE 'system' END,
+       CASE severity WHEN 'info' THEN 'quiet' ELSE 'normal' END,
+       CASE severity WHEN 'error' THEN 'error' WHEN 'warning' THEN 'warning' ELSE 'info' END,
+       title, body, session_id, run_id, 'system',
+       CASE WHEN read = 1 THEN at END
+FROM inbox;
+DELETE FROM sqlite_sequence WHERE name = 'notifications';
+INSERT INTO sqlite_sequence(name, seq)
+SELECT 'notifications', max(COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'inbox'), 0),
+                            COALESCE((SELECT max(id) FROM notifications), 0));
+DROP TABLE inbox;
+CREATE INDEX notifications_unseen ON notifications(seen_at, level, id);
+CREATE INDEX notifications_open ON notifications(request_ref) WHERE request_ref IS NOT NULL AND resolved_at IS NULL;
+CREATE INDEX notifications_dedupe ON notifications(dedupe_key) WHERE dedupe_key IS NOT NULL AND resolved_at IS NULL;
+CREATE INDEX notifications_by_session ON notifications(session_id, id);
+CREATE INDEX notifications_by_project ON notifications(project_id, id) WHERE project_id IS NOT NULL;
+""")
+
 
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session

@@ -1411,7 +1411,8 @@ body.resizing iframe { pointer-events: none; }
 .kind { width: 32px; height: 32px; border-radius: var(--radius-sm); background: var(--surface-2); display: inline-flex; align-items: center; justify-content: center; color: var(--fg-2); flex: none; }
 .kind.error { color: var(--bad); background: color-mix(in srgb, var(--bad) 14%, transparent); }
 .kind.warning { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
-.kind.notice { color: var(--info); background: color-mix(in srgb, var(--info) 14%, transparent); }
+.kind.info { color: var(--info); background: color-mix(in srgb, var(--info) 14%, transparent); }
+.kind.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
 .inbox-body { margin-top: 6px; cursor: default; }
 .inbox-entry + .inbox-entry { margin-top: 8px; }
 .inbox-entry-title { font-weight: 600; font-size: var(--fs-13); margin-bottom: 4px; }
