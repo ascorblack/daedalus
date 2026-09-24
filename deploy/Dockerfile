@@ -1,7 +1,8 @@
 # Daedalus runtime image. The agent may edit this file; a change triggers an image rebuild.
 #
-# Three stages. The environment is assembled where a compiler and a Node are allowed to live, and
-# only the results — the virtualenv and the built Mini App — are copied into the image that ships.
+# Four stages. The environment is assembled where a compiler, a Node and a Go are allowed to live,
+# and only the results — the virtualenv, the built Mini App and the terminal daemon — are copied into
+# the image that ships.
 # The `speech` extra rides in the default image rather than being an opt-in like `browser`: the two
 # wheels together are about fifteen megabytes against Playwright's several hundred, and an installation
 # that never downloads a model never loads them. opus-tools comes in with it, from apt-packages.txt,
@@ -76,11 +77,70 @@ COPY miniapp ./
 RUN npm run build
 
 
+# -- the terminal daemon ----------------------------------------------------------------------
+# ptyd owns the terminals. It is Go with a C library linked into it — libghostty-vt, the screen
+# emulator, which Zig builds from the sources ptyd/libghostty/pins.env names — and neither toolchain
+# belongs in the image that ships, so they live in this stage and only the one binary leaves it.
+# The binary lands in the same image as the agent because the `terminals` service in
+# deploy/compose.yaml is that image started with ptyd as its entrypoint: one image to pull, and the
+# daemon is always the build the host beside it was tested against.
+#
+# Debian bookworm's Go rather than the default tag's newer Debian: the library is static but the C
+# runtime is not, and a binary linked against a newer glibc than Ubuntu 24.04's refuses to start.
+#
+# The stage runs on the machine that builds and compiles for the one the image is for. The published
+# image is built for arm64 as well, and Zig building Ghostty under an emulated CPU is many times
+# slower than a cross build, which costs nothing extra here: Zig targets any architecture on its own,
+# and the Go side needs only Debian's cross C compiler for its few lines of cgo.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS ptyd
+ARG TARGETARCH
+
+RUN case "$TARGETARCH" in \
+        amd64) triple=x86_64-linux-gnu ;; \
+        arm64) triple=aarch64-linux-gnu ;; \
+        *) echo "no terminal daemon build for $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && cross="" \
+    && if [ "$TARGETARCH" != "$(dpkg --print-architecture)" ]; then cross="gcc-$triple libc6-dev-$TARGETARCH-cross"; fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends xz-utils $cross \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "$triple" > /opt/target-triple
+
+WORKDIR /src/ptyd
+# The library first, from the pins and the patches alone, so the minutes of Zig are paid again only
+# when one of those moves, never for a change to the daemon's Go. Only the installed library is kept:
+# the compiler, the Ghostty checkout and Zig's caches are a gigabyte nothing after this step reads.
+COPY ptyd/libghostty ./libghostty
+RUN PTYD_CACHE=/opt/libghostty LIBGHOSTTY_TARGET="$(cat /opt/target-triple)" libghostty/build.sh > /opt/libghostty.pkgconfig \
+    && find /opt/libghostty -mindepth 1 -maxdepth 1 ! -name 'libghostty-*' -exec rm -rf {} +
+
+COPY ptyd/go.mod ptyd/go.sum ./
+RUN go mod download
+COPY ptyd ./
+# The version is a digest of the daemon's sources. The host compares the version of the daemon that
+# is running with the one in its own image, and the digest differs exactly when the daemon changed —
+# a rebuild of the agent for any other reason does not offer to end every terminal for nothing.
+# The binary is asked its version only when this machine can run it.
+RUN export PKG_CONFIG_PATH="$(cat /opt/libghostty.pkgconfig)" \
+    && triple="$(cat /opt/target-triple)" \
+    && cc=gcc \
+    && if [ "$TARGETARCH" != "$(dpkg --print-architecture)" ]; then cc="$triple-gcc"; fi \
+    && digest="$(find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)" \
+    && CGO_ENABLED=1 GOOS=linux GOARCH="$TARGETARCH" CC="$cc" go build -trimpath \
+        -ldflags "-s -w -X github.com/ascorblack/daedalus/ptyd/internal/version.Version=src-$digest" \
+        -o /out/ptyd ./cmd/ptyd \
+    && if [ "$cc" = gcc ]; then /out/ptyd version; fi
+
+
 # -- what ships -------------------------------------------------------------------------------
 FROM base AS runtime
 
 COPY --from=venv /srv/venv /srv/venv
 COPY --from=miniapp /build/dist /opt/miniapp-dist
+# The terminals service runs this as its entrypoint. The agent's container carries it too, and only
+# asks it its version: that is how the host knows a newer daemon is in the image than the one running.
+COPY --from=ptyd /out/ptyd /usr/local/bin/ptyd
 # The bot and the core are mounted, not installed: pointing the interpreter at the mounted checkouts
 # is what an editable install would have written anyway, and it needs no sync at the first start.
 RUN printf '%s\n' /srv/daedalus /srv/protocore-exp > /srv/venv/lib/python3.12/site-packages/_daedalus_checkouts.pth

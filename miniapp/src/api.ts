@@ -76,7 +76,9 @@ function authHeaders(): Record<string, string> {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  /** `data` is the error body as the host sent it: some refusals carry fields beside `detail`, such as
+   *  the `code`, `running` and `cap` of a terminal refused at the machine's cap. */
+  constructor(public status: number, message: string, public data: Record<string, unknown> = {}) {
     super(message);
   }
 }
@@ -89,14 +91,17 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   });
   if (!response.ok) {
     let detail: unknown = response.statusText;
+    let data: Record<string, unknown> = {};
     try {
-      detail = (await response.json()).detail ?? detail;
+      const parsed = await response.json();
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) data = parsed;
+      detail = parsed?.detail ?? detail;
     } catch {
       /* ignore */
     }
     if (Array.isArray(detail)) detail = detail.map((d: any) => (d && d.msg ? `${(d.loc ?? []).slice(-1)[0] ?? ""}: ${d.msg}` : JSON.stringify(d))).join("; ");
     const text = typeof detail === "string" && detail ? detail : response.status >= 500 ? `Server unavailable (${response.status})` : `Request failed (${response.status})`;
-    throw new ApiError(response.status, text);
+    throw new ApiError(response.status, text, data);
   }
   return (await response.json()) as T;
 }
@@ -126,6 +131,28 @@ export const api = {
    */
   terminalTicket: (id: string, readOnly: boolean) =>
     call<{ ticket: string; expires_in: number }>("POST", `/api/terminals/${encodeURIComponent(id)}/ticket`, { read_only: readOnly }),
+  /** A new terminal. At the machine's cap the host answers 409 `over_cap`; `confirm` is the operator's "open it anyway". */
+  createTerminal: (body: TerminalCreate) => call<TerminalView>("POST", "/api/terminals", body),
+  terminal: (id: string) => call<TerminalView>("GET", `/api/terminals/${encodeURIComponent(id)}`),
+  /** Ends the process (hang-up, then kill, the whole group). The row stays, as an exited terminal. */
+  killTerminal: (id: string) => call<TerminalView>("POST", `/api/terminals/${encodeURIComponent(id)}/kill`, {}),
+  /** The same command in the same place under a new id; the old row stays as it ended. */
+  restartTerminal: (id: string) => call<TerminalView>("POST", `/api/terminals/${encodeURIComponent(id)}/restart`, {}),
+  /** Forgets an exited or lost terminal; refused (409) while it runs. */
+  removeTerminal: (id: string) => call<unknown>("DELETE", `/api/terminals/${encodeURIComponent(id)}`),
+};
+
+export type TerminalCreate = {
+  env: TerminalEnvName;
+  owner_kind: "session" | "staff" | "project" | "free";
+  owner_id?: string;
+  project_id?: string;
+  cwd?: string;
+  title?: string;
+  sandbox?: boolean;
+  cols?: number;
+  rows?: number;
+  confirm?: boolean;
 };
 
 /** Where a terminal runs: the terminals container, or the machine itself. */
@@ -182,7 +209,7 @@ export type TerminalView = {
   activity?: unknown;
 };
 
-export type TerminalList = { envs: TerminalEnv[]; terminals: TerminalView[] };
+export type TerminalList = { envs: TerminalEnv[]; terminals: TerminalView[]; capacity?: { running: number; cap: number; queued: number } };
 
 /** One kind of terminal's average cost, as the host has measured it. `cpu_percent` is of one CPU. */
 export type TerminalCost = { rss_bytes: number; cpu_percent: number; samples: number };
@@ -288,6 +315,8 @@ export type SessionSummary = {
   project_id: string;
   project: string;
   metadata?: { subagent_of?: string; subagent_name?: string; loop?: LoopView; forked_from?: { session_id: string; seq: number }; [k: string]: unknown };
+  /** How many of the session's terminals are running. */
+  terminals?: number;
 };
 
 export type TaskView = {

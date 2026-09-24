@@ -322,8 +322,9 @@ release signing and uninstalling.
 
 ### 2. A server
 
-The same stack with Compose in front of it: one published image, two containers from it, and every
-other piece behind a profile that is off unless you ask for it.
+The same stack with Compose in front of it: one published image, three containers from it (the agent,
+the key proxy and the terminals), and every other piece behind a profile that is off unless you ask
+for it.
 
 Requirements: Docker with Compose, and at least one model API key **or** a ChatGPT / Claude Code /
 SuperGrok login on the host. **Telegram is optional**: with a bot token you get the chat as a front;
@@ -353,6 +354,36 @@ The browser skills — driving a page with Playwright, drawing with Pillow — a
 image either: they are two thirds of one and most sessions never open a page. Run the `:browser` tag
 instead (`ghcr.io/ascorblack/daedalus:browser`, 368 MB to pull) where they are wanted; without it the
 skills say so instead of writing scripts that cannot run, and `daedalus doctor` says it too.
+
+### Terminals
+
+The shells the app opens in the container run in a third container, the `terminals` service: the same
+image started as `ptyd`, the terminal daemon. It is a service of its own so the terminals outlive the
+agent. What survives what:
+
+| | Container terminals |
+|---|---|
+| `docker restart deploy-daedalus-1`, a self-development rebuild (`up -d --no-deps daedalus`), the agent's own restart | keep running; the app reattaches |
+| `docker compose up -d terminals` after the image changed, or **Update** in the app | end — every one of them |
+| `docker compose down`, a reboot | end |
+
+- **The first deploy that has it needs `docker compose -f deploy/compose.yaml --env-file .env up -d --build`**,
+  not a restart of the agent's container: the service is new, the agent gains a volume, and an image
+  built before the service existed has no daemon in it. Until then `daedalus doctor` reports the
+  container terminals as not installed and names that command.
+- **Updating the daemon.** A deploy never recreates the service, so after a rebuild the image can hold a
+  newer `ptyd` than the one running. The app and the doctor say so, and the update — recreating the
+  service, which ends every container terminal — is the operator's, with the count of what it ends
+  shown first. The app's button asks the `selfdev` rebuilder to do it; without that profile, run
+  `docker compose -f deploy/compose.yaml --env-file .env up -d terminals` on the server.
+- **Ports.** A server started in a terminal (a dev server, a preview) listens in `TERMINALS_PORT_RANGE`,
+  `8120–8139` by default, published on every interface like the agent's own `8100–8119`, and reached
+  at `SERVICES_PUBLIC_HOST:<port>`. The two ranges must not overlap.
+- **Its home.** `/root` in the service is the `terminals-home` volume: CLIs installed there, their
+  logins, shell history. It is never mounted into the agent's container.
+- **Project folders.** A folder mounted into the agent's container is mounted into `terminals` too, at
+  the same absolute path, so a path means the same thing in a terminal as it does to the agent. The
+  desktop launcher writes both entries itself.
 
 ### The install ends in the app: add a model
 
