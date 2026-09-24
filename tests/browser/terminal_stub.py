@@ -71,8 +71,8 @@ except Exception:  # noqa: BLE001 - any failure to import the host means the loc
     CODEC = "local"
 
 ENVS: list[dict[str, Any]] = [
-    {"env": "container", "available": True, "reason": "", "detail": "", "version": "0.1.0", "sandbox": True, "shell": "/bin/bash", "home": "/root", "port_range": "8120-8139", "public_host": "", "preview_poll_ms": 3000, "running": 0},
-    {"env": "host", "available": True, "reason": "", "detail": "", "version": "0.1.0", "sandbox": False, "shell": "/bin/bash", "home": "/home/operator", "port_range": "", "public_host": "", "preview_poll_ms": 3000, "running": 0},
+    {"env": "container", "available": True, "reason": "", "detail": "", "version": "0.1.0", "sandbox": "ok", "shell": "/bin/bash", "home": "/root", "port_range": "8120-8139", "public_host": "", "preview_poll_ms": 3000, "running": 0},
+    {"env": "host", "available": True, "reason": "", "detail": "", "version": "0.1.0", "sandbox": "bwrap cannot create namespaces here: setting up uid map: Permission denied", "shell": "/bin/bash", "home": "/home/operator", "port_range": "", "public_host": "", "preview_poll_ms": 3000, "running": 0},
 ]
 
 WINDOW = 256 * 1024
@@ -99,6 +99,7 @@ class Term:
     snapshot: bytes | None = None
     busy: bool = False
     size_owner: str = "host"
+    sandbox: bool = False
     # Shell integration, as the daemon keeps it: the commands the shell marked, with absolute rows
     # (counted from the terminal's start by line feeds: the stub's output is line-oriented), and the
     # row of the prompt being typed at. None: the shell has not marked a prompt.
@@ -110,7 +111,7 @@ class Term:
         return {
             "id": self.id, "env": self.env, "title": self.title,
             "owner": {"kind": self.owner_kind, "id": self.owner_id or None, "label": ""}, "project_id": None,
-            "profile": "shell", "sandbox": False, "cwd": self.cwd, "status": self.status,
+            "profile": "shell", "sandbox": self.sandbox, "cwd": self.cwd, "status": self.status,
             "exit_code": self.exit_code, "exit_signal": None, "created_at": "2026-09-24T09:00:00Z", "exited_at": None,
             "last_output_at": None, "last_input_at": None, "cols": self.cols, "rows": self.rows,
             "live": {"clients": 0, "busy": self.busy, "keyboard": {"owner": "auto", "until": None}, "size_owner": self.size_owner, "alt_screen": False},
@@ -150,6 +151,8 @@ class TerminalStub:
         self.log: list[tuple[str, int, str, dict[str, Any]]] = []
         self.counter = 0
         self.lock = threading.RLock()
+        # What a sandboxed create or restart reports as left read-only, as the host would.
+        self.skipped: list[dict[str, str]] = []
 
     # -- the terminals ------------------------------------------------------------------------
 
@@ -292,7 +295,10 @@ class TerminalStub:
             client = Client(n=self.counter, term=term, ws=ws)
             self.clients.append(client)
         ws.on_message(lambda message: self.on_message(client, message))
-        ws.on_close(lambda *_: setattr(client, "closed", True))
+        # No close handler: with one installed, a socket the page closes itself (a restarted
+        # terminal's old instance, say) reaches Playwright 1.62 as a close event without a code, whose
+        # KeyError then fails every later call of the check. A socket the page closed is found by
+        # the next send failing, which marks the client closed.
 
     def on_message(self, client: Client, message: bytes | str) -> None:
         if isinstance(message, str):
@@ -401,8 +407,9 @@ class TerminalStub:
             if method == "POST":
                 self.counter += 1
                 id_ = f"new{self.counter:09d}"[:12]
-                term = self.add(id_, env=(body or {}).get("env", "container"), title="bash", owner_id=(body or {}).get("owner_id") or "")
-                return 201, term.view()
+                boxed = bool((body or {}).get("sandbox"))
+                term = self.add(id_, env=(body or {}).get("env", "container"), title="bash", owner_id=(body or {}).get("owner_id") or "", sandbox=boxed)
+                return 201, {**term.view(), **({"sandbox_skipped": self.skipped} if boxed else {})}
         if len(segments) == 3 and segments[2] == "load":
             return 200, {"cap": 20, "running": 0, "queued": 0}
         term = self.terms.get(segments[2]) if len(segments) >= 3 else None
@@ -428,8 +435,12 @@ class TerminalStub:
             return 200, term.view()
         if action == "restart":
             self.counter += 1
-            fresh = self.add(f"rst{self.counter:09d}"[:12], env=term.env, title=term.title, cwd=term.cwd, owner_id=term.owner_id)
-            return 200, fresh.view()
+            asked = (body or {}).get("sandbox")
+            boxed = term.sandbox if asked is None else bool(asked)
+            if term.status == "running":
+                self.exit(term.id, 129)
+            fresh = self.add(f"rst{self.counter:09d}"[:12], env=term.env, title=term.title, cwd=term.cwd, owner_id=term.owner_id, sandbox=boxed)
+            return 200, {**fresh.view(), **({"sandbox_skipped": self.skipped} if boxed else {})}
         return 404, {"detail": "no such route"}
 
     def install(self, page: Any) -> None:

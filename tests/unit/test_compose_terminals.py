@@ -83,6 +83,15 @@ def test_the_terminals_service_is_the_agents_image_started_as_ptyd() -> None:
     assert "terminals" not in agent.get("depends_on", {})
 
 
+def test_the_terminals_may_create_the_namespaces_their_sandbox_needs() -> None:
+    # The sandbox toggle runs bubblewrap inside the service; Docker's default seccomp and AppArmor
+    # profiles refuse it the namespaces, exactly as they would the agent's Exec sandbox.
+    services = compose()["services"]
+    for name in ("terminals", "daedalus"):
+        assert services[name]["cap_add"] == ["SYS_ADMIN"]
+        assert sorted(services[name]["security_opt"]) == ["apparmor=unconfined", "seccomp=unconfined"]
+
+
 def test_the_terminals_see_the_workspaces_at_the_agents_paths_and_nothing_of_the_agent_beyond() -> None:
     services = compose()["services"]
     terminals, agent = volumes(services["terminals"]), volumes(services["daedalus"])

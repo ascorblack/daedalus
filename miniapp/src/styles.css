@@ -367,6 +367,10 @@ a { color: var(--accent); text-decoration: none; }
 .menu button { background:none; border:0; color:var(--fg); text-align:left; padding:6px 10px; min-height:var(--row-h); border-radius:var(--radius-sm); font-size:var(--fs-14); cursor:pointer; }
 .menu button:active { background:var(--surface-3); }
 .menu button.danger { color:var(--bad); }
+/* A checkbox item sets how the items below it act; its box sits at the row's end, like a setting's. */
+.menu .menu-check { margin-left:auto; flex:none; width:16px; height:16px; display:inline-flex; align-items:center; justify-content:center; border:1px solid var(--line-strong); border-radius:var(--radius-xs); }
+.menu .menu-check.on { background:var(--fg); color:var(--bg); border-color:var(--fg); }
+.menu .menu-check .ic { color:inherit; }
 
 .chat-body { flex:1; min-height:0; display:flex; position:relative; }
 .chat-main { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; }
@@ -2434,6 +2438,8 @@ button.staff-row:hover { background: var(--surface-2); }
 .term-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .term-tab-title { min-width: 0; }
 .term-tab-code { color: var(--fg-3); font-size: var(--fs-11); }
+/* A sandboxed terminal: a shield before its title, in the tab, the full view and the phone's list. */
+.term-shield { flex: none; display: inline-flex; color: var(--accent); }
 .term-tab-x { flex: none; width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--fg-3); cursor: pointer; padding: 0; opacity: 0; }
 .term-tab:hover .term-tab-x, .term-tab.on .term-tab-x, .term-tab-x:focus-visible { opacity: 1; }
 .term-tab-x:hover { background: var(--surface-3); color: var(--fg); }

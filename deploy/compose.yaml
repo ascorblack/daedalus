@@ -161,6 +161,12 @@ services:
     # Reaps what the terminals leave behind: a shell's orphaned background job is reparented to
     # pid 1, and ptyd is not an init.
     init: true
+    # A terminal's sandbox (bubblewrap: the filesystem read-only, the project's folders writable,
+    # ptyd's token hidden) needs the container to create namespaces, which Docker's default seccomp
+    # and AppArmor profiles forbid. The same widening the agent's container accepts for Exec: without
+    # it the sandbox toggle is offered as unavailable and terminals open unsandboxed.
+    cap_add: [SYS_ADMIN]
+    security_opt: ["seccomp=unconfined", "apparmor=unconfined"]
     entrypoint: ["/usr/local/bin/ptyd"]
     command: ["serve", "--env", "container", "--run-dir", "/run/daedalus-terminals",
               "--state-dir", "/var/lib/ptyd", "--home", "/root"]

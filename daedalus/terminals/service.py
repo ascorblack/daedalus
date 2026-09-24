@@ -391,7 +391,7 @@ class Terminals(SideChannels):
                     reason="" if link.available else link.reason,
                     detail="" if link.available else link.detail,
                     version=version,
-                    sandbox=capabilities.get("sandbox") == "ok",
+                    sandbox=str(capabilities.get("sandbox") or "") if link.available else "",
                     shell=str(info.get("shell") or ""),
                     home=str(info.get("home") or ""),
                     port_range=self.port_ranges.get(env, ""),
@@ -739,6 +739,14 @@ class Terminals(SideChannels):
         integrated = int(bool(result.get("shell_integration")))
         await self.db.execute("UPDATE terminals SET cwd = ?, ptyd_instance = ?, shell_integration = ? WHERE id = ?", (actual, link.instance, integrated, terminal_id))
         detail: dict[str, Any] = {"owner": {"kind": spec.owner.kind, "id": spec.owner.id}, "cwd": actual, "profile": spec.profile, "sandbox": spec.sandbox}
+        # What the sandbox made writable is the daemon's answer, not the request: a folder that is a
+        # symbolic link, or missing in that environment, is left read-only, and the operator is told.
+        boxed = result.get("sandbox") if spec.sandbox else None
+        skipped = list((boxed or {}).get("skipped") or [])
+        if boxed is not None:
+            detail["writable"] = list(boxed.get("writable") or [])
+            if skipped:
+                detail["skipped"] = skipped
         if spec.argv:
             detail["argv"] = spec.argv
         if over_cap:
@@ -751,6 +759,8 @@ class Terminals(SideChannels):
         )
         view = await self.get(terminal_id)
         view["cwd_fallback"] = bool(result.get("cwd_fallback"))
+        if spec.sandbox:
+            view["sandbox_skipped"] = skipped
         return view
 
     async def kill(self, terminal_id: str, *, actor: str = "operator") -> TerminalView:

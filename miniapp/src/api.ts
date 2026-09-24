@@ -137,7 +137,9 @@ export const api = {
   /** Ends the process (hang-up, then kill, the whole group). The row stays, as an exited terminal. */
   killTerminal: (id: string) => call<TerminalView>("POST", `/api/terminals/${encodeURIComponent(id)}/kill`, {}),
   /** The same command in the same place under a new id; the old row stays as it ended. */
-  restartTerminal: (id: string) => call<TerminalView>("POST", `/api/terminals/${encodeURIComponent(id)}/restart`, {}),
+  /** Starts the same program for the same owner as a new terminal; ``sandbox`` switches the sandbox
+   * on or off, and leaving it out keeps what the terminal had. */
+  restartTerminal: (id: string, sandbox?: boolean) => call<TerminalView>("POST", `/api/terminals/${encodeURIComponent(id)}/restart`, sandbox === undefined ? {} : { sandbox }),
   /** The commands the terminal's shell reported, oldest first; with `output`, the text each one printed. 501 when its program reports none. */
   terminalCommands: (id: string, last: number, output: boolean) =>
     call<{ commands: TerminalCommand[] }>("GET", `/api/terminals/${encodeURIComponent(id)}/commands?last=${last}&output=${output ? 1 : 0}`),
@@ -184,7 +186,8 @@ export type TerminalEnv = {
   /** Why it is unavailable, as a code (e.g. "not_installed"); empty when available. */
   reason: string;
   version: string;
-  sandbox: boolean;
+  /** "ok" when a terminal here can run in the sandbox; otherwise why not, in the daemon's words. */
+  sandbox: string;
   shell: string;
   home: string;
   /** The ports a server started in this environment is reachable on, as "lo-hi". */
@@ -205,6 +208,8 @@ export type TerminalView = {
   project_id: string | null;
   profile: string;
   sandbox: boolean;
+  /** On the answer to a sandboxed create: the writable folders the sandbox left read-only, and why. */
+  sandbox_skipped?: { path: string; reason: string }[];
   cwd: string;
   status: "running" | "exited" | "lost";
   exit_code: number | null;

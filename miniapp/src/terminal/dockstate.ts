@@ -127,3 +127,41 @@ export function replaceTab(state: DockState, from: string, to: string): DockStat
   const tabs = state.tabs.map((t) => (t === from ? to : t));
   return { ...state, tabs: [...new Set(tabs)], active: state.active === from ? to : state.active, split: state.split === from ? to : state.split };
 }
+
+// ── the sandbox choice ──────────────────────────────────────────────────────────────────────
+
+const SANDBOX_KEY = "daedalus.term.sandbox";
+
+/** Whether new terminals open in the sandbox. One choice per device, not per session: it is how the
+ * operator likes to work, and a session they open next should not quietly drop it. */
+export function loadSandboxChoice(): boolean {
+  try {
+    return localStorage.getItem(SANDBOX_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function saveSandboxChoice(on: boolean): void {
+  try {
+    if (on) localStorage.setItem(SANDBOX_KEY, "1");
+    else localStorage.removeItem(SANDBOX_KEY);
+  } catch {
+    /* remembered for this page only */
+  }
+}
+
+/** What an environment says about the sandbox: whether a terminal there can have it, and if not, why. */
+export type SandboxOffer = { ok: boolean; reason: string };
+
+export function sandboxOffer(env: { available: boolean; sandbox: string } | undefined): SandboxOffer {
+  if (!env || !env.available) return { ok: false, reason: "" };
+  return env.sandbox === "ok" ? { ok: true, reason: "" } : { ok: false, reason: env.sandbox };
+}
+
+/** The toggle is offered when any available environment can sandbox; otherwise it shows the first reason. */
+export function sandboxToggle(envs: { available: boolean; sandbox: string }[]): SandboxOffer {
+  const offers = envs.map(sandboxOffer);
+  if (offers.some((o) => o.ok)) return { ok: true, reason: "" };
+  return { ok: false, reason: offers.find((o) => o.reason)?.reason ?? "" };
+}

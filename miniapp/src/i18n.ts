@@ -2667,5 +2667,12 @@ Object.assign(DICT, {
   "term.cap.title": { en: "Open one more terminal?", ru: "Открыть ещё один терминал?" },
   "term.cap.body": { en: "{running} terminals are running, and the limit is {cap}. Agents wait at the limit; you can go past it.", ru: "Работает терминалов: {running}, предел — {cap}. Агенты у предела ждут, а вы можете его превысить." },
   "term.cap.action": { en: "Open anyway", ru: "Всё равно открыть" },
+  "term.sandbox.toggle": { en: "Sandbox", ru: "Песочница" },
+  "term.sandbox.hint": { en: "New terminals write only to this project's folders", ru: "Новые терминалы пишут только в папки проекта" },
+  "term.sandbox.unavailable": { en: "The sandbox is not available: {reason}", ru: "Песочница недоступна: {reason}" },
+  "term.sandbox.on": { en: "In the sandbox: writes only to the project's folders", ru: "В песочнице: пишет только в папки проекта" },
+  "term.sandbox.restartOn": { en: "Restart in the sandbox", ru: "Перезапустить в песочнице" },
+  "term.sandbox.restartOff": { en: "Restart without the sandbox", ru: "Перезапустить без песочницы" },
+  "term.sandbox.skipped": { en: "Left read-only: {paths}", ru: "Оставлены только для чтения: {paths}" },
   "term.delete.ends": { en: "Its running terminal will end.|Its {n} running terminals will end.", ru: "Его работающий терминал завершится.|Его {n} работающих терминала завершатся.|Его {n} работающих терминалов завершатся." },
 });

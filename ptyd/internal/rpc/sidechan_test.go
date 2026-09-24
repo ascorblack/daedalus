@@ -20,8 +20,10 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/hooks"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
 	"github.com/ascorblack/daedalus/ptyd/internal/rpc"
+	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
 	"github.com/ascorblack/daedalus/ptyd/internal/server/clienttest"
+	"github.com/ascorblack/daedalus/ptyd/internal/shellint"
 	"github.com/ascorblack/daedalus/ptyd/internal/sidechan"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
 	"github.com/ascorblack/daedalus/ptyd/internal/wire"
@@ -39,6 +41,12 @@ func TestMain(m *testing.M) {
 // startSide is start with the side channels: a hook listener, a launch registry whose hook command
 // is this test binary, a reader over a project root, and the dialer.
 func startSide(t *testing.T) (*fixture, *rpc.Side) {
+	t.Helper()
+	return startSideWith(t, nil)
+}
+
+// startSideWith is startSide with a sandbox prober; nil offers no sandbox.
+func startSideWith(t *testing.T, box *sandbox.Prober) (*fixture, *rpc.Side) {
 	t.Helper()
 	base, err := os.MkdirTemp("", "ptyd")
 	if err != nil {
@@ -87,7 +95,10 @@ func startSide(t *testing.T) (*fixture, *rpc.Side) {
 		t.Fatal(err)
 	}
 	f.daemon = &rpc.Daemon{Config: cfg, Instance: "inst1", StartedAt: time.Now().UTC(), Registry: registry,
-		Events: evlog, Log: log, EmulatorName: "fake@0", Environ: os.Environ(), Side: side}
+		Events: evlog, Log: log, EmulatorName: "fake@0", Environ: os.Environ(), Side: side, Sandbox: box}
+	if f.daemon.ShellDir, err = shellint.Install(filepath.Join(cfg.StateDir, "shell")); err != nil {
+		t.Fatal(err)
+	}
 	srv := server.New(ep.Token, log, f.daemon.Hello)
 	f.daemon.Register(srv)
 	go srv.Serve(ep.Listener)

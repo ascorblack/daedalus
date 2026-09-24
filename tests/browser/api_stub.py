@@ -137,8 +137,8 @@ GATES: dict[str, object] = {
     # `terminal_stub.TerminalStub`, which answers the rest of `/api/terminals*` and the WebSocket.
     "/api/terminals": {
         "envs": [
-            {"env": "container", "available": True, "reason": "", "version": "0.1.0", "sandbox": True, "shell": "/bin/bash", "home": "/root", "port_range": "8120-8139", "public_host": "", "preview_poll_ms": 3000},
-            {"env": "host", "available": False, "reason": "not_installed", "version": "", "sandbox": False, "shell": "", "home": "", "port_range": "", "public_host": "", "preview_poll_ms": 3000},
+            {"env": "container", "available": True, "reason": "", "version": "0.1.0", "sandbox": "ok", "shell": "/bin/bash", "home": "/root", "port_range": "8120-8139", "public_host": "", "preview_poll_ms": 3000},
+            {"env": "host", "available": False, "reason": "not_installed", "version": "", "sandbox": "", "shell": "", "home": "", "port_range": "", "public_host": "", "preview_poll_ms": 3000},
         ],
         "terminals": [],
         "capacity": {"running": 0, "cap": 20, "queued": 0},
