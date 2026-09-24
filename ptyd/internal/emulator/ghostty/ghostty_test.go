@@ -4,10 +4,9 @@ package ghostty
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
@@ -21,48 +20,42 @@ func TestContract(t *testing.T) { conformance.RunContract(t, Factory) }
 
 var update = flag.Bool("update", false, "rewrite the golden snapshots")
 
-// The snapshots of the conformance cases are kept as files: the browser side replays them into
+type golden struct {
+	Name string   `json:"name"`
+	Cols int      `json:"cols"`
+	Rows int      `json:"rows"`
+	VT   string   `json:"vt"`   // the snapshot
+	Text []string `json:"text"` // what the screen and history say, as AllText reads them
+}
+
+// The snapshots of the conformance cases are kept as data: the browser side replays them into
 // xterm.js and compares the text, and a change in how the library formats a screen shows up here as
 // a diff to review rather than silently.
 func TestGoldenSnapshots(t *testing.T) {
+	var want []golden
 	for _, c := range conformance.Cases {
-		name := slug(c.Name)
 		e := conformance.Feed(Factory, c)
 		snap, _ := e.Snapshot(emulator.SnapshotOptions{Scrollback: 1000})
-		text := strings.Join(conformance.AllText(e), "\n") + "\n"
+		cols, rows := e.Size()
+		want = append(want, golden{Name: c.Name, Cols: cols, Rows: rows, VT: string(snap), Text: conformance.AllText(e)})
 		e.Close()
-		vt, txt := filepath.Join("testdata", "snapshots", name+".vt"), filepath.Join("testdata", "snapshots", name+".txt")
-		if *update {
-			if err := os.MkdirAll(filepath.Dir(vt), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(vt, snap, 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(txt, []byte(text), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
-		haveVT, err1 := os.ReadFile(vt)
-		haveTxt, err2 := os.ReadFile(txt)
-		if err1 != nil || err2 != nil {
-			t.Fatalf("%s: missing golden files; run with -update", c.Name)
-		}
-		if !bytes.Equal(haveVT, snap) || string(haveTxt) != text {
-			t.Errorf("%s: snapshot differs from %s; review and run with -update", c.Name, vt)
+	}
+	data, err := json.MarshalIndent(want, "", " ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	const path = "testdata/snapshots.json"
+	if *update {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
 		}
 	}
-}
-
-func slug(s string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(s) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case b.Len() > 0 && !strings.HasSuffix(b.String(), "-"):
-			b.WriteByte('-')
-		}
+	have, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("%v; run with -update", err)
 	}
-	return strings.TrimSuffix(b.String(), "-")
+	if !bytes.Equal(have, data) {
+		t.Errorf("the snapshots differ from %s; review the difference and run with -update", path)
+	}
 }
