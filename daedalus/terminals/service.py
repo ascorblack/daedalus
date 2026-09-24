@@ -127,7 +127,10 @@ def rpc_failure(exc: wire.RpcError, what: str) -> TerminalError:
         return Conflict(f"{what}: a person is typing in this terminal and holds the keyboard", reason="keyboard_held")
     if code == wire.TIMEOUT:
         return TimedOut(f"{what}: {exc.message}")
-    if code in (wire.UNSUPPORTED, wire.METHOD_NOT_FOUND):
+    if code == wire.UNSUPPORTED:
+        # The daemon says why: no sandbox in this build, or a program that reports no commands.
+        return Unsupported(f"{what}: {exc.message}")
+    if code == wire.METHOD_NOT_FOUND:
         return Unsupported(f"{what}: not available in this terminal service yet ({exc.message})")
     if code in (wire.INVALID_PARAMS, wire.INVALID_SIZE):
         return InvalidRequest(f"{what}: {exc.message}")
@@ -517,6 +520,7 @@ class Terminals(SideChannels):
             "rows": int(info.get("rows") or row["rows"]) if info else row["rows"],
             "live": None,
             "last_command": None,
+            "shell_integration": bool(row["shell_integration"]),
             "activity": None,
         }
         if info is not None:
@@ -721,7 +725,9 @@ class Terminals(SideChannels):
         actual = str(result.get("cwd") or cwd)
         if spec.launch_id:
             self._launch_terminals.setdefault(spec.launch_id, terminal_id)
-        await self.db.execute("UPDATE terminals SET cwd = ?, ptyd_instance = ? WHERE id = ?", (actual, link.instance, terminal_id))
+        # Whether the shell was started with its integration: only then are its commands recorded.
+        integrated = int(bool(result.get("shell_integration")))
+        await self.db.execute("UPDATE terminals SET cwd = ?, ptyd_instance = ?, shell_integration = ? WHERE id = ?", (actual, link.instance, integrated, terminal_id))
         detail: dict[str, Any] = {"owner": {"kind": spec.owner.kind, "id": spec.owner.id}, "cwd": actual, "profile": spec.profile, "sandbox": spec.sandbox}
         if spec.argv:
             detail["argv"] = spec.argv
@@ -965,6 +971,7 @@ class Terminals(SideChannels):
             "rows": int(info.get("rows") or 24),
             "ptyd_instance": link.instance,
             "created_by": "system",
+            "shell_integration": int(bool(info.get("shell_integration"))),
         }
         await self.db.execute(
             f"INSERT OR IGNORE INTO terminals({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",  # noqa: S608 — column names are this module's own
@@ -1035,7 +1042,9 @@ class Terminals(SideChannels):
         elif kind == "terminal.cwd" and data.get("cwd"):
             await self.db.execute("UPDATE terminals SET cwd = ? WHERE id = ?", (str(data["cwd"]), terminal_id))
         elif kind == "terminal.command":
-            command = {"command": str(data.get("command") or ""), "exit_code": data.get("exit_code"), "at": now_iso()}
+            command: dict[str, Any] = {"command": str(data.get("command") or ""), "exit_code": data.get("exit_code"), "at": now_iso()}
+            if isinstance(data.get("duration_ms"), int):
+                command["duration_ms"] = data["duration_ms"]
             await self.db.execute("UPDATE terminals SET last_command_json = ? WHERE id = ?", (json.dumps(command, ensure_ascii=False), terminal_id))
 
     async def _on_stats(self, data: dict[str, Any]) -> None:
@@ -1215,7 +1224,10 @@ class Terminals(SideChannels):
         return Attachment(terminal_id=terminal_id, env=row["env"], client_id=str(result.get("client_id") or ""), channel=client.channel(int(result["channel"])), client=client)
 
     async def commands(self, terminal_id: str, *, last: int = 20, with_output: bool = False) -> builtins.list[dict[str, Any]]:
-        """The commands a shell reported running, newest last; ``Unsupported`` until the daemon keeps them."""
+        """The commands a shell reported running, oldest first and the newest last, each with its
+        rows, directory, exit code (``None`` while it runs) and, with ``with_output``, its output as
+        the terminal still shows it. ``Unsupported`` when the terminal's program reports none: it is
+        not a shell started with its integration."""
         row = await self._row(terminal_id)
         result = await self._call(row["env"], "terminal.commands", {"id": terminal_id, "last": max(1, min(last, 500)), "with_output": with_output}, what="listing the commands")
         return [c for c in result.get("commands") or [] if isinstance(c, dict)]

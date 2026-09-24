@@ -703,7 +703,9 @@ class Team:
         elif ref.startswith("staff:"):
             member = await self.manager.staff.get(ask.staff_id) if ask.staff_id else None
             if ask.kind == "permission":
-                await self.publish("permission.resolved", {"request_id": ask.id, "request_ref": ref, "decision": "allow" if allow else "deny", "via": via, "by": by}, member=member, project_id=ask.project_id)
+                # Answered on the agent's own screen, the decision is the CLI's to know, not ours.
+                decision = "terminal" if allow is None and via == "terminal" else "allow" if allow else "deny"
+                await self.publish("permission.resolved", {"request_id": ask.id, "request_ref": ref, "decision": decision, "via": via, "by": by}, member=member, project_id=ask.project_id)
             else:
                 await self.publish("ask.answered", {"request_id": ask.id, "request_ref": ref, "via": via}, member=member, project_id=ask.project_id)
 
@@ -1013,12 +1015,16 @@ class Ingress:
         return self.team.manager
 
     async def status(self, live: LiveSession, status: str, waiting_for: str = "", *, detail: str = "", actor: str = "") -> None:
+        # Compared with the row as it was, not with the caller's copy of it: two paths report the same
+        # change — a command-line runtime sets the session working when it delivers an answer, and the
+        # team does after it — and a stale copy would announce the second as a change of its own.
+        before = await self.manager.staff.session(live.id)
         # One line: it is a status, and the whole question is on the request.
         changed = await self.manager.staff.set_status(live.id, status, " ".join(waiting_for.split())[:200])
         if changed is None:
             return
         previous, session = changed
-        if previous == status and session.waiting_for == live.session.waiting_for:
+        if previous == status and session.waiting_for == (before.waiting_for if before is not None else live.session.waiting_for):
             return
         payload: dict[str, Any] = {"status": status, "previous": previous}
         if session.waiting_for:
@@ -1119,6 +1125,30 @@ class Ingress:
 
     async def usage(self, live: LiveSession, snapshot: UsageSnapshot) -> None:
         await self.manager.staff.record_usage(live.id, snapshot.view())
+
+    async def signal(self, live: LiveSession) -> None:
+        await self.manager.staff.touch(live.id)
+
+    async def resolved(self, live: LiveSession, request_ref: str, *, by: str = "operator", via: str = "terminal") -> bool:
+        row = await self.manager.db.fetchone(
+            "SELECT id FROM asks WHERE staff_session_id = ? AND request_ref = ? AND resolved_at IS NULL ORDER BY created_at DESC LIMIT 1", (live.id, request_ref)
+        )
+        ask = await self.manager.asks.get(row["id"]) if row is not None else None
+        if ask is None or not await self.manager.asks.resolve(ask.id, by, {"via": via, "in_session": True}):
+            return False
+        if via == "withdrawn":
+            await self.team._withdrawn(ask)
+        else:
+            await self.team._announce_resolved(ask, allow=None, by=by, via=via)
+        return True
+
+    async def located(self, live: LiveSession, *, cli_session_id: str | None = None, transcript_ref: str | None = None) -> None:
+        await self.manager.staff.started(live.id, cli_session_id=cli_session_id, transcript_ref=transcript_ref)
+
+    async def ended(self, live: LiveSession, reason: str) -> None:
+        await self.team._end(live, reason, stop=False)
+        # A place under the project's concurrency came free.
+        self.team.queue.pump_soon(live.staff.project_id)
 
 
 async def install(app: Application) -> list[asyncio.Task[None]]:

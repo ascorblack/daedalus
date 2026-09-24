@@ -91,18 +91,21 @@ func newHarness(t *testing.T) *harness {
 
 func (h *harness) start(t *testing.T, id string, argv ...string) *Terminal {
 	t.Helper()
-	env := BuildEnv(os.Environ(), nil, map[string]string{"PS1": "$ "}, id)
+	env := BuildEnv(os.Environ(), nil, map[string]string{"PS1": "$ ", "DAEDALUS_SI_NONCE": testNonce}, id)
 	path, ok := LookPath(argv[0], env, "/")
 	if !ok {
 		t.Skipf("%s is not installed", argv[0])
 	}
 	term, err := h.reg.Create(Spec{ID: id, Path: path, Argv: argv, Cwd: h.dir, Env: env, Cols: 80, Rows: 24,
-		RingBytes: 1 << 20, InputIdle: 0})
+		RingBytes: 1 << 20, InputIdle: 0, Nonce: testNonce})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return term
 }
+
+// testNonce is the shell-integration nonce of the terminals these tests start.
+const testNonce = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
 
 func waitDone(t *testing.T, term *Terminal) {
 	t.Helper()
@@ -177,7 +180,7 @@ func TestExitCodeAndSignal(t *testing.T) {
 
 func TestEventsArePublishedBeforeTheExit(t *testing.T) {
 	h := newHarness(t)
-	term := h.start(t, "ev", "sh", "-c", `printf '\033]0;my title\007\033]7;file://h/tmp\007\007\033]133;D;4\007'`)
+	term := h.start(t, "ev", "sh", "-c", `printf '\033]0;my title\007\033]7;file://h/tmp\007\007\033]133;C;k=%s\007\033]133;D;4;k=%s\007' "$DAEDALUS_SI_NONCE" "$DAEDALUS_SI_NONCE"`)
 	waitDone(t, term)
 	types := h.rec.types("ev")
 	want := []string{"terminal.created", "terminal.title", "terminal.cwd", "terminal.bell", "terminal.command", "terminal.exited"}
