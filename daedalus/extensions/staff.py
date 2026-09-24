@@ -874,6 +874,8 @@ class Team:
                     await self.seen(live)
         elif event.type == "task.moved" and event.payload.get("to") in FINISHED_TASK:
             await self._task_finished(str(event.payload.get("task_id") or ""))
+        elif event.type == "task.moved" and event.payload.get("to") == "todo" and event.project_id:
+            self.queue.pump_soon(event.project_id)  # a dependency finished: a waiting task may go
         elif event.type in ("staff.status", "terminal.exited"):
             if event.type == "terminal.exited" or event.payload.get("status") in ("exited", "idle", "turn_done_unseen", "error"):
                 self.queue.pump_soon(event.project_id if event.type == "staff.status" else None)
