@@ -39,7 +39,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_PORT, Unhandled, answer_shared, serve_shared_post  # noqa: E402
+from api_stub import DEFAULT_PORT, Unhandled, answer_shared, folders, serve_shared_post  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "miniapp" / "dist"
@@ -82,7 +82,7 @@ class Stub(BaseHTTPRequestHandler):
             "id": SESSION, "title": "A session", "status": "idle" if done else "running",
             "housekeeping": Stub.housekeeping, "run_id": None if done else "r1",
             "workspace": "/workspace", "workspace_name": "ws", "workspace_own": True, "workspace_sessions": [],
-            "project": {"id": "p", "name": "Project", "root": "/workspace", "settings": {"snapshots": True}},
+            "project": {"id": "p", "name": "Project", "folders": folders("/workspace"), "settings": {"snapshots": True}},
             "pending": None, "model": "some-model", "mode": "", "brief": "", "tools_off": [], "loop": None,
             "services": [], "subagents": [], "usage": {}, "first_seq": 101, "has_older": False,
             "context": {"tokens": 10, "window": 100000, "messages": 2, "summaries": 0, "operator_turns": 1},

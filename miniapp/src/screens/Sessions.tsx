@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, Project, ProjectFolder, SessionList, SessionSummary, Settings } from "../api";
+import { projectPath, projectReachable } from "../folders";
 import { Avatar, Dot, Skeleton, Status, ToolPicker, fmtInterval, statusWord } from "../components";
 import { OverflowMenu, Sheet, confirmDialog, toast } from "../dialogs";
 import { relTime, shortModel, untilShort } from "../format";
@@ -80,7 +81,7 @@ export function SessionsScreen({ onOpen, toast, current, compact, bare, project 
   ) : (
       <PageHeader
         title={inProject ? inProject.name : screenTitle("agents")}
-        subtitle={data ? `${plural("agents.count", folders.total)}${folders.active ? ` · ${t("agents.active", { n: folders.active })}` : ""}${inProject ? ` · ${inProject.root}` : ""}` : undefined}
+        subtitle={data ? `${plural("agents.count", folders.total)}${folders.active ? ` · ${t("agents.active", { n: folders.active })}` : ""}${inProject ? ` · ${projectPath(inProject)}` : ""}` : undefined}
         actions={
           <>
             {onProjects && <button className="iconbtn" onClick={onProjects} title={t("shell.projects")} aria-label={t("shell.projects")}><Icon name="skill" /></button>}
@@ -111,7 +112,7 @@ export function SessionsScreen({ onOpen, toast, current, compact, bare, project 
         {data && !searching && folders.total === 0 && (
           <div className="empty">
             <b>{inProject ? t("agents.empty.project", { name: inProject.name }) : t("agents.empty")}</b>
-            <div>{inProject ? t("agents.empty.project.sub", { root: inProject.root }) : t("agents.empty.sub")}</div>
+            <div>{inProject ? t("agents.empty.project.sub", { root: projectPath(inProject) }) : t("agents.empty.sub")}</div>
             <button className="btn primary" onClick={() => setCreating(true)}>{t("agents.empty.create")}</button>
           </div>
         )}
@@ -175,7 +176,7 @@ function sameFolder(a: FolderProps, b: FolderProps): boolean {
   if (l.single !== r.single || l.system !== r.system || a.toast !== b.toast) return false;
   if (a.filtered !== b.filtered || a.current !== b.current || a.onOpen !== b.onOpen || a.compact !== b.compact) return false;
   if (l.key !== r.key || l.name !== r.name || l.total !== r.total || l.active !== r.active || l.loops !== r.loops || l.last_message_at !== r.last_message_at) return false;
-  if (l.project?.root !== r.project?.root) return false;
+  if ((l.project ? projectPath(l.project) : undefined) !== (r.project ? projectPath(r.project) : undefined)) return false;
   return l.sig === r.sig;
 }
 
@@ -255,7 +256,7 @@ export const FolderSection = memo(function FolderSection({ folder, onOpen, curre
         <button className="btn small folder-add" onClick={() => setAdding(true)} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" size={16} /></button>
         {!single && <button className="iconbtn small quiet folder-actions" onClick={editProject} aria-label={t("project.settings.for", { name: folder.name })}><Icon name="more" size={16} /></button>}
       </div>
-      {showing && !compact && <div className="folder-root sub mono truncate" title={folder.project.root}>{folder.project.root}</div>}
+      {showing && !compact && <div className="folder-root sub mono truncate" title={projectPath(folder.project)}>{projectPath(folder.project)}</div>}
       {showing && folder.rows.length === 0 && <div className="folder-empty sub">{filtered ? t("common.nothing") : t("agents.folder.none")}</div>}
       {showing && !single && (
         <WindowedRows
@@ -489,12 +490,12 @@ export function NewAgentSheet({ onClose, onCreated, toast, project: initial = ""
       <select className="field" value={project} onChange={(e) => setProject(e.target.value)}>
         <option value="">{t("newagent.where.newproject")}</option>
         {(projects.data ?? []).map((p) => (
-          <option key={p.id} value={p.id} disabled={!p.reachable}>
-            {p.name} · {p.root}{p.reachable ? "" : t("newagent.where.unmounted")}
+          <option key={p.id} value={p.id} disabled={!projectReachable(p)}>
+            {p.name} · {projectPath(p)}{projectReachable(p) ? "" : t("newagent.where.unmounted")}
           </option>
         ))}
       </select>
-      {chosen ? <div className="sub">{t("newagent.where.inside", { root: chosen.root })}</div> : <div className="sub">{t("newagent.where.newproject.hint")}</div>}
+      {chosen ? <div className="sub">{t("newagent.where.inside", { root: projectPath(chosen) })}</div> : <div className="sub">{t("newagent.where.newproject.hint")}</div>}
       {chosen && <label className="toggle-row"><input type="checkbox" checked={ownDirectory} onChange={(e) => setOwnDirectory(e.target.checked)} /><span>{t("newagent.directory.own")}</span><span className="sub">{t("newagent.directory.own.hint")}</span></label>}
       <button type="button" className="disclosure" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced}>
         <span className={`chev ${advanced ? "down" : ""}`}>›</span> {t("newagent.advanced")}{loopOn ? t("newagent.advanced.loop") : ""}{toolsOff.length ? t("newagent.advanced.tools", { n: toolsOff.length }) : ""}

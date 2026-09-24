@@ -16,7 +16,7 @@ async def test_request_manifest_is_durable_and_large_values_are_by_reference(tmp
     await db.open()
     try:
         await db.execute(
-            "INSERT INTO projects(id, name, root, created_at, settings, system) VALUES ('project', 'p', '/tmp/p', 'now', '{}', '')"
+            "INSERT INTO projects(id, name, created_at, settings, system) VALUES ('project', 'p', 'now', '{}', '')"
         )
         await db.execute(
             "INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata, project_id) VALUES ('session', 'tenant', '', 'now', 'now', '{}', 'project')"
@@ -54,7 +54,7 @@ async def test_request_manifest_cascades_with_session(tmp_path) -> None:
     await db.open()
     try:
         await db.execute(
-            "INSERT INTO projects(id, name, root, created_at, settings, system) VALUES ('p', 'p', '/tmp/p', 'now', '{}', '')"
+            "INSERT INTO projects(id, name, created_at, settings, system) VALUES ('p', 'p', 'now', '{}', '')"
         )
         await db.execute(
             "INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata, project_id) VALUES ('s', 't', '', 'now', 'now', '{}', 'p')"

@@ -2207,3 +2207,21 @@ Object.assign(DICT, {
   "composer.place.project": { en: "Project: {name}", ru: "Проект: {name}" },
   "composer.place.workspace": { en: "Workspace: {name}", ru: "Рабочая папка: {name}" },
 });
+
+// A terminal's connection, as the strip over it says it.
+Object.assign(DICT, {
+  "term.state.connecting": { en: "Connecting…", ru: "Подключение…" },
+  "term.state.live": { en: "Connected", ru: "Подключено" },
+  "term.state.reconnecting": { en: "Connection lost · reconnecting…", ru: "Связь потеряна · переподключаемся…" },
+  "term.state.reconnectingIn": { en: "Connection lost · reconnecting in {n} s", ru: "Связь потеряна · переподключимся через {n} с" },
+  "term.state.exited": { en: "Process ended · code {code}", ru: "Процесс завершён · код {code}" },
+  "term.state.exitedSignal": { en: "Process ended · signal {signal}", ru: "Процесс завершён · сигнал {signal}" },
+  "term.state.gone": { en: "This terminal no longer exists", ru: "Этого терминала больше нет" },
+  "term.state.environment": { en: "The terminal service is not answering · retrying…", ru: "Служба терминалов не отвечает · пробуем снова…" },
+  "term.state.origin": { en: "This address is not allowed to open terminals", ru: "С этого адреса терминалы открывать нельзя" },
+  "term.state.auth": { en: "Sign in again to open the terminal", ru: "Войдите снова, чтобы открыть терминал" },
+  "term.state.proxy": {
+    en: "The connection was refused on the way. If the app is behind a reverse proxy, it must forward WebSocket upgrades on /ws/.",
+    ru: "Соединение оборвалось по дороге. Если приложение стоит за обратным прокси, он должен пропускать WebSocket на /ws/.",
+  },
+});

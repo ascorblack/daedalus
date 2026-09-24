@@ -389,7 +389,7 @@ async def test_orphan_sweep_keeps_ancestors_of_project_roots(settings: Settings,
         root = container / ".agents" / "child"
         root.mkdir(parents=True)
         (root / "work.txt").write_text("keep")
-        await manager.projects.create("nested", str(root))
+        await manager.projects.create("nested", [str(root)])
         assert container not in await manager.orphan_workspaces()
         await manager.sweep_orphan_workspaces()
         assert (root / "work.txt").read_text() == "keep"

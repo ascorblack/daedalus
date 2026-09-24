@@ -154,9 +154,11 @@ class CheckpointRetention:
     async def stores(self, keep_last: int = 0) -> list[_Store]:
         """Every store that holds checkpoints, with the rows of all the sessions that share it."""
         rows = await self.db.fetchall(
-            "SELECT s.id AS id, s.metadata AS metadata, p.root AS root FROM sessions s "
-            "LEFT JOIN projects p ON p.id = s.project_id "
-            "WHERE s.id IN (SELECT session_id FROM checkpoints)"
+            # The folder the session works in: the one its metadata names, or its project's first.
+            "SELECT s.id AS id, s.metadata AS metadata, COALESCE("
+            "(SELECT f.path FROM project_folders f WHERE f.project_id = s.project_id AND f.id = json_extract(s.metadata, '$.folder_id')), "
+            "(SELECT f.path FROM project_folders f WHERE f.project_id = s.project_id ORDER BY f.position LIMIT 1)) AS root "
+            "FROM sessions s WHERE s.id IN (SELECT session_id FROM checkpoints)"
         )
         workspaces = {row["id"]: self._workspace(row) for row in rows}
         stores: dict[Path, _Store] = {}

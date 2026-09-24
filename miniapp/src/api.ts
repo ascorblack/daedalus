@@ -120,7 +120,69 @@ export const api = {
     const blob = await res.blob();
     return { url: URL.createObjectURL(blob), type: blob.type, size: blob.size };
   },
+  /**
+   * A single-use pass for one terminal's WebSocket. A browser cannot put the auth header on a
+   * WebSocket, and inside Telegram there is no cookie, so the socket is opened with this instead.
+   */
+  terminalTicket: (id: string, readOnly: boolean) =>
+    call<{ ticket: string; expires_in: number }>("POST", `/api/terminals/${encodeURIComponent(id)}/ticket`, { read_only: readOnly }),
 };
+
+/** Where a terminal runs: the terminals container, or the machine itself. */
+export type TerminalEnvName = "container" | "host";
+
+/** One terminal environment, as the host reports it: whether it can be used, and what it offers. */
+export type TerminalEnv = {
+  env: TerminalEnvName;
+  available: boolean;
+  /** Why it is unavailable, as a code (e.g. "not_installed"); empty when available. */
+  reason: string;
+  version: string;
+  sandbox: boolean;
+  shell: string;
+  home: string;
+  /** The ports a server started in this environment is reachable on, as "lo-hi". */
+  port_range: string;
+  /** The address those ports are published on; empty when only this machine can reach them. */
+  public_host?: string;
+  preview_poll_ms?: number;
+};
+
+/** One styled run of a preview row: text and its pen. */
+export type TerminalRun = { t: string; fg?: number | string; bg?: number | string; b?: boolean; i?: boolean; u?: boolean; d?: boolean; inv?: boolean };
+
+export type TerminalView = {
+  id: string;
+  env: TerminalEnvName;
+  title: string;
+  owner: { kind: "session" | "staff" | "project" | "free"; id: string | null; label?: string };
+  project_id: string | null;
+  profile: string;
+  sandbox: boolean;
+  cwd: string;
+  status: "running" | "exited" | "lost";
+  exit_code: number | null;
+  exit_signal: string | null;
+  created_at: string;
+  exited_at: string | null;
+  last_output_at: string | null;
+  last_input_at: string | null;
+  cols: number;
+  rows: number;
+  live?: {
+    clients: number;
+    busy: boolean;
+    keyboard: { owner: "auto" | "human" | "agent"; until: string | null };
+    size_owner: string;
+    alt_screen: boolean;
+  } | null;
+  last_command?: { command: string; exit_code: number | null; at: string } | null;
+  preview?: TerminalRun[][];
+  /** Filled by other parts of the app (a staff member's status, a pending permission); null otherwise. */
+  activity?: unknown;
+};
+
+export type TerminalList = { envs: TerminalEnv[]; terminals: TerminalView[] };
 
 export type WebSearchConf = {
   backend: string;
@@ -323,18 +385,43 @@ export type MemoryRecord = { id: string; scope: string; scope_key: string; kind:
 export type MemoryBucket = { scope: string; scope_key: string; title: string | null; count: number };
 export type MemoryListing = { records: MemoryRecord[]; buckets: MemoryBucket[]; sessions: Record<string, string> };
 
-export type Project = {
+/** One folder of a project, as the host stores it. */
+export type ProjectDir = {
   id: string;
-  name: string;
-  /** The folder, as the operator gave it. Shown, never edited in place: moving a project is a deliberate act. */
-  root: string;
-  created_at: string;
-  settings: { snapshots: boolean; system?: string };
-  /** Non-empty on a project the installation made for itself: "voice" is the concierge's. It cannot be moved or removed. */
-  system?: string;
+  /** The absolute path, as the operator gave it. Shown, never edited in place. */
+  path: string;
+  label: string;
+  /** Where the folder lives: inside the container the bot runs in, or on the machine around it. */
+  env: "container" | "host";
+  is_git: boolean;
+  readonly: boolean;
+  position: number;
+  /** A scratch folder the installation made for itself rather than one the operator pointed at. */
+  managed: boolean;
   /** Whether the bot can reach the folder from where it runs. False in Docker until the folder is mounted. */
   reachable: boolean;
   writable: boolean;
+};
+
+export type OrchestratorSettings = {
+  enabled: boolean;
+  session_id: string;
+  model: string;
+  autonomy: "ask" | "normal" | "full";
+  concurrency: number;
+  concurrency_cap: number;
+  telegram_topic_id: number;
+};
+
+export type Project = {
+  id: string;
+  name: string;
+  created_at: string;
+  settings: { snapshots: boolean; system?: string; ephemeral?: boolean; default_env?: "container" | "host"; orchestrator?: OrchestratorSettings };
+  /** Non-empty on a project the installation made for itself: "voice" is the concierge's. It cannot be moved or removed. */
+  system?: string;
+  /** In order; the first is the primary folder, where an agent works unless it is given another. */
+  folders: ProjectDir[];
   sessions: { id: string; title: string; running?: boolean }[];
 };
 

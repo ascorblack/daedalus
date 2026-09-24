@@ -28,6 +28,7 @@ from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from api_stub import GATES, Unhandled, serve_shared_post  # noqa: E402
+from api_stub import folders as folder_rows  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "miniapp" / "dist"
@@ -52,12 +53,10 @@ def installation(agents: int, folders: int) -> dict:
         {
             "id": f"p{n:02d}",
             "name": f"Project {n:02d}",
-            "root": f"/home/operator/work/project-{n:02d}",
+            "folders": folder_rows(f"/home/operator/work/project-{n:02d}"),
             "created_at": ago(86_400 * 30),
             "settings": {"snapshots": False, "system": "voice" if n == 0 else ""},
             "system": "voice" if n == 0 else "",
-            "reachable": True,
-            "writable": True,
             "total": 0,
             "active": 0,
             "loops": 0,
@@ -89,7 +88,7 @@ def installation(agents: int, folders: int) -> dict:
                 "run_id": "r1" if status == "running" else None,
                 "model": MODELS[i % len(MODELS)],
                 "workspace": sid,
-                "workspace_path": f"{project_row['root']}/.agents/{sid}" if own else project_row["root"],
+                "workspace_path": f"{project_row['folders'][0]['path']}/.agents/{sid}" if own else project_row["folders"][0]["path"],
                 "workspace_own": own,
                 "metadata": meta,
                 "project_id": project,

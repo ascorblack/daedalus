@@ -24,7 +24,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, Unhandled, expect_app, fulfil_shared  # noqa: E402
+from api_stub import DEFAULT_APP, Unhandled, expect_app, folders, fulfil_shared  # noqa: E402
 
 UNHANDLED = Unhandled()
 
@@ -67,7 +67,7 @@ DETAIL = {
     "workspace_name": "ws",
     "workspace_own": True,
     "workspace_sessions": [],
-    "project": {"id": "p", "name": "Project", "root": "/workspace", "settings": {"snapshots": True}},
+    "project": {"id": "p", "name": "Project", "folders": folders("/workspace"), "settings": {"snapshots": True}},
     "pending": None,
     "model": CONFIGURED,
     "provider": "claude",

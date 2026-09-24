@@ -1192,7 +1192,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/projects")
     async def create_project(body: ProjectBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:
-            project = await manager.projects.create(body.name, body.root, settings=ProjectSettings(snapshots=True if body.root is None else body.snapshots))
+            project = await manager.projects.create(body.name, [body.root] if body.root is not None else None, settings=ProjectSettings(snapshots=True if body.root is None else body.snapshots))
         except ProjectError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {**project.view(), "sessions": []}
@@ -1202,9 +1202,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         current = await manager.projects.get(project_id)
         if current is None:
             raise HTTPException(404, "no such project")
-        settings_patch = None if body.snapshots is None else ProjectSettings(snapshots=body.snapshots)
         try:
-            project = await manager.projects.update(project_id, name=body.name, settings=settings_patch)
+            project = await manager.projects.update(project_id, name=body.name, snapshots=body.snapshots)
         except ProjectError as exc:
             raise HTTPException(400, str(exc)) from exc
         # Loaded sessions keep their own immutable project value, so refresh their editable label
@@ -1372,8 +1371,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             project = await manager.projects.get(body.project_id)
             if project is None:
                 raise HTTPException(404, "no such project")
-            if not await manager.projects.ensure_reachable(project):
-                raise HTTPException(409, f"the folder of {project.name} ({project.root}) is not reachable from here yet; mount it and restart before starting an agent in it")
+            if not await manager.projects.ensure_reachable(project.primary):
+                raise HTTPException(409, f"the folder of {project.name} ({project.primary.path}) is not reachable from here yet; mount it and restart before starting an agent in it")
         create_args: dict[str, Any] = {"metadata": metadata or None, "project_id": body.project_id or None}
         if body.own_directory:
             create_args["own_directory"] = True
@@ -2833,8 +2832,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         project = await manager.projects.get(body.project_id)
         if project is None:
             raise HTTPException(404, "no such project")
-        if not await manager.projects.ensure_reachable(project):
-            raise HTTPException(409, f"the folder of {project.name} ({project.root}) is not reachable from here yet; mount it and restart")
+        if not await manager.projects.ensure_reachable(project.primary):
+            raise HTTPException(409, f"the folder of {project.name} ({project.primary.path}) is not reachable from here yet; mount it and restart")
         moved = await manager.attach_project(session_id, project, own_directory=body.own_directory)
         return {"id": session_id, "project_id": project.id, "project": project.name, "workspace": str(moved.workspace)}
 
@@ -2881,6 +2880,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             metadata={"forked_from": {"session_id": session_id, "seq": body.seq}, "telegram_detached": True},
             project_id=source.project.id if source.project is not None else None,
             own_directory=bool(source.metadata.get("directory")),
+            folder_id=source.metadata.get("folder_id") or None,
         )
         try:
             result = await manager.fork_into(session_id, body.seq, target)
@@ -3649,8 +3649,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def project_directories(root: str = "", path: str = "", _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """List one safe, bounded directory level for the project folder picker."""
         known_projects = await manager.projects.list()
-        offered = _picker_roots([project.root for project in known_projects if project.reachable])
-        project_ids = {str(project.root.resolve()): project.id for project in known_projects if project.root.exists()}
+        folders = [folder for project in known_projects for folder in project.local_folders(manager.projects.local_env)]
+        offered = _picker_roots([folder.path for folder in folders if folder.reachable])
+        project_ids = {str(folder.path.resolve()): folder.project_id for folder in folders if folder.path.exists()}
         if not root and not path:
             return {
                 "roots": [{"name": p.name or str(p), "path": str(p), "readable": True, "writable": os.access(p, os.W_OK), "project_id": project_ids.get(str(p))} for p in offered],

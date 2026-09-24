@@ -184,12 +184,12 @@ class Subagents:
             if leader.metadata.get(key) is not None:
                 metadata[key] = leader.metadata[key]
         # A subagent works beside its leader, which in a project means inside the project: the same
-        # root and the same wall. The project is passed rather than the directory, because the
+        # folder and the same wall. The project is passed rather than the directory, because the
         # directory alone would give the child the leader's files with none of the containment —
         # and moving the project would then move the leader and leave the child behind.
         if leader.project is None:
             raise RuntimeError("the leader has no project")
-        child = await manager.create_session(f"[sub] {label}", metadata=metadata, project_id=leader.project.id)
+        child = await manager.create_session(f"[sub] {label}", metadata=metadata, project_id=leader.project.id, folder_id=leader.metadata.get("folder_id") or None)
         cid = child.session.id
         if model is not None:
             await manager.set_model(cid, preset=model)

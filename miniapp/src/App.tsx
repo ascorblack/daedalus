@@ -13,6 +13,7 @@ import { shortcutFor } from "./navigation";
 import { readSidebar, rememberSidebar, usePaneWidth } from "./layout";
 import { Capabilities, SelfDevMode, visibleScreens } from "./capabilities";
 import { ProjectSwitcher, rememberProject, storedProject, useProjects } from "./projects";
+import { projectPath } from "./folders";
 import { ChangeStrip } from "./change";
 import { MaintenanceNotice } from "./maintenance";
 import { SCREENS } from "./router";
@@ -308,7 +309,7 @@ export function App() {
     return [
       { id: "new-agent", label: t("shell.search.newagent"), icon: "plus", run: () => navigate(pathFor("agents", null, { new: "1" })) },
       { id: "projects", label: t("shell.projects"), hint: projectList.find((p) => p.id === project)?.name ?? t("shell.projects.all"), icon: "folder", run: () => setSwitching(true) },
-      ...projectList.map((p) => ({ id: `p-${p.id}`, label: t("shell.search.workin", { name: p.name }), hint: p.root, icon: "folder" as const, run: () => pickProject(p.id) })),
+      ...projectList.map((p) => ({ id: `p-${p.id}`, label: t("shell.search.workin", { name: p.name }), hint: projectPath(p), icon: "folder" as const, run: () => pickProject(p.id) })),
       ...visibleScreens(SCREENS, selfdev).map((s) => ({ id: `go-${s}`, label: t("shell.search.goto", { name: screenTitle(s) }), icon: "back" as const, run: () => navigate(pathFor(s)) })),
       ...sessions.map((s) => ({ id: `s-${s.id}`, label: s.title, hint: s.model ?? "", icon: "bots" as const, run: () => open(s.id) })),
     ];

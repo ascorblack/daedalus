@@ -28,7 +28,7 @@ from pathlib import Path
 from playwright.sync_api import Page, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app, fulfil_shared  # noqa: E402
+from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app, folders, fulfil_shared  # noqa: E402
 
 UNHANDLED = Unhandled()
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
@@ -68,7 +68,7 @@ class Host:
         return {
             "id": SESSION, "title": "A session", "status": self.status, "error": self.error, "run_id": "r1" if self.status == "running" else None, "workspace": "/workspace",
             "workspace_name": "ws", "workspace_own": True, "workspace_sessions": [], "pending": self.pending, "model": "Claude Opus 5", "provider": "claude",
-            "project": {"id": "p", "name": "Project", "root": "/workspace", "settings": {"snapshots": True}},
+            "project": {"id": "p", "name": "Project", "folders": folders("/workspace"), "settings": {"snapshots": True}},
             "configured_model": CONFIGURED, "effective_model": STANDBY if self.fallback else CONFIGURED, "fallback": self.fallback,
             "thinking": self.thinking, "reasoning_effort": self.effort, "mode": "", "brief": "",
             "tools_off": [], "loop": None, "services": [], "subagents": [], "usage": {}, "context": {"tokens": 42000, "window": 200000, "messages": 38, "summaries": 1, "operator_turns": 6},
