@@ -139,7 +139,7 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
     )
 
 
-Role = Literal["agent", "voice", "orchestrator"]
+Role = Literal["agent", "voice", "orchestrator", "dispatcher"]
 
 
 def _agent_sections(deps: EngineDeps, config: RuntimeConfig, *, mode: ModeConfig | None, workspace: Path, session_title: str, model: str, extra_notes: str, project: str, notify: bool) -> tuple[str, ...]:
@@ -192,7 +192,8 @@ def build_engine(
     project: str = "",
 ) -> QueryEngine:
     """``role`` picks the system prompt: an agent that works in a folder, the voice concierge that
-    only talks and hands over, or a project's orchestrator that only runs a team."""
+    only talks and hands over, a project's orchestrator that only runs a team, or the main
+    orchestrator that only hands work to projects and follows it."""
     primary_provider, primary_model = rungs[0]
     model = model_name or primary_model
     all_tools = {t.name for t in deps.tool_registry.list_all()}
@@ -200,6 +201,8 @@ def build_engine(
         sections: tuple[str, ...] = prompts.concierge_sections(answer_language=config.answer_language, agents=extra_notes)
     elif role == "orchestrator":
         sections = prompts.orchestrator_sections(answer_language=config.answer_language, governance=prompts.governance_section(deps.governance_path))
+    elif role == "dispatcher":
+        sections = prompts.dispatcher_sections(answer_language=config.answer_language, governance=prompts.governance_section(deps.governance_path))
     else:
         # Only where the tool can be called: a subagent or a staff member told how to notify the
         # operator would try, be refused, and spend a turn learning that its leader speaks for it.

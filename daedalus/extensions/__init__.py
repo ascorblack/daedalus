@@ -32,6 +32,7 @@ EXTENSIONS = (
     "daedalus.extensions.staff",
     "daedalus.extensions.orchestrator",
     "daedalus.extensions.dispatches",
+    "daedalus.extensions.dispatcher",
     "daedalus.extensions.loops",
     "daedalus.extensions.services",
     "daedalus.extensions.balance",

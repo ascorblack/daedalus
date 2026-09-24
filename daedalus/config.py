@@ -1090,6 +1090,14 @@ file writes, no subagents. An allowlist rather than a list of refusals, so a too
 an orchestrator's until someone decides it should be."""
 
 
+DISPATCHER_TOOLS = ["Projects", "Delegate", "Progress", "Cancel", "CreateProject", "Answer", "Notify", "StaySilent", "HistorySearch", "HistoryExpand", "Recall"]
+"""Everything the main orchestrator may call. It routes the operator's words to projects and follows
+what it handed over; it never touches files, staff or a board itself, and it never blocks on a
+question (no AskUser: a main orchestrator paused on a question could not hear its projects report).
+Its own tools share names with other roles' tools (the voice concierge's Delegate and Projects, the
+project orchestrator's Answer), so they live in a registry of their own and this list is the whole of it."""
+
+
 class WebhookConfig(BaseModel):
     """One inbound webhook provider: how it is authenticated and where its events run."""
 
@@ -1578,6 +1586,32 @@ class RuntimeConfig(BaseModel):
 
         return max(order, key=strength)
 
+    def middle_preset(self) -> str | None:
+        """A preset in the middle of the table by the same measure as :meth:`strongest_preset`: for
+        work that is routing and following rather than judgement, where the strongest is waste. With
+        two presets the weaker one; with one, that one."""
+        if not self.presets:
+            return None
+        strongest = self.strongest_preset()
+        effort = {name: rank for rank, name in enumerate(REASONING_EFFORTS)}
+        order = list(self.presets)
+
+        def strength(pid: str) -> tuple[int, int, int, int, int]:
+            p = self.presets[pid]
+            return (int(p.thinking), effort.get(p.reasoning_effort, 0), p.context_window, p.max_output_tokens, -order.index(pid))
+
+        ranked = sorted(order, key=strength)
+        if len(ranked) > 1 and ranked[-1] != strongest:
+            ranked.remove(strongest)  # type: ignore[arg-type]
+            ranked.append(strongest)  # type: ignore[arg-type]
+        return ranked[(len(ranked) - 1) // 2]
+
+    def dispatcher_preset(self) -> str | None:
+        """The preset the main orchestrator runs: the one chosen in Settings, else a mid-tier one."""
+        if self.dispatcher.preset and self.dispatcher.preset in self.presets:
+            return self.dispatcher.preset
+        return self.middle_preset()
+
     def orchestrator_preset(self, project_choice: str = "") -> str | None:
         """The preset a project orchestrator runs: its project's choice, else the Settings default, else the strongest."""
         for pid in (project_choice, self.orchestrator.preset):
@@ -1858,6 +1892,7 @@ __all__ = [
     "StaffConfig",
     "OrchestratorConfig",
     "DispatcherConfig",
+    "DISPATCHER_TOOLS",
     "HarnessConfig",
     "DEFAULT_MODES",
     "HeartbeatConfig",

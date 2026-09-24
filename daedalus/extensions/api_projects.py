@@ -140,6 +140,12 @@ class ReplaceBody(BaseModel):
     reason: str = Field(default="", max_length=300)
 
 
+class CancelBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=500)
+
+
 def host_bridge(settings: Any, terminals: Any = None) -> bool:
     """Whether a terminal daemon answers on the host, so a host folder can be worked in by anything.
 
@@ -521,6 +527,67 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         if not await keeper().remove(project_id, watch_id, by="operator"):
             raise HTTPException(404, "no such watch")
         return {"deleted": True}
+
+    # -- the main orchestrator -----------------------------------------------------------------
+
+    def dispatcher() -> Any:
+        found = app.extensions.get("dispatcher")
+        if found is None:
+            raise HTTPException(503, "the main orchestrator is not running on this installation")
+        return found
+
+    def dispatches() -> Any:
+        found = app.extensions.get("dispatches")
+        if found is None:
+            raise HTTPException(503, "dispatches are not running on this installation")
+        return found
+
+    @api.get("/api/main")
+    async def get_main(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The main chat as the app draws it: its session (empty until first opened), the dispatches
+        newest first, and the requests shown in it — open ones as cards, answered ones as their line."""
+        return await dispatcher().view()  # type: ignore[no-any-return]
+
+    @api.post("/api/main")
+    async def open_main(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The main orchestrator's session, made the first time the operator opens it."""
+        return {"session_id": await dispatcher().ensure()}
+
+    @api.post("/api/main/replace")
+    async def replace_main(body: ReplaceBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """A fresh main orchestrator in place of the current one; the old chat keeps its history."""
+        return {"session_id": await dispatcher().replace(body.reason, by="operator")}
+
+    @api.get("/api/dispatches/{dispatch_id}")
+    async def get_dispatch(dispatch_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        dispatch = await manager.dispatches.get(dispatch_id)
+        if dispatch is None:
+            raise HTTPException(404, "no such dispatch")
+        project = await manager.projects.get(dispatch.project_id)
+        return {
+            **dispatch.view(),
+            "project_name": project.name if project is not None else "",
+            "messages": [m.view() for m in await manager.dispatches.messages(dispatch.id, limit=100)],
+            "asks": [a.view() for a in await manager.asks.of_dispatches([dispatch.id], open_only=False)],
+        }
+
+    @api.post("/api/dispatches/{dispatch_id}/cancel")
+    async def cancel_dispatch(dispatch_id: str, body: CancelBody | None = None, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The operator stops a dispatch themselves: the project is told, and the main orchestrator is told too."""
+        dispatch = await manager.dispatches.get(dispatch_id)
+        if dispatch is None:
+            raise HTTPException(404, "no such dispatch")
+        try:
+            done = await dispatches().cancel(dispatch, reason=body.reason if body is not None else "", by="operator")
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return dict(done.view())
+
+    @api.post("/api/projects/{project_id}/setup/finish")
+    async def finish_setup(project_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """"Finish setup": the project's requests are its own again, whatever its first dispatch is doing."""
+        await existing(project_id)
+        return {"finished": await dispatches().finish_setup(project_id, by="operator")}
 
 
 __all__ = ["environments", "host_bridge", "reach", "register"]

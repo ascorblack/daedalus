@@ -351,6 +351,7 @@ class NotificationService:
         self._session_metadata = session_metadata
         self._project_policy: ProjectPolicy | None = None
         self._resolvers: dict[str, Resolver] = {}
+        self._links: list[Callable[[str], Awaitable[str | None]]] = []
         self._channels: dict[str, Channel] = {}
         prefs = self._preferences()
         self._limiter = RateLimiter(prefs.push_per_session, timedelta(minutes=prefs.push_window_minutes), prefs.push_per_hour)
@@ -362,6 +363,22 @@ class NotificationService:
     def register_resolver(self, prefix: str, resolver: Resolver) -> None:
         """Who answers a request whose ``request_ref`` starts with ``<prefix>:``."""
         self._resolvers[prefix] = resolver
+
+    def register_link(self, link: Callable[[str], Awaitable[str | None]]) -> None:
+        """``request_ref -> path`` asked before a request's notification is written: the first that
+        answers is where tapping it goes. A request shown in the main orchestrator's chat opens there."""
+        self._links.append(link)
+
+    async def link_for(self, request_ref: str, default: str) -> str:
+        for link in self._links:
+            try:
+                found = await link(request_ref)
+            except Exception:  # noqa: BLE001 — a link is a courtesy; the session's own is always there
+                logger.warning("a notification link hook failed for %s", request_ref, exc_info=True)
+                continue
+            if found:
+                return found
+        return default
 
     def register_channel(self, channel: Channel) -> None:
         self._channels[channel.name] = channel
@@ -881,11 +898,13 @@ class NotificationRouter:
             await self.service.resolve_session(sid, "expired", via="run", prefixes=("ask",))
         status = p.get("status")
         title = str(p.get("title") or sid or "")
-        if status == "completed" and p.get("operator_facing") and float(p.get("duration_s") or 0) >= self.service.preferences().finished_min_seconds:
+        # A run that tells news (the main orchestrator relaying a project's report) is worth a line however
+        # short it was: the threshold exists for runs the operator started and waited on.
+        if status == "completed" and p.get("operator_facing") and (p.get("news") or float(p.get("duration_s") or 0) >= self.service.preferences().finished_min_seconds):
             await self.service.post(Draft(
                 "run_finished", render("run.finished", self._lang(), title=title), str(p.get("summary") or ""), kind="run_finished",
                 tone="ok", session_id=sid, project_id=event.project_id, run_id=str(p.get("run_id") or "") or None,
-                link=self._session_link(sid), dedupe_key=f"run:{sid}", source="run", handled=self._telegram_handled(p),
+                link=str(p.get("link") or "") or self._session_link(sid), dedupe_key=f"run:{sid}", source="run", handled=self._telegram_handled(p),
             ))
         elif status == "failed" and p.get("origin") not in SELF_REPORTING_ORIGINS and not await self._reports_itself(sid):
             body = str(p.get("error") or "").strip() or render("run.failed.body", self._lang())
@@ -924,7 +943,7 @@ class NotificationRouter:
         await self.service.post(Draft(
             "question", render("ask", self._lang(), title=str(p.get("title") or "")), "\n".join(line for line in lines if line), kind="ask",
             tone="warning", session_id=event.session_id, project_id=event.project_id, staff_id=event.staff_id,
-            run_id=str(p.get("run_id") or "") or None, link=self._session_link(event.session_id), actions=tuple(actions),
+            run_id=str(p.get("run_id") or "") or None, link=await self.service.link_for(ref, self._session_link(event.session_id)), actions=tuple(actions),
             request_ref=ref, dedupe_key=ref, source="ask", handled=self._telegram_handled(p),
         ))
 
@@ -947,7 +966,7 @@ class NotificationRouter:
             "permission", render("permission", lang, title=str(p.get("title") or "")), f"{tool}: {text}" if tool else text,
             kind=str(p.get("kind") or "permission"), tone="warning", level="urgent",
             session_id=event.session_id, project_id=event.project_id, staff_id=event.staff_id, terminal_id=event.terminal_id,
-            link=self._session_link(event.session_id), actions=actions, request_ref=ref, dedupe_key=ref,
+            link=await self.service.link_for(ref, self._session_link(event.session_id)), actions=actions, request_ref=ref, dedupe_key=ref,
             source=str(p.get("kind") or "policy"), handled=self._telegram_handled(p),
         ))
 

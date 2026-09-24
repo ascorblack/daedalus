@@ -79,7 +79,8 @@ This chat is a window onto one session at a time. /new opens a topic in the boun
 /stop — stop the current run · /close — put the current session away (asks whether to delete the agent)
 """
 
-HELP_TAIL = """/rename &lt;title&gt; — rename this session (and its topic) · /compact [focus] — replace the history with a summary
+HELP_TAIL = """/main — the main orchestrator: in a group it lives in General; here it speaks under 🧭 Main, and a reply to one of its posts reaches it
+/rename &lt;title&gt; — rename this session (and its topic) · /compact [focus] — replace the history with a summary
 /delete &lt;id&gt; · /cleanup — delete a session; delete every session whose topic is already closed
 /model [provider/]&lt;name&gt;|default · /thinking on|off|low|medium|high — model settings (per session; in a group's General topic, the default)
 /usage · /balance — spend and provider balances
@@ -162,6 +163,12 @@ vanish, and a repeat rename then fails with TOPIC_NOT_MODIFIED); every prefix he
 CURRENT_SESSION_KEY = "telegram.current_session"
 """Which session the private chat is a window onto; in kv, so a restart resumes the same one."""
 SESSION_HEADER = "▸"
+MAIN_HEADER = "🧭 Main"
+"""What the main orchestrator's posts carry in the private chat, which it shares with the current session:
+the operator always sees which of the two is speaking, and a reply to one of these reaches it."""
+POSTS_REMEMBERED = 2000
+"""Messages of the shared channels (General, the private chat) remembered with the session that posted
+them, so a reply to one reaches that session. Older ones fall back to the header they carry."""
 """Marks the line that names a session speaking in the private chat out of its turn."""
 SESSION_LIST_LIMIT = 30
 """How many sessions /sessions prints — and therefore the largest number /use may be given:
@@ -203,6 +210,12 @@ def is_subagent(metadata: dict[str, Any] | None) -> bool:
     return bool((metadata or {}).get("subagent_of"))
 
 
+def is_dispatcher(metadata: dict[str, Any] | None) -> bool:
+    """Whether a session is the main orchestrator. It never gets a topic of its own: in a forum General is
+    its home, and in the private chat it speaks under :data:`MAIN_HEADER` beside the current session."""
+    return bool((metadata or {}).get("dispatcher"))
+
+
 def _telegram_media(source: Path | str) -> FSInputFile | str:
     """Telegram fetches a link itself. A workspace file is still uploaded."""
     return source if isinstance(source, str) else FSInputFile(source)
@@ -226,11 +239,19 @@ class TelegramOutbox(Outbox):
     talking; in a topic, where the topic itself is the name, it stays empty.
     """
 
-    def __init__(self, bot: Bot, chat_id: int, thread_id: int | None, *, header: Callable[[], str] | None = None) -> None:
+    def __init__(self, bot: Bot, chat_id: int, thread_id: int | None, *, header: Callable[[], str] | None = None, on_sent: Callable[[int, int], None] | None = None) -> None:
         self.bot = bot
         self.chat_id = chat_id
         self.thread_id = thread_id or None
         self.header = header
+        self.on_sent = on_sent
+        """``(chat_id, message_id)`` for each text message sent: a channel several sessions share
+        remembers who said what, so a reply goes back to the one that said it."""
+
+    def _sent(self, message_id: int) -> int:
+        if self.on_sent is not None:
+            self.on_sent(self.chat_id, message_id)
+        return message_id
 
     def attributed(self, text: str) -> str:
         """``text`` with the session's name above it, for plain and Markdown messages.
@@ -256,7 +277,7 @@ class TelegramOutbox(Outbox):
                     message_thread_id=self.thread_id,
                     flood_chat=self.chat_id,
                 )
-                return msg.message_id
+                return self._sent(msg.message_id)
             except TelegramBadRequest as exc:
                 logger.warning("rich markdown refused (%s); falling back to HTML", exc)
             try:
@@ -269,11 +290,11 @@ class TelegramOutbox(Outbox):
                     disable_web_page_preview=True,
                     flood_chat=self.chat_id,
                 )
-                return msg.message_id
+                return self._sent(msg.message_id)
             except TelegramBadRequest:
                 pass
         msg = await tg_call(self.bot.send_message, self.chat_id, text, message_thread_id=self.thread_id, parse_mode=None, flood_chat=self.chat_id)
-        return msg.message_id
+        return self._sent(msg.message_id)
 
     async def send_html(self, html: str) -> int:
         html = self.attributed_html(html)
@@ -281,11 +302,11 @@ class TelegramOutbox(Outbox):
             msg = await tg_call(
                 self.bot.send_rich_message, self.chat_id, InputRichMessage(html=html), message_thread_id=self.thread_id, flood_chat=self.chat_id
             )
-            return msg.message_id
+            return self._sent(msg.message_id)
         except TelegramBadRequest as exc:
             logger.warning("rich html refused (%s); sending plain text", exc)
         msg = await tg_call(self.bot.send_message, self.chat_id, strip_tags(html), message_thread_id=self.thread_id, parse_mode=None, flood_chat=self.chat_id)
-        return msg.message_id
+        return self._sent(msg.message_id)
 
     async def react(self, message_id: int, emoji: str | None) -> None:
         """Set (or clear, with ``None``) the bot's reaction on a message; never raises."""
@@ -455,6 +476,8 @@ class TelegramFront:
         self.callback_hooks: dict[str, Callable[[CallbackQuery, list[str]], Awaitable[None]]] = {}
         self.message_interceptors: list[Callable[[Message], Awaitable[bool]]] = []
         """Return True to consume a message before it reaches a session (e.g. a rejection reason)."""
+        self._posts: dict[tuple[int, int], str] = {}
+        """(chat, message) → the session that posted it, in the channels several sessions share."""
         self._register_handlers()
         manager.add_sink(self._on_event)
         manager.on_finished(self._on_finished)
@@ -563,6 +586,13 @@ class TelegramFront:
         msg = await tg_call(self.bot.send_message, outbox.chat_id, outbox.attributed(text), message_thread_id=outbox.thread_id, reply_markup=keyboard, flood_chat=outbox.chat_id)
         return int(msg.message_id)
 
+    async def edit_post(self, chat_id: int, message_id: int, text: str) -> None:
+        """Replace a posted message's text and take its buttons away; a message already gone is not an error."""
+        try:
+            await tg_call(self.bot.edit_message_text, text, chat_id=chat_id, message_id=message_id, reply_markup=None, attempts=2, flood_chat=chat_id)
+        except TelegramAPIError as exc:
+            logger.debug("could not edit message %s: %s", message_id, exc)
+
     async def send_force_reply(self, chat_id: int, thread_id: int | None, text: str) -> int:
         """Ask for a one-message free-text reply (the client opens the reply box); returns its message id."""
         msg = await tg_call(self.bot.send_message, chat_id, text, message_thread_id=thread_id, reply_markup=ForceReply(selective=True), flood_chat=chat_id)
@@ -615,6 +645,28 @@ class TelegramFront:
         self._topic_status.pop(session_id, None)
         return True
 
+    def remember_post(self, session_id: str) -> Callable[[int, int], None]:
+        """The ``on_sent`` of an outbox on a shared channel: each message it sends is remembered as this session's."""
+
+        def sent(chat_id: int, message_id: int) -> None:
+            self._posts[(chat_id, message_id)] = session_id
+            while len(self._posts) > POSTS_REMEMBERED:
+                self._posts.pop(next(iter(self._posts)))
+
+        return sent
+
+    async def dispatcher_session(self) -> str:
+        """The main orchestrator's session, when there is one (read from where its extension keeps it)."""
+        return str(await self.manager.db.kv_get("dispatcher.session", "") or "")
+
+    def _main_outbox(self, session_id: str) -> TelegramOutbox | None:
+        """The main orchestrator's channel: General in a forum, the private chat (under its header) otherwise."""
+        if not self.private_mode() and self.config.telegram.forum_chat_id:
+            return TelegramOutbox(self.bot, self.config.telegram.forum_chat_id, self.config.telegram.general_topic_id or None, on_sent=self.remember_post(session_id))
+        if not self.settings.owner_user_id:
+            return None
+        return TelegramOutbox(self.bot, self.settings.owner_user_id, None, header=lambda: MAIN_HEADER, on_sent=self.remember_post(session_id))
+
     async def outbox_for_session(self, session_id: str) -> TelegramOutbox | None:
         """Where this session's output goes: the one place that tells the two modes apart."""
         state = await self.manager.get_state(session_id)
@@ -622,6 +674,8 @@ class TelegramFront:
         # It must win over the global private-chat mode or background output leaks into DMs.
         if state is not None and (state.metadata.get("telegram_detached") or is_subagent(state.metadata)):
             return None
+        if state is not None and is_dispatcher(state.metadata):
+            return self._main_outbox(session_id)
         binding = await self.binding_for_session(session_id)
         if binding is not None:
             return TelegramOutbox(self.bot, binding.chat_id, binding.thread_id)
@@ -637,7 +691,11 @@ class TelegramFront:
             logger.warning("session %s has no topic: %s", session_id, exc)
         if binding is not None:
             return TelegramOutbox(self.bot, binding.chat_id, binding.thread_id)
-        return self._general_outbox(header=lambda: f"{SESSION_HEADER} {title}")
+        general = self._general_outbox(header=lambda: f"{SESSION_HEADER} {title}")
+        if general is not None:
+            # It shares General with the main orchestrator; a reply to it must reach it, not the main one.
+            general.on_sent = self.remember_post(session_id)
+        return general
 
     async def _private_outbox(self, session_id: str) -> TelegramOutbox | None:
         """The private chat, naming the session whenever it is not the one the operator is writing to."""
@@ -651,7 +709,7 @@ class TelegramFront:
             state = self.manager.live_state(session_id)
             return f"{SESSION_HEADER} {state.session.title if state is not None else session_id}"
 
-        return TelegramOutbox(self.bot, self.settings.owner_user_id, None, header=header)
+        return TelegramOutbox(self.bot, self.settings.owner_user_id, None, header=header, on_sent=self.remember_post(session_id))
 
     async def ensure_topic(self, session_id: str, title: str, *, chat_id: int | None = None) -> TopicBinding | None:
         """The session's own topic in the bound forum, opened now if it has none.
@@ -669,6 +727,8 @@ class TelegramFront:
         state = await self.manager.get_state(session_id)
         if state is not None and is_subagent(state.metadata):
             return None  # a subagent speaks through its leader, so a topic of its own would only ever be empty
+        if state is not None and is_dispatcher(state.metadata):
+            return None  # General is the main orchestrator's; a topic of its own would split its one conversation
         try:
             topic = await tg_call(self.bot.create_forum_topic, forum, title[:128], attempts=2, flood_chat=forum)
         except TelegramRetryAfter as exc:
@@ -689,7 +749,7 @@ class TelegramFront:
         for session in await self.manager.list_sessions():
             # A session started on the site has no topic on purpose. Binding the group must
             # not pull it into the forum: that is the leak the flag exists to stop.
-            if (session.get("metadata") or {}).get("telegram_detached") or is_subagent(session.get("metadata")):
+            if (session.get("metadata") or {}).get("telegram_detached") or is_subagent(session.get("metadata")) or is_dispatcher(session.get("metadata")):
                 continue
             if await self.binding_for_session(session["id"]) is not None:
                 continue
@@ -740,7 +800,7 @@ class TelegramFront:
         forum_id = chat_id or self.config.telegram.forum_chat_id
         # Neither a topic nor the private chat's binding: binding a subagent to the private chat
         # would make it the session the operator's next message goes to.
-        if is_subagent(metadata) or (self.private_mode() and not (force_topic and forum_id)):
+        if is_subagent(metadata) or is_dispatcher(metadata) or (self.private_mode() and not (force_topic and forum_id)):
             return state, TopicBinding(self.settings.owner_user_id, 0, state.session.id, title)
         forum = forum_id if (topic or force_topic) else 0
         binding = await self.ensure_topic(state.session.id, title, chat_id=forum) if forum else None
@@ -758,9 +818,39 @@ class TelegramFront:
             logger.warning("could not post the session banner", exc_info=True)
         return state, binding
 
+    async def _replied_session(self, message: Message) -> SessionState | None:
+        """The session whose post this message replies to, in a channel several sessions share.
+
+        Asked before anything else: a reply in General to a session that fell back there is for that
+        session, not for the main orchestrator General belongs to, and a reply in the private chat to
+        the main orchestrator's post is for it, not for the current session.
+        """
+        reply = message.reply_to_message
+        if reply is None or reply.forum_topic_created is not None or not (reply.from_user and reply.from_user.is_bot):
+            return None
+        session_id = self._posts.get((message.chat.id, reply.message_id))
+        if session_id is None and (reply.text or reply.caption or "").startswith(MAIN_HEADER):
+            # Remembered posts do not survive a restart; the main orchestrator's header does.
+            session_id = await self.dispatcher_session() or None
+        if not session_id:
+            return None
+        state = await self.manager.get_state(session_id)
+        if state is None or is_subagent(state.metadata) or state.metadata.get("telegram_detached"):
+            return None
+        return state
+
     async def _session_for_message(self, message: Message) -> SessionState | None:
         chat_id = message.chat.id
         thread_id = message.message_thread_id or 0
+        replied = await self._replied_session(message)
+        if replied is not None:
+            return replied
+        if message.chat.type != "private" and chat_id == self.config.telegram.forum_chat_id and thread_id in (0, self.config.telegram.general_topic_id or 0):
+            # Plain text in General is the main orchestrator's. Nothing else listened there before.
+            main = await self.dispatcher_session()
+            state = await self.manager.get_state(main) if main else None
+            if state is not None and is_dispatcher(state.metadata) and not self.private_mode():
+                return state
         if message.chat.type == "private":
             thread_id = 0
             if self.private_mode():
@@ -794,6 +884,7 @@ class TelegramFront:
         r.message.register(self.cmd_start, Command("start", "help"))
         r.message.register(self.cmd_new, Command("new"))
         r.message.register(self.cmd_use, Command("use"))
+        r.message.register(self.cmd_main, Command("main"))
         r.message.register(self.cmd_stop, Command("stop"))
         r.message.register(self.cmd_close, Command("close"))
         r.message.register(self.cmd_rename, Command("rename"))
@@ -931,6 +1022,20 @@ class TelegramFront:
             return
         await self.set_current_session(str(chosen["id"]))
         await message.answer(f"Writing to '{chosen['title']}' ({chosen['id']}). What the others say still arrives here, under their names.")
+
+    async def cmd_main(self, message: Message) -> None:
+        """Talk to the main orchestrator: in the private chat it becomes the current session; in a forum it is General."""
+        if not self._is_owner(message.from_user.id if message.from_user else None):
+            return
+        main = await self.dispatcher_session()
+        if not main or await self.manager.get_state(main) is None:
+            await message.answer("There is no main orchestrator yet; open it once in the app (Main, at the top of the list).")
+            return
+        if not self.private_mode() and self.config.telegram.forum_chat_id:
+            await message.answer("The main orchestrator lives in General: write there, or reply to one of its posts.")
+            return
+        await self.set_current_session(main)
+        await message.answer(f"{MAIN_HEADER}: writing to the main orchestrator. /use switches back to a session.")
 
     async def cmd_stop(self, message: Message) -> None:
         if not self._is_owner(message.from_user.id if message.from_user else None):
