@@ -192,6 +192,8 @@ describe("the keys the code asks for", () => {
       ["pboard.none.", listed("./board/board.ts", "COLUMNS")],
       ["pboard.brief.", listed("./board/board.ts", "BRIEF_FIELDS")],
       ["pboard.need.kind.", ["question", "permission", "folder"]],
+      // Why Merge is disabled comes from the host as a code; each code the app knows has its words.
+      ["pboard.review.block.", listed("./board/board.ts", "BLOCKER_CODES")],
       // A project's focus mode: the panel's project tabs, the orchestrator's steps, why a launch
       // waits, the pages, the colours of a member's dot, the brief's sections, the journal's kinds
       // and authors, and a message's receipt all name a word from a list.

@@ -69,6 +69,8 @@ BASIS_MIN = 12
 OPEN_TASK = ("todo", "blocked")
 FINISHED_TASK = ("done", "dropped")
 ABNORMAL = ("error", "no_signal")
+SENT_BACK = "sent back by the "
+"""How a rejection from review is written into a task's notes (see ``review.py``)."""
 
 
 class AlreadyAnswered(StaffError):
@@ -118,7 +120,18 @@ def _task(row: Any) -> BoardTask:
         assignee_staff_id=row["assignee_staff_id"],
         branch=row["branch"],
         depends_on=depends,
+        sent_back=_sent_back(row),
     )
+
+
+def _sent_back(row: Any) -> str:
+    """The latest "sent back" note of a task the operator rejected from review, else nothing."""
+    if row["merge_state"] != "rejected":
+        return ""
+    for line in reversed(str(row["notes"] or "").splitlines()):
+        if SENT_BACK in line:
+            return line.split(SENT_BACK, 1)[1].partition(": ")[2].strip()
+    return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +171,8 @@ class Team:
             on_failure=self._launch_failed,
         )
         self._pause_commits: set[asyncio.Task[None]] = set()
+        self.review: Any = None
+        """Review and merge of staff branches (``review.py``), set at install."""
         self.own_requests: Any = None
         """The orchestrators, once installed: a request the orchestrator itself made (a question to the
         operator, a folder it wants) has no staff session to deliver the answer to, so they take it."""
@@ -474,6 +489,8 @@ class Team:
                 f"\n\nThis task was worked on before, in session {predecessor.id}, which ended: {why}. "
                 "Look at what is already there before you start over."
             )
+        if task.sent_back:
+            before += f"\n\nThe operator sent this work back from review: {task.sent_back}\nChange it on the same branch, commit, and report done again."
         return prompts.STAFF_TASK.format(
             task_id=task.id,
             by="orchestrator" if by == "orchestrator" else "operator",
@@ -1156,7 +1173,10 @@ class Ingress:
 
 
 async def install(app: Application) -> list[asyncio.Task[None]]:
+    from daedalus.extensions.review import Review  # Lazy: review.py imports this module for its names
+
     team = Team(app)
+    team.review = Review(app, team)
     app.extensions["staff"] = team
     handler = team.attach()
     await team.rebuild()

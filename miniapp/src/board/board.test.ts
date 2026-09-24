@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Assignee, NeedsYou, ProjectTask, arrange, briefChanges, chips, columnCount, columnOf, emptyBrief, missingBrief, sections, statusLine, toggleFilter } from "./board";
+import { Assignee, NeedsYou, ProjectTask, arrange, briefChanges, chips, columnCount, columnOf, emptyBrief, mergeBlock, mergesOnAccept, missingBrief, sections, statusLine, toggleFilter } from "./board";
 
 let seq = 0;
 function task(fields: Partial<ProjectTask> = {}): ProjectTask {
@@ -110,5 +110,23 @@ describe("a task's brief", () => {
     const before = { objective: "a", deliverable: "b", boundaries: "", done_when: "" };
     expect(briefChanges(before, { ...before, boundaries: "only src" })).toEqual({ boundaries: "only src" });
     expect(briefChanges(before, before)).toEqual({});
+  });
+});
+
+describe("review and merge", () => {
+  const blocker = (code: string) => ({ code, text: code });
+  it("names no reason when Merge may be pressed", () => {
+    expect(mergeBlock({ can_merge: true, blockers: [] })).toBeNull();
+  });
+  it("puts a conflict first, since that one goes back to the orchestrator", () => {
+    expect(mergeBlock({ can_merge: false, blockers: [blocker("dirty"), blocker("conflicts")] })?.code).toBe("conflicts");
+    expect(mergeBlock({ can_merge: false, blockers: [blocker("moved"), blocker("dirty")] })?.code).toBe("moved");
+    expect(mergeBlock({ can_merge: false, blockers: [] })?.code).toBe("unknown");
+  });
+  it("makes Accept a merge only for unmerged staff work", () => {
+    expect(mergesOnAccept({ branch: "agent/ada/t1-menu", merge_state: "proposed" })).toBe(true);
+    expect(mergesOnAccept({ branch: "agent/ada/t1-menu", merge_state: "conflict" })).toBe(true);
+    expect(mergesOnAccept({ branch: "agent/ada/t1-menu", merge_state: "merged" })).toBe(false);
+    expect(mergesOnAccept({ branch: null, merge_state: "" })).toBe(false);
   });
 });

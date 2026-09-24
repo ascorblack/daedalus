@@ -53,6 +53,8 @@ class BoardTask:
     assignee_staff_id: str | None = None
     branch: str | None = None
     depends_on: tuple[str, ...] = ()
+    sent_back: str = ""
+    """The operator's note when the work was sent back from review; the next session starts from it."""
 
     def missing(self) -> list[str]:
         """The brief's fields still empty; a task is not handed to anyone until all four are written."""

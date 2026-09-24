@@ -623,11 +623,24 @@ live status; `needs_you` is the project's open requests routed to the operator, 
 requests themselves each time, so an answer from anywhere ends one. `POST` to the same address adds a
 task with `{"title", "brief", "assignee_staff_id", "depends_on", "priority"}`; `PUT /api/board/{id}`
 also takes `assignee_staff_id` (`""` unassigns), `brief` (the parts sent) and `depends_on`; `POST
-/api/board/{id}/accept` moves a task from review to done (**409** when it is not in review, or its
-staff branch is not merged); `GET /api/board?project=<id>` is one project's tasks. A project's staff
+/api/board/{id}/accept` moves a task from review to done, and on a task with a staff branch it is the
+merge below (**409** when it is not in review, or the merge is refused); `GET /api/board?project=<id>`
+is one project's tasks. A project's staff
 and orchestrator see its whole board, move only their own tasks and never to done; an ordinary agent
 keeps its own board, without the team's tasks. Each change is a `task.created`, `task.moved`,
 `task.assigned` or `task.accepted` event naming its `actor`.
+
+**Reviewing and merging a staff branch.** The orchestrator proposes, you merge. `GET
+/api/board/{id}/review` reads, without changing anything, what merging the task's branch into its
+folder's current branch would bring: `commits` (at most 50), `files` with their added and removed
+lines, a bounded `patch`, the dry run's `conflicts` (`git merge-tree`), whether the folder is clean and
+still on the branch the work was cut from, the staff member's verification `receipts`, and `blockers`,
+each a `code` and a sentence, when Merge cannot be pressed. `POST /api/board/{id}/merge` merges it as a
+merge commit, finishes the task and publishes `task.accepted`; the staff worktree is removed when its
+member has nothing else to do in that folder, and the branch is deleted only once it is merged. A
+conflict is never left in the folder: the merge is aborted, the task is marked `conflict` and
+`task.merge_failed` wakes the orchestrator. `POST /api/board/{id}/reject` with `{"note"}` sends the work
+back to its member. Nothing is pushed.
 
 **A project's team at work.** `POST /api/staff/{id}/assign` with `{"task_id"}` gives a staff member a
 task from its project's board; the task needs all four parts of its brief (objective, deliverable,

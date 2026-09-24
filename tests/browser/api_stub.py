@@ -379,6 +379,10 @@ class BoardStub:
         self.created: list[dict] = []
         self.updated: list[tuple[str, dict]] = []
         self.accepted: list[str] = []
+        self.reviews: dict[str, dict] = {}
+        """A task's review as the host would read it from git; a branch task without one gets :meth:`review`."""
+        self.merged: list[str] = []
+        self.rejected: list[tuple[str, str]] = []
 
     @staticmethod
     def task(id_: str, title: str, *, status: str = "todo", priority: int = 3, assignee: dict | None = None, **fields: object) -> dict:
@@ -395,6 +399,30 @@ class BoardStub:
         row = {"id": id_, "name": name, "color": color, "harness": harness, "archived_at": None, "status": status, "on_task": on_task, "waiting_for": "", "status_at": "2026-09-24T09:40:00Z" if on_task else None, "session_id": f"sess-{id_}" if status != "off" else None}
         row.update(fields)
         return row
+
+    @staticmethod
+    def review(row: dict, *, blockers: list[dict] | None = None, conflicts: list[str] | None = None, receipts: list[dict] | None = None) -> dict:
+        """A two-file change on the task's branch, mergeable unless ``blockers`` say otherwise."""
+        patch = (
+            "diff --git a/api/notify.py b/api/notify.py\n--- a/api/notify.py\n+++ b/api/notify.py\n@@ -1,3 +1,5 @@\n def notify(order):\n-    send(order)\n+    if order.paid:\n+        send(order)\n+    log(order)\n     return True\n"
+            "diff --git a/tests/test_notify.py b/tests/test_notify.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_notify.py\n@@ -0,0 +1,2 @@\n+def test_unpaid_orders_are_not_sent():\n+    assert not notify(unpaid)\n"
+        )
+        blockers = list(blockers or [])
+        return {
+            "task_id": row["id"], "title": row["title"], "status": row["status"], "merge_state": row.get("merge_state") or "proposed", "branch": row["branch"], "base": "main", "current": "main",
+            "folder": {"id": "f1", "path": "/home/operator/work/bakery", "label": "", "env": "container"}, "exists": True, "on_base": True, "folder_clean": True, "merged": False,
+            "commits": [
+                {"sha": "4f2a9c1d0b7e6a5f4c3b2a1d0e9f8a7b6c5d4e3f", "author": "daedalus", "at": "2026-09-24T09:20:00Z", "subject": "Send notifications for paid orders only"},
+                {"sha": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d", "author": "daedalus", "at": "2026-09-24T09:25:00Z", "subject": "Test that unpaid orders are not sent"},
+            ],
+            "more_commits": False, "files": [{"path": "api/notify.py", "added": 3, "removed": 1}, {"path": "tests/test_notify.py", "added": 2, "removed": 0}],
+            "added": 5, "removed": 1, "patch": patch, "patch_complete": True, "conflicts": conflicts or [],
+            "receipts": receipts if receipts is not None else [{"criterion": "tests pass", "command": "pytest -q", "exit_code": 0, "passed": True, "at": "2026-09-24T09:26:00Z"}],
+            "can_merge": not blockers, "blockers": blockers,
+        }
+
+    def _review_of(self, row: dict) -> dict:
+        return self.reviews.get(row["id"]) or self.review(row)
 
     def listing(self, include_done: bool) -> dict:
         rows = [t for t in self.tasks if include_done or t["status"] not in ("done", "dropped")]
@@ -434,9 +462,31 @@ class BoardStub:
             if method == "POST" and path.endswith("/accept"):
                 if row["status"] != "review":
                     return 409, {"detail": f"only a task in review can be accepted; this one is {row['status']}"}
+                if row.get("branch") and row.get("merge_state") != "merged" and not self._review_of(row)["can_merge"]:
+                    return 409, {"detail": "; ".join(b["text"] for b in self._review_of(row)["blockers"])}
                 self.accepted.append(row["id"])
                 row["status"] = "done"
+                if row.get("branch"):
+                    row["merge_state"] = "merged"
                 return 200, row
+            if path.endswith("/review") and method == "GET":
+                if not row.get("branch"):
+                    return 409, {"detail": f"task {row['id']} has no staff branch to review"}
+                return 200, {**self._review_of(row), "status": row["status"]}
+            if path.endswith("/merge") and method == "POST":
+                review = self._review_of(row)
+                if row["status"] != "review" or not review["can_merge"]:
+                    return 409, {"detail": "; ".join(b["text"] for b in review["blockers"]) or "not in review"}
+                self.merged.append(row["id"])
+                row.update(status="done", merge_state="merged")
+                return 200, {**row, "merge": {"commit": "c0ffee00" * 5, "into": "main", "worktree_removed": True, "branch_deleted": True}}
+            if path.endswith("/reject") and method == "POST":
+                note = str((body or {}).get("note") or "")
+                if not note:
+                    return 422, {"detail": "a note is required"}
+                self.rejected.append((row["id"], note))
+                row.update(status="doing", merge_state="rejected")
+                return 200, {**row, "told": True}
             if method == "PUT":
                 payload = dict(body or {})
                 self.updated.append((row["id"], payload))
