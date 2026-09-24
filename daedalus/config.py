@@ -1170,6 +1170,11 @@ class OrchestratorConfig(BaseModel):
     """The ceiling the orchestrator may raise that to, when first switched on; the operator moves it."""
     max_concurrency_cap: int = Field(default=32, ge=1)
     """The most any project's ceiling may be set to."""
+    wakeups_max: int = Field(default=20, ge=1, le=200)
+    """Wake-ups one project may hold at once, whoever set them."""
+    wake_cron_min_minutes: int = Field(default=10, ge=1, le=1440)
+    """The shortest gap a recurring wake-up may have. A fired wake-up is urgent and passes the hourly
+    cap, so this is what keeps a cron from buying a turn every minute."""
 
 
 class HarnessConfig(BaseModel):

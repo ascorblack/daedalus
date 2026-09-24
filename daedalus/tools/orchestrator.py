@@ -380,9 +380,32 @@ async def harnesses(context: ToolContext, harness: str | None = None, env: str |
     return await _call(context, "harnesses", harness=harness, env=env, folder=folder)
 
 
+@tool(
+    name="WakeMe",
+    description=(
+        "Set an alarm for yourself: when it fires you are woken with the note, even in the middle of a turn. Give "
+        "exactly one of in_minutes (at least 1), at (ISO 8601; without an offset it is the operator's time) or cron "
+        "(minute hour day month weekday, in UTC; at most every 10 minutes by default). The note says what to look at "
+        "— write it for yourself without this conversation. The scheduler looks every 30 seconds, so a wake-up can "
+        "come up to half a minute late. Unwatch(id) cancels it; the state block lists yours."
+    ),
+)
+async def wake_me(context: ToolContext, note: str, at: str | None = None, in_minutes: int | None = None, cron: str | None = None) -> ToolResult:
+    return await _call(context, "wake_me", note=note, at=at, in_minutes=in_minutes, cron=cron)
+
+
+@tool(
+    name="Unwatch",
+    description="Cancel a wake-up or remove a watch, by the id the state block or WakeMe/Watch gave you.",
+)
+async def unwatch(context: ToolContext, id: str) -> ToolResult:
+    return await _call(context, "unwatch", id=id)
+
+
 TOOLS = [
     brief, folders, journal, team, tasks, peek, AskOperator, project_report,
     hire, staff_edit, dismiss, assign, tell, read_staff, answer, interrupt, pause, release, harnesses,
+    wake_me, unwatch,
 ]
 
 __all__ = ["TOOLS"]

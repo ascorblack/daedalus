@@ -685,6 +685,19 @@ export type Proposal = {
   created_at: string;
 };
 
+/** A project orchestrator's wake-up (``/api/projects/{id}/wakeups``): a schedule that wakes it with a note. */
+export type Wakeup = {
+  id: string;
+  note: string;
+  cron: string | null;
+  at: string | null;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  enabled: boolean;
+  set_by: "orchestrator" | "operator";
+  created_at: string;
+};
+
 export type Schedule = {
   id: string;
   name: string;
@@ -696,7 +709,7 @@ export type Schedule = {
   next_run_at: string | null;
   last_run_at: string | null;
   last_summary: string | null;
-  kind: "agent" | "message" | "lazy";
+  kind: "agent" | "message" | "lazy" | "wake";
   target_session: string | null;
   created_by_session?: string | null;
   active_session_id?: string | null;

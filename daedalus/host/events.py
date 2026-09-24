@@ -221,6 +221,10 @@ class ScheduleFired(TypedDict):
     schedule_id: str
     name: str
     kind: str
+    note: NotRequired[str]
+    """A wake-up's note: what its orchestrator is to look at."""
+    set_by: NotRequired[str]
+    """A wake-up's author: ``orchestrator`` or ``operator``."""
 
 
 class WatchFired(TypedDict):

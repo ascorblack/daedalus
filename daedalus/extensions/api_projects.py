@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from daedalus.extensions import wakeups
 from daedalus.stores.projects import FolderSpec, Project, ProjectError, ProjectFolder, ProjectSettings
 
 if TYPE_CHECKING:
@@ -28,6 +29,17 @@ BRIEF_SECTION_MAX_CHARS = 20000
 """A brief section is re-read into the orchestrator's prompt every turn, so it is bounded."""
 
 Env = Literal["container", "host"]
+
+
+class WakeupBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str
+    at: str | None = None
+    """ISO 8601; without an offset it is the operator's own time."""
+    in_minutes: int | None = None
+    cron: str | None = None
+    """In UTC, like every schedule."""
 
 
 class FolderBody(BaseModel):
@@ -416,6 +428,33 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         session_id = orchestrator.session_id if orchestrator.enabled else ""
         text = await orchestrators().project_state(project, session_id=session_id or None)
         return {"project_id": project_id, "session_id": session_id or None, "text": text, "chars": len(text), "max_chars": manager.config.orchestrator.state_max_chars}
+
+    # -- wake-ups ------------------------------------------------------------------------
+
+    @api.get("/api/projects/{project_id}/wakeups")
+    async def get_wakeups(project_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The orchestrator's wake-ups, whoever set them, soonest first."""
+        await existing(project_id)
+        return {"wakeups": await wakeups.wakeups(app, project_id), "max": manager.config.orchestrator.wakeups_max}
+
+    @api.post("/api/projects/{project_id}/wakeups")
+    async def post_wakeup(project_id: str, body: WakeupBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The operator leaves the orchestrator a wake-up with a note."""
+        project = await existing(project_id)
+        try:
+            wakeup = await wakeups.set_wakeup(app, project, note=body.note, at=body.at, in_minutes=body.in_minutes, cron=body.cron)
+        except wakeups.WakeupRefused as exc:
+            raise HTTPException(400, str(exc)) from exc
+        await manager.bus.publish("project.changed", {"change": "wakeups", "actor": "operator"}, project_id=project_id)
+        return wakeup
+
+    @api.delete("/api/projects/{project_id}/wakeups/{wakeup_id}")
+    async def delete_wakeup(project_id: str, wakeup_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await existing(project_id)
+        if not await wakeups.cancel(app, project_id, wakeup_id):
+            raise HTTPException(404, "no such wake-up")
+        await manager.bus.publish("project.changed", {"change": "wakeups", "actor": "operator"}, project_id=project_id)
+        return {"deleted": True}
 
 
 __all__ = ["environments", "host_bridge", "reach", "register"]

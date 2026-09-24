@@ -671,6 +671,12 @@ such a project carries `orchestrator: {"enabled", "session_id", "staff", "workin
 (null for a project without one), and `GET /api/sessions/{id}` names what a session is to its
 project: `orchestrator_of` (the project's id) or `staff` (`{"id", "session_id"}`).
 
+It sets its own alarms with `WakeMe` (in some minutes, at a moment, or on a cron at most every ten
+minutes) and is woken with the note, even mid-turn; you can leave it one too. `GET|POST
+/api/projects/{id}/wakeups` (`{"note", "in_minutes" | "at" | "cron"}`) and `DELETE …/wakeups/{id}` are
+the Wake-ups panel of the project. A wake-up belongs to the project: a replaced orchestrator, or one
+switched off and on again, gets the ones set before.
+
 A command-line member runs its CLI in a terminal of its own, which you can open like any other. The
 launch answers the CLI's folder-trust question on screen before the task is given, and a CLI that
 cannot get ready — signed out, or stuck on a screen it does not recognise within `ready_timeout_s` —

@@ -1,4 +1,4 @@
-"""Scheduled tasks: cron or one-shot, in three kinds.
+"""Scheduled tasks: cron or one-shot, in four kinds.
 
 * ``agent`` — a prompt for a fresh session with its own persistent workspace and a summary
   handoff between runs (the default).
@@ -6,6 +6,10 @@
 * ``lazy`` — a silent note that rides along with the operator's next message in a session
   ("when I next write, remind me…"); if the operator does not write within the TTL it is
   promoted to an ``agent`` task so it is never lost.
+* ``wake`` — a project orchestrator's alarm: no run and no notification of its own, only a
+  ``schedule.fired`` event on the project, which the orchestrator's wake queue turns into a turn
+  carrying the note. It follows the office, not the session: whoever is the project's orchestrator
+  when it fires is woken.
 
 A recurring task never overlaps itself (the in-flight run is recorded on the row, so a
 restart remembers it), a task that keeps failing is switched off with an inbox entry, an
@@ -39,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 RUN_IN = ("new", "self")
 """Where an agent task runs when it fires: a fresh task session, or the session that created it."""
-KINDS = ("agent", "message", "lazy")
+KINDS = ("agent", "message", "lazy", "wake")
 UNATTENDED_ANSWER = (
     "No operator is available for this unattended run. Continue with your best judgement, "
     "prefer the safe and reversible option, and state the assumption you made in your final reply."
@@ -155,8 +159,17 @@ class Scheduler:
             recurring = 0
         if kind == "lazy" and not (target_session or created_by_session):
             raise ValueError("a lazy reminder needs the session it belongs to")
+        if kind == "wake":
+            # Only an orchestrator is woken this way: any other session's wake-up would publish an event
+            # nobody turns into a turn, and the alarm would be silently nothing.
+            if await self.orchestrated_project(target_session or created_by_session) is None:
+                raise ValueError("a wake-up belongs to a project's orchestrator; for anything else use kind 'agent' or 'message'")
+            if not cron and next_run <= _now():
+                raise ValueError(f"{run_at} has already passed; give a moment in the future")
         workspace = self.root / f"sched-{schedule_id}"
         copied: list[str] = []
+        if kind == "wake":
+            workspace = Path()
         project = await self._project_of(target_session or created_by_session)
         if kind == "agent" and run_in == "self":
             manager = self.app.manager
@@ -397,7 +410,8 @@ class Scheduler:
             raise RuntimeError(f"schedule {schedule['id']} already has a run in flight")
         kind = schedule.get("kind") or "agent"
         await self.app.db.execute("UPDATE schedules SET last_run_at = ? WHERE id = ?", (_now().isoformat(), schedule["id"]))
-        if self.app.manager is not None:
+        # A wake-up's event is its whole delivery and carries its project; it is published below.
+        if self.app.manager is not None and kind != "wake":
             await self.app.manager.bus.publish("schedule.fired", {"schedule_id": str(schedule["id"]), "name": str(schedule["name"]), "kind": kind})
         if advance:
             # The next occurrence is fixed before dispatch so a restart cannot fire the same slot twice.
@@ -406,7 +420,51 @@ class Scheduler:
             return await self._fire_message(schedule)
         if kind == "lazy":
             return await self._fire_lazy(schedule)
+        if kind == "wake":
+            return await self._fire_wake(schedule)
         return await self._fire_agent(schedule)
+
+    async def orchestrated_project(self, session_id: str | None) -> str | None:
+        """The project a session is or was the orchestrator of, read from the stored row.
+
+        A retired session counts: a wake-up set by an orchestrator that was replaced or switched off
+        and on again still belongs to the project, and fires for whoever holds the office then.
+        """
+        if not session_id:
+            return None
+        row = await self.app.db.fetchone(
+            "SELECT coalesce(json_extract(metadata, '$.orchestrator_of'), json_extract(metadata, '$.orchestrator_retired_of')) AS project_id FROM sessions WHERE id = ?",
+            (session_id,),
+        )
+        return str(row["project_id"]) if row is not None and row["project_id"] else None
+
+    async def _fire_wake(self, schedule: dict[str, Any]) -> str:
+        """Publish the wake-up on its project. Its orchestrator's queue delivers it at once, as a steer
+        if a turn is running; a project whose orchestrator is off has nobody to wake, and says so."""
+        manager = self.app.manager
+        assert manager is not None
+        project_id = await self.orchestrated_project(schedule.get("target_session"))
+        project = await manager.projects.get(project_id) if project_id else None
+        if project is None or not project.settings.orchestrator.enabled:
+            await self._post(
+                "wake_dropped",
+                f"A wake-up was not delivered: '{schedule['name']}'",
+                "The orchestrator it was set for is switched off." if project is not None else "The project it was set for is gone.",
+                level="quiet",
+            )
+            return ""
+        await manager.bus.publish(
+            "schedule.fired",
+            {
+                "schedule_id": str(schedule["id"]),
+                "name": str(schedule["name"]),
+                "kind": "wake",
+                "note": str(schedule.get("prompt") or ""),
+                "set_by": "orchestrator" if schedule.get("created_by_session") else "operator",
+            },
+            project_id=project.id,
+        )
+        return ""
 
     async def _fire_message(self, schedule: dict[str, Any]) -> str:
         """A plain reminder: deliver the text where the task was created, or to the operator channel."""

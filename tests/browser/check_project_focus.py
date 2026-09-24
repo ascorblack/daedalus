@@ -153,7 +153,7 @@ def desktop(page: Page, lang: str, width: int) -> None:
     expect(page.locator(".panel .brief-card.notes")).to_contain_text(words["byorch"])
     assert f"/app/project/{PID}?" in page.url and "panel=brief" in page.url, page.url
     page.locator(".panel .panel-tab[data-tab='wakeups']").click()
-    expect(page.locator(".panel .wakeup-row")).to_contain_text(invented["wake.name"])
+    expect(page.locator(".panel .wakeup-row")).to_contain_text(invented["wake.note"])
     page.locator(".panel .panel-tab[data-tab='folders']").click()
     expect(page.locator(".panel .focus-folder")).to_have_count(3)
 
