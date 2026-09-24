@@ -32,7 +32,7 @@ export type ProjectSidebarProps = {
   onWidth: (w: number) => void;
   menu: ReactNode;
   toast: (text: string) => void;
-  /** Room at the top for an entry pinned above every project; nothing is pinned there yet. */
+  /** Room at the top for the entry pinned above every project: the main orchestrator's. */
   pinned?: ReactNode;
 };
 
@@ -67,6 +67,7 @@ export function ProjectSidebar(p: ProjectSidebarProps) {
           </a>
           {toggle}
           <Bell />
+          {p.pinned}
           <a className={`iconbtn quiet ${p.view.kind === "orchestrator" ? "on" : ""}`} href={projectHome(p.projectId)} onClick={(e) => go(e, projectHome(p.projectId))} title={t("focus.orchestrator")} aria-label={t("focus.orchestrator")}>
             <Icon name="conductor" size={18} />
           </a>

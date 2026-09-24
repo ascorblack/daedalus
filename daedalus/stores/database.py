@@ -1171,6 +1171,82 @@ CREATE TABLE push_subscriptions (
 """)
 
 
+# The main orchestrator's hand-overs. A dispatch is one piece of work the operator gave a project
+# through the main orchestrator; it stays open until the project's orchestrator closes it with a
+# report, and its follow-ups and reports are its messages. ``seq`` numbers a project's dispatches, so
+# the one that set a new project up is #1 wherever it is read. ``stalled_at`` is when the watchdog
+# said it had gone quiet, so it says so once per silence and not at every tick.
+#
+# The requests table is rebuilt rather than altered, because three of its constraints change at once:
+# a request may now belong to no project yet (the confirmation that creates one), may come from the
+# main orchestrator, and may be of the kind "project"; and it gains the dispatch it is shown under.
+# Nothing references the requests table, so the rebuild is a copy, a drop and a rename. A project
+# that the main orchestrator set up carries ``setup_by`` until its first dispatch is closed as done or
+# the operator finishes the setup by hand; while it does, every request of the project is linked.
+MIGRATIONS.append("""
+CREATE TABLE dispatches (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    from_session TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'setup')),
+    title TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'blocked', 'cancelled')),
+    result TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT,
+    stalled_at TEXT
+);
+CREATE UNIQUE INDEX dispatches_seq ON dispatches(project_id, seq);
+CREATE INDEX dispatches_open ON dispatches(status, updated_at);
+CREATE TABLE dispatch_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dispatch_id TEXT NOT NULL REFERENCES dispatches(id) ON DELETE CASCADE,
+    at TEXT NOT NULL,
+    author TEXT NOT NULL CHECK (author IN ('dispatcher', 'orchestrator', 'operator', 'system')),
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL
+);
+CREATE INDEX dispatch_messages_by_dispatch ON dispatch_messages(dispatch_id, id);
+
+CREATE TABLE asks_rebuilt (
+    id TEXT PRIMARY KEY,
+    short_id TEXT NOT NULL,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    origin TEXT NOT NULL CHECK (origin IN ('staff', 'orchestrator', 'dispatcher')),
+    kind TEXT NOT NULL CHECK (kind IN ('question', 'permission', 'folder', 'project')),
+    staff_id TEXT REFERENCES staff(id) ON DELETE CASCADE,
+    staff_session_id TEXT REFERENCES staff_sessions(id) ON DELETE SET NULL,
+    task_id TEXT REFERENCES board_tasks(id) ON DELETE SET NULL,
+    request_ref TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    routed_to TEXT NOT NULL CHECK (routed_to IN ('orchestrator', 'operator')),
+    suggestion TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    routed_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolved_by TEXT CHECK (resolved_by IN ('orchestrator', 'operator', 'staff', 'system')),
+    resolution_json TEXT NOT NULL DEFAULT '{}',
+    dispatch_id TEXT REFERENCES dispatches(id) ON DELETE SET NULL
+);
+INSERT INTO asks_rebuilt(id, short_id, project_id, origin, kind, staff_id, staff_session_id, task_id, request_ref, text,
+                         detail_json, routed_to, suggestion, created_at, routed_at, resolved_at, resolved_by, resolution_json)
+SELECT id, short_id, project_id, origin, kind, staff_id, staff_session_id, task_id, request_ref, text,
+       detail_json, routed_to, suggestion, created_at, routed_at, resolved_at, resolved_by, resolution_json
+FROM asks;
+DROP TABLE asks;
+ALTER TABLE asks_rebuilt RENAME TO asks;
+CREATE INDEX asks_open ON asks(project_id, resolved_at, routed_to);
+CREATE UNIQUE INDEX asks_short_id_open ON asks(short_id) WHERE resolved_at IS NULL;
+CREATE INDEX asks_by_dispatch ON asks(dispatch_id) WHERE dispatch_id IS NOT NULL;
+
+ALTER TABLE projects ADD COLUMN setup_by TEXT NOT NULL DEFAULT '';
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""

@@ -29,6 +29,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from daedalus.extensions.dispatcher_telegram import is_mirrored
 from daedalus.extensions.staff import AlreadyAnswered
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.stores.projects import Project
@@ -262,6 +263,10 @@ class ProjectTopics:
             count = 0
             for ask in await self.manager.asks.open_for(project.id, routed_to="operator"):
                 if ask.id in posted:
+                    continue
+                if await is_mirrored(self.app, ask):
+                    # Shown in the main orchestrator's chat, so posted once, where it lives (General or
+                    # its header in the private chat); a second post here would be a second set of buttons.
                     continue
                 text, rows = await self._request(project, ask)
                 message_id = await self.front.post(outbox, text, rows)

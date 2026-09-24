@@ -103,6 +103,10 @@ export function arrange(
   opts: { project?: string; filter?: Filter; query?: string; results?: boolean } = {},
 ): Arranged {
   const { project = "", filter = "all", query = "" } = opts;
+  // The main orchestrator's chat is pinned above the list, so it is not a row, and its project is a
+  // folder only while it holds the chats of main orchestrators that were replaced.
+  sessions = sessions.filter((s) => !s.metadata?.dispatcher);
+  projects = projects.filter((p) => p.system !== "dispatcher" || sessions.some((s) => s.project_id === p.id));
   const all = (project ? sessions.filter((s) => s.project_id === project) : [...sessions]).sort((a, b) =>
     opts.results ? (b.match?.score ?? 0) - (a.match?.score ?? 0) : activity(b) - activity(a) || a.id.localeCompare(b.id));
   const ids = new Set(all.map((s) => s.id));

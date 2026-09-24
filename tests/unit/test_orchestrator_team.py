@@ -428,26 +428,13 @@ async def test_harnesses_lists_the_executors_and_is_the_orchestrators_alone(sett
         await r.manager.close()
 
 
-async def test_ask_operator_links_a_dispatch_only_once_the_column_exists(settings: Settings, db: Database, tmp_path: Path) -> None:
+async def test_ask_operator_and_report_refuse_a_dispatch_the_project_does_not_have(settings: Settings, db: Database, tmp_path: Path) -> None:
     r = await rig(settings, db, tmp_path)
     try:
         sid = await office(r)
-        said = await r.call(sid, "ask_operator", question="Ship on Friday?", dispatch_id="d12345")
-        assert said.startswith("asked the operator")
-        assert "reported" in await r.call(sid, "project_report", text="The menu is done", kind="done", dispatch_id="d12345")
-    finally:
-        await r.manager.close()
-
-
-async def test_ask_operator_stores_the_dispatch_when_the_column_is_there(settings: Settings, db: Database, tmp_path: Path) -> None:
-    r = await rig(settings, db, tmp_path)
-    try:
-        await r.manager.db.execute("ALTER TABLE asks ADD COLUMN dispatch_id TEXT")
-        sid = await office(r)
-        await r.call(sid, "ask_operator", question="Ship on Friday?", dispatch_id="d12345")
-        [ask] = await r.manager.asks.open_for(r.project.id)
-        row = await r.manager.db.fetchone("SELECT dispatch_id FROM asks WHERE id = ?", (ask.id,))
-        assert row is not None and row["dispatch_id"] == "d12345"
+        with pytest.raises(Refused, match="no dispatch"):
+            await r.call(sid, "ask_operator", question="Ship on Friday?", dispatch_id="d12345")
+        assert await r.manager.asks.open_for(r.project.id) == [], "nothing is asked under a dispatch that is not there"
     finally:
         await r.manager.close()
 

@@ -573,6 +573,8 @@ export type Project = {
   /** In order; the first is the primary folder, where an agent works unless it is given another. */
   folders: ProjectDir[];
   sessions: { id: string; title: string; running?: boolean }[];
+  /** "dispatcher" while the main orchestrator is setting the project up. */
+  setup_by?: string;
 };
 
 /** A project as a session names it: everything but the list of agents, which a session view has no use for. */
@@ -589,9 +591,10 @@ export type Orchestration = { enabled: boolean; session_id: string; staff: numbe
 export type Ask = {
   id: string;
   short_id: string;
-  project_id: string;
-  origin: "staff" | "orchestrator";
-  kind: "question" | "permission" | "folder";
+  /** Null only for the main orchestrator's confirmation of a project that does not exist yet. */
+  project_id: string | null;
+  origin: "staff" | "orchestrator" | "dispatcher";
+  kind: "question" | "permission" | "folder" | "project";
   staff_id: string | null;
   task_id: string | null;
   text: string;
@@ -601,8 +604,36 @@ export type Ask = {
   created_at: string;
   resolved_at: string | null;
   resolved_by: string | null;
-  resolution: { allow?: boolean | null; text?: string; selected?: string[]; via?: string };
+  resolution: { allow?: boolean | null; text?: string; selected?: string[]; via?: string; closed?: string; outcome?: string };
+  /** The main orchestrator's dispatch this request is shown under, in its chat as well as the project's. */
+  dispatch_id?: string | null;
 };
+
+/** A piece of work the main orchestrator handed to a project, and where it stands. */
+export type Dispatch = {
+  id: string;
+  project_id: string;
+  project_name?: string;
+  seq: number;
+  kind: "work" | "setup";
+  title: string;
+  text: string;
+  status: "open" | "done" | "blocked" | "cancelled";
+  result: string;
+  created_at: string;
+  updated_at: string;
+  closed_at: string | null;
+  stalled_at: string | null;
+  last?: DispatchMessage | null;
+};
+
+export type DispatchMessage = { id: number; dispatch_id: string; at: string; author: "dispatcher" | "orchestrator" | "operator" | "system"; kind: string; text: string };
+
+/** A request as the main chat shows it: the row, the project's name, who asked, and whether it acts on the host. */
+export type MainAsk = Ask & { project_name: string; asker: string; host: boolean };
+
+/** What GET /api/main answers: the main orchestrator's chat as the app draws it. */
+export type MainView = { session_id: string; dispatches: Dispatch[]; asks: MainAsk[]; questions: number; setup: { project_id: string; name: string }[] };
 
 /** One entry of a project's journal: who wrote it, what kind, and what it refers to. */
 export type JournalEntry = { id: number; at: string; author: "operator" | "orchestrator" | "staff" | "system"; kind: string; text: string; refs: Record<string, string> };
@@ -817,6 +848,7 @@ export type Settings = {
   vision: { preset: string; max_output_tokens: number };
   /** A project orchestrator's defaults. `strongest` is what an empty `preset` means, sent by the host. */
   orchestrator?: { preset: string; strongest?: string };
+  dispatcher?: { preset: string; middle?: string; stalled_minutes?: number };
   asr: { provider: string; url: string; api_key: string; api_key_set?: boolean; model: string; language: string; timeout_seconds: number; max_seconds: number; autosend: boolean };
   tools: {
     web: { fetch_timeout_seconds: number; proxy: string; user_agent: string; fetch_max_chars: number; search: WebSearchConf };

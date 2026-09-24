@@ -728,6 +728,35 @@ subscription window used. Calls nobody priced are counted in `unpriced`, never a
 rows, the project's column and the top of its journal show it, and the orchestrator's state block reads
 the same numbers.
 
+**The main orchestrator.** One chat, pinned first in the app, where you say "in Bakery, add a
+gluten-free menu": it hands the work to that project's orchestrator as a *dispatch* and follows it. It
+never touches files, staff or a board; its tools are `Projects`, `Delegate`, `Progress`, `Cancel`,
+`CreateProject` and `Answer`, beside `Notify`, `StaySilent` and the history tools. A dispatch wakes the
+project's orchestrator at once and is closed by exactly one `ProjectReport` with its id (done or
+blocked); a progress report is a message on it. The main orchestrator is woken only by those reports
+and by a dispatch that went quiet for `dispatcher.stalled_minutes` (30) while nobody in its project
+worked, and it tells you in a line or two — pushed to your phone when you are not looking at its chat.
+A question a project puts to you about a dispatch (`AskOperator(dispatch_id=…)`) is shown in the main
+chat as well as the project's, as one request answered once wherever you answer it; its model is not
+woken for it. It answers one for you only when your latest message says the answer (`Answer` quotes
+your words), and never a permission. Its model is Settings → Models → Main orchestrator, a mid-tier
+preset unless you choose one; the model chip in its chat writes that setting. `GET /api/main` is the
+chat as the app draws it (the session, the dispatches, the questions), `POST /api/main` opens it the
+first time and `POST /api/main/replace` gives it a fresh chat; `GET /api/dispatches/{id}` and `POST
+/api/dispatches/{id}/cancel` (`{"reason"}`) are a dispatch's card. With a Telegram bot it lives in the
+General topic of a forum — plain text there is for it, and a reply to another session's post in
+General still goes to that session — or, without a forum, it speaks in the private chat under "🧭 Main";
+a reply to one of its posts reaches it and `/main` makes it the chat's session. Its questions are
+posted there once, with buttons, and never in the project's topic.
+
+`CreateProject` makes a project only after you confirm it on a card in the main chat — a misheard
+name never becomes a folder. A container folder must lie under `dispatcher.container_roots` (by default
+the folders your container projects already live in); a host folder is looked at on your machine
+through the host terminal, and a card for one is answered in the app alone. On "Create" the folders
+are made if asked, the project's orchestrator is switched on and handed dispatch #1: survey the folders
+and write the brief. Until that dispatch is done — or you press "Finish setup" (`POST
+/api/projects/{id}/setup/finish`) — every question the project asks is shown in the main chat too.
+
 A command-line member runs its CLI in a terminal of its own, which you can open like any other. The
 launch answers the CLI's folder-trust question on screen before the task is given, and a CLI that
 cannot get ready — signed out, or stuck on a screen it does not recognise within `ready_timeout_s` —

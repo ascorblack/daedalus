@@ -176,6 +176,9 @@ class Team:
         self.own_requests: Any = None
         """The orchestrators, once installed: a request the orchestrator itself made (a question to the
         operator, a folder it wants) has no staff session to deliver the answer to, so they take it."""
+        self.dispatcher_requests: Any = None
+        """The main orchestrator, once installed: its confirmation before a project is created is a
+        request of no project, which it settles itself."""
 
     # -- lookups -----------------------------------------------------------------------------------
 
@@ -628,7 +631,18 @@ class Team:
             return "operator"
         return "orchestrator"
 
-    async def answer(self, ref: str, *, allow: bool | None = None, text: str | None = None, selected: list[str] | None = None, by: str = "operator", basis: str = "", via: str | None = None) -> dict[str, Any]:
+    async def answer(
+        self,
+        ref: str,
+        *,
+        allow: bool | None = None,
+        text: str | None = None,
+        selected: list[str] | None = None,
+        by: str = "operator",
+        basis: str = "",
+        via: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Answer a request, once. The first answer to update the row delivers; a later one is refused.
 
         The orchestrator answers within the project's autonomy. At ``ask`` its answer to a question
@@ -642,6 +656,15 @@ class Team:
             raise KeyError(ref)
         if not ask.open:
             raise AlreadyAnswered(f"request {ask.short_id} was already answered by the {ask.resolved_by}")
+        if ask.origin == "dispatcher":
+            # The main orchestrator's own confirmation belongs to no project yet; it settles it itself.
+            if self.dispatcher_requests is None:
+                raise StaffError("the main orchestrator is not running to take the answer")
+            if by != "operator":
+                raise StaffError(f"request {ask.short_id} is the operator's to answer")
+            settled: dict[str, Any] = await self.dispatcher_requests.answer_own(ask, allow=allow, text=text, selected=selected, by=by, via=via or "app")
+            return settled
+        assert ask.project_id is not None
         project = await self.project(ask.project_id)
         if by == "orchestrator":
             outcome = await self._orchestrator_may(ask, project, allow=allow, text=text, selected=selected, basis=basis)
@@ -650,6 +673,8 @@ class Team:
         resolution: dict[str, Any] = {"allow": allow, "text": text or "", "selected": list(selected or []), "via": via or ("orchestrator" if by == "orchestrator" else "app")}
         if basis:
             resolution["basis"] = basis
+        if extra:
+            resolution.update({k: v for k, v in extra.items() if k not in resolution})
         if not await self.manager.asks.resolve(ask.id, by, resolution):
             current = await self.manager.asks.get(ask.id)
             raise AlreadyAnswered(f"request {ask.short_id} was already answered by the {current.resolved_by if current else 'someone else'}")

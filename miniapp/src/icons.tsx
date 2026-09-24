@@ -4,7 +4,7 @@ export type IconName =
   | "back" | "more" | "plus" | "up" | "stop" | "model" | "terminal" | "file" | "pen" | "search" | "globe" | "attach" | "image"
   | "question" | "skill" | "spawn" | "bulb" | "wrench" | "clock" | "plug" | "dot" | "compact"
   | "folder" | "settings" | "bots" | "inbox" | "board" | "changes" | "chart" | "loop" | "pause" | "play" | "trash" | "check" | "close" | "send"
-  | "download" | "share" | "split" | "key" | "link" | "unlink" | "down" | "copy" | "columns" | "eye" | "mic" | "fork" | "undo" | "phone" | "expand" | "external" | "reload" | "forward" | "panel" | "chevron" | "bolt" | "volume" | "mute" | "lock" | "bell" | "shield" | "conductor" | "journal" | "alert";
+  | "download" | "share" | "split" | "key" | "link" | "unlink" | "down" | "copy" | "columns" | "eye" | "mic" | "fork" | "undo" | "phone" | "expand" | "external" | "reload" | "forward" | "panel" | "chevron" | "bolt" | "volume" | "mute" | "lock" | "bell" | "shield" | "conductor" | "journal" | "alert" | "compass";
 
 const PATHS: Record<IconName, string> = {
   back: "M15 18l-6-6 6-6",
@@ -76,6 +76,7 @@ const PATHS: Record<IconName, string> = {
   alert: "M12 3l10 18H2zM12 10v4M12 17.5h.01",
   conductor: "M12 3a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM12 8v4M5 16v-2h14v2M5 16a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM12 12v4M12 16a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM19 16a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
   journal: "M6 3h11a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6zM9 3v18M12 8h3M12 12h3",
+  compass: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM15.5 8.5l-2 5-5 2 2-5z",
 };
 
 export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
