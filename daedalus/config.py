@@ -910,6 +910,34 @@ quick factual question itself. Nothing that reads, writes or runs anything — t
 VOICE_ONLY_TOOLS = ["Delegate", "Agents", "AgentResult", "StopAgent", "Projects"]
 """The tools that exist for the concierge alone; every other session is blocked from them (it has SpawnAgent)."""
 
+STAFF_BLOCKED_TOOLS = [
+    "AskUser",
+    "SpawnAgent",
+    "ScheduleCreate",
+    "ScheduleList",
+    "ScheduleDelete",
+    "LoopNext",
+    "LoopPause",
+    "LoopResume",
+    "LoopStatus",
+    "LoopStop",
+    "IntentCreate",
+    "IntentDelete",
+    "IntentList",
+    "SelfPropose",
+    "SelfApply",
+    "SelfRebuild",
+    "SelfRollback",
+    "SelfWorkspace",
+]
+"""What a staff member of a project may not call. It asks the orchestrator, not the operator
+(``AskOrchestrator``), works on the task it was given rather than starting agents, schedules, loops
+or intents of its own, and never changes the installation. Enforced by the host beside the voice rule,
+not through a mode, so editing a mode cannot hand a staff member any of them."""
+
+STAFF_ONLY_TOOLS = ["Report", "AskOrchestrator"]
+"""The tools that exist for staff alone; every other session is blocked from them."""
+
 
 class WebhookConfig(BaseModel):
     """One inbound webhook provider: how it is authenticated and where its events run."""
@@ -1514,4 +1542,6 @@ __all__ = [
     "TtsConfig",
     "VOICE_TOOLS",
     "VOICE_ONLY_TOOLS",
+    "STAFF_BLOCKED_TOOLS",
+    "STAFF_ONLY_TOOLS",
 ]
