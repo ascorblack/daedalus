@@ -617,6 +617,14 @@ pause it: they are requests you answer like a staff member's, and the answer wak
 the project's own choice, else the default for project orchestrators in Settings → Models, else the
 strongest preset; the model chip in its chat changes the project's choice.
 
+A command-line member runs its CLI in a terminal of its own, which you can open like any other. The
+launch answers the CLI's folder-trust question on screen before the task is given, and a CLI that
+cannot get ready — signed out, or stuck on a screen it does not recognise within `ready_timeout_s` —
+shows as an error with that screen, its terminal left open for you. A working CLI that goes quiet has
+its screen read: an idle prompt seen twice ends the turn, anything less shows as silence, never as
+a failure. Its team tools post to the terminal service's hook listener and are answered there. The
+CLIs keep running when the host restarts, and the host takes them up again where they were.
+
 Push reaches a phone or a browser with the app closed once the app is served from a public https
 address (`MINIAPP_PUBLIC_URL`). Turn it on per device in Settings → Notifications; inside Telegram the
 bot is the push instead, and an iPhone or iPad gets it only for the app added to the Home Screen.
