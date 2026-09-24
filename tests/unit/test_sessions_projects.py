@@ -16,6 +16,7 @@ model call.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,11 +56,11 @@ async def test_a_system_project_is_made_once_and_refuses_to_be_moved_or_removed(
     store = ProjectStore(db, reserved=[tmp_path / "state"], home=tmp_path)
     root = tmp_path / "state" / "workspaces" / PROJECT_DIR
     made = await store.ensure_system(PROJECT_KIND, name="Voice", root=root)
-    assert made.settings.system == PROJECT_KIND and made.root == root
+    assert made.settings.system == PROJECT_KIND and made.primary.path == root
     # The folder is under a reserved directory on purpose: it is the installation's, and an
     # operator's project rooted there is refused by the very check this one steps past.
     with pytest.raises(ProjectError, match="belongs to the installation"):
-        await store.create("Mine", str(root))
+        await store.create("Mine", [str(root)])
     # Asking again is the same project, not a second one.
     assert (await store.ensure_system(PROJECT_KIND, name="Voice", root=root)).id == made.id
     assert len(await store.list()) == 1
@@ -85,10 +86,7 @@ async def test_several_callers_asking_at_once_make_one_system_project(db: Databa
     assert [p.settings.system for p in await store.list()] == [PROJECT_KIND]
     # …and the table refuses a second one even if the code above ever stops checking.
     with pytest.raises(sqlite3.IntegrityError):
-        await db.execute(
-            "INSERT INTO projects(id, name, root, created_at, settings, system) VALUES ('x', 'Voice', ?, '', '{}', ?)",
-            (str(root / "other"), PROJECT_KIND),
-        )
+        await db.execute("INSERT INTO projects(id, name, created_at, settings, system) VALUES ('x', 'Voice', '', '{}', ?)", (PROJECT_KIND,))
 
 
 async def test_the_duplicate_system_projects_an_installation_already_has_are_merged(tmp_path: Path) -> None:
@@ -154,10 +152,11 @@ async def test_unreadable_project_settings_do_not_prevent_migration(tmp_path: Pa
         await db.open()
         try:
             rows = await db.fetchall("SELECT id, settings, system FROM projects ORDER BY id")
-            assert [dict(row) for row in rows] == [
-                {"id": "p", "settings": settings, "system": ""},
-                {"id": "v", "settings": '{"system": "voice"}', "system": "voice"},
-            ]
+            assert [(row["id"], row["system"]) for row in rows] == [("p", ""), ("v", "voice")]
+            # Unreadable settings are read as none at all, and the keys every project now has are added.
+            loaded = {row["id"]: json.loads(row["settings"]) for row in rows}
+            assert loaded["v"]["system"] == "voice" and "system" not in loaded["p"]
+            assert all(value["ephemeral"] is False and value["orchestrator"]["enabled"] is False for value in loaded.values())
             rows = await db.fetchall("SELECT project_id FROM sessions WHERE id = 's'")
             assert rows[0]["project_id"] == "p"
             rows = await db.fetchall("SELECT version FROM schema_version")
@@ -170,7 +169,7 @@ async def test_the_counts_beside_the_folders_are_of_the_table_and_not_of_a_page(
     store = ProjectStore(db)
     root = tmp_path / "bakery"
     root.mkdir()
-    project = await store.create("Bakery", str(root))
+    project = await store.create("Bakery", [str(root)])
     loop = '{"loop": {"status": "active"}}'
     for n in range(3):
         await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata, project_id) VALUES (?, 't', ?, '', ?, ?, ?)", (f"p{n}", f"in it {n}", f"2026-09-0{n + 1}", loop if n == 0 else "{}", project.id))
@@ -320,9 +319,9 @@ async def test_a_delegated_agent_shares_the_concierges_folder_unless_it_asks_for
 
     for result in (shared, other):
         assert result["workspace"] == "shared" and result["project"] == "Voice"
-        assert manager.live_state(result["session_id"]).workspace == project.root  # type: ignore[union-attr]
+        assert manager.live_state(result["session_id"]).workspace == project.primary.path  # type: ignore[union-attr]
     # Two agents on one errand see the same files; a third one sees none of them.
-    assert manager.live_state(mine["session_id"]).workspace.parent.parent == project.root  # type: ignore[union-attr]
+    assert manager.live_state(mine["session_id"]).workspace.parent.parent == project.primary.path  # type: ignore[union-attr]
     assert mine["workspace"] == "own"
     own_state = manager.live_state(mine["session_id"])
     assert own_state is not None and own_state.project is not None and own_state.project.id == project.id
@@ -341,7 +340,7 @@ async def test_an_agent_can_be_started_in_a_project_the_operator_named_and_nowhe
     _no_runs(manager)
     root = tmp_path / "bakery"
     root.mkdir()
-    bakery = await manager.projects.create("Bakery", str(root))
+    bakery = await manager.projects.create("Bakery", [str(root)])
 
     listed = await voice.project_list()
     # The Voice project is not offered: it is where an agent goes when no project is named.
@@ -356,7 +355,7 @@ async def test_an_agent_can_be_started_in_a_project_the_operator_named_and_nowhe
         await voice.delegate(title="x", task="y", project_id=bakery.id, workspace="own")
     with pytest.raises(ValueError, match="'shared' or 'own'"):
         await voice.delegate(title="x", task="y", workspace="somewhere")
-    unreachable = await manager.projects.create("Gone", str(tmp_path / "not-mounted"))
+    unreachable = await manager.projects.create("Gone", [str(tmp_path / "not-mounted")])
     with pytest.raises(ValueError, match="not reachable"):
         await voice.delegate(title="x", task="y", project_id=unreachable.id)
     # Nothing was started by any of the four refusals.

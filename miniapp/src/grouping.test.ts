@@ -14,11 +14,9 @@ function folder(id: string, name: string, over: Partial<ProjectFolder> = {}): Pr
   return {
     id,
     name,
-    root: `/projects/${name}`,
     created_at: "2026-09-01T00:00:00Z",
     settings: { snapshots: false, system: "" },
-    reachable: true,
-    writable: true,
+    folders: [{ id: `f-${id}`, path: `/projects/${name}`, label: "", env: "container", is_git: false, readonly: false, position: 0, managed: false, reachable: true, writable: true }],
     total: 0,
     active: 0,
     loops: 0,

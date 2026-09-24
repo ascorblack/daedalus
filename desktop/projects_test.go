@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,5 +86,27 @@ func TestAPathThatWouldBreakTheEntryIsRefused(t *testing.T) {
 	}
 	if got := readMounts(p); len(got) != 1 || got[0] != "/a/good" {
 		t.Fatalf("the mount list is %v", got)
+	}
+}
+
+// Every folder of a project is its own mount: a project with a second folder that was never mounted
+// is a project half of which the agent cannot see. A host folder is never mounted into the container,
+// because it is reached through the host bridge and its path means nothing inside.
+func TestEveryUnmountedContainerFolderIsMountedAndNoOtherIs(t *testing.T) {
+	body := `[{"name": "Bakery", "folders": [
+		{"path": "/home/someone/work/bakery", "env": "container", "reachable": true},
+		{"path": "/home/someone/work/photos", "env": "container", "reachable": false},
+		{"path": "/home/someone/work/tools", "env": "host", "reachable": false}]},
+	{"name": "Broken", "folders": [{"path": "/home/a:b", "env": "container", "reachable": false}]}]`
+	var projects []Project
+	if err := json.Unmarshal([]byte(body), &projects); err != nil {
+		t.Fatal(err)
+	}
+	wanted, refused := foldersToMount(projects)
+	if len(wanted) != 1 || wanted[0] != "/home/someone/work/photos" {
+		t.Fatalf("the folders to mount are %v", wanted)
+	}
+	if len(refused) != 1 || !strings.Contains(refused[0], "Broken") {
+		t.Fatalf("the refusals are %v", refused)
 	}
 }

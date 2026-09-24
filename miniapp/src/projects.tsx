@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, Project } from "./api";
+import { primaryFolder, projectPath, projectReachable } from "./folders";
 import { Sheet } from "./dialogs";
 import { Icon } from "./icons";
 import { invalidate, useQuery } from "./store";
@@ -44,10 +45,10 @@ export function ProjectChip({ projects, current, onOpen, collapsed }: { projects
   const active = projects.find((p) => p.id === current);
   const label = active ? active.name : projects.length ? t("shell.projects.all") : t("shell.projects.add");
   return (
-    <button className="project-chip" onClick={onOpen} title={active ? active.root : t("shell.projects")} aria-haspopup="dialog">
+    <button className="project-chip" onClick={onOpen} title={active ? projectPath(active) : t("shell.projects")} aria-haspopup="dialog">
       <Icon name="folder" size={16} />
       {!collapsed && <span className="sidebar-text truncate">{label}</span>}
-      {!collapsed && active && !active.reachable && <span className="badge attn" title={t("project.notmounted.here")}>{t("project.notmounted")}</span>}
+      {!collapsed && active && !projectReachable(active) && <span className="badge attn" title={t("project.notmounted.here")}>{t("project.notmounted")}</span>}
       {!collapsed && <span className="chev">›</span>}
     </button>
   );
@@ -75,10 +76,10 @@ export function ProjectSwitcher({ projects, current, onPick, onClose, toast }: {
           <button className="grow project-pick" onClick={() => pick(p.id)}>
             <span className="project-name truncate">
               {p.name}
-              {!p.reachable && <span className="badge attn" title={t("project.notmounted.bot")}>{t("project.notmounted")}</span>}
+              {!projectReachable(p) && <span className="badge attn" title={t("project.notmounted.bot")}>{t("project.notmounted")}</span>}
               {p.settings.snapshots && <span className="badge" title={t("project.snapshots.title")}>{t("project.snapshots.badge")}</span>}
             </span>
-            <span className="sub mono truncate">{p.root}</span>
+            <span className="sub mono truncate">{projectPath(p)}</span>
             <span className="sub">{p.sessions.length ? plural("project.agents", p.sessions.length) : t("project.noagents")}</span>
           </button>
           <button className="iconbtn small" onClick={() => setEditing(p)} title={t("project.settings.for", { name: p.name })} aria-label={t("project.settings.for", { name: p.name })}>
@@ -111,7 +112,7 @@ export function AddProjectSheet({ onClose, onAdded, toast }: { onClose: () => vo
     try {
       const created = await api.post<Project>("/api/projects", { name: name.trim(), root: typed || undefined });
       afterChange();
-      toast(t(created.reachable ? "project.added" : "project.added.unmounted", { name: created.name }));
+      toast(t(projectReachable(created) ? "project.added" : "project.added.unmounted", { name: created.name }));
       onAdded(created);
     } catch (e) {
       toast(errorText(e));
@@ -205,8 +206,8 @@ export function ProjectSettingsSheet({ project, onClose, onRemoved, toast }: { p
       <label className="field" htmlFor="project-rename">{t("common.name")}</label>
       <input id="project-rename" className="field" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && save()} />
       <label className="field">{t("project.folder")}</label>
-      <div className="readonly-path mono">{project.root}</div>
-      <div className="sub">{project.reachable ? (project.writable ? t("project.reachable") : t("project.readonly")) : t("project.unreachable")}</div>
+      <div className="readonly-path mono">{projectPath(project)}</div>
+      <div className="sub">{primaryFolder(project)?.reachable ? (primaryFolder(project)?.writable ? t("project.reachable") : t("project.readonly")) : t("project.unreachable")}</div>
       <label className="toggle-row">
         <input type="checkbox" checked={snapshots} onChange={(e) => setSnapshots(e.target.checked)} />
         <span>{t("project.snapshots")}</span>
@@ -261,17 +262,17 @@ export function MoveSessionSheet({ sessionId, current, currentOwn, onClose, onMo
       <select id="move-project" className="field" value={target} onChange={(e) => { setTarget(e.target.value); setOwnDirectory(false); }}>
         <option value="" disabled>{t("move.choose")}</option>
         {(projects.data ?? []).filter((p) => !p.system || p.id === current).map((p) => (
-          <option key={p.id} value={p.id}>{p.name} · {p.root}</option>
+          <option key={p.id} value={p.id}>{p.name} · {projectPath(p)}</option>
         ))}
       </select>
       {chosen && (
         <>
           <label className="toggle-row">
-            <input type="checkbox" checked={ownDirectory} onChange={(e) => setOwnDirectory(e.target.checked)} disabled={!chosen.reachable} />
+            <input type="checkbox" checked={ownDirectory} onChange={(e) => setOwnDirectory(e.target.checked)} disabled={!projectReachable(chosen)} />
             <span>{t("move.owndirectory")}</span>
-            <span className="sub">{t("move.owndirectory.hint", { root: chosen.root })}</span>
+            <span className="sub">{t("move.owndirectory.hint", { root: projectPath(chosen) })}</span>
           </label>
-          <div className="sub attn">{ownDirectory ? t("move.warn.separate", { root: chosen.root }) : t("move.warn.shared", { root: chosen.root })}</div>
+          <div className="sub attn">{ownDirectory ? t("move.warn.separate", { root: projectPath(chosen) }) : t("move.warn.shared", { root: projectPath(chosen) })}</div>
         </>
       )}
       <div className="sheet-foot">

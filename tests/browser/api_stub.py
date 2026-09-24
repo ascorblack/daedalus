@@ -29,6 +29,15 @@ import urllib.request
 DEFAULT_PORT = 8163
 DEFAULT_APP = f"http://127.0.0.1:{DEFAULT_PORT}/app"
 
+
+def folders(path: str, *, reachable: bool = True, writable: bool | None = None) -> list[dict[str, object]]:
+    """A project's folders as the host reports them, for a project whose one folder is ``path``."""
+    return [{
+        "id": "f-" + path.rstrip("/").rsplit("/", 1)[-1],
+        "path": path, "label": "", "env": "container", "is_git": False, "readonly": False, "position": 0, "managed": False,
+        "reachable": reachable, "writable": reachable if writable is None else writable,
+    }]
+
 GATES: dict[str, object] = {
     "/api/maintenance": {"notice": None},
     "/api/conversation-search/settings": {"mode": "off", "paused": False, "reason": "off", "busy": False, "indexed": 0, "pending": 0, "label": "Multilingual E5 Small", "size_bytes": 135429554, "licence": "MIT", "installed": False},

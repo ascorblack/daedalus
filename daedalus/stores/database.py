@@ -6,15 +6,22 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
+from daedalus.config import native_mode
+
 logger = logging.getLogger(__name__)
 
-MIGRATIONS: list[str] = [
+Migration = str | Callable[["Database"], str]
+"""A migration is its SQL, or a function that writes the SQL from what the opening database knows
+(the managed workspaces folder, the environment it runs in). A callable keeps a migration that
+needs such a value in its numbered place instead of being special-cased by its index."""
+
+MIGRATIONS: list[Migration] = [
     # 1 — core stores
     """
     CREATE TABLE sessions (
@@ -524,9 +531,9 @@ MIGRATIONS: list[str] = [
 ]
 
 
-def _project_unification(workspaces_dir: Path) -> str:
+def _project_unification(db: Database) -> str:
     """Build the migration that turns every existing working directory into a project."""
-    base = str(Path(os.path.normpath(workspaces_dir.expanduser()))).replace("'", "''")
+    base = _sql_text(str(Path(os.path.normpath(db.workspaces_dir.expanduser()))))
     return f"""
     UPDATE sessions SET metadata = CASE WHEN json_valid(metadata)
         THEN CASE WHEN json_type(metadata) = 'object' THEN metadata ELSE '{{}}' END
@@ -627,7 +634,12 @@ def _project_unification(workspaces_dir: Path) -> str:
     """
 
 
-MIGRATIONS.append("-- generated from the configured project directory")
+def _sql_text(value: str) -> str:
+    """A value from Python spliced into a migration script, which takes no parameters."""
+    return value.replace("'", "''")
+
+
+MIGRATIONS.append(_project_unification)
 
 
 MIGRATIONS.append("""
@@ -780,6 +792,191 @@ CREATE INDEX app_events_by_project ON app_events(project_id, seq) WHERE project_
 """)
 
 
+def _projects_with_folders(db: Database) -> str:
+    """Build the migration that gives a project folders, a brief, a journal and a team.
+
+    A project was one ``root``; it becomes a row with one or more folders, and the old root is its
+    first folder, in the environment this process runs in — the only one whose paths it ever wrote.
+    The column is dropped rather than kept beside the folders: two answers to "where does this
+    project live" is the shape the move to projects had to undo once already.
+
+    ``auto_created`` becomes ``ephemeral``, its honest name: a project made implicitly by a new chat
+    and removed with its last session. Everything a team of agents needs later is created here too,
+    empty, so the whole model is one migration and one rehearsal on a copy of the real database.
+
+    The per-project concurrency starts at 6 and its cap at 10. ``allowed_without_operator`` is a
+    section of the brief like any other to the schema; that only the operator may write it is the
+    store's rule, and the reason is there.
+    """
+    env = _sql_text(db.local_env)
+    return f"""
+    CREATE TABLE project_folders (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        path TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL DEFAULT '',
+        env TEXT NOT NULL CHECK (env IN ('container', 'host')),
+        is_git INTEGER NOT NULL DEFAULT 0,
+        readonly INTEGER NOT NULL DEFAULT 0,
+        position INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX project_folders_by_project ON project_folders(project_id, position);
+    INSERT INTO project_folders(id, project_id, path, env, position, created_at)
+        SELECT 'f-' || id, id, root, '{env}', 0, created_at FROM projects;
+    DROP INDEX projects_root;
+    ALTER TABLE projects DROP COLUMN root;
+    UPDATE projects SET settings = CASE WHEN json_valid(settings)
+        THEN CASE WHEN json_type(settings) = 'object' THEN settings ELSE '{{}}' END
+        ELSE '{{}}' END;
+    UPDATE projects SET settings = json_set(
+        json_remove(settings, '$.auto_created'),
+        '$.ephemeral', json(CASE WHEN json_extract(settings, '$.auto_created') = 1 THEN 'true' ELSE 'false' END),
+        '$.default_env', '{env}',
+        '$.orchestrator', json('{{"enabled":false,"session_id":"","model":"","autonomy":"normal","concurrency":6,"concurrency_cap":10,"telegram_topic_id":0}}'));
+
+    CREATE TABLE project_briefs (
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        section TEXT NOT NULL CHECK (section IN ('goals', 'constraints', 'preferences', 'done_when', 'allowed_without_operator', 'notes')),
+        body TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL,
+        updated_by TEXT NOT NULL CHECK (updated_by IN ('operator', 'orchestrator', 'system')),
+        PRIMARY KEY (project_id, section)
+    );
+    CREATE TABLE project_journal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        at TEXT NOT NULL,
+        author TEXT NOT NULL CHECK (author IN ('orchestrator', 'operator', 'system')),
+        kind TEXT NOT NULL,
+        text TEXT NOT NULL,
+        refs_json TEXT NOT NULL DEFAULT '{{}}'
+    );
+    CREATE INDEX project_journal_by_project ON project_journal(project_id, id);
+
+    CREATE TABLE staff (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        color TEXT NOT NULL DEFAULT '',
+        role TEXT NOT NULL DEFAULT '',
+        harness TEXT NOT NULL CHECK (harness IN ('daedalus', 'claude', 'codex', 'grok', 'opencode', 'pi')),
+        agent TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        effort TEXT NOT NULL DEFAULT '',
+        permission_mode TEXT NOT NULL DEFAULT '',
+        env TEXT NOT NULL DEFAULT '' CHECK (env IN ('', 'container', 'host')),
+        default_folder_id TEXT REFERENCES project_folders(id) ON DELETE SET NULL,
+        isolation TEXT NOT NULL DEFAULT 'worktree' CHECK (isolation IN ('shared', 'worktree', 'readonly')),
+        instructions TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        one_off INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT NOT NULL CHECK (created_by IN ('operator', 'orchestrator')),
+        created_at TEXT NOT NULL,
+        archived_at TEXT
+    );
+    CREATE UNIQUE INDEX staff_name ON staff(project_id, name COLLATE NOCASE) WHERE archived_at IS NULL;
+
+    ALTER TABLE board_tasks ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE CASCADE;
+    ALTER TABLE board_tasks ADD COLUMN assignee_staff_id TEXT REFERENCES staff(id) ON DELETE SET NULL;
+    ALTER TABLE board_tasks ADD COLUMN brief_json TEXT NOT NULL DEFAULT '{{}}';
+    ALTER TABLE board_tasks ADD COLUMN folder_id TEXT REFERENCES project_folders(id) ON DELETE SET NULL;
+    ALTER TABLE board_tasks ADD COLUMN branch TEXT;
+    ALTER TABLE board_tasks ADD COLUMN merge_state TEXT NOT NULL DEFAULT '' CHECK (merge_state IN ('', 'proposed', 'merged', 'conflict', 'rejected'));
+    UPDATE board_tasks SET project_id = (SELECT project_id FROM sessions WHERE sessions.id = board_tasks.origin_session_id)
+        WHERE origin_session_id IS NOT NULL;
+    CREATE INDEX board_tasks_by_project ON board_tasks(project_id, status);
+
+    CREATE TABLE staff_sessions (
+        id TEXT PRIMARY KEY,
+        staff_id TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('daedalus', 'cli')),
+        session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+        terminal_id TEXT,
+        cli_session_id TEXT,
+        transcript_ref TEXT,
+        task_id TEXT REFERENCES board_tasks(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'starting' CHECK (status IN ('starting', 'working', 'turn_done_unseen', 'idle', 'question', 'permission', 'error', 'exited', 'no_signal')),
+        waiting_for TEXT NOT NULL DEFAULT '',
+        status_at TEXT NOT NULL,
+        last_signal_at TEXT,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        end_reason TEXT NOT NULL DEFAULT '',
+        predecessor_id TEXT REFERENCES staff_sessions(id) ON DELETE SET NULL,
+        folder_id TEXT REFERENCES project_folders(id) ON DELETE SET NULL,
+        worktree_path TEXT,
+        branch TEXT,
+        base_ref TEXT,
+        pause_requested INTEGER NOT NULL DEFAULT 0,
+        team_token_hash TEXT NOT NULL DEFAULT '',
+        usage_json TEXT NOT NULL DEFAULT '{{}}'
+    );
+    CREATE UNIQUE INDEX staff_sessions_live ON staff_sessions(staff_id) WHERE ended_at IS NULL;
+    CREATE INDEX staff_sessions_by_session ON staff_sessions(session_id);
+
+    CREATE TABLE staff_messages (
+        id TEXT PRIMARY KEY,
+        staff_id TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+        staff_session_id TEXT REFERENCES staff_sessions(id) ON DELETE SET NULL,
+        origin TEXT NOT NULL CHECK (origin IN ('orchestrator', 'operator')),
+        text TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('queue', 'steer', 'interrupt')),
+        state TEXT NOT NULL CHECK (state IN ('queued', 'written', 'submitted', 'acknowledged', 'failed')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        error TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX staff_messages_by_staff ON staff_messages(staff_id, created_at);
+
+    CREATE TABLE asks (
+        id TEXT PRIMARY KEY,
+        short_id TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        origin TEXT NOT NULL CHECK (origin IN ('staff', 'orchestrator')),
+        kind TEXT NOT NULL CHECK (kind IN ('question', 'permission', 'folder')),
+        staff_id TEXT REFERENCES staff(id) ON DELETE CASCADE,
+        staff_session_id TEXT REFERENCES staff_sessions(id) ON DELETE SET NULL,
+        task_id TEXT REFERENCES board_tasks(id) ON DELETE SET NULL,
+        request_ref TEXT NOT NULL DEFAULT '',
+        text TEXT NOT NULL,
+        detail_json TEXT NOT NULL DEFAULT '{{}}',
+        routed_to TEXT NOT NULL CHECK (routed_to IN ('orchestrator', 'operator')),
+        suggestion TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        routed_at TEXT NOT NULL,
+        resolved_at TEXT,
+        resolved_by TEXT CHECK (resolved_by IN ('orchestrator', 'operator', 'staff', 'system')),
+        resolution_json TEXT NOT NULL DEFAULT '{{}}'
+    );
+    CREATE INDEX asks_open ON asks(project_id, resolved_at, routed_to);
+    -- The short id is what a person types on a phone or in Telegram to answer. It only has to tell
+    -- apart the requests still waiting, so it is unique among those and free again once answered.
+    CREATE UNIQUE INDEX asks_short_id_open ON asks(short_id) WHERE resolved_at IS NULL;
+
+    CREATE TABLE watches (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        pattern_json TEXT NOT NULL,
+        action_json TEXT NOT NULL,
+        cooldown_s INTEGER NOT NULL DEFAULT 600,
+        once INTEGER NOT NULL DEFAULT 0,
+        note TEXT NOT NULL DEFAULT '',
+        created_by TEXT NOT NULL CHECK (created_by IN ('operator', 'orchestrator')),
+        created_at TEXT NOT NULL,
+        last_fired_at TEXT,
+        fire_count INTEGER NOT NULL DEFAULT 0,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        state_json TEXT NOT NULL DEFAULT '{{}}'
+    );
+    CREATE INDEX watches_by_project ON watches(project_id, enabled);
+    """
+
+
+MIGRATIONS.append(_projects_with_folders)
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""
@@ -794,9 +991,12 @@ large freelist is spread over passes rather than holding the lock for all of it 
 class Database:
     """A single shared aiosqlite connection guarded by a lock."""
 
-    def __init__(self, path: Path, *, workspaces_dir: Path | None = None) -> None:
+    def __init__(self, path: Path, *, workspaces_dir: Path | None = None, local_env: str | None = None) -> None:
         self.path = path
         self.workspaces_dir = workspaces_dir or path.parent / "workspaces"
+        self.local_env = local_env or ("host" if native_mode() else "container")
+        """The environment this process's folders live in. A migration that turns a path it finds
+        into a project folder records it there: in a container the paths are the container's."""
         self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
         self._warned_about_freelist = False
@@ -904,8 +1104,8 @@ class Database:
         for index, script in enumerate(MIGRATIONS, start=1):
             if index <= current:
                 continue
-            if index == 29:
-                script = _project_unification(self.workspaces_dir)
+            if callable(script):
+                script = script(self)
             # The version is written inside the migration's own transaction. Written after it, a
             # process killed in between would leave the schema at N and the version at N-1, and the
             # next start would run migration N again — on an ALTER TABLE, which is not idempotent,

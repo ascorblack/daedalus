@@ -28,6 +28,7 @@ from protocore.contracts.types import (
 
 from daedalus.providers.openai_compat import UsageRecord, UsageSink
 from daedalus.stores.database import Database
+from daedalus.stores.projects import ProjectSettings
 
 UNFINISHED_RUN_STATUSES = ", ".join(f"'{status.value}'" for status in (RunStatus.queued, RunStatus.running, RunStatus.paused))
 """The statuses of a run that is not over. Its events are what the live view reads and what a resume
@@ -118,16 +119,20 @@ class SqliteSessionStore(ISessionStore):
     async def create(self, session: Session, *, project_id: str | None = None) -> None:
         if project_id is None:
             project_id = session.id
-            await self._db.execute(
-                "INSERT OR IGNORE INTO projects(id, name, root, created_at, settings, system) VALUES (?, ?, ?, ?, ?, '')",
-                (
-                    project_id,
-                    session.title.strip() or "Project",
-                    str(self._db.workspaces_dir / session.id),
-                    session.created_at.isoformat(),
-                    '{"snapshots":true,"system":""}',
-                ),
-            )
+            async with self._db.transaction() as conn:
+                await conn.execute(
+                    "INSERT OR IGNORE INTO projects(id, name, created_at, settings, system) VALUES (?, ?, ?, ?, '')",
+                    (
+                        project_id,
+                        session.title.strip() or "Project",
+                        session.created_at.isoformat(),
+                        json.dumps(ProjectSettings(snapshots=True, default_env=self._db.local_env).dump()),
+                    ),
+                )
+                await conn.execute(
+                    "INSERT OR IGNORE INTO project_folders(id, project_id, path, env, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (f"f-{project_id}", project_id, str(self._db.workspaces_dir / session.id), self._db.local_env, session.created_at.isoformat()),
+                )
         await self._db.execute(
             "INSERT OR REPLACE INTO sessions(id, tenant_id, title, created_at, last_message_at, metadata, project_id)"
             " VALUES (?, ?, ?, ?, ?, ?, ?)",
