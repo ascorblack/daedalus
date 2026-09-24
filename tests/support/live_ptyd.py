@@ -28,7 +28,8 @@ daemon that actually hosts a CLI:
   event order.
 
 The shapes follow ``docs/architecture/terminals.md`` and the side-channel contract of the terminals
-plan. Processes are started without ``fork`` from this (threaded) test process; the fake CLIs take
+plan. Browser attachments are not streamed here: ``FakePtyd``'s scripted channels serve the gateway's
+tests, and an adapter never attaches. Processes are started without ``fork`` from this (threaded) test process; the fake CLIs take
 their terminal as controlling terminal themselves, and a resize signals the process group directly.
 Everything is killed on ``stop``.
 """
@@ -295,7 +296,7 @@ class LivePtyd(FakePtyd):
             while True:
                 channel, payload = await self._read(reader)
                 if channel != 0:
-                    await self._channel_frame(channel, payload)
+                    await self._stream_frame(channel, payload)
                     continue
                 message = json.loads(payload)
                 method, params = message.get("method"), message.get("params") or {}
@@ -1000,7 +1001,7 @@ class LivePtyd(FakePtyd):
             with contextlib.suppress(ConnectionError, RuntimeError):
                 await self._frame(host, channel, b"")
 
-    async def _channel_frame(self, channel: int, payload: bytes) -> None:
+    async def _stream_frame(self, channel: int, payload: bytes) -> None:
         entry = self._streams.get(channel)
         if entry is None:
             return
