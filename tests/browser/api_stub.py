@@ -143,16 +143,6 @@ GATES: dict[str, object] = {
         "terminals": [],
         "capacity": {"running": 0, "cap": 20, "queued": 0},
     },
-    # What the running terminals cost the machine, for the load bar in the Terminals screen's header:
-    # nothing runs, on a 16 GB machine with half of it in use. The page does the arithmetic and the words.
-    "/api/terminals/load": {
-        "cap": 20, "running": 0, "queued": [],
-        "used": {"rss_bytes": 0, "daemon_rss_bytes": 30 << 20, "cpu_percent": 0.0, "cpus": 8, "mem_total_bytes": 16 << 30, "mem_available_bytes": 8 << 30, "machine_cpu_percent": 10.0},
-        "profiles": {},
-        "likely": {"rss_bytes": 64 << 20, "cpu_percent": 1.0, "samples": 0, "basis": "default"},
-        "projection": {"cap": 20, "sessions": 20, "terminals_rss_bytes": 20 * (64 << 20), "machine_used_bytes": (8 << 30) + 20 * (64 << 20), "mem_total_bytes": 16 << 30, "mem_percent": 57.8, "cpu_percent": 12.5, "level": "ok", "cpu_level": "ok"},
-        "envs": [], "thresholds": {"warn": 70.0, "bad": 90.0},
-    },
 }
 
 
