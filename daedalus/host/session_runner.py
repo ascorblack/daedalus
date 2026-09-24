@@ -57,6 +57,7 @@ from daedalus.host.request_manifests import RequestManifestStore
 from daedalus.host.services import SessionServices, locator
 from daedalus.host.skills import DirectorySkillStore
 from daedalus.host.transcript_view import TranscriptViewBuilder, message_view
+from daedalus.host.worktrees import append_exclude, exclude_lines
 from daedalus.mcp.manager import McpManager, blocked_for
 from daedalus.providers.chain import build_chain
 from daedalus.providers.registry import ProviderRegistry
@@ -303,11 +304,6 @@ def _ensure_inbox(workspace: Path, folder: ProjectFolder | None) -> None:
         _exclude_artefacts(workspace)
 
 
-# The directories a session writes into the folder it works in: the inbox files arrive in, and the
-# per-tool scratch of Exec, its background jobs, the services it hosts and the snapshots. In a
-# workspace of the session's own they are the whole of the directory. In a project they land in the
-# operator's repository, where they have no business showing up in `git status` or being swept into a
-# commit by `git add -A`.
 def _steer_cards(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     """The waiting steers as the composer draws them: a recognisable amount of each, and not all of them."""
     cards: list[dict[str, Any]] = []
@@ -324,10 +320,6 @@ def _steer_cards(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return cards
 
 
-SESSION_ARTEFACTS = ("inbox/", ".exec/", ".jobs/", ".services/", ".checkpoints/", ".agents/")
-_EXCLUDE_MARKER = "# daedalus: what an agent working in this folder writes into it"
-
-
 def _exclude_artefacts(root: Path) -> None:
     """Keep the agent's own directories out of the operator's git status.
 
@@ -336,19 +328,13 @@ def _exclude_artefacts(root: Path) -> None:
     a change to their project. A root that is not a git repository has nothing to write and nothing
     to worry about.
     """
-    info = root / ".git" / "info"
     if not (root / ".git").is_dir():
         return
+    path = root / ".git" / "info" / "exclude"
     try:
-        info.mkdir(parents=True, exist_ok=True)
-        path = info / "exclude"
-        current = path.read_text(encoding="utf-8") if path.exists() else ""
-        if _EXCLUDE_MARKER in current:
-            return
-        prefix = "" if not current or current.endswith("\n") else "\n"
-        path.write_text(current + prefix + _EXCLUDE_MARKER + "\n" + "".join(f"/{name}\n" for name in SESSION_ARTEFACTS), encoding="utf-8")
+        append_exclude(path, exclude_lines())
     except OSError as exc:
-        logger.warning("could not write %s: %s", info / "exclude", exc)
+        logger.warning("could not write %s: %s", path, exc)
 
 
 TITLE_PROMPT = (
