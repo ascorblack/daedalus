@@ -200,7 +200,7 @@ def expect_app(base: str) -> None:
         raise SystemExit(1)
 
 
-__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "EVENTS", "GATES", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "fulfil_shared", "serve_shared_post"]
+__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "EVENTS", "GATES", "BoardStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "fulfil_shared", "serve_shared_post"]
 
 # What the harness manager reports for the container: Claude Code installed and signed in, Codex
 # installed but signed out, the rest absent. Enough for the hiring form to show one command-line agent
@@ -293,6 +293,102 @@ class TeamStub:
                 return 200, [row["live"]] if row["live"] else []
             return 200, row
         return None
+
+class BoardStub:
+    """A project's board, answered the way the host answers it, and kept between requests.
+
+    The page creates, edits, assigns and accepts; each is remembered, so a card that moved is drawn
+    where it moved to. The host's own refusal to accept what is not in review is kept as well.
+    """
+
+    ORDER = {"doing": 0, "review": 1, "todo": 2, "blocked": 3, "done": 4, "dropped": 5}
+
+    def __init__(self, project: dict, *, staff: list[dict] | None = None, tasks: list[dict] | None = None, needs_you: list[dict] | None = None) -> None:
+        self.project = {"id": project["id"], "name": project["name"], "ephemeral": False, "system": ""}
+        self.staff = [dict(m) for m in staff or []]
+        self.tasks = [dict(t) for t in tasks or []]
+        self.needs_you = [dict(n) for n in needs_you or []]
+        self.created: list[dict] = []
+        self.updated: list[tuple[str, dict]] = []
+        self.accepted: list[str] = []
+
+    @staticmethod
+    def task(id_: str, title: str, *, status: str = "todo", priority: int = 3, assignee: dict | None = None, **fields: object) -> dict:
+        row = {
+            "id": id_, "title": title, "status": status, "priority": priority, "acceptance": "", "checklist": [], "depends_on": [], "session_id": None, "notes": "",
+            "created_at": "2026-09-24T09:00:00Z", "updated_at": "2026-09-24T09:30:00Z", "project_id": "", "assignee_staff_id": assignee["id"] if assignee else None,
+            "brief": {"objective": "", "deliverable": "", "boundaries": "", "done_when": ""}, "branch": None, "merge_state": "", "assignee": assignee,
+        }
+        row.update(fields)
+        return row
+
+    @staticmethod
+    def assignee(id_: str, name: str, *, harness: str = "daedalus", color: str = "blue", status: str = "off", on_task: bool = False, **fields: object) -> dict:
+        row = {"id": id_, "name": name, "color": color, "harness": harness, "archived_at": None, "status": status, "on_task": on_task, "waiting_for": "", "status_at": "2026-09-24T09:40:00Z" if on_task else None, "session_id": f"sess-{id_}" if status != "off" else None}
+        row.update(fields)
+        return row
+
+    def listing(self, include_done: bool) -> dict:
+        rows = [t for t in self.tasks if include_done or t["status"] not in ("done", "dropped")]
+        rows.sort(key=lambda t: (self.ORDER.get(t["status"], 9), t["priority"], t["created_at"]))
+        counts = {s: sum(1 for t in self.tasks if t["status"] == s) for s in self.ORDER}
+        counts["needs_you"] = len(self.needs_you)
+        team = [{k: m[k] for k in ("id", "name", "color", "harness")} for m in self.staff]
+        return {"project": self.project, "tasks": rows, "needs_you": self.needs_you, "counts": counts, "staff": team}
+
+    def _assign(self, row: dict, staff_id: str | None) -> None:
+        member = next((m for m in self.staff if m["id"] == staff_id), None)
+        row["assignee_staff_id"] = member["id"] if member else None
+        row["assignee"] = self.assignee(member["id"], member["name"], harness=member["harness"], color=member["color"]) if member else None
+
+    def answer(self, method: str, path: str, query: str, body: dict | None) -> tuple[int, object] | None:
+        """``(status, body)`` for a route of the board, or None for anything else."""
+        base = f"/api/projects/{self.project['id']}/board"
+        if path == base and method == "GET":
+            return 200, self.listing("include_done=1" in query)
+        if path == base and method == "POST":
+            payload = dict(body or {})
+            self.created.append(payload)
+            brief = {"objective": "", "deliverable": "", "boundaries": "", "done_when": ""}
+            brief.update(payload.get("brief") or {})
+            row = self.task(f"n{len(self.tasks) + 1}", payload["title"], priority=int(payload.get("priority", 3)), brief=brief, depends_on=payload.get("depends_on") or [], project_id=self.project["id"])
+            self._assign(row, payload.get("assignee_staff_id"))
+            self.tasks.append(row)
+            launch = {"state": "queued", "position": 1} if row["assignee_staff_id"] else None
+            return 201, {**row, "launch": launch}
+        if path == "/api/board" and method == "GET":
+            return 200, [t for t in self.tasks if "include_done=1" in query or t["status"] not in ("done", "dropped")]
+        if path.startswith("/api/board/"):
+            parts = path.split("/")
+            row = next((t for t in self.tasks if t["id"] == parts[3]), None)
+            if row is None:
+                return 404, {"detail": "no such task"}
+            if method == "POST" and path.endswith("/accept"):
+                if row["status"] != "review":
+                    return 409, {"detail": f"only a task in review can be accepted; this one is {row['status']}"}
+                self.accepted.append(row["id"])
+                row["status"] = "done"
+                return 200, row
+            if method == "PUT":
+                payload = dict(body or {})
+                self.updated.append((row["id"], payload))
+                before = row.get("assignee_staff_id")
+                if "assignee_staff_id" in payload:
+                    self._assign(row, payload["assignee_staff_id"] or None)
+                if "brief" in payload:
+                    row["brief"] = {**row["brief"], **payload["brief"]}
+                for key in ("title", "status", "priority", "depends_on"):
+                    if key in payload:
+                        row[key] = payload[key]
+                if payload.get("note"):
+                    row["notes"] = (row["notes"] + "\n" if row["notes"] else "") + payload["note"]
+                launched = row["assignee_staff_id"] and row["assignee_staff_id"] != before
+                return 200, {**row, "launch": {"state": "started"} if launched else None}
+            if method == "DELETE":
+                self.tasks.remove(row)
+                return 200, {"deleted": True}
+        return None
+
 
 # Small documents with deliberately different structures make the explorer and preview checks
 # exercise parsing, navigation and media decoding without reading anybody's real workspace.

@@ -2341,6 +2341,51 @@ button.staff-row:hover { background: var(--surface-2); }
   .staff-status-inline { display: block; margin-top: 2px; }
 }
 
+/* A project's board. On a phone and in a narrow panel it is one list under chips; from 1024 px the
+   columns stand side by side and each scrolls with the page, so a long queue never hides the review. */
+.pboard-list { display: flex; flex-direction: column; gap: var(--space-2); }
+.pboard-section { display: flex; flex-direction: column; gap: var(--space-2); }
+.pboard-section .section-title, .pboard-list > .section-title { margin: 10px 2px 2px; }
+.pboard-none { color: var(--fg-3); font-size: var(--fs-12); padding: 6px 4px; }
+.pboard-fold { border: 0; background: none; padding: 0; cursor: pointer; font: inherit; font-size: var(--fs-12); color: var(--fg-2); text-transform: uppercase; letter-spacing: 0.06em; align-items: center; }
+.pboard-fold .ic { transform: rotate(-90deg); transition: transform .15s ease; }
+.pboard-fold[aria-expanded="true"] .ic { transform: none; }
+.pboard-chips .chip.need:not([aria-pressed="true"]) { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.pcard { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-1); color: var(--fg); cursor: pointer; }
+.pcard:hover { background: var(--surface-2); }
+.pcard:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pcard.p1 { box-shadow: inset 3px 0 0 var(--bad); }
+.pcard.p2 { box-shadow: inset 3px 0 0 var(--warn); }
+.pcard.done, .pcard.dropped { opacity: 0.75; }
+.pcard.need { cursor: default; border-color: color-mix(in srgb, var(--warn) 50%, var(--line)); background: color-mix(in srgb, var(--warn) 7%, var(--surface-1)); }
+.pcard.need:hover { background: color-mix(in srgb, var(--warn) 7%, var(--surface-1)); }
+.pcard-head { display: flex; align-items: flex-start; gap: var(--space-2); min-width: 0; }
+.pcard-title { flex: 1; min-width: 0; font-size: var(--fs-14); font-weight: 500; overflow-wrap: anywhere; }
+.pcard-line { font-size: var(--fs-12); min-width: 0; }
+.pcard-meta { display: flex; align-items: center; gap: var(--space-2); min-width: 0; color: var(--fg-2); font-size: var(--fs-12); }
+.pcard-meta > .truncate { min-width: 0; }
+.pcard-who { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.pcard-short { font-family: var(--mono); font-size: var(--fs-11); color: var(--fg-3); flex: none; }
+.pcard-branch { font-family: var(--mono); font-size: var(--fs-11); color: var(--fg-2); min-width: 0; display: block; }
+.pcard .btn.small { flex: none; }
+.btn.warn { color: var(--warn); background: transparent; border-color: color-mix(in srgb, var(--warn) 50%, transparent); font-weight: 600; }
+.btn.warn:hover { background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.pboard-sheet-status { margin-bottom: 8px; flex-wrap: wrap; }
+.pboard-moves { margin: 0 0 6px; flex-wrap: wrap; }
+.pboard-brief { border: 0; padding: 0; margin: 0; min-width: 0; }
+.pboard-brief legend { padding: 0; margin: 14px 0 0; color: var(--fg-2); font-size: var(--fs-12); text-transform: uppercase; letter-spacing: 0.06em; }
+.pboard-moves .sub { align-self: center; }
+.pboard-sheet textarea.field { resize: vertical; font: inherit; }
+.pboard-deps { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+.pboard-deps .chip { max-width: 100%; min-width: 0; }
+.pboard-notes { max-height: 180px; overflow: auto; }
+@media (min-width: 1024px) {
+  .pboard-cols { display: grid; grid-template-columns: repeat(4, minmax(200px, 1fr)) minmax(170px, 0.8fr); gap: 12px; align-items: start; }
+  .pboard-col { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; padding: 4px 6px 8px; border-radius: var(--radius-md); }
+  .pboard-col.needs { background: color-mix(in srgb, var(--warn) 5%, transparent); }
+  .pboard-col .section-title { margin: 6px 4px 4px; }
+}
+
 /* Push on this device: the Settings card and the phone's nudge above the notification list. */
 .push-steps { margin: 8px 0 0; padding-left: 20px; color: var(--fg-2); font-size: var(--fs-13); line-height: var(--lh-ui); display: grid; gap: 4px; }
 .push-error { color: var(--bad); }
