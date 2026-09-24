@@ -33,6 +33,7 @@ from daedalus.harness.contract import (
     Answer,
     Catalog,
     CheckResult,
+    CheckStep,
     CompanionSpec,
     Delivery,
     EnvironmentPort,
@@ -52,6 +53,7 @@ from daedalus.harness.contract import (
     TurnUsage,
     UpdateResult,
 )
+from daedalus.harness.manager import HarnessManager, Operation
 from daedalus.harness.runtime import CliStaffRuntime, install_runtimes
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.host.session_runner import SessionManager
@@ -672,6 +674,28 @@ async def test_runtimes_are_installed_per_adapter_and_say_when_they_cannot_start
             assert not unavailable.ok and "host terminal service is not available" in unavailable.reason
             await HarnessStore(db).record_check("container", "claude", install=InstallInfo(True, "claude", "2.1.281", "native"), login=LoginState("no"))
             assert (await made[0].available("container")).reason == "Claude Code is not signed in in the container environment"
+        finally:
+            for runtime in made:
+                runtime.close()
+
+
+async def test_the_harness_manager_holds_a_launch_back_while_it_updates_the_cli(settings: Settings, db: Database) -> None:
+    async with stand(settings, db) as s:
+        store = HarnessStore(db)
+        await store.record_check("container", "claude", install=InstallInfo(True, "claude", "2.1.281", "native"), login=LoginState("yes"))
+
+        async def nobody(harness: str) -> list[dict[str, Any]]:
+            return []
+
+        harness = HarnessManager(store, ports=lambda env: None, environments=lambda: [], config=lambda: s.harness, live_staff=nobody)
+        made = install_runtimes({"claude": StubClaude}, {}, terminals=s.terminals, store=store, ingress=s.team.ingress, lookup=s.team.live, config=lambda: s.harness, blocker=harness.launch_blocker)
+        try:
+            assert (await made[0].available("container")).ok
+            harness.operations[("container", "claude")] = Operation(kind="update", env="container", harness="claude", started_at="")
+            assert (await made[0].available("container")).reason == "Claude Code is being updated in the container environment"
+            del harness.operations[("container", "claude")]
+            await store.record_self_check("container", "claude", CheckResult(ok=False, steps=(CheckStep("version", True), CheckStep("hook", False, "no SessionStart")), version="2.1.281", duration_ms=1))
+            assert (await made[0].available("container")).reason == "Claude Code's last self-check failed at hook: no SessionStart"
         finally:
             for runtime in made:
                 runtime.close()

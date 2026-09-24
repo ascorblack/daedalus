@@ -269,6 +269,7 @@ class CliStaffRuntime:
         lookup: Lookup,
         config: Callable[[], HarnessConfig],
         clock: Callable[[], float] = time.monotonic,
+        blocker: Callable[[str, str], Awaitable[str]] | None = None,
     ) -> None:
         self.adapter = adapter
         self.kind = adapter.name
@@ -278,6 +279,9 @@ class CliStaffRuntime:
         self.lookup = lookup
         self.config = config
         self.clock = clock
+        self.blocker = blocker
+        """The harness manager's word on ``(env, harness)``: why no member may start on it now (it is
+        being updated, its last self-check failed, its major is not supported), or empty."""
         self.sessions: dict[str, CliSession] = {}
         self._by_terminal: dict[str, CliSession] = {}
         self._unsubscribe = terminals.subscribe(self._on_terminal_event)
@@ -320,6 +324,10 @@ class CliStaffRuntime:
             return Availability(False, f"{label} is not installed in the {env} environment")
         if row is not None and row.logged_in == "no":
             return Availability(False, f"{label} is not signed in in the {env} environment")
+        if self.blocker is not None:
+            reason = await self.blocker(env, self.kind)
+            if reason:
+                return Availability(False, reason)
         return Availability(True)
 
     # -- starting --------------------------------------------------------------------------------
@@ -1002,11 +1010,12 @@ def install_runtimes(
     ingress: TeamIngress,
     lookup: Lookup,
     config: Callable[[], HarnessConfig],
+    blocker: Callable[[str, str], Awaitable[str]] | None = None,
 ) -> list[CliStaffRuntime]:
     """One runtime per registered adapter, put into the team's ``runtimes`` under the harness name."""
     made = []
     for name, factory in adapters.items():
-        runtime = CliStaffRuntime(factory(), terminals=terminals, store=store, ingress=ingress, lookup=lookup, config=config)
+        runtime = CliStaffRuntime(factory(), terminals=terminals, store=store, ingress=ingress, lookup=lookup, config=config, blocker=blocker)
         runtimes[name] = runtime
         made.append(runtime)
     return made

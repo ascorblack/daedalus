@@ -223,22 +223,38 @@ class HarnessManager(HarnessCatalog):
         label = capabilities(harness).label
         if not view["installed"]:
             return view.get("error") or f"{label} is not installed in the {env} environment"
-        if not view["supported"]:
-            return f"{label} {view['installed_version']} is a major version the adapter does not support"
-        operation = self.operations.get((env, harness))
-        if operation is not None and operation.kind in ("update", "install"):
-            return f"{label} is being updated"
         if view["logged_in"] == "no":
             return f"{label} is not signed in in the {env} environment"
+        blocked = self._blocked(env, harness, view)
+        if blocked:
+            return blocked
+        if harness not in ADAPTERS:
+            return f"Daedalus cannot run {label} as staff yet"
+        return ""
+
+    def _blocked(self, env: str, harness: str, view: dict[str, Any]) -> str:
+        """What only the manager knows against a launch: an operation on the CLI, a major it does not
+        support, a failed self-check, an untested version when those are not allowed."""
+        label = capabilities(harness).label
+        operation = self.operations.get((env, harness))
+        if operation is not None and operation.kind in ("update", "install"):
+            return f"{label} is being {PAST[operation.kind]} in the {env} environment"
+        if view["installed"] and not view["supported"]:
+            return f"{label} {view['installed_version']} is a major version the adapter does not support"
         check = view.get("self_check") or {}
         if check and not check.get("ok"):
             failed: dict[str, Any] = next((s for s in check.get("steps") or [] if not s.get("ok") and not s.get("skipped")), {})
             return f"{label}'s last self-check failed" + (f" at {failed.get('name')}: {failed.get('detail')}" if failed else "")
-        if not view["tested"] and not self.config().allow_untested:
+        if view["installed"] and not view["tested"] and not self.config().allow_untested:
             return f"{label} {view['installed_version']} is outside the tested versions"
-        if harness not in ADAPTERS:
-            return f"Daedalus cannot run {label} as staff yet"
         return ""
+
+    async def launch_blocker(self, env: str, harness: str) -> str:
+        """For the staff runtime before a launch, beside its own checks (environment reachable,
+        installed, signed in): why the manager holds this CLI back now, or empty. A CLI never checked
+        is not held back here; the runtime decides that."""
+        capabilities(harness)
+        return self._blocked(env, harness, self._entry(env, CAPABILITIES[harness], await self.store.catalog_row(env, harness)))
 
     async def entry(self, env: str, harness: str) -> dict[str, Any]:
         capabilities(harness)

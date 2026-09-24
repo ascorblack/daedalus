@@ -98,6 +98,7 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
         ingress=team.ingress,
         lookup=team.live,
         config=lambda: app.config.harness,
+        blocker=harness.launch_blocker,
     )
     if not runtimes:
         return tasks
