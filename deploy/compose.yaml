@@ -31,6 +31,16 @@
 #   terminals-home        -> /root (terminals only)     the terminals' home: CLI installs, their logins,
 #                                                       shell history. Never mounted into the agent.
 #   terminals-state       -> /var/lib/ptyd (terminals only)  the daemon's journal, launches, logs
+#   ../../daedalus-host-terminals -> /run/daedalus-host-terminals  the host terminal's socket and
+#                                                       token (DAEDALUS_HOST_TERMINALS_DIR overrides it)
+#
+# Host terminal (optional). `bash deploy/setup.sh` can install `ptyd` on the server itself as a
+# systemd user unit of the operator's (deploy/ptyd/daedalus-ptyd.service): a shell on the server as
+# the operator, opened from the app. Its run directory is a sibling of this checkout, and it is
+# mounted into the agent whether or not the unit is installed: an empty directory reads as "not
+# installed", and installing or removing the unit later needs no change here and no recreate,
+# because the socket appears in a directory that is already mounted. setup.sh creates the directory
+# as the operator; left to Docker, it would be created as root and the unit could not write to it.
 #
 # Networks: "telegram" (bot ⇄ local Bot API), "keys" (bot ⇄ key proxy), "search" (bot ⇄ SearXNG),
 # "terminals" (the terminals service's own way out, with no route to the key proxy or SearXNG).
@@ -91,6 +101,8 @@ services:
       SERVICES_PUBLIC_HOST: ${SERVICES_PUBLIC_HOST:-}
       # The terminals service's run directory (the terminal-run volume) and the ports it publishes.
       TERMINALS_CONTAINER_DIR: /run/daedalus-terminals
+      # The host terminal's run directory: empty until the systemd user unit is installed on the host.
+      TERMINALS_HOST_DIR: /run/daedalus-host-terminals
       TERMINALS_PORT_RANGE: ${TERMINALS_PORT_RANGE:-8120-8139}
       GITHUB_DAEDALUS_TOKEN: ${GITHUB_DAEDALUS_TOKEN:-}
       DAEDALUS_GITHUB_ORG: ${DAEDALUS_GITHUB_ORG:-}
@@ -120,6 +132,9 @@ services:
       # The terminal daemon's socket and token. The directory is sealed from the agent's commands;
       # only the app's own process opens it.
       - terminal-run:/run/daedalus-terminals
+      # The host terminal's socket and token, from the server itself. Sealed the same way: its token
+      # opens a shell on the server as the operator.
+      - ${DAEDALUS_HOST_TERMINALS_DIR:-../../daedalus-host-terminals}:/run/daedalus-host-terminals
     ports:
       - "127.0.0.1:${API_PORT:-8765}:${API_PORT:-8765}"
       # Services the agent hosts (ServiceStart) listen in this range; published on every interface so the

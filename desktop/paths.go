@@ -13,6 +13,7 @@ import (
 //	<data>/protocore-exp                  the core checkout
 //	<data>/daedalus-secrets/keyproxy.env  provider keys, never inside a mounted checkout
 //	<data>/daedalus-secrets/ssh           hosts the agent may reach (may stay empty)
+//	<data>/daedalus-host-terminals        a server's host terminal socket; compose mounts it always
 //	<data>/.env                           the values compose interpolates
 //	<data>/compose.desktop.yaml           the override that points at the published images
 //	<data>/mode                           docker or native, chosen once and remembered
@@ -44,6 +45,10 @@ type Paths struct {
 	Override    string
 	Mode        string
 	Lang        string
+
+	// HostTerminals is where a host terminal daemon keeps its socket on a server. The compose file
+	// mounts it whether or not one runs, and a missing source would be created by Docker as root.
+	HostTerminals string
 
 	Runtime         string
 	RuntimeUV       string
@@ -89,6 +94,8 @@ func NewPaths(dataDir string) (Paths, error) {
 		Override:    filepath.Join(abs, "compose.desktop.yaml"),
 		Mode:        filepath.Join(abs, "mode"),
 		Lang:        filepath.Join(abs, "lang"),
+
+		HostTerminals: filepath.Join(abs, "daedalus-host-terminals"),
 
 		Runtime:         runtimeDir,
 		RuntimeUV:       filepath.Join(runtimeDir, "uv"),
@@ -151,6 +158,9 @@ func (p Paths) EnsureDirs() error {
 		return err
 	}
 	if err := os.MkdirAll(p.Secrets, 0o700); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(p.HostTerminals, 0o700); err != nil {
 		return err
 	}
 	return os.MkdirAll(p.SSH, 0o700)

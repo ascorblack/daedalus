@@ -55,6 +55,23 @@ it differs from the running daemon's. Updating is the operator's: the route belo
 terminals`, which ends every container terminal, and refuses with the count until the operator
 confirms. Without a rebuilder the refusal names the command to run on the server.
 
+### On a server: the host terminal
+
+The `host` environment of a compose install is `ptyd` on the server itself, as the operator: a
+systemd user unit (`deploy/ptyd/daedalus-ptyd.service`, installed by `deploy/host-terminal.sh`, which
+`deploy/setup.sh` offers) running `serve --env host --run-dir <dir> --state-dir
+~/.local/state/daedalus-ptyd`, with the image's own binary copied to `~/.local/lib/daedalus/ptyd` so
+the two daemons speak one protocol. The run directory is `../daedalus-host-terminals` beside the
+checkout (`DAEDALUS_HOST_TERMINALS_DIR`), and compose mounts it into the agent's container at
+`/run/daedalus-host-terminals` (`TERMINALS_HOST_DIR`) whether or not the unit is installed: an empty
+directory reads as `not_installed`, and the socket appears in a directory already mounted. setup
+creates it as the operator, `0700`, because Docker would create a missing source as root. The unit
+keeps the default `KillMode=control-group`, so stopping it ends every host terminal, and the
+installer turns on lingering so it outlives the operator's login. The host reports why it cannot
+use the daemon: `not_installed` (empty directory; its detail says when root owns it), `not_running`
+(a lock or token without an endpoint, or an endpoint nothing answers at), `permission_denied` (root
+in the container is not root on the host: rootless Docker or userns-remap), `protocol_mismatch`.
+
 ## Run directory and handshake
 
 ```
@@ -576,7 +593,8 @@ FIFOs and devices are refused.
 
 | Method | Params → result |
 |---|---|
-| `fs.stat` | `{path}` → `{exists, type, size, mtime, mode, file_id}`; a missing path under a root is `{exists: false}` |
+| `fs.stat` | `{path, as_root?}` → `{exists, type, size, mtime, mode, file_id}`; a missing path under a root is `{exists: false}`. With `as_root`, the path need not be under a root: it is held to the rules a root is (not `/`, not holding the home directory, nothing denied or the daemon's own) and the answer adds `writable` |
+| `fs.mkdir` | `{path}` → `fs.stat {as_root}`'s answer plus `created`: makes a folder that is to become a root (a project folder), with its parents, under the same rules; an existing folder is left as it is. The side channels' only write |
 | `fs.list` | `{path, glob?, sort? "name"\|"mtime", limit? ≤ 5000}` → `{entries[{name, type, size, mtime}], truncated}`; denied entries are left out, symlinks listed as such |
 | `fs.read` | `{path, offset?, max? ≤ 4 MiB}` → `{data_b64, offset, size, eof, file_id}` |
 | `fs.tail` | `{path, from_offset, max?, follow_ms? ≤ 60 000, file_id?}` → `{data_b64, next_offset, size, rotated, file_id}` |
@@ -746,6 +764,13 @@ because the token in them is a shell.
   launch registered or ended, port opened, stream dialled and hook answered is in the audit, with
   the launch's terminal when it is known. Natively the daemons' state directories are sealed like
   the rest of the installation.
+- **The host bridge** (`daedalus/terminals/bridge.py`, `app.extensions["host_bridge"]`) is how the
+  rest of a Docker install reaches the host: `available()` is the live connection, not the endpoint
+  file (a killed daemon leaves that behind); `check_folder(path, create_missing=)` checks or makes a
+  project folder through `fs.stat {as_root}` / `fs.mkdir` and says whether it is a git work tree;
+  `exec_run` runs git for the staff worktrees of host folders, and a call that cannot reach the
+  daemon is an `OSError` there, so "the bridge is down" is never mistaken for git failing. Project
+  folders accept a host folder only while it answers.
 
 | Route | |
 |---|---|
