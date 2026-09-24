@@ -126,6 +126,8 @@ async def test_folders_are_added_locked_and_removed_with_a_journal_of_it(running
     assert folder["readonly"] is True and folder["writable"] is False and folder["label"] == "Reference"
     live = manager.live_state(sid).project.folder(docs_id)
     assert live is not None and live.readonly is True, "a loaded session must see the lock now, not at its next load"
+    walls = manager.live_state(sid).services.walls
+    assert docs in walls.readable and docs not in walls.writable, "and its walls with it: readable, never writable"
     assert (await client.patch(f"/api/projects/{pid}/folders/f-nope", headers=HEADERS, json={"readonly": True})).status_code == 404
 
     removed = await client.delete(f"/api/projects/{pid}/folders/{docs_id}", headers=HEADERS)

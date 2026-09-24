@@ -1358,6 +1358,29 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         default = app.config.default_preset()
         return default[1].provider if default else ""
 
+    def _session_folders(state: Any) -> list[dict[str, Any]]:
+        """The folders of its project the session's file pane may open: the ones its walls let it read.
+
+        Empty for a session with a directory of its own, whose pane is that directory and nothing
+        else; ``writable`` is the walls' answer, so a folder marked read-only offers no upload.
+        """
+        services = state.services
+        if state.project is None or services is None or services.walls is None or state.metadata.get("directory"):
+            return []
+        out = []
+        for folder in state.project.folders:
+            if not services.contains(folder.path):
+                continue
+            out.append({
+                "id": folder.id,
+                "path": str(folder.path),
+                "label": folder.label,
+                "env": folder.env,
+                "readonly": folder.readonly,
+                "writable": services.contains(folder.path, write=True),
+            })
+        return out
+
     @api.get("/api/sessions/{session_id}")
     async def get_session(session_id: str, tail: int = 600, before: int = 0, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """One page of a session. ``tail`` is the newest N turns; ``before=<seq>`` the page older than one already shown.
@@ -1407,6 +1430,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "workspace_name": state.workspace.name,
             "workspace_own": bool(state.metadata.get("directory")),
             "project": state.project.view(),
+            "folder_id": state.metadata.get("folder_id") or (state.project.primary.id if state.project.folders else ""),
+            "folders": _session_folders(state),
             # Subagents share their leader's workspace by design; they are listed under Subagents (and the leader under
             # "leader:"), so the workspace list shows only the sessions that were attached to it.
             "workspace_sessions": [u for u in await manager.workspace_users(state.workspace) if u["id"] != session_id and u["id"] not in {c["session_id"] for c in subagents} and u["id"] != state.metadata.get("subagent_of")],
@@ -3581,25 +3606,54 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             current = current.parent
         return {"root": str(anchor), "path": str(target), "parents": list(reversed(parents)), "entries": entries, "truncated": truncated}
 
-    @api.post("/api/sessions/{session_id}/files/upload")
-    async def session_files_upload(session_id: str, path: str = Form(""), files: list[UploadFile] = File(default=[]), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """Put files into the session's workspace without a message to the agent."""
+    async def _files_root(session_id: str, folder_id: str, *, write: bool = False) -> Path:
+        """The directory a session's file pane is rooted at: its workspace, or another folder of its project.
+
+        Another folder opens only when the session's walls let it read that folder — a session with
+        a directory of its own reads nothing but that directory, and a folder of the other environment
+        is no folder of this process at all — and an upload only when they let it write there, so the
+        pane cannot put a file where the agent itself could not.
+        """
         state = await manager.get_state(session_id)
         if state is None:
             raise HTTPException(404, "no such session")
+        services = state.services
+        if not folder_id:
+            root = state.workspace
+        else:
+            folder = state.project.folder(folder_id) if state.project is not None else None
+            if folder is None:
+                raise HTTPException(404, "no such folder in this session's project")
+            if services is None or not services.contains(folder.path):
+                raise HTTPException(403, f"{folder.path} is not a folder this session can read")
+            root = folder.path
+        if write and services is not None and not services.contains(root, write=True):
+            raise HTTPException(403, f"{root} is read-only for this session")
+        return root
+
+    # Every route of the pane answers under two addresses: the session's own folder, and
+    # ``/folders/{folder_id}`` for another folder of its project. The folder is part of the path rather
+    # than a query parameter because the app builds each file's address as ``{base}/download?path=…``
+    # in many places — the preview, the page preview's links, the panel's history, a download — and a
+    # base that already names the folder reaches every one of them unchanged.
+
+    @api.post("/api/sessions/{session_id}/files/upload")
+    @api.post("/api/sessions/{session_id}/folders/{folder_id}/files/upload")
+    async def session_files_upload(session_id: str, folder_id: str = "", path: str = Form(""), files: list[UploadFile] = File(default=[]), _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Put files into the session's workspace, or another folder of its project, without a message to the agent."""
+        root = await _files_root(session_id, folder_id, write=True)
         if not files:
             raise HTTPException(400, "no files")
-        return {"files": await _store_uploads(state.workspace, files, path)}
+        return {"files": await _store_uploads(root, files, path)}
 
     @api.get("/api/sessions/{session_id}/files")
-    async def list_files(session_id: str, path: str = "", _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        state = await manager.get_state(session_id)
-        if state is None:
-            raise HTTPException(404, "no such session")
-        return _read_path(state.workspace, path)
+    @api.get("/api/sessions/{session_id}/folders/{folder_id}/files")
+    async def list_files(session_id: str, folder_id: str = "", path: str = "", _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return _read_path(await _files_root(session_id, folder_id), path)
 
     @api.get("/api/sessions/{session_id}/files/search")
-    async def search_files(session_id: str, q: str = "", limit: int = FILE_SEARCH_MAX_RESULTS, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+    @api.get("/api/sessions/{session_id}/folders/{folder_id}/files/search")
+    async def search_files(session_id: str, folder_id: str = "", q: str = "", limit: int = FILE_SEARCH_MAX_RESULTS, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Find a file by name anywhere in the session's tree — the explorer's filter box, unbounded by what it has loaded.
 
         ``q`` is a case-insensitive substring of the name, or a glob when it carries one of ``*?[``;
@@ -3607,42 +3661,37 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         both work. Every answer goes through the browser's containment, so a symlink out of the
         tree and a path inside the installation are absent rather than refused.
         """
-        state = await manager.get_state(session_id)
-        if state is None:
-            raise HTTPException(404, "no such session")
+        root = await _files_root(session_id, folder_id)
         query = q.strip()
         if not query:
             return {"query": "", "results": [], "truncated": False, "engine": "none"}
         wanted = max(1, min(int(limit), FILE_SEARCH_MAX_RESULTS))
-        results, truncated, engine = await _run_search(_search_names, state.workspace, query, wanted)
+        results, truncated, engine = await _run_search(_search_names, root, query, wanted)
         return {"query": query, "results": results, "truncated": truncated, "engine": engine}
 
     @api.get("/api/sessions/{session_id}/files/grep")
-    async def grep_files(session_id: str, q: str = "", limit: int = FILE_SEARCH_MAX_RESULTS, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+    @api.get("/api/sessions/{session_id}/folders/{folder_id}/files/grep")
+    async def grep_files(session_id: str, folder_id: str = "", q: str = "", limit: int = FILE_SEARCH_MAX_RESULTS, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Find a line by its text anywhere in the session's tree, with the line it is on.
 
         Content search is ripgrep's job and is not reimplemented in Python: an install without it
         gets 501 and a sentence saying so, which the panel shows in place of the results instead of
         offering a search that would walk the whole tree in the event loop.
         """
-        state = await manager.get_state(session_id)
-        if state is None:
-            raise HTTPException(404, "no such session")
+        root = await _files_root(session_id, folder_id)
         if shutil.which("rg") is None:
             raise HTTPException(501, "content search needs ripgrep (rg), which is not installed here; search by name instead")
         query = q.strip()
         if not query:
             return {"query": "", "hits": [], "truncated": False}
         wanted = max(1, min(int(limit), FILE_SEARCH_MAX_RESULTS))
-        hits, truncated = await _run_search(_search_content, state.workspace, query, wanted)
+        hits, truncated = await _run_search(_search_content, root, query, wanted)
         return {"query": query, "hits": hits, "truncated": truncated}
 
     @api.get("/api/sessions/{session_id}/download")
-    async def download(session_id: str, path: str, _: dict[str, Any] = Depends(auth)) -> FileResponse:
-        state = await manager.get_state(session_id)
-        if state is None:
-            raise HTTPException(404, "no such session")
-        return _file_response(state.workspace, path)
+    @api.get("/api/sessions/{session_id}/folders/{folder_id}/download")
+    async def download(session_id: str, path: str, folder_id: str = "", _: dict[str, Any] = Depends(auth)) -> FileResponse:
+        return _file_response(await _files_root(session_id, folder_id), path)
 
     # -- the steer queue: what was sent to a working agent and has not reached it yet -------
 

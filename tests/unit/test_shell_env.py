@@ -85,7 +85,7 @@ async def test_the_sandbox_opens_the_paths_the_host_named_for_the_session(tmp_pa
     exec_config = SimpleNamespace(sandbox="workspace", sandbox_extra_writable=[])
     link = tmp_path / "worktrees" / "bot" / "elsewhere"
     link.symlink_to(tmp_path)
-    argv, sandboxed = await shell.sandbox_argv("git commit", worktree, workspace, exec_config, writable=[worktree, tmp_path / "missing", link, worktree])
+    argv, sandboxed = await shell.sandbox_argv("git commit", exec_config, writable=[workspace, worktree, tmp_path / "missing", link, worktree])
     assert sandboxed
     binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
     # The missing path, the symlink and the duplicate are left out; the sandbox still runs.
@@ -93,7 +93,7 @@ async def test_the_sandbox_opens_the_paths_the_host_named_for_the_session(tmp_pa
 
 
 def test_a_worktree_opens_its_git_metadata_but_not_the_whole_repository(tmp_path) -> None:
-    from daedalus.host.session_runner import worktree_writable_paths
+    from daedalus.host.containment import worktree_writable_paths
 
     repo = tmp_path / "repo"
     (repo / ".git" / "worktrees" / "fix").mkdir(parents=True)

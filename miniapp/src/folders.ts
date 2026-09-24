@@ -18,7 +18,7 @@ export function projectReachable(project: Pick<ProjectRef, "folders">): boolean 
 }
 
 /** What a folder is called on screen: the label the operator gave it, else the last part of its path. */
-export function folderName(folder: Pick<ProjectDir, "label" | "path">): string {
+export function folderName(folder: { label: string; path: string }): string {
   if (folder.label.trim()) return folder.label.trim();
   const parts = folder.path.split(/[\\/]+/).filter(Boolean);
   return parts[parts.length - 1] ?? folder.path;
@@ -62,4 +62,13 @@ export function needsMount(env: "container" | "host", environments?: Pick<Projec
 export function pathProblem(path: string): boolean {
   const typed = path.trim();
   return !!typed && !(typed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(typed));
+}
+
+/**
+ * Where a session's file pane reads a folder from. The session's own folder is the session's own
+ * address; another one is under `/folders/{id}`, so every file address built from the base — the
+ * preview, a download, a page preview's links — names the folder without knowing about it.
+ */
+export function folderBase(sessionBase: string, folder: string, home: string): string {
+  return !folder || folder === home ? sessionBase : `${sessionBase}/folders/${encodeURIComponent(folder)}`;
 }

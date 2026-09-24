@@ -47,7 +47,7 @@ async def test_a_name_creates_the_project_folder_and_every_session_has_a_project
             assert shared_state is not None and shared_state.workspace == Path(project["folders"][0]["path"])
             assert private_state is not None and private_state.workspace.parent.parent == Path(project["folders"][0]["path"])
             assert private_state.project is not None and private_state.project.id == project["id"]
-            assert private_state.services is not None and private_state.services.project_root == private_state.workspace
+            assert private_state.services is not None and private_state.services.walls is not None and private_state.services.walls.readable == (private_state.workspace,)
 
             listing = (await client.get("/api/sessions", headers=HEADERS)).json()
             assert "free" not in listing

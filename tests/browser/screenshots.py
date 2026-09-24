@@ -591,6 +591,9 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         parts = rel.split("/")
         sid = parts[3]
         tail = "/".join(parts[4:])
+        if tail.startswith("folders/"):
+            # Another folder of the session's project answers under /folders/{id} with the same routes.
+            tail = "/".join(tail.split("/")[2:])
         if tail == "":
             return respond(route, detail(sid))
         if tail == "files":
