@@ -30,6 +30,7 @@ type Info struct {
 	LaunchID         string            `json:"launch_id"`
 	Sandbox          bool              `json:"sandbox"`
 	Shell            string            `json:"shell,omitempty"`
+	ShellIntegration string            `json:"shell_integration,omitempty"`
 	OutputSeq        int64             `json:"output_seq"` // offset one past the last output byte
 	Preview          any               `json:"preview,omitempty"`
 }
@@ -56,16 +57,23 @@ func (t *Terminal) Info() Info {
 	running := t.Running()
 	lastHuman := t.in.LastHuman()
 	kb := t.in.Keyboard()
-	busy := false
+	foreground := false
 	if running {
 		// A job other than the terminal's own program is in the foreground: under a shell, a command
 		// is running.
 		if pg, err := t.proc.Foreground(); err == nil && pg > 0 && pg != t.Pid {
-			busy = true
+			foreground = true
 		}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// The shell's own marks say it best, once it prints them: a builtin loop runs in the shell's
+	// process group, and a job put in the background with its output still coming is not the
+	// prompt's business.
+	busy := foreground
+	if marked, ok := t.busyLocked(); ok {
+		busy = marked && running
+	}
 	labels := t.Labels
 	if labels == nil {
 		labels = map[string]string{}
@@ -75,7 +83,7 @@ func (t *Terminal) Info() Info {
 		CreatedAt: t.CreatedAt, LastOutputAt: timePtr(t.lastOutput), LastInputAt: timePtr(t.lastInput),
 		LastHumanInputAt: timePtr(lastHuman.UTC()), Cols: t.cols, Rows: t.rows, Clients: []ClientInfo{},
 		Keyboard: kb, Modes: t.modes, Busy: busy, LastCommand: t.lastCommand, Labels: labels,
-		LaunchID: t.LaunchID, Shell: t.Shell, OutputSeq: t.ring.Head(),
+		LaunchID: t.LaunchID, Shell: t.Shell, ShellIntegration: t.cmds.integration, OutputSeq: t.ring.Head(),
 	}
 	if lastHuman.IsZero() {
 		info.LastHumanInputAt = nil
