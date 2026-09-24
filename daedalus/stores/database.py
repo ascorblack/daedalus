@@ -1086,6 +1086,70 @@ CREATE INDEX terminal_audit_by_terminal ON terminal_audit(terminal_id, seq);
 CREATE INDEX terminal_audit_by_at ON terminal_audit(at);
 """)
 
+
+# Command-line agents as staff. The orchestrator owns staff sessions, their messages and the
+# requests they raise; these tables hold only what is particular to a CLI in a terminal, keyed to
+# those rows and dropped with them, so neither side writes the other's columns.
+# - harness_catalog: per environment and CLI, what is installed, what is latest, whether it is
+#   signed in, its agents and models, and the last self-check. Whether a version is tested is not
+#   stored: it follows from the adapter's range, which changes with the code, not with the data.
+# - harness_launches: the launch a staff session runs in — the daemon's launch id that hook posts
+#   are routed by, the companion terminal, the CLI's session id — so a restarted host can attach to
+#   a CLI that kept running. At most one open launch per staff session.
+# - harness_deliveries: how a message reached the CLI (paste, pointer, a channel), whether steer had
+#   to become something else, and the id the CLI echoes for it, which is how a restarted host tells a
+#   message that arrived from one to send again.
+MIGRATIONS.append("""
+CREATE TABLE harness_catalog (
+    env TEXT NOT NULL CHECK (env IN ('container', 'host')),
+    harness TEXT NOT NULL,
+    installed_version TEXT NOT NULL DEFAULT '',
+    latest_version TEXT NOT NULL DEFAULT '',
+    install_method TEXT NOT NULL DEFAULT '',
+    binary_path TEXT NOT NULL DEFAULT '',
+    logged_in TEXT NOT NULL DEFAULT 'unknown' CHECK (logged_in IN ('yes', 'no', 'unknown')),
+    login_detail TEXT NOT NULL DEFAULT '',
+    agents_json TEXT NOT NULL DEFAULT '[]',
+    models_json TEXT NOT NULL DEFAULT '[]',
+    modes_json TEXT NOT NULL DEFAULT '[]',
+    efforts_json TEXT NOT NULL DEFAULT '[]',
+    profiles_json TEXT NOT NULL DEFAULT '[]',
+    self_check_json TEXT NOT NULL DEFAULT '{}',
+    checked_at TEXT,
+    latest_checked_at TEXT,
+    error TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (env, harness)
+);
+CREATE TABLE harness_launches (
+    launch_id TEXT PRIMARY KEY,
+    staff_session_id TEXT NOT NULL REFERENCES staff_sessions(id) ON DELETE CASCADE,
+    harness TEXT NOT NULL,
+    env TEXT NOT NULL CHECK (env IN ('container', 'host')),
+    terminal_id TEXT,
+    companion_terminal_id TEXT,
+    launch_dir TEXT NOT NULL DEFAULT '',
+    session_ref TEXT NOT NULL DEFAULT '',
+    harness_version TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    ended_at TEXT
+);
+CREATE UNIQUE INDEX harness_launches_open ON harness_launches(staff_session_id) WHERE ended_at IS NULL;
+CREATE INDEX harness_launches_by_terminal ON harness_launches(terminal_id);
+CREATE TABLE harness_deliveries (
+    message_id TEXT PRIMARY KEY REFERENCES staff_messages(id) ON DELETE CASCADE,
+    launch_id TEXT NOT NULL REFERENCES harness_launches(launch_id) ON DELETE CASCADE,
+    via TEXT NOT NULL DEFAULT '',
+    degraded_to TEXT NOT NULL DEFAULT '' CHECK (degraded_to IN ('', 'queue', 'interrupt')),
+    client_ref TEXT NOT NULL DEFAULT '',
+    enters INTEGER NOT NULL DEFAULT 0,
+    written_at TEXT,
+    submitted_at TEXT,
+    acknowledged_at TEXT
+);
+CREATE INDEX harness_deliveries_by_launch ON harness_deliveries(launch_id, client_ref);
+""")
+
+
 # The browsers and phones Web Push reaches, one row per push subscription. The endpoint is the
 # subscription's identity (a browser that subscribes again gets a new one), so it is unique and an
 # upsert replaces the keys that come with it. No foreign keys: a subscription belongs to the

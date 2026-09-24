@@ -49,7 +49,7 @@ from daedalus.host.notify_routing import (
 )
 from daedalus.host.notify_text import render
 from daedalus.host.presence import PresenceSnapshot
-from daedalus.transport.telegram.front import TelegramOutbox
+from daedalus.transport.telegram.front import TelegramOutbox, is_subagent
 from daedalus.transport.telegram.markdown import split_message
 
 if TYPE_CHECKING:
@@ -471,7 +471,9 @@ class NotificationService:
         from_orchestrator = source.startswith("orchestrator") or (session_id is not None and session_id == policy.orchestrator_session_id)
         facts = TelegramFacts(
             front=self._front() is not None,
-            detached=bool(metadata.get("telegram_detached")),
+            # A subagent is off Telegram whatever its leader does (the front refuses it an outbox),
+            # so the router must not count on Telegram having shown it.
+            detached=bool(metadata.get("telegram_detached")) or is_subagent(dict(metadata)),
             orchestrated=policy.orchestrated,
             from_orchestrator=from_orchestrator,
         )

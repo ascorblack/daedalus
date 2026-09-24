@@ -177,6 +177,33 @@ async def test_the_terminal_tables_are_created_and_a_second_open_leaves_them_alo
     await db.close()
 
 
+async def test_the_harness_tables_are_created_keyed_to_the_staff_rows_and_a_second_open_leaves_them_alone(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite"
+    db = Database(path)
+    await db.open()
+    catalog = [r["name"] for r in await db.fetchall("PRAGMA table_info(harness_catalog)")]
+    assert catalog[:4] == ["env", "harness", "installed_version", "latest_version"]
+    assert {"logged_in", "agents_json", "models_json", "checked_at", "error", "binary_path", "login_detail", "latest_checked_at", "self_check_json"} <= set(catalog)
+    # The orchestrator's tables are keyed to, never widened: no harness column lands on them.
+    for table in ("staff_sessions", "staff_messages", "asks"):
+        assert not {r["name"] for r in await db.fetchall(f"PRAGMA table_info({table})")} & {"launch_id", "delivered_via", "degraded_to", "client_ref", "companion_terminal_id"}
+    launch_keys = {(r["table"], r["on_delete"]) for r in await db.fetchall("PRAGMA foreign_key_list(harness_launches)")}
+    assert launch_keys == {("staff_sessions", "CASCADE")}
+    delivery_keys = {(r["table"], r["on_delete"]) for r in await db.fetchall("PRAGMA foreign_key_list(harness_deliveries)")}
+    assert delivery_keys == {("staff_messages", "CASCADE"), ("harness_launches", "CASCADE")}
+    assert {"harness_launches_open", "harness_launches_by_terminal"} <= {r["name"] for r in await db.fetchall("PRAGMA index_list(harness_launches)")}
+    await db.execute("INSERT INTO harness_catalog(env, harness) VALUES ('host', 'codex')")
+    version = (await db.fetchone("SELECT version FROM schema_version"))["version"]
+    await db.close()
+
+    db = Database(path)
+    await db.open()
+    assert (await db.fetchone("SELECT version FROM schema_version"))["version"] == version
+    row = await db.fetchone("SELECT * FROM harness_catalog")
+    assert (row["logged_in"], row["agents_json"], row["self_check_json"], row["installed_version"]) == ("unknown", "[]", "{}", "")
+    await db.close()
+
+
 async def test_the_push_subscription_table_is_created_and_a_second_open_leaves_it_alone(tmp_path: Path) -> None:
     path = tmp_path / "state.sqlite"
     db = Database(path)
