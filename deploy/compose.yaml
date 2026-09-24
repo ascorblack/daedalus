@@ -155,6 +155,12 @@ services:
     # that could not edit them would need a chown regime of its own.
     environment:
       HOME: /root
+      # The command-line agents and the pinned Node the Harnesses screen installs live in the home
+      # volume, so an image rebuild keeps them: the native installers put theirs in ~/.local/bin, npm
+      # into ~/.npm-global. Both come first, so the installed version is the one every terminal and
+      # every version check finds.
+      PATH: /root/.local/bin:/root/.npm-global/bin:/srv/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      NPM_CONFIG_PREFIX: /root/.npm-global
     healthcheck:
       test: ["CMD", "test", "-S", "/run/daedalus-terminals/ptyd.sock"]
       interval: 30s
