@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from api_stub import (  # noqa: E402
     DEFAULT_APP,
     FILE_TEXT,
+    TeamStub,
     Unhandled,
     expect_app,
     file_entries,
@@ -80,6 +81,22 @@ PROJECTS = [
     # The installation's own: the concierge and what it started by being spoken to.
     {"id": PV, "name": "Voice", "folders": folders("/home/operator/.daedalus/workspaces/voice"), "created_at": ago(days=12), "settings": {"snapshots": False, "system": "voice"}, "system": "voice", "sessions": []},
 ]
+
+
+def _team() -> TeamStub:
+    """The Bakery site's team: a Daedalus writer at work, a Claude Code reviewer waiting on permission,
+    a Codex tester with nothing to do, and a one-off helper that finished its turn."""
+    bakery = next(p for p in PROJECTS if p["id"] == P1)
+    listed = [dict(f, is_git=True) for f in bakery["folders"]]
+    staff = [
+        TeamStub.member("st-ada", "Ada", status="working", sessions=4, color="teal", role="Builds the seasonal menu page", agent="builder", model="strong", created_at=ago(days=3)),
+        TeamStub.member("st-cleo", "Cleo", harness="claude", status="permission", sessions=9, color="violet", role="Reviews every change before it reaches review", agent="code-reviewer", model="opus", permission_mode="acceptEdits", created_at=ago(days=3)),
+        TeamStub.member("st-kai", "Kai", harness="codex", sessions=2, color="amber", role="Keeps the checkout tests green", model="gpt-5.2-codex", isolation="shared", created_at=ago(days=2)),
+        TeamStub.member("st-photo", "Photo sorter", status="turn_done_unseen", sessions=1, color="rose", role="Renames and crops the product photos", one_off=True, isolation="shared", created_at=ago(hours=5)),
+    ]
+    for member in staff:
+        member["project_id"] = P1
+    return TeamStub({**bakery, "folders": listed}, staff=staff, presets=[{"id": "strong", "label": "Claude Opus 5"}, {"id": "fast", "label": "DeepSeek Flash"}], personas=["builder", "reviewer", "tester"])
 
 
 def session(id_: str, title: str, model: str, *, status: str = "idle", last: str, own: bool = False, meta: dict | None = None, project: str) -> dict:
@@ -550,6 +567,9 @@ COMPONENTS = {
 # ---- the stub API -------------------------------------------------------------------------
 
 
+TEAM = _team()
+
+
 def respond(route, body, *, content_type: str = "application/json", status: int = 200) -> None:  # type: ignore[no-untyped-def]
     route.fulfill(status=status, content_type=content_type, body=body if isinstance(body, (bytes, str)) else json.dumps(body))
 
@@ -567,6 +587,9 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, {"base_url": "http://keyproxy:3200/openrouter/v1", "models": [e["id"] for e in CATALOGUE], "entries": CATALOGUE})
     if rel == "/api/voice/tts":
         return respond(route, SILENCE, content_type="audio/wav")
+    team = TEAM.answer(request.method, rel, urlsplit(url).query, None)
+    if team is not None:
+        return respond(route, team[1], status=team[0])
     if request.method != "GET":
         return respond(route, {"ok": True})
     if rel == "/api/stt/progress":
@@ -781,8 +804,8 @@ PHONE = {"width": 390, "height": 844}
 # The handful of words these helpers click on, in the language the run is in. Everything else is
 # picked by class or by data, which no translation moves.
 WORDS = {
-    "en": {"steps": "8 steps", "panel": "Panel", "access": "Access", "actions": "Session actions", "details": "Details"},
-    "ru": {"steps": "8 шагов", "panel": "Панель", "access": "Доступ", "actions": "Действия с сессией", "details": "Сведения"},
+    "en": {"steps": "8 steps", "panel": "Panel", "access": "Access", "actions": "Session actions", "details": "Details", "role": "Writes the delivery page"},
+    "ru": {"steps": "8 шагов", "panel": "Панель", "access": "Доступ", "actions": "Действия с сессией", "details": "Сведения", "role": "Пишет страницу доставки"},
 }
 
 
@@ -867,6 +890,13 @@ def open_projects(page: Page) -> None:
     """The switcher over a list already grouped by project: the folders on one side, the agents in them on the other."""
     page.locator(".sidebar .project-chip").click()
     page.wait_for_selector(".project-row", timeout=5000)
+
+
+def open_hire(page: Page) -> None:
+    page.locator(".pagehead-actions .iconbtn").click()
+    page.wait_for_selector(".staff-sheet .executor")
+    page.locator("#staff-name").fill("Mira")
+    page.locator("#staff-role").fill(word("role"))
 
 
 def open_menu(page: Page) -> None:
@@ -1134,6 +1164,8 @@ def run() -> int:
         shot(page, "dual", f"agents/{S1}?with={S2}", wait=".chat-scroll .timeline", settle=1500)
         shot(page, "session-share", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_share, settle=800)
         desk.add_init_script("try { localStorage.setItem('agents.groupBy', 'project'); } catch (e) {}")
+        shot(page, "team", f"project/{P1}/team", wait=".staff-row")
+        shot(page, "team-hire", f"project/{P1}/team", wait=".staff-row", before=open_hire, settle=700)
         # The start canvas under a folded sidebar has neither a list nor a chat, so waiting for
         # either timed out here and stopped every picture after this one; the sidebar is what the
         # switcher opens from.
@@ -1172,6 +1204,7 @@ def run() -> int:
         shot(page, "phone-voice", "voice")
         shot(page, "phone-memory", "memory")
         shot(page, "phone-more", "agents", before=open_more)
+        shot(page, "phone-team", f"project/{P1}/team", wait=".staff-row")
         stub.fresh = True  # type: ignore[attr-defined]
         shot(page, "phone-add-model", "agents", wait=".addmodel", before=pick_a_model, settle=600)
         stub.fresh = False  # type: ignore[attr-defined]

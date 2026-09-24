@@ -7,6 +7,7 @@ module may import the HTTP framework; nothing below the extensions may.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -18,6 +19,8 @@ from daedalus.stores.projects import FolderSpec, Project, ProjectError, ProjectF
 
 if TYPE_CHECKING:
     from daedalus.app import Application
+
+logger = logging.getLogger(__name__)
 
 JOURNAL_NOTE_MAX_CHARS = 4000
 """An operator's note is a sentence or a paragraph; the journal is read as a list, not as documents."""
@@ -215,6 +218,13 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         if sessions:
             one = len(sessions) == 1
             raise HTTPException(409, f"{len(sessions)} agent{'' if one else 's'} {'works' if one else 'work'} in {project.name}; move or remove {'it' if one else 'them'} first")
+        # What the project itself holds (its terminals) ends before the row goes, so nothing is left
+        # running for an owner that no longer exists.
+        for hook in manager.project_delete_hooks:
+            try:
+                await hook(project_id)
+            except Exception:  # noqa: BLE001 — a hook that fails must not keep the project
+                logger.exception("project delete hook failed for %s", project_id)
         try:
             await manager.projects.delete(project_id)
         except ProjectError as exc:

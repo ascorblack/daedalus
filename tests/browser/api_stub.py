@@ -188,7 +188,99 @@ def expect_app(base: str) -> None:
         raise SystemExit(1)
 
 
-__all__ = ["DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "GATES", "Unhandled", "answer_shared", "expect_app", "folder", "folders", "fulfil_shared", "serve_shared_post"]
+__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "GATES", "TeamStub", "Unhandled", "answer_shared", "expect_app", "folder", "folders", "fulfil_shared", "serve_shared_post"]
+
+# What the harness manager reports for the container: Claude Code installed and signed in, Codex
+# installed but signed out, the rest absent. Enough for the hiring form to show one command-line agent
+# it can offer and one it cannot, with the reason.
+CATALOG: dict[str, object] = {
+    "claude": {"installed": True, "version": "2.1.40", "latest": "2.1.40", "logged_in": True, "agents": [{"name": "code-reviewer", "source": "project"}], "models": ["opus", "sonnet"], "error": "", "checked_at": "2026-09-24T09:00:00Z"},
+    "codex": {"installed": True, "version": "0.40.0", "latest": "0.41.0", "logged_in": False, "agents": [], "models": ["gpt-5.2-codex"], "error": "", "checked_at": "2026-09-24T09:00:00Z"},
+}
+
+
+class TeamStub:
+    """A project's team, answered the way the host answers it, and kept between requests.
+
+    The page hires, edits and dismisses; a stub that forgot each change would show a list that never
+    moves, and a check of those three would pass against nothing. The rules the host enforces that
+    the page shows back — a name already taken, dismissing a member who works — are kept here too.
+    """
+
+    def __init__(self, project: dict, *, staff: list[dict] | None = None, catalog: dict | None = None, presets: list[dict] | None = None, personas: list[str] | None = None) -> None:
+        folders = project.get("folders") or []
+        self.project = {
+            "id": project["id"], "name": project["name"], "ephemeral": False, "system": "", "default_env": "container", "local_env": "container",
+            "concurrency": 6, "concurrency_cap": 10, "orchestrator": False,
+            "folders": [{k: f[k] for k in ("id", "path", "label", "env", "is_git", "readonly")} for f in folders],
+        }
+        self.staff: list[dict] = [dict(m) for m in staff or []]
+        self.catalog = CATALOG if catalog is None else catalog
+        self.presets = presets if presets is not None else [{"id": "strong", "label": "Claude Opus 5"}, {"id": "fast", "label": "DeepSeek Flash"}]
+        self.personas = personas if personas is not None else ["reviewer", "tester"]
+        self.hired: list[dict] = []
+        self.patched: list[dict] = []
+
+    @staticmethod
+    def member(id_: str, name: str, *, harness: str = "daedalus", status: str = "off", sessions: int = 0, **fields: object) -> dict:
+        row = {
+            "id": id_, "project_id": "", "name": name, "color": "blue", "role": "", "harness": harness, "agent": "", "model": "", "effort": "",
+            "permission_mode": "", "env": "", "default_folder_id": None, "isolation": "worktree", "instructions": "", "notes": "", "one_off": False,
+            "created_by": "operator", "created_at": "2026-09-24T09:00:00Z", "archived_at": None, "sessions": sessions, "status": status,
+            "live": None if status == "off" else {"id": f"ss-{id_}", "status": status, "waiting_for": "", "task_id": None, "started_at": "2026-09-24T09:00:00Z", "ended_at": None, "branch": None, "worktree_path": None},
+        }
+        row.update(fields)
+        return row
+
+    def listing(self, archived: bool) -> dict:
+        rows = [m for m in self.staff if archived or not m["archived_at"]]
+        working = sum(1 for m in self.staff if m["status"] in ("starting", "working", "question", "permission", "no_signal"))
+        return {
+            "project": self.project,
+            "staff": rows,
+            "counts": {"staff": sum(1 for m in self.staff if not m["archived_at"]), "working": working},
+            "choices": {"harnesses": ["daedalus", "claude", "codex", "grok", "opencode", "pi"], "personas": self.personas, "presets": self.presets, "default_preset": self.presets[0]["id"] if self.presets else ""},
+        }
+
+    def answer(self, method: str, path: str, query: str, body: dict | None) -> tuple[int, object] | None:
+        """``(status, body)`` for a route of the team, or None for anything else."""
+        if path == "/api/harnesses/catalog":
+            return (200, self.catalog) if self.catalog is not None else (404, {"detail": "Not Found"})
+        if path == f"/api/projects/{self.project['id']}/staff":
+            if method == "GET":
+                return 200, self.listing("archived=1" in query)
+            if method == "POST":
+                payload = body or {}
+                if any(m["name"].lower() == str(payload.get("name", "")).strip().lower() and not m["archived_at"] for m in self.staff):
+                    return 400, {"detail": f"the team already has someone called {payload['name']}"}
+                self.hired.append(payload)
+                row = self.member(f"st-{len(self.staff) + 1}", str(payload["name"]).strip(), harness=payload.get("harness", "daedalus"))
+                row.update({k: payload[k] for k in ("role", "agent", "model", "effort", "permission_mode", "env", "isolation", "instructions", "one_off") if k in payload})
+                row["default_folder_id"] = payload.get("folder_id") or None
+                row["project_id"] = self.project["id"]
+                self.staff.append(row)
+                return 201, row
+        if path.startswith("/api/staff/"):
+            sid = path.split("/")[3]
+            row = next((m for m in self.staff if m["id"] == sid), None)
+            if row is None:
+                return 404, {"detail": "no such staff member"}
+            if method == "PATCH":
+                payload = dict(body or {})
+                self.patched.append(payload)
+                if "folder_id" in payload:
+                    payload["default_folder_id"] = payload.pop("folder_id") or None
+                row.update(payload)
+                return 200, row
+            if method == "DELETE":
+                if row["live"] is not None:
+                    return 409, {"detail": f"{row['name']} is working; release the session first"}
+                row["archived_at"] = "2026-09-24T10:00:00Z"
+                return 200, {"ok": True, "staff": row}
+            if path.endswith("/sessions"):
+                return 200, [row["live"]] if row["live"] else []
+            return 200, row
+        return None
 
 # Small documents with deliberately different structures make the explorer and preview checks
 # exercise parsing, navigation and media decoding without reading anybody's real workspace.

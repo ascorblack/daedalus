@@ -1038,6 +1038,55 @@ CREATE INDEX notifications_by_project ON notifications(project_id, id) WHERE pro
 """)
 
 
+# Terminals: the host's mirror of what each environment's terminal daemon runs, and the audit of what
+# was done to them. No foreign keys to sessions, projects or staff: an owner is one of four kinds,
+# cleanup goes through the owners' delete hooks, and a later reshaping of any of those tables must
+# not have to rebuild this one. The audit has no key to the terminal either, because it outlives the
+# row: an ended host terminal's attach history is exactly what someone reads after the fact.
+MIGRATIONS.append("""
+CREATE TABLE terminals (
+    id TEXT PRIMARY KEY,
+    env TEXT NOT NULL,
+    project_id TEXT,
+    owner_kind TEXT NOT NULL,
+    owner_id TEXT,
+    title TEXT NOT NULL DEFAULT '',
+    cwd TEXT NOT NULL,
+    argv_json TEXT NOT NULL DEFAULT '[]',
+    profile TEXT NOT NULL DEFAULT 'shell',
+    sandbox INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'running',
+    exit_code INTEGER,
+    created_at TEXT NOT NULL,
+    exited_at TEXT,
+    last_output_at TEXT,
+    last_input_at TEXT,
+    cols INTEGER NOT NULL DEFAULT 80,
+    rows INTEGER NOT NULL DEFAULT 24,
+    ptyd_instance TEXT NOT NULL DEFAULT '',
+    exit_signal TEXT,
+    shell_integration INTEGER NOT NULL DEFAULT 1,
+    last_command_json TEXT,
+    final_preview_json TEXT,
+    created_by TEXT NOT NULL DEFAULT 'operator'
+);
+CREATE INDEX terminals_by_owner ON terminals(owner_kind, owner_id);
+CREATE INDEX terminals_by_project ON terminals(project_id);
+CREATE INDEX terminals_by_status ON terminals(status);
+CREATE TABLE terminal_audit (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    terminal_id TEXT NOT NULL,
+    env TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX terminal_audit_by_terminal ON terminal_audit(terminal_id, seq);
+CREATE INDEX terminal_audit_by_at ON terminal_audit(at);
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""

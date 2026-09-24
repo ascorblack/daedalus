@@ -7,6 +7,7 @@ import { api, Project, ProjectDir, ProjectEnvironments } from "./api";
 import { folderName, needsMount, pathProblem, projectPath, projectReachable, reachIsProblem, reachKey } from "./folders";
 import { Sheet } from "./dialogs";
 import { Icon } from "./icons";
+import { navigate, projectPagePath } from "./router";
 import { invalidate, useQuery } from "./store";
 import { confirmAsync, errorText } from "./ui";
 import { plural, t } from "./i18n";
@@ -82,6 +83,11 @@ export function ProjectSwitcher({ projects, current, onPick, onClose, toast }: {
             <span className="sub mono truncate">{projectPath(p)}</span>
             <span className="sub">{p.sessions.length ? plural("project.agents", p.sessions.length) : t("project.noagents")}</span>
           </button>
+          {!p.system && !p.settings.ephemeral && (
+            <button className="iconbtn small" onClick={() => { onClose(); navigate(projectPagePath(p.id, "team")); }} title={t("project.team.for", { name: p.name })} aria-label={t("project.team.for", { name: p.name })}>
+              <Icon name="bots" size={15} />
+            </button>
+          )}
           <button className="iconbtn small" onClick={() => setEditing(p)} title={t("project.settings.for", { name: p.name })} aria-label={t("project.settings.for", { name: p.name })}>
             <Icon name="settings" size={15} />
           </button>

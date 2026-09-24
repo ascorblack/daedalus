@@ -174,6 +174,12 @@ describe("the keys the code asks for", () => {
       ["comp.state.", ["installed", "missing", "installing", "unavailable"]],
       ["comp.enables.", ["stt", "tts", "voicenotes", "skills.browser", "screenshots", "skills.node", "npx", "selfdev", "projects", "search", "sandbox"]],
       ["comp.mode.", ["native", "docker"]],
+      // A staff member's status, isolation and colour come from the host by name; each has a word.
+      ["team.status.", listed("./team/team.ts", "STAFF_STATUSES")],
+      ["team.isolation.", listed("./team/team.ts", "ISOLATIONS")],
+      ["team.colour.", listed("./team/team.ts", "STAFF_COLOURS")],
+      ["team.env.", ["container", "host"]],
+      ["team.unavailable.", ["notinstalled", "loggedout", "error"]],
     ];
     const missing = families.flatMap(([prefix, names]) => names.map((n) => prefix + n)).filter((key) => !(key in DICT));
     // The section hints sit beside the section names, and a hint nobody wrote is a blank line.
@@ -182,7 +188,8 @@ describe("the keys the code asks for", () => {
     const verbs = ["Exec", "Read", "Write", "Edit", "Find", "WebSearch", "WebFetch", "SendFile", "ImageView", "Skill", "Verify", "SubAgent", "SpawnAgent", "AskPeer", "HistorySearch", "ServiceStart", "ServiceStop"]
       .flatMap((name) => [`tool.${name}.on`, `tool.${name}.off`])
       .filter((k) => !(k in DICT));
-    expect([...missing, ...hints, ...verbs]).toEqual([]);
+    const isolation = listed("./team/team.ts", "ISOLATIONS").flatMap((i) => [`team.isolation.${i}.short`, `team.isolation.${i}.hint`]).filter((k) => !(k in DICT));
+    expect([...missing, ...hints, ...verbs, ...isolation]).toEqual([]);
   });
 });
 
