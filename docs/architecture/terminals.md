@@ -297,6 +297,40 @@ kept.
 
 ## The host side
 
+The host (`daedalus/terminals/`) keeps a row per terminal in the `terminals` table and an append-only
+`terminal_audit`. It is told each environment's run directory (`TERMINALS_CONTAINER_DIR`,
+`TERMINALS_HOST_DIR`), connects in the background and retries until the daemon is there. Both
+directories are sealed from the agent — named in a command, even inside a container, it is refused —
+because the token in them is a shell.
+
+- **Ids and labels.** The host makes the id (12 hex characters) and writes the row before
+  `terminal.create`, so the row is the reservation under the cap. `labels` carry `owner_kind`,
+  `owner_id`, `project_id` and `profile`.
+- **Reconcile**, on every connection and every minute: a running row the daemon does not list is
+  `lost` when the daemon's `instance` changed and `exited` when it did not (ended and forgotten
+  while the host was away); a running terminal with no row is adopted from its labels; a terminal
+  whose owner no longer exists is ended. Events are resumed from the last `seq` seen when the
+  instance is the same.
+- **Owners** are `session`, `staff`, `project` or `free`. Deleting a session or a project ends its
+  terminals. Ended rows are kept for `terminals.exited_retention_hours` with their last screen.
+- **The cap.** At most `terminals.running_cap` terminals run at once across both environments. An
+  agent's launch waits in line for a place; the operator's is refused with `409 {"code":
+  "over_cap"}` and admitted past the cap when repeated with `confirm: true`.
+- **The audit** records create, kill, restart, signal, keyboard, update and remove for every
+  terminal, and every agent write with its first 4 KiB and the SHA-256 of the whole. What a person
+  types is never recorded.
+- **Load.** The daemons' `terminal.stats` events feed a rolling average cost per profile; `GET
+  /api/terminals/load?cap=N` reports what runs now and the machine with the cap filled.
+
+| Route | |
+|---|---|
+| `GET /api/terminals?env&owner_kind&owner_id&project_id&status&preview=0..12` | `{envs, terminals, capacity}` |
+| `POST /api/terminals` | `{env, owner_kind, owner_id?, project_id?, cwd?, title?, sandbox?, cols?, rows?, confirm?}` → the view (201) |
+| `GET /api/terminals/load?cap=` | the cost now and the projection |
+| `GET`, `PATCH`, `DELETE /api/terminals/{id}` | the view; rename or hand to another owner; remove an ended row |
+| `POST /api/terminals/{id}/kill`, `/signal`, `/restart` | end; `{signal}`; the same program as a new terminal |
+| `GET /api/terminals/{id}/screen`, `/audit` | the screen (with the emulator); the audit, newest first |
+
 The browser reaches a terminal through the host: `POST /api/terminals/{id}/ticket` returns a
 single-use ticket valid for 30 s, and `WS /ws/terminals/{id}?ticket=…` checks the Origin, spends the
 ticket and relays frames. Close codes: 4401 ticket, 4403 origin, 4404 no terminal, 4409 environment
