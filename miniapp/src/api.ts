@@ -462,6 +462,10 @@ export type SessionDetail = {
   services?: ServiceView[];
   subagent_of?: string | null;
   subagent_name?: string | null;
+  /** The project this session is the orchestrator of (current or retired). */
+  orchestrator_of?: string | null;
+  /** The staff member this session is the work of. */
+  staff?: { id: string; session_id: string | null } | null;
   leader_title?: string | null;
   subagents?: SubagentView[];
   /** Whether this session currently sends to and receives from its own Telegram topic. */
@@ -569,7 +573,37 @@ export type ProjectRef = Omit<Project, "sessions">;
 
 /** A project in the agents listing: the project, and how many agents are in it — counted over the
  *  whole table, not over the page of rows beside it. */
-export type ProjectFolder = ProjectRef & { members?: number; total: number; active: number; loops: number; last_message_at: string };
+export type ProjectFolder = ProjectRef & { members?: number; total: number; active: number; loops: number; last_message_at: string; orchestrator?: Orchestration | null };
+
+/** What the agents list says about a project whose orchestrator is on: it is drawn as one entry. */
+export type Orchestration = { enabled: boolean; session_id: string; staff: number; working: number; needs_you: number };
+
+/** A pending decision of a project: a staff member's question or permission, or one of the orchestrator's own. */
+export type Ask = {
+  id: string;
+  short_id: string;
+  project_id: string;
+  origin: "staff" | "orchestrator";
+  kind: "question" | "permission" | "folder";
+  staff_id: string | null;
+  task_id: string | null;
+  text: string;
+  detail: { options?: string[]; urgent?: boolean; [k: string]: unknown };
+  routed_to: "orchestrator" | "operator";
+  suggestion: string;
+  created_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  resolution: { allow?: boolean | null; text?: string; selected?: string[]; via?: string };
+};
+
+/** One entry of a project's journal: who wrote it, what kind, and what it refers to. */
+export type JournalEntry = { id: number; at: string; author: "operator" | "orchestrator" | "staff" | "system"; kind: string; text: string; refs: Record<string, string> };
+
+export type BriefSection = { section: string; body: string; updated_at: string | null; updated_by: string | null };
+
+/** A message sent to a staff member, and how far it got. */
+export type StaffMessage = { id: string; staff_id: string; origin: "orchestrator" | "operator"; text: string; mode: string; state: "queued" | "written" | "submitted" | "acknowledged" | "failed"; attempts: number; created_at: string; updated_at: string; error: string };
 
 /** What GET /api/sessions answers: a page of agents and the project folders they are in. */
 export type SessionList = {

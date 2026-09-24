@@ -176,9 +176,9 @@ def desktop(page: Page, lang: str, unhandled: Unhandled) -> None:
     expect(page.locator(".toast")).to_contain_text(words["started"])
     fits(page, f"{lang} desktop")
 
-    # The request is answered where it was asked: the staff member's session.
+    # The request is answered where it was asked: the staff member's session, inside the project.
     need.get_by_role("button", name=words["answer"]).click()
-    page.wait_for_url("**/app/agents/sess-ira**")
+    page.wait_for_url(f"**/app/project/{PID}/s/sess-ira**")
 
 
 def phone(page: Page, lang: str, unhandled: Unhandled) -> None:

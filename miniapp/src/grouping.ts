@@ -5,7 +5,7 @@
 // fork under the session it was taken from) is decided here too, so one pass over the rows answers
 // both questions and the screen does no bookkeeping of its own.
 
-import { ProjectFolder, SessionSummary } from "./api";
+import { Orchestration, ProjectFolder, SessionSummary } from "./api";
 
 export type Filter = "all" | "working" | "loops";
 export type Kind = "waiting" | "working" | "loop" | "idle";
@@ -20,6 +20,10 @@ export type Folder = {
   project: ProjectFolder;
   /** True on the installation's own project — the concierge's — which is drawn with a mic. */
   system: boolean;
+  /** A project whose orchestrator is on: one entry that opens its focus mode, with what is going on
+   *  inside it, and none of its sessions as rows — the orchestrator's chat and the team's sessions are
+   *  the project's, and focus mode is where they are listed. */
+  orchestrated: Orchestration | null;
   single: boolean;
   rows: Row[];
   /** What the rows of this folder would look different for, built once while they are arranged.
@@ -134,10 +138,12 @@ export function arrange(
     forks: (forks.get(s.id) ?? []).filter((f) => !q || hits(f)).map(row),
   });
 
+  const orchestrated = new Set(projects.filter((p) => p.orchestrator?.enabled).map((p) => p.id));
   const byProject = new Map<string, Row[]>();
   for (const s of kept) {
     const key = s.project_id;
     if (!projects.some((p) => p.id === key)) continue;
+    if (orchestrated.has(key) && !opts.results) continue;
     byProject.set(key, [...(byProject.get(key) ?? []), row(s)]);
   }
 
@@ -149,10 +155,11 @@ export function arrange(
       name: p.name,
       project: p,
       system: !!p.system,
-      single: (p.members ?? p.total) === 1 && (byProject.get(p.id)?.length ?? 0) === 1
+      orchestrated: p.orchestrator?.enabled ? p.orchestrator : null,
+      single: !p.orchestrator?.enabled && (p.members ?? p.total) === 1 && (byProject.get(p.id)?.length ?? 0) === 1
         && !byProject.get(p.id)![0].kids.length && !byProject.get(p.id)![0].forks.length,
       rows: byProject.get(p.id) ?? [],
-      sig: rowSig(byProject.get(p.id) ?? []),
+      sig: p.orchestrator?.enabled ? `o:${p.orchestrator.session_id}:${p.orchestrator.staff}:${p.orchestrator.working}:${p.orchestrator.needs_you}` : rowSig(byProject.get(p.id) ?? []),
       total: p.total,
       active: p.active,
       loops: p.loops,

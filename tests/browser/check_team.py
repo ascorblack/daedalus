@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import Page, expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, TeamStub, Unhandled, expect_app, folders, fulfil_shared  # noqa: E402
+from api_stub import DEFAULT_APP, BoardStub, TeamStub, Unhandled, expect_app, folders, fulfil_shared  # noqa: E402
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
@@ -45,12 +45,14 @@ def run_one(page: Page, lang: str, width: int, unhandled: Unhandled) -> None:
     words = WORDS[lang]
     team = TeamStub(project(), staff=[TeamStub.member("st-cleo", "Cleo", harness="claude", status="working", sessions=9, role="Reviews every change", model="opus", permission_mode="acceptEdits", color="violet")])
     team.staff[0]["project_id"] = PID
+    board = BoardStub(project())
 
     def stub(route) -> None:  # type: ignore[no-untyped-def]
         request = route.request
         url = urlsplit(request.url)
         path = url.path[url.path.index("/api/"):] if "/api/" in url.path else ""
-        answered = team.answer(request.method, path, url.query, request.post_data_json if request.method in ("POST", "PATCH") else None)
+        # The team page is a page of the project's focus mode, whose column reads the project's board too.
+        answered = team.answer(request.method, path, url.query, request.post_data_json if request.method in ("POST", "PATCH") else None) or board.answer(request.method, path, url.query, None)
         if answered is not None:
             status, body = answered
             return route.fulfill(status=status, content_type="application/json", body=json.dumps(body))

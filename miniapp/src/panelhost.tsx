@@ -5,10 +5,11 @@
 
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Sheet, useLayer } from "./dialogs";
-import { Icon } from "./icons";
+import { Icon, IconName } from "./icons";
 import {
   PANEL_CLOSED,
   PANEL_TABS,
+  PanelContext,
   PanelEntry,
   PanelState,
   PanelTab,
@@ -29,6 +30,7 @@ import {
   readPanelTab,
   rememberPanelPct,
   rememberPanelTab,
+  tabsFor,
   toggleExpanded,
   togglePanel,
 } from "./panel";
@@ -51,10 +53,14 @@ export type PanelHostProps = {
   root: string;
   /** Where the current file downloads from, for open-in-new. */
   downloadUrl: (entry: PanelEntry) => string;
+  /** The tabs offered, in order; a session's own four unless the panel is inside a project. */
+  tabs?: PanelTab[];
   /** The Details, Files and Jobs tabs, rendered by the screen that owns their data. */
-  details: (ids: string) => ReactNode;
-  files: ReactNode;
-  jobs: ReactNode;
+  details?: (ids: string) => ReactNode;
+  files?: ReactNode;
+  jobs?: ReactNode;
+  /** The project's tabs in its focus mode: the board, the brief, the wake-ups, the folders. */
+  project?: Partial<Record<PanelTab, ReactNode>>;
   /** A number on a tab: subagents working on Details, jobs on Jobs. */
   badges?: Partial<Record<PanelTab, number>>;
   /** Phones: the tabs in a full sheet instead of a column. */
@@ -127,14 +133,14 @@ function Column(props: HostProps) {
   );
 }
 
-const TAB_ICON: Record<PanelTab, "settings" | "folder" | "eye" | "terminal"> = { details: "settings", files: "folder", preview: "eye", jobs: "terminal" };
+const TAB_ICON: Record<PanelTab, IconName> = { details: "settings", files: "folder", preview: "eye", jobs: "terminal", board: "board", brief: "pen", wakeups: "clock", folders: "folder" };
 
-function Tabs({ state, onTab, onClose, onExpand, badges, inSheet, local }: HostProps & { inSheet?: boolean }) {
+function Tabs({ state, onTab, onClose, onExpand, badges, inSheet, local, tabs = PANEL_TABS }: HostProps & { inSheet?: boolean }) {
   const strip = useRef<HTMLDivElement>(null);
   const onKey = (e: React.KeyboardEvent) => {
-    const i = PANEL_TABS.indexOf(state.tab!);
+    const i = tabs.indexOf(state.tab!);
     if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
-      const next = PANEL_TABS[(i + (e.key === "ArrowRight" ? 1 : PANEL_TABS.length - 1)) % PANEL_TABS.length];
+      const next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
       onTab(next);
       strip.current?.querySelector<HTMLElement>(`[data-tab="${next}"]`)?.focus();
       e.preventDefault();
@@ -142,8 +148,8 @@ function Tabs({ state, onTab, onClose, onExpand, badges, inSheet, local }: HostP
   };
   return (
     <div className="panel-tabs">
-      <div ref={strip} className="panel-tablist" role="tablist" aria-label={t("panel.label")} onKeyDown={onKey}>
-        {PANEL_TABS.map((tab) => {
+      <div ref={strip} className={`panel-tablist ${tabs.length > PANEL_TABS.length ? "many" : ""}`} role="tablist" aria-label={t("panel.label")} onKeyDown={onKey}>
+        {tabs.map((tab) => {
           const n = badges?.[tab] ?? 0;
           return (
             <button key={tab} role="tab" id={`${local.ids}-tab-${tab}`} aria-controls={`${local.ids}-body`} data-tab={tab} className={`panel-tab ${state.tab === tab ? "on" : ""}`} aria-selected={state.tab === tab} tabIndex={state.tab === tab ? 0 : -1} onClick={() => onTab(tab)}>
@@ -221,10 +227,11 @@ function Body(props: HostProps) {
   return (
     <div ref={box} id={`${local.ids}-body`} role="tabpanel" aria-labelledby={`${local.ids}-tab-${state.tab}`} tabIndex={-1} className={`panel-body tab-${state.tab} ${split ? "split" : ""}`}>
       {loading && <div className={`preview-progress ${progress == null ? "busy" : ""}`} role="progressbar" aria-label={t("common.loading")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress == null ? undefined : Math.round(progress * 100)}><i style={progress == null ? undefined : { width: `${progress * 100}%` }} /></div>}
-      {state.tab === "details" && props.details(local.ids)}
-      <div className="panel-files" hidden={state.tab !== "files" && !split} style={split ? { width } : undefined}>{(visited || state.tab === "files" || split) && props.files}{split && <PaneHandle side="left" onDrag={(dx) => setWidth(width + dx)} />}</div>
+      {state.tab === "details" && props.details?.(local.ids)}
+      {props.files !== undefined && <div className="panel-files" hidden={state.tab !== "files" && !split} style={split ? { width } : undefined}>{(visited || state.tab === "files" || split) && props.files}{split && <PaneHandle side="left" onDrag={(dx) => setWidth(width + dx)} />}</div>}
       {state.tab === "preview" && (entry ? <Viewer key={`${entry.base}:${entry.path}:${entry.lines ?? ""}:${local.gen}`} src={entry as PreviewSource} onInfo={local.setInfo} onNavigation={local.setNav} className="panel-viewer" /> : <div className="empty">{t("panel.preview.empty")}</div>)}
       {state.tab === "jobs" && props.jobs}
+      {state.tab && props.project?.[state.tab]}
     </div>
   );
 }
@@ -244,45 +251,53 @@ export type PanelControls = {
 
 /** A pane's panel. With `route`, the URL carries the open tab and the previewed path, so a link
  *  reproduces the view and the browser's Back closes what was opened; the second pane of a dual
- *  view keeps its panel to itself. Below 1920 px only one pane's panel is open at a time. */
-export function usePanel(sessionId: string, base: string, opts: { route: URLSearchParams | null; beside?: string | null; pane?: "left" | "right" }): PanelControls {
-  const { route, beside, pane } = opts;
+ *  view keeps its panel to itself. Below 1920 px only one pane's panel is open at a time.
+ *
+ *  `context` decides the tabs (`tabsFor`) and where the last one is remembered; `at` is the address
+ *  the pane lives at, for a pane that is not an agent's own page — a project's focus mode writes the
+ *  panel into its own route, or opening a tab would leave the project. */
+export function usePanel(sessionId: string, base: string, opts: { route: URLSearchParams | null; beside?: string | null; pane?: "left" | "right"; context?: PanelContext; at?: (query: Record<string, string | null>) => string }): PanelControls {
+  const { route, beside, pane, context = "session", at } = opts;
+  const tabs = tabsFor(context);
   const [state, setState] = useState<PanelState>(() => {
-    const fromRoute = route ? readPanelQuery(route) : null;
+    const fromRoute = route ? readPanelQuery(route, tabs) : null;
     if (fromRoute) return applyPanelQuery(PANEL_CLOSED, fromRoute, base);
     // The second pane keeps its panel closed until asked while the window has room for one only.
     if (pane === "right" && window.innerWidth < DUAL_BOTH_MIN) return PANEL_CLOSED;
-    const tab = readPanelTab(window.innerWidth);
+    const tab = readPanelTab(window.innerWidth, undefined, context);
     return tab ? openTab(PANEL_CLOSED, tab) : PANEL_CLOSED;
   });
   const last = useRef<PanelTab | null>(state.tab);
   if (state.tab) last.current = state.tab;
   // What this pane last wrote into the URL, so a route change it caused is not applied back to it.
-  const written = useRef<string>(route ? routeKey(route, base) : "");
+  const written = useRef<string>(route ? routeKey(route, base, tabs) : "");
+  const atRef = useRef(at);
+  atRef.current = at;
   const commit = useCallback(
     (next: PanelState, push = false) => {
       setState(next);
-      rememberPanelTab(next.tab);
+      rememberPanelTab(next.tab, undefined, context);
       if (!route) return;
       const q = panelQuery(next);
       written.current = queryString(q);
-      navigate(pathFor("agents", sessionId, { with: beside ?? undefined, ...q }), { replace: !push });
+      navigate(atRef.current ? atRef.current(q) : pathFor("agents", sessionId, { with: beside ?? undefined, ...q }), { replace: !push });
     },
-    [route, sessionId, beside],
+    [route, sessionId, beside, context],
   );
   // The route moved under the pane (Back, a link, the other pane): follow it.
   useEffect(() => {
     if (!route) return;
-    const q = readPanelQuery(route);
-    const incoming = routeKey(route, base);
+    const q = readPanelQuery(route, tabs);
+    const incoming = routeKey(route, base, tabs);
     if (incoming === written.current) return;
     written.current = incoming;
     setState((s) => {
       const next = applyPanelQuery(s, q, base);
-      rememberPanelTab(next.tab);
+      rememberPanelTab(next.tab, undefined, context);
       return next;
     });
-  }, [route, base]);
+    // `tabs` is derived from `context`, which is what the effect depends on.
+  }, [route, base, context]);
   // One panel at a time below 1920: opening this pane's closes the other's.
   useEffect(() => {
     if (!pane) return;
@@ -312,8 +327,8 @@ export function usePanel(sessionId: string, base: string, opts: { route: URLSear
     toggle: useCallback(() => {
       const s = stateRef.current;
       if (s.tab === null) announce();
-      commit(togglePanel(s, last.current), s.tab === null);
-    }, [commit, announce]),
+      commit(togglePanel(s, last.current, tabs[0]), s.tab === null);
+    }, [commit, announce, tabs[0]]),
     expand: useCallback(() => {
       const s = stateRef.current;
       if (s.tab !== null) {
@@ -321,8 +336,8 @@ export function usePanel(sessionId: string, base: string, opts: { route: URLSear
         return;
       }
       announce();
-      commit({ ...openTab(s, last.current ?? "details"), expanded: true }, true);
-    }, [commit, announce]),
+      commit({ ...openTab(s, last.current ?? tabs[0]), expanded: true }, true);
+    }, [commit, announce, tabs[0]]),
     back: useCallback(() => commit(goBack(stateRef.current)), [commit]),
     forward: useCallback(() => commit(goForward(stateRef.current)), [commit]),
     openFile: useCallback(
@@ -341,8 +356,8 @@ const PANEL_EVENT = "daedalus:panel-open";
 export const DUAL_BOTH_MIN = 1920;
 
 /** The panel part of a route, normalised the way this pane writes it. */
-function routeKey(route: URLSearchParams, base: string): string {
-  const q = readPanelQuery(route);
+function routeKey(route: URLSearchParams, base: string, tabs: readonly PanelTab[]): string {
+  const q = readPanelQuery(route, tabs);
   return queryString(panelQuery(q ? applyPanelQuery(PANEL_CLOSED, q, base) : PANEL_CLOSED));
 }
 

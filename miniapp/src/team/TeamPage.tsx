@@ -12,8 +12,9 @@ import { plural, t } from "../i18n";
 import { HarnessBadge, StaffAvatar } from "./parts";
 import { StaffSheet } from "./StaffSheet";
 import { HARNESS_NAMES, Staff, Team, statusTone } from "./team";
+import { firstWait, waitKey } from "../project/focus";
 
-export function TeamPage({ projectId, toast }: { projectId: string; toast: (text: string) => void }) {
+export function TeamPage({ projectId, toast, back }: { projectId: string; toast: (text: string) => void; back?: string | null }) {
   const [showArchived, setShowArchived] = useState(false);
   const key = `/api/projects/${encodeURIComponent(projectId)}/staff?archived=${showArchived ? 1 : 0}`;
   const { data: team, error, loading, refresh } = useQuery<Team>(key, { pollMs: 15000, staleMs: 5000 });
@@ -36,7 +37,7 @@ export function TeamPage({ projectId, toast }: { projectId: string; toast: (text
       <PageHeader
         title={team ? t("team.title.of", { name: team.project.name }) : t("team.title")}
         subtitle={subtitle}
-        back={pathFor("agents")}
+        back={back === undefined ? pathFor("agents") : back ?? undefined}
         actions={
           team && !closed ? (
             <>
@@ -102,7 +103,15 @@ function StaffRow({ member, team, onOpen }: { member: Staff; team: Team; onOpen?
   const runs = [HARNESS_NAMES[member.harness], model, member.permission_mode].filter(Boolean).join(" · ");
   const where = [t(`team.env.${env}`), t(`team.isolation.${member.isolation}.short`), folder ? folder.label || folder.path.split("/").pop() : "", plural("team.count.sessions", member.sessions)].filter(Boolean).join(" · ");
   const waiting = member.live?.waiting_for;
-  const status = (
+  // A launch that waits says why: the queue's reason in words, its place, and the host's own sentence
+  // with the numbers in it on hover.
+  const queued = firstWait(member);
+  const status = queued ? (
+    <span className="status waiting" title={queued.detail || undefined}>
+      <span className="dot" aria-hidden />
+      {t("focus.wait.line", { reason: t(waitKey(queued.reason)), n: queued.position })}
+    </span>
+  ) : (
     <span className={`status ${statusTone(member.status)}`} title={waiting || undefined}>
       <span className="dot" aria-hidden />
       {t(`team.status.${member.status}`)}
