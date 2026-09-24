@@ -93,6 +93,65 @@ async def test_the_event_ring_is_created_and_a_second_open_leaves_it_alone(tmp_p
     await db.close()
 
 
+def _index_of(fragment: str) -> int:
+    return next(i for i, script in enumerate(database_module.MIGRATIONS) if isinstance(script, str) and fragment in script)
+
+
+async def test_the_inbox_becomes_notifications_with_its_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reshaping keeps every entry and its number, and splits the old severity into how loud an
+    entry is and what colour it has: an 'info' entry was a record, never worth a badge."""
+    path = tmp_path / "state.sqlite"
+    before = _index_of("CREATE TABLE notifications")
+    monkeypatch.setattr(database_module, "MIGRATIONS", database_module.MIGRATIONS[:before])
+    db = Database(path)
+    await db.open()
+    rows = [
+        (3, "2026-09-01T10:00:00+00:00", "run_failed", "error", "Run failed in 'a'", "boom", "s1", "r1", 0),
+        (4, "2026-09-01T11:00:00+00:00", "heartbeat", "info", "Heartbeat: quiet", "", "s2", "r2", 1),
+        (5, "2026-09-01T12:00:00+00:00", "loop_paused", "warning", "Loop paused: needs you", "x", "s3", None, 0),
+        (6, "2026-09-01T13:00:00+00:00", "loop", "notice", "Loop", "done", "s3", None, 0),
+        (7, "2026-09-01T14:00:00+00:00", "schedule_run", "notice", "Daily", "", None, None, 1),
+        (8, "2026-09-01T15:00:00+00:00", "service", "warning", "Service 'web' is not running", "", "s1", None, 0),
+        (9, "2026-09-01T16:00:00+00:00", "run_cap", "warning", "A run hit its spend cap", "", "s1", "r9", 0),
+    ]
+    await db.executemany("INSERT INTO inbox(id, at, kind, severity, title, body, session_id, run_id, read) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    # A deleted entry at the top of the inbox: its number was handed out and must stay used.
+    await db.execute("INSERT INTO inbox(id, at, kind, title) VALUES (12, '2026-09-02T00:00:00+00:00', 'x', 'gone')")
+    await db.execute("DELETE FROM inbox WHERE id = 12")
+    await db.close()
+
+    monkeypatch.undo()
+    db = Database(path)
+    await db.open()
+    assert not await db.fetchall("SELECT name FROM sqlite_master WHERE name = 'inbox'")
+    got = {r["id"]: dict(r) for r in await db.fetchall("SELECT * FROM notifications")}
+    assert sorted(got) == [3, 4, 5, 6, 7, 8, 9]
+    assert {i: (r["category"], r["level"], r["tone"]) for i, r in got.items()} == {
+        3: ("run_failed", "normal", "error"),
+        4: ("reminder", "quiet", "info"),
+        5: ("question", "normal", "warning"),
+        6: ("agent_notify", "normal", "info"),
+        7: ("reminder", "normal", "info"),
+        8: ("system", "normal", "warning"),
+        9: ("run_failed", "normal", "warning"),
+    }
+    assert got[4]["seen_at"] == got[4]["at"] and got[3]["seen_at"] is None
+    assert got[3]["updated_at"] == got[3]["at"] and got[3]["source"] == "system" and got[3]["count"] == 1
+    assert (got[3]["session_id"], got[3]["run_id"], got[3]["title"], got[3]["body"]) == ("s1", "r1", "Run failed in 'a'", "boom")
+    await db.execute("INSERT INTO notifications(at, updated_at, kind, category, title) VALUES ('t', 't', 'k', 'system', 'new')")
+    assert (await db.fetchone("SELECT max(id) AS n FROM notifications"))["n"] == 13
+    indexes = {r["name"] for r in await db.fetchall("PRAGMA index_list(notifications)")}
+    assert {"notifications_unseen", "notifications_open", "notifications_dedupe", "notifications_by_session", "notifications_by_project"} <= indexes
+    version = (await db.fetchone("SELECT version FROM schema_version"))["version"]
+    await db.close()
+
+    db = Database(path)
+    await db.open()
+    assert (await db.fetchone("SELECT version FROM schema_version"))["version"] == version
+    assert (await db.fetchone("SELECT count(*) AS n FROM notifications"))["n"] == 8
+    await db.close()
+
+
 async def test_the_terminal_tables_are_created_and_a_second_open_leaves_them_alone(tmp_path: Path) -> None:
     path = tmp_path / "state.sqlite"
     db = Database(path)

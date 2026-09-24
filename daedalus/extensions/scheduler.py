@@ -29,6 +29,7 @@ from croniter import croniter
 from protocore.contracts.types import MessageRole, TextBlock
 
 from daedalus.config import NO_MODEL_MESSAGE, NoModelConfigured
+from daedalus.extensions.notifications import Category, Draft, Level, Tone
 
 if TYPE_CHECKING:
     from daedalus.app import Application
@@ -62,9 +63,6 @@ class Scheduler:
     def root(self) -> Path:
         return self.app.settings.workspaces_dir
 
-    def _inbox(self):  # type: ignore[no-untyped-def]
-        return self.app.extensions.get("inbox")
-
     async def _project_of(self, session_id: str | None):  # type: ignore[no-untyped-def]
         """The project the session that owns a schedule works in, or None.
 
@@ -77,10 +75,22 @@ class Scheduler:
             return None
         return await manager.project_of(session_id)
 
-    async def _post(self, kind: str, title: str, body: str = "", **kw: Any) -> None:
-        inbox = self._inbox()
-        if inbox is not None:
-            await inbox.post(kind, title, body, **kw)
+    async def _post(
+        self,
+        kind: str,
+        title: str,
+        body: str = "",
+        *,
+        tone: Tone = "info",
+        level: Level | None = None,
+        category: Category = "system",
+        session_id: str | None = None,
+        run_id: str | None = None,
+        handled: frozenset[str] = frozenset(),
+    ) -> None:
+        notifications = self.app.notifications
+        if notifications is not None:
+            await notifications.post(Draft(category, title, body, kind=kind, tone=tone, level=level, session_id=session_id, run_id=run_id, handled=handled, source="scheduler"))
 
     async def restore(self) -> None:
         """Rebuild the in-flight map from the rows after a restart; settle runs that are already over."""
@@ -289,10 +299,10 @@ class Scheduler:
                 stale = now - due > timedelta(hours=1)
                 if stale and not self.app.config.scheduler.catch_up_missed:
                     await self._advance(schedule, ran=False)
-                    await self._post("schedule_missed", f"Missed run of '{row['name']}' skipped", f"It was due {row['next_run_at']}; catch-up is off.", severity="notice")
+                    await self._post("schedule_missed", f"Missed run of '{row['name']}' skipped", f"It was due {row['next_run_at']}; catch-up is off.")
                     continue
                 if stale:
-                    await self._post("schedule_missed", f"Late run of '{row['name']}'", f"It was due {row['next_run_at']} (the bot was down); running now.", severity="notice")
+                    await self._post("schedule_missed", f"Late run of '{row['name']}'", f"It was due {row['next_run_at']} (the bot was down); running now.")
                 await self.fire(schedule)
             except NoModelConfigured:
                 # Not this schedule's failure and not something it can recover from by being counted
@@ -300,15 +310,14 @@ class Scheduler:
                 # there when a model is added. Counted as a failure, a fresh install would switch off
                 # every schedule it ships before anyone had configured a model.
                 await self._advance(schedule, ran=False)
-                await self._post("schedule_no_model", f"'{row['name']}' was skipped", NO_MODEL_MESSAGE, severity="notice")
+                await self._post("schedule_no_model", f"'{row['name']}' was skipped", NO_MODEL_MESSAGE)
             except Exception as exc:  # noqa: BLE001 — one bad task must not skip the rest of the tick
                 logger.exception("schedule %s could not fire", row["id"])
                 await self._record_start_failure(schedule, f"{type(exc).__name__}: {exc}")
         await self._promote_lazy_notes(now)
         await self._answer_stale_questions(now)
-        inbox = self._inbox()
-        if inbox is not None:
-            await inbox.prune(self.app.config.scheduler.inbox_keep_days)
+        if self.app.notifications is not None:
+            await self.app.notifications.prune(self.app.config.notifications.keep_days)
         await self._maintain_database(now)
 
     async def _maintain_database(self, now: datetime) -> None:
@@ -378,7 +387,7 @@ class Scheduler:
             "schedule_failed",
             f"'{schedule['name']}' could not start ({failures}/{limit})" + (" — switched off" if disable else ""),
             error[:2000],
-            severity="error" if disable else "warning",
+            tone="error" if disable else "warning",
         )
 
     async def fire(self, schedule: dict[str, Any], *, advance: bool = True) -> str:
@@ -387,6 +396,8 @@ class Scheduler:
             raise RuntimeError(f"schedule {schedule['id']} already has a run in flight")
         kind = schedule.get("kind") or "agent"
         await self.app.db.execute("UPDATE schedules SET last_run_at = ? WHERE id = ?", (_now().isoformat(), schedule["id"]))
+        if self.app.manager is not None:
+            await self.app.manager.bus.publish("schedule.fired", {"schedule_id": str(schedule["id"]), "name": str(schedule["name"]), "kind": kind})
         if advance:
             # The next occurrence is fixed before dispatch so a restart cannot fire the same slot twice.
             await self._advance(schedule, ran=True)
@@ -411,7 +422,10 @@ class Scheduler:
                 delivered = True
             except Exception:  # noqa: BLE001
                 logger.warning("reminder delivery failed", exc_info=True)
-        await self._post("reminder", schedule["name"], schedule["prompt"], severity="notice" if delivered or front is None else "warning", session_id=schedule.get("target_session"))
+        await self._post(
+            "reminder", schedule["name"], schedule["prompt"], category="reminder", tone="info" if delivered or front is None else "warning",
+            session_id=schedule.get("target_session"), handled=frozenset({"telegram"}) if delivered else frozenset(),
+        )
         return ""
 
     async def _fire_lazy(self, schedule: dict[str, Any]) -> str:
@@ -473,10 +487,10 @@ class Scheduler:
                 await self.app.db.execute("UPDATE lazy_notes SET promote_attempts = ? WHERE id = ?", (attempts, row["id"]))
                 logger.warning("could not promote lazy note %s (attempt %d): %s", row["id"], attempts, exc)
                 if attempts >= PROMOTE_MAX_ATTEMPTS:
-                    await self._post("reminder_lost", "A lazy reminder could not be turned into a task", f"{row['text']}\n\n{type(exc).__name__}: {exc}", severity="error", session_id=row["session_id"])
+                    await self._post("reminder_lost", "A lazy reminder could not be turned into a task", f"{row['text']}\n\n{type(exc).__name__}: {exc}", tone="error", session_id=row["session_id"])
                 continue
             await self.app.db.execute("UPDATE lazy_notes SET promoted_at = ? WHERE id = ?", (now.isoformat(), row["id"]))
-            await self._post("reminder_promoted", "A lazy reminder became a task", row["text"], severity="notice", session_id=row["session_id"])
+            await self._post("reminder_promoted", "A lazy reminder became a task", row["text"], session_id=row["session_id"])
 
     async def _answer_stale_questions(self, now: datetime) -> None:
         """Any unattended run waiting on AskUser for too long continues on its own judgement."""
@@ -498,8 +512,8 @@ class Scheduler:
             try:
                 if front is not None:
                     await front.close_question(row["session_id"], f"⏳ No answer for {self.app.config.scheduler.question_timeout_minutes} min: the unattended run continues on its own judgement.")
-                await manager.answer(row["session_id"], [{"custom": UNATTENDED_ANSWER}])
-                await self._post("schedule_question_timeout", "An unattended run waited too long for an answer", f"Session '{state.session.title}': the question was answered with 'continue on your own judgement'.", severity="warning", session_id=row["session_id"])
+                await manager.answer(row["session_id"], [{"custom": UNATTENDED_ANSWER}], via="timeout")
+                await self._post("schedule_question_timeout", "An unattended run waited too long for an answer", f"Session '{state.session.title}': the question was answered with 'continue on your own judgement'.", tone="warning", session_id=row["session_id"])
             except RuntimeError:
                 pass
 
@@ -577,10 +591,10 @@ class Scheduler:
         target = schedule.get("target_session") or schedule.get("created_by_session")
         state = await manager.get_state(target) if target else None
         if state is None:
-            await self._post("schedule_orphaned", f"'{schedule['name']}' lost its session", "The session it was meant to run in no longer exists; this run starts a task session instead.", severity="warning")
+            await self._post("schedule_orphaned", f"'{schedule['name']}' lost its session", "The session it was meant to run in no longer exists; this run starts a task session instead.", tone="warning")
             return None
         if state.pending is not None:
-            await self._post("schedule_skipped", f"'{schedule['name']}' skipped", "Its session is waiting for the operator's answer; the next occurrence will try again.", severity="notice", session_id=state.session.id)
+            await self._post("schedule_skipped", f"'{schedule['name']}' skipped", "Its session is waiting for the operator's answer; the next occurrence will try again.", session_id=state.session.id)
             return state.session.id
         if state.running:
             # A wake-up call for a session that is already working is noise: it would land mid-task as a steer.
@@ -635,7 +649,7 @@ class Scheduler:
                     "schedule_failed",
                     f"'{row['name']}' failed ({failures}/{limit})" + (" — switched off" if disable else ""),
                     summary[:2000] or "The run ended with an error.",
-                    severity="error" if disable else "warning",
+                    tone="error" if disable else "warning",
                     session_id=session_id,
                     run_id=run_id,
                 )
@@ -648,7 +662,8 @@ class Scheduler:
                 "schedule_run",
                 f"'{row['name']}': " + ("quiet, nothing to report" if quiet else status),
                 note if quiet else summary[:4000],
-                severity="info",
+                category="reminder",
+                level="quiet" if quiet else "normal",
                 session_id=session_id,
                 run_id=run_id,
             )

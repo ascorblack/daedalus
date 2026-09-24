@@ -83,13 +83,13 @@ async def front(settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatc
     await manager.start()
     submitted: list[tuple[str, str, list[str]]] = []
 
-    async def fake_submit(session_id: str, text: str, attachments=(), *, steer: bool = False) -> str:  # type: ignore[no-untyped-def]
+    async def fake_submit(session_id: str, text: str, attachments=(), *, steer: bool = False, via: str = "app") -> str:  # type: ignore[no-untyped-def]
         submitted.append((session_id, text, [a.path.name for a in attachments]))
         return "run"
 
     answered: list[tuple[str, list[dict[str, Any]]]] = []
 
-    async def fake_answer(session_id: str, answers: list[dict[str, Any]]) -> str:
+    async def fake_answer(session_id: str, answers: list[dict[str, Any]], *, via: str) -> str:
         answered.append((session_id, answers))
         return "run"
 
@@ -270,3 +270,61 @@ def test_builtin_callback_prefixes_do_not_shadow_extension_hooks() -> None:
     selfdev_src = Path("daedalus/extensions/selfdev.py").read_text()
     extension = set(re.findall(r'callback_hooks\["(\w+)"\]', selfdev_src))
     assert builtin.isdisjoint(extension), builtin & extension
+
+
+async def test_a_question_answered_in_the_app_retires_its_keyboard_here(front: TelegramFront) -> None:
+    state = await front.manager.create_session("q")
+    sid = state.session.id
+    await front.bind_topic(OWNER, 0, sid, "q")
+    retired: list[tuple[int, int]] = []
+
+    async def edit_message_reply_markup(*, chat_id: int, message_id: int, reply_markup: Any) -> None:
+        retired.append((chat_id, message_id))
+
+    front.bot.edit_message_reply_markup = edit_message_reply_markup  # type: ignore[attr-defined]
+    front.listen()
+    try:
+        await front._ask(sid, {"questions": [{"question": "Color?", "options": [{"label": "Red"}], "multiSelect": False, "allow_custom": False}]})
+        asked = front.bot.sent[-1]["id"]  # type: ignore[attr-defined]
+        # Answered here: the front already knows, and says nothing more.
+        await front.manager.bus.publish("ask.answered", {"request_id": "c1", "request_ref": f"ask:{sid}:c1", "via": "telegram"}, session_id=sid)
+        await front.manager.bus.publish("ask.answered", {"request_id": "c1", "request_ref": f"ask:{sid}:c1", "via": "timeout"}, session_id=sid)
+        count = len(front.bot.sent)  # type: ignore[attr-defined]
+        await front.manager.bus.publish("ask.answered", {"request_id": "c1", "request_ref": f"ask:{sid}:c1", "via": "app"}, session_id=sid)
+        await grows_to(front.bot.sent, count + 1, "the note")  # type: ignore[attr-defined]
+        assert front.bot.sent[-1]["text"] == "Answered in the app."  # type: ignore[attr-defined]
+        assert retired == [(OWNER, asked)] and sid not in front._question_state
+        assert len(front.bot.sent) == count + 1, "the answers from Telegram and the timeout posted nothing"  # type: ignore[attr-defined]
+    finally:
+        await front.stop_listening()
+
+
+async def test_leave_refused_carries_the_key_and_closes_the_request(front: TelegramFront) -> None:
+    state = await front.manager.create_session("p")
+    sid = state.session.id
+    calls: list[tuple[str, str, str]] = []
+
+    async def refuse(session_id: str, key: str, *, via: str) -> dict[str, Any]:
+        calls.append((session_id, key, via))
+        return {"key": key, "refuses": None}
+
+    front.manager.refuse = refuse  # type: ignore[method-assign]
+    edited: list[str] = []
+
+    async def reply(*args: Any, **kwargs: Any) -> None:
+        edited.extend(str(a) for a in args)
+
+    query = CallbackQuery.model_validate(
+        {
+            "id": "cq",
+            "from": {"id": OWNER, "is_bot": False, "first_name": "A"},
+            "chat_instance": "x",
+            "data": f"pa:{sid}:0123456789ab:no",
+            "message": {"message_id": 5, "date": 1, "chat": {"id": OWNER, "type": "private"}, "text": "refused"},
+        }
+    )
+    object.__setattr__(query, "answer", reply)
+    object.__setattr__(query.message, "edit_text", reply)
+    await front.on_callback(query)
+    assert calls == [(sid, "0123456789ab", "telegram")]
+    assert "Left refused." in edited

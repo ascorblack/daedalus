@@ -1,5 +1,5 @@
 import { Component, Suspense, lazy, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, SessionList, SessionSummary, telegram } from "./api";
+import { api, NotificationSummary, SessionList, SessionSummary, telegram } from "./api";
 import { StatusLabel } from "./components";
 import { ConfirmHost, Sheet, ToastHost, toast as showToast } from "./dialogs";
 import type { AuthConfig } from "./screens/Login";
@@ -19,6 +19,7 @@ import { MaintenanceNotice } from "./maintenance";
 import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
 import { t, useLang } from "./i18n";
+import { startPresence } from "./presence";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -122,6 +123,8 @@ export function App() {
   const [authed, setAuthed] = useState<boolean | null>(() => (telegram()?.initData ? true : null));
   // Nothing in the app works without a model, so the app asks for one before it shows anything else.
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
+  // What this window shows goes to the host from the moment it may ask anything at all.
+  useEffect(() => (authed ? startPresence() : undefined), [authed]);
   useEffect(() => {
     if (!authed) return;
     api
@@ -129,7 +132,7 @@ export function App() {
       .then(setOnboarding)
       .catch(() => setOnboarding({ has_model: true } as OnboardingState)); // an older bot has no such route: let the app through
   }, [authed]);
-  const inbox = useQuery<{ unread: number }>(authed ? "/api/inbox/unread" : null, { pollMs: 20000, staleMs: 5000 });
+  const notifications = useQuery<NotificationSummary>(authed ? "/api/notifications/summary" : null, { pollMs: 20000, staleMs: 5000 });
   const projects = useProjects();
   const projectList = projects.data ?? [];
   // A project removed elsewhere must not leave the shell filtering by something that is gone.
@@ -145,7 +148,7 @@ export function App() {
   // this app does not recognise, must not take the whole shell down over a nav label.
   const selfdev: SelfDevMode = caps.data?.selfdev?.mode ?? "server";
   const proposals = useQuery<{ status: string }[]>(authed && selfdev !== "off" ? "/api/proposals" : null, { pollMs: 60000, staleMs: 30000 });
-  const counts: Counts = { inbox: inbox.data?.unread ?? 0, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
+  const counts: Counts = { inbox: notifications.data?.unseen ?? 0, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
   useShortcuts(openPalette, selfdev);
   // Two more on a desktop: the menu and the sidebar, both with a modifier so a text field never eats them.
   useEffect(() => {

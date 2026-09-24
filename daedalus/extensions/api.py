@@ -53,6 +53,7 @@ from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
+from daedalus.extensions.notifications import Draft, NotificationService
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import model_options, tts_configured
 from daedalus.host import capabilities, component_install, launcher_bridge
@@ -61,6 +62,7 @@ from daedalus.host.config_validation import ConfigConflict, config_revision, val
 from daedalus.host.dependencies import DependencyPlanner
 from daedalus.host.events import EventFilter, event_stream, streamed_types
 from daedalus.host.policy import sealed_root
+from daedalus.host.presence import MAX_ID_LENGTH, MAX_PROJECTS, MAX_SESSIONS, MAX_TERMINALS, PresenceReport
 from daedalus.host.prompt_changes import PromptChangePlanner
 from daedalus.host.prompts import DEFAULT_RULES
 from daedalus.host.session_runner import TENANT, Attachment, clip_title
@@ -255,6 +257,21 @@ class AnswerBody(BaseModel):
     answers: list[dict[str, Any]]
 
 
+class PresenceBody(BaseModel):
+    """One window's account of itself: whether it is seen, and what it shows."""
+
+    client: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    kind: Literal["browser", "pwa", "telegram", "window"] = "browser"
+    visible: bool
+    focused: bool
+    sessions: list[str] = []
+    terminals: list[str] = []
+    projects: list[str] = []
+    screen: str = Field("", max_length=64)
+    lang: str = Field("", max_length=16)
+    tz: str = Field("", max_length=64)
+
+
 class SpaFiles(StaticFiles):
     """The built app with its screens in the URL: a path that is not a file is the app itself."""
 
@@ -369,9 +386,13 @@ class SchedulePatchBody(BaseModel):
     model_config = {"extra": "forbid"}
 
 
-class InboxReadBody(BaseModel):
-    ids: list[int] | None = None
-    """Omitted = mark everything read."""
+class NotificationsSeenBody(BaseModel):
+    """Which notifications the operator has seen: the listed ids, every one, or every one of a session."""
+
+    ids: list[int] | None = Field(default=None, max_length=1000)
+    all: bool = False
+    session_id: str | None = Field(default=None, max_length=64)
+    model_config = {"extra": "forbid"}
 
 
 class HeartbeatBody(BaseModel):
@@ -1722,9 +1743,40 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             last = request.headers.get("last-event-id", "").strip()
             cursor = int(last) if last.isdigit() else None
         flt = EventFilter(types=wanted or streamed_types())
-        frames = event_stream(manager.bus, flt, after=cursor, is_disconnected=request.is_disconnected, client=client, kind=kind)
+        presence = manager.presence
+
+        async def opened() -> None:
+            await presence.stream_opened(client, kind)
+
+        async def closed() -> None:
+            await presence.stream_closed(client, kind)
+
+        frames = event_stream(
+            manager.bus, flt, after=cursor, is_disconnected=request.is_disconnected, client=client, kind=kind,
+            on_open=opened, on_close=closed,
+        )
         headers = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
         return StreamingResponse(frames, media_type="text/event-stream", headers=headers)
+
+    @api.post("/api/presence", status_code=204)
+    async def report_presence(body: PresenceBody, _: dict[str, Any] = Depends(auth)) -> Response:
+        """What one window shows, re-sent every 20 s while it is visible and whenever that changes.
+
+        Nothing is written to the database here except the language and time zone when they change:
+        every visible tab calls this three times a minute.
+        """
+        limits = (("sessions", body.sessions, MAX_SESSIONS), ("terminals", body.terminals, MAX_TERMINALS), ("projects", body.projects, MAX_PROJECTS))
+        for name, ids, most in limits:
+            if len(ids) > most or any(not item or len(item) > MAX_ID_LENGTH for item in ids):
+                raise HTTPException(400, f"{name}: at most {most} ids of at most {MAX_ID_LENGTH} characters")
+        await manager.presence.report(
+            PresenceReport(
+                client=body.client, kind=body.kind, visible=body.visible, focused=body.focused,
+                sessions=tuple(body.sessions), terminals=tuple(body.terminals), projects=tuple(body.projects),
+                screen=body.screen, lang=body.lang, tz=body.tz,
+            )
+        )
+        return Response(status_code=204)
 
     @api.get("/api/sessions/{session_id}/tool-results/{call_id}")
     async def tool_result(session_id: str, call_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -2796,7 +2848,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/sessions/{session_id}/answer")
     async def answer(session_id: str, body: AnswerBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         try:
-            run_id = await manager.answer(session_id, body.answers)
+            run_id = await manager.answer(session_id, body.answers, via="app")
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {"run_id": run_id}
@@ -3364,9 +3416,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except Exception as exc:  # noqa: BLE001 — the sender must get a status, and the failure goes to the inbox
             logger.warning("webhook %s could not run", provider, exc_info=True)
             await inbound.forget_delivery(provider, delivery_id)  # type: ignore[attr-defined]
-            inbox = app.extensions.get("inbox")
-            if inbox is not None:
-                await inbox.post("webhook_failed", f"Webhook {provider} could not start a run", f"{type(exc).__name__}: {exc}", severity="warning")  # type: ignore[attr-defined]
+            if app.notifications is not None:
+                await app.notifications.post(Draft("system", f"Webhook {provider} could not start a run", f"{type(exc).__name__}: {exc}", kind="webhook_failed", tone="warning", source=f"webhook:{provider}"))
             raise HTTPException(503, "accepted but could not start a run; see the inbox") from exc
         return {"status": "accepted", "delivery_id": delivery_id, **result}
 
@@ -3424,12 +3475,22 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def policy_grant(session_id: str, body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Let one refused call through: ``{"key": "<approval key from the refusal>"}``."""
         try:
-            grants = await manager.grant(session_id, str(body.get("key") or ""))
+            grants = await manager.grant(session_id, str(body.get("key") or ""), via="app")
         except KeyError as exc:
             raise HTTPException(404, "no such session") from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"grants": grants}
+
+    @api.post("/api/sessions/{session_id}/policy/refuse")
+    async def policy_refuse(session_id: str, body: dict[str, Any], _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Leave one refused call refused: ``{"key": "<approval key>"}``. The request stops being open."""
+        try:
+            return await manager.refuse(session_id, str(body.get("key") or ""), via="app")
+        except KeyError as exc:
+            raise HTTPException(404, "no such session") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @api.get("/api/sessions/{session_id}/egress")
     async def session_egress(session_id: str, limit: int = 200, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -4062,7 +4123,6 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     async def status(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         selfdev = app.extensions.get("selfdev")
         supervisor = await selfdev.supervisor_status() if selfdev is not None else None  # type: ignore[attr-defined]
-        inbox = app.extensions.get("inbox")
         heartbeat = app.extensions.get("heartbeat")
         return {
             "model": app.config.model.model_dump(),
@@ -4070,7 +4130,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             "supervisor": supervisor,
             "budget_exceeded": manager.budget_exceeded(),
             "sessions": await manager.list_sessions(limit=50),
-            "inbox_unread": await inbox.unread_count() if inbox is not None else 0,  # type: ignore[attr-defined]
+            "notifications": await app.notifications.summary() if app.notifications is not None else {"unseen": 0, "needs_you": 0},
             "heartbeat": heartbeat.status() if heartbeat is not None else None,  # type: ignore[attr-defined]
         }
 
@@ -4131,34 +4191,41 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         checks = await run_checks(_doctor_context(True))
         return {"checks": [c.as_dict() for c in checks], "summary": summarize(checks)}
 
-    # -- inbox --------------------------------------------------------------------------
+    # -- notifications ------------------------------------------------------------------
 
-    @api.get("/api/inbox")
-    async def inbox_list(unread: int = 0, limit: int = 100, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        inbox = app.extensions.get("inbox")
-        if inbox is None:
-            return {"entries": [], "unread": 0}
-        return {"entries": await inbox.list(limit=limit, unread_only=bool(unread)), "unread": await inbox.unread_count()}  # type: ignore[attr-defined]
+    def notifications_service() -> NotificationService:
+        if app.notifications is None:
+            raise HTTPException(503, "notifications are not installed")
+        return app.notifications
 
-    @api.get("/api/inbox/unread")
-    async def inbox_unread(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        inbox = app.extensions.get("inbox")
-        return {"unread": await inbox.unread_count() if inbox is not None else 0}  # type: ignore[attr-defined]
+    @api.get("/api/notifications")
+    async def notifications_list(
+        view: Literal["all", "unseen", "problems", "needs_you"] = "all",
+        project: str | None = Query(default=None, max_length=64),
+        before: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=100, ge=1, le=500),
+        _: dict[str, Any] = Depends(auth),
+    ) -> dict[str, Any]:
+        return dict(await notifications_service().list(view, project_id=project, before=before, limit=limit))
 
-    @api.post("/api/inbox/read")
-    async def inbox_read(body: InboxReadBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        inbox = app.extensions.get("inbox")
-        if inbox is None:
-            raise HTTPException(503, "inbox is not installed")
-        return {"marked": await inbox.mark_read(body.ids), "unread": await inbox.unread_count()}  # type: ignore[attr-defined]
+    @api.get("/api/notifications/summary")
+    async def notifications_summary(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        return dict(await notifications_service().summary())
 
-    @api.delete("/api/inbox/{entry_id}")
-    async def inbox_delete(entry_id: int, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        inbox = app.extensions.get("inbox")
-        if inbox is None:
-            raise HTTPException(503, "inbox is not installed")
-        await inbox.delete(entry_id)  # type: ignore[attr-defined]
-        return {"deleted": entry_id}
+    @api.post("/api/notifications/seen")
+    async def notifications_seen(body: NotificationsSeenBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        service = notifications_service()
+        if sum((body.ids is not None, body.all, body.session_id is not None)) != 1:
+            raise HTTPException(422, "name exactly one of ids, all or session_id")
+        marked = await service.mark_seen(body.ids, everything=body.all, session_id=body.session_id)
+        return {"marked": marked, "summary": await service.summary()}
+
+    @api.delete("/api/notifications/{entry_id}")
+    async def notifications_delete(entry_id: int, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        service = notifications_service()
+        if not await service.delete(entry_id):
+            raise HTTPException(404, "no such notification")
+        return {"deleted": entry_id, "summary": await service.summary()}
 
     # -- heartbeat ------------------------------------------------------------------------
 

@@ -179,8 +179,8 @@ async def test_grants_timing_and_subagent_spend_live_in_the_manager(settings, db
         state = await manager.create_session("policy")
         sid = state.session.id
         with pytest.raises(ValueError):
-            await manager.grant(sid, "not-a-key")
-        granted = await manager.grant(sid, "0123456789ab")
+            await manager.grant(sid, "not-a-key", via="app")
+        granted = await manager.grant(sid, "0123456789ab", via="app")
         assert granted["grants"] == ["0123456789ab"] and granted["approves"] is None
         gate = manager.policy_gate(sid, "run-1")
         decision = gate.decide("Exec", {"command": "curl https://x.example/"})
@@ -192,7 +192,7 @@ async def test_grants_timing_and_subagent_spend_live_in_the_manager(settings, db
         gate = manager.policy_gate(sid, "run-1")
         refused = gate.decide("Exec", {"command": "curl https://other.example/"})
         assert refused.action == "ask" and refused.key
-        granted = await manager.grant(sid, refused.key)
+        granted = await manager.grant(sid, refused.key, via="app")
         assert granted["approves"]["tool"] == "Exec" and "other.example" in granted["approves"]["text"]
         assert gate.decide("Exec", {"command": "curl https://other.example/"}).action == "allow"
         await manager.flush_background()

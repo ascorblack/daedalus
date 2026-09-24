@@ -638,10 +638,11 @@ async def _runtime(ctx: DoctorContext) -> list[Check]:
     if heartbeat is not None:
         hb = heartbeat.status()
         out.append(Check("heartbeat", True, "armed" if hb["armed"] else ("on, file empty" if hb["enabled"] else "off"), "ok" if hb["armed"] or not hb["enabled"] else "info"))
-    inbox = ctx.extensions.get("inbox")
-    if inbox is not None:
-        unread = await inbox.unread_count()
-        out.append(Check("inbox", True, f"{unread} unread", "ok" if unread == 0 else "info"))
+    notifications = ctx.extensions.get("notifications")
+    if notifications is not None:
+        summary = await notifications.summary()
+        open_requests = f", {summary['needs_you']} waiting for an answer" if summary["needs_you"] else ""
+        out.append(Check("notifications", True, f"{summary['unseen']} unseen{open_requests}", "ok" if summary["unseen"] == 0 else "info"))
     if ctx.db is not None:
         row = await ctx.db.fetchone("SELECT count(*) c FROM schedules WHERE enabled = 0 AND failure_count > 0")
         if row and row["c"]:

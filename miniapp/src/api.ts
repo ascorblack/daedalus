@@ -32,6 +32,8 @@ declare global {
     daedalus?: {
       /** Open the platform's folder chooser; resolves to the path, or null when the operator cancelled. */
       pickFolder?: () => Promise<string | null>;
+      /** Set by the desktop launcher's own window, so the page can say which kind of window it is in. */
+      window?: boolean;
     };
   }
 }
@@ -463,6 +465,40 @@ export type Question = {
   multiSelect?: boolean;
   allow_custom?: boolean;
 };
+
+/** How many notifications want the operator: unseen ones worth a badge, and open requests. */
+export type NotificationSummary = { unseen: number; needs_you: number };
+
+export type NotificationAction = { id: string; label: string; style: "primary" | "default" | "danger" | "ghost"; quick: boolean };
+
+/** One entry of the notification centre, as `/api/notifications` and the `notify` event carry it. */
+export type Notification = {
+  id: number;
+  at: string;
+  updated_at: string;
+  category: string;
+  kind: string;
+  level: "quiet" | "normal" | "urgent";
+  tone: "ok" | "info" | "warning" | "error";
+  title: string;
+  body: string;
+  link: string;
+  session_id: string | null;
+  run_id: string | null;
+  project_id: string | null;
+  staff_id: string | null;
+  terminal_id: string | null;
+  source: string;
+  dedupe_key: string | null;
+  count: number;
+  actions: NotificationAction[];
+  seen: boolean;
+  resolved: string | null;
+  needs_you: boolean;
+  delivered: Record<string, unknown>;
+};
+
+export type NotificationPage = { entries: Notification[]; next_before: number | null; summary: NotificationSummary };
 
 export type Proposal = {
   id: string;

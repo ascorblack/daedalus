@@ -753,8 +753,13 @@ class SchedulerConfig(BaseModel):
     """An unattended run (schedule, heartbeat) that asks a question waits this long, then continues on its own judgement."""
     lazy_ttl_hours: int = Field(default=24, ge=1)
     """A lazy reminder not yet seen by the operator after this long becomes an agent task."""
-    inbox_keep_days: int = Field(default=30, ge=1)
-    """Read inbox entries older than this are pruned."""
+
+
+class NotificationsConfig(BaseModel):
+    """What happens to the things that want the operator's attention."""
+
+    keep_days: int = Field(default=30, ge=1)
+    """Seen (or quiet) notifications older than this are pruned; one still waiting for an answer never is."""
 
 
 class AsrConfig(BaseModel):
@@ -1009,6 +1014,12 @@ class OpsConfig(BaseModel):
     event_replay_max: int = Field(default=5000, ge=100)
     """Events a reconnecting client may be behind and still be caught up. Further behind, it is told
     to re-read its lists, which is cheaper than streaming it a day of history."""
+    presence_ttl_seconds: float = Field(default=60.0, ge=5)
+    """How long one window's report of what it shows counts. The app re-sends it every 20 s while
+    visible, so a window that stopped reporting (a phone locked without a word) is away after this."""
+    presence_grace_seconds: float = Field(default=5.0, ge=0)
+    """How long a window still counts after its event stream dropped: long enough for a reconnect,
+    far shorter than the report's own lifetime."""
 
 
 class TerminalsConfig(BaseModel):
@@ -1147,6 +1158,7 @@ class RuntimeConfig(BaseModel):
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     balance: BalanceConfig = Field(default_factory=BalanceConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
@@ -1405,9 +1417,23 @@ def _migrate_keyproxy_base(raw: dict[str, Any], base: str = "") -> bool:
     return changed
 
 
+def _migrate_inbox_retention(raw: dict[str, Any]) -> bool:
+    """``[scheduler] inbox_keep_days`` became ``[notifications] keep_days`` when the inbox did."""
+    scheduler = raw.get("scheduler")
+    if not isinstance(scheduler, dict) or "inbox_keep_days" not in scheduler:
+        return False
+    days = scheduler.pop("inbox_keep_days")
+    notifications = raw.get("notifications")
+    if not isinstance(notifications, dict):
+        notifications = raw["notifications"] = {}
+    notifications.setdefault("keep_days", days)
+    return True
+
+
 def _migrate(raw: dict[str, Any]) -> bool:
     """Rewrite config shapes older versions wrote; returns True when something changed."""
     changed = _seed_presets(raw)
+    changed = _migrate_inbox_retention(raw) or changed
     changed = _migrate_keyproxy_base(raw) or changed
     changed = _seed_claude_subscription(raw) or changed
     changed = _migrate_web_search(raw) or changed
@@ -1434,6 +1460,7 @@ __all__ = [
     "McpOAuthConfig",
     "McpServerConfig",
     "ModelConfig",
+    "NotificationsConfig",
     "ModelPresetConfig",
     "PROVIDER_KINDS",
     "PromptConfig",

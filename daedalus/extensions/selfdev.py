@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -21,7 +20,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daedalus import supervisor_client
+from daedalus.extensions.notifications import Draft
 from daedalus.host import reachability
+from daedalus.host.gitrun import GitError, run_command, run_git
 from daedalus.security import redact
 
 # A command that runs Python tests. Such a run prints how many it executed, so a receipt for one that
@@ -56,11 +57,6 @@ class RepoSpec:
     worktrees: Path
 
 
-class GitError(RuntimeError):
-    pass
-
-
-_TOKEN_RE = re.compile(r"(https?://)[^/@\s]+@")
 _PRIVATE_LINES = re.compile(r"(?im)^\s*(session|run|operator|owner|claude-session|co-authored-by|generated[- ]with|signed-off-by)\s*:.*(?:\n|$)")
 _PRIVATE_ADDRESSES = re.compile(r"\b(?:10|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}(?:\.\d{1,3}){1,2}\b|/home/[A-Za-z0-9_-]+|/srv/state/[^\s`'\"]*")
 _PRIVATE_PROSE = re.compile(
@@ -86,28 +82,6 @@ def public_text(text: str) -> str:
     text = _PRIVATE_LINES.sub("", redact.shared().redact(text))
     text = _PRIVATE_ADDRESSES.sub("<redacted>", text)
     return text.strip()
-
-
-
-async def _run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None, timeout: float = 600) -> str:
-    """Run a git/gh command; returns stdout only, stderr goes into the error message."""
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=str(cwd) if cwd else None,
-        env={**os.environ, **(env or {})},
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError as exc:
-        proc.kill()
-        raise GitError(f"timed out: {' '.join(cmd)}") from exc
-    text = out.decode("utf-8", "replace")
-    if proc.returncode != 0:
-        detail = _TOKEN_RE.sub(r"\1***@", (err.decode("utf-8", "replace") + text)[-1500:])
-        raise GitError(f"{' '.join(cmd[:3])} failed ({proc.returncode}):\n{detail}")
-    return text
 
 
 ADDED_LINES_CAP = 200
@@ -506,10 +480,10 @@ class SelfDevelopment:
         return env
 
     async def git(self, repo: RepoSpec, *args: str, cwd: Path | None = None) -> str:
-        return await _run(["git", "-C", str(cwd or repo.checkout), *args], env=self._git_env())
+        return await run_git(["-C", str(cwd or repo.checkout), *args], env=self._git_env())
 
     async def gh(self, *args: str, cwd: Path) -> str:
-        return await _run(["gh", *args], cwd=cwd, env=self._git_env())
+        return await run_command(["gh", *args], cwd=cwd, env=self._git_env())
 
     def repo(self, name: str) -> RepoSpec:
         if name not in self.repos:
@@ -766,9 +740,8 @@ class SelfDevelopment:
         (self.selfdev_dir / RESULT_FILE).write_text(json.dumps(record, indent=2))
         (self.selfdev_dir / PENDING_FILE).unlink(missing_ok=True)
         if outcome["status"] != "applied":
-            inbox = self.app.extensions.get("inbox")
-            if inbox is not None:
-                await inbox.post("selfdev", f"The change '{pending.get('summary')}' was not applied", outcome["detail"], severity="warning")
+            if self.app.notifications is not None:
+                await self.app.notifications.post(Draft("system", f"The change '{pending.get('summary')}' was not applied", outcome["detail"], kind="selfdev", tone="warning", source="selfdev"))
         await self._notify_session(
             pending.get("session_id"),
             f"Your change '{pending.get('summary')}' — {outcome['status']}. {outcome['detail']}",
@@ -834,24 +807,27 @@ class SelfDevelopment:
     async def _send_card(self, proposal_id: str, repo: str, title: str, summary: str, pr_url: str, diffstat: str) -> None:
         front = self.app.front
         outbox = front._general_outbox() if front is not None else None
-        if outbox is None:
-            # No chat to put the buttons in: the proposal is decided on the Changes screen, and the
-            # inbox is what tells the operator there is one waiting.
-            inbox = self.app.extensions.get("inbox")
-            if inbox is not None:
-                await inbox.post("change_proposal", f"Change proposal ({repo}): {title}", f"{summary[:1500]}\n\n{pr_url}", severity="notice")
-            return
-        assert front is not None
-        text = f"🛠 Change proposal ({repo}): {title}\n\n{summary[:1500]}\n\n{diffstat[-800:]}\n\n{pr_url}"
-        message_id = await front.send_choice(
-            outbox,
-            text,
-            [
-                [("✅ Approve", f"cp:{proposal_id}:approve"), ("❌ Reject", f"cp:{proposal_id}:reject")],
-                [("✍️ Reject with reason", f"cp:{proposal_id}:reason")],
-            ],
-        )
-        await self.app.db.execute("UPDATE change_proposals SET message_id = ? WHERE id = ?", (message_id, proposal_id))
+        sent = False
+        if outbox is not None:
+            assert front is not None
+            text = f"🛠 Change proposal ({repo}): {title}\n\n{summary[:1500]}\n\n{diffstat[-800:]}\n\n{pr_url}"
+            message_id = await front.send_choice(
+                outbox,
+                text,
+                [
+                    [("✅ Approve", f"cp:{proposal_id}:approve"), ("❌ Reject", f"cp:{proposal_id}:reject")],
+                    [("✍️ Reject with reason", f"cp:{proposal_id}:reason")],
+                ],
+            )
+            await self.app.db.execute("UPDATE change_proposals SET message_id = ? WHERE id = ?", (message_id, proposal_id))
+            sent = True
+        # Recorded either way: without a chat to put the buttons in, this entry is what tells the
+        # operator a proposal waits on the Changes screen; with one, it is the record of the card.
+        if self.app.notifications is not None:
+            await self.app.notifications.post(Draft(
+                "system", f"Change proposal ({repo}): {title}", f"{summary[:1500]}\n\n{pr_url}", kind="change_proposal",
+                link=f"/app/changes/{proposal_id}", source="selfdev", handled=frozenset({"telegram"}) if sent else frozenset(),
+            ))
 
     async def decide(self, proposal_id: str, decision: str, *, reason: str = "") -> str:
         row = await self.app.db.fetchone("SELECT * FROM change_proposals WHERE id = ?", (proposal_id,))
@@ -926,9 +902,8 @@ class SelfDevelopment:
             while manager.running_run_ids() and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(5)
             outcome = await self.rebuild(reason)
-            inbox = self.app.extensions.get("inbox")
-            if inbox is not None:
-                await inbox.post("rebuild", f"Rebuild: {reason}", outcome, severity="notice")
+            if self.app.notifications is not None:
+                await self.app.notifications.post(Draft("system", f"Rebuild: {reason}", outcome, kind="rebuild", source="selfdev"))
 
         task = asyncio.create_task(_wait_then_rebuild(), name="rebuild-when-idle")
         self._background.add(task)
