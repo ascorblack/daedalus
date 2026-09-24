@@ -151,7 +151,7 @@ export function TerminalView({ id, visible, readOnly, env, fileOpener, workspace
       {searching && instance?.search && <TerminalSearch search={instance.search} onClose={closeSearch} />}
       {exited && (
         <div className="term-exit" role="status">
-          <span className="term-exit-text">{exited.code === null && exited.signal ? t("term.state.exitedSignal", { signal: exited.signal }) : t("term.exited", { code: exited.code ?? "?" })}</span>
+          <span className="term-exit-text">{exited.signal ? t("term.state.exitedSignal", { signal: exited.signal }) : t("term.exited", { code: exited.code ?? "?" })}</span>
           {onRestart && <button className="btn small" onClick={onRestart}><Icon name="reload" size={14} />{t("term.restart")}</button>}
           {onRemove && <button className="btn small ghost" onClick={onRemove}><Icon name="trash" size={14} />{t("term.remove")}</button>}
         </div>

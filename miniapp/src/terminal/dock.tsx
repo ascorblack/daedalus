@@ -310,7 +310,10 @@ function tabDot(row: TerminalRow | null, state: TerminalState | undefined): Dot 
   return "";
 }
 
+/** What a finished tab shows: the signal that ended it, or its exit code. */
 function exitCode(row: TerminalRow | null, state: TerminalState | undefined): string {
+  const signal = state?.exit?.signal ?? row?.exit_signal;
+  if (signal) return signal;
   const code = state?.exit?.code ?? row?.exit_code;
   return code === null || code === undefined ? "" : String(code);
 }

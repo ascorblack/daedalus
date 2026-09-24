@@ -143,6 +143,7 @@ export class TerminalInstance {
   private desired: Size | null = null;
   /** A size went out on the current socket (possibly before its `hello` arrived). */
   private sizedThisSocket = false;
+  private focusOnOpen = false;
   private disposed = false;
   private stateValue: TerminalState = {
     kit: "loading",
@@ -234,7 +235,9 @@ export class TerminalInstance {
 
   focus(): void {
     this.interact();
-    this.term?.focus();
+    // A terminal made a moment ago is still waiting for xterm.js to load; it takes the focus when it opens.
+    if (this.term && this.opened) this.term.focus();
+    else this.focusOnOpen = true;
   }
 
   /**
@@ -243,6 +246,8 @@ export class TerminalInstance {
    */
   fit(): void {
     if (!this.term || !this.fitAddon || !this.opened || this.disposed) return;
+    // A finished process has no PTY to size; its exit banner taking a row must not send anything.
+    if (this.stateValue.exit) return;
     const context = this.binding.context?.() ?? { visible: false, focused: false };
     const interacted = Date.now() - this.lastInteraction < INTERACTION_MS;
     if (!context.visible) {
@@ -405,6 +410,10 @@ export class TerminalInstance {
     this.opened = true;
     this.applyWebgl();
     this.fit();
+    if (this.focusOnOpen) {
+      this.focusOnOpen = false;
+      this.term.focus();
+    }
   }
 
   private applyWebgl(): void {
@@ -443,8 +452,9 @@ export class TerminalInstance {
       reset: (cols, rows) => {
         base.reset(cols, rows);
         // A snapshot is at the PTY's size, which is what the terminal now shows; whether this screen
-        // wants another one is decided again from scratch.
-        this.scheduler.forget();
+        // wants another one is decided again from scratch — unless this socket already carried its
+        // size, which the daemon applies after the snapshot and confirms with a `size` event.
+        if (!this.sizedThisSocket) this.scheduler.forget();
       },
     };
     this.connection = new TerminalConnection(sink, {
@@ -478,7 +488,10 @@ export class TerminalInstance {
           altScreen: event.modes.alt_screen,
           exit: event.terminal.status === "running" ? null : this.stateValue.exit,
         });
-        this.applySize(event.size);
+        // The hello describes the PTY as it was when the attach arrived; a size this socket sent since is
+        // on its way and will be confirmed by a `size` event, so the stale one is not drawn meanwhile.
+        if (this.sizedThisSocket) this.patch({ size: { cols: event.size.cols, rows: event.size.rows, owner: event.size.owner } });
+        else this.applySize(event.size);
         this.fit();
         break;
       case "size":
