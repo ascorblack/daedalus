@@ -12,8 +12,8 @@ import { plural, t } from "../i18n";
 import { Icon } from "../icons";
 import { ProjectSettingsSheet } from "../projects";
 import { folderName, reachIsProblem, reachKey } from "../folders";
-import { navigate, projectPagePath } from "../router";
-import { PageHeader } from "../shell";
+import { navigate, pathFor, projectPagePath } from "../router";
+import { go, PageHeader } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { EnvPill } from "../terminal/dock";
 import { TerminalView } from "../terminal/view";
@@ -268,7 +268,19 @@ export function TerminalsPage({ projectId, selected, back }: { projectId: string
   const current = terminals.find((term) => term.id === selected) ?? null;
   return (
     <>
-      <PageHeader title={project ? t("focus.terminals.title", { name: project.name }) : t("focus.page.terminals")} back={back ?? undefined} />
+      <PageHeader
+        title={project ? t("focus.terminals.title", { name: project.name }) : t("focus.page.terminals")}
+        back={back ?? undefined}
+        actions={
+          // The rows stay here, inside the project's column; the Terminals screen's own view (a grid,
+          // End, the owner) is one step away rather than the place a row leads, which would leave focus mode.
+          current ? (
+            <a className="iconbtn" href={pathFor("terminals", current.id)} onClick={(e) => go(e, pathFor("terminals", current.id))} aria-label={t("term.maximize")} title={t("term.maximize")}>
+              <Icon name="expand" />
+            </a>
+          ) : undefined
+        }
+      />
       <div className="focus-terminals">
         <div className="focus-terminal-list">
           {data && terminals.length === 0 && <div className="empty calm">{t("focus.terminals.empty")}</div>}

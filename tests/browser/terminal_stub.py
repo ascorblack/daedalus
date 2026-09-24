@@ -99,6 +99,18 @@ class Term:
     snapshot: bytes | None = None
     busy: bool = False
     size_owner: str = "host"
+    # What the Terminals screen shows of it without connecting: the owner's name, the project, the last
+    # rows as styled runs (the daemon's encoding: colour 0 default, 1..256 palette + 1), and when.
+    owner_label: str = ""
+    project_id: str | None = None
+    preview: list[list[dict[str, Any]]] = field(default_factory=list)
+    exit_signal: str | None = None
+    created_at: str = "2026-09-24T09:00:00Z"
+    exited_at: str | None = None
+    last_input_at: str | None = None
+    clients: int = 1
+    activity: dict[str, Any] | None = None
+    created_by: str = "operator"
     sandbox: bool = False
     # Shell integration, as the daemon keeps it: the commands the shell marked, with absolute rows
     # (counted from the terminal's start by line feeds: the stub's output is line-oriented), and the
@@ -107,15 +119,16 @@ class Term:
     prompt_row: int | None = None
     row: int = 0
 
-    def view(self) -> dict[str, Any]:
+    def view(self, preview: bool = False) -> dict[str, Any]:
+        running = self.status == "running"
         return {
             "id": self.id, "env": self.env, "title": self.title,
-            "owner": {"kind": self.owner_kind, "id": self.owner_id or None, "label": ""}, "project_id": None,
+            "owner": {"kind": self.owner_kind, "id": self.owner_id or None, "label": self.owner_label}, "project_id": self.project_id,
             "profile": "shell", "sandbox": self.sandbox, "cwd": self.cwd, "status": self.status,
-            "exit_code": self.exit_code, "exit_signal": None, "created_at": "2026-09-24T09:00:00Z", "exited_at": None,
-            "last_output_at": None, "last_input_at": None, "cols": self.cols, "rows": self.rows,
-            "live": {"clients": 0, "busy": self.busy, "keyboard": {"owner": "auto", "until": None}, "size_owner": self.size_owner, "alt_screen": False},
-            "last_command": None, "preview": [], "activity": None,
+            "exit_code": self.exit_code, "exit_signal": self.exit_signal, "created_at": self.created_at, "created_by": self.created_by,
+            "exited_at": self.exited_at, "last_output_at": None, "last_input_at": self.last_input_at, "cols": self.cols, "rows": self.rows,
+            "live": {"clients": self.clients, "busy": self.busy, "keyboard": {"owner": "auto", "until": None}, "size_owner": self.size_owner, "alt_screen": False} if running else None,
+            "last_command": None, "preview": self.preview if preview else [], "activity": self.activity,
         }
 
 
@@ -151,6 +164,11 @@ class TerminalStub:
         self.log: list[tuple[str, int, str, dict[str, Any]]] = []
         self.counter = 0
         self.lock = threading.RLock()
+        # The machine-wide cap: an operator's create past it is answered 409 `over_cap` until it is
+        # sent again with `confirm: true`, exactly as the host does.
+        self.cap = 20
+        # What `GET /api/terminals/load` answers; a check replaces it to paint the bar warn or bad.
+        self.load = load_answer()
         # What a sandboxed create or restart reports as left read-only, as the host would.
         self.skipped: list[dict[str, str]] = []
 
@@ -376,11 +394,15 @@ class TerminalStub:
 
     # -- REST ---------------------------------------------------------------------------------
 
+    def running(self) -> int:
+        return sum(1 for t in self.terms.values() if t.status == "running")
+
     def listing(self, query: dict[str, list[str]]) -> dict[str, Any]:
         owner = query.get("owner_id", [None])[0]
-        rows = [t.view() for t in self.terms.values() if owner is None or t.owner_id == owner]
-        running = sum(1 for t in self.terms.values() if t.status == "running")
-        return {"envs": self.envs, "terminals": rows, "capacity": {"running": running, "cap": 20, "queued": 0}}
+        kind = query.get("owner_kind", [None])[0]
+        preview = int(query.get("preview", ["0"])[0] or 0) > 0
+        rows = [t.view(preview) for t in self.terms.values() if (owner is None or t.owner_id == owner) and (kind is None or t.owner_kind == kind)]
+        return {"envs": self.envs, "terminals": rows, "capacity": {"running": self.running(), "cap": self.cap, "queued": 0}}
 
     def route(self, route: Any) -> None:
         """``page.route("**/api/terminals**", stub.route)``: registered after the general stub, so it wins."""
@@ -405,13 +427,20 @@ class TerminalStub:
             if method == "GET":
                 return 200, self.listing(query)
             if method == "POST":
+                body = body or {}
+                if self.running() >= self.cap and not body.get("confirm"):
+                    return 409, {"code": "over_cap", "running": self.running(), "cap": self.cap, "detail": "the machine runs as many terminals as the cap allows"}
                 self.counter += 1
                 id_ = f"new{self.counter:09d}"[:12]
-                boxed = bool((body or {}).get("sandbox"))
-                term = self.add(id_, env=(body or {}).get("env", "container"), title="bash", owner_id=(body or {}).get("owner_id") or "", sandbox=boxed)
+                boxed = bool(body.get("sandbox"))
+                term = self.add(
+                    id_, env=body.get("env", "container"), title="bash", owner_id=body.get("owner_id") or "",
+                    owner_kind=body.get("owner_kind", "session"), project_id=body.get("project_id"), sandbox=boxed,
+                    **({"cwd": body["cwd"]} if body.get("cwd") else {}),
+                )
                 return 201, {**term.view(), **({"sandbox_skipped": self.skipped} if boxed else {})}
-        if len(segments) == 3 and segments[2] == "load":
-            return 200, {"cap": 20, "running": 0, "queued": 0}
+        if len(segments) == 3 and segments[2] == "load" and method == "GET":
+            return 200, {**self.load, "cap": self.cap, "running": self.running()}
         term = self.terms.get(segments[2]) if len(segments) >= 3 else None
         if term is None:
             return 404, {"detail": "no such terminal"}
@@ -448,6 +477,29 @@ class TerminalStub:
         page.route_web_socket("**/ws/terminals/**", self.socket)
 
 
+def load_answer(*, total_gb: float = 62, used_gb: float = 20, terminals_gb: float = 1.4, likely_mb: int = 500, cpus: int = 8, machine_cpu: float = 20.0) -> dict[str, Any]:
+    """``GET /api/terminals/load`` as the host answers it; the page does the arithmetic and the words."""
+    gb, mb = 1 << 30, 1 << 20
+    return {
+        "cap": 20, "running": 0, "queued": [],
+        "used": {"rss_bytes": int(terminals_gb * gb), "daemon_rss_bytes": 60 * mb, "cpu_percent": 12.0, "cpus": cpus,
+                 "mem_total_bytes": int(total_gb * gb), "mem_available_bytes": int((total_gb - used_gb) * gb), "machine_cpu_percent": machine_cpu},
+        "profiles": {"shell": {"rss_bytes": likely_mb * mb, "cpu_percent": 4.0, "samples": 12}},
+        "likely": {"rss_bytes": likely_mb * mb, "cpu_percent": 4.0, "samples": 12, "basis": "running"},
+        "projection": {"cap": 20, "sessions": 20, "terminals_rss_bytes": 0, "machine_used_bytes": 0, "mem_total_bytes": int(total_gb * gb), "mem_percent": 0.0, "cpu_percent": 0.0, "level": "ok", "cpu_level": "ok"},
+        "envs": [], "thresholds": {"warn": 70.0, "bad": 90.0},
+    }
+
+
+def run(text: str, fg: int = 0, **style: Any) -> dict[str, Any]:
+    """One styled run of a preview row; ``fg`` is an ANSI colour 1..15, encoded as the daemon does (0 leaves the default)."""
+    out: dict[str, Any] = {"t": text}
+    if fg:
+        out["fg"] = fg + 1
+    out.update(style)
+    return out
+
+
 def dock_state(session_id: str, tabs: list[str], *, active: str | None = None, split: str | None = None, open_: bool = True, height: int = 300) -> str:
     """An init script that opens the session's dock with these tabs, as the page would have saved it."""
     state = {"open": open_, "height": height, "tabs": tabs, "active": active or (tabs[0] if tabs else None), "split": split}
@@ -482,4 +534,4 @@ def stub_requests(stub: TerminalStub, method: str, suffix: str) -> list[Any]:
     return [b for m, p, b in stub.requests if m == method and p.endswith(suffix)]
 
 
-__all__ = ["CODEC", "DEBUG", "ENVS", "WINDOW", "Term", "TerminalStub", "dock_state", "open_session", "stub_requests", "text", "wait_live"]
+__all__ = ["CODEC", "DEBUG", "ENVS", "WINDOW", "Term", "TerminalStub", "dock_state", "load_answer", "open_session", "run", "stub_requests", "text", "wait_live"]
