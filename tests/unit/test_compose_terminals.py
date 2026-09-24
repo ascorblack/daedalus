@@ -316,3 +316,16 @@ async def test_without_a_rebuilder_the_operator_is_given_the_command(client: htt
     assert refused.status_code == 503 and refused.json()["code"] == "no_rebuilder" and refused.json()["command"] == BY_HAND
     assert (await client.post("/api/terminals/envs/host/update", json={"confirm": True}, headers=H)).status_code == 400
     assert (await client.post("/api/terminals/envs/container/update", json={"confirm": True})).status_code == 401
+
+
+async def test_the_doctor_names_the_update_and_the_first_deploy(app: Any, settings: Settings, tmp_path: Path) -> None:
+    from daedalus.doctor import DoctorContext, _terminals  # noqa: PLC0415 — the probe alone, not the whole doctor
+
+    checks = {c.name: c for c in await _terminals(DoctorContext(settings=app.settings, config=app.config, extensions=app.extensions))}
+    update = checks["terminals update (container)"]
+    assert "src-feedfacecafe" in update.message and BY_HAND in update.fix_hint
+    # A stack started before the service existed: the run directory is an empty volume.
+    empty = tmp_path / "empty-run"
+    empty.mkdir()
+    alone = await _terminals(DoctorContext(settings=settings.model_copy(update={"terminals_container_dir": empty}), config=app.config))
+    assert alone[0].name == "terminals (container)" and not alone[0].ok and "up -d --build" in alone[0].fix_hint
