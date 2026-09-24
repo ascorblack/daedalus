@@ -694,6 +694,10 @@ class NotificationService:
         if view is None:
             raise LookupError(entry_id)
         offered = {a["id"]: a for a in view["actions"]}
+        # Checked first, "open" included: a lock-screen token answers the quick actions and does
+        # nothing else, not even marking the entry seen or reading it back.
+        if quick_only and not (action in offered and offered[action].get("quick")):
+            raise ActionRefused("this request is answered in the app")
         if action == "open":
             await self.mark_seen([entry_id])
             return view["resolved"], await self.get(entry_id) or view
@@ -703,8 +707,6 @@ class NotificationService:
         custom = action == "answer" and bool((value or "").strip()) and split_ref(ref)[0] == "ask"
         if action not in offered and not custom:
             raise ActionRefused(f"this notification offers no {action!r}")
-        if quick_only and not (action in offered and offered[action].get("quick")):
-            raise ActionRefused("this request is answered in the app")
         # One answer at a time per request, so two taps racing each other cannot both reach the
         # resolver: the second waits, then finds the first one's resolution and is told so.
         async with self._answering.setdefault(ref, asyncio.Lock()):

@@ -20,9 +20,11 @@ import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
 import { t, useLang } from "./i18n";
 import { startPresence } from "./presence";
+import { insideTerminal } from "./terminal/keys";
 import { startEvents } from "./events";
 import { useSummary } from "./notifications";
 import { NotificationToasts } from "./toasts";
+import { listenForOpen, syncPush } from "./push";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -132,6 +134,12 @@ export function App() {
   useEffect(() => (authed ? startPresence() : undefined), [authed]);
   // The host's events drive the badge and the lists from here on; the polls below are the net under it.
   useEffect(() => (authed ? startEvents() : undefined), [authed]);
+  // A tap on a pushed notification while the app is open moves the app instead of opening another;
+  // and a device the host forgot is registered again, since the browser still thinks it is.
+  useEffect(() => listenForOpen((path) => navigate(path)), []);
+  useEffect(() => {
+    if (authed) void syncPush();
+  }, [authed]);
   useEffect(() => {
     if (!authed) return;
     api
@@ -162,6 +170,8 @@ export function App() {
   useEffect(() => {
     if (!wide) return;
     const onKey = (e: KeyboardEvent) => {
+      // Ctrl+\ quits a program in a terminal; the sidebar waits until the terminal loses focus.
+      if (insideTerminal(e.target)) return;
       const which = shortcutFor(e);
       if (!which) return;
       e.preventDefault();

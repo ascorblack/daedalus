@@ -1149,6 +1149,28 @@ CREATE TABLE harness_deliveries (
 CREATE INDEX harness_deliveries_by_launch ON harness_deliveries(launch_id, client_ref);
 """)
 
+
+# The browsers and phones Web Push reaches, one row per push subscription. The endpoint is the
+# subscription's identity (a browser that subscribes again gets a new one), so it is unique and an
+# upsert replaces the keys that come with it. No foreign keys: a subscription belongs to the
+# installation, not to a session or a project. ``failures`` counts consecutive failed sends and is
+# reset by a success; a row that has not succeeded for a week is dropped by the sender.
+MIGRATIONS.append("""
+CREATE TABLE push_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    endpoint TEXT NOT NULL UNIQUE,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    user_agent TEXT NOT NULL DEFAULT '',
+    device TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    last_ok_at TEXT,
+    failures INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
+);
+""")
+
+
 CACHE_PAGES = -65536
 """Page cache, as negative kibibytes: 64 MiB. The default is two megabytes, which a session
 open walks straight through."""
