@@ -30,7 +30,7 @@ async def test_hire_list_edit_and_dismiss(settings: Settings, config: RuntimeCon
     (repo / ".git").mkdir(parents=True)
     try:
         async with _client(settings, config, db, manager) as client:
-            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "root": str(repo)})).json()
+            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "folders": [{"path": str(repo)}]})).json()
             pid = project["id"]
             assert (await client.get(f"/api/projects/{pid}/staff")).status_code == 401
 

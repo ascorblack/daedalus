@@ -22,29 +22,61 @@ type Event struct {
 type Log struct {
 	mu    sync.Mutex
 	buf   []Event
+	sizes []int // the size each held event was published with, parallel to buf
 	first int   // index of the oldest event in buf
 	n     int   // events held
 	seq   int64 // the last sequence number handed out
 	wake  chan struct{}
 	now   func() time.Time
+
+	bytes    int // the sizes of the events held
+	maxBytes int // 0: bounded by count alone
 }
+
+// nominalSize is what an event published without a size counts for: the small events of terminals
+// are a few hundred bytes each.
+const nominalSize = 256
 
 // NewLog returns a log that keeps size events.
 func NewLog(size int) *Log {
-	return &Log{buf: make([]Event, max(1, size)), wake: make(chan struct{}), now: time.Now}
+	size = max(1, size)
+	return &Log{buf: make([]Event, size), sizes: make([]int, size), wake: make(chan struct{}), now: time.Now}
+}
+
+// SetMaxBytes bounds the log by the sizes its events were published with, as well as by count. An
+// event that pushes the log past it drops the oldest ones; a subscriber that had not read them is
+// told to resync, as when the count runs over.
+func (l *Log) SetMaxBytes(n int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.maxBytes = n
 }
 
 // Publish appends an event and wakes every waiting subscriber.
 func (l *Log) Publish(typ, terminalID string, data any) Event {
+	return l.PublishSized(typ, terminalID, data, nominalSize)
+}
+
+// PublishSized is Publish for an event whose data is large (a hook's body), with its encoded size,
+// which counts against the log's byte bound.
+func (l *Log) PublishSized(typ, terminalID string, data any, size int) Event {
 	l.mu.Lock()
 	l.seq++
 	e := Event{Seq: l.seq, At: l.now().UTC(), Type: typ, TerminalID: terminalID, Data: data}
 	if l.n == len(l.buf) {
-		l.buf[l.first] = e
+		l.bytes -= l.sizes[l.first]
 		l.first = (l.first + 1) % len(l.buf)
-	} else {
-		l.buf[(l.first+l.n)%len(l.buf)] = e
-		l.n++
+		l.n--
+	}
+	i := (l.first + l.n) % len(l.buf)
+	l.buf[i], l.sizes[i] = e, size
+	l.n++
+	l.bytes += size
+	for l.maxBytes > 0 && l.bytes > l.maxBytes && l.n > 1 {
+		l.bytes -= l.sizes[l.first]
+		l.buf[l.first] = Event{} // let the dropped data go
+		l.first = (l.first + 1) % len(l.buf)
+		l.n--
 	}
 	wake := l.wake
 	l.wake = make(chan struct{})

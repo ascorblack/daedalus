@@ -5,7 +5,7 @@
 import { useState } from "react";
 import { Skeleton } from "../components";
 import { Icon } from "../icons";
-import { pathFor } from "../router";
+import { navigate, pathFor, projectPagePath } from "../router";
 import { PageHeader } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { plural, t } from "../i18n";
@@ -37,7 +37,14 @@ export function TeamPage({ projectId, toast }: { projectId: string; toast: (text
         title={team ? t("team.title.of", { name: team.project.name }) : t("team.title")}
         subtitle={subtitle}
         back={pathFor("agents")}
-        actions={team && !closed ? <button className="iconbtn primary" onClick={() => setHiring(true)} title={t("team.hire")} aria-label={t("team.hire")}><Icon name="plus" /></button> : undefined}
+        actions={
+          team && !closed ? (
+            <>
+              <button className="iconbtn" onClick={() => navigate(projectPagePath(projectId, "board"))} title={t("pboard.title")} aria-label={t("pboard.title")}><Icon name="board" /></button>
+              <button className="iconbtn primary" onClick={() => setHiring(true)} title={t("team.hire")} aria-label={t("team.hire")}><Icon name="plus" /></button>
+            </>
+          ) : undefined
+        }
       >
         {team && !closed && (
           <div className="chips">

@@ -3788,7 +3788,7 @@ class SessionManager:
             home_dir=Path.home() if self.settings.native else "",
             project_roots=self.projects.roots,
             worktrees_root=self.settings.worktrees_dir,
-            sealed_paths=self.settings.sealed_paths,
+            sealed_paths=(*self.settings.sealed_paths, *terminal_endpoint.sealed_state_dirs(self.settings)),
             sealed_everywhere=self.settings.sealed_everywhere,
             sealed_ports=self._sealed_ports(),
             # Where a relative path is resolved from, so that `../../daedalus-secrets/keyproxy.env`

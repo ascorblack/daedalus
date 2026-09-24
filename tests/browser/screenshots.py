@@ -297,22 +297,64 @@ BOARD = [
 ]
 
 
-def notification(id: int, at: str, kind: str, category: str, level: str, tone: str, title: str, body: str, session_id: str | None, seen: bool, count: int = 1) -> dict:
+def notification(id: int, at: str, kind: str, category: str, level: str, tone: str, title: str, body: str, session_id: str | None, seen: bool, count: int = 1, *, project: str | None = None, actions: list | None = None, ref: str | None = None) -> dict:
     return {
         "id": id, "at": at, "updated_at": at, "category": category, "kind": kind, "level": level, "tone": tone, "title": title, "body": body,
-        "link": f"/app/agents/{session_id}" if session_id else "", "session_id": session_id, "run_id": None, "project_id": None, "staff_id": None,
-        "terminal_id": None, "source": "system", "dedupe_key": None, "count": count, "actions": [], "seen": seen, "resolved": None, "needs_you": False, "delivered": {},
+        "link": f"/app/agents/{session_id}" if session_id else "", "session_id": session_id, "run_id": None, "project_id": project, "staff_id": None,
+        "terminal_id": None, "source": "system", "dedupe_key": ref, "request_ref": ref, "count": count, "actions": actions or [], "seen": seen,
+        "resolved": None, "needs_you": ref is not None, "delivered": {},
     }
 
 
+def buttons(*pairs: tuple[str, str, str]) -> list[dict]:
+    """A request's buttons as the host words them (``id``, label, style); everything but Open is quick."""
+    return [{"id": i, "label": label, "style": style, "quick": i != "open"} for i, label, style in pairs]
+
+
+# The host writes these in the operator's language; the Russian run gets the Russian words it would.
+NOTICE_WORDS = {
+    "en": {"allow": "Allow", "deny": "Deny", "open": "Open", "permission": "Bakery site: photos is waiting for permission", "ask": "Weekly digest asks: keep it to the usual 8?", "eight": "Keep 8", "all": "All 14"},
+    "ru": {"allow": "Разрешить", "deny": "Отклонить", "open": "Открыть", "permission": "Bakery site: photos ждёт разрешения", "ask": "Weekly digest спрашивает: оставить обычные 8?", "eight": "Оставить 8", "all": "Все 14"},
+}[LANG]
+
+PERMISSION = notification(
+    33, ago(minutes=1), "policy", "permission", "urgent", "warning", NOTICE_WORDS["permission"], "Exec: npm install sharp · Bakery site", S2, False,
+    project=P1, ref=f"policy:{S2}:exec.npm", actions=buttons(("allow", NOTICE_WORDS["allow"], "primary"), ("deny", NOTICE_WORDS["deny"], "default"), ("open", NOTICE_WORDS["open"], "ghost")),
+)
+QUESTION = notification(
+    32, ago(minutes=4), "ask", "question", "normal", "warning", NOTICE_WORDS["ask"], "The digest has 14 items this week.", S4, False,
+    project=P4, ref=f"ask:{S4}:toolu_ask", actions=buttons(("answer:0", NOTICE_WORDS["eight"], "primary"), ("answer:1", NOTICE_WORDS["all"], "default"), ("open", NOTICE_WORDS["open"], "ghost")),
+)
 INBOX = [
-    notification(31, ago(minutes=4), "ask_user", "question", "normal", "info", "Weekly digest asks: keep it to the usual 8?", "The digest has 14 items this week.", S4, False),
+    PERMISSION,
+    QUESTION,
+    notification(31, ago(minutes=6), "run", "run_finished", "normal", "ok", "Bakery site: photos finished", "Six photos cropped to 800×800 and renamed.", S2, False, project=P1),
     notification(30, ago(minutes=20), "change_proposal", "system", "normal", "info", "Pull request #57 is waiting for your decision", "WebSearch: retry a backend that timed out once before falling back", None, False),
-    notification(29, ago(minutes=52), "loop", "agent_notify", "quiet", "info", "Support inbox: 6 answered, 2 on the board", "Two delivery questions wait for the courier's rates.", S3, True),
-    notification(28, ago(hours=3), "service", "system", "normal", "warning", "digest-api restarted after the rebuild", "It was running before the rebuild and is running again on :8101.", S4, True),
-    notification(27, ago(hours=20), "balance", "system", "normal", "warning", "DeepSeek balance below $5", "$4.62 left; the next threshold is $2.", None, True, count=2),
+    notification(29, ago(minutes=52), "loop", "agent_notify", "quiet", "info", "Support inbox: 6 answered, 2 on the board", "Two delivery questions wait for the courier's rates.", S3, True, project=P3),
+    notification(28, ago(hours=3), "service", "system", "normal", "warning", "digest-api restarted after the rebuild", "It was running before the rebuild and is running again on :8101.", S4, True, project=P4),
+    notification(27, ago(hours=20), "balance", "spend", "normal", "warning", "DeepSeek balance below $5", "$4.62 left; the next threshold is $2.", None, True, count=2),
 ]
-INBOX_SUMMARY = {"unseen": 2, "needs_you": 0}
+INBOX_SUMMARY = {"unseen": 4, "needs_you": 2}
+
+
+def notifications_view(view: str) -> list[dict]:
+    if view == "needs_you":
+        return [e for e in INBOX if e["needs_you"]]
+    if view == "unseen":
+        return [e for e in INBOX if not e["seen"] and e["level"] != "quiet"]
+    if view == "problems":
+        return [e for e in INBOX if e["tone"] in ("warning", "error")]
+    return INBOX
+
+
+def notify_frames(*entries: dict) -> str:
+    """The host's stream saying these notifications arrived just now, each marked for a toast."""
+    frames = [f'event: hello\ndata: {json.dumps({"head": 900, "oldest": 1, "server_time": datetime.now(UTC).isoformat(), "client": ""})}\n\n']
+    for n, e in enumerate(entries, start=901):
+        event = {"seq": n, "at": datetime.now(UTC).isoformat(), "type": "notify", "project_id": e["project_id"], "session_id": e["session_id"], "staff_id": None, "terminal_id": None,
+                 "payload": {"notification": e, "toast": True, "deliver": {"push": False, "desktop": False, "telegram": "handled"}, "merged": False, "summary": INBOX_SUMMARY}}
+        frames.append(f"id: {n}\nevent: notify\ndata: {json.dumps(event)}\n\n")
+    return "".join(frames)
 
 PROPOSALS = [{"id": "p57", "repo": "daedalus", "branch": "bot/websearch-retry", "pr_number": 57, "pr_url": "https://github.com/example/daedalus/pull/57", "title": "WebSearch: retry a backend that timed out once before falling back", "summary": "A backend that answers 504 once is tried again after a second; only a second failure falls through to the next backend. Unit test added.", "status": "pending", "reason": None, "created_at": ago(minutes=20)}]
 
@@ -590,8 +632,19 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     team = TEAM.answer(request.method, rel, urlsplit(url).query, None)
     if team is not None:
         return respond(route, team[1], status=team[0])
+    if request.method == "POST" and rel.startswith("/api/notifications/") and rel.endswith("/act"):
+        entry = next((e for e in INBOX if e["id"] == int(rel.split("/")[3])), None)
+        action = json.loads(request.post_data or "{}").get("action", "")
+        resolution = "answered" if action.startswith("answer") else action
+        return respond(route, {"resolution": resolution, "notification": entry and {**entry, "resolved": resolution, "needs_you": False, "seen": True}})
+    if request.method == "POST" and rel == "/api/notifications/seen":
+        return respond(route, {"marked": 0, "summary": INBOX_SUMMARY})
     if request.method != "GET":
         return respond(route, {"ok": True})
+    if rel == "/api/events" and getattr(stub, "events", ""):
+        # A finite body: the page reads it, reconnects a second later and is handed the same frames,
+        # which it recognises by their sequence numbers and does not raise twice.
+        return respond(route, stub.events, content_type="text/event-stream")  # type: ignore[attr-defined]
     if rel == "/api/stt/progress":
         # The voice page opens this to hear the engine finish loading; the picker opens it for the
         # download bars. Neither needs anything to happen here — what is true now is on /api/voice.
@@ -664,11 +717,7 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     if rel == "/api/notifications/summary":
         return respond(route, INBOX_SUMMARY)
     if rel == "/api/notifications":
-        view = params.get("view", ["all"])[0]
-        shown = [e for e in INBOX if not e["seen"] and e["level"] != "quiet"] if view == "unseen" else [e for e in INBOX if e["tone"] in ("warning", "error")] if view == "problems" else INBOX
-        return respond(route, {"entries": shown, "next_before": None, "summary": INBOX_SUMMARY})
-    if rel == "/api/notifications/seen":
-        return respond(route, {"marked": 0, "summary": INBOX_SUMMARY})
+        return respond(route, {"entries": notifications_view(params.get("view", ["all"])[0]), "next_before": None, "summary": INBOX_SUMMARY})
     if rel == "/api/proposals":
         return respond(route, PROPOSALS)
     if rel == "/api/schedules":
@@ -1202,6 +1251,46 @@ def dock_shots(context, prefix: str = "") -> None:  # type: ignore[no-untyped-de
     page.close()
 
 
+def open_bell(page: Page) -> None:
+    """The bell's popover over the agents: what needs you, with its buttons, and the day's feed."""
+    page.locator(".sidebar .bell").click()
+    page.wait_for_selector(".bell-pop .needs-you .notice-row", timeout=5000)
+
+
+def raise_toasts(page: Page) -> None:
+    """Three notifications arriving while the operator reads another conversation."""
+    page.wait_for_selector(".notice-toasts .notice-toast", timeout=10000)
+    page.wait_for_timeout(400)
+    page.mouse.move(DESK["width"] - 60, DESK["height"] - 60)  # a hand on the stack keeps it still
+
+
+def run_notifications() -> int:
+    """The bell, the toasts and the Inbox as the centre, on a desktop and on a phone."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    finished = next(e for e in INBOX if e["id"] == 31)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        desk = browser.new_context(viewport=DESK, device_scale_factor=2, color_scheme="dark")
+        page = desk.new_page()
+        page.route("**/api/**", stub)
+        shot(page, "bell", "agents", before=open_bell, settle=500)
+        shot(page, "inbox", "inbox")
+        stub.events = notify_frames(finished, QUESTION, PERMISSION)  # type: ignore[attr-defined]
+        shot(page, "toasts", f"agents/{S1}", wait=".chat-scroll .timeline", before=raise_toasts, settle=300)
+        stub.events = ""  # type: ignore[attr-defined]
+        desk.close()
+        phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
+        page = phone.new_page()
+        page.route("**/api/**", stub)
+        shot(page, "phone-inbox", "inbox", wait=".needs-you .notice-row")
+        stub.events = notify_frames(PERMISSION)  # type: ignore[attr-defined]
+        shot(page, "phone-toast", "agents", wait=".notice-toasts.banner .notice-toast", settle=500)
+        stub.events = ""  # type: ignore[attr-defined]
+        phone.close()
+        browser.close()
+    return UNHANDLED.report()
+
+
 def run() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
@@ -1224,7 +1313,10 @@ def run() -> int:
         desk.add_init_script("try { localStorage.setItem('agents.groupBy', 'project'); } catch (e) {}")
         shot(page, "team", f"project/{P1}/team", wait=".staff-row")
         shot(page, "team-hire", f"project/{P1}/team", wait=".staff-row", before=open_hire, settle=700)
-        shot(page, "projects", "agents", before=open_projects)
+        # The start canvas under a folded sidebar has neither a list nor a chat, so waiting for
+        # either timed out here and stopped every picture after this one; the sidebar is what the
+        # switcher opens from.
+        shot(page, "projects", "agents", wait=".sidebar", before=open_projects)
         shot(page, "voice", "voice")
         shot(page, "voice-settings", "settings/voice", wait=".stt-list .stt-card", before=scroll_to_voices, settle=700)
         shot(page, "board", "board")
@@ -1266,11 +1358,12 @@ def run() -> int:
         stub.fresh = False  # type: ignore[attr-defined]
         phone.close()
         browser.close()
-    return UNHANDLED.report()
+    # The notification centre needs a stream of its own for the toasts; it reports what went unanswered.
+    return run_notifications()
 
 
 if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
     only = os.environ.get("ONLY")
-    sys.exit(run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
+    sys.exit(run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())

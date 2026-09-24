@@ -64,6 +64,7 @@ type input struct {
 
 	mu        sync.Mutex
 	replies   [][]byte
+	replyLen  int // bytes queued in replies
 	human     [][]byte
 	agent     []*agentWrite
 	keyboard  KeyboardState
@@ -88,11 +89,19 @@ func (in *input) poke() {
 	}
 }
 
+// maxQueuedReplies bounds the answers waiting to be written. A program that asks and never reads
+// (`cat` of a file full of cursor queries is enough) stops taking input once the kernel's buffer is
+// full; without a bound every further query would queue its answer in the daemon for good. Past the
+// bound answers are dropped, which is what that program would see from a real terminal whose input
+// it does not read.
+const maxQueuedReplies = 64 << 10
+
 // Reply queues an answer to a terminal query ahead of everything else.
 func (in *input) Reply(p []byte) {
 	in.mu.Lock()
-	if !in.closed {
+	if !in.closed && in.replyLen+len(p) <= maxQueuedReplies {
 		in.replies = append(in.replies, append([]byte(nil), p...))
+		in.replyLen += len(p)
 	}
 	in.mu.Unlock()
 	in.poke()
@@ -218,7 +227,7 @@ func (in *input) run() {
 		in.mu.Lock()
 		if in.closed {
 			pending := in.agent
-			in.agent, in.human, in.replies = nil, nil, nil
+			in.agent, in.human, in.replies, in.replyLen = nil, nil, nil, 0
 			in.mu.Unlock()
 			for _, a := range pending {
 				a.done <- ErrExited
@@ -228,6 +237,7 @@ func (in *input) run() {
 		if len(in.replies) > 0 {
 			p := in.replies[0]
 			in.replies = in.replies[1:]
+			in.replyLen -= len(p)
 			in.mu.Unlock()
 			in.write(p)
 			continue

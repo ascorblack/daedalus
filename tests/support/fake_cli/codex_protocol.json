@@ -1,0 +1,37 @@
+{
+  "about": "The subset of the Codex app-server protocol the fake speaks and the adapter uses. One JSON object per line; JSON-RPC without the jsonrpc member. Hand-written from the method names the harness plan verified against the generated schema; the adapter's recorded payloads replace the shapes marked unverified.",
+  "requests": {
+    "initialize": {"params": {"clientInfo": {"name": "string", "version": "string"}}, "result": {"userAgent": "string"}},
+    "thread/start": {"params": {"cwd": "string", "model": "string?", "sandbox": "read-only|workspace-write|danger-full-access", "approvalPolicy": "on-request|never|untrusted", "developerInstructions": "string?", "serviceName": "string?"}, "result": {"thread": {"id": "string", "preview": "string", "cwd": "string", "createdAt": "number"}, "model": "string"}},
+    "thread/resume": {"params": {"threadId": "string"}, "result": {"thread": {"id": "string", "turns": "Turn[]"}}},
+    "thread/loaded/list": {"params": {}, "result": {"data": "string[]"}},
+    "turn/start": {"params": {"threadId": "string", "input": [{"type": "text", "text": "string"}], "clientUserMessageId": "string?"}, "result": {"turn": {"id": "string", "status": "inProgress"}}},
+    "turn/steer": {"params": {"threadId": "string", "input": "Input[]", "expectedTurnId": "string (required)", "clientUserMessageId": "string?"}, "result": {"turnId": "string"}, "errors": ["expectedTurnId does not name the running turn: -32600"]},
+    "turn/interrupt": {"params": {"threadId": "string", "turnId": "string"}, "result": {}},
+    "thread/turns/list": {"params": {"threadId": "string", "cursor": "string?", "limit": "number?"}, "result": {"data": "Turn[]", "nextCursor": "string|null"}},
+    "thread/items/list": {"params": {"threadId": "string", "turnId": "string?", "cursor": "string?", "limit": "number?"}, "result": {"data": "Item[]", "nextCursor": "string|null"}},
+    "config/read": {"params": {}, "result": {"config": "object"}, "unverified": true}
+  },
+  "notifications": {
+    "thread/started": {"thread": "Thread"},
+    "thread/status/changed": {"threadId": "string", "status": [{"type": "idle"}, {"type": "active", "activeFlags": ["waitingOnApproval", "waitingOnUserInput"]}, {"type": "systemError"}]},
+    "turn/started": {"threadId": "string", "turn": {"id": "string", "status": "inProgress"}},
+    "turn/completed": {"threadId": "string", "turn": {"id": "string", "status": "completed|interrupted|failed", "error": "{message, codexErrorInfo}|null"}},
+    "item/started": {"threadId": "string", "turnId": "string", "item": "Item"},
+    "item/completed": {"threadId": "string", "turnId": "string", "item": "Item"},
+    "thread/tokenUsage/updated": {"threadId": "string", "turnId": "string", "tokenUsage": {"total": "Usage", "last": "Usage"}},
+    "turn/diff/updated": {"threadId": "string", "turnId": "string", "diff": "string"},
+    "serverRequest/resolved": {"threadId": "string", "requestId": "number"},
+    "error": {"threadId": "string", "turnId": "string", "error": {"message": "string", "codexErrorInfo": "string"}, "willRetry": "boolean"}
+  },
+  "serverRequests": {
+    "item/commandExecution/requestApproval": {"params": {"threadId": "string", "turnId": "string", "itemId": "string", "command": "string", "cwd": "string", "reason": "string?"}, "result": {"decision": "accept|acceptForSession|decline|cancel"}},
+    "item/tool/requestUserInput": {"params": {"threadId": "string", "turnId": "string", "itemId": "string", "questions": [{"id": "string", "header": "string", "question": "string", "options": [{"label": "string", "description": "string"}]}]}, "result": {"answers": {"<question id>": {"answers": ["label"]}}}}
+  },
+  "items": {
+    "userMessage": {"id": "string", "content": [{"type": "text", "text": "string"}], "clientId": "string? (the clientUserMessageId the client chose)"},
+    "agentMessage": {"id": "string", "text": "string"},
+    "commandExecution": {"id": "string", "command": "string", "cwd": "string", "status": "inProgress|completed|declined", "aggregatedOutput": "string|null", "exitCode": "number|null"},
+    "mcpToolCall": {"id": "string", "server": "string", "tool": "string", "arguments": "object", "status": "inProgress|completed", "result": "object|null"}
+  }
+}

@@ -31,13 +31,22 @@ DEFAULT_PORT = 8163
 DEFAULT_APP = f"http://127.0.0.1:{DEFAULT_PORT}/app"
 
 
+def folder(path: str, *, position: int = 0, label: str = "", env: str = "container", reach: str = "agents", reachable: bool = True, writable: bool | None = None, readonly: bool = False, is_git: bool = False) -> dict[str, object]:
+    """One folder of a project as ``/api/projects`` reports it."""
+    return {
+        "id": "f-" + path.rstrip("/").rsplit("/", 1)[-1],
+        "path": path, "label": label, "env": env, "is_git": is_git, "readonly": readonly, "position": position, "managed": False,
+        "reachable": reachable, "writable": (reachable and not readonly) if writable is None else writable, "reach": reach,
+    }
+
+
 def folders(path: str, *, reachable: bool = True, writable: bool | None = None) -> list[dict[str, object]]:
     """A project's folders as the host reports them, for a project whose one folder is ``path``."""
-    return [{
-        "id": "f-" + path.rstrip("/").rsplit("/", 1)[-1],
-        "path": path, "label": "", "env": "container", "is_git": False, "readonly": False, "position": 0, "managed": False,
-        "reachable": reachable, "writable": reachable if writable is None else writable,
-    }]
+    return [folder(path, reachable=reachable, writable=writable)]
+
+
+ENVIRONMENTS = {"local": "container", "available": ["container"], "host_bridge": False, "docker": True}
+"""Where a folder may live: a Docker installation without the host terminal bridge."""
 
 GATES: dict[str, object] = {
     "/api/maintenance": {"notice": None},
@@ -58,8 +67,10 @@ GATES: dict[str, object] = {
     "/api/auth/me": {"user": "operator"},
     "/api/auth/config": {"passkeys": 1},
     "/api/status": {"ok": True},
-    # The badge on the Inbox entry of the navigation.
+    # The badge on the Inbox entry of the navigation and on the bell.
     "/api/notifications/summary": {"unseen": 0, "needs_you": 0},
+    # The centre itself, whichever view the bell's popover or the Inbox asks for: nothing yet.
+    "/api/notifications": {"entries": [], "next_before": None, "summary": {"unseen": 0, "needs_you": 0}},
     "/api/modes": {},
     "/api/commands": [],
     "/api/asr": {"configured": False, "reason": "", "provider": "", "model": "", "max_seconds": 120, "autosend": False},
@@ -68,6 +79,8 @@ GATES: dict[str, object] = {
     "/api/sessions": {"sessions": [], "projects": []},
     # The shell asks which projects there are before it draws the rail.
     "/api/projects": [],
+    # The folder form asks where a folder may live before it offers the environment choice.
+    "/api/project-environments": ENVIRONMENTS,
     # The composer offers the voice page only where the installation has one; a harness has none.
     "/api/voice": {"enabled": False},
     # Terminal environments and the terminals in them: a container environment that works, a host
@@ -89,6 +102,8 @@ SHARED_WRITES: dict[tuple[str, str], tuple[int, str, str]] = {
     # Every signed-in window reports what it shows, whatever screen a harness drives; the host
     # answers with no content.
     ("POST", "/api/presence"): (204, "application/json", ""),
+    # "Mark all read" in the bell's popover and on the Inbox.
+    ("POST", "/api/notifications/seen"): (200, "application/json", json.dumps({"marked": 0, "summary": {"unseen": 0, "needs_you": 0}})),
 }
 
 
@@ -124,6 +139,10 @@ def answer_shared(method: str, path: str) -> tuple[int, str, str] | None:
     write = SHARED_WRITES.get((method.upper(), path))
     if write is not None:
         return write
+    if method.upper() == "POST" and path.startswith("/api/notifications/") and path.endswith("/act"):
+        # The shared centre is empty, so every entry a harness might answer is one the host no
+        # longer has; a harness that invents entries answers this route itself.
+        return 404, "application/json", json.dumps({"detail": "no such notification"})
     if path in GATES:
         return 200, "application/json", json.dumps(GATES[path])
     return None
@@ -200,7 +219,7 @@ def expect_app(base: str) -> None:
         raise SystemExit(1)
 
 
-__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "EVENTS", "GATES", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "fulfil_shared", "serve_shared_post"]
+__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "EVENTS", "GATES", "BoardStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "folder", "folders", "fulfil_shared", "serve_shared_post"]
 
 # What the harness manager reports for the container: Claude Code installed and signed in, Codex
 # installed but signed out, the rest absent. Enough for the hiring form to show one command-line agent
@@ -293,6 +312,102 @@ class TeamStub:
                 return 200, [row["live"]] if row["live"] else []
             return 200, row
         return None
+
+class BoardStub:
+    """A project's board, answered the way the host answers it, and kept between requests.
+
+    The page creates, edits, assigns and accepts; each is remembered, so a card that moved is drawn
+    where it moved to. The host's own refusal to accept what is not in review is kept as well.
+    """
+
+    ORDER = {"doing": 0, "review": 1, "todo": 2, "blocked": 3, "done": 4, "dropped": 5}
+
+    def __init__(self, project: dict, *, staff: list[dict] | None = None, tasks: list[dict] | None = None, needs_you: list[dict] | None = None) -> None:
+        self.project = {"id": project["id"], "name": project["name"], "ephemeral": False, "system": ""}
+        self.staff = [dict(m) for m in staff or []]
+        self.tasks = [dict(t) for t in tasks or []]
+        self.needs_you = [dict(n) for n in needs_you or []]
+        self.created: list[dict] = []
+        self.updated: list[tuple[str, dict]] = []
+        self.accepted: list[str] = []
+
+    @staticmethod
+    def task(id_: str, title: str, *, status: str = "todo", priority: int = 3, assignee: dict | None = None, **fields: object) -> dict:
+        row = {
+            "id": id_, "title": title, "status": status, "priority": priority, "acceptance": "", "checklist": [], "depends_on": [], "session_id": None, "notes": "",
+            "created_at": "2026-09-24T09:00:00Z", "updated_at": "2026-09-24T09:30:00Z", "project_id": "", "assignee_staff_id": assignee["id"] if assignee else None,
+            "brief": {"objective": "", "deliverable": "", "boundaries": "", "done_when": ""}, "branch": None, "merge_state": "", "assignee": assignee,
+        }
+        row.update(fields)
+        return row
+
+    @staticmethod
+    def assignee(id_: str, name: str, *, harness: str = "daedalus", color: str = "blue", status: str = "off", on_task: bool = False, **fields: object) -> dict:
+        row = {"id": id_, "name": name, "color": color, "harness": harness, "archived_at": None, "status": status, "on_task": on_task, "waiting_for": "", "status_at": "2026-09-24T09:40:00Z" if on_task else None, "session_id": f"sess-{id_}" if status != "off" else None}
+        row.update(fields)
+        return row
+
+    def listing(self, include_done: bool) -> dict:
+        rows = [t for t in self.tasks if include_done or t["status"] not in ("done", "dropped")]
+        rows.sort(key=lambda t: (self.ORDER.get(t["status"], 9), t["priority"], t["created_at"]))
+        counts = {s: sum(1 for t in self.tasks if t["status"] == s) for s in self.ORDER}
+        counts["needs_you"] = len(self.needs_you)
+        team = [{k: m[k] for k in ("id", "name", "color", "harness")} for m in self.staff]
+        return {"project": self.project, "tasks": rows, "needs_you": self.needs_you, "counts": counts, "staff": team}
+
+    def _assign(self, row: dict, staff_id: str | None) -> None:
+        member = next((m for m in self.staff if m["id"] == staff_id), None)
+        row["assignee_staff_id"] = member["id"] if member else None
+        row["assignee"] = self.assignee(member["id"], member["name"], harness=member["harness"], color=member["color"]) if member else None
+
+    def answer(self, method: str, path: str, query: str, body: dict | None) -> tuple[int, object] | None:
+        """``(status, body)`` for a route of the board, or None for anything else."""
+        base = f"/api/projects/{self.project['id']}/board"
+        if path == base and method == "GET":
+            return 200, self.listing("include_done=1" in query)
+        if path == base and method == "POST":
+            payload = dict(body or {})
+            self.created.append(payload)
+            brief = {"objective": "", "deliverable": "", "boundaries": "", "done_when": ""}
+            brief.update(payload.get("brief") or {})
+            row = self.task(f"n{len(self.tasks) + 1}", payload["title"], priority=int(payload.get("priority", 3)), brief=brief, depends_on=payload.get("depends_on") or [], project_id=self.project["id"])
+            self._assign(row, payload.get("assignee_staff_id"))
+            self.tasks.append(row)
+            launch = {"state": "queued", "position": 1} if row["assignee_staff_id"] else None
+            return 201, {**row, "launch": launch}
+        if path == "/api/board" and method == "GET":
+            return 200, [t for t in self.tasks if "include_done=1" in query or t["status"] not in ("done", "dropped")]
+        if path.startswith("/api/board/"):
+            parts = path.split("/")
+            row = next((t for t in self.tasks if t["id"] == parts[3]), None)
+            if row is None:
+                return 404, {"detail": "no such task"}
+            if method == "POST" and path.endswith("/accept"):
+                if row["status"] != "review":
+                    return 409, {"detail": f"only a task in review can be accepted; this one is {row['status']}"}
+                self.accepted.append(row["id"])
+                row["status"] = "done"
+                return 200, row
+            if method == "PUT":
+                payload = dict(body or {})
+                self.updated.append((row["id"], payload))
+                before = row.get("assignee_staff_id")
+                if "assignee_staff_id" in payload:
+                    self._assign(row, payload["assignee_staff_id"] or None)
+                if "brief" in payload:
+                    row["brief"] = {**row["brief"], **payload["brief"]}
+                for key in ("title", "status", "priority", "depends_on"):
+                    if key in payload:
+                        row[key] = payload[key]
+                if payload.get("note"):
+                    row["notes"] = (row["notes"] + "\n" if row["notes"] else "") + payload["note"]
+                launched = row["assignee_staff_id"] and row["assignee_staff_id"] != before
+                return 200, {**row, "launch": {"state": "started"} if launched else None}
+            if method == "DELETE":
+                self.tasks.remove(row)
+                return 200, {"deleted": True}
+        return None
+
 
 # Small documents with deliberately different structures make the explorer and preview checks
 # exercise parsing, navigation and media decoding without reading anybody's real workspace.

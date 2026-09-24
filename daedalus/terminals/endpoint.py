@@ -83,6 +83,25 @@ def remember_hook_port(run_dir: Path, port: int) -> None:
         _hook_ports.pop(str(run_dir), None)
 
 
+_state_dirs: dict[str, str] = {}
+"""The state directory each daemon reported, by run directory. It holds every launch's overlay files
+and dial sockets, and the journal of agent writes."""
+
+
+def remember_state_dir(run_dir: Path, state_dir: str) -> None:
+    if state_dir.startswith("/"):
+        _state_dirs[str(run_dir)] = state_dir
+    else:
+        _state_dirs.pop(str(run_dir), None)
+
+
+def sealed_state_dirs(settings: Settings) -> tuple[Path, ...]:
+    """The daemons' state directories, sealed like the rest of the installation where they are on
+    this machine's filesystem — natively. A launch's settings overlay and its dial sockets are there,
+    and whatever reaches a dial socket speaks to a running CLI as its adapter does."""
+    return tuple(Path(d) for run_dir in settings.sealed_everywhere if (d := _state_dirs.get(str(run_dir))))
+
+
 def sealed_ports(settings: Settings) -> tuple[int, ...]:
     """The loopback ports of this installation's terminal daemons: a TCP endpoint and a hook listener.
 
@@ -104,4 +123,4 @@ def sealed_ports(settings: Settings) -> tuple[int, ...]:
     return tuple(ports)
 
 
-__all__ = ["Endpoint", "EndpointMissing", "read_endpoint", "remember_hook_port", "sealed_ports"]
+__all__ = ["Endpoint", "EndpointMissing", "read_endpoint", "remember_hook_port", "remember_state_dir", "sealed_ports", "sealed_state_dirs"]

@@ -21,12 +21,12 @@ ptyd version
 |---|---|
 | `--env` | the environment's name, echoed to clients (required) |
 | `--run-dir` | the run directory: endpoint, token, socket (required) |
-| `--state-dir` | the daemon's log, the journal of agent writes, terminal logs (required) |
+| `--state-dir` | the journal of agent writes, terminal logs, launch directories and dial sockets (required) |
 | `--listen` | `unix` (a socket in the run directory), or `tcp:127.0.0.1:<port>` |
 | `--home` | the home directory of spawned programs (`$HOME`) |
 | `--shell` | the login shell: `$SHELL`, then the user's passwd entry, then `/bin/bash`, then `/bin/sh` |
-| `--hooks-listen` | loopback address of the hook listener (*not yet*) |
-| `--config` | a JSON file of limits: `{"limits": {"max_terminals", "ring_bytes", "input_idle_ms", "kill_grace_ms"}}`; unknown keys are refused |
+| `--hooks-listen` | loopback address of the hook listener (`127.0.0.1:0`); anything off the loopback interface is refused |
+| `--config` | a JSON file: `{"limits": {"max_terminals", "ring_bytes", "input_idle_ms", "kill_grace_ms"}, "exec": {"allow": []}, "fs": {"roots": [], "deny": []}}`; the lists only add to the built-in ones; unknown keys are refused |
 | `--log-file`, `--log-level` | the daemon's own JSON-lines log (stderr, `info`) |
 
 `SIGTERM` or `SIGINT` stops the daemon: the endpoint file is removed first, every running terminal
@@ -79,7 +79,7 @@ codes plus:
 | 1005 | `timeout` | |
 | 1006 | `keyboard_held` | a human holds the keyboard and an agent write timed out waiting |
 | 1007 | `unsupported` | not in this build or on this platform |
-| 1008 | `stale_launch` | |
+| 1008 | `stale_launch` | the launch is not registered, or it has ended |
 | 1009 | `invalid_size` | outside 20×4 … 500×300 |
 
 Parameters are decoded strictly: an unknown field is `-32602`.
@@ -88,9 +88,9 @@ Parameters are decoded strictly: an unknown field is `-32602`.
 
 | Method | Params → result | |
 |---|---|---|
-| `daemon.info` | → `{version, protocol, instance, env, os, arch, pid, started_at, uptime_s, home, shell, capabilities{sandbox, shells[], shell_integration[], emulator, stats}, hooks{listen}, limits{…}, counts{running, exited}, machine}` | |
+| `daemon.info` | → `{version, protocol, instance, env, os, arch, pid, started_at, uptime_s, home, shell, capabilities{sandbox, shells[], shell_integration[], emulator, stats}, hooks{listen, launches, held}, side_channels{exec_allow[], fs_roots[], state_dir}, limits{…}, counts{running, exited}, machine}` | |
 | `terminal.create` | see below → `{id, pid, cwd, cwd_fallback, shell, created_at}` | |
-| `terminal.list` | `{ids?, preview_rows? 0..12}` → `{terminals:[Info]}` | previews *not yet* |
+| `terminal.list` | `{ids?, preview_rows? 0..12}` → `{terminals:[Info]}` | see The screen |
 | `terminal.get` | `{id}` → `Info` | |
 | `terminal.write` | see below → `{bytes, seq_before, queued_ms, delivered_at}` | |
 | `terminal.resize` | `{id, cols, rows, px_w?, px_h?}` → `{cols, rows}`; the host becomes the size owner | |
@@ -104,8 +104,11 @@ Parameters are decoded strictly: an unknown field is `-32602`.
 | `terminal.attach` | `{id, client{kind? = "human" \| "viewer", label?, via?, read_only?}}` → `{channel, client_id}` | see Attachments |
 | `terminal.detach` | `{channel}`; the daemon closes the channel | |
 | `terminal.keyboard` | `{id, owner: "auto" \| "human" \| "agent", ttl_ms? ≤ 86 400 000}` → `{owner, until?}` | |
-| `terminal.snapshot`, `terminal.read_screen`, `terminal.wait_for`, `terminal.commands` | the screen | *not yet* |
-| `exec.run`, `fs.*`, `net.dial`, `net.allow`, `hooks.*` | side channels for CLI adapters | *not yet* |
+| `terminal.snapshot` | `{id, scrollback? ≤ 10000 = 2000}` → `{cols, rows, seq, first_abs_row, data_b64}` | see The screen |
+| `terminal.read_screen` | `{id, format? "text" \| "runs" \| "vt", scrollback? ≤ 10000, tail_rows?}` → `{cols, rows, cursor{x, y, visible, abs_row}, alt_screen, title, cwd, seq, first_abs_row, lines[] \| runs[][] \| data_b64, truncated?}` | |
+| `terminal.wait_for` | `{id, regex?, scope? "screen" \| "output", since_seq?, idle_ms?, timeout_ms}` → `{matched: "regex" \| "idle" \| "exited" \| "timeout", seq, match?}` | |
+| `terminal.commands`, `wait_for {command_done}` | shell integration | *not yet* |
+| `exec.run`, `fs.*`, `net.dial`, `net.allow`, `hooks.*` | side channels for CLI adapters: see below | |
 
 ### `terminal.create`
 
@@ -205,8 +208,9 @@ memory and CPU limits. Outside Linux `supported` is false and the numbers are ze
 ## Events
 
 An `event` notification carries `{seq, at, type, terminal_id?, data}`. Every event takes its `seq`
-from one counter, so a subscriber sees one total order across terminals and kinds. The daemon keeps
-the last 20 000.
+from one counter, so a subscriber sees one total order across terminals and kinds — a hook post and
+a terminal's output included. The daemon keeps the last 20 000, and no more than 64 MiB of them by
+size.
 
 - `events.subscribe {after_seq}` delivers every event after `after_seq`. `resync: true` means some
   were lost: they left the log, or `after_seq` came from an earlier life of the daemon (compare
@@ -226,8 +230,63 @@ the last 20 000.
 | `terminal.command` | `{phase: "D", exit_code, command, abs_row, seq}` — OSC 133/633 `D` |
 | `terminal.mode` | `{alt_screen, bracketed_paste, mouse, app_cursor, mouse_mode?, kitty_flags?}` |
 | `terminal.stats` | a `terminal.stats` result |
+| `hook` | `{launch_id, terminal_id, name, body, size, truncated?, reply_id?, hold_ms?}` — a hook post of a launch; tagged with the launch's terminal |
+| `launch.ended` | `{launch_id, reason}` — `unregistered`, `terminal_exited`, `expired` or `shutdown` |
 
-`seq` inside `data` is the output offset at which the mark occurred.
+`seq` inside `data` is the output offset at which the mark occurred. An event too large for one
+frame is delivered as its envelope with `data: {"too_large": true}` rather than ending the
+subscription.
+
+## The screen
+
+Every answer about the screen is taken at one output offset, `seq`: the screen shows every byte
+before it and none after. Rows have absolute numbers counted from the terminal's start, so a row
+keeps its number while older ones leave the history (`first_abs_row` is the number of the first row
+returned). The numbering is exact between resizes; a resize reflows the history and can shift it.
+
+- `terminal.snapshot` returns VT bytes that rebuild the screen, its history (`scrollback` lines of
+  it), both screens, the cursor, the pen, the modes, the scroll region, the tab stops, the character
+  sets, the links and the colours the program set, when written into a freshly reset terminal of the
+  same size. The stream continues at `seq`. A snapshot that would not fit in one frame (700 KiB) is
+  taken again with less history.
+- `terminal.read_screen` returns the visible screen and `scrollback` lines above it (only the last
+  `tail_rows`, when given). `text`: one string per line, soft-wrapped rows joined, trailing spaces
+  and trailing blank lines dropped; when the text would not fit in a frame the oldest lines go and
+  `truncated` is true. `runs`: per row, `[{t, fg?, bg?, b?, i?, u?, d?, inv?}]` (a colour is 1–256 for
+  palette entries 0–255, `0x1000000 + RGB` for true colour, absent for the default), at most 1000
+  rows. `vt`: a snapshot. Under the alternate screen there is no history.
+- `terminal.wait_for` ends at the first condition met: `regex` (RE2) found in the visible screen's
+  text, re-evaluated at most every 50 ms and only after new output, or with `scope: "output"` in the
+  output since `since_seq` (default: the call), escape sequences removed; `idle_ms` of no output,
+  counted from the call at the earliest; the program's exit; or `timeout_ms` (at most 30 minutes).
+- `terminal.list {preview_rows}` fills `preview` with that many rows as runs: under a shell the rows
+  ending at the cursor, on the alternate screen its bottom rows.
+
+## Terminal queries
+
+A program asks its terminal questions and waits for the answer on its input. The daemon answers all
+of them, with nobody attached as with three, at the exact point of the stream where they were asked
+and ahead of any queued input; every browser swallows them. The answers are the ones xterm.js gives,
+since xterm.js draws the terminal and encodes the keys and the mouse, so a program is never told
+about a feature the browser lacks:
+
+| Query | Answer |
+|---|---|
+| DA1 `CSI c`, DA2 `CSI > c` | `CSI ? 1 ; 2 c`, `CSI > 0 ; 276 ; 0 c` |
+| XTVERSION `CSI > q` | `DCS > \| xterm.js(<the app's xterm.js version>) ST` |
+| DSR `CSI 5 n`, CPR `CSI 6 n`, `CSI ? 6 n` | `CSI 0 n`; the cursor, from the top left whatever DECOM says |
+| `CSI ? 996 n` | `CSI ? 997 ; 1 n` when the viewer's background is darker than its foreground, else `; 2` |
+| DECRQM, both forms | the modes xterm.js knows, with its values (`0` for the rest), plus 2027 (grapheme clustering, on) |
+| kitty `CSI ? u` | the current flags |
+| DECRQSS `m`, `r`, `SP q`, `" q`, `" p` | the pen, the margins, the cursor shape, `0`, `61 ; 1` |
+| OSC 4/10/11/12 when every slot is `?` | the colour, `rgb:rrrr/gggg/bbbb`, one reply per slot: the one the program set, else the size owner's theme (from ATTACH), else the app's dark palette |
+| XTWINOPS 14, 15, 16, 18, 19 | the text area in pixels and cells, once a browser has measured it (18 and 19 always) |
+
+Other `CSI n` requests and XTWINOPS reports get no answer; the title reports (20, 21) never do,
+because echoing a title a program wrote back as input is a way to type into a shell. Where xterm.js
+reports an option rather than the state (the cursor shape, cursor blink, the pen) or a column past
+the margin while a wrap is pending, the daemon reports the state and the last column. At most 64 KiB
+of answers wait for a program that does not read its input; beyond that they are dropped.
 
 ## What every consumer of the output may rely on
 
@@ -249,7 +308,8 @@ to a parameter, or buffer an unterminated string without limit, so:
 
 A sequence split across reads is held until complete; the result does not depend on how the output
 was chunked. Per terminal, the daemon's memory is bounded by the ring, 64 KiB of pending sequence,
-the emulator's queue and the emulator's scrollback of 10 000 lines.
+the emulator's queue and the emulator's history: about 10 000 lines at the terminal's width, at most
+64 MiB.
 
 ## The emulator
 
@@ -259,9 +319,35 @@ one Go interface (`ptyd/internal/emulator`): `Feed`, `Resize`, `Size`, `Cursor`,
 served in order, so every answer corresponds to an exact output offset. Emulators start with
 grapheme clustering (mode 2027) on, which is how the browser's width provider measures text.
 
-The current build's emulator tracks only the size and the modes (bracketed paste, cursor-key mode,
-the alternate screen, mouse reporting, the kitty keyboard stack), which is what writes need. It
-answers no terminal queries and keeps no screen; `daemon.info` names it as `basic@1`.
+The emulator is libghostty-vt, Ghostty's terminal core, linked statically into the daemon and built
+from pinned sources (`ptyd/libghostty`). It was chosen by measurement against xterm.js headless,
+alacritty_terminal and charmbracelet/x/vt:
+
+- It was the only one to survive every unclamped hostile stream (32 of them, up to 20 MB each) with
+  no crash and no hang, at most 92 MB. Behind the daemon's clamps the same corpus peaks at 38 MB
+  above the daemon's own memory.
+- Its snapshots, replayed into a fresh xterm.js, reproduce the live xterm.js screen at 162 of 192
+  checkpoints of recorded programs and synthetic cases, and at 59 of the 68 checkpoints of real
+  programs (vim, less, htop, top, git, rich, Textual, bash, and five coding agents), with 3 cells
+  wrong. The differences left are policies (below).
+- It parses 75–186 MB/s on an idle machine and holds a 200×50 terminal with 10 000 lines of history
+  in about 15 MB. A snapshot of 2000 lines of history takes about 7 ms, of 10 000 about 30 ms.
+
+The daemon's snapshot layer puts right what the library's formatter leaves out or gets wrong: rows
+the formatter trims, the primary screen under an alternate one, the cursor's shape, the title,
+mouse modes a program already turned off, colours a program set, and the cursor position under
+origin mode. A patch carried against the pinned commit fixes three formatter defects (rows of only
+background colour, blanks after a styled cell, links).
+
+The width of every character is Ghostty's with grapheme clustering (mode 2027) on, and the app's
+xterm.js measures with a width provider generated from the same tables; the two are held together by
+recorded grids both sides test against. Where the library and xterm.js differ by policy, the library
+is kept: lines scrolled out of a scroll region that starts at the top go into the history (as in
+xterm; Codex keeps its conversation this way), the cursor's line reflows on resize, invalid UTF-8
+becomes U+FFFD, left and right margins (DECSLRM) exist, and a soft reset keeps bracketed paste.
+
+A build without cgo has no screen emulator: it tracks only the size and the modes, answers only the
+queries that need no screen, and `daemon.info` names it `basic@1` instead of `libghostty-vt@…`.
 
 ## Browser frames
 
@@ -356,6 +442,110 @@ When the effective character type (the first of `LC_ALL`, `LC_CTYPE`, `LANG` tha
 UTF-8, the non-UTF-8 overrides are removed and `LANG=C.UTF-8` is set; a user's `ru_RU.UTF-8` is
 kept.
 
+## Side channels
+
+What a CLI adapter reaches besides a terminal. Every one is fenced by a list, all over the same
+authenticated socket.
+
+### `exec.run`
+
+`{argv, cwd?, env{}, timeout_ms? ≤ 1 800 000, stdin_b64?, max_output? ≤ 4 MiB}` →
+`{exit_code, signal, stdout, stderr, truncated, timed_out, duration_ms, path}`
+
+- Not a terminal: the program runs in its own process group, with the environment a terminal gets
+  (without `DAEDALUS_TERMINAL_ID`), and the whole group gets `SIGHUP` and then, after 2 s, `SIGKILL`
+  when the time runs out or the caller's connection closes.
+- `argv[0]`, resolved through the program's `PATH`, must have a basename on the list: `claude codex
+  opencode pi grok npm npx node git uname`, plus the configuration's `exec.allow`. `1004` otherwise.
+  This guards against mistakes, not against a hostile host: the token already starts any terminal.
+- stdout and stderr are captured up to `max_output` each (default 1 MiB), the rest read and
+  dropped, as text (invalid UTF-8 replaced). One reply is one frame, so together they are cut to
+  about 640 KiB; `truncated` says so. A program that fails is a result, not an error. At most 16
+  run at once (`1003`).
+
+### `fs.*`
+
+A path must be absolute. It is allowed when, both as written (cleaned) and as the filesystem
+resolves it, it lies under a root and matches no deny pattern; the file actually opened is checked
+again by the path the kernel reports for it, and its last component is never a followed symlink.
+FIFOs and devices are refused.
+
+- **Roots** are the host's list (`fs.set_roots`) plus the configuration's `fs.roots`. `fs.set_roots
+  {roots[]}` → `{roots, accepted, refused[{root, reason}]}` replaces the host's list; a root that is
+  `/`, holds the home directory, or is the daemon's own is refused.
+- **Deny** patterns (`**` any directories, `*` part of a name) are compiled in and only extended by
+  the configuration's `fs.deny`: every CLI's login (`**/.claude/.credentials.json`,
+  `**/.codex/auth.json`, `**/.grok/auth.json`, `**/.local/share/opencode/auth.json`,
+  `**/.pi/agent/auth.json`), `**/.ssh/**`, `**/.gnupg/**`, `**/.config/gh/hosts.yml`, `**/.netrc`,
+  `**/.git-credentials`, `**/.docker/config.json`, `**/.aws/**`, `**/.kube/**`,
+  `**/.config/gcloud/**`, `**/.azure/**`, `**/.npmrc`, `**/.pypirc`, and the daemon's run and state
+  directories. A refusal is `1004` and is written to the daemon's log.
+
+| Method | Params → result |
+|---|---|
+| `fs.stat` | `{path}` → `{exists, type, size, mtime, mode, file_id}`; a missing path under a root is `{exists: false}` |
+| `fs.list` | `{path, glob?, sort? "name"\|"mtime", limit? ≤ 5000}` → `{entries[{name, type, size, mtime}], truncated}`; denied entries are left out, symlinks listed as such |
+| `fs.read` | `{path, offset?, max? ≤ 4 MiB}` → `{data_b64, offset, size, eof, file_id}` |
+| `fs.tail` | `{path, from_offset, max?, follow_ms? ≤ 60 000, file_id?}` → `{data_b64, next_offset, size, rotated, file_id}` |
+
+One reply carries at most 640 KiB of a file; a longer read continues at its offset. `fs.tail`
+waits up to `follow_ms` for bytes past `from_offset` (at most 128 tails wait at once). `rotated`
+means the file at the path is another one than `file_id` names, or it shrank; its data then starts
+at the beginning of the file.
+
+### Launches and hooks
+
+A **launch** is how a program in a terminal speaks back without typing on a screen.
+
+`hooks.register_launch {launch_id?, terminal_id?, files{name: base64}, ports[], hold_max_ms? ≤ 600 000,
+ttl_s?}` → `{launch_id, hook_url, hook_token, dir, dial_dir, env{}, files[]}`
+
+- `launch_id` is the host's, like a terminal id; without one the daemon picks it.
+- `files` (at most 32 of 512 KiB, each one plain name) are written 0600 into `dir`,
+  `<state>/launches/<launch_id>/` (0700): a CLI's settings overlay, its MCP entry, a long prompt.
+- `ports` are the loopback ports `net.dial` may reach for it; `net.allow {launch_id, port}` adds one.
+- A terminal created with `launch_id` gets the launch's environment on top of the caller's:
+  `DAEDALUS_LAUNCH_ID`, `DAEDALUS_HOOK_URL` (`http://127.0.0.1:<port>/hook/<launch_id>`),
+  `DAEDALUS_HOOK_TOKEN`, `DAEDALUS_HOOK_CMD` (`<state>/bin/hook-post`, one path, a link to the
+  daemon), `DAEDALUS_PTYD_BIN` (the daemon's executable), `DAEDALUS_DIAL_DIR` (`dial_dir`,
+  `<state>/dial/<launch_id>`) and `DAEDALUS_LAUNCH_DIR` (`dir`). `env` in the reply is the same set.
+  A launch that is not registered is `1008`.
+- It ends 30 s after the last of its terminals exits, after `ttl_s` (default 600) if no terminal was
+  started with it, or at `hooks.unregister_launch {launch_id}` → `{removed}`. Its directories are
+  removed, its streams closed, its waiting posts answered 410, and `launch.ended` is published.
+
+The **hook listener** takes `POST /hook/<launch_id>/<name>[?wait_ms=N]` with `Authorization: Bearer
+<hook_token>` (`name`: 1–64 of `A-Z a-z 0-9 . - _`; a body of at most 1 MiB; at most 100 posts a
+second per launch):
+
+| Answer | When |
+|---|---|
+| 204 | the `hook` event was published (and a held post got no reply in time) |
+| 200 + body | a held post, answered by `hooks.reply` |
+| 401 | a wrong token |
+| 410 | no such launch, or it ended; nothing is published |
+| 413 | a body over 1 MiB |
+| 429 | over the rate, or too many posts waiting (32 per launch, 256 in all) |
+
+A post is **held** with `wait_ms` (or `hold_ms`) in the query, or a `daedalus_hold_ms` field in a JSON
+object body, at most the launch's `hold_max_ms`. Its event carries `reply_id`, and
+`hooks.reply {reply_id, launch_id?, status? = 200, body?, content_type?}` → `{delivered}` answers it:
+a JSON string body is sent as text, anything else as JSON. A reply for a post that stopped waiting,
+or whose `launch_id` differs, is `1001`. The event's `body` is the post's JSON, or its text; one over
+256 KiB has its long strings shortened (every key kept) and `truncated: true`.
+
+`ptyd hook-post <name> [--wait-ms N]` (also `$DAEDALUS_HOOK_CMD <name>`) posts its stdin with the
+URL and token from its environment and prints a successful reply's body. It exits 0 on 2xx, 2 on
+401 or 410, and 1 on anything else, including no listener.
+
+### `net.dial`
+
+`{target, launch_id}` → `{channel}`: a byte stream on its own channel. `unix:<name>` is a socket in
+the launch's dial directory; `tcp:127.0.0.1:<port>` only a port registered for a live launch
+(natively the loopback interface also holds the Daedalus API and the key proxy). An empty frame
+from either side closes it. The daemon holds at most 1 MiB the socket has not read before it closes
+the stream; the host bounds its side the same way. At most 16 streams per launch and 256 in all.
+
 ## The host side
 
 The host (`daedalus/terminals/`) keeps a row per terminal in the `terminals` table and an append-only
@@ -382,6 +572,14 @@ because the token in them is a shell.
   attach and detach of a host terminal. What a person types is never recorded, only how much.
 - **Load.** The daemons' `terminal.stats` events feed a rolling average cost per profile; `GET
   /api/terminals/load?cap=N` reports what runs now and the machine with the cap filled.
+- **Side channels** (`daedalus/terminals/sidechannels.py`, methods of the same service): the file
+  roots of each environment are its project folders plus the directories adapters name
+  (`set_extra_roots`), sent on every connection and whenever they change. `hook_events(launch_id)`
+  yields a launch's posts in the daemon's order, kept from the moment the launch is registered, and
+  ends with the launch. `net_dial` returns a stream bounded at 1 MiB unread. Every program run,
+  launch registered or ended, port opened, stream dialled and hook answered is in the audit, with
+  the launch's terminal when it is known. Natively the daemons' state directories are sealed like
+  the rest of the installation.
 
 | Route | |
 |---|---|

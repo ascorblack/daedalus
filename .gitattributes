@@ -8,3 +8,7 @@
 *.md text diff
 *.css text diff
 *.toml text diff
+
+# A patch keeps the context lines of the file it patches, and a blank context line is a single
+# space: that is the format, not trailing whitespace.
+ptyd/libghostty/patches/*.patch -whitespace

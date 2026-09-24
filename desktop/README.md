@@ -235,14 +235,16 @@ A session writes five directories into the folder it works in — `inbox/`, `.ex
 they are added to `.git/info/exclude` when the first agent starts there, so they stay out of your
 `git status` and out of a `git add -A`; they are yours to delete whenever you like.
 
-`GET /api/projects` reports, per project, whether its folder is reachable from inside the running
-process (`reachable`) and whether it may be written (`writable`).
+`GET /api/projects` reports, per folder of each project, whether it is reachable from inside the
+running process (`reachable`), whether it may be written (`writable`), and who could ever work in it
+(`reach`: every agent, only what runs in a host terminal, or nothing yet). A project can have several
+folders; they are added, locked read-only and removed in the project's settings.
 
 **In Docker mode a project is also a bind mount, and that is the one place this mode is visibly
 heavier than native.** The agent container sees only what is mounted into it, so a folder that is not
 mounted is a project whose files are simply not there — which is what `reachable: false` says. The
-launcher is what closes that gap: once the stack is up it asks the app which project folders it
-cannot see and puts each of them in `data/project-mounts`, one path per line, which it splices into
+launcher is what closes that gap: once the stack is up it asks the app which container folders of
+its projects it cannot see and puts each of them in `data/project-mounts`, one path per line, which it splices into
 the agent service's `volumes` in `data/compose.desktop.yaml` every time it writes that file. It then
 says so on its page. **It does not restart anything by itself** — a restart takes the agent away from
 whatever it is doing — so **Stop** and **Start** are what mount the folder, and until you press them
