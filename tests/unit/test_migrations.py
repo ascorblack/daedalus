@@ -91,3 +91,28 @@ async def test_the_event_ring_is_created_and_a_second_open_leaves_it_alone(tmp_p
     assert (await db.fetchone("SELECT version FROM schema_version"))["version"] == version
     assert (await db.fetchone("SELECT count(*) AS n FROM app_events"))["n"] == 1
     await db.close()
+
+
+async def test_the_terminal_tables_are_created_and_a_second_open_leaves_them_alone(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite"
+    db = Database(path)
+    await db.open()
+    columns = [r["name"] for r in await db.fetchall("PRAGMA table_info(terminals)")]
+    assert columns[:18] == ["id", "env", "project_id", "owner_kind", "owner_id", "title", "cwd", "argv_json", "profile", "sandbox", "status", "exit_code", "created_at", "exited_at", "last_output_at", "last_input_at", "cols", "rows"]
+    assert {"ptyd_instance", "exit_signal", "final_preview_json", "created_by"} <= set(columns)
+    indexes = {r["name"] for r in await db.fetchall("PRAGMA index_list(terminals)")}
+    assert {"terminals_by_owner", "terminals_by_project", "terminals_by_status"} <= indexes
+    # No key to the owner: owners are four kinds, and the audit outlives the terminal it is about.
+    assert await db.fetchall("PRAGMA foreign_key_list(terminals)") == []
+    await db.execute("INSERT INTO terminals(id, env, owner_kind, cwd, created_at) VALUES ('t1', 'container', 'free', '/w', '2026-01-01T00:00:00.000Z')")
+    await db.execute("INSERT INTO terminal_audit(at, terminal_id, env, actor, action) VALUES ('2026-01-01T00:00:00.000Z', 'gone', 'host', 'operator', 'attach')")
+    version = (await db.fetchone("SELECT version FROM schema_version"))["version"]
+    await db.close()
+
+    db = Database(path)
+    await db.open()
+    assert (await db.fetchone("SELECT version FROM schema_version"))["version"] == version
+    row = await db.fetchone("SELECT * FROM terminals WHERE id = 't1'")
+    assert (row["status"], row["profile"], row["argv_json"], row["cols"], row["rows"], row["created_by"]) == ("running", "shell", "[]", 80, 24, "operator")
+    assert (await db.fetchone("SELECT count(*) AS n FROM terminal_audit"))["n"] == 1
+    await db.close()

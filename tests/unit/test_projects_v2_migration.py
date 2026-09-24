@@ -132,7 +132,9 @@ async def test_every_project_keeps_its_folder_and_every_session_its_directory(tm
     after = tables(path)
     assert {name: after[name] for name in counts if name != "schema_version"} == {name: n for name, n in counts.items() if name != "schema_version"}
     new = set(after) - set(counts)
-    assert new == {"project_folders", "project_briefs", "project_journal", "staff", "staff_sessions", "staff_messages", "asks", "watches"}
+    # The migrations after this one run as well and add tables of their own; this one's are these.
+    later = {"terminals", "terminal_audit"}
+    assert new - later == {"project_folders", "project_briefs", "project_journal", "staff", "staff_sessions", "staff_messages", "asks", "watches"}
     assert after["project_folders"] == counts["projects"]
 
     # Opened a second time nothing runs and nothing moves.
