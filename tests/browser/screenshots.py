@@ -1120,7 +1120,10 @@ def run() -> int:
         shot(page, "dual", f"agents/{S1}?with={S2}", wait=".chat-scroll .timeline", settle=1500)
         shot(page, "session-share", f"agents/{S1}", wait=".chat-scroll .timeline", before=open_share, settle=800)
         desk.add_init_script("try { localStorage.setItem('agents.groupBy', 'project'); } catch (e) {}")
-        shot(page, "projects", "agents", before=open_projects)
+        # The start canvas under a folded sidebar has neither a list nor a chat, so waiting for
+        # either timed out here and stopped every picture after this one; the sidebar is what the
+        # switcher opens from.
+        shot(page, "projects", "agents", wait=".sidebar", before=open_projects)
         shot(page, "voice", "voice")
         shot(page, "voice-settings", "settings/voice", wait=".stt-list .stt-card", before=scroll_to_voices, settle=700)
         shot(page, "board", "board")
