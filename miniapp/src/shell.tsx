@@ -16,7 +16,7 @@ function tagFor(s: Screen, selfdev: SelfDevMode): string {
   return screenTag(s, selfdev, BETA);
 }
 
-export const ICONS: Record<Screen, IconName> = { agents: "bots", voice: "mic", inbox: "inbox", board: "board", changes: "changes", schedules: "clock", services: "globe", memory: "bulb", usage: "chart", health: "check", settings: "settings" };
+export const ICONS: Record<Screen, IconName> = { agents: "bots", voice: "mic", inbox: "inbox", board: "board", changes: "changes", schedules: "clock", services: "globe", memory: "bulb", usage: "chart", health: "check", settings: "settings", project: "folder" };
 
 /** A destination's name, in the reader's language. The components below re-render with it because
  *  the shell's own `useLang` does; nothing here holds a translated string of its own. */

@@ -921,6 +921,28 @@ class SubagentsConfig(BaseModel):
     wait_timeout_minutes: int = Field(default=30, ge=1)
 
 
+class StaffConfig(BaseModel):
+    """The named members of a project's team: how much of them is kept, and how their signals are paced."""
+
+    notes_max_chars: int = Field(default=8000, ge=500)
+    """What a staff member carries from one session to the next. Past it the oldest lines go: notes
+    are read at the start of every session, so an unbounded file would slowly become the whole prompt."""
+    launch_stagger_seconds: int = Field(default=5, ge=0)
+    """The gap between two launches of one project, so a queue that frees six slots at once does not
+    start six processes in the same second."""
+    silence_minutes: int = Field(default=10, ge=1)
+    """A working staff member with no signal for this long is shown as silent rather than working."""
+    ask_escalate_minutes: int = Field(default=10, ge=1)
+    """A request left with the orchestrator this long goes to the operator: a blocked worker must not
+    wait on a model that is itself failing."""
+    read_default_chars: int = Field(default=4000, ge=200)
+    read_max_chars: int = Field(default=16000, ge=1000)
+    report_summary_chars: int = Field(default=300, ge=40)
+    signal_write_seconds: int = Field(default=5, ge=0)
+    """The least time between two writes of a staff session's last signal. Every event of a busy
+    session is a signal, and a row rewritten on each one is write load that tells nobody anything new."""
+
+
 class LoopsConfig(BaseModel):
     """Loop agents: a session woken up for one standing task, on an interval or when it asks."""
 
@@ -1120,6 +1142,7 @@ class RuntimeConfig(BaseModel):
     board: BoardConfig = Field(default_factory=BoardConfig)
     peers: PeersConfig = Field(default_factory=PeersConfig)
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
+    staff: StaffConfig = Field(default_factory=StaffConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
     modes: dict[str, ModeConfig] = Field(default_factory=lambda: {k: v.model_copy() for k, v in DEFAULT_MODES.items()})
     webhooks: dict[str, WebhookConfig] = Field(default_factory=dict)
@@ -1428,6 +1451,7 @@ __all__ = [
     "SttConfig",
     "BoardConfig",
     "PeersConfig",
+    "StaffConfig",
     "DEFAULT_MODES",
     "HeartbeatConfig",
     "ModeConfig",

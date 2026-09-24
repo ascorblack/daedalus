@@ -84,8 +84,9 @@ from daedalus.speech.tts_service import MEDIA_TYPE_HEADER, SEQUENCE_TYPE
 from daedalus.speech.tts_service import frame as speech_frame
 from daedalus.stores import pairing, passkeys
 from daedalus.stores.media import MEDIA_TENANT
-from daedalus.stores.projects import ProjectError, ProjectSettings
+from daedalus.stores.projects import Project, ProjectError, ProjectSettings
 from daedalus.stores.sqlite import ReceiptConflict
+from daedalus.stores.staff import ACTIVE_STATUSES, HARNESSES, Staff, StaffBusy, StaffError
 from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
 from daedalus.transport.telegram.markdown import split_message
@@ -293,6 +294,42 @@ class ProjectPatch(BaseModel):
 
     name: str | None = None
     snapshots: bool | None = None
+
+
+class HireBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    role: str = ""
+    harness: str = "daedalus"
+    agent: str = ""
+    model: str = ""
+    effort: str = ""
+    permission_mode: str = ""
+    env: str = ""
+    folder_id: str | None = None
+    isolation: str | None = None
+    """Omitted: an own worktree where the folder is a git repository, the shared folder otherwise."""
+    instructions: str = ""
+    one_off: bool = False
+    color: str = ""
+
+
+class StaffPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str | None = None
+    agent: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    permission_mode: str | None = None
+    env: str | None = None
+    folder_id: str | None = None
+    """An empty string clears it: the member then works in the project's primary folder."""
+    isolation: str | None = None
+    instructions: str | None = None
+    notes: str | None = None
+    color: str | None = None
 
 
 class NewSessionBody(BaseModel):
@@ -1232,6 +1269,129 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         await manager.reload_project(None, project_id)
         return {"ok": True}
+
+    # -- staff: the named members of a project's team ------------------------------------------
+
+    def staff_row(member: Staff, live: Any, sessions: int) -> dict[str, Any]:
+        return {**member.view(), "live": live.view() if live is not None else None, "status": live.status if live is not None else "off", "sessions": sessions}
+
+    async def staff_project(project_id: str) -> Project:
+        project = await manager.projects.get(project_id)
+        if project is None:
+            raise HTTPException(404, "no such project")
+        return project
+
+    async def staff_member(staff_id: str) -> Staff:
+        member = await manager.staff.get(staff_id)
+        if member is None:
+            raise HTTPException(404, "no such staff member")
+        return member
+
+    async def staff_changed(member: Staff, change: str) -> None:
+        # The team page of another window, and later the orchestrator, learn of it from the stream.
+        await manager.bus.publish("project.changed", {"change": change, "actor": "operator"}, project_id=member.project_id, staff_id=member.id)
+
+    @api.get("/api/projects/{project_id}/staff")
+    async def list_staff(project_id: str, archived: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The team, with each member's live session, and what the hiring form offers for Daedalus staff.
+
+        The personas and presets travel with the team because nothing else serves the personas, and a
+        form that has to wait on three requests before it can draw a choice is a form drawn twice.
+        What the command-line agents offer is the harness catalog's, asked for separately.
+        """
+        project = await staff_project(project_id)
+        members = await manager.staff.list(project_id, archived=archived)
+        live = await manager.staff.live_sessions(project_id)
+        counts = await manager.staff.session_counts(project_id)
+        presets = manager.config.presets
+        default = manager.config.default_preset()
+        orchestrator = project.settings.orchestrator
+        return {
+            "project": {
+                "id": project.id,
+                "name": project.name,
+                "ephemeral": project.settings.ephemeral,
+                "system": project.settings.system,
+                "default_env": project.settings.default_env or manager.projects.local_env,
+                "local_env": manager.projects.local_env,
+                "concurrency": orchestrator.concurrency,
+                "concurrency_cap": orchestrator.concurrency_cap,
+                "orchestrator": orchestrator.enabled,
+                "folders": [{"id": f.id, "path": str(f.path), "label": f.label, "env": f.env, "is_git": f.is_git, "readonly": f.readonly} for f in project.folders],
+            },
+            "staff": [staff_row(m, live.get(m.id), counts.get(m.id, 0)) for m in members],
+            "counts": {"staff": sum(1 for m in members if m.active), "working": sum(1 for s in live.values() if s.status in ACTIVE_STATUSES)},
+            "choices": {
+                "harnesses": list(HARNESSES),
+                "personas": manager.staff.personas(),
+                "presets": [{"id": pid, "label": preset.display(pid)} for pid, preset in presets.items()],
+                "default_preset": default[0] if default else "",
+            },
+        }
+
+    @api.post("/api/projects/{project_id}/staff", status_code=201)
+    async def hire_staff(project_id: str, body: HireBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        project = await staff_project(project_id)
+        isolation = body.isolation
+        if isolation is None:
+            folder = project.folder(body.folder_id) if body.folder_id else (project.folders[0] if project.folders else None)
+            isolation = "worktree" if folder is not None and folder.is_git and not folder.readonly else "shared"
+        try:
+            member = await manager.staff.hire(
+                project_id,
+                name=body.name, role=body.role, harness=body.harness, agent=body.agent, model=body.model, effort=body.effort,
+                permission_mode=body.permission_mode, env=body.env, folder_id=body.folder_id or None, isolation=isolation,
+                instructions=body.instructions, one_off=body.one_off, color=body.color, created_by="operator",
+            )
+        except StaffError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        await staff_changed(member, "staff.hired")
+        return staff_row(member, None, 0)
+
+    @api.get("/api/staff/{staff_id}")
+    async def get_staff(staff_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        member = await staff_member(staff_id)
+        live = await manager.staff.live(staff_id)
+        return staff_row(member, live, len(await manager.staff.sessions(staff_id, limit=500)))
+
+    @api.patch("/api/staff/{staff_id}")
+    async def patch_staff(staff_id: str, body: StaffPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await staff_member(staff_id)
+        changes = body.model_dump(exclude_unset=True)
+        if "folder_id" in changes:
+            changes["default_folder_id"] = changes.pop("folder_id")
+        try:
+            member = await manager.staff.update(staff_id, **changes)
+        except StaffError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        await staff_changed(member, "staff.updated")
+        live = await manager.staff.live(staff_id)
+        return staff_row(member, live, len(await manager.staff.sessions(staff_id, limit=500)))
+
+    @api.delete("/api/staff/{staff_id}")
+    async def dismiss_staff(staff_id: str, release: bool = False, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Dismiss a member. Refused while a session of theirs is live, unless ``release`` asks the
+        staff runtime to end it first — which only the runtime can, since only it knows what is running."""
+        member = await staff_member(staff_id)
+        live = await manager.staff.live(staff_id)
+        if live is not None:
+            runtime = app.extensions.get("staff")
+            if not release:
+                raise HTTPException(409, f"{member.name} is working; release the session first")
+            if runtime is None or not hasattr(runtime, "release"):
+                raise HTTPException(409, f"{member.name} has a live session and nothing here can end it yet")
+            await runtime.release(member, keep_worktree=True)
+        try:
+            member = await manager.staff.archive(staff_id, by="operator")
+        except StaffBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
+        await staff_changed(member, "staff.dismissed")
+        return {"ok": True, "staff": member.view()}
+
+    @api.get("/api/staff/{staff_id}/sessions")
+    async def staff_sessions(staff_id: str, limit: int = 50, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        await staff_member(staff_id)
+        return [s.view() for s in await manager.staff.sessions(staff_id, limit=limit)]
 
     # -- sessions -------------------------------------------------------------------
 

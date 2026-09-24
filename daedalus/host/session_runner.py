@@ -77,6 +77,7 @@ from daedalus.stores.sqlite import (
     SqliteUsageSink,
     message_text,
 )
+from daedalus.stores.staff import AsksStore, StaffStore
 from daedalus.tools import discover_tools
 
 logger = logging.getLogger(__name__)
@@ -418,6 +419,17 @@ class SessionManager:
             home=Path.home(),
             local_env="host" if settings.native else "container",
         )
+        personas = settings.bot_repo_dir / "personas"
+        # Read through the live configuration, not a copy: a preset added in Settings is a model a
+        # staff member may be given at once, without a restart.
+        self.staff = StaffStore(
+            db,
+            local_env=self.projects.local_env,
+            config=lambda: self.config.staff,
+            presets=lambda: self.config.presets.keys(),
+            personas=lambda: [p.stem for p in personas.glob("*.md")] if personas.is_dir() else [],
+        )
+        self.asks = AsksStore(db)
         self.checkpoint_retention = CheckpointRetention(db, workspaces_dir=settings.workspaces_dir, busy=self.busy_sessions, occupants=self.store_occupants)
         self.memory = PersistentMemory(db)
         self.workspace_units = PersistentWorkspace(db)
