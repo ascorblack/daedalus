@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from daedalus.terminals.bus import BusBridge
 from daedalus.terminals.owners import ManagerOwners
 from daedalus.terminals.service import Terminals
+from daedalus.terminals.update import DaemonUpdate
 
 if TYPE_CHECKING:
     from daedalus.app import Application
@@ -31,6 +32,9 @@ def build(app: Application) -> Terminals:
         # A server in a container terminal is published on the terminals service's own range. One in
         # a host terminal is on the machine itself, on whatever port it picked.
         port_ranges={"container": settings.terminals_port_range, "host": ""},
+        # Only a compose install runs the container's daemon from this image; natively there is no
+        # image, and the launcher updates its own daemon.
+        daemon_update=DaemonUpdate(settings.rebuild_trigger_dir) if settings.terminals_container_dir is not None and not settings.native else None,
     )
 
 
@@ -52,6 +56,14 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     # Before the connections start, so the events replayed on the first one are retold as well.
     terminals.subscribe(BusBridge(terminals))
     tasks = await terminals.start()
+    update = terminals.daemon_update
+    if update is not None:
+
+        async def probe() -> None:
+            await update.probe()
+
+        # In the background: it runs a program, and nothing about the start waits for its answer.
+        tasks.append(asyncio.create_task(probe(), name="terminals-image-version"))
 
     async def closer() -> None:
         # Cancelled at shutdown like every background task; the connections go with it, which leaves

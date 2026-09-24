@@ -24,14 +24,19 @@ type WaitSpec struct {
 	Output   bool           // match Regex against the output since SinceSeq instead of the screen
 	SinceSeq int64          // where output matching starts; negative for the output head at the call
 	Idle     time.Duration  // no output for this long; 0 for no idle condition
-	Timeout  time.Duration
+	// CommandDone waits for a command to end (its D mark) after SinceSeq, or after the output head at
+	// the call. Giving the offset a write's receipt reported closes the race with a command that ends
+	// before the wait begins.
+	CommandDone bool
+	Timeout     time.Duration
 }
 
 // WaitResult says which condition ended a wait.
 type WaitResult struct {
-	Matched string // regex | idle | exited | timeout
-	Seq     int64  // the output head when it ended
+	Matched string // regex | idle | command_done | exited | timeout
+	Seq     int64  // the output head when it ended (for command_done, the offset after the D mark)
 	Match   string // the text the regex matched
+	Command *CommandRecord
 }
 
 // WaitFor blocks until one of the conditions holds, the terminal exits, or the timeout passes.
@@ -46,10 +51,16 @@ func (t *Terminal) WaitFor(ctx context.Context, w WaitSpec) (WaitResult, error) 
 	if pos < 0 {
 		pos = t.ring.Head()
 	}
+	doneAfter := pos
 	var out strings.Builder
 	lastScreen := int64(-1)
 	check := func() (WaitResult, bool) {
 		head := t.ring.Head()
+		if w.CommandDone {
+			if r, ok := t.CommandDoneAfter(doneAfter); ok {
+				return WaitResult{Matched: "command_done", Seq: *r.EndSeq, Command: &r}, true
+			}
+		}
 		if w.Regex != nil && w.Output && pos < head {
 			for pos < head {
 				data, from, to, _ := t.ReadOutput(pos, 256<<10, true)

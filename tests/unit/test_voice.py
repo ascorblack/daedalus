@@ -14,6 +14,7 @@ from protocore.runtime.events.types import EventType
 from starlette.middleware.gzip import GZipMiddleware
 
 from daedalus.config import (
+    ORCHESTRATOR_ONLY_TOOLS,
     STAFF_ONLY_TOOLS,
     VOICE_ONLY_TOOLS,
     VOICE_TOOLS,
@@ -103,9 +104,10 @@ async def test_the_concierge_gets_its_four_tools_and_nothing_else(app: Any) -> N
         assert name in blocked
     for name in VOICE_TOOLS:
         assert name not in blocked
-    # And the delegation tools are the concierge's alone, as the reporting tools are staff's: a working session reaches neither.
+    # And the delegation tools are the concierge's alone, as the reporting tools are staff's and the
+    # control tools the orchestrator's: a working session reaches none of them.
     worker = await manager.create_session("work")
-    assert manager.blocked_tools_for(worker) == set(VOICE_ONLY_TOOLS) | set(STAFF_ONLY_TOOLS)
+    assert manager.blocked_tools_for(worker) == set(VOICE_ONLY_TOOLS) | set(STAFF_ONLY_TOOLS) | (known & set(ORCHESTRATOR_ONLY_TOOLS))
 
 
 async def test_a_mode_cannot_give_a_voice_session_a_shell(app: Any) -> None:

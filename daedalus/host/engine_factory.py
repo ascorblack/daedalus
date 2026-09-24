@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from protocore.contracts.llm import IProviderChain
 from protocore.contracts.tool_registry import IToolRegistry, ToolVisibilityPolicy
@@ -139,31 +139,11 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
     )
 
 
-def build_engine(
-    *,
-    deps: EngineDeps,
-    config: RuntimeConfig,
-    run_id: str,
-    session_id: str,
-    session_title: str,
-    workspace: Path,
-    rungs: list[tuple[OpenAICompatibleProvider, str]],
-    provider_chain: IProviderChain | None,
-    model_name: str | None = None,
-    thinking: bool = True,
-    reasoning_effort: str = "medium",
-    context_window: int = 128_000,
-    max_output_tokens: int = 32_000,
-    extra_notes: str = "",
-    tool_visibility_policy: ToolVisibilityPolicy | None = None,
-    mode: ModeConfig | None = None,
-    voice: bool = False,
-    project: str = "",
-) -> QueryEngine:
-    primary_provider, primary_model = rungs[0]
-    model = model_name or primary_model
-    all_tools = {t.name for t in deps.tool_registry.list_all()}
-    sections = prompts.concierge_sections(answer_language=config.answer_language, agents=extra_notes) if voice else (
+Role = Literal["agent", "voice", "orchestrator"]
+
+
+def _agent_sections(deps: EngineDeps, config: RuntimeConfig, *, mode: ModeConfig | None, workspace: Path, session_title: str, model: str, extra_notes: str, project: str) -> tuple[str, ...]:
+    return (
         prompts.PERSONA,
         prompts.rules_section(config.prompt.rules),
         prompts.language_section(config.answer_language),
@@ -187,6 +167,40 @@ def build_engine(
             project=project,
         ),
     )
+
+
+def build_engine(
+    *,
+    deps: EngineDeps,
+    config: RuntimeConfig,
+    run_id: str,
+    session_id: str,
+    session_title: str,
+    workspace: Path,
+    rungs: list[tuple[OpenAICompatibleProvider, str]],
+    provider_chain: IProviderChain | None,
+    model_name: str | None = None,
+    thinking: bool = True,
+    reasoning_effort: str = "medium",
+    context_window: int = 128_000,
+    max_output_tokens: int = 32_000,
+    extra_notes: str = "",
+    tool_visibility_policy: ToolVisibilityPolicy | None = None,
+    mode: ModeConfig | None = None,
+    role: Role = "agent",
+    project: str = "",
+) -> QueryEngine:
+    """``role`` picks the system prompt: an agent that works in a folder, the voice concierge that
+    only talks and hands over, or a project's orchestrator that only runs a team."""
+    primary_provider, primary_model = rungs[0]
+    model = model_name or primary_model
+    all_tools = {t.name for t in deps.tool_registry.list_all()}
+    if role == "voice":
+        sections: tuple[str, ...] = prompts.concierge_sections(answer_language=config.answer_language, agents=extra_notes)
+    elif role == "orchestrator":
+        sections = prompts.orchestrator_sections(answer_language=config.answer_language, governance=prompts.governance_section(deps.governance_path))
+    else:
+        sections = _agent_sections(deps, config, mode=mode, workspace=workspace, session_title=session_title, model=model, extra_notes=extra_notes, project=project)
     engine_config = QueryEngineConfig(
         run_id=run_id,
         tenant_id=TENANT,
@@ -221,4 +235,4 @@ def build_engine(
     return engine
 
 
-__all__ = ["TENANT", "EngineDeps", "build_engine", "runtime_constants"]
+__all__ = ["TENANT", "EngineDeps", "Role", "build_engine", "runtime_constants"]

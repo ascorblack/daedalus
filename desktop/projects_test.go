@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,39 @@ func TestAMountedFolderIsTheSamePathOnBothSides(t *testing.T) {
 	want := "services:\n  daedalus:\n    volumes:\n      - /home/someone/work/bakery:/home/someone/work/bakery\n    image: x\n"
 	if !strings.HasPrefix(body, want) {
 		t.Fatalf("the override is:\n%s\nwant it to start with:\n%s", body, want)
+	}
+	if strings.Count(body, "services:") != 1 {
+		t.Fatalf("a YAML document has one services key; the override has %d:\n%s", strings.Count(body, "services:"), body)
+	}
+}
+
+// The terminals service gets every mount the agent gets, at the same path: a shell in a container
+// terminal works in the project's folders, and a path has to name the same folder in both.
+func TestATerminalsServiceSeesEveryFolderTheAgentSees(t *testing.T) {
+	p := paths(t)
+	if _, err := addMounts(p, []string{"/home/someone/work/bakery", "/home/someone/work/photos"}); err != nil {
+		t.Fatal(err)
+	}
+	body := withProjectMounts(p, fmt.Sprintf(overrideYAML, "img", "img", "img"))
+	for _, service := range []string{"daedalus", "terminals"} {
+		at := strings.Index(body, "  "+service+":\n")
+		if at < 0 {
+			t.Fatalf("the override has no %s service:\n%s", service, body)
+		}
+		block := body[at+len("  "+service+":\n"):]
+		want := "    volumes:\n      - /home/someone/work/bakery:/home/someone/work/bakery\n      - /home/someone/work/photos:/home/someone/work/photos\n"
+		if !strings.HasPrefix(block, want) {
+			t.Fatalf("%s does not start with the two mounts:\n%s", service, body)
+		}
+	}
+	for _, service := range []string{"keyproxy", "telegram-bot-api"} {
+		at := strings.Index(body, "  "+service+":\n")
+		if at < 0 {
+			t.Fatalf("the override has no %s service:\n%s", service, body)
+		}
+		if strings.HasPrefix(body[at+len("  "+service+":\n"):], "    volumes:") {
+			t.Fatalf("%s got the project mounts, and it has no business in a project:\n%s", service, body)
+		}
 	}
 	if strings.Count(body, "services:") != 1 {
 		t.Fatalf("a YAML document has one services key; the override has %d:\n%s", strings.Count(body, "services:"), body)

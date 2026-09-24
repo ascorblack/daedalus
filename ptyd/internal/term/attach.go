@@ -542,9 +542,10 @@ func (c *Client) snapshot(reason string) error {
 	t := c.t
 	lines := c.scrollback
 	var (
-		vt   []byte
-		info emulator.SnapshotInfo
-		seq  int64
+		vt    []byte
+		info  emulator.SnapshotInfo
+		seq   int64
+		marks map[string]any
 	)
 	tooLarge := false
 	for {
@@ -553,6 +554,12 @@ func (c *Client) snapshot(reason string) error {
 			seq = t.fed.Load()
 			if info.Cols == 0 || info.Rows == 0 {
 				info.Cols, info.Rows = e.Size()
+			}
+			// The command marks as of the same point of the stream: a snapshot draws the screen
+			// without them, and the client places them again from this list.
+			marks = nil
+			if t.CommandsKnown() {
+				marks = t.marksFrom(info.FirstAbsRow)
 			}
 		})
 		if err != nil {
@@ -580,6 +587,11 @@ func (c *Client) snapshot(reason string) error {
 		return err
 	}
 	c.lastSend = time.Now()
+	if marks != nil {
+		if err := c.event(marks); err != nil {
+			return err
+		}
+	}
 	if tooLarge {
 		return c.errorEvent("snapshot_too_large", "the screen does not fit in one frame; it was sent empty")
 	}

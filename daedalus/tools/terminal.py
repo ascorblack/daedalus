@@ -141,7 +141,7 @@ async def _commands(context: ToolContext, hook: Any, view: dict[str, Any], last:
     except Unsupported:
         command = view.get("last_command")
         known = f" The last one known: `{command.get('command')}` → exit {command.get('exit_code')}." if isinstance(command, dict) and command.get("command") else ""
-        return ok(context, f"terminal {_name(view)}: this terminal service does not record the commands run in it yet; read the output instead.{known}")
+        return ok(context, f"terminal {_name(view)}: its commands are not recorded (it is not a shell started with its integration); read the output instead.{known}")
     if not commands:
         return ok(context, f"terminal {_name(view)}: no commands recorded (the shell may not report them).")
     rows = []
