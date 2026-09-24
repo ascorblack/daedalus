@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectDir } from "./api";
-import { primaryFolder, projectPath, projectReachable } from "./folders";
+import { agentFolders, folderName, needsMount, offersFolderChoice, pathProblem, primaryFolder, projectPath, projectReachable, reachIsProblem, reachKey } from "./folders";
 
 function dir(id: string, over: Partial<ProjectDir> = {}): ProjectDir {
-  return { id, path: `/work/${id}`, label: "", env: "container", is_git: false, readonly: false, position: 0, managed: false, reachable: true, writable: true, ...over };
+  return { id, path: `/work/${id}`, label: "", env: "container", is_git: false, readonly: false, position: 0, managed: false, reachable: true, writable: true, reach: "agents", ...over };
 }
 
 describe("a project's folders", () => {
@@ -22,5 +22,55 @@ describe("a project's folders", () => {
     expect(primaryFolder({ folders: [] })).toBeUndefined();
     expect(projectPath({ folders: [] })).toBe("");
     expect(projectReachable({ folders: [] })).toBe(false);
+  });
+
+  it("calls a folder by its label, else by the last part of its path", () => {
+    expect(folderName(dir("site", { label: " Shop " }))).toBe("Shop");
+    expect(folderName(dir("site"))).toBe("site");
+    expect(folderName(dir("x", { path: "C:\\work\\docs\\" }))).toBe("docs");
+  });
+
+  it("offers a new agent a folder only among those the bot can work in", () => {
+    const one = { folders: [dir("site"), dir("tools", { env: "host", reach: "terminals" })] };
+    expect(agentFolders(one).map((f) => f.id)).toEqual(["site"]);
+    expect(offersFolderChoice(one)).toBe(false);
+    expect(offersFolderChoice({ folders: [dir("site"), dir("docs")] })).toBe(true);
+    // A session's own copy of its project carries no reach and offers nothing rather than guessing.
+    expect(offersFolderChoice({ folders: [dir("site", { reach: undefined }), dir("docs", { reach: undefined })] })).toBe(false);
+  });
+});
+
+describe("the sentence under a folder", () => {
+  const docker = { docker: true };
+  it("says who can reach a host folder instead of asking for a mount", () => {
+    expect(reachKey(dir("tools", { env: "host", reach: "terminals", reachable: false }), docker)).toBe("folder.reach.terminals");
+    expect(reachKey(dir("tools", { env: "host", reach: "none", reachable: false }), docker)).toBe("folder.reach.none");
+  });
+
+  it("asks for a mount in Docker and for the folder back natively", () => {
+    expect(reachKey(dir("site", { reachable: false }), docker)).toBe("folder.reach.unmounted");
+    expect(reachKey(dir("site", { reachable: false }), { docker: false })).toBe("folder.reach.missing");
+    expect(reachIsProblem("folder.reach.unmounted")).toBe(true);
+  });
+
+  it("tells a locked folder from one the bot may not write", () => {
+    expect(reachKey(dir("site", { readonly: true, writable: false }), docker)).toBe("folder.reach.readonly");
+    expect(reachKey(dir("site", { writable: false }), docker)).toBe("folder.reach.notwritable");
+    expect(reachKey(dir("site"), docker)).toBe("folder.reach.ok");
+    expect(reachIsProblem("folder.reach.ok")).toBe(false);
+  });
+
+  it("warns about the mount only for a container folder in Docker", () => {
+    expect(needsMount("container", docker)).toBe(true);
+    expect(needsMount("host", docker)).toBe(false);
+    expect(needsMount("container", { docker: false })).toBe(false);
+    expect(needsMount("container", undefined)).toBe(false);
+  });
+
+  it("takes a full path on either system and nothing else", () => {
+    expect(pathProblem("")).toBe(false);
+    expect(pathProblem("/work/site")).toBe(false);
+    expect(pathProblem("D:\\work")).toBe(false);
+    expect(pathProblem("work/site")).toBe(true);
   });
 });

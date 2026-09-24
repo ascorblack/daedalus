@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from protocore.contracts.memory import MemoryScope
 from protocore.contracts.types import ToolResultBlock, ToolUseBlock
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -50,6 +50,7 @@ from daedalus.config import (
     keyproxy_upstream,
 )
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
+from daedalus.extensions import api_projects
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
@@ -82,7 +83,6 @@ from daedalus.speech.tts_service import MEDIA_TYPE_HEADER, SEQUENCE_TYPE
 from daedalus.speech.tts_service import frame as speech_frame
 from daedalus.stores import pairing, passkeys
 from daedalus.stores.media import MEDIA_TENANT
-from daedalus.stores.projects import ProjectError, ProjectSettings
 from daedalus.stores.sqlite import ReceiptConflict
 from daedalus.tools import websearch
 from daedalus.transport.telegram.front import TelegramBusy, TelegramOutbox, TelegramRefused
@@ -264,20 +264,6 @@ class SpaFiles(StaticFiles):
             raise
 
 
-class ProjectBody(BaseModel):
-    name: str
-    root: str | None = None
-    """An existing folder selected as the optional second step; omitted creates one automatically."""
-    snapshots: bool = False
-
-
-class ProjectPatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str | None = None
-    snapshots: bool | None = None
-
-
 class NewSessionBody(BaseModel):
     title: str = ""
     """Empty when the chat is started by its first message; a clip of that message stands in."""
@@ -286,6 +272,8 @@ class NewSessionBody(BaseModel):
     prompt: str | None = None
     project_id: str | None = None
     """The project to work in: its folder becomes the session's workspace and the limit of its reach."""
+    folder_id: str | None = None
+    """One of the project's folders to work in; empty is its primary folder."""
     own_directory: bool = False
     """Work in a private child of the project rather than its shared root."""
     tools_off: list[str] = Field(default_factory=list)
@@ -1151,66 +1139,9 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         response.delete_cookie(SESSION_COOKIE, path="/")
         return {"ok": True}
 
-    # -- projects: the folders the operator adds, and the sessions that work inside them -------
-
-    @api.get("/api/projects")
-    async def list_projects(_: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
-        """Every project, with who works in it and whether this process can reach its folder.
-
-        ``reachable`` is the Docker seam: the row exists as soon as the operator adds the folder, but
-        in a container the folder is only there once it is bind-mounted, so the app can say "restart
-        to mount this" instead of showing a project whose files are mysteriously absent.
-        """
-        # The narrower question on purpose: a session whose run has ended and whose snapshot is
-        # still being written may not be rewritten, but it is not working, and a list that draws it
-        # as running contradicts its own screen — which says idle, because it is.
-        busy = manager.active_sessions()
-        out = []
-        for project in await manager.projects.list():
-            # Which of them are working right now, so the app can name them before it asks the
-            # operator to confirm something that would move the folder under them.
-            sessions = [{**s, "running": s["id"] in busy} for s in await manager.projects.sessions_of(project.id)]
-            out.append({**project.view(), "sessions": sessions})
-        return out
-
-    @api.post("/api/projects")
-    async def create_project(body: ProjectBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        try:
-            project = await manager.projects.create(body.name, [body.root] if body.root is not None else None, settings=ProjectSettings(snapshots=True if body.root is None else body.snapshots))
-        except ProjectError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        return {**project.view(), "sessions": []}
-
-    @api.patch("/api/projects/{project_id}")
-    async def patch_project(project_id: str, body: ProjectPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        current = await manager.projects.get(project_id)
-        if current is None:
-            raise HTTPException(404, "no such project")
-        try:
-            project = await manager.projects.update(project_id, name=body.name, snapshots=body.snapshots)
-        except ProjectError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        # Loaded sessions keep their own immutable project value, so refresh their editable label
-        # and snapshot setting after the row changes.
-        await manager.reload_project(project, project_id)
-        return {**project.view(), "sessions": await manager.projects.sessions_of(project.id)}
-
-    @api.delete("/api/projects/{project_id}")
-    async def delete_project(project_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
-        """Forget an empty project. Files are never deleted."""
-        project = await manager.projects.get(project_id)
-        if project is None:
-            raise HTTPException(404, "no such project")
-        sessions = await manager.projects.sessions_of(project_id)
-        if sessions:
-            one = len(sessions) == 1
-            raise HTTPException(409, f"{len(sessions)} agent{'' if one else 's'} {'works' if one else 'work'} in {project.name}; move or remove {'it' if one else 'them'} first")
-        try:
-            await manager.projects.delete(project_id)
-        except ProjectError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        await manager.reload_project(None, project_id)
-        return {"ok": True}
+    # The projects, their folders, brief and journal: their own module, which the features built
+    # on projects extend rather than this file.
+    api_projects.register(api, app, auth)
 
     # -- sessions -------------------------------------------------------------------
 
@@ -1355,9 +1286,20 @@ def build_app(app: Application, api_token: str) -> FastAPI:
             project = await manager.projects.get(body.project_id)
             if project is None:
                 raise HTTPException(404, "no such project")
-            if not await manager.projects.ensure_reachable(project.primary):
-                raise HTTPException(409, f"the folder of {project.name} ({project.primary.path}) is not reachable from here yet; mount it and restart before starting an agent in it")
+            folder = project.folder(body.folder_id) if body.folder_id else project.primary
+            if folder is None:
+                raise HTTPException(404, f"{project.name} has no such folder")
+            if not folder.local(manager.projects.local_env):
+                # An agent of this process works with this process's tools; a folder of the other
+                # environment is reached only by what runs in a terminal there.
+                raise HTTPException(409, f"{folder.path} is a {folder.env} folder; an agent started here cannot work in it, only one started in a {folder.env} terminal can")
+            if not await manager.projects.ensure_reachable(folder):
+                raise HTTPException(409, f"the folder of {project.name} ({folder.path}) is not reachable from here yet; mount it and restart before starting an agent in it")
+        elif body.folder_id:
+            raise HTTPException(400, "a folder is named within a project")
         create_args: dict[str, Any] = {"metadata": metadata or None, "project_id": body.project_id or None}
+        if body.folder_id:
+            create_args["folder_id"] = body.folder_id
         if body.own_directory:
             create_args["own_directory"] = True
         state = await manager.create_session(title, **create_args)

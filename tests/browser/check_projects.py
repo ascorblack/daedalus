@@ -31,7 +31,7 @@ def run() -> int:
         if path == "/api/projects" and request.method == "POST":
             payload = request.post_data_json
             created.append(payload)
-            project = {"id": f"p{len(projects) + 1}", "name": payload["name"], "folders": folders(payload.get("root", f"/managed/p{len(projects) + 1}")), "created_at": "2026-09-19T00:00:00Z", "settings": {"snapshots": True, "system": ""}, "system": "", "sessions": []}
+            project = {"id": f"p{len(projects) + 1}", "name": payload["name"], "folders": folders((payload.get("folders") or [{"path": f"/managed/p{len(projects) + 1}"}])[0]["path"]), "created_at": "2026-09-19T00:00:00Z", "settings": {"snapshots": True, "system": ""}, "system": "", "sessions": []}
             projects.append(project)
             return answer(route, project)
         if path == "/api/projects":
@@ -75,12 +75,12 @@ def run() -> int:
         page.get_by_role("button", name="Add a project", exact=True).click()
         page.locator("#project-name").fill("Existing")
         page.get_by_role("button", name="Use an existing folder").click()
-        expect(page.get_by_text("desktop launcher must add a bind mount", exact=False)).to_be_visible()
+        expect(page.get_by_text("the bot sees a folder only once it is mounted", exact=False)).to_be_visible()
         page.get_by_role("button", name="work", exact=True).click()
         page.get_by_role("button", name="existing", exact=True).click()
         expect(page.locator("#project-root")).to_have_value("/work/existing")
         page.get_by_role("button", name="Add", exact=True).click()
-        assert created[1] == {"name": "Existing", "root": "/work/existing"}, created[1]
+        assert created[1] == {"name": "Existing", "folders": [{"path": "/work/existing"}]}, created[1]
         browser.close()
     return unhandled.report()
 

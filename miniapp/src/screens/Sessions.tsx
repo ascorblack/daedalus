@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, Project, ProjectFolder, SessionList, SessionSummary, Settings } from "../api";
-import { projectPath, projectReachable } from "../folders";
+import { agentFolders, folderName, offersFolderChoice, projectPath, projectReachable } from "../folders";
 import { Avatar, Dot, Skeleton, Status, ToolPicker, fmtInterval, statusWord } from "../components";
 import { OverflowMenu, Sheet, confirmDialog, toast } from "../dialogs";
 import { relTime, shortModel, untilShort } from "../format";
@@ -444,11 +444,16 @@ export function NewAgentSheet({ onClose, onCreated, toast, project: initial = ""
   const [loopMax, setLoopMax] = useState("");
   const [project, setProject] = useState(initial);
   const [ownDirectory, setOwnDirectory] = useState(false);
+  const [folder, setFolder] = useState("");
   const [preset, setPreset] = useState("");
   const [advanced, setAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const projects = useProjects();
   const chosen = (projects.data ?? []).find((p) => p.id === project);
+  const folderChoice = chosen && offersFolderChoice(chosen) ? agentFolders(chosen) : [];
+  // Empty is the primary: the session then follows whichever folder is first, as one that named
+  // none always has. Only another folder is named outright.
+  const chosenFolder = folderChoice.find((f) => f.id === folder && f.position !== 0);
   const settings = useQuery<Settings>("/api/settings", { staleMs: 60000 });
   const presets = settings.data?.presets ?? {};
   const defaultPreset = settings.data?.model?.preset ?? "";
@@ -464,7 +469,7 @@ export function NewAgentSheet({ onClose, onCreated, toast, project: initial = ""
       const loop = loopOn && loopText.trim()
         ? { instruction: loopText.trim(), mode: loopMode, interval_minutes: loopMode === "interval" ? Math.max(1, Number(loopMinutes) || 10) : null, max_runs: loopMax.trim() ? Math.max(1, Number(loopMax) || 1) : null }
         : undefined;
-      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff, loop, project_id: project || undefined, own_directory: ownDirectory, preset: preset || undefined });
+      const created = await api.post<{ id: string }>("/api/sessions", { title: title.trim(), prompt: prompt.trim() || undefined, tools_off: toolsOff, loop, project_id: project || undefined, folder_id: chosenFolder?.id, own_directory: ownDirectory, preset: preset || undefined });
       onClose();
       onCreated(created.id);
     } catch (e) {
@@ -487,7 +492,7 @@ export function NewAgentSheet({ onClose, onCreated, toast, project: initial = ""
         ))}
       </select>
       <label className="field">{t("newagent.where")}</label>
-      <select className="field" value={project} onChange={(e) => setProject(e.target.value)}>
+      <select className="field" value={project} onChange={(e) => { setProject(e.target.value); setFolder(""); }}>
         <option value="">{t("newagent.where.newproject")}</option>
         {(projects.data ?? []).map((p) => (
           <option key={p.id} value={p.id} disabled={!projectReachable(p)}>
@@ -495,7 +500,19 @@ export function NewAgentSheet({ onClose, onCreated, toast, project: initial = ""
           </option>
         ))}
       </select>
-      {chosen ? <div className="sub">{t("newagent.where.inside", { root: projectPath(chosen) })}</div> : <div className="sub">{t("newagent.where.newproject.hint")}</div>}
+      {folderChoice.length > 0 && (
+        <>
+          <label className="field" htmlFor="newagent-folder">{t("newagent.folder")}</label>
+          <select id="newagent-folder" className="field" value={chosenFolder?.id ?? ""} onChange={(e) => setFolder(e.target.value)}>
+            {folderChoice.map((f) => (
+              <option key={f.id} value={f.position === 0 ? "" : f.id} disabled={!f.reachable}>
+                {folderName(f)} · {f.path}{f.position === 0 ? t("newagent.folder.primary") : ""}{f.reachable ? "" : t("newagent.where.unmounted")}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
+      {chosen ? <div className="sub">{t("newagent.where.inside", { root: chosenFolder?.path ?? projectPath(chosen) })}</div> : <div className="sub">{t("newagent.where.newproject.hint")}</div>}
       {chosen && <label className="toggle-row"><input type="checkbox" checked={ownDirectory} onChange={(e) => setOwnDirectory(e.target.checked)} /><span>{t("newagent.directory.own")}</span><span className="sub">{t("newagent.directory.own.hint")}</span></label>}
       <button type="button" className="disclosure" onClick={() => setAdvanced((v) => !v)} aria-expanded={advanced}>
         <span className={`chev ${advanced ? "down" : ""}`}>›</span> {t("newagent.advanced")}{loopOn ? t("newagent.advanced.loop") : ""}{toolsOff.length ? t("newagent.advanced.tools", { n: toolsOff.length }) : ""}

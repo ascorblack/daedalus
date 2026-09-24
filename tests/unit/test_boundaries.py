@@ -83,8 +83,8 @@ def test_only_the_telegram_transport_imports_aiogram() -> None:
     assert _violations(PKG, TELEGRAM_ONLY, allowed_dirs=("daedalus/transport/telegram/",)) == []
 
 
-def test_only_the_api_extension_imports_the_http_framework() -> None:
-    assert _violations(PKG, HTTP_FRAMEWORK, allowed_dirs=("daedalus/extensions/api.py",)) == []
+def test_only_the_api_modules_import_the_http_framework() -> None:
+    assert _violations(PKG, HTTP_FRAMEWORK, allowed_dirs=("daedalus/extensions/api.py", "daedalus/extensions/api_projects.py")) == []
 
 
 def test_lower_layers_do_not_import_upward() -> None:

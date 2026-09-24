@@ -3,8 +3,8 @@
 // over every list of agents, not a destination of its own.
 
 import { useCallback, useEffect, useState } from "react";
-import { api, Project } from "./api";
-import { primaryFolder, projectPath, projectReachable } from "./folders";
+import { api, Project, ProjectDir, ProjectEnvironments } from "./api";
+import { folderName, needsMount, pathProblem, projectPath, projectReachable, reachIsProblem, reachKey } from "./folders";
 import { Sheet } from "./dialogs";
 import { Icon } from "./icons";
 import { invalidate, useQuery } from "./store";
@@ -95,24 +95,56 @@ export function ProjectSwitcher({ projects, current, onPick, onClose, toast }: {
   );
 }
 
+type Env = "container" | "host";
+
 type DirectoryEntry = { name: string; path: string; readable: boolean; writable: boolean; project_id?: string | null };
 type DirectoryListing = { roots?: DirectoryEntry[]; docker?: boolean; root?: string; path?: string; parents?: { name: string; path: string }[]; entries?: DirectoryEntry[]; truncated?: boolean };
 
+/** Where a folder may live, asked once and kept: it changes only when the host terminal bridge is installed. */
+export function useEnvironments() {
+  return useQuery<ProjectEnvironments>("/api/project-environments", { staleMs: 60000 });
+}
+
+/** The environment choice, drawn only when there is a choice to make. */
+function EnvSelect({ id, value, onChange, environments }: { id: string; value: Env; onChange: (env: Env) => void; environments?: ProjectEnvironments }) {
+  if (!environments || environments.available.length < 2) return null;
+  return (
+    <>
+      <label className="field" htmlFor={id}>{t("folder.env")}</label>
+      <select id={id} className="field" value={value} onChange={(e) => onChange(e.target.value as Env)}>
+        {environments.available.map((env) => <option key={env} value={env}>{t(`folder.env.${env}.long`)}</option>)}
+      </select>
+    </>
+  );
+}
+
+/** What adding a folder in this environment means, said before the operator adds it. */
+function EnvNote({ env, environments }: { env: Env; environments?: ProjectEnvironments }) {
+  if (environments && env !== environments.local) return <div className="sub">{t("folder.host.hint")}</div>;
+  if (needsMount(env, environments)) return <div className="sub attn dir-mount">{t("folder.mount.warning")}</div>;
+  return null;
+}
+
 /** A name is enough. Choosing an existing folder is the optional second step. */
 export function AddProjectSheet({ onClose, onAdded, toast }: { onClose: () => void; onAdded: (p: Project) => void; toast: (t: string) => void }) {
+  const environments = useEnvironments().data;
   const [name, setName] = useState("");
   const [root, setRoot] = useState("");
+  const [env, setEnv] = useState<Env | "">("");
   const [choosing, setChoosing] = useState(false);
   const [busy, setBusy] = useState(false);
   const typed = root.trim();
-  const rootProblem = typed && !(typed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(typed)) ? t("project.root.problem") : "";
+  const where: Env = env || environments?.local || "container";
+  const local = !environments || where === environments.local;
+  const rootProblem = pathProblem(typed) ? t("project.root.problem") : "";
   async function add() {
     if (!name.trim() || rootProblem || busy) return;
     setBusy(true);
     try {
-      const created = await api.post<Project>("/api/projects", { name: name.trim(), root: typed || undefined });
+      const folders = typed ? [{ path: typed, ...(env ? { env } : {}) }] : undefined;
+      const created = await api.post<Project>("/api/projects", { name: name.trim(), folders });
       afterChange();
-      toast(t(projectReachable(created) ? "project.added" : "project.added.unmounted", { name: created.name }));
+      toast(t(projectReachable(created) || !local ? "project.added" : "project.added.unmounted", { name: created.name }));
       onAdded(created);
     } catch (e) {
       toast(errorText(e));
@@ -125,13 +157,29 @@ export function AddProjectSheet({ onClose, onAdded, toast }: { onClose: () => vo
       <label className="field" htmlFor="project-name">{t("common.name")}</label>
       <input id="project-name" className="field" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder={t("project.name.placeholder")} />
       <button className="disclosure" type="button" onClick={() => setChoosing((value) => !value)} aria-expanded={choosing}><span className={`chev ${choosing ? "down" : ""}`}>›</span> {t("project.existing")}</button>
-      {choosing ? <DirectoryPicker value={root} onChange={setRoot} toast={toast} /> : <div className="sub">{t("project.automatic.hint")}</div>}
+      {choosing ? (
+        <>
+          <EnvSelect id="project-env" value={where} onChange={(next) => { setEnv(next); setRoot(""); }} environments={environments} />
+          {local ? <DirectoryPicker value={root} onChange={setRoot} toast={toast} /> : <PathInput value={root} onChange={setRoot} />}
+          <EnvNote env={where} environments={environments} />
+        </>
+      ) : <div className="sub">{t("project.automatic.hint")}</div>}
       {rootProblem && <div className="sub attn">{rootProblem}</div>}
       <div className="sheet-foot">
         <button className="btn ghost" onClick={onClose}>{t("common.cancel")}</button>
         <button className="btn primary" onClick={add} disabled={busy || !name.trim() || !!rootProblem}>{t("common.add")}</button>
       </div>
     </Sheet>
+  );
+}
+
+/** A path typed by hand: a folder of the other environment cannot be browsed from here. */
+function PathInput({ value, onChange }: { value: string; onChange: (path: string) => void }) {
+  return (
+    <>
+      <label className="field" htmlFor="project-root">{t("project.folder")}</label>
+      <input id="project-root" className="field mono" value={value} onChange={(e) => onChange(e.target.value)} placeholder={t("project.path.placeholder")} />
+    </>
   );
 }
 
@@ -148,35 +196,155 @@ function DirectoryPicker({ value, onChange, toast }: { value: string; onChange: 
   useEffect(() => { api.get<DirectoryListing>("/api/project-directories").then(setListing).catch((e) => toast(errorText(e))); }, [toast]);
   return (
     <div className="directory-picker">
-      <label className="field" htmlFor="project-root">{t("project.folder")}</label>
-      <input id="project-root" className="field mono" value={value} onChange={(e) => onChange(e.target.value)} placeholder={t("project.path.placeholder")} />
+      <PathInput value={value} onChange={onChange} />
       {listing?.roots && <div className="directory-roots">{listing.roots.map((entry) => <button key={entry.path} className="btn ghost" onClick={() => { setRoot(entry.path); void load(entry.path, entry.path); }}><Icon name="folder" size={14} /> {entry.name}</button>)}</div>}
       {listing?.parents && <div className="directory-crumbs">{listing.parents.map((entry) => <button key={entry.path} className="linkbtn mono" onClick={() => void load(root, entry.path)}>{entry.name}</button>)}</div>}
       {listing?.entries?.map((entry) => <button key={entry.path} className="menu-item" disabled={!entry.readable} onClick={() => void load(root, entry.path)}><Icon name="folder" size={15} /><span className="grow truncate">{entry.name}</span>{entry.project_id && <span className="badge">{t("project.already")}</span>}{!entry.writable && <span className="badge attn">{t("project.readonly.short")}</span>}</button>)}
       {listing?.truncated && <div className="sub attn">{t("project.browser.truncated")}</div>}
-      {listing?.docker && <div className="sub">{t("project.browser.mount")}</div>}
     </div>
   );
 }
 
-/** Rename it, turn snapshots on or off, or remove it. The folder is shown and never edited here. */
-export function ProjectSettingsSheet({ project, onClose, onRemoved, toast }: { project: Project; onClose: () => void; onRemoved: () => void; toast: (t: string) => void }) {
+/** One folder of a project: what it is, who can reach it, the read-only switch and the way to forget it. */
+function FolderRow({ project, folder, environments, toast }: { project: Project; folder: ProjectDir; environments?: ProjectEnvironments; toast: (t: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const primary = folder.position === 0;
+  const only = project.folders.length === 1;
+  const key = reachKey(folder, environments);
+  const base = `/api/projects/${encodeURIComponent(project.id)}/folders/${encodeURIComponent(folder.id)}`;
+  async function lock(readonly: boolean) {
+    setBusy(true);
+    try {
+      await api.patch(base, { readonly });
+      afterChange();
+      toast(t(readonly ? "folder.locked" : "folder.unlocked", { name: folderName(folder) }));
+    } catch (e) {
+      toast(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function remove() {
+    if (!(await confirmAsync(t("folder.remove.title", { name: folderName(folder) }), { body: t("folder.remove.body", { path: folder.path }), action: t("common.remove") }))) return;
+    setBusy(true);
+    try {
+      await api.delete(base);
+      afterChange();
+      toast(t("folder.removed", { name: folderName(folder) }));
+    } catch (e) {
+      // The refusal names the agents that work there; it is the sentence the operator needs.
+      toast(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="dir-row" data-folder={folder.id}>
+      <div className="dir-head">
+        <Icon name="folder" size={15} />
+        <span className="dir-name truncate">{folderName(folder)}</span>
+        {primary && <span className="badge" title={t("folder.primary.title")}>{t("folder.primary")}</span>}
+        <span className={`badge env-${folder.env}`}>{t(`folder.env.${folder.env}`)}</span>
+        {folder.is_git && <span className="badge">{t("comp.name.git")}</span>}
+        <button className="iconbtn small" onClick={remove} disabled={busy || only} title={only ? t("folder.remove.last") : t("folder.remove", { name: folderName(folder) })} aria-label={t("folder.remove", { name: folderName(folder) })}>
+          <Icon name="trash" size={14} />
+        </button>
+      </div>
+      <div className="sub mono dir-path">{folder.path}</div>
+      <label className="toggle-row dir-lock">
+        <input type="checkbox" checked={folder.readonly} disabled={busy} onChange={(e) => void lock(e.target.checked)} />
+        <span>{t("folder.readonly")}</span>
+      </label>
+      <div className={`sub dir-reach ${reachIsProblem(key) ? "attn" : ""}`}>{t(key)}</div>
+    </div>
+  );
+}
+
+/** Another folder for a project: where it lives, the path, a label, and whether agents may write in it. */
+function AddFolder({ project, environments, onDone, toast }: { project: Project; environments?: ProjectEnvironments; onDone: () => void; toast: (t: string) => void }) {
+  const [env, setEnv] = useState<Env>(environments?.local ?? "container");
+  const [path, setPath] = useState("");
+  const [label, setLabel] = useState("");
+  const [readonly, setReadonly] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const local = !environments || env === environments.local;
+  const problem = pathProblem(path) ? t("project.root.problem") : "";
+  async function add() {
+    if (!path.trim() || problem || busy) return;
+    setBusy(true);
+    try {
+      const updated = await api.post<Project>(`/api/projects/${encodeURIComponent(project.id)}/folders`, { path: path.trim(), label: label.trim(), env, readonly });
+      afterChange();
+      const added = updated.folders[updated.folders.length - 1];
+      toast(t(added && added.reach === "agents" && !added.reachable ? "folder.added.unmounted" : "folder.added", { name: added ? folderName(added) : path.trim() }));
+      onDone();
+    } catch (e) {
+      toast(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="dir-form">
+      <EnvSelect id="folder-env" value={env} onChange={(next) => { setEnv(next); setPath(""); }} environments={environments} />
+      {local ? <DirectoryPicker value={path} onChange={setPath} toast={toast} /> : <PathInput value={path} onChange={setPath} />}
+      {problem && <div className="sub attn">{problem}</div>}
+      <EnvNote env={env} environments={environments} />
+      <label className="field" htmlFor="folder-label">{t("folder.label")}</label>
+      <input id="folder-label" className="field" value={label} onChange={(e) => setLabel(e.target.value)} placeholder={t("folder.label.placeholder")} />
+      <label className="toggle-row">
+        <input type="checkbox" checked={readonly} onChange={(e) => setReadonly(e.target.checked)} />
+        <span>{t("folder.readonly")}</span>
+        <span className="sub">{t("folder.readonly.hint")}</span>
+      </label>
+      <div className="dir-form-foot">
+        <button className="btn ghost" onClick={onDone}>{t("common.cancel")}</button>
+        <button className="btn primary" onClick={add} disabled={busy || !path.trim() || !!problem}>{t("folder.add.action")}</button>
+      </div>
+    </div>
+  );
+}
+
+/** Rename it, manage its folders, choose where its agents run, keep a chat's project, or remove it.
+ *
+ * The project is read live from the list rather than from the copy it was opened with: a folder
+ * added or locked here changes the list, and the sheet has to show the change it just made. */
+export function ProjectSettingsSheet({ project: opened, onClose, onRemoved, toast }: { project: Project; onClose: () => void; onRemoved: () => void; toast: (t: string) => void }) {
+  const projects = useProjects();
+  const environments = useEnvironments().data;
+  const project = projects.data?.find((p) => p.id === opened.id) ?? opened;
   const [name, setName] = useState(project.name);
   const [snapshots, setSnapshots] = useState(project.settings.snapshots);
+  const savedEnv: Env = project.settings.default_env ?? environments?.local ?? "container";
+  const [defaultEnv, setDefaultEnv] = useState<Env>(savedEnv);
+  const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    setName(project.name);
-    setSnapshots(project.settings.snapshots);
-  }, [project]);
-  const dirty = name.trim() !== project.name || snapshots !== project.settings.snapshots;
+    setName(opened.name);
+    setSnapshots(opened.settings.snapshots);
+  }, [opened]);
+  useEffect(() => setDefaultEnv(savedEnv), [savedEnv]);
+  const dirty = name.trim() !== project.name || snapshots !== project.settings.snapshots || defaultEnv !== savedEnv;
   async function save() {
     if (!dirty || !name.trim() || busy) return;
     setBusy(true);
     try {
-      await api.patch(`/api/projects/${encodeURIComponent(project.id)}`, { name: name.trim(), snapshots });
+      await api.patch(`/api/projects/${encodeURIComponent(project.id)}`, { name: name.trim(), snapshots, ...(defaultEnv !== savedEnv ? { default_env: defaultEnv } : {}) });
       afterChange();
       toast(t("common.saved"));
       onClose();
+    } catch (e) {
+      toast(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function keep() {
+    setBusy(true);
+    try {
+      await api.patch(`/api/projects/${encodeURIComponent(project.id)}`, { keep: true });
+      afterChange();
+      toast(t("project.kept", { name: project.name }));
     } catch (e) {
       toast(errorText(e));
     } finally {
@@ -205,9 +373,28 @@ export function ProjectSettingsSheet({ project, onClose, onRemoved, toast }: { p
     <Sheet title={project.name} ariaLabel={t("project.settings.for", { name: project.name })} onClose={onClose} size="narrow">
       <label className="field" htmlFor="project-rename">{t("common.name")}</label>
       <input id="project-rename" className="field" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && save()} />
-      <label className="field">{t("project.folder")}</label>
-      <div className="readonly-path mono">{projectPath(project)}</div>
-      <div className="sub">{primaryFolder(project)?.reachable ? (primaryFolder(project)?.writable ? t("project.reachable") : t("project.readonly")) : t("project.unreachable")}</div>
+      {project.settings.ephemeral && (
+        <div className="project-ephemeral">
+          <span className="sub">{t("project.ephemeral")}</span>
+          <button className="btn ghost" onClick={keep} disabled={busy}>{t("project.keep")}</button>
+        </div>
+      )}
+      <label className="field">{t("project.folders")}</label>
+      <div className="dir-list">
+        {project.folders.map((folder) => <FolderRow key={folder.id} project={project} folder={folder} environments={environments} toast={toast} />)}
+      </div>
+      {adding
+        ? <AddFolder project={project} environments={environments} onDone={() => setAdding(false)} toast={toast} />
+        : <button className="btn ghost dir-add-open" onClick={() => setAdding(true)}><Icon name="plus" size={15} /> {t("folder.add")}</button>}
+      {environments && environments.available.length > 1 && (
+        <>
+          <label className="field" htmlFor="project-default-env">{t("project.defaultenv")}</label>
+          <select id="project-default-env" className="field" value={defaultEnv} onChange={(e) => setDefaultEnv(e.target.value as Env)}>
+            {environments.available.map((env) => <option key={env} value={env}>{t(`folder.env.${env}.long`)}</option>)}
+          </select>
+          <div className="sub">{t("project.defaultenv.hint")}</div>
+        </>
+      )}
       <label className="toggle-row">
         <input type="checkbox" checked={snapshots} onChange={(e) => setSnapshots(e.target.checked)} />
         <span>{t("project.snapshots")}</span>
