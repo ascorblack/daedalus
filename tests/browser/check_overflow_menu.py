@@ -30,7 +30,7 @@ from playwright.sync_api import Page, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import screenshots as shots  # noqa: E402
-from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app  # noqa: E402
+from api_stub import DEFAULT_APP, Unhandled, expect_app, fulfil_shared  # noqa: E402
 from screenshots import S1 as SESSION  # noqa: E402
 
 UNHANDLED = Unhandled()
@@ -79,12 +79,11 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         # selector times out. Anything past them is reported at the end rather than answered blind.
         rel = url.split("?", 1)[0]
         rel = rel[rel.index("/api/"):] if "/api/" in rel else ""
-        if rel in GATES:
-            body = json.dumps(GATES[rel])
-        else:
-            if rel:
-                UNHANDLED.record(rel)
-            body = "[]"
+        if fulfil_shared(route):
+            return
+        if rel:
+            UNHANDLED.record(rel)
+        body = "[]"
     route.fulfill(status=200, content_type="application/json", body=body)
 
 

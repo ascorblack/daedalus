@@ -18,6 +18,7 @@ import { MaintenanceNotice } from "./maintenance";
 import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
 import { t, useLang } from "./i18n";
+import { startPresence } from "./presence";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -121,6 +122,8 @@ export function App() {
   const [authed, setAuthed] = useState<boolean | null>(() => (telegram()?.initData ? true : null));
   // Nothing in the app works without a model, so the app asks for one before it shows anything else.
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
+  // What this window shows goes to the host from the moment it may ask anything at all.
+  useEffect(() => (authed ? startPresence() : undefined), [authed]);
   useEffect(() => {
     if (!authed) return;
     api

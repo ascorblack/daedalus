@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 from playwright.sync_api import expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app  # noqa: E402
+from api_stub import DEFAULT_APP, Unhandled, expect_app, fulfil_shared  # noqa: E402
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
 CHROMIUM = os.environ.get("CHROMIUM", "/usr/local/bin/chromium")
@@ -50,8 +50,8 @@ def run() -> int:
             entries = [{"name": "existing", "path": "/work/existing", "readable": True, "writable": True, "project_id": None}] if selected == "/work" else []
             parents = [{"name": "work", "path": "/work"}] + ([{"name": "existing", "path": "/work/existing"}] if selected != "/work" else [])
             return answer(route, {"root": "/work", "path": selected, "parents": parents, "entries": entries, "truncated": False})
-        if path in GATES:
-            return answer(route, GATES[path])
+        if fulfil_shared(route):
+            return None
         unhandled.record(path)
         answer(route, [])
 

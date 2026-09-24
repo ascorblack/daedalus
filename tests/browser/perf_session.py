@@ -34,7 +34,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import GATES, Unhandled  # noqa: E402
+from api_stub import GATES, Unhandled, serve_shared_post  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "miniapp" / "dist"
@@ -239,6 +239,9 @@ class Stub(BaseHTTPRequestHandler):
                 time.sleep(Stub.delta_ms / 1000)
         except (BrokenPipeError, ConnectionResetError, ValueError):
             return
+
+    def do_POST(self) -> None:  # noqa: N802
+        serve_shared_post(self, Stub.unhandled)
 
     def do_GET(self) -> None:  # noqa: N802
         raw, _, qs = self.path.partition("?")

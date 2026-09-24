@@ -39,7 +39,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_PORT, GATES, Unhandled  # noqa: E402
+from api_stub import DEFAULT_PORT, Unhandled, answer_shared, serve_shared_post  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "miniapp" / "dist"
@@ -127,6 +127,9 @@ class Stub(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ValueError):
             return
 
+    def do_POST(self) -> None:  # noqa: N802
+        serve_shared_post(self, Stub.unhandled)
+
     def do_GET(self) -> None:  # noqa: N802
         raw, _, _qs = self.path.partition("?")
         if raw.endswith("/stream"):
@@ -138,8 +141,9 @@ class Stub(BaseHTTPRequestHandler):
                 return self._send(json.dumps({"sessions": [], "projects": []}).encode(), "application/json")
             if raw == "/api/auth/me":
                 return self._send(json.dumps({"user_id": 1, "via": "token"}).encode(), "application/json")
-            if raw in GATES:
-                return self._send(json.dumps(GATES[raw]).encode(), "application/json")
+            shared = answer_shared("GET", raw)
+            if shared is not None:
+                return self._send(shared[2].encode(), shared[1])
             if raw.startswith(f"/api/sessions/{SESSION}/"):
                 return self._send(b"[]", "application/json")
             Stub.unhandled.record(raw)

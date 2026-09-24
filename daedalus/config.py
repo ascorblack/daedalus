@@ -985,6 +985,12 @@ class OpsConfig(BaseModel):
     event_replay_max: int = Field(default=5000, ge=100)
     """Events a reconnecting client may be behind and still be caught up. Further behind, it is told
     to re-read its lists, which is cheaper than streaming it a day of history."""
+    presence_ttl_seconds: float = Field(default=60.0, ge=5)
+    """How long one window's report of what it shows counts. The app re-sends it every 20 s while
+    visible, so a window that stopped reporting (a phone locked without a word) is away after this."""
+    presence_grace_seconds: float = Field(default=5.0, ge=0)
+    """How long a window still counts after its event stream dropped: long enough for a reconnect,
+    far shorter than the report's own lifetime."""
 
 
 class HeartbeatConfig(BaseModel):

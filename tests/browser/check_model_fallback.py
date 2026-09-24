@@ -24,7 +24,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, GATES, Unhandled, expect_app  # noqa: E402
+from api_stub import DEFAULT_APP, Unhandled, expect_app, fulfil_shared  # noqa: E402
 
 UNHANDLED = Unhandled()
 
@@ -121,12 +121,11 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
     else:
         rel = url.split("?", 1)[0]
         rel = rel[rel.index("/api/"):] if "/api/" in rel else ""
-        if rel in GATES:
-            body = json.dumps(GATES[rel])
-        else:
-            if rel:
-                UNHANDLED.record(rel)
-            body = "[]"
+        if fulfil_shared(route):
+            return
+        if rel:
+            UNHANDLED.record(rel)
+        body = "[]"
     route.fulfill(status=200, content_type="application/json", body=body)
 
 

@@ -498,7 +498,7 @@ class Scheduler:
             try:
                 if front is not None:
                     await front.close_question(row["session_id"], f"⏳ No answer for {self.app.config.scheduler.question_timeout_minutes} min: the unattended run continues on its own judgement.")
-                await manager.answer(row["session_id"], [{"custom": UNATTENDED_ANSWER}])
+                await manager.answer(row["session_id"], [{"custom": UNATTENDED_ANSWER}], via="timeout")
                 await self._post("schedule_question_timeout", "An unattended run waited too long for an answer", f"Session '{state.session.title}': the question was answered with 'continue on your own judgement'.", severity="warning", session_id=row["session_id"])
             except RuntimeError:
                 pass
