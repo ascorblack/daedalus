@@ -447,11 +447,22 @@ async def test_the_load_reports_what_runs_and_learns_a_cost_per_profile(service:
     await wait_until(lambda: _profiles(service), 2)
     load = await service.load(cap=4)
     assert load["running"] == 2 and load["cap"] == 20
-    assert load["used"]["rss_bytes"] == 510 << 20
+    # ptyd's own memory is counted with the terminals: it holds their emulators and output rings.
+    assert load["used"]["rss_bytes"] == (510 << 20) + (30 << 20) and load["used"]["daemon_rss_bytes"] == 30 << 20
+    assert load["envs"][0]["rss_bytes"] == 510 << 20 and load["envs"][0]["daemon_rss_bytes"] == 30 << 20
+    # Only the terminals' own samples teach the per-profile cost; the daemon's share is not in them.
     assert load["profiles"]["harness:claude"]["rss_bytes"] == 500 << 20
     assert load["likely"]["basis"] == "running" and load["likely"]["rss_bytes"] == 255 << 20
     projection = load["projection"]
-    assert projection["cap"] == 4 and projection["terminals_rss_bytes"] == (510 << 20) + 2 * (255 << 20)
+    assert projection["cap"] == 4 and projection["terminals_rss_bytes"] == (540 << 20) + 2 * (255 << 20)
+
+
+async def test_a_daemon_that_reports_no_process_of_its_own_adds_nothing(service: Terminals, daemon: FakePtyd) -> None:
+    # An older daemon sends no "daemon" block; the sum is then the terminals' alone.
+    await service.create(TerminalSpec(env="container", owner=Owner("free"), cwd="/tmp"))
+    daemon.daemon = {}
+    load = await service.load()
+    assert load["used"]["rss_bytes"] == 50 << 20 and load["used"]["daemon_rss_bytes"] == 0
 
 
 async def _profiles(service: Terminals) -> int:

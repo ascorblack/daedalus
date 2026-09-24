@@ -9,6 +9,7 @@ sides of the mount.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -39,23 +40,41 @@ class Endpoint:
     token: bytes
 
 
+def permission_detail(path: Path, exc: OSError) -> str:
+    """Why this process may not open a daemon's file, in terms the operator can act on.
+
+    The host daemon's directory belongs to the operator, mode 0700, and the agent's container reads it
+    as root. Root in an ordinary container passes that check; root in a rootless Docker or under
+    userns-remap is an unprivileged user on the host and does not, and nothing in the container can
+    change that.
+    """
+    return (
+        f"{path}: {exc.strerror or exc} — this process runs as uid {os.getuid()} and may not open the terminal service's files; "
+        "with rootless Docker or userns-remap, root in the container is not root on the host"
+    )
+
+
 def read_endpoint(run_dir: Path) -> Endpoint:
     """What to connect to and what to say first; raises ``EndpointMissing`` with the reason."""
     if not run_dir.is_dir():
         raise EndpointMissing("not_installed", f"{run_dir} does not exist")
     try:
         text = (run_dir / ENDPOINT_FILE).read_text(encoding="utf-8").strip()
+    except PermissionError as exc:
+        raise EndpointMissing("permission_denied", permission_detail(run_dir / ENDPOINT_FILE, exc)) from None
     except FileNotFoundError:
         # An empty directory is what setup leaves whether or not the service was installed, so it
         # reads as not installed. One a daemon has used (its lock, its token) held a daemon that
         # stopped — it removes its endpoint first thing when it does.
         if any((run_dir / name).exists() for name in (TOKEN_FILE, "ptyd.lock")):
             raise EndpointMissing("not_running", f"the terminal service in {run_dir} is not running") from None
-        raise EndpointMissing("not_installed", f"no terminal service has run in {run_dir}") from None
+        raise EndpointMissing("not_installed", f"no terminal service has run in {run_dir}{owned_by_root(run_dir)}") from None
     except OSError as exc:
         raise EndpointMissing("unreachable", f"{run_dir / ENDPOINT_FILE}: {exc}") from exc
     try:
         token = (run_dir / TOKEN_FILE).read_bytes().strip()
+    except PermissionError as exc:
+        raise EndpointMissing("permission_denied", permission_detail(run_dir / TOKEN_FILE, exc)) from None
     except OSError as exc:
         raise EndpointMissing("unreachable", f"{run_dir / TOKEN_FILE}: {exc}") from exc
     kind, _, rest = text.partition(":")
@@ -69,6 +88,20 @@ def read_endpoint(run_dir: Path) -> Endpoint:
         # A daemon may only listen on this machine's loopback interface; anything else in the file is
         # not a daemon this host should hand its token to.
     raise EndpointMissing("unreachable", f"{run_dir / ENDPOINT_FILE} holds {text[:80]!r}, which is not an endpoint")
+
+
+def owned_by_root(run_dir: Path) -> str:
+    """A note for an empty directory that root owns while this process is not root's only user.
+
+    Docker creates a missing bind-mount source as root. A host daemon runs as the operator and
+    cannot write its files into that directory, so installing it would fail until it is handed over.
+    Inside the container the directory's owner is the one fact available; the fix is on the host.
+    """
+    try:
+        owner = run_dir.stat().st_uid
+    except OSError:
+        return ""
+    return " (the directory belongs to root, so a host terminal service running as you could not use it: hand it over with sudo chown)" if owner == 0 else ""
 
 
 _hook_ports: dict[str, int] = {}
@@ -123,4 +156,4 @@ def sealed_ports(settings: Settings) -> tuple[int, ...]:
     return tuple(ports)
 
 
-__all__ = ["Endpoint", "EndpointMissing", "read_endpoint", "remember_hook_port", "remember_state_dir", "sealed_ports", "sealed_state_dirs"]
+__all__ = ["Endpoint", "EndpointMissing", "owned_by_root", "permission_detail", "read_endpoint", "remember_hook_port", "remember_state_dir", "sealed_ports", "sealed_state_dirs"]

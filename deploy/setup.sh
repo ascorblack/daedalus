@@ -41,7 +41,7 @@ mkdir -p "$SECRETS_DIR" && chmod 700 "$SECRETS_DIR"
 [ -f "$SECRETS_FILE" ] || cp deploy/keyproxy.env.example "$SECRETS_FILE"
 chmod 600 "$SECRETS_FILE"
 
-say "1/4 Telegram — optional. Leave the token empty to run on the app alone; you will sign in with a pairing link the bot writes at startup."
+say "1/5 Telegram — optional. Leave the token empty to run on the app alone; you will sign in with a pairing link the bot writes at startup."
 say "(https://t.me/BotFather for the token; @userinfobot for your numeric id; https://my.telegram.org/apps for the API pair)"
 ask TELEGRAM_BOT_TOKEN "Bot token (empty = no Telegram)" secret
 if [ -n "$(current TELEGRAM_BOT_TOKEN "$ENV_FILE")" ]; then
@@ -50,13 +50,13 @@ if [ -n "$(current TELEGRAM_BOT_TOKEN "$ENV_FILE")" ]; then
   ask TELEGRAM_API_HASH "Telegram API hash" secret
 fi
 
-say "2/4 Provider keys (stored in $SECRETS_FILE, never inside the checkout). Leave a key empty to skip that provider."
+say "2/5 Provider keys (stored in $SECRETS_FILE, never inside the checkout). Leave a key empty to skip that provider."
 say "A key is an address, not a model: you pick the model itself in the app at the end, and it is the only step that cannot be skipped."
 ask DEEPSEEK_API_KEY "DeepSeek API key" secret "$SECRETS_FILE"
 ask OPENROUTER_API_KEY "OpenRouter API key" secret "$SECRETS_FILE"
 ask KEYPROXY_USD_PER_DAY "Daily spend cap for the key proxy, USD" "" "$SECRETS_FILE"
 
-say "3/4 GitHub and the app"
+say "3/5 GitHub and the app"
 ask GITHUB_TOKEN "Fine-grained GitHub token for the two agent repositories (pull requests + contents); empty disables self-development" secret
 ask MINIAPP_PUBLIC_URL "Public HTTPS address of the app (a reverse proxy in front of port 8765); empty for LAN only"
 ask USD_PER_DAY "Daily spend cap enforced by the supervisor, USD"
@@ -76,11 +76,35 @@ for var, value in (("DAEDALUS_COMPOSE_PROJECT_DIR", root), ("DAEDALUS_COMPOSE_FI
 p.write_text(text)
 PY
 
-say "4/4 Starting the stack (the first build takes a few minutes)."
+# The host terminal's run directory is mounted into the agent whether or not the host terminal is
+# installed, so it must exist before compose starts: Docker would create a missing one as root, and
+# the unit, which runs as you, could then never write to it.
+HOST_TERMINALS_DIR="$(bash deploy/host-terminal.sh run-dir)"
+if ! bash deploy/host-terminal.sh prepare-dir; then
+  read -r -p "Hand it over now with sudo chown? [y/N]: " answer
+  case "$answer" in
+    y | Y | yes | YES) sudo chown "$(id -un):" "$HOST_TERMINALS_DIR" && bash deploy/host-terminal.sh prepare-dir ;;
+    *) say "Left as it is; the host terminal cannot be installed until it is yours: sudo chown $(id -un): \"$HOST_TERMINALS_DIR\"" ;;
+  esac
+fi
+
+say "4/5 Starting the stack (the first build takes a few minutes)."
 PROFILE=()
 [ -n "$(current TELEGRAM_BOT_TOKEN "$ENV_FILE")" ] && PROFILE=(--profile telegram)  # the local Bot API server is only for a bot
 docker compose -f deploy/compose.yaml --env-file "$ENV_FILE" "${PROFILE[@]}" up -d --build
 say "Done. Logs: docker logs -f deploy-daedalus-1"
+
+say "5/5 Host terminal — optional."
+if systemctl --user cat daedalus-ptyd.service >/dev/null 2>&1; then
+  say "The host terminal is installed. Updating it copies this build's daemon to the server and restarts it, which ends every open host terminal."
+  read -r -p "Update the host terminal? [y/N]: " answer
+  case "$answer" in y | Y | yes | YES) bash deploy/host-terminal.sh install --yes || say "The host terminal was not updated; see above." ;; esac
+else
+  say "A shell on this server as you, opened from the app. Every attach and every agent write is recorded; what you type is not."
+  say "It runs as a systemd user unit of yours, and can be removed with: systemctl --user disable --now daedalus-ptyd"
+  read -r -p "Install the host terminal? [y/N]: " answer
+  case "$answer" in y | Y | yes | YES) bash deploy/host-terminal.sh install --yes || say "The host terminal was not installed; see above. Try again later with: bash deploy/host-terminal.sh install" ;; esac
+fi
 if [ ${#PROFILE[@]} -gt 0 ]; then
   say "Next: send /start to the bot; /bind in a supergroup with topics for parallel sessions; /app for the Mini App."
   say "Then add a model in the app (it opens on \"Add a model\"): until one exists, nothing can run."
