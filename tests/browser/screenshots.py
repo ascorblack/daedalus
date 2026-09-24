@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from api_stub import (  # noqa: E402
     DEFAULT_APP,
     FILE_TEXT,
+    BoardStub,
     FocusStub,
     TeamStub,
     Unhandled,
@@ -621,6 +622,8 @@ COMPONENTS = {
 
 
 TEAM = _team()
+# The team page is a page of the project's focus mode, whose column also reads the project's board.
+TEAM_BOARD = BoardStub(next(p for p in PROJECTS if p["id"] == P1))
 
 
 def respond(route, body, *, content_type: str = "application/json", status: int = 200) -> None:  # type: ignore[no-untyped-def]
@@ -640,7 +643,7 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, {"base_url": "http://keyproxy:3200/openrouter/v1", "models": [e["id"] for e in CATALOGUE], "entries": CATALOGUE})
     if rel == "/api/voice/tts":
         return respond(route, SILENCE, content_type="audio/wav")
-    team = TEAM.answer(request.method, rel, urlsplit(url).query, None)
+    team = TEAM.answer(request.method, rel, urlsplit(url).query, None) or TEAM_BOARD.answer(request.method, rel, urlsplit(url).query, None)
     if team is not None:
         return respond(route, team[1], status=team[0])
     if request.method == "POST" and rel.startswith("/api/notifications/") and rel.endswith("/act"):
