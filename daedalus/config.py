@@ -1072,6 +1072,61 @@ class StaffConfig(BaseModel):
     session is a signal, and a row rewritten on each one is write load that tells nobody anything new."""
 
 
+class HarnessConfig(BaseModel):
+    """Command-line agents as staff: how long to wait on them, and how carefully to type into them."""
+
+    no_signal_after_s: int = Field(default=300, ge=30, le=3600)
+    """A working session with neither a structured signal nor terminal output for this long has its
+    screen checked; what the screen cannot settle is shown as silent, never as failed."""
+    reconcile_gap_ms: int = Field(default=1500, ge=200, le=10_000)
+    """Between the two screen readings that must agree before a turn end is inferred from the screen."""
+    ack_timeout_s: float = Field(default=8.0, ge=1, le=120)
+    """How long a submitted message may go unacknowledged before it is looked for on screen and in
+    the transcript."""
+    enter_retries: int = Field(default=2, ge=0, le=5)
+    """Enters sent again when the composer still holds the message. Never more: a message that is
+    neither in the composer nor in the transcript is reported failed, not resent."""
+    enter_delay_base_ms: int = Field(default=400, ge=0, le=5000)
+    enter_delay_per_kib_ms: int = Field(default=60, ge=0, le=1000)
+    enter_delay_max_ms: int = Field(default=2000, ge=0, le=10_000)
+    """The pause between a paste and its Enter grows with the paste, up to this: a TUI still reading
+    a large paste takes an early Enter as part of it."""
+    paste_chunk_bytes: int = Field(default=4096, ge=256, le=65_536)
+    pointer_threshold_bytes: int = Field(default=16_384, ge=1024, le=1 << 20)
+    """A message longer than this goes as a file in the launch directory with a one-line pointer:
+    TUIs collapse, truncate or choke on large pastes."""
+    interrupt_timeout_s: float = Field(default=15.0, ge=1, le=300)
+    answer_confirm_s: float = Field(default=5.0, ge=0.5, le=60)
+    """How long an answer typed into a dialog may take to show its effect before it counts as not
+    delivered and the operator is asked to answer in the terminal."""
+    ask_hold_s: int = Field(default=300, ge=10, le=3600)
+    """How long a staff member's question to the orchestrator is held open before the tool returns
+    "no answer yet" and the worker goes on with what its brief allows."""
+    stop_grace_s: float = Field(default=10.0, ge=0, le=120)
+    """Between asking a CLI to exit and killing its terminal."""
+    catalog_ttl_s: int = Field(default=21_600, ge=300)
+    latest_ttl_s: int = Field(default=21_600, ge=300)
+    allow_untested: bool = True
+    """Launch a CLI whose version is outside the adapter's tested range, when its self-check passed."""
+    self_check_model_turn: bool = True
+    """The self-check after an update sends one tiny prompt on the cheapest model, which costs a few
+    tokens of the subscription and is the only proof that a prompt still gets through."""
+    opencode_port_range: str = Field(default="18300-18399", pattern=r"^\d{4,5}-\d{4,5}$")
+    """Loopback ports OpenCode's embedded server may take, one per launch."""
+
+    @field_validator("opencode_port_range")
+    @classmethod
+    def _outside_reserved_ports(cls, value: str) -> str:
+        # The agent hands 8100–8119 to its own preview servers and 8120–8139 to container terminals'
+        # servers; an OpenCode server on one of those would take a port someone else was promised.
+        low, high = (int(part) for part in value.split("-"))
+        if not 1024 <= low <= high <= 65535:
+            raise ValueError("a port range is low-high within 1024-65535")
+        if low <= 8139 and high >= 8100:
+            raise ValueError("the range must stay clear of 8100-8139")
+        return value
+
+
 class LoopsConfig(BaseModel):
     """Loop agents: a session woken up for one standing task, on an interval or when it asks."""
 
@@ -1299,6 +1354,7 @@ class RuntimeConfig(BaseModel):
     peers: PeersConfig = Field(default_factory=PeersConfig)
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
     staff: StaffConfig = Field(default_factory=StaffConfig)
+    harness: HarnessConfig = Field(default_factory=HarnessConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
     terminals: TerminalsConfig = Field(default_factory=TerminalsConfig)
     modes: dict[str, ModeConfig] = Field(default_factory=lambda: {k: v.model_copy() for k, v in DEFAULT_MODES.items()})
@@ -1609,6 +1665,7 @@ __all__ = [
     "BoardConfig",
     "PeersConfig",
     "StaffConfig",
+    "HarnessConfig",
     "DEFAULT_MODES",
     "HeartbeatConfig",
     "ModeConfig",
