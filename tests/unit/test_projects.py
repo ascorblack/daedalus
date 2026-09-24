@@ -208,7 +208,7 @@ async def test_project_crud_and_a_session_that_works_in_one(settings: Settings, 
         async with await _client(settings, config, db, manager) as client:
             assert (await client.get("/api/projects")).status_code == 401  # the folders the operator works in; not to anyone
 
-            created = await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "root": str(root)})
+            created = await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "folders": [{"path": str(root)}]})
             assert created.status_code == 200
             project = created.json()
             assert [(f["path"], f["reachable"], f["env"], f["position"]) for f in project["folders"]] == [(str(root), True, "container", 0)]
@@ -219,7 +219,7 @@ async def test_project_crud_and_a_session_that_works_in_one(settings: Settings, 
             listing = (await client.get("/api/projects", headers=HEADERS)).json()
             assert [p["id"] for p in listing] == [project["id"]] and listing[0]["sessions"] == []
 
-            bad = await client.post("/api/projects", headers=HEADERS, json={"name": "Nested", "root": str(root / "menu")})
+            bad = await client.post("/api/projects", headers=HEADERS, json={"name": "Nested", "folders": [{"path": str(root / "menu")}]})
             assert bad.status_code == 400 and "inside the project" in bad.json()["detail"]
 
             made = await client.post("/api/sessions", headers=HEADERS, json={"title": "Menu page", "project_id": project["id"]})
@@ -294,7 +294,7 @@ async def test_an_unreachable_folder_is_reported_and_no_agent_is_started_in_it(s
     await manager.start()
     try:
         async with await _client(settings, config, db, manager) as client:
-            created = await client.post("/api/projects", headers=HEADERS, json={"name": "Not mounted", "root": str(tmp_path / "not-here")})
+            created = await client.post("/api/projects", headers=HEADERS, json={"name": "Not mounted", "folders": [{"path": str(tmp_path / "not-here")}]})
             assert created.status_code == 200 and created.json()["folders"][0]["reachable"] is False
             refused = await client.post("/api/sessions", headers=HEADERS, json={"title": "x", "project_id": created.json()["id"]})
             assert refused.status_code == 409 and "not reachable from here yet" in refused.json()["detail"]
@@ -497,7 +497,7 @@ async def test_a_fork_of_a_project_session_stays_in_it_and_copies_nothing(settin
     (root / "big.bin").write_bytes(b"x" * 4096)
     try:
         async with await _client(settings, config, db, manager) as client:
-            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Repo", "root": str(root)})).json()
+            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Repo", "folders": [{"path": str(root)}]})).json()
             sid = (await client.post("/api/sessions", headers=HEADERS, json={"title": "work", "project_id": project["id"]})).json()["id"]
             forked = await client.post(f"/api/sessions/{sid}/fork", headers=HEADERS, json={"seq": 1})
             assert forked.status_code == 200
@@ -701,7 +701,7 @@ async def test_a_project_root_is_immutable_and_a_nonempty_project_cannot_be_remo
     (tmp_path / "elsewhere").mkdir()
     try:
         async with await _client(settings, config, db, manager) as client:
-            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Repo", "root": str(root)})).json()
+            project = (await client.post("/api/projects", headers=HEADERS, json={"name": "Repo", "folders": [{"path": str(root)}]})).json()
             sid = (await client.post("/api/sessions", headers=HEADERS, json={"title": "worker", "project_id": project["id"]})).json()["id"]
             manager.live_state(sid).pending = SimpleNamespace(payload={})  # a question outstanding: the turn is in flight
 
