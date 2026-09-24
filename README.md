@@ -384,6 +384,13 @@ agent. What survives what:
 - **Project folders.** A folder mounted into the agent's container is mounted into `terminals` too, at
   the same absolute path, so a path means the same thing in a terminal as it does to the agent. The
   desktop launcher writes both entries itself.
+- **The sandbox toggle.** A terminal is an ordinary shell by default. With **Sandbox** ticked in the
+  terminal menu it runs in bubblewrap instead: the filesystem read-only, the project's writable folders
+  writable (what the session's own `Exec` may write), a private `/tmp`, and the daemon's token hidden.
+  It is a wall against writing, not reading. For it the `terminals` service carries `cap_add:
+  [SYS_ADMIN]` with unconfined seccomp and AppArmor — the same widening the agent's container accepts
+  for `Exec`'s sandbox. Without them the toggle shows as unavailable, with the reason, and terminals
+  open unsandboxed.
 
 ### The install ends in the app: add a model
 

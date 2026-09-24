@@ -15,6 +15,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/procstat"
+	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
 	"github.com/ascorblack/daedalus/ptyd/internal/version"
@@ -30,8 +31,9 @@ type Daemon struct {
 	Events       *events.Log
 	Log          *slog.Logger
 	EmulatorName string
-	Environ      []string // the environment spawned processes inherit
-	Side         *Side    // the side channels; nil in builds and tests without them
+	Environ      []string        // the environment spawned processes inherit
+	Side         *Side           // the side channels; nil in builds and tests without them
+	Sandbox      *sandbox.Prober // bubblewrap; nil where the daemon offers no sandbox
 
 	sampler  *procstat.Sampler
 	statsMu  sync.Mutex
@@ -124,7 +126,7 @@ func (d *Daemon) info(ctx context.Context, c *server.Conn, params json.RawMessag
 		"home":       d.Config.Home,
 		"shell":      d.Config.Shell,
 		"capabilities": map[string]any{
-			"sandbox":           "not available in this build",
+			"sandbox":           d.sandboxStatus(),
 			"shells":            config.Shells(),
 			"shell_integration": []string{},
 			"emulator":          d.EmulatorName,

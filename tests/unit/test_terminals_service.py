@@ -180,6 +180,49 @@ async def test_what_cannot_be_done_is_refused_with_its_reason(service: Terminals
     assert [a["action"] for a in await _audit(db, view["id"])] == ["create", "kill", "remove"]
 
 
+async def test_a_sandboxed_terminal_is_given_its_owners_writable_folders_and_keeps_the_choice_on_restart(db: Database, run_dir: Path, owners: FakeOwners, cfg: TerminalsConfig, daemon: FakePtyd, tmp_path: Path) -> None:
+    daemon.sandbox = "ok"
+    service = await _service(db, run_dir, owners, cfg)
+    try:
+        assert await service.wait_available("container")
+        assert [e.sandbox for e in service.environments()] == ["ok", ""]
+        view = await service.create(TerminalSpec(env="container", owner=Owner("free"), cwd=str(tmp_path), sandbox=True))
+        [params] = [p for m, p in daemon.calls if m == "terminal.create"]
+        assert params["sandbox"] == {"writable": [str(tmp_path)]}
+        assert view["sandbox"] is True and view["sandbox_skipped"] == []
+        [create] = [a for a in await _audit(db, view["id"]) if a["action"] == "create"]
+        assert json.loads(create["detail_json"])["writable"] == [str(tmp_path)]
+
+        # A restart keeps the sandbox unless it is asked to change it, either way.
+        same = await service.restart(view["id"])
+        assert same["sandbox"] is True and daemon.terminals[same["id"]].sandbox is not None
+        plain = await service.restart(same["id"], sandbox=False)
+        assert plain["sandbox"] is False and daemon.terminals[plain["id"]].sandbox is None
+        assert "sandbox" not in [p for m, p in daemon.calls if m == "terminal.create"][-1]
+        boxed = await service.restart(plain["id"], sandbox=True)
+        assert boxed["sandbox"] is True and (await _row(db, boxed["id"]))["sandbox"] == 1
+
+        # A folder the daemon cannot bind is left read-only, and the answer says which and why.
+        owners.sandbox_writable = _writable([str(tmp_path), "/no/such/folder"])  # type: ignore[method-assign]
+        partial = await service.create(TerminalSpec(env="container", owner=Owner("free"), cwd=str(tmp_path), sandbox=True))
+        assert partial["sandbox_skipped"] == [{"path": "/no/such/folder", "reason": "missing"}]
+    finally:
+        await service.close()
+
+
+def _writable(paths: list[str]) -> Any:
+    async def writable(env: str, owner: Owner, project_id: str | None, cwd: str) -> list[str]:
+        return paths
+
+    return writable
+
+
+async def test_an_environment_reports_why_it_cannot_sandbox(service: Terminals) -> None:
+    [container, host] = service.environments()
+    assert container.sandbox == "not available in this build" and host.sandbox == ""
+    assert container.view()["sandbox"] == "not available in this build"
+
+
 async def test_a_missing_directory_falls_back_to_home_and_says_so(service: Terminals, daemon: FakePtyd) -> None:
     view = await service.create(TerminalSpec(env="container", owner=Owner("free"), cwd="/no/such/place"))
     assert view["cwd_fallback"] is True and view["cwd"] == daemon.home

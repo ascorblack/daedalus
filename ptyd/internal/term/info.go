@@ -59,8 +59,9 @@ func (t *Terminal) Info() Info {
 	busy := false
 	if running {
 		// A job other than the terminal's own program is in the foreground: under a shell, a command
-		// is running.
-		if pg, err := t.proc.Foreground(); err == nil && pg > 0 && pg != t.Pid {
+		// is running. In a sandbox the program is not the PTY's process but bubblewrap's grandchild,
+		// with a group of its own; until it is found, bubblewrap's group is the only one known.
+		if pg, err := t.proc.Foreground(); err == nil && pg > 0 && pg != t.Pid && pg != t.proc.ProgramGroup() {
 			busy = true
 		}
 	}
@@ -75,7 +76,7 @@ func (t *Terminal) Info() Info {
 		CreatedAt: t.CreatedAt, LastOutputAt: timePtr(t.lastOutput), LastInputAt: timePtr(t.lastInput),
 		LastHumanInputAt: timePtr(lastHuman.UTC()), Cols: t.cols, Rows: t.rows, Clients: []ClientInfo{},
 		Keyboard: kb, Modes: t.modes, Busy: busy, LastCommand: t.lastCommand, Labels: labels,
-		LaunchID: t.LaunchID, Shell: t.Shell, OutputSeq: t.ring.Head(),
+		LaunchID: t.LaunchID, Sandbox: t.Sandbox, Shell: t.Shell, OutputSeq: t.ring.Head(),
 	}
 	if lastHuman.IsZero() {
 		info.LastHumanInputAt = nil

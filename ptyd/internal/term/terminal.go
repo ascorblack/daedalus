@@ -73,6 +73,10 @@ type Spec struct {
 	LaunchID    string
 	Labels      map[string]string
 	Shell       string // the shell, when the terminal runs the login shell
+	// Sandbox is a program wrapped in bubblewrap: Path and Argv are bubblewrap's, and Program is
+	// what it runs, which is what the terminal reports as its argv.
+	Sandbox bool
+	Program []string
 }
 
 // ModesInfo is the part of the emulator's modes that clients and adapters act on.
@@ -106,6 +110,7 @@ type Terminal struct {
 	CreatedAt   time.Time
 	LaunchID    string
 	Labels      map[string]string
+	Sandbox     bool
 	cwdFallback bool
 
 	deps Deps
@@ -163,7 +168,7 @@ func Start(spec Spec, deps Deps) (*Terminal, error) {
 	}
 	tag := "DAEDALUS_TERMINAL_ID=" + spec.ID
 	proc, err := ptyproc.Start(ptyproc.Spec{Path: spec.Path, Argv: spec.Argv, Dir: spec.Cwd, Env: spec.Env,
-		Cols: spec.Cols, Rows: spec.Rows, Tag: tag})
+		Cols: spec.Cols, Rows: spec.Rows, Tag: tag, Wrapped: spec.Sandbox})
 	if err != nil {
 		if disk != nil {
 			disk.Close()
@@ -171,8 +176,12 @@ func Start(spec Spec, deps Deps) (*Terminal, error) {
 		return nil, err
 	}
 	now := deps.Clock.Now().UTC()
+	argv := spec.Argv
+	if spec.Program != nil {
+		argv = spec.Program
+	}
 	t := &Terminal{
-		ID: spec.ID, Pid: proc.Pid, Argv: spec.Argv, Shell: spec.Shell, CreatedAt: now, LaunchID: spec.LaunchID,
+		ID: spec.ID, Pid: proc.Pid, Argv: argv, Sandbox: spec.Sandbox, Shell: spec.Shell, CreatedAt: now, LaunchID: spec.LaunchID,
 		Labels: spec.Labels, cwdFallback: spec.CwdFallback,
 		deps: deps, proc: proc, ring: ring.New(spec.RingBytes), disk: disk,
 		vt: make(chan vtRequest, emulatorQueue), vtQuit: make(chan struct{}),

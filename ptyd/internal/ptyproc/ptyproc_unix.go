@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -30,6 +31,9 @@ type Spec struct {
 	// Linux, KillTree also ends processes that carry it, which catches the ones that left the
 	// session and the process tree (a daemonising `setsid` whose parent has already exited).
 	Tag string
+	// Wrapped is a program started inside bubblewrap: the process the PTY runs is bubblewrap, and
+	// the program is its grandchild in a namespace of its own. See ProgramGroup.
+	Wrapped bool
 }
 
 // Exit is how the program ended.
@@ -43,6 +47,9 @@ type Proc struct {
 	Master *os.File
 	Pid    int
 	tag    string
+
+	wrapped bool
+	program atomic.Int64 // the wrapped program's pid, once found; 0 before
 
 	cmd  *exec.Cmd
 	done chan struct{}
@@ -64,7 +71,7 @@ func Start(spec Spec) (*Proc, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Proc{Pid: cmd.Process.Pid, tag: spec.Tag, cmd: cmd, done: make(chan struct{})}
+	p := &Proc{Pid: cmd.Process.Pid, tag: spec.Tag, wrapped: spec.Wrapped, cmd: cmd, done: make(chan struct{})}
 	go p.wait()
 	if p.Master, err = pollable(master); err != nil {
 		_ = syscall.Kill(-p.Pid, syscall.SIGKILL)

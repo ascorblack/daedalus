@@ -146,8 +146,51 @@ Parameters are decoded strictly: an unknown field is `-32602`.
 - Size defaults to 80×24; outside 20×4 … 500×300 it is `1009`.
 - `labels` (at most 32, each at most 256 bytes) are stored and echoed, never interpreted.
 - `log_to_disk` also writes the output to `<state>/terminals/<id>.log` (rotated at 32 MiB).
-- `sandbox` is `1007` in this build.
+- `sandbox {writable[]}` runs the program in the sandbox (below); `1007` where it is not available,
+  with the reason `daemon.info.capabilities.sandbox` gives.
 - Beyond `max_terminals` running terminals (128) it is `1003`.
+
+### The sandbox
+
+`terminal.create {sandbox: {writable: [...]}}` wraps the program in bubblewrap, which the daemon
+probes and runs itself, because it has to happen where the process lives. The wall is against
+writing, not reading:
+
+```
+bwrap --ro-bind / / --dev /dev --dev-bind /dev/pts /dev/pts --proc /proc --tmpfs /tmp
+      --unshare-pid --die-with-parent  [--bind <w> <w>]...  --tmpfs <run> --tmpfs <state>
+      [launch paths bound back]  --chdir <cwd> -- <program>
+```
+
+- Everything is read-only except the `writable` folders and a private `/tmp`. The daemon's run
+  directory (the token) and state directory are empty inside, masked after the writable folders so
+  a writable folder that holds one cannot show it again.
+- A writable folder that is not an absolute path, is `/`, lies in `/proc`, `/dev` or `/sys` or in the
+  daemon's own directories, is a symbolic link, is missing or is not a directory is left read-only.
+  The program still starts, and the reply says which were left and why:
+  `sandbox {writable[], skipped[{path, reason}]}`.
+- There is no `--new-session`: the shell keeps its controlling terminal and with it job control
+  (`sleep 100 &`, `fg`, Ctrl+C). The outer `/dev/pts` is bound in, so `tty`, `ssh` and `sudo` find the
+  terminal where it is. `TIOCSTI` in a PTY the daemon owns can only type into that same PTY.
+- `HISTFILE` is `/tmp/.shell_history` unless the caller sets it: home is read-only inside.
+- A terminal started with a launch gets back what the launch needs from the masked state
+  directory: its overlay directory and the hook command (and the daemon binary it links to)
+  read-only, its dial directory writable.
+- A working directory inside the daemon's own directories is refused (`-32602`) rather than shown as
+  an empty one; one in `/tmp` that no writable folder covers is shown read-only.
+- `daemon.info.capabilities.sandbox` is `ok`, or why not: `bwrap is not installed`, `bwrap cannot
+  create namespaces here: …`, `not available on <os>`. The probe is `bwrap --ro-bind / / --dev /dev
+  --proc /proc --unshare-pid true`, the agent's own `Exec` probe; a success is kept, a failure is
+  believed for five minutes, so namespaces allowed later are noticed without a restart.
+- `Info.sandbox` is true and `Info.argv` is the program's, not bubblewrap's; `pid` is bubblewrap's.
+  `busy` compares the foreground group with the program's own group inside, not bubblewrap's.
+- In the compose install the `terminals` service carries `cap_add: [SYS_ADMIN]` with unconfined
+  seccomp and AppArmor for this; on a machine, unprivileged user namespaces must be allowed.
+
+The host sends as `writable` what the owner's agent may write: a session's own sandbox set when the
+session lives in this environment, else the owner's project folders there that are not read-only,
+else the working directory alone. `POST /api/terminals/{id}/restart {sandbox}` starts the same
+program with the sandbox switched on or off.
 
 ### `Info`
 

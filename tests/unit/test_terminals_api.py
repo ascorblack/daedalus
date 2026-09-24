@@ -210,6 +210,26 @@ async def test_a_host_terminal_of_a_container_session_starts_in_a_host_folder_or
     assert await owners.sandbox_writable("container", owner, state.project.id, "") == [str(p) for p in state.services.sandbox_writable()]  # type: ignore[union-attr]
 
 
+async def test_a_sandboxed_terminal_writes_what_its_owner_may(manager: SessionManager, tmp_path: Path) -> None:
+    owners = ManagerOwners(manager)
+    # A session here: exactly what its agent's own sandbox may write.
+    state = await manager.create_session("boxed")
+    session = Owner("session", state.session.id)
+    assert await owners.sandbox_writable("container", session, state.project.id, "/elsewhere") == [str(p) for p in state.services.sandbox_writable()]  # type: ignore[union-attr]
+    # A project: its writable folders of that environment, never a read-only one or another environment's.
+    for name in ("code", "docs"):
+        (tmp_path / name).mkdir()
+    project = await manager.projects.create("Walls", [FolderSpec(str(tmp_path / "code")), FolderSpec(str(tmp_path / "docs"), readonly=True), FolderSpec("/home/someone/code", env="host")])
+    assert await owners.sandbox_writable("container", Owner("project", project.id), project.id, str(tmp_path)) == [str(tmp_path / "code")]
+    assert await owners.sandbox_writable("host", Owner("project", project.id), project.id, "/home/someone") == ["/home/someone/code"]
+    # A project with nothing writable there, and a free terminal: only the directory it starts in.
+    (tmp_path / "docs2").mkdir()
+    only_docs = await manager.projects.create("Docs", [FolderSpec(str(tmp_path / "docs2"), readonly=True)])
+    assert await owners.sandbox_writable("container", Owner("project", only_docs.id), only_docs.id, "/start") == ["/start"]
+    assert await owners.sandbox_writable("container", Owner("free"), None, "/start") == ["/start"]
+    assert await owners.sandbox_writable("container", Owner("free"), None, "") == []
+
+
 async def test_the_doctor_reports_each_environment(terminal_settings: Settings, app: Any, run_dir: Path, tmp_path: Path) -> None:
     from daedalus.doctor import DoctorContext, _terminals  # noqa: PLC0415 — the probe alone, not the whole doctor
 

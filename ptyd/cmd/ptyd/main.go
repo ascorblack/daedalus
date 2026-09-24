@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
 	"github.com/ascorblack/daedalus/ptyd/internal/rpc"
+	"github.com/ascorblack/daedalus/ptyd/internal/sandbox"
 	"github.com/ascorblack/daedalus/ptyd/internal/server"
 	"github.com/ascorblack/daedalus/ptyd/internal/term"
 	"github.com/ascorblack/daedalus/ptyd/internal/version"
@@ -129,6 +131,11 @@ func serve(args []string) error {
 	}
 	defer closeSide()
 	daemon.Side = side
+	// bubblewrap is looked up once, on the daemon's own PATH: a program's PATH may be anything. The
+	// first probe starts now, so the first daemon.info usually has the answer.
+	bwrap, _ := exec.LookPath("bwrap")
+	daemon.Sandbox = sandbox.NewProber(bwrap)
+	log.Info("sandbox", "status", daemon.Sandbox.Peek())
 	srv := server.New(ep.Token, log, daemon.Hello)
 	daemon.Register(srv)
 
