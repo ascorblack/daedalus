@@ -267,7 +267,14 @@ def the_grid(browser, problems: list[str]) -> None:  # type: ignore[no-untyped-d
         elif sizes[i][0][0] < 20 or sizes[i][0][1] < 4:
             problems.append(f"pane {i} sent a size too small to be a real pane: {sizes[i][0]}")
     # What each pane sent is what its terminal was fitted to in that pane, not a size from elsewhere.
-    grids = {i: page.evaluate("(id) => window.__terminals.size(id)", i) for i in ids}
+    # The grid follows the size the host confirms, and xterm.js applies a resize only between writes,
+    # so under load it lands a little after the RESIZE went out: wait for it rather than read once.
+    grids: dict = {}
+    for _ in range(25):
+        grids = {i: page.evaluate("(id) => window.__terminals.size(id)", i) for i in ids}
+        if all(not sizes[i] or (grids[i] and (grids[i]["cols"], grids[i]["rows"]) == sizes[i][-1]) for i in ids):
+            break
+        page.wait_for_timeout(200)
     for i in ids:
         if sizes[i] and grids[i] and (grids[i]["cols"], grids[i]["rows"]) != sizes[i][-1]:
             problems.append(f"pane {i} holds {grids[i]} but sent {sizes[i][-1]}")
