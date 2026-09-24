@@ -1,0 +1,155 @@
+{
+ "note": "Golden frames of the terminal wire format, written independently of the TypeScript codec (Python struct, big-endian). The daemon's own wire tests should hold the same bytes; when both sides keep a copy, the two copies must be identical.",
+ "frames": [
+  {
+   "name": "output",
+   "direction": "server",
+   "hex": "01000000000000100068690d0a",
+   "value": {
+    "kind": "output",
+    "seq": 4096,
+    "data": "hi\r\n"
+   }
+  },
+  {
+   "name": "output-empty",
+   "direction": "server",
+   "hex": "010000000000000000",
+   "value": {
+    "kind": "output",
+    "seq": 0,
+    "data": ""
+   }
+  },
+  {
+   "name": "output-large-seq",
+   "direction": "server",
+   "hex": "01000001000000000778",
+   "value": {
+    "kind": "output",
+    "seq": 1099511627783,
+    "data": "x"
+   }
+  },
+  {
+   "name": "snapshot",
+   "direction": "server",
+   "hex": "020078002000000000000100001b5b306d1b5b4870726f6d70742420",
+   "value": {
+    "kind": "snapshot",
+    "cols": 120,
+    "rows": 32,
+    "seq": 65536,
+    "data": "\u001b[0m\u001b[Hprompt$ "
+   }
+  },
+  {
+   "name": "event-size",
+   "direction": "server",
+   "hex": "037b2274797065223a2273697a65222c22636f6c73223a3130302c22726f7773223a33302c226f776e6572223a226f74686572227d",
+   "value": {
+    "kind": "event",
+    "event": {
+     "type": "size",
+     "cols": 100,
+     "rows": 30,
+     "owner": "other"
+    }
+   }
+  },
+  {
+   "name": "event-title-utf8",
+   "direction": "server",
+   "hex": "037b2274797065223a20227469746c65222c20227469746c65223a202276696d20c2b720d0b7d0b0d0bcd0b5d182d0bad0b8227d",
+   "value": {
+    "kind": "event",
+    "event": {
+     "type": "title",
+     "title": "vim · заметки"
+    }
+   }
+  },
+  {
+   "name": "input",
+   "direction": "client",
+   "hex": "106c73202d6c610d",
+   "value": {
+    "kind": "input",
+    "data": "ls -la\r"
+   }
+  },
+  {
+   "name": "input-utf8",
+   "direction": "client",
+   "hex": "10d191e29da40d",
+   "value": {
+    "kind": "input",
+    "data": "ё❤\r"
+   }
+  },
+  {
+   "name": "resize",
+   "direction": "client",
+   "hex": "110078002003c00220",
+   "value": {
+    "kind": "resize",
+    "cols": 120,
+    "rows": 32,
+    "px_w": 960,
+    "px_h": 544
+   }
+  },
+  {
+   "name": "ack",
+   "direction": "client",
+   "hex": "120000000000010000",
+   "value": {
+    "kind": "ack",
+    "seq": 65536
+   }
+  },
+  {
+   "name": "attach",
+   "direction": "client",
+   "hex": "137b226c617374536571223a343039362c22686176655374617465223a747275652c22726561644f6e6c79223a66616c73657d",
+   "value": {
+    "kind": "attach",
+    "request": {
+     "lastSeq": 4096,
+     "haveState": true,
+     "readOnly": false
+    }
+   }
+  }
+ ],
+ "malformed": [
+  {
+   "name": "empty",
+   "hex": ""
+  },
+  {
+   "name": "short-output",
+   "hex": "0100000000"
+  },
+  {
+   "name": "short-snapshot",
+   "hex": "02007800200000000000"
+  },
+  {
+   "name": "event-not-json",
+   "hex": "037b6e6f"
+  },
+  {
+   "name": "event-no-type",
+   "hex": "037b22636f6c73223a20317d"
+  },
+  {
+   "name": "unknown-type",
+   "hex": "7f00"
+  },
+  {
+   "name": "seq-too-large",
+   "hex": "011000000000000000"
+  }
+ ]
+}
