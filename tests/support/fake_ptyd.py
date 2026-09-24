@@ -58,6 +58,22 @@ class FakeTerminal:
         return out
 
 
+@dataclass
+class FakeChannel:
+    """An attachment the host opened: what it sent, in order, and whether it closed it."""
+
+    id: int
+    terminal_id: str
+    client: dict[str, Any]
+    writer: asyncio.StreamWriter
+    received: asyncio.Queue[bytes] = field(default_factory=asyncio.Queue)
+    closed_by_host: asyncio.Event = field(default_factory=asyncio.Event)
+    closed_by_daemon: bool = False
+
+    async def frame(self, timeout: float = 5.0) -> bytes:
+        return await asyncio.wait_for(self.received.get(), timeout)
+
+
 class FakePtyd:
     def __init__(self, run_dir: Path, *, env: str = "container", protocol: int = 1) -> None:
         self.run_dir = run_dir
@@ -77,6 +93,10 @@ class FakePtyd:
         self._subscribers: list[tuple[asyncio.StreamWriter, asyncio.Queue[dict[str, Any] | None]]] = []
         self._writers: set[asyncio.StreamWriter] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
+        self.channels: dict[int, FakeChannel] = {}
+        self.attached: asyncio.Queue[FakeChannel] = asyncio.Queue()
+        """Every attachment as it is opened, for a test to wait on."""
+        self._next_channel = 0
 
     # -- lifecycle ------------------------------------------------------------------------
 
@@ -155,10 +175,14 @@ class FakePtyd:
             while True:
                 channel, payload = await self._read(reader)
                 if channel != 0:
+                    await self._channel_frame(writer, channel, payload)
                     continue
                 message = json.loads(payload)
                 method, params = message.get("method"), message.get("params") or {}
                 self.calls.append((method, params))
+                if method == "terminal.attach" and method not in self.fail:
+                    await self._attach(writer, message["id"], params)
+                    continue
                 if method == "events.subscribe":
                     after = int(params.get("after_seq") or 0)
                     resync = after > len(self.events)
@@ -187,6 +211,44 @@ class FakePtyd:
             writer.close()
             if task is not None:
                 self._tasks.discard(task)
+
+    async def _attach(self, writer: asyncio.StreamWriter, call_id: int, params: dict[str, Any]) -> None:
+        term = self.terminals.get(str(params.get("id")))
+        if term is None:
+            await self._send(writer, {"jsonrpc": "2.0", "id": call_id, "error": {"code": 1001, "message": "no such terminal"}})
+            return
+        self._next_channel += 1
+        channel = FakeChannel(self._next_channel, term.id, dict(params.get("client") or {}), writer)
+        self.channels[channel.id] = channel
+        await self._send(writer, {"jsonrpc": "2.0", "id": call_id, "result": {"channel": channel.id, "client_id": f"c{channel.id}"}})
+        self.attached.put_nowait(channel)
+
+    async def _channel_frame(self, writer: asyncio.StreamWriter, channel_id: int, payload: bytes) -> None:
+        channel = self.channels.get(channel_id)
+        if channel is None or channel.writer is not writer:
+            return
+        if payload:
+            channel.received.put_nowait(payload)
+            return
+        channel.closed_by_host.set()
+        if not channel.closed_by_daemon:
+            channel.closed_by_daemon = True
+            await self._frame(writer, channel_id, b"")  # a close is answered with a close
+
+    async def send_channel(self, channel_id: int, payload: bytes) -> None:
+        """A frame from the terminal to the attached browser."""
+        await self._frame(self.channels[channel_id].writer, channel_id, payload)
+
+    async def close_channel(self, channel_id: int) -> None:
+        """The daemon lets go of the client (a detach, or the terminal forgotten)."""
+        channel = self.channels[channel_id]
+        if not channel.closed_by_daemon:
+            channel.closed_by_daemon = True
+            await self._frame(channel.writer, channel_id, b"")
+
+    async def _frame(self, writer: asyncio.StreamWriter, channel_id: int, payload: bytes) -> None:
+        writer.write(struct.pack(">II", 4 + len(payload), channel_id) + payload)
+        await writer.drain()
 
     async def _pump(self, writer: asyncio.StreamWriter, queue: asyncio.Queue[dict[str, Any] | None]) -> None:
         with contextlib.suppress(ConnectionError, asyncio.CancelledError):
@@ -285,4 +347,4 @@ class _RpcFail(Exception):
         self.message = message
 
 
-__all__ = ["FakePtyd", "FakeTerminal"]
+__all__ = ["FakeChannel", "FakePtyd", "FakeTerminal"]

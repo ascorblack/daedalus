@@ -378,8 +378,8 @@ because the token in them is a shell.
   agent's launch waits in line for a place; the operator's is refused with `409 {"code":
   "over_cap"}` and admitted past the cap when repeated with `confirm: true`.
 - **The audit** records create, kill, restart, signal, keyboard, update and remove for every
-  terminal, and every agent write with its first 4 KiB and the SHA-256 of the whole. What a person
-  types is never recorded.
+  terminal, every agent write with its first 4 KiB and the SHA-256 of the whole, and each browser's
+  attach and detach of a host terminal. What a person types is never recorded, only how much.
 - **Load.** The daemons' `terminal.stats` events feed a rolling average cost per profile; `GET
   /api/terminals/load?cap=N` reports what runs now and the machine with the cap filled.
 
@@ -391,8 +391,37 @@ because the token in them is a shell.
 | `GET`, `PATCH`, `DELETE /api/terminals/{id}` | the view; rename or hand to another owner; remove an ended row |
 | `POST /api/terminals/{id}/kill`, `/signal`, `/restart` | end; `{signal}`; the same program as a new terminal |
 | `GET /api/terminals/{id}/screen`, `/audit` | the screen (with the emulator); the audit, newest first |
+| `POST /api/terminals/{id}/ticket` | `{read_only?}` → `{ticket, expires_in}` for the WebSocket |
+| `WS /ws/terminals/{id}?ticket=` | the attachment, below |
 
-The browser reaches a terminal through the host: `POST /api/terminals/{id}/ticket` returns a
-single-use ticket valid for 30 s, and `WS /ws/terminals/{id}?ticket=…` checks the Origin, spends the
-ticket and relays frames. Close codes: 4401 ticket, 4403 origin, 4404 no terminal, 4409 environment
-unavailable, 1012 terminal service restarting.
+### The WebSocket
+
+The browser reaches a terminal through the host (`daedalus/terminals/gateway.py`; the two routes are
+declared in the API extension).
+
+- **The ticket.** `POST /api/terminals/{id}/ticket {read_only?}`, behind the usual sign-in, returns
+  `{ticket, expires_in}`: single use, for that terminal only, valid for `terminals.ticket_ttl_seconds`
+  (30 s). It records how the caller signed in (`telegram`, `token` or `cookie`), the user agent and the
+  address. `404` for an unknown or lost terminal; `409 {"code": "unavailable"}` while its environment is
+  down. Tickets live in memory, at most 256; a host restart drops them with the sockets.
+- **The socket.** `WS /ws/terminals/{id}?ticket=…`. The server accepts first and then judges, because a
+  refusal during the handshake reaches a browser as a bare 1006 and the app needs the code:
+  - the Origin must be the one the `Host` header names (http or https), or exactly the origin of
+    `MINIAPP_PUBLIC_URL` (a proxy that rewrites `Host`, and Telegram's webview); a missing or `null`
+    Origin is refused — **4403**, and the ticket is not spent;
+  - the ticket must be known, unexpired and for this terminal, and is spent whatever follows —
+    **4401**;
+  - `terminal.attach` with `client {kind: human | viewer, label: the user agent, via, read_only}` —
+    **4404** when the daemon has no such terminal, **4409** when the environment is unavailable.
+- **The relay.** Frames pass unchanged both ways. From the browser, only INPUT (at most 32 KiB), RESIZE
+  (9 bytes), ACK (9 bytes, offset ≤ 2^53 − 1) and ATTACH (a JSON object, at most 4 KiB) are accepted;
+  anything else ends the socket with **1008** (1009 when too long, 1003 for a text message). A read-only
+  ticket makes the client a viewer, drops its INPUT, and rewrites ATTACH's `readOnly` to true. Messages
+  over 1 MiB are refused by the server itself (1009). Nothing is buffered beyond what the daemon's
+  window lets through.
+- **The end.** The browser leaving closes the channel with its empty frame. The daemon closing the
+  channel closes the socket with **1000**; the daemon's connection going closes it with **1012**, which
+  the app retries.
+- **The audit.** For host terminals only, `attach {via, user_agent, address, socket_address, read_only,
+  client_id}` and `detach {client_id, bytes_typed, input_dropped, bytes_out, seconds, ended_by, code}`,
+  with the actor `operator`. How many bytes were typed, never which.
