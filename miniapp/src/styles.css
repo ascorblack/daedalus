@@ -2447,6 +2447,9 @@ button.staff-row:hover { background: var(--surface-2); }
 .term-dot.unseen { background: var(--accent); box-shadow: none; }
 .term-dot.bell { background: var(--warn); box-shadow: none; }
 .term-dot.exited { background: var(--fg-3); box-shadow: none; }
+.term-dot.cmd-ok { background: var(--ok); box-shadow: none; }
+.term-dot.cmd-failed { background: var(--bad); box-shadow: none; }
+.term-dot.cmd-running { box-shadow: inset 0 0 0 2px var(--accent); }
 .term-tabs > .iconbtn { margin-left: 2px; }
 .term-tools { flex: none; display: flex; align-items: center; gap: 2px; padding: 0 6px; }
 .term-env { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 7px; margin-right: 4px; border-radius: var(--radius-pill); border: 1px solid; font-size: var(--fs-11); font-weight: 600; letter-spacing: .05em; text-transform: uppercase; white-space: nowrap; }
@@ -2464,6 +2467,18 @@ button.staff-row:hover { background: var(--surface-2); }
 .term-screen { flex: 1; min-height: 0; min-width: 0; overflow: hidden; padding: 4px 0 0 8px; }
 .term-host { width: 100%; height: 100%; }
 .term-host .xterm { height: 100%; }
+/* A command's mark: xterm.js draws the decoration over the prompt's first cell, and the dot hangs to
+   the left of it, in the screen's padding, so no character of the prompt is covered. The cell itself
+   stays transparent to the pointer: a click there still selects. */
+.term-host .xterm-decoration.term-mark { pointer-events: none; }
+.term-host .xterm-decoration.term-mark::before { content: ""; position: absolute; left: -7px; top: calc(50% - 2.5px); width: 5px; height: 5px; border-radius: 50%; background: var(--fg-3); }
+.term-host .xterm-decoration.term-mark[data-result="ok"]::before { background: var(--ok); }
+.term-host .xterm-decoration.term-mark[data-result="failed"]::before { background: var(--bad); }
+.term-host .xterm-decoration.term-mark[data-result="running"]::before { background: var(--accent); }
+.term-host .xterm-decoration.term-mark.current::before { box-shadow: 0 0 0 2px color-mix(in srgb, var(--fg) 45%, transparent); }
+.term-menu-anchor { position: fixed; width: 0; height: 0; pointer-events: none; }
+.term-menu button { min-width: 240px; }
+.term-menu-key { margin-left: 16px; font-size: var(--fs-11); font-family: var(--mono); }
 /* xterm.js paints the space below its last row black whatever the theme; in the light scheme that
    is a black bar under every terminal. */
 .term-host .xterm:not(.allow-transparency) .xterm-viewport { background-color: var(--term-bg); }

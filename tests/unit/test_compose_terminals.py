@@ -118,6 +118,16 @@ def test_the_terminals_home_is_never_the_agents() -> None:
     assert {"terminal-run", "terminals-home", "terminals-state"} <= set(declared)
 
 
+def test_what_the_harnesses_screen_installs_is_found_first_and_kept_in_the_home() -> None:
+    environment = compose()["services"]["terminals"]["environment"]
+    path = environment["PATH"].split(":")
+    # The native installers' directory and the npm prefix, both on the home volume, ahead of anything
+    # the image carries; otherwise an installed CLI or the pinned Node is there and never found.
+    assert path[:2] == ["/root/.local/bin", "/root/.npm-global/bin"]
+    assert {"/usr/local/bin", "/usr/bin", "/bin"} <= set(path)
+    assert environment["NPM_CONFIG_PREFIX"] == "/root/.npm-global"
+
+
 def test_the_terminals_have_their_own_way_out_and_no_route_to_the_keys() -> None:
     document = compose()
     assert document["services"]["terminals"]["networks"] == ["terminals"]

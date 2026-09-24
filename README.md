@@ -239,7 +239,7 @@ What follows the mode: the `Self*` tools (absent in `off`, `SelfWorkspace` and `
 | Quality | `Verify` — a check with a criterion, recorded as a receipt; `LearningReport` |
 | Self | `SelfWorkspace` plus either `SelfApply` (local: commit into the running checkout, restart to apply) or `SelfPropose`, `SelfRebuild`, `SelfRollback` (server: pull request, rebuild, roll back) — registered according to `[self_change] mode`; on an installation that does not change its own code there are none |
 | Planning | `BoardAdd` / `BoardUpdate` / `BoardList` / `BoardGet` — the agent's own board (shared with its subagents; tasks you post to nobody in particular are on every board), with acceptance criteria, checklists, dependencies and a per-agent work-in-progress limit; `PLAN.md` in the workspace is its rendering |
-| Extensions | `Skill` (33 bundled skills: design systems, web QA, writing, scheduling, comparable variants, figures, search discipline…), `Mcp*` with OAuth, `SendFile` (attached under the answer in the app too), `StaySilent` |
+| Extensions | `Skill` (33 bundled skills: design systems, web QA, writing, scheduling, comparable variants, figures, search discipline…), `Mcp*` with OAuth, `SendFile` (attached under the answer in the app too), `StaySilent`, `Notify` — tells you something outside the chat, routed like any notification and limited per session |
 
 Every tool can be switched off per session from the app, and a **mode** (`quick`, `deep`, `careful`) bundles limits and extra rules.
 
@@ -607,6 +607,13 @@ first one's outcome. `GET /api/notifications/preferences` returns the section wi
 revision, `PUT` saves it (`{"preferences", "base_revision"}`, 409 when stale), and
 `POST /api/notifications/test` sends one notification through every channel there is and reports
 each outcome.
+
+An agent can notify you itself with the `Notify` tool (a title, a body, a level, a link, and a key that
+updates the earlier notification with the same key instead of adding one). It goes through the same
+routing, and each session may send `notify_tool_per_session` of them per `notify_tool_window_minutes`
+(5 per 10 minutes) and `notify_tool_urgent_per_hour` urgent ones (2), because urgent passes through
+quiet hours. Subagents and a project's staff do not have the tool: their work reaches you through the
+agent or orchestrator that gave it to them.
 
 **A project's board.** Every task whose project is set is on that project's board, and a task an
 agent adds is drawn on the board of the project it works in. `GET /api/projects/{id}/board` answers

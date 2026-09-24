@@ -35,6 +35,7 @@ from daedalus.config import HarnessConfig
 from daedalus.harness.contract import (
     LAUNCH_DIR,
     Answer,
+    EnvironmentUnavailable,
     EventKind,
     ExecResult,
     HarnessAdapter,
@@ -42,6 +43,7 @@ from daedalus.harness.contract import (
     Launch,
     LaunchPlan,
     LaunchSpec,
+    ProgramNotFound,
     ScreenClass,
     StaffEvent,
     Turn,
@@ -63,8 +65,8 @@ from daedalus.staff_runtime import (
     UsageSnapshot,
 )
 from daedalus.stores.harness import HarnessStore
+from daedalus.terminals.model import EnvUnavailable, NotFound, Origin, Owner, TerminalError, TerminalEvent, TerminalSpec
 from daedalus.terminals.model import LaunchSpec as DaemonLaunch
-from daedalus.terminals.model import NotFound, Origin, Owner, TerminalError, TerminalEvent, TerminalSpec
 from daedalus.terminals.service import Terminals
 
 logger = logging.getLogger(__name__)
@@ -164,20 +166,38 @@ class RuntimeTerminal:
 
 
 class RuntimeEnvironment:
-    """``EnvironmentPort`` over the terminals service's side channels of one environment."""
+    """``EnvironmentPort`` over the terminals service's side channels of one environment: the one
+    implementation, for the staff runtime and the harness manager alike, so every program run and
+    file read is audited and fenced by the daemon's lists the same way."""
 
-    def __init__(self, terminals: Terminals, env: str, *, actor: str = "agent:harness") -> None:
+    def __init__(self, terminals: Terminals, env: str, *, home: str = "", actor: str = "agent:harness") -> None:
         self.terminals = terminals
         self._env = env
+        self._home = home
         self.actor = actor
 
     @property
     def name(self) -> Any:
         return self._env
 
+    @property
+    def home(self) -> str:
+        """As the environment's daemon reported it; asked again while unknown, because a daemon that
+        was not connected when the port was made reports it once it is."""
+        if not self._home:
+            self._home = next((s.home for s in self.terminals.environments() if s.env == self._env), "")
+        return self._home
+
     async def run(self, argv: list[str], *, cwd: str | None = None, env: Mapping[str, str] | None = None, timeout: float = 30.0) -> ExecResult:
-        result = await self.terminals.exec_run(self._env, list(argv), cwd=cwd, env_vars=dict(env) if env else None, timeout=timeout, actor=self.actor)
-        return ExecResult(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr, timed_out=result.timed_out)
+        try:
+            result = await self.terminals.exec_run(self._env, list(argv), cwd=cwd, env_vars=dict(env) if env else None, timeout=timeout, actor=self.actor)
+        except NotFound as exc:
+            # "Not installed" and "the environment is down" are different answers to a version check;
+            # the contract names them so a caller never has to know the terminals' error classes.
+            raise ProgramNotFound(exc.message) from None
+        except EnvUnavailable as exc:
+            raise EnvironmentUnavailable(exc.message) from None
+        return ExecResult(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr, timed_out=result.timed_out, path=result.path)
 
     async def read(self, path: str, *, offset: int = 0, limit: int = 1 << 20) -> bytes:
         out = bytearray()
@@ -249,6 +269,7 @@ class CliStaffRuntime:
         lookup: Lookup,
         config: Callable[[], HarnessConfig],
         clock: Callable[[], float] = time.monotonic,
+        blocker: Callable[[str, str], Awaitable[str]] | None = None,
     ) -> None:
         self.adapter = adapter
         self.kind = adapter.name
@@ -258,6 +279,9 @@ class CliStaffRuntime:
         self.lookup = lookup
         self.config = config
         self.clock = clock
+        self.blocker = blocker
+        """The harness manager's word on ``(env, harness)``: why no member may start on it now (it is
+        being updated, its last self-check failed, its major is not supported), or empty."""
         self.sessions: dict[str, CliSession] = {}
         self._by_terminal: dict[str, CliSession] = {}
         self._unsubscribe = terminals.subscribe(self._on_terminal_event)
@@ -300,6 +324,10 @@ class CliStaffRuntime:
             return Availability(False, f"{label} is not installed in the {env} environment")
         if row is not None and row.logged_in == "no":
             return Availability(False, f"{label} is not signed in in the {env} environment")
+        if self.blocker is not None:
+            reason = await self.blocker(env, self.kind)
+            if reason:
+                return Availability(False, reason)
         return Availability(True)
 
     # -- starting --------------------------------------------------------------------------------
@@ -804,6 +832,8 @@ class CliStaffRuntime:
             untracked = await port.run(["git", "-C", cwd, "ls-files", "--others", "--exclude-standard"], timeout=DIFF_TIMEOUT)
         except TerminalError as exc:
             return ReadPage(f"no diff: {exc.message}", None, False)
+        except (ProgramNotFound, EnvironmentUnavailable) as exc:
+            return ReadPage(f"no diff: {exc}", None, False)
         if stat.exit_code != 0:
             return ReadPage(f"no diff: {stat.stderr.strip() or 'git failed'}", None, False)
         text = (stat.stdout.strip() or "(no changes against the base)") + (f"\n\nnew files not yet added:\n{untracked.stdout.strip()}" if untracked.stdout.strip() else "") + (f"\n\n{patch.stdout}" if patch.stdout.strip() else "")
@@ -980,11 +1010,12 @@ def install_runtimes(
     ingress: TeamIngress,
     lookup: Lookup,
     config: Callable[[], HarnessConfig],
+    blocker: Callable[[str, str], Awaitable[str]] | None = None,
 ) -> list[CliStaffRuntime]:
     """One runtime per registered adapter, put into the team's ``runtimes`` under the harness name."""
     made = []
     for name, factory in adapters.items():
-        runtime = CliStaffRuntime(factory(), terminals=terminals, store=store, ingress=ingress, lookup=lookup, config=config)
+        runtime = CliStaffRuntime(factory(), terminals=terminals, store=store, ingress=ingress, lookup=lookup, config=config, blocker=blocker)
         runtimes[name] = runtime
         made.append(runtime)
     return made

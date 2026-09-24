@@ -18,7 +18,7 @@ import { errorText } from "../ui";
 import { clampHeight, closeTab, DockState, loadDock, loadSandboxChoice, openTab, prune, replaceTab, sandboxOffer, sandboxToggle, saveDock, saveSandboxChoice, setSplit, splitCandidate, toggleDock } from "./dockstate";
 import type { TerminalState } from "./instance";
 import { instanceFor, setTerminalEnvs, terminals } from "./terminals";
-import { TerminalView } from "./view";
+import { CopyOutputButton, TerminalView } from "./view";
 
 /** How often the session's terminals are listed while its screen is open. */
 export const LIST_POLL_MS = 5000;
@@ -352,13 +352,30 @@ function tabTitle(row: TerminalRow | null, state: TerminalState | undefined): st
   return state?.title || row?.title || t("term.untitled");
 }
 
-type Dot = "exited" | "bell" | "unseen" | "";
+type Dot = "exited" | "bell" | "unseen" | "cmd-running" | "cmd-ok" | "cmd-failed" | "";
 
+/**
+ * What a tab's dot says, most urgent first: the process ended, it rang, its last command failed, it
+ * printed unseen, a command runs, the last one succeeded. A failure outranks unseen output because it
+ * is the thing to go and look at; success is the quietest thing a dot can say.
+ */
 function tabDot(row: TerminalRow | null, state: TerminalState | undefined): Dot {
   if (state?.exit || row?.status === "exited" || row?.status === "lost") return "exited";
   if (state?.bell) return "bell";
+  const last = state?.commands.last;
+  if (last?.result === "failed") return "cmd-failed";
   if (state?.unseen) return "unseen";
+  if (last?.result === "running") return "cmd-running";
+  if (last?.result === "ok") return "cmd-ok";
   return "";
+}
+
+/** The dot's words, for a tooltip and a screen reader: how the last command went. */
+function dotTitle(state: TerminalState | undefined): string | undefined {
+  const last = state?.commands.last;
+  if (!last) return undefined;
+  const command = last.command || t("term.marks.command");
+  return last.result === "failed" ? t("term.marks.failed", { command, code: last.exitCode ?? "?" }) : t(`term.marks.${last.result}`, { command });
 }
 
 /** What a finished tab shows: the signal that ended it, or its exit code. */
@@ -493,7 +510,7 @@ export function TerminalDock({ dock, workspace, fileOpener }: { dock: DockContro
             const on = id === active || id === state.split;
             return (
               <div key={id} role="tab" tabIndex={0} aria-selected={on} className={`term-tab ${on ? "on" : ""} ${row?.env === "host" ? "host" : ""}`} data-tab={id} onClick={() => dock.activate(id)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); dock.activate(id); } }} title={row?.cwd || undefined}>
-                <span className={`term-dot ${dot}`} aria-hidden="true" />
+                <span className={`term-dot ${dot}`} aria-hidden="true" title={dotTitle(st)} data-result={st?.commands.last?.result} />
                 <Shield row={row} />
                 <span className="term-tab-title truncate">{tabTitle(row, st)}</span>
                 {dot === "exited" && exitCode(row, st) && <span className="term-tab-code num">{exitCode(row, st)}</span>}
@@ -508,6 +525,7 @@ export function TerminalDock({ dock, workspace, fileOpener }: { dock: DockContro
         </div>
         <div className="term-tools">
           {activeRow && <EnvPill env={activeRow.env} />}
+          <CopyOutputButton id={active} state={active ? dock.states[active] : undefined} />
           <button className="iconbtn small flat" onClick={() => active && instanceFor(active)?.openSearch()} aria-label={t("term.search")} title={`${t("term.search")} (Ctrl+Shift+F)`} disabled={!active}><Icon name="search" size={16} /></button>
           <button className={`iconbtn small flat ${state.split ? "on" : ""}`} onClick={dock.split} aria-label={t("term.split")} title={t("term.split")} aria-pressed={!!state.split} disabled={!active}><Icon name="split" size={16} /></button>
           <button className="iconbtn small flat" onClick={() => active && dock.maximise(active)} aria-label={t("term.maximize")} title={t("term.maximize")} disabled={!active}><Icon name="expand" size={16} /></button>
@@ -562,6 +580,7 @@ export function TerminalFull({ dock, phone, workspace, fileOpener }: { dock: Doc
         <span className="term-full-title truncate">{tabTitle(row, st)}</span>
         {row && <EnvPill env={row.env} />}
         <div className="grow" />
+        <CopyOutputButton id={id} state={st} />
         <button className="iconbtn small flat" onClick={() => instanceFor(id)?.openSearch()} aria-label={t("term.search")} title={t("term.search")}><Icon name="search" size={16} /></button>
         {row?.status === "running" && (
           <button className="iconbtn small flat danger" onClick={() => void dock.end(id)} aria-label={t("term.end")} title={t("term.end")}><Icon name="stop" size={16} /></button>

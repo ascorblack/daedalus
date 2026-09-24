@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api";
-import { backoffDelay, ConnectionDeps, ConnectionState, SocketLike, TerminalConnection, TerminalSink } from "./connection";
+import { Terminal as Headless } from "@xterm/headless";
+import { backoffDelay, ConnectionDeps, ConnectionState, SocketLike, TerminalConnection, TerminalSink, xtermSink } from "./connection";
 import { EventMessage, FRAME } from "./protocol";
 
 class FakeSocket implements SocketLike {
@@ -49,7 +50,8 @@ class FakeSink implements TerminalSink {
   pending: (() => void)[] = [];
   auto = true;
   write(data: Uint8Array, parsed: () => void) {
-    this.log.push(`write:${new TextDecoder().decode(data)}`);
+    // An empty write is the connection waiting, in stream order, to hand over an event.
+    this.log.push(data.length ? `write:${new TextDecoder().decode(data)}` : "wait");
     if (this.auto) parsed();
     else this.pending.push(parsed);
   }
@@ -96,7 +98,7 @@ async function settle() {
   for (let i = 0; i < 5; i++) await Promise.resolve();
 }
 
-function start(options: { readOnly?: boolean; ticketError?: Error; resumeSeq?: number } = {}): Harness {
+function start(options: { readOnly?: boolean; ticketError?: Error; resumeSeq?: number; sink?: TerminalSink } = {}): Harness {
   const h = { sockets: [], states: [], events: [], tickets: 0, ticketError: options.ticketError ?? null, wake: () => undefined } as unknown as Harness;
   const deps: ConnectionDeps = {
     ticket: async () => {
@@ -118,7 +120,7 @@ function start(options: { readOnly?: boolean; ticketError?: Error; resumeSeq?: n
   };
   h.sink = new FakeSink();
   h.last = () => h.sockets[h.sockets.length - 1];
-  h.connection = new TerminalConnection(h.sink, { id: "t1", readOnly: options.readOnly, resumeSeq: options.resumeSeq, onState: (s) => h.states.push(s), onEvent: (e) => h.events.push(e) }, deps);
+  h.connection = new TerminalConnection(options.sink ?? h.sink, { id: "t1", readOnly: options.readOnly, resumeSeq: options.resumeSeq, onState: (s) => h.states.push(s), onEvent: (e) => h.events.push(e) }, deps);
   return h;
 }
 
@@ -266,9 +268,78 @@ describe("the terminal connection", () => {
     h.last().receive(event({ type: "resync", reason: "resized", first_abs_row: 0 }));
     h.last().receive(snapshot(100, 30, 900, "new"));
     h.last().receive(output(900, "after"));
-    expect(h.sink.log).toEqual(["write:old"]);
+    expect(h.sink.log).toEqual(["write:old", "wait"]);
     h.sink.flush();
-    expect(h.sink.log).toEqual(["write:old", "reset:100x30", "write:new", "write:after"]);
+    // Not inside the callback that released it: after it has returned.
+    expect(h.sink.log).toEqual(["write:old", "wait"]);
+    await settle();
+    expect(h.sink.log).toEqual(["write:old", "wait", "reset:100x30", "write:new", "write:after"]);
+  });
+
+  it("never parses a write twice when a snapshot's reset resizes a real terminal", async () => {
+    // xterm.js's `resize` flushes its write queue from the start, and inside a write callback the
+    // queue still holds the writes already parsed: a snapshot applied there brought the old screen's
+    // bytes back onto the new one, and called their callbacks twice.
+    const term = new Headless({ cols: 80, rows: 24, allowProposedApi: true });
+    const h = start({ sink: xtermSink(term) });
+    await live(h);
+    h.last().receive(output(0, "old 1\r\nold 2\r\n"));
+    h.last().receive(event({ type: "resync", reason: "lagged", first_abs_row: 0 }));
+    h.last().receive(snapshot(100, 30, 900, "fresh screen"));
+    h.last().receive(output(900, "\r\nafter"));
+    await vi.advanceTimersByTimeAsync(100);
+    const buffer = term.buffer.active;
+    const lines: string[] = [];
+    for (let y = 0; y < buffer.length; y++) lines.push(buffer.getLine(y)!.translateToString(true));
+    expect(lines.filter((l) => l)).toEqual(["fresh screen", "after"]);
+    expect(term.cols).toBe(100);
+    const acks = h.last().acks();
+    expect(acks).toEqual([...acks].sort((a, b) => a - b));
+    expect(acks.at(-1)).toBe(900);
+    term.dispose();
+  });
+
+  it("hands a mark over after the bytes before it are parsed, holding one that arrived ahead of them", async () => {
+    const h = start();
+    await live(h);
+    h.sink.auto = false;
+    const seen = () => h.events.filter((e) => e.type === "command").map((e) => (e as { phase: string }).phase);
+    h.last().receive(output(0, "$ "));
+    // The daemon sends events ahead of output still batched: the start of a command whose mark ends
+    // at offset 12 comes before the bytes up to it.
+    h.last().receive(event({ type: "command", phase: "start", n: 1, command: "ls", abs_row: 1, prompt_row: 0, seq: 12 }));
+    expect(h.sink.log).toEqual(["write:$ "]);
+    h.sink.flush();
+    expect(seen()).toEqual([]);
+    h.last().receive(output(2, "ls\r\n\x1b]133;C"));
+    expect(h.sink.log).toEqual(["write:$ ", "write:ls\r\n\x1b]133;C", "wait"]);
+    expect(seen()).toEqual([]);
+    h.sink.flush();
+    expect(seen()).toEqual(["start"]);
+    // One without an offset (the marks after a snapshot) waits only for what came before it.
+    h.last().receive(output(13, "a\r\n"));
+    expect(h.sink.log.at(-1)).toBe("write:a\r\n");
+    h.last().receive(event({ type: "marks", list: [], first_abs_row: 0, prompt_row: null }));
+    expect(h.events.some((e) => e.type === "marks")).toBe(false);
+    h.sink.flush();
+    expect(h.events.some((e) => e.type === "marks")).toBe(true);
+  });
+
+  it("drops a mark the snapshot before it already covers, and keeps one past it", async () => {
+    const h = start();
+    await live(h);
+    h.last().receive(event({ type: "resync", reason: "lagged", first_abs_row: 40 }));
+    h.last().receive(snapshot(80, 24, 500, "screen"));
+    h.last().receive(event({ type: "marks", list: [{ n: 3, command: "make", exit_code: 0, prompt_row: 41, output_row: 42, end_row: 50, running: false }], first_abs_row: 40, prompt_row: 50 }));
+    // Queued before the snapshot, sent after it: already in the list.
+    h.last().receive(event({ type: "command", phase: "end", n: 3, exit_code: 0, abs_row: 42, end_row: 50, seq: 480 }));
+    // Ahead of its bytes: held until they come.
+    h.last().receive(event({ type: "command", phase: "prompt", abs_row: 51, seq: 510 }));
+    const kinds = () => h.events.filter((e) => e.type !== "hello" && e.type !== "clients").map((e) => (e.type === "command" ? `command:${(e as { phase: string }).phase}` : e.type));
+    expect(kinds()).toEqual(["resync", "marks"]);
+    h.last().receive(output(500, "0123456789"));
+    expect(kinds()).toEqual(["resync", "marks", "command:prompt"]);
+    expect(h.sink.log.indexOf("reset:80x24")).toBeLessThan(h.sink.log.lastIndexOf("wait"));
   });
 
   it("starts over from a snapshot when the stream has a hole", async () => {

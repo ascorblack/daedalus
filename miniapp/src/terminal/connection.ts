@@ -14,6 +14,10 @@
 //   mobile network change); the daemon pings every 20 s, so silence is a reliable signal.
 // - When tickets keep succeeding and the socket keeps failing, the host is fine and something between
 //   (a reverse proxy without WebSocket upgrades) is not; that gets its own state and its own hint.
+// - Events that describe a place in the stream (a command's mark, the marks after a snapshot, the
+//   resync before one) reach the terminal in stream order: after every byte before them is parsed. The
+//   daemon sends events ahead of output still batched for this client, so a mark can arrive before
+//   the bytes it marks; one that names its offset (`seq`) is held until those bytes have arrived.
 
 import { api, ApiError } from "../api";
 import {
@@ -133,7 +137,38 @@ export function backoffDelay(attempt: number, random: () => number): number {
   return Math.round(base * (0.8 + 0.4 * random()));
 }
 
-type Pending = { kind: "write"; data: Uint8Array; end: number } | { kind: "snapshot"; frame: Extract<ServerFrame, { kind: "snapshot" }> };
+type Pending =
+  | { kind: "write"; data: Uint8Array; end: number }
+  | { kind: "snapshot"; frame: Extract<ServerFrame, { kind: "snapshot" }> }
+  | { kind: "event"; event: EventMessage };
+
+/** Events delivered in stream order rather than on arrival. */
+const ORDERED = new Set(["resync", "marks", "command"]);
+/** Early events held for their bytes; past this many the oldest go (a mark is worth less than memory). */
+const EARLY_MAX = 256;
+const NOTHING = new Uint8Array(0);
+
+/**
+ * Runs a callback xterm.js calls when it has parsed a write, never letting an error out: xterm.js calls
+ * them inside its write loop, and an error thrown there leaves the loop stopped with the write still
+ * queued — every later write waits behind it and the terminal freezes. The error is reported apart.
+ */
+export function guarded(callback: () => void): () => void {
+  return () => {
+    try {
+      callback();
+    } catch (error) {
+      queueMicrotask(() => {
+        throw error;
+      });
+    }
+  };
+}
+
+function eventSeq(event: EventMessage): number | null {
+  const seq = (event as { seq?: unknown }).seq;
+  return typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 0 ? seq : null;
+}
 
 export class TerminalConnection {
   private state: ConnectionState = { kind: "connecting" };
@@ -156,6 +191,12 @@ export class TerminalConnection {
   private inFlight = 0;
   private deferred: Pending[] = [];
   private generation = 0;
+  /** Ordered events whose bytes have not arrived yet, by offset. */
+  private early: { seq: number; event: EventMessage }[] = [];
+  /** A snapshot will run once the write callback that released it has returned (`drain`). */
+  private snapshotDue = false;
+  /** The offset of the last snapshot: a mark at or before it is already in the `marks` that follow it. */
+  private snapshotSeq = -1;
 
   constructor(private readonly sink: TerminalSink, private readonly options: ConnectionOptions, private readonly deps: ConnectionDeps = browserDeps()) {
     if (options.resumeSeq !== undefined && options.resumeSeq !== null && Number.isSafeInteger(options.resumeSeq) && options.resumeSeq >= 0) {
@@ -304,11 +345,15 @@ export class TerminalConnection {
       } else if (event.type === "exit") {
         this.setState({ kind: "exited", code: event.code, signal: event.signal });
       }
+      if (ORDERED.has(event.type)) return this.ordered(event);
       this.options.onEvent?.(event);
       return;
     }
     if (frame.kind === "snapshot") {
       this.receivedSeq = frame.seq;
+      this.snapshotSeq = frame.seq;
+      // Marks held for bytes the snapshot replaces are described again by the `marks` after it.
+      this.early = this.early.filter((e) => e.seq > frame.seq);
       this.apply({ kind: "snapshot", frame });
       return;
     }
@@ -322,6 +367,31 @@ export class TerminalConnection {
     const data = skip ? frame.data.subarray(skip) : frame.data;
     this.receivedSeq += data.length;
     this.apply({ kind: "write", data, end: this.receivedSeq });
+    this.releaseEarly();
+  }
+
+  private ordered(event: EventMessage): void {
+    const seq = eventSeq(event);
+    if (seq !== null && event.type === "command") {
+      // Queued before the last snapshot and sent after it: the snapshot's `marks` already hold it.
+      if (seq <= this.snapshotSeq) return;
+      if (this.receivedSeq === null || seq > this.receivedSeq) {
+        this.early.push({ seq, event });
+        if (this.early.length > EARLY_MAX) this.early.shift();
+        return;
+      }
+    }
+    this.apply({ kind: "event", event });
+  }
+
+  private releaseEarly(): void {
+    if (!this.early.length || this.receivedSeq === null) return;
+    const received = this.receivedSeq;
+    const due = this.early.filter((e) => e.seq <= received);
+    if (!due.length) return;
+    this.early = this.early.filter((e) => e.seq > received);
+    due.sort((a, b) => a.seq - b.seq);
+    for (const { event } of due) this.apply({ kind: "event", event });
   }
 
   private apply(op: Pending): void {
@@ -333,6 +403,16 @@ export class TerminalConnection {
   }
 
   private run(op: Pending): void {
+    if (op.kind === "event") {
+      // An empty write whose callback comes after everything written before it has been parsed.
+      this.inFlight++;
+      this.sink.write(NOTHING, guarded(() => {
+        this.inFlight--;
+        guarded(() => this.options.onEvent?.(op.event))();
+        this.drain();
+      }));
+      return;
+    }
     if (op.kind === "snapshot") {
       this.sink.reset(op.frame.cols, op.frame.rows);
       this.parsedSeq = op.frame.seq;
@@ -346,18 +426,39 @@ export class TerminalConnection {
 
   private write(data: Uint8Array, end: number, ackNow: boolean): void {
     this.inFlight++;
-    this.sink.write(data, () => {
-      this.inFlight--;
-      this.parsedSeq = Math.max(this.parsedSeq, end);
-      if (ackNow || this.parsedSeq - this.ackedSeq >= this.ackBytes) this.ack();
-      this.drain();
-    });
+    this.sink.write(
+      data,
+      guarded(() => {
+        this.inFlight--;
+        this.parsedSeq = Math.max(this.parsedSeq, end);
+        if (ackNow || this.parsedSeq - this.ackedSeq >= this.ackBytes) this.ack();
+        this.drain();
+      }),
+    );
   }
 
+  /**
+   * Runs what waited, in order. Called from xterm.js's write callbacks, so a snapshot is not run here
+   * but just after: its reset resizes the terminal, and xterm.js's `resize` first flushes its write
+   * queue from the start — writes it has already parsed are parsed again and their callbacks called
+   * twice. Inside a callback the queue still holds them; once the callback has returned it does not.
+   */
   private drain(): void {
     while (this.deferred.length) {
       const next = this.deferred[0];
-      if (next.kind === "snapshot" && this.inFlight > 0) return;
+      if (next.kind === "snapshot") {
+        if (this.inFlight > 0 || this.snapshotDue) return;
+        this.snapshotDue = true;
+        queueMicrotask(() => {
+          this.snapshotDue = false;
+          // A write started meanwhile: its callback drains again.
+          if (this.deferred[0] !== next || this.inFlight > 0) return;
+          this.deferred.shift();
+          this.run(next);
+          this.drain();
+        });
+        return;
+      }
       this.deferred.shift();
       this.run(next);
     }

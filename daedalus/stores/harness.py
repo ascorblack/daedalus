@@ -202,7 +202,7 @@ class HarnessStore:
             "version": result.version,
             "duration_ms": result.duration_ms,
             "at": _now(),
-            "steps": [{"name": s.name, "ok": s.ok, "detail": s.detail[:500], "duration_ms": s.duration_ms} for s in result.steps],
+            "steps": [{"name": s.name, "ok": s.ok, "skipped": s.skipped, "detail": s.detail[:500], "duration_ms": s.duration_ms} for s in result.steps],
         }
         await self._upsert(env, harness, {"self_check_json": json.dumps(check)})
 

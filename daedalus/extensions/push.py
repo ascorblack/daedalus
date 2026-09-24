@@ -390,6 +390,11 @@ class PushService:
         """Wait for the sends in flight; tests use it, and so does a clean shutdown."""
         while self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            # A gather over tasks that are already done completes without yielding to the loop,
+            # and the callbacks that take finished tasks out of the set run only when it does.
+            # Without this the loop spun forever with the event loop held, so not even a
+            # timeout around it could fire: the host suite once sat here for an hour.
+            await asyncio.sleep(0)
 
     async def _send_all(self, rows: Sequence[Any], payload: bytes, *, ttl: int, urgency: Urgency, topic: str) -> list[tuple[Any, PushResult]]:
         keys = await self.keys()

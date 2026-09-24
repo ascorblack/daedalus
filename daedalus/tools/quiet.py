@@ -14,7 +14,7 @@ from daedalus.tools._common import error, ok, services_for
     description=(
         "For unattended runs (heartbeat checks, scheduled monitors): declare that nothing needs "
         "the operator's attention. The run's final reply is then not sent to the chat; only a "
-        "short note goes to the inbox. Call it instead of writing 'nothing new' — silence is the "
+        "short note goes to the notifications. Call it instead of writing 'nothing new' — silence is the "
         "correct outcome of a routine check. Give a one-line note of what was checked."
     ),
 )

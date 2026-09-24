@@ -142,7 +142,7 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
 Role = Literal["agent", "voice", "orchestrator"]
 
 
-def _agent_sections(deps: EngineDeps, config: RuntimeConfig, *, mode: ModeConfig | None, workspace: Path, session_title: str, model: str, extra_notes: str, project: str) -> tuple[str, ...]:
+def _agent_sections(deps: EngineDeps, config: RuntimeConfig, *, mode: ModeConfig | None, workspace: Path, session_title: str, model: str, extra_notes: str, project: str, notify: bool) -> tuple[str, ...]:
     return (
         prompts.PERSONA,
         prompts.rules_section(config.prompt.rules),
@@ -152,6 +152,7 @@ def _agent_sections(deps: EngineDeps, config: RuntimeConfig, *, mode: ModeConfig
         prompts.HISTORY,
         prompts.BOARD,
         prompts.SCHEDULING,
+        prompts.NOTIFY if notify else "",
         (mode.prompt.strip() + "\n") if mode is not None and mode.prompt.strip() else "",
         prompts.environment_section(
             workspace=workspace,
@@ -200,7 +201,12 @@ def build_engine(
     elif role == "orchestrator":
         sections = prompts.orchestrator_sections(answer_language=config.answer_language, governance=prompts.governance_section(deps.governance_path))
     else:
-        sections = _agent_sections(deps, config, mode=mode, workspace=workspace, session_title=session_title, model=model, extra_notes=extra_notes, project=project)
+        # Only where the tool can be called: a subagent or a staff member told how to notify the
+        # operator would try, be refused, and spend a turn learning that its leader speaks for it.
+        notify = "Notify" in all_tools and (tool_visibility_policy is None or "Notify" not in tool_visibility_policy.blocked)
+        sections = _agent_sections(
+            deps, config, mode=mode, workspace=workspace, session_title=session_title, model=model, extra_notes=extra_notes, project=project, notify=notify,
+        )
     engine_config = QueryEngineConfig(
         run_id=run_id,
         tenant_id=TENANT,

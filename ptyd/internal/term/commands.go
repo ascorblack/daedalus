@@ -114,10 +114,13 @@ func (t *Terminal) onShellMark(e emulator.Emulator, m scan.Mark, seq int64) {
 	}
 	t.mu.Unlock()
 
+	// Every event carries the output offset of its mark. The client's queue flushes events ahead of
+	// output still batched for it, so an event can arrive before the bytes it marks; the offset lets a
+	// client hold it until those bytes are drawn, and place the mark on the right row.
 	if promptRow != nil {
 		row := *promptRow
 		t.broadcast("", func(*Client) any {
-			return map[string]any{"type": "command", "phase": "prompt", "abs_row": row, "at": now}
+			return map[string]any{"type": "command", "phase": "prompt", "abs_row": row, "seq": seq, "at": now}
 		})
 	}
 	if ended != nil {
@@ -155,12 +158,18 @@ func (t *Terminal) endLocked(e emulator.Emulator, cur emulator.Cursor, now time.
 	return &out
 }
 
-// commandEnded tells the host and the clients that a command ended.
+// commandEnded tells the host and the clients that a command ended. The clients were once told only
+// of starts, so a command's mark could never show how it ended until the next snapshot.
 func (t *Terminal) commandEnded(r CommandRecord) {
 	t.deps.Events.Publish("terminal.command", t.ID, map[string]any{
 		"phase": "end", "n": r.N, "exit_code": r.ExitCode, "command": r.Command, "cwd": r.Cwd,
 		"abs_row": r.OutputRow, "end_row": r.EndRow, "started_at": r.StartedAt, "duration_ms": r.DurationMs,
 		"seq": *r.EndSeq,
+	})
+	t.broadcast("", func(*Client) any {
+		return map[string]any{"type": "command", "phase": "end", "n": r.N, "exit_code": r.ExitCode,
+			"command": r.Command, "abs_row": r.OutputRow, "prompt_row": r.PromptRow, "end_row": r.EndRow,
+			"duration_ms": r.DurationMs, "seq": *r.EndSeq, "at": *r.FinishedAt}
 	})
 }
 
