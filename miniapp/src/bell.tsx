@@ -94,7 +94,7 @@ function BellPanel({ anchor, onClose, unseen, needs }: { anchor: HTMLElement | n
       <div className="bell-head">
         <b className="grow">{t("bell.title")}</b>
         <button className="linkbtn accent" onClick={() => void markAllSeen()} disabled={unseen === 0}>{t("inbox.markall")}</button>
-        <button className="iconbtn small quiet" title={t("bell.settings")} aria-label={t("bell.settings")} onClick={() => { navigate(pathFor("settings")); onClose(); }}>
+        <button className="iconbtn small quiet" title={t("bell.settings")} aria-label={t("bell.settings")} onClick={() => { navigate(pathFor("settings", "notifications")); onClose(); }}>
           <Icon name="settings" size={16} />
         </button>
       </div>

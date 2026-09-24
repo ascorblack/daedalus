@@ -272,6 +272,12 @@ async def test_the_tool_and_its_prompt_are_for_leaders_only(settings: Settings, 
             assert ("Notify" not in manager.blocked_tools_for(state)) is allowed, state.session.title
             engine = await manager._build_engine(state, f"run-{state.session.title}")
             assert (prompts.NOTIFY in engine.config.system_prompt_sections) is allowed, state.session.title
+        # A project's orchestrator keeps it within its allowlist, and its own brief says when to use it.
+        orchestrator = await manager.create_session("orchestrator", metadata={"orchestrator_of": "p1"})
+        assert "Notify" not in manager.blocked_tools_for(orchestrator)
+        engine = await manager._build_engine(orchestrator, "run-orchestrator")
+        assert prompts.NOTIFY not in engine.config.system_prompt_sections
+        assert "Notify only for what cannot wait" in engine.config.system_prompt_sections[0]
         # A leader's tools_off reaches the prompt as well: the section never names a tool the session lacks.
         ordinary.metadata["tools_off"] = ["Notify"]
         engine = await manager._build_engine(ordinary, "run-off")

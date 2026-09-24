@@ -190,64 +190,7 @@ func TestFindChromiumLooksWhereTheInstallersPut(t *testing.T) {
 	}
 }
 
-func TestWatchAnnouncesOnlyWhatIsNew(t *testing.T) {
-	base := "http://127.0.0.1:8765"
-	waiting := map[string]bool{}
-	unread := -1
-	first := stackStatus{}
-	first.Notifications.Unseen = 3
-	first.Sessions = append(first.Sessions, sessionLine("s1", "Reading the logs", "waiting"))
-	// The first answer is a baseline: an installation that was already waiting does not announce it
-	// the moment the launcher starts.
-	if got := changes(first, &unread, waiting, base); len(got) != 0 {
-		t.Fatalf("the first poll announced %+v", got)
-	}
-	second := stackStatus{}
-	second.Notifications.Unseen = 5
-	second.Sessions = append(second.Sessions, sessionLine("s1", "Reading the logs", "waiting"), sessionLine("s2", "Rewriting the parser", "waiting"))
-	got := changes(second, &unread, waiting, base)
-	if len(got) != 2 {
-		t.Fatalf("want the inbox and the new session, got %+v", got)
-	}
-	if !strings.Contains(got[0].Body, "2 new entries") {
-		t.Fatalf("the inbox line reads %q", got[0].Body)
-	}
-	if !strings.Contains(got[1].Body, "Rewriting the parser") || !strings.HasSuffix(got[1].Link, "/app/agents/s2") {
-		t.Fatalf("the waiting line reads %+v", got[1])
-	}
-	// Reading the inbox is not news, and a session that is still waiting is not news twice.
-	read := stackStatus{Sessions: second.Sessions}
-	read.Notifications.Unseen = 1
-	if got := changes(read, &unread, waiting, base); len(got) != 0 {
-		t.Fatalf("nothing happened and it announced %+v", got)
-	}
-	// Once it has stopped waiting and waits again, it is news again.
-	running := stackStatus{}
-	running.Notifications.Unseen = 1
-	running.Sessions = append(running.Sessions, sessionLine("s2", "Rewriting the parser", "running"))
-	changes(running, &unread, waiting, base)
-	again := stackStatus{}
-	again.Notifications.Unseen = 1
-	again.Sessions = append(again.Sessions, sessionLine("s2", "Rewriting the parser", "waiting"))
-	if got := changes(again, &unread, waiting, base); len(got) != 1 {
-		t.Fatalf("a session waiting again announced %+v", got)
-	}
-}
-
-// sessionLine is one row of what /api/status says about the sessions.
-func sessionLine(id, title, status string) struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Status string `json:"status"`
-} {
-	return struct {
-		ID     string `json:"id"`
-		Title  string `json:"title"`
-		Status string `json:"status"`
-	}{ID: id, Title: title, Status: status}
-}
-
-// A notification's title and body come from the agent's inbox and from the page in the web view,
+// A notification's title and body come from the agent's notifications over the event stream,
 // and they are handed to a helper as arguments. One beginning with a dash would be read as an
 // option — another -e script for osascript, another flag for notify-send — so it is fenced first.
 func TestANotificationCannotBeginWithAnOption(t *testing.T) {

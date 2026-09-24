@@ -1055,6 +1055,40 @@ agent that started it, which decides what is worth the operator's attention; a s
 notify on its own would put a dozen workers' progress on the operator's phone. Enforced by the host
 beside the staff rule, so no mode or leader can hand it back."""
 
+ORCHESTRATOR_ONLY_TOOLS = [
+    "Brief",
+    "Folders",
+    "Journal",
+    "Team",
+    "Hire",
+    "StaffEdit",
+    "Dismiss",
+    "Assign",
+    "Tell",
+    "ReadStaff",
+    "Answer",
+    "Interrupt",
+    "Pause",
+    "Release",
+    "Peek",
+    "Tasks",
+    "WakeMe",
+    "Watch",
+    "Unwatch",
+    "AskOperator",
+    "ProjectReport",
+    "Harnesses",
+]
+"""The tools that exist for a project's orchestrator alone; every other session is blocked from them.
+Names that are not registered on this installation yet are simply absent from every list. ``Harnesses``
+is here too: only the orchestrator hires, and an ordinary session would pay for its description on
+every turn."""
+
+ORCHESTRATOR_TOOLS = [*ORCHESTRATOR_ONLY_TOOLS, "Notify", "StaySilent", "HistorySearch", "HistoryExpand", "Recall"]
+"""Everything an orchestrator may call. It runs the team and never does the work itself: no shell, no
+file writes, no subagents. An allowlist rather than a list of refusals, so a tool added later is not
+an orchestrator's until someone decides it should be."""
+
 
 class WebhookConfig(BaseModel):
     """One inbound webhook provider: how it is authenticated and where its events run."""
@@ -1112,6 +1146,32 @@ class StaffConfig(BaseModel):
     session is a signal, and a row rewritten on each one is write load that tells nobody anything new."""
 
 
+class OrchestratorConfig(BaseModel):
+    """A project's orchestrator: which model it runs by default, how its wake-ups are batched, and what bounds a turn."""
+
+    preset: str = ""
+    """The model preset of a project orchestrator whose project names none; empty is the strongest
+    preset (:meth:`RuntimeConfig.strongest_preset`). A project's own choice overrides it."""
+    batch_seconds: int = Field(default=20, ge=1, le=600)
+    """Routine events wait this long after the first of them, so one wake-up carries several."""
+    batch_max_lines: int = Field(default=30, ge=5, le=200)
+    """Lines of one wake-up batch; the rest is counted, and the team and board say what they were."""
+    state_max_chars: int = Field(default=8000, ge=1000, le=40_000)
+    """The project state re-sent at every turn. It is paid for on every turn, so it is bounded."""
+    max_iterations: int = Field(default=40, ge=5)
+    """Model calls in one orchestrator turn. It hands work over and ends its turn; forty is a lot of that."""
+    usd_per_run: float | None = Field(default=None, ge=0)
+    """Spend cap of one orchestrator turn; ``None`` is ``limits.usd_per_run``."""
+    max_wakes_per_hour: int = Field(default=30, ge=1)
+    """Past this, routine batches wait for the next hour and the operator is told; urgent ones still go."""
+    default_concurrency: int = Field(default=6, ge=1)
+    """How many staff of a project work at once when the operator first switches its orchestrator on."""
+    default_concurrency_cap: int = Field(default=10, ge=1)
+    """The ceiling the orchestrator may raise that to, when first switched on; the operator moves it."""
+    max_concurrency_cap: int = Field(default=32, ge=1)
+    """The most any project's ceiling may be set to."""
+
+
 class HarnessConfig(BaseModel):
     """Command-line agents as staff: how long to wait on them, and how carefully to type into them."""
 
@@ -1120,6 +1180,11 @@ class HarnessConfig(BaseModel):
     screen checked; what the screen cannot settle is shown as silent, never as failed."""
     reconcile_gap_ms: int = Field(default=1500, ge=200, le=10_000)
     """Between the two screen readings that must agree before a turn end is inferred from the screen."""
+    ready_timeout_s: float = Field(default=30.0, ge=5, le=600)
+    """How long a launched CLI may take to say it is ready before the session is shown as failed,
+    with the screen it was stuck on; the terminal is left running for the operator to look at."""
+    ready_poll_ms: int = Field(default=300, ge=50, le=5000)
+    """How often the readiness gate reads the screen for a dialog it answers."""
     ack_timeout_s: float = Field(default=8.0, ge=1, le=120)
     """How long a submitted message may go unacknowledged before it is looked for on screen and in
     the transcript."""
@@ -1398,6 +1463,7 @@ class RuntimeConfig(BaseModel):
     peers: PeersConfig = Field(default_factory=PeersConfig)
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
     staff: StaffConfig = Field(default_factory=StaffConfig)
+    orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     harness: HarnessConfig = Field(default_factory=HarnessConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
     terminals: TerminalsConfig = Field(default_factory=TerminalsConfig)
@@ -1437,6 +1503,33 @@ class RuntimeConfig(BaseModel):
         if found is None:
             raise NoModelConfigured
         return found
+
+    def strongest_preset(self) -> str | None:
+        """The preset most likely to be the strongest model, for work that is judgement rather than typing.
+
+        The host cannot know which model is stronger, and prices say little when several models are
+        on a subscription. What a preset does say is how hard it is asked to think and how much it
+        may hold: the highest reasoning effort with thinking on wins, then the larger window, then the
+        longer reply, and a tie goes to the default preset, then to the order of the table. It is a
+        guess the operator corrects once, in Settings → Models.
+        """
+        if not self.presets:
+            return None
+        effort = {name: rank for rank, name in enumerate(REASONING_EFFORTS)}
+        order = list(self.presets)
+
+        def strength(pid: str) -> tuple[int, int, int, int, int, int]:
+            p = self.presets[pid]
+            return (int(p.thinking), effort.get(p.reasoning_effort, 0), p.context_window, p.max_output_tokens, int(pid == self.model.preset), -order.index(pid))
+
+        return max(order, key=strength)
+
+    def orchestrator_preset(self, project_choice: str = "") -> str | None:
+        """The preset a project orchestrator runs: its project's choice, else the Settings default, else the strongest."""
+        for pid in (project_choice, self.orchestrator.preset):
+            if pid and pid in self.presets:
+                return pid
+        return self.strongest_preset()
 
     def vision_preset(self) -> tuple[str, ModelPresetConfig] | None:
         if self.vision.preset and self.vision.preset in self.presets and self.presets[self.vision.preset].images:
@@ -1709,6 +1802,7 @@ __all__ = [
     "BoardConfig",
     "PeersConfig",
     "StaffConfig",
+    "OrchestratorConfig",
     "HarnessConfig",
     "DEFAULT_MODES",
     "HeartbeatConfig",
@@ -1723,4 +1817,6 @@ __all__ = [
     "STAFF_BLOCKED_TOOLS",
     "STAFF_ONLY_TOOLS",
     "SUBAGENT_BLOCKED_TOOLS",
+    "ORCHESTRATOR_TOOLS",
+    "ORCHESTRATOR_ONLY_TOOLS",
 ]

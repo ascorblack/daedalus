@@ -45,12 +45,15 @@ from protocore.tools.ask_user import AskUserTool
 from protocore.tools.memory import build_memory_tools
 
 from daedalus.config import (
+    ORCHESTRATOR_ONLY_TOOLS,
+    ORCHESTRATOR_TOOLS,
     REASONING_EFFORTS,
     STAFF_BLOCKED_TOOLS,
     STAFF_ONLY_TOOLS,
     SUBAGENT_BLOCKED_TOOLS,
     VOICE_ONLY_TOOLS,
     VOICE_TOOLS,
+    ModeConfig,
     NoModelConfigured,
     RuntimeConfig,
     Settings,
@@ -488,6 +491,12 @@ class SessionManager:
         self.answer_claims: list[Callable[[str, str, str], Awaitable[str | None]]] = []
         """``(session_id, tool_call_id, via) -> refusal`` asked before a pending question is answered;
         a non-empty refusal (someone else answered first) stops the answer with that text."""
+        self.turn_notes_hooks: list[Callable[[SessionState], Awaitable[str | None]]] = []
+        """``state -> notes`` asked at every run start before the workspace's own notes; the first that
+        answers (not ``None``) replaces them. A project's orchestrator reads its project's state here."""
+        self.preset_hooks: list[Callable[[SessionState], str | None]] = []
+        """``state -> preset id`` that a session runs whatever its live override says: an orchestrator
+        runs the model its project names, which the operator changes on the project, not per chat."""
         self.run_started_hooks: list[Callable[[str, str], Awaitable[None]]] = []
         """``(session_id, run_id)`` after a run was actually created — the point where a prompt hook's side effects may be committed."""
         self.shutting_down = False
@@ -1429,6 +1438,10 @@ class SessionManager:
 
     async def _compact_locked(self, state: SessionState, instructions: str, *, keep_recent: int = 0, reason: str = "manual", own_task_ok: bool = False) -> str:
         session_id = state.session.id
+        if not instructions and self.is_orchestrator(state):
+            # Its brief, team and board come back in full every turn; a summary that spends its words
+            # on them loses the promises and open questions that exist nowhere else.
+            instructions = prompts.ORCHESTRATOR_COMPACTION
         if state.running and state.engine is not None and state.engine.is_terminal and state.task is not None and not own_task_ok:
             # The loop has settled; only bookkeeping remains.
             await asyncio.gather(asyncio.shield(state.task), return_exceptions=True)
@@ -2561,7 +2574,14 @@ class SessionManager:
 
     def mode_for(self, state: SessionState) -> Any:
         name = str(state.metadata.get("mode") or "")
-        return self.config.modes.get(name) if name else None
+        if name:
+            return self.config.modes.get(name)
+        if self.is_orchestrator(state):
+            # An orchestrator's turn hands work over and ends; its own limits bound one that does not,
+            # without a mode the operator would have to remember to set.
+            limits = self.config.orchestrator
+            return ModeConfig(max_iterations=limits.max_iterations, usd_per_run=limits.usd_per_run, description="orchestrator")
+        return None
 
     async def stop(self, session_id: str) -> bool:
         state = self._states.get(session_id)
@@ -2609,6 +2629,11 @@ class SessionManager:
 
     async def _build_engine(self, state: SessionState, run_id: str) -> QueryEngine:
         overrides = await self.live.load(state.session.id)
+        for hook in self.preset_hooks:
+            chosen = hook(state)
+            if chosen:
+                overrides = {**overrides, "preset": chosen}
+                break
         rungs, preset = self.resolve_model(overrides)
         hold = ExitStack()
         hold.enter_context(self.providers.hold([provider for provider, _ in rungs]))
@@ -2652,8 +2677,7 @@ class SessionManager:
             selfdev_mode=self.capabilities.selfdev.mode,
             request_manifest_sink=self.request_manifests,
         )
-        mode_name = str(state.metadata.get("mode") or "")
-        mode = self.config.modes.get(mode_name) if mode_name else None
+        mode = self.mode_for(state)
         enabled = self.mcp_enabled(state)
         if enabled:
             # Re-establish connections for servers this session left enabled (e.g. after a
@@ -2695,7 +2719,7 @@ class SessionManager:
             max_output_tokens=preset.max_output_tokens,
             extra_notes=self.notes_for(state),
             tool_visibility_policy=self.tool_policy_for(state),
-            voice=self.is_voice(state),
+            role="voice" if self.is_voice(state) else "orchestrator" if self.is_orchestrator(state) else "agent",
         )
         self._attach_hooks(engine, state)
         if chain is not None:
@@ -3008,7 +3032,15 @@ class SessionManager:
         """
         # The core allows a user message one content block, so the context joins the text rather
         # than following it; a message with no text (an image alone) goes as it is.
-        volatile = [await self.workspace_notes(state)]
+        notes: str | None = None
+        for hook in self.turn_notes_hooks:
+            try:
+                notes = await hook(state)
+            except Exception:  # noqa: BLE001 — a turn starts without its notes rather than not at all
+                logger.exception("turn notes hook failed for session %s", state.session.id)
+            if notes is not None:
+                break
+        volatile = [notes if notes is not None else await self.workspace_notes(state)]
         loop_state = str(state.metadata.get("loop_state") or "").strip()
         if loop_state:
             volatile.append("\n" + loop_state)  # the loop's counter and next wake-up change every run
@@ -3674,6 +3706,11 @@ class SessionManager:
         """Whether this session is a staff member's, working on a task of its project's team."""
         return bool(state.metadata.get("staff_session_id"))
 
+    @staticmethod
+    def is_orchestrator(state: SessionState) -> bool:
+        """Whether this session is a project's orchestrator (current or retired; a retired one's tools refuse)."""
+        return bool(state.metadata.get("orchestrator_of") or state.metadata.get("orchestrator_retired_of"))
+
     def _local_blocked_tools_for(self, state: SessionState) -> set[str]:
         """Restrictions selected directly for this session, before its parent narrows them."""
         known = {t.name for t in self.tools.list_all()}
@@ -3690,6 +3727,9 @@ class SessionManager:
         # this through the parent chain below, and a staff member's subagents through both rules.
         if state.metadata.get("subagent_of"):
             blocked |= known & set(SUBAGENT_BLOCKED_TOOLS)
+        # An orchestrator runs a team and does none of the work: everything outside its allowlist is
+        # off, and its control tools are nobody else's. Beside the two rules above, for their reason.
+        blocked |= (known - set(ORCHESTRATOR_TOOLS)) if self.is_orchestrator(state) else (known & set(ORCHESTRATOR_ONLY_TOOLS))
         mode = self.mode_for(state)
         if mode is not None:
             if mode.tools_only:
@@ -4108,7 +4148,7 @@ class SessionManager:
         if note is not None:
             pass
         elif (run_cap > 0 or mode_cap is not None) and spent >= run_cap:
-            source = f"mode {state.metadata.get('mode')}" if mode_cap is not None else "limits.usd_per_run"
+            source = (f"mode {state.metadata.get('mode')}" if state.metadata.get("mode") else "orchestrator.usd_per_run") if mode_cap is not None else "limits.usd_per_run"
             note = f"💸 per-run cap reached: ${spent:.2f} spent of ${run_cap:.2f} ({source}); stopping this run. Send a message to continue in a new run."
             if unmetered:
                 note += f" {unmetered} call(s) had no known price and are not counted."

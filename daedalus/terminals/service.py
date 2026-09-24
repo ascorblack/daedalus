@@ -22,6 +22,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Iterable
@@ -41,6 +42,8 @@ from daedalus.terminals.model import (
     EnvStatus,
     EnvUnavailable,
     InvalidRequest,
+    LiveTerminals,
+    NoRebuilder,
     NotFound,
     Origin,
     OutputChunk,
@@ -56,6 +59,7 @@ from daedalus.terminals.model import (
 )
 from daedalus.terminals.owners import Owners
 from daedalus.terminals.sidechannels import SideChannels
+from daedalus.terminals.update import BY_HAND, DaemonUpdate
 
 if TYPE_CHECKING:
     from daedalus.config import TerminalsConfig
@@ -123,7 +127,10 @@ def rpc_failure(exc: wire.RpcError, what: str) -> TerminalError:
         return Conflict(f"{what}: a person is typing in this terminal and holds the keyboard", reason="keyboard_held")
     if code == wire.TIMEOUT:
         return TimedOut(f"{what}: {exc.message}")
-    if code in (wire.UNSUPPORTED, wire.METHOD_NOT_FOUND):
+    if code == wire.UNSUPPORTED:
+        # The daemon says why: no sandbox in this build, or a program that reports no commands.
+        return Unsupported(f"{what}: {exc.message}")
+    if code == wire.METHOD_NOT_FOUND:
         return Unsupported(f"{what}: not available in this terminal service yet ({exc.message})")
     if code in (wire.INVALID_PARAMS, wire.INVALID_SIZE):
         return InvalidRequest(f"{what}: {exc.message}")
@@ -201,8 +208,11 @@ class Terminals(SideChannels):
         bus: EventBus | None = None,
         public_host: str = "",
         port_ranges: dict[str, str] | None = None,
+        daemon_update: DaemonUpdate | None = None,
     ) -> None:
         self.db = db
+        self.daemon_update = daemon_update
+        """The container environment's daemon as the image holds it; None where no image does."""
         self.config = config
         self.owners = owners
         self.bus = bus
@@ -356,19 +366,31 @@ class Terminals(SideChannels):
 
     # -- environments ---------------------------------------------------------------------------
 
+    def configured(self, env: str) -> bool:
+        """Whether this installation has a daemon for ``env`` at all (a run directory it was told of)."""
+        link = self.links.get(env)
+        return link is not None and link.run_dir is not None
+
+    def available(self, env: str) -> bool:
+        """Whether ``env``'s daemon answers now: connected, not merely installed."""
+        link = self.links.get(env)
+        return link is not None and link.available
+
     def environments(self, running: dict[str, int] | None = None) -> list[EnvStatus]:
         cfg = self.config()
         out = []
         for env, link in self.links.items():
             info = link.info if link.available else {}
             capabilities = info.get("capabilities") or {}
+            version = str(info.get("version") or "")
+            image_version = self.daemon_update.image_version if self.daemon_update is not None and env == "container" else ""
             out.append(
                 EnvStatus(
                     env=env,
                     available=link.available,
                     reason="" if link.available else link.reason,
                     detail="" if link.available else link.detail,
-                    version=str(info.get("version") or ""),
+                    version=version,
                     sandbox=capabilities.get("sandbox") == "ok",
                     shell=str(info.get("shell") or ""),
                     home=str(info.get("home") or ""),
@@ -376,9 +398,35 @@ class Terminals(SideChannels):
                     public_host=self.public_host,
                     preview_poll_ms=cfg.preview_poll_ms,
                     running=(running or {}).get(env, 0),
+                    image_version=image_version,
+                    update_available=bool(link.available and version and image_version and version != image_version),
                 )
             )
         return out
+
+    async def request_update(self, env: str, *, confirm: bool, actor: str = "operator") -> dict[str, Any]:
+        """Ask for the terminals service to be recreated from the image: the daemon is updated, and
+        every terminal it runs ends. Refused with the count until the operator confirms, whenever one
+        is running — the count is taken here rather than trusted from the page that asked."""
+        if env != "container":
+            raise InvalidRequest("only the container's terminal service is updated from here; the host's is updated where it is installed")
+        if self.daemon_update is None or not self.daemon_update.image_version:
+            raise Unsupported("this installation has no terminals service image to update from")
+        running = (await self.running_by_env()).get(env, 0)
+        if running and not confirm:
+            raise LiveTerminals(f"updating the terminal service ends {running} running terminal(s)", running=running)
+        if not self.daemon_update.rebuilder_alive():
+            raise NoRebuilder(f"no rebuilder is running to recreate the terminals service; on the server run: {BY_HAND}", command=BY_HAND, running=running)
+        job = self.daemon_update.request()
+        link = self.links[env]
+        await self.audit("", env, actor, "daemon_update", {"job": job, "running": running, "from": str(link.info.get("version") or "") if link.available else "", "to": self.daemon_update.image_version})
+        return {"job": job, "running": running, "image_version": self.daemon_update.image_version}
+
+    def update_result(self, env: str, job: str) -> dict[str, str]:
+        # The job names a file in the trigger directory, so it is exactly what request() makes.
+        if env != "container" or self.daemon_update is None or not re.fullmatch(r"[0-9a-f]{32}", job):
+            raise NotFound("no update of this environment's terminal service was asked for")
+        return self.daemon_update.result(job)
 
     def _client(self, env: str) -> PtydClient:
         link = self.links.get(env)
@@ -482,6 +530,7 @@ class Terminals(SideChannels):
             "rows": int(info.get("rows") or row["rows"]) if info else row["rows"],
             "live": None,
             "last_command": None,
+            "shell_integration": bool(row["shell_integration"]),
             "activity": None,
         }
         if info is not None:
@@ -686,7 +735,9 @@ class Terminals(SideChannels):
         actual = str(result.get("cwd") or cwd)
         if spec.launch_id:
             self._launch_terminals.setdefault(spec.launch_id, terminal_id)
-        await self.db.execute("UPDATE terminals SET cwd = ?, ptyd_instance = ? WHERE id = ?", (actual, link.instance, terminal_id))
+        # Whether the shell was started with its integration: only then are its commands recorded.
+        integrated = int(bool(result.get("shell_integration")))
+        await self.db.execute("UPDATE terminals SET cwd = ?, ptyd_instance = ?, shell_integration = ? WHERE id = ?", (actual, link.instance, integrated, terminal_id))
         detail: dict[str, Any] = {"owner": {"kind": spec.owner.kind, "id": spec.owner.id}, "cwd": actual, "profile": spec.profile, "sandbox": spec.sandbox}
         if spec.argv:
             detail["argv"] = spec.argv
@@ -930,6 +981,7 @@ class Terminals(SideChannels):
             "rows": int(info.get("rows") or 24),
             "ptyd_instance": link.instance,
             "created_by": "system",
+            "shell_integration": int(bool(info.get("shell_integration"))),
         }
         await self.db.execute(
             f"INSERT OR IGNORE INTO terminals({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",  # noqa: S608 — column names are this module's own
@@ -1000,7 +1052,9 @@ class Terminals(SideChannels):
         elif kind == "terminal.cwd" and data.get("cwd"):
             await self.db.execute("UPDATE terminals SET cwd = ? WHERE id = ?", (str(data["cwd"]), terminal_id))
         elif kind == "terminal.command":
-            command = {"command": str(data.get("command") or ""), "exit_code": data.get("exit_code"), "at": now_iso()}
+            command: dict[str, Any] = {"command": str(data.get("command") or ""), "exit_code": data.get("exit_code"), "at": now_iso()}
+            if isinstance(data.get("duration_ms"), int):
+                command["duration_ms"] = data["duration_ms"]
             await self.db.execute("UPDATE terminals SET last_command_json = ? WHERE id = ?", (json.dumps(command, ensure_ascii=False), terminal_id))
 
     async def _on_stats(self, data: dict[str, Any]) -> None:
@@ -1026,7 +1080,7 @@ class Terminals(SideChannels):
         target = cap if cap is not None else configured
         rows = await self.db.fetchall("SELECT id, env, profile FROM terminals WHERE status = 'running'")
         running_profiles = [r["profile"] for r in rows]
-        envs, used_rss, used_cpu = [], 0, 0.0
+        envs, used_rss, used_cpu, daemons_rss = [], 0, 0.0, 0
         machine: dict[str, Any] = {}
         for env in ENVS:
             link = self.links[env]
@@ -1040,11 +1094,18 @@ class Terminals(SideChannels):
             terminals = [t for t in stats.get("terminals") or [] if isinstance(t, dict)]
             rss = sum(int(t.get("rss_bytes") or 0) for t in terminals)
             cpu = sum(float(t.get("cpu_percent") or 0) for t in terminals)
-            used_rss += rss
-            used_cpu += cpu
+            # The daemon itself holds every terminal's emulator and output ring, and none of the
+            # terminals' own processes shows that memory; leaving it out made "used now" smaller
+            # than what the terminals really cost.
+            daemon = stats.get("daemon") if isinstance(stats.get("daemon"), dict) else {}
+            daemon_rss = int(daemon.get("rss_bytes") or 0)
+            daemon_cpu = float(daemon.get("cpu_percent") or 0)
+            used_rss += rss + daemon_rss
+            used_cpu += cpu + daemon_cpu
+            daemons_rss += daemon_rss
             env_machine = stats.get("machine") or {}
             total, available = load_math.effective_memory(env_machine)
-            envs.append({"env": env, "supported": bool(stats.get("supported")), "terminals": len(terminals), "rss_bytes": rss, "cpu_percent": round(cpu, 1), "mem_total_bytes": total, "mem_available_bytes": available, "cpus": load_math.effective_cpus(env_machine)})
+            envs.append({"env": env, "supported": bool(stats.get("supported")), "terminals": len(terminals), "rss_bytes": rss, "cpu_percent": round(cpu, 1), "daemon_rss_bytes": daemon_rss, "mem_total_bytes": total, "mem_available_bytes": available, "cpus": load_math.effective_cpus(env_machine)})
             # The host environment is the machine itself; a container's view is the same machine
             # seen through its limits. Both environments on one server are one machine, so its
             # memory is counted once: from the host daemon when there is one.
@@ -1056,7 +1117,7 @@ class Terminals(SideChannels):
             "cap": configured,
             "running": len(rows),
             "queued": self.queue(),
-            "used": {"rss_bytes": used_rss, "cpu_percent": round(used_cpu, 1), "mem_total_bytes": total, "mem_available_bytes": available, "machine_cpu_percent": round(float(machine.get("cpu_percent") or 0), 1)},
+            "used": {"rss_bytes": used_rss, "daemon_rss_bytes": daemons_rss, "cpu_percent": round(used_cpu, 1), "cpus": load_math.effective_cpus(machine), "mem_total_bytes": total, "mem_available_bytes": available, "machine_cpu_percent": round(float(machine.get("cpu_percent") or 0), 1)},
             "profiles": {name: c.view() for name, c in self.costs.profiles().items()},
             "likely": {**cost.view(), "basis": basis},
             "projection": load_math.project(cap=target, running=len(rows), used_rss=used_rss, used_cpu=used_cpu, machine=machine, cost=cost),
@@ -1180,7 +1241,10 @@ class Terminals(SideChannels):
         return Attachment(terminal_id=terminal_id, env=row["env"], client_id=str(result.get("client_id") or ""), channel=client.channel(int(result["channel"])), client=client)
 
     async def commands(self, terminal_id: str, *, last: int = 20, with_output: bool = False) -> builtins.list[dict[str, Any]]:
-        """The commands a shell reported running, newest last; ``Unsupported`` until the daemon keeps them."""
+        """The commands a shell reported running, oldest first and the newest last, each with its
+        rows, directory, exit code (``None`` while it runs) and, with ``with_output``, its output as
+        the terminal still shows it. ``Unsupported`` when the terminal's program reports none: it is
+        not a shell started with its integration."""
         row = await self._row(terminal_id)
         result = await self._call(row["env"], "terminal.commands", {"id": terminal_id, "last": max(1, min(last, 500)), "with_output": with_output}, what="listing the commands")
         return [c for c in result.get("commands") or [] if isinstance(c, dict)]

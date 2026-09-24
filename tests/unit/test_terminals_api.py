@@ -154,6 +154,17 @@ async def test_a_terminals_life_through_the_routes(client: httpx.AsyncClient, da
     assert (await client.get("/api/terminals/nope00000000/audit", headers=H)).status_code == 404
 
 
+async def test_the_commands_route_answers_for_a_shell_and_refuses_for_a_program(client: httpx.AsyncClient, daemon: FakePtyd) -> None:
+    view = (await client.post("/api/terminals", json={"env": "container", "owner_kind": "free", "cwd": "/tmp"}, headers=H)).json()
+    refused = await client.get(f"/api/terminals/{view['id']}/commands", headers=H)
+    assert refused.status_code == 501 and refused.json()["code"] == "unsupported"
+    daemon.terminals[view["id"]].commands = [{"n": n, "command": f"step {n}", "exit_code": 0} for n in range(1, 4)]
+    answer = await client.get(f"/api/terminals/{view['id']}/commands?last=2&output=1", headers=H)
+    assert answer.status_code == 200 and [c["n"] for c in answer.json()["commands"]] == [2, 3]
+    assert (await client.get(f"/api/terminals/{view['id']}/commands?last=0", headers=H)).status_code == 422
+    assert (await client.get("/api/terminals/nope00000000/commands", headers=H)).status_code == 404
+
+
 async def test_refusals_carry_their_status(client: httpx.AsyncClient) -> None:
     assert (await client.get("/api/terminals/nope00000000", headers=H)).status_code == 404
     assert (await client.post("/api/terminals/nope00000000/kill", headers=H)).status_code == 404
@@ -173,9 +184,11 @@ async def test_the_load_route_projects_a_cap(client: httpx.AsyncClient) -> None:
     await client.post("/api/terminals", json={"env": "container", "owner_kind": "free", "cwd": "/tmp"}, headers=H)
     load = (await client.get("/api/terminals/load", params={"cap": 10}, headers=H)).json()
     assert load["running"] == 1 and load["cap"] == 20 and load["queued"] == []
-    assert load["used"]["rss_bytes"] == 50 << 20 and load["used"]["mem_total_bytes"] == 16 << 30
+    # The terminal's process and the daemon that holds its emulator are both what it costs now.
+    assert load["used"]["rss_bytes"] == (50 << 20) + (30 << 20) and load["used"]["daemon_rss_bytes"] == 30 << 20
+    assert load["used"]["mem_total_bytes"] == 16 << 30 and load["used"]["cpus"] == 8
     assert load["likely"]["basis"] == "default" and load["projection"]["cap"] == 10
-    assert load["projection"]["terminals_rss_bytes"] == (50 << 20) + 9 * load["likely"]["rss_bytes"]
+    assert load["projection"]["terminals_rss_bytes"] == (80 << 20) + 9 * load["likely"]["rss_bytes"]
     assert load["thresholds"] == {"warn": 70.0, "bad": 90.0}
     assert (await client.get("/api/terminals/load", params={"cap": 0}, headers=H)).status_code == 422
 

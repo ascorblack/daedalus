@@ -22,6 +22,7 @@ from daedalus.harness.contract import (
     LaunchPlan,
     LaunchSpec,
     LoginState,
+    ReadyStep,
     ScreenClass,
     SendMode,
     StaffEvent,
@@ -106,6 +107,9 @@ class StubAdapter:
 
     def resume_plan(self, spec: LaunchSpec, ref: str) -> LaunchPlan:
         return LaunchPlan(argv=("pi", "--session-id", ref), env={}, cwd=spec.cwd, session_ref=ref)
+
+    def readiness(self, screen: str) -> ReadyStep:
+        return ReadyStep()
 
     async def after_spawn(self, term: TerminalPort, launch: Launch, plan: LaunchPlan) -> None:
         return None

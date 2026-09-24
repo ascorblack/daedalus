@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from protocore.contracts.llm import IProviderChain
 from protocore.contracts.tool_registry import IToolRegistry, ToolVisibilityPolicy
@@ -139,6 +139,37 @@ def runtime_constants(config: RuntimeConfig, *, context_window: int, max_output_
     )
 
 
+Role = Literal["agent", "voice", "orchestrator"]
+
+
+def _agent_sections(deps: EngineDeps, config: RuntimeConfig, *, mode: ModeConfig | None, workspace: Path, session_title: str, model: str, extra_notes: str, project: str, notify: bool) -> tuple[str, ...]:
+    return (
+        prompts.PERSONA,
+        prompts.rules_section(config.prompt.rules),
+        prompts.language_section(config.answer_language),
+        prompts.governance_section(deps.governance_path),
+        prompts.self_development_section(deps.selfdev_mode),
+        prompts.HISTORY,
+        prompts.BOARD,
+        prompts.SCHEDULING,
+        prompts.NOTIFY if notify else "",
+        (mode.prompt.strip() + "\n") if mode is not None and mode.prompt.strip() else "",
+        prompts.environment_section(
+            workspace=workspace,
+            bot_repo=deps.bot_repo,
+            core_repo=deps.core_repo,
+            session_title=session_title,
+            model=model,
+            extra_notes=extra_notes,
+            sandboxed=config.tools.exec.sandbox != "off",
+            github_org=deps.github_org,
+            ssh_hosts=prompts.ssh_hosts(deps.ssh_config) if deps.ssh_config else (),
+            selfdev_mode=deps.selfdev_mode,
+            project=project,
+        ),
+    )
+
+
 def build_engine(
     *,
     deps: EngineDeps,
@@ -157,39 +188,25 @@ def build_engine(
     extra_notes: str = "",
     tool_visibility_policy: ToolVisibilityPolicy | None = None,
     mode: ModeConfig | None = None,
-    voice: bool = False,
+    role: Role = "agent",
     project: str = "",
 ) -> QueryEngine:
+    """``role`` picks the system prompt: an agent that works in a folder, the voice concierge that
+    only talks and hands over, or a project's orchestrator that only runs a team."""
     primary_provider, primary_model = rungs[0]
     model = model_name or primary_model
     all_tools = {t.name for t in deps.tool_registry.list_all()}
-    sections = prompts.concierge_sections(answer_language=config.answer_language, agents=extra_notes) if voice else (
-        prompts.PERSONA,
-        prompts.rules_section(config.prompt.rules),
-        prompts.language_section(config.answer_language),
-        prompts.governance_section(deps.governance_path),
-        prompts.self_development_section(deps.selfdev_mode),
-        prompts.HISTORY,
-        prompts.BOARD,
-        prompts.SCHEDULING,
+    if role == "voice":
+        sections: tuple[str, ...] = prompts.concierge_sections(answer_language=config.answer_language, agents=extra_notes)
+    elif role == "orchestrator":
+        sections = prompts.orchestrator_sections(answer_language=config.answer_language, governance=prompts.governance_section(deps.governance_path))
+    else:
         # Only where the tool can be called: a subagent or a staff member told how to notify the
         # operator would try, be refused, and spend a turn learning that its leader speaks for it.
-        prompts.NOTIFY if "Notify" in all_tools and (tool_visibility_policy is None or "Notify" not in tool_visibility_policy.blocked) else "",
-        (mode.prompt.strip() + "\n") if mode is not None and mode.prompt.strip() else "",
-        prompts.environment_section(
-            workspace=workspace,
-            bot_repo=deps.bot_repo,
-            core_repo=deps.core_repo,
-            session_title=session_title,
-            model=model,
-            extra_notes=extra_notes,
-            sandboxed=config.tools.exec.sandbox != "off",
-            github_org=deps.github_org,
-            ssh_hosts=prompts.ssh_hosts(deps.ssh_config) if deps.ssh_config else (),
-            selfdev_mode=deps.selfdev_mode,
-            project=project,
-        ),
-    )
+        notify = "Notify" in all_tools and (tool_visibility_policy is None or "Notify" not in tool_visibility_policy.blocked)
+        sections = _agent_sections(
+            deps, config, mode=mode, workspace=workspace, session_title=session_title, model=model, extra_notes=extra_notes, project=project, notify=notify,
+        )
     engine_config = QueryEngineConfig(
         run_id=run_id,
         tenant_id=TENANT,
@@ -224,4 +241,4 @@ def build_engine(
     return engine
 
 
-__all__ = ["TENANT", "EngineDeps", "build_engine", "runtime_constants"]
+__all__ = ["TENANT", "EngineDeps", "Role", "build_engine", "runtime_constants"]

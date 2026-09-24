@@ -1,0 +1,1097 @@
+"""A project's orchestrator: its session, its office, what it sees and what wakes it.
+
+``app.extensions["orchestrator"]`` switches a project's orchestrator on and off and replaces it,
+answers "is this session the project's current orchestrator" for every one of its tools, writes the
+project's state into the turn context of each of its turns, and wakes it with batches of the
+project's events (:class:`daedalus.host.wake_queue.WakeQueue`).
+
+Being the orchestrator is an office, not a property of a session. The project's settings name the one
+session that holds it, and only a compare-and-set changes that name; enabling, replacing and
+disabling also hold a lock per project. Every tool starts by asking :meth:`Orchestrators.current`,
+so a replaced orchestrator whose engine is still running cannot act for the project it left: two
+orchestrators can never act at once, and a replacement is never silent — the journal says who
+replaced whom and why, and the successor's first state block names its predecessor.
+
+An orchestrator never blocks on the operator. Its questions (``AskOperator``) are request rows that
+return at once; the answer arrives as an ``ask.answered`` event in a later wake-up.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, tzinfo
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from daedalus.extensions import orchestrator_ops, orchestrator_team
+from daedalus.extensions.notifications import Draft, ProjectNotifyPolicy
+from daedalus.host.events import AppEvent, EventFilter
+from daedalus.host.peek import FolderAccess, LocalFolderAccess, UnreachableFolder
+from daedalus.host.wake_queue import Batch, TargetState, Wake, WakeQueue
+from daedalus.staff_runtime import ReadRequest
+from daedalus.stores.projects import BRIEF_SECTIONS, OrchestratorSettings, Project, ProjectError, ProjectFolder
+from daedalus.stores.staff import ACTIVE_STATUSES, HARNESS_NAMES, Ask, Staff
+
+if TYPE_CHECKING:
+    from daedalus.app import Application
+    from daedalus.host.session_runner import SessionManager, SessionState
+
+logger = logging.getLogger(__name__)
+
+CURSOR_KEY = "orchestrator_cursor:{project_id}"
+"""The kv key of a project's wake-up cursor: the last event its orchestrator was given."""
+
+WAKE_TYPES = (
+    "staff.status",
+    "staff.report",
+    "ask.pending",
+    "ask.answered",
+    "permission.pending",
+    "permission.resolved",
+    "task.",
+    "run.started",
+    "schedule.fired",
+    "watch.fired",
+    "dispatch.created",
+    "dispatch.message",
+)
+"""What an orchestrator's queue subscribes to; :meth:`Orchestrators.classify` decides which of them wake it.
+The two ``dispatch`` types are the main orchestrator's hand-overs to a project; they wake at once."""
+
+STAFF_WAKE_STATUSES = frozenset({"turn_done_unseen", "error", "exited", "no_signal"})
+URGENT_REPORTS = frozenset({"needs_input", "stuck"})
+TASK_WAKES = frozenset({"task.created", "task.moved", "task.assigned", "task.accepted", "task.merge_failed"})
+SELF_EVENTS_ALLOWED = frozenset({"ask.answered", "permission.resolved"})
+"""Events that carry the orchestrator's own session id but are someone else's news: the operator
+answering what it asked."""
+
+QUESTION_MAX = 2000
+OPTION_MAX = 200
+HEADLINE_CHARS = 200
+BRIEF_SECTION_CHARS = 400
+TEAM_LINES = 12
+OPEN_TASK_LINES = 12
+ASK_LINES = 8
+JOURNAL_LINES = 5
+QUEUE_LINES = 6
+READ_TIMEOUT_SECONDS = 5.0
+SECTION_LABELS = {
+    "goals": "goals",
+    "constraints": "constraints",
+    "preferences": "preferences",
+    "done_when": "done when",
+    "allowed_without_operator": "allowed without the operator",
+    "notes": "notes",
+}
+
+
+class NotCurrent(RuntimeError):
+    """This session does not hold its project's orchestrator office (any more); the message says who does."""
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _one_line(text: str, limit: int) -> str:
+    flat = " / ".join(line.strip() for line in (text or "").strip().splitlines() if line.strip())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def _age(at: str | None, now: datetime) -> str:
+    if not at:
+        return "never"
+    try:
+        then = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except ValueError:
+        return "?"
+    then = then if then.tzinfo else then.replace(tzinfo=UTC)
+    minutes = max(0, int((now - then).total_seconds() // 60))
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} min"
+    hours = minutes // 60
+    return f"{hours} h" if hours < 48 else f"{hours // 24} d"
+
+
+def _tokens(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1000:
+        return f"{n // 1000}k"
+    return str(n)
+
+
+def who(member: Staff | None) -> str:
+    """A member as a line names them: their name, and the harness when it is not Daedalus's own."""
+    if member is None:
+        return "a staff member"
+    return member.name if member.harness == "daedalus" else f"{member.name} ({HARNESS_NAMES.get(member.harness, member.harness)})"
+
+
+Section = tuple[list[str], str]
+"""Lines of the state block, and where the orchestrator finds what a cut left out."""
+
+OPERATIONS = {**orchestrator_ops.OPS, **orchestrator_team.OPS}
+"""Everything the orchestrator's tools can ask of this extension: the project tools and the team tools."""
+
+CUT_NOTE = "\n[… the state is cut here; the tools show the rest]"
+
+
+def _section(title: str, items: list[str], *, cap: int, more: str) -> Section:
+    """A titled list of at most ``cap`` items, with what was left out counted and where to find it."""
+    shown = items[:cap]
+    rest = len(items) - len(shown)
+    lines = [f"{title}:", *(f"  - {line}" for line in shown)] if shown else []
+    if rest > 0:
+        lines.append(f"  - … {rest} more ({more})")
+    return lines, more
+
+
+def fit(sections: list[Section], limit: int) -> str:
+    """Join the sections, cutting the longest lists first until the whole fits ``limit`` characters.
+
+    A section keeps its title and a "… N more (where)" line as it shrinks, so the orchestrator always
+    sees that something is there and which tool shows the rest.
+    """
+    blocks = [(list(lines), more) for lines, more in sections if lines]
+
+    def size() -> int:
+        return sum(len(line) + 1 for lines, _ in blocks for line in lines)
+
+    def items(lines: list[str]) -> int:
+        return sum(1 for line in lines if line.startswith("  - ") and not line.startswith("  - … "))
+
+    while size() > limit:
+        candidates = [b for b in blocks if items(b[0]) > 0]
+        if not candidates:
+            break
+        lines, more = max(candidates, key=lambda b: sum(len(line) for line in b[0]))
+        dropped = 0
+        if lines[-1].startswith("  - … "):
+            try:
+                dropped = int(lines[-1].split()[2])
+            except (IndexError, ValueError):
+                dropped = 0
+            lines.pop()
+        lines.pop()
+        lines.append(f"  - … {dropped + 1} more ({more})")
+    text = "\n".join(line for lines, _ in blocks for line in lines)
+    return text if len(text) <= limit else text[: max(0, limit - len(CUT_NOTE))] + CUT_NOTE
+
+
+class Orchestrators:
+    """Every project's orchestrator of this installation."""
+
+    def __init__(self, app: Application) -> None:
+        self.app = app
+        assert app.manager is not None
+        self.manager: SessionManager = app.manager
+        self._locks: dict[str, asyncio.Lock] = {}
+        self.queues: dict[str, WakeQueue] = {}
+        self._models: dict[str, str] = {}
+        """The model each enabled project's orchestrator runs, by project: read on every engine build,
+        which is synchronous, so it is kept here and written with every change of the setting."""
+        self.state_sections: list[Callable[[Project], Awaitable[Section]]] = []
+        """Further sections of the state block, each ``project -> (lines, where the rest is)``: what a
+        later feature (the dispatches a project was handed) wants its orchestrator to see every turn."""
+        self.clock: Callable[[], float] | None = None
+        """A fake monotonic clock for the wake queues, in tests."""
+        self._replacing: set[str] = set()
+        self._background: set[asyncio.Task[None]] = set()
+
+    # -- lookups ---------------------------------------------------------------------------------
+
+    def lock(self, project_id: str) -> asyncio.Lock:
+        return self._locks.setdefault(project_id, asyncio.Lock())
+
+    @property
+    def team(self) -> Any:
+        return self.app.extensions.get("staff")
+
+    @property
+    def board(self) -> Any:
+        return self.app.extensions.get("board")
+
+    async def project(self, project_id: str) -> Project:
+        project = await self.manager.projects.get(project_id)
+        if project is None:
+            raise KeyError(project_id)
+        return project
+
+    async def current(self, session_id: str) -> tuple[Project, OrchestratorSettings]:
+        """The project this session is the current orchestrator of; :class:`NotCurrent` otherwise."""
+        state = await self.manager.get_state(session_id)
+        metadata = state.metadata if state is not None else {}
+        project_id = str(metadata.get("orchestrator_of") or metadata.get("orchestrator_retired_of") or "")
+        if not project_id:
+            raise NotCurrent("this session is not a project's orchestrator")
+        project = await self.manager.projects.get(project_id)
+        if project is None:
+            raise NotCurrent("the project this orchestrator ran no longer exists")
+        orchestrator = project.settings.orchestrator
+        if orchestrator.session_id != session_id:
+            if orchestrator.session_id:
+                raise NotCurrent(f"this orchestrator was replaced by {orchestrator.session_id}; it no longer acts for {project.name}")
+            raise NotCurrent(f"the orchestrator of {project.name} is switched off")
+        if not orchestrator.enabled:
+            raise NotCurrent(f"the orchestrator of {project.name} is switched off")
+        return project, orchestrator
+
+    def session_of(self, project: Project) -> str:
+        orchestrator = project.settings.orchestrator
+        return orchestrator.session_id if orchestrator.enabled else ""
+
+    # -- the office --------------------------------------------------------------------------------
+
+    async def enable(self, project_id: str, *, model: str | None = None, autonomy: str | None = None, concurrency_cap: int | None = None, by: str = "operator") -> Project:
+        """Switch the project's orchestrator on: a session of its own, its settings, its wake-ups.
+
+        Enabling a project that already has a working orchestrator changes only what was passed. Two
+        enables racing each other make one session: the lock serialises them in this process and the
+        compare-and-set on the settings decides between processes; the loser's session is removed and
+        it answers with the winner.
+        """
+        async with self.lock(project_id):
+            project = await self.project(project_id)
+            orchestrator = project.settings.orchestrator
+            if orchestrator.enabled and orchestrator.session_id and await self.manager.get_state(orchestrator.session_id) is not None:
+                if model is None and autonomy is None and concurrency_cap is None:
+                    return project
+                return await self._update_locked(project, model=model, autonomy=autonomy, concurrency=None, concurrency_cap=concurrency_cap, by=by)
+            if model is not None:
+                self._check_model(model)
+            config = self.manager.config.orchestrator
+            first = await self._never_had_one(project_id)
+            cap = concurrency_cap if concurrency_cap is not None else (config.default_concurrency_cap if first else orchestrator.concurrency_cap)
+            self._check_cap(cap)
+            concurrency = min(config.default_concurrency, cap) if first else min(orchestrator.concurrency, cap)
+            project = await self.manager.projects.update_orchestrator(project_id, enabled=True, model=model, autonomy=autonomy, concurrency=concurrency, concurrency_cap=cap)
+            stale = orchestrator.session_id
+            try:
+                session_id = await self._new_session(project, predecessor=stale, reason="its session could not be loaded" if stale else "")
+            except (OSError, ValueError, KeyError) as exc:
+                # Switched on with no session would be an orchestrator that exists only in the settings.
+                await self.manager.projects.update_orchestrator(project_id, enabled=False)
+                raise ProjectError(f"the orchestrator of {project.name} could not be started: {exc}") from exc
+            if not await self.manager.projects.set_orchestrator(project_id, expect=stale, value=session_id):
+                await self.manager.delete_session(session_id)
+                return await self.project(project_id)
+            if stale:
+                await self._retire(stale, project_id, successor=session_id)
+            project = await self.project(project_id)
+            await self._took_office(project)
+            await self.manager.projects.record(
+                project_id, "system", "orchestrator",
+                f"The orchestrator was switched on by the {by} (model {self.model_of(project)}, autonomy {project.settings.orchestrator.autonomy}, concurrency {project.settings.orchestrator.concurrency} of {project.settings.orchestrator.concurrency_cap}).",
+                {"session_id": session_id},
+            )
+            await self._changed(project_id, "orchestrator.enabled", by)
+            return project
+
+    async def update(self, project_id: str, *, model: str | None = None, autonomy: str | None = None, concurrency: int | None = None, concurrency_cap: int | None = None, by: str = "operator") -> Project:
+        async with self.lock(project_id):
+            project = await self.project(project_id)
+            if not project.settings.orchestrator.enabled:
+                raise ProjectError(f"{project.name} has no orchestrator; switch it on first")
+            return await self._update_locked(project, model=model, autonomy=autonomy, concurrency=concurrency, concurrency_cap=concurrency_cap, by=by)
+
+    async def _update_locked(self, project: Project, *, model: str | None, autonomy: str | None, concurrency: int | None, concurrency_cap: int | None, by: str) -> Project:
+        if model is not None:
+            self._check_model(model)
+        if concurrency_cap is not None:
+            self._check_cap(concurrency_cap)
+        before = project.settings.orchestrator
+        updated = await self.manager.projects.update_orchestrator(project.id, model=model, autonomy=autonomy, concurrency=concurrency, concurrency_cap=concurrency_cap)
+        after = updated.settings.orchestrator
+        changes = []
+        if model is not None and before.model != after.model:
+            changes.append(f"model {self.model_of(updated)}")
+        if before.autonomy != after.autonomy:
+            changes.append(f"autonomy {after.autonomy}")
+        if before.concurrency != after.concurrency or before.concurrency_cap != after.concurrency_cap:
+            changes.append(f"concurrency {after.concurrency} of {after.concurrency_cap}")
+        self._models[project.id] = after.model
+        if model is not None:
+            await self._sync_model(updated)
+        if changes:
+            await self.manager.projects.record(project.id, "system", "orchestrator", f"The {by} changed the orchestrator: {', '.join(changes)}.", {})
+            await self._changed(project.id, "orchestrator.settings", by)
+        if before.concurrency != after.concurrency and self.team is not None:
+            self.team.queue.pump_soon(project.id)
+        return updated
+
+    async def disable(self, project_id: str, *, by: str = "operator") -> Project:
+        """Switch the orchestrator off. Its session stays, with its history; what it was asked goes to the operator."""
+        async with self.lock(project_id):
+            project = await self.project(project_id)
+            orchestrator = project.settings.orchestrator
+            if not orchestrator.enabled and not orchestrator.session_id:
+                return project
+            await self.manager.projects.update_orchestrator(project_id, enabled=False)
+            if orchestrator.session_id and await self.manager.projects.set_orchestrator(project_id, expect=orchestrator.session_id, value=""):
+                await self._retire(orchestrator.session_id, project_id, successor="")
+            await self._left_office(project_id)
+            await self._hand_requests_to_operator(project_id, why="the orchestrator was switched off")
+            await self.manager.projects.record(project_id, "system", "orchestrator", f"The orchestrator was switched off by the {by}.", {"session_id": orchestrator.session_id})
+            await self._changed(project_id, "orchestrator.disabled", by)
+            return await self.project(project_id)
+
+    async def replace(self, project_id: str, reason: str, *, by: str = "operator") -> Project:
+        """A new orchestrator session in place of the current one, linked both ways, never silently.
+
+        The predecessor is retired (its tools refuse from now on, and a run it is in is stopped), the
+        wake-ups it set are re-pointed at the successor, the journal records the replacement, and the
+        successor's first state block names the predecessor and the reason.
+        """
+        reason = " ".join((reason or "").split())[:300] or "replaced"
+        async with self.lock(project_id):
+            project = await self.project(project_id)
+            orchestrator = project.settings.orchestrator
+            if not orchestrator.enabled:
+                raise ProjectError(f"{project.name} has no orchestrator to replace; switch it on instead")
+            old = orchestrator.session_id
+            session_id = await self._new_session(project, predecessor=old, reason=reason)
+            if not await self.manager.projects.set_orchestrator(project_id, expect=old, value=session_id):
+                await self.manager.delete_session(session_id)
+                return await self.project(project_id)
+            if old:
+                await self._retire(old, project_id, successor=session_id)
+                await self.manager.db.execute("UPDATE schedules SET target_session = ? WHERE target_session = ?", (session_id, old))
+            project = await self.project(project_id)
+            await self._sync_model(project)
+            await self.manager.projects.record(
+                project_id, "system", "replacement",
+                f"The orchestrator {old or '(none)'} was replaced by {session_id} ({by}): {reason}",
+                {"predecessor": old, "successor": session_id},
+            )
+            await self._changed(project_id, "orchestrator.replaced", by)
+            queue = self.queues.get(project_id)
+            if queue is not None:
+                queue.poke()
+            return project
+
+    async def _never_had_one(self, project_id: str) -> bool:
+        """Whether no session of the project has ever been its orchestrator. Every project's settings
+        carry the orchestrator block from the start, so the sessions are what remember one existed."""
+        row = await self.manager.db.fetchone(
+            "SELECT 1 FROM sessions WHERE project_id = ? AND (json_extract(metadata, '$.orchestrator_of') IS NOT NULL OR json_extract(metadata, '$.orchestrator_retired_of') IS NOT NULL) LIMIT 1",
+            (project_id,),
+        )
+        return row is None
+
+    def _check_cap(self, cap: int) -> None:
+        ceiling = self.manager.config.orchestrator.max_concurrency_cap
+        if not 1 <= int(cap) <= ceiling:
+            raise ProjectError(f"the concurrency cap is between 1 and {ceiling}, not {cap}")
+
+    def _check_model(self, model: str) -> None:
+        if model and model not in self.manager.config.presets:
+            raise ProjectError(f"no model preset {model!r}; the presets are in Settings → Models")
+
+    async def _new_session(self, project: Project, *, predecessor: str, reason: str) -> str:
+        metadata: dict[str, Any] = {"orchestrator_of": project.id, "telegram_detached": True}
+        if predecessor:
+            metadata["predecessor"] = predecessor
+            metadata["predecessor_reason"] = reason
+        state = await self.manager.create_session(f"Orchestrator · {project.name}", metadata=metadata, project_id=project.id)
+        return state.session.id
+
+    async def _retire(self, session_id: str, project_id: str, *, successor: str) -> None:
+        """The old session keeps its history and loses its office: it is marked, and a run it is in stops."""
+        state = await self.manager.get_state(session_id)
+        if state is None:
+            return
+        for metadata in (state.metadata, state.session.metadata):
+            metadata.pop("orchestrator_of", None)
+            metadata["orchestrator_retired_of"] = project_id
+            if successor:
+                metadata["successor"] = successor
+        await self.manager.sessions.update_metadata(session_id, state.session.metadata)
+        await self.manager.stop(session_id)
+
+    async def _took_office(self, project: Project) -> None:
+        self._models[project.id] = project.settings.orchestrator.model
+        await self._sync_model(project)
+        # A new office starts from now: what happened to the project before it existed is not news.
+        await self.manager.db.kv_set(CURSOR_KEY.format(project_id=project.id), self.manager.bus.head)
+        await self.start_queue(project.id)
+
+    async def _left_office(self, project_id: str) -> None:
+        self._models.pop(project_id, None)
+        await self.stop_queue(project_id)
+        await self.manager.db.kv_set(CURSOR_KEY.format(project_id=project_id), None)
+
+    async def _hand_requests_to_operator(self, project_id: str, *, why: str) -> None:
+        team = self.team
+        if team is None:
+            return
+        for ask in await self.manager.asks.open_for(project_id, routed_to="orchestrator"):
+            await team.escalate(ask, why=why)
+
+    async def _changed(self, project_id: str, change: str, by: str) -> None:
+        try:
+            await self.manager.bus.publish("project.changed", {"change": change, "actor": by}, project_id=project_id)
+        except Exception:  # noqa: BLE001 — the change stands; the event is a courtesy
+            logger.warning("could not publish project.changed for %s", project_id, exc_info=True)
+
+    # -- the model ------------------------------------------------------------------------------------
+
+    def model_of(self, project: Project) -> str:
+        """The preset the project's orchestrator runs: its own choice, the Settings default, or the strongest."""
+        return self.manager.config.orchestrator_preset(project.settings.orchestrator.model) or "(no model)"
+
+    def preset_for(self, state: SessionState) -> str | None:
+        """The manager's preset hook: an orchestrator runs its project's model, whatever the chat was set to."""
+        project_id = str(state.metadata.get("orchestrator_of") or "")
+        if not project_id or project_id not in self._models:
+            return None
+        return self.manager.config.orchestrator_preset(self._models[project_id])
+
+    async def _sync_model(self, project: Project) -> None:
+        """Write the effective preset on the session too, so the chat's model chip shows what it runs."""
+        session_id = self.session_of(project)
+        preset = self.manager.config.orchestrator_preset(project.settings.orchestrator.model)
+        if not session_id or not preset:
+            return
+        try:
+            await self.manager.set_model(session_id, preset=preset)
+        except (KeyError, ValueError):
+            logger.warning("could not set the model of orchestrator %s", session_id, exc_info=True)
+
+    async def model_chosen(self, session_id: str, preset: str | None, *, clear: bool = False) -> bool:
+        """The composer's model chip on an orchestrator's chat: the choice is the project's setting.
+
+        Whether the session was a current orchestrator (and so the project changed). A cleared chip
+        returns the project to the Settings default.
+        """
+        try:
+            project, _ = await self.current(session_id)
+        except NotCurrent:
+            return False
+        if not clear and not preset:
+            return False
+        await self.update(project.id, model="" if clear else preset)
+        return True
+
+    # -- what it sees ---------------------------------------------------------------------------------
+
+    async def turn_notes(self, state: SessionState) -> str | None:
+        """The manager's turn-notes hook: the project state in place of the workspace notes."""
+        project_id = str(state.metadata.get("orchestrator_of") or state.metadata.get("orchestrator_retired_of") or "")
+        if not project_id:
+            return None
+        try:
+            project, _ = await self.current(state.session.id)
+        except NotCurrent as exc:
+            return f"\n- {exc}. Its tools refuse; tell the operator, and do nothing else."
+        text = await self.project_state(project, session_id=state.session.id)
+        if state.metadata.get("predecessor") and not state.metadata.get("predecessor_announced"):
+            for metadata in (state.metadata, state.session.metadata):
+                metadata["predecessor_announced"] = True
+            await self.manager.sessions.update_metadata(state.session.id, state.session.metadata)
+        return "\n" + text
+
+    async def project_state(self, project: Project, *, session_id: str | None = None) -> str:
+        """The state block: the project as it is now, bounded by ``orchestrator.state_max_chars``."""
+        now = datetime.now(UTC)
+        config = self.manager.config
+        orchestrator = project.settings.orchestrator
+        members = await self.manager.staff.list(project.id)
+        live = await self.manager.staff.live_sessions(project.id)
+        working = sum(1 for s in live.values() if s.status in ACTIVE_STATUSES)
+        tasks = {r["id"]: dict(r) for r in await self.manager.db.fetchall("SELECT id, title, status, priority, assignee_staff_id, branch FROM board_tasks WHERE project_id = ? ORDER BY priority, updated_at DESC", (project.id,))}
+        by_id = {m.id: m for m in members}
+
+        head = [f"Project: {project.name} · default env {project.settings.default_env or self.manager.projects.local_env} · autonomy {orchestrator.autonomy} · concurrency {orchestrator.concurrency} of cap {orchestrator.concurrency_cap} · {working} working"]
+        state = self.manager.live_state(session_id) if session_id else None
+        if state is not None and state.metadata.get("predecessor") and not state.metadata.get("predecessor_announced"):
+            head.append(f"You replace the orchestrator session {state.metadata['predecessor']}: {state.metadata.get('predecessor_reason') or 'replaced'}. Its journal entries are yours to read.")
+
+        folders = [self._folder_line(f) for f in project.folders]
+        brief = await self.manager.projects.brief(project.id)
+        brief_parts = [f"{SECTION_LABELS[name]}: {_one_line(brief[name].body, BRIEF_SECTION_CHARS) or '(empty)'}" for name in BRIEF_SECTIONS]
+
+        team_lines: list[str] = []
+        one_offs: list[str] = []
+        for member in members:
+            line = self._member_line(member, live.get(member.id), tasks, now)
+            (one_offs if member.one_off else team_lines).append(line)
+
+        asks = await self.manager.asks.open_for(project.id)
+        for_me = [self._ask_line(a, by_id, now) for a in asks if a.routed_to == "orchestrator"]
+        for_operator = [self._ask_line(a, by_id, now) for a in asks if a.routed_to == "operator"]
+
+        queue_lines: list[str] = []
+        if self.team is not None:
+            for entry in self.team.queue.queue(project.id):
+                waiting = by_id.get(entry["staff_id"])
+                queue_lines.append(f"{waiting.name if waiting else entry['staff_id']} → {entry['task_id']} ({entry['reason'] or 'waiting'}: {_one_line(entry['detail'], 120)})")
+
+        counts: dict[str, int] = {}
+        for task in tasks.values():
+            counts[task["status"]] = counts.get(task["status"], 0) + 1
+        open_tasks = [
+            f"{t['id']} {_one_line(t['title'], 80)} ({by_id[t['assignee_staff_id']].name if t['assignee_staff_id'] in by_id else 'unassigned'}, {t['status']})"
+            for t in tasks.values() if t["status"] not in ("done", "dropped")
+        ]
+        board_head = "Board: " + " · ".join(f"{name} {counts.get(name, 0)}" for name in ("doing", "review", "todo", "blocked", "done"))
+
+        wakeups = []
+        if session_id:
+            for row in await self.manager.db.fetchall("SELECT id, name, prompt, next_run_at, cron FROM schedules WHERE target_session = ? AND enabled = 1 ORDER BY next_run_at LIMIT 10", (session_id,)):
+                when = row["cron"] or (row["next_run_at"] or "")[:16].replace("T", " ")
+                wakeups.append(f"[{row['id']}] {when} \"{_one_line(row['prompt'] or row['name'], 80)}\"")
+        watches = [
+            f"[{row['id']}] {_one_line(row['note'] or row['pattern_json'], 80)}"
+            for row in await self.manager.db.fetchall("SELECT id, note, pattern_json FROM watches WHERE project_id = ? AND enabled = 1 ORDER BY created_at LIMIT 10", (project.id,))
+        ]
+
+        journal = [f"{self._clock(e.at)} {e.kind}: {_one_line(e.text, 160)}" for e in await self.manager.projects.journal(project.id, limit=JOURNAL_LINES)]
+
+        board_lines = [board_head + (" — open:" if open_tasks else "")] + [f"  - {line}" for line in open_tasks[:OPEN_TASK_LINES]]
+        if len(open_tasks) > OPEN_TASK_LINES:
+            board_lines.append(f"  - … {len(open_tasks) - OPEN_TASK_LINES} more (Tasks)")
+        team_section = _section("Team", team_lines, cap=TEAM_LINES, more="Team")
+        sections: list[Section] = [
+            (head, ""),
+            (["Folders: " + " · ".join(folders)] if folders else [], ""),
+            (["Brief — " + " · ".join(brief_parts)], ""),
+            team_section if team_section[0] else (["Team: nobody yet"], ""),
+            _section("One-off", one_offs, cap=TEAM_LINES, more="Team"),
+            _section("Waiting for your answer", for_me, cap=ASK_LINES, more="the requests list"),
+            _section("Needs the operator", for_operator, cap=ASK_LINES, more="the requests list"),
+            _section("Launch queue", queue_lines, cap=QUEUE_LINES, more="Team"),
+            (board_lines, "Tasks"),
+            (["Wake-ups: " + (" · ".join(wakeups) or "none") + " · Watches: " + (" · ".join(watches) or "none")], ""),
+            _section("Journal (latest)", journal, cap=JOURNAL_LINES, more="Journal"),
+            ([await self._spend_line(project.id, now)], ""),
+        ]
+        for extra in self.state_sections:
+            try:
+                sections.append(await extra(project))
+            except Exception:  # noqa: BLE001 — one section that fails must not take the state away
+                logger.exception("an orchestrator state section failed for %s", project.id)
+        return fit(sections, config.orchestrator.state_max_chars)
+
+    def _folder_line(self, folder: ProjectFolder) -> str:
+        marks = [m for m in ("git" if folder.is_git else "", folder.env if folder.env != self.manager.projects.local_env else "", "read-only" if folder.readonly else "") if m]
+        return f"[{folder.id}] {folder.label or Path(folder.path).name} {folder.path}" + (f" ({', '.join(marks)})" if marks else "")
+
+    def _member_line(self, member: Staff, session: Any, tasks: dict[str, dict[str, Any]], now: datetime) -> str:
+        role = f" — {_one_line(member.role, 60)}" if member.role else ""
+        kind = HARNESS_NAMES.get(member.harness, member.harness) + (f" {member.agent}" if member.agent else "")
+        where = member.isolation + (f" {session.branch}" if session is not None and session.branch else "")
+        if session is None:
+            return f"{member.name}{role}, {kind}, {where}: off"
+        status = session.status.replace("_", " ")
+        task = tasks.get(session.task_id or "")
+        on = f" on \"{_one_line(task['title'], 60)}\" ({task['id']})" if task else ""
+        waiting = f" — {session.waiting_for}" if session.waiting_for else ""
+        return f"{member.name}{role}, {kind}, {where}: {status}{on}{waiting}, last signal {_age(session.last_signal_at or session.status_at, now)}"
+
+    def _ask_line(self, ask: Ask, members: dict[str, Staff], now: datetime) -> str:
+        asker = "you" if ask.origin == "orchestrator" else who(members.get(ask.staff_id or ""))
+        suggestion = f" — your suggestion: {_one_line(ask.suggestion, 80)}" if ask.suggestion else ""
+        return f"[{ask.short_id}] {asker} ({ask.kind}): {_one_line(ask.text, 160)} ({_age(ask.created_at, now)}){suggestion}"
+
+    async def _spend_line(self, project_id: str, now: datetime) -> str:
+        since = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        rows = await self.manager.db.fetchall(
+            "SELECT s.metadata AS metadata, sum(u.cost_usd) AS usd, sum(u.input_tokens + u.output_tokens) AS tokens "
+            "FROM usage_events u JOIN sessions s ON s.id = u.session_id WHERE s.project_id = ? AND u.at >= ? GROUP BY s.id",
+            (project_id, since),
+        )
+        mine = staff = other = 0.0
+        tokens = 0
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except (TypeError, ValueError):
+                metadata = {}
+            usd = float(row["usd"] or 0.0)
+            tokens += int(row["tokens"] or 0)
+            if metadata.get("orchestrator_of") or metadata.get("orchestrator_retired_of"):
+                mine += usd
+            elif metadata.get("staff_session_id"):
+                staff += usd
+            else:
+                other += usd
+        extra = f" · other sessions ${other:.2f}" if other else ""
+        return f"Spend today: orchestrator ${mine:.2f} · staff ${staff:.2f}{extra} (tokens: {_tokens(tokens)})"
+
+    def _zone(self) -> tzinfo:
+        """The operator's time zone, as their app last reported it: the times in a batch are theirs."""
+        tz = self.manager.presence.locale()[1]
+        try:
+            return ZoneInfo(tz) if tz else UTC
+        except (ZoneInfoNotFoundError, ValueError):
+            return UTC
+
+    def _clock(self, at: str) -> str:
+        try:
+            moment = datetime.fromisoformat(at.replace("Z", "+00:00"))
+        except ValueError:
+            return at[:16]
+        moment = moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+        return moment.astimezone(self._zone()).strftime("%H:%M")
+
+    # -- wake-ups -------------------------------------------------------------------------------------
+
+    async def start_queue(self, project_id: str) -> WakeQueue:
+        existing = self.queues.get(project_id)
+        if existing is not None and not existing.closed:
+            return existing
+        key = CURSOR_KEY.format(project_id=project_id)
+
+        async def load_cursor() -> int | None:
+            value = await self.manager.db.kv_get(key)
+            return int(value) if isinstance(value, int) else None
+
+        async def save_cursor(seq: int) -> None:
+            await self.manager.db.kv_set(key, int(seq))
+
+        async def classify(event: AppEvent) -> Wake | None:
+            return await self.classify(project_id, event)
+
+        async def render(batch: Batch) -> str:
+            return await self.render(project_id, batch)
+
+        async def state() -> TargetState:
+            return await self.target_state(project_id)
+
+        async def deliver(text: str, steer: bool) -> None:
+            await self.deliver(project_id, text, steer=steer)
+
+        async def capped(wait_seconds: float) -> None:
+            await self._capped(project_id, wait_seconds)
+
+        extra: dict[str, Any] = {"clock": self.clock} if self.clock is not None else {}
+        queue = WakeQueue(
+            name=project_id,
+            bus=self.manager.bus,
+            flt=EventFilter(types=WAKE_TYPES, project_id=project_id),
+            classify=classify,
+            render=render,
+            state=state,
+            deliver=deliver,
+            load_cursor=load_cursor,
+            save_cursor=save_cursor,
+            batch_seconds=lambda: float(self.manager.config.orchestrator.batch_seconds),
+            max_wakes_per_hour=lambda: self.manager.config.orchestrator.max_wakes_per_hour,
+            on_capped=capped,
+            **extra,
+        )
+        self.queues[project_id] = queue
+        await queue.start()
+        return queue
+
+    async def stop_queue(self, project_id: str) -> None:
+        queue = self.queues.pop(project_id, None)
+        if queue is not None:
+            await queue.close()
+
+    async def classify(self, project_id: str, event: AppEvent) -> Wake | None:
+        """Whether an event of the project wakes its orchestrator, and whether it cannot wait.
+
+        Its own doing is never news to it: an event it caused (``actor: orchestrator``, or its own
+        session's) is dropped at the source, so a message it sends a member cannot wake it again.
+        """
+        project = await self.manager.projects.get(project_id)
+        if project is None or not project.settings.orchestrator.enabled:
+            return None
+        mine = project.settings.orchestrator.session_id
+        p = event.payload
+        if p.get("actor") == "orchestrator" or (event.session_id and event.session_id == mine and event.type not in SELF_EVENTS_ALLOWED):
+            return None
+        kind = event.type
+        if kind == "staff.status":
+            status = str(p.get("status") or "")
+            if status not in STAFF_WAKE_STATUSES or not event.staff_id:
+                return None
+            return Wake(f"staff:{event.staff_id}", urgent=status == "error")
+        if kind == "staff.report":
+            return Wake(f"report:{event.seq}", urgent=p.get("kind") in URGENT_REPORTS)
+        if kind in ("ask.pending", "permission.pending"):
+            if not event.staff_id:
+                return None
+            routed = str(p.get("routed_to") or "")
+            if not routed:
+                routed = self.team.route(project, "permission" if kind == "permission.pending" else "question") if self.team is not None else "operator"
+            # A request the operator decides is news to the orchestrator, not a call to act.
+            return Wake(f"request:{p.get('request_ref') or event.seq}", urgent=routed == "orchestrator")
+        if kind in ("ask.answered", "permission.resolved"):
+            ask = await self._ask_for_event(p)
+            if ask is None:
+                return None
+            own = ask.origin == "orchestrator"
+            escalated = ask.routed_to == "operator" and ask.routed_at > ask.created_at and ask.resolved_by == "operator"
+            if not (own or escalated):
+                return None
+            return Wake(f"answer:{ask.id}", urgent=kind == "ask.answered")
+        if kind in TASK_WAKES:
+            return Wake(f"task:{p.get('task_id') or event.seq}", urgent=kind == "task.merge_failed")
+        if kind == "run.started":
+            if not event.staff_id or p.get("origin") != "operator":
+                return None
+            return Wake(f"wrote:{event.staff_id}")
+        if kind == "schedule.fired":
+            return Wake(f"schedule:{event.seq}", urgent=True) if p.get("kind") == "wake" else None
+        if kind == "watch.fired":
+            action = (p.get("action") or "wake") if isinstance(p.get("action"), str) else "wake"
+            return Wake(f"watch:{event.seq}", urgent=True) if action == "wake" else None
+        if kind in ("dispatch.created", "dispatch.message"):
+            return Wake(f"dispatch:{event.seq}", urgent=True)
+        return None
+
+    async def _ask_for_event(self, payload: Any) -> Ask | None:
+        ref = str(payload.get("request_ref") or "")
+        if ref:
+            row = await self.manager.db.fetchone("SELECT id FROM asks WHERE json_extract(detail_json, '$.event_ref') = ? ORDER BY created_at DESC LIMIT 1", (ref,))
+            if row is not None:
+                return await self.manager.asks.get(row["id"])
+        request_id = str(payload.get("request_id") or "")
+        if request_id.startswith("ask-"):
+            return await self.manager.asks.get(request_id)
+        return None
+
+    async def render(self, project_id: str, batch: Batch) -> str:
+        """One line per event, with the ids the orchestrator needs to act on it without a lookup."""
+        project = await self.manager.projects.get(project_id)
+        name = project.name if project is not None else project_id
+        limit = self.manager.config.orchestrator.batch_max_lines
+        events = batch.events
+        lines: list[str] = []
+        for event in events[:limit]:
+            try:
+                line = await self.line(project, event)
+            except Exception:  # noqa: BLE001 — an event that cannot be described is still named
+                logger.warning("could not describe %s for the orchestrator", event.type, exc_info=True)
+                line = event.type
+            lines.append(f"- {self._clock(event.at)} {line}")
+        if len(events) > limit:
+            lines.append(f"- … and {len(events) - limit} more (Team, Tasks)")
+        first = self._clock(events[0].at) if events else ""
+        return f"[events · {name} · {len(events)} since {first}]\n" + "\n".join(lines)
+
+    async def line(self, project: Project | None, event: AppEvent) -> str:
+        p = event.payload
+        member = await self.manager.staff.get(event.staff_id) if event.staff_id else None
+        task = await self._task_bit(p.get("task_id")) if p.get("task_id") else ""
+        kind = event.type
+        if kind == "staff.status":
+            status = p.get("status")
+            detail = _one_line(str(p.get("detail") or ""), 200)
+            if status == "turn_done_unseen":
+                headline = await self._headline(member)
+                on = await self._on_task(member)
+                quoted = f': "{headline}"' if headline else ""
+                return f"{who(member)} finished a turn{on}{quoted} — ReadStaff(\"{member.name if member else ''}\") for the whole reply"
+            if status == "error":
+                return f"{who(member)} stopped with an error{await self._on_task(member)}: {detail or 'no detail'}"
+            if status == "exited":
+                return f"{who(member)}'s session ended{': ' + detail if detail else ''}"
+            return f"{who(member)} has gone silent{await self._on_task(member)}{': ' + detail if detail else ''} (silent is not failed)"
+        if kind == "staff.report":
+            return f"{who(member)} reported {p.get('kind')}{(' on ' + task) if task else ''}: \"{_one_line(str(p.get('text') or ''), 300)}\""
+        if kind in ("ask.pending", "permission.pending"):
+            ask = await self._ask_for_event(p)
+            short = f" [{ask.short_id}]" if ask is not None else ""
+            routed = ask.routed_to if ask is not None else str(p.get("routed_to") or "")
+            tail = " — yours to answer or escalate" if routed == "orchestrator" else " — the operator decides; you are told"
+            if kind == "permission.pending":
+                text = _one_line(str(p.get("text") or (ask.text if ask else "")), 200)
+                tool = str(p.get("tool") or "")
+                autonomy = project.settings.orchestrator.autonomy if project is not None else ""
+                return f"{who(member)} needs permission{short}: {tool + ': ' if tool and not text.startswith(tool) else ''}{text} (autonomy {autonomy}){tail}"
+            questions = p.get("questions") or []
+            first = questions[0] if questions and isinstance(questions[0], dict) else {}
+            text = _one_line(str(first.get("question") or (ask.text if ask else "")), 240)
+            options = " / ".join(str(o.get("label") or "") for o in first.get("options") or [] if isinstance(o, dict))
+            return f"{who(member)} asks{short}: {text}{' — options: ' + options if options else ''}{tail}"
+        if kind in ("ask.answered", "permission.resolved"):
+            ask = await self._ask_for_event(p)
+            if ask is None:
+                return kind
+            answer = self._answer_text(ask)
+            if ask.origin == "orchestrator":
+                return f"the operator answered your request [{ask.short_id}] \"{_one_line(ask.text, 120)}\": {answer}"
+            return f"the operator answered the request [{ask.short_id}] of {who(member)} you escalated: {answer}"
+        if kind in TASK_WAKES:
+            actor = self._actor(str(p.get("actor") or ""), member)
+            title = f"\"{_one_line(str(p.get('title') or ''), 80)}\" ({p.get('task_id')})"
+            if kind == "task.created":
+                return f"{actor} added {title} to the board ({p.get('to') or 'todo'})"
+            if kind == "task.moved":
+                return f"{actor} moved {title} {p.get('from')} → {p.get('to')}"
+            if kind == "task.assigned":
+                assignee = await self.manager.staff.get(str(p.get("assignee_staff_id") or "")) if p.get("assignee_staff_id") else None
+                error = f" ({_one_line(str(p.get('error')), 200)})" if p.get("error") else ""
+                return f"{title} assigned to {assignee.name}{error}" if assignee else f"{title} is unassigned{error}"
+            if kind == "task.accepted":
+                return f"{actor} accepted {title}"
+            return f"merging {title} failed: {_one_line(str(p.get('error') or 'conflicts'), 300)}"
+        if kind == "run.started":
+            return f"the operator wrote to {who(member)} directly"
+        if kind == "schedule.fired":
+            return f"your wake-up [{p.get('schedule_id')}] fired: {_one_line(str(p.get('note') or p.get('name') or ''), 200)}"
+        if kind == "watch.fired":
+            return f"watch [{p.get('watch_id')}] fired{': ' + _one_line(str(p.get('note')), 200) if p.get('note') else ''}"
+        if kind in ("dispatch.created", "dispatch.message"):
+            title = str(p.get("title") or "")
+            text = _one_line(str(p.get("text") or ""), 600)
+            return f"[from the main orchestrator] dispatch {p.get('dispatch_id') or ''}{': ' + title if title else ''}: {text}"
+        return kind
+
+    @staticmethod
+    def _actor(actor: str, member: Staff | None) -> str:
+        if actor == "staff" and member is not None:
+            return member.name
+        return {"operator": "the operator", "system": "the board", "agent": "an agent"}.get(actor, "someone")
+
+    @staticmethod
+    def _answer_text(ask: Ask) -> str:
+        r = ask.resolution
+        if ask.kind == "permission":
+            return "granted" if r.get("allow") else "refused"
+        if ask.kind == "folder":
+            return "approved" if r.get("allow") or (r.get("selected") and r["selected"][0] == (ask.detail.get("options") or ["Add"])[0]) else "declined"
+        parts = [", ".join(str(s) for s in r.get("selected") or []), str(r.get("text") or "")]
+        return _one_line(" — ".join(p for p in parts if p), 400) or "(no text)"
+
+    async def _task_bit(self, task_id: Any) -> str:
+        row = await self.manager.db.fetchone("SELECT id, title FROM board_tasks WHERE id = ?", (str(task_id),))
+        return f"\"{_one_line(row['title'], 80)}\" ({row['id']})" if row is not None else str(task_id)
+
+    async def _on_task(self, member: Staff | None) -> str:
+        if member is None:
+            return ""
+        session = await self.manager.staff.live(member.id)
+        if session is None or not session.task_id:
+            return ""
+        return " on " + await self._task_bit(session.task_id)
+
+    async def _headline(self, member: Staff | None) -> str:
+        """The start of the member's last reply, so a finished turn can often be judged without reading it."""
+        team = self.team
+        if member is None or team is None:
+            return ""
+        try:
+            live = await team.live_of(member)
+            if live is None:
+                return ""
+            async with asyncio.timeout(READ_TIMEOUT_SECONDS):
+                page = await team.runtime(member).read(live, ReadRequest(what="last", max_chars=self.manager.config.staff.report_summary_chars))
+        except Exception:  # noqa: BLE001 — the line stands without it
+            return ""
+        return _one_line(page.text, HEADLINE_CHARS)
+
+    async def target_state(self, project_id: str) -> TargetState:
+        project = await self.manager.projects.get(project_id)
+        session_id = self.session_of(project) if project is not None else ""
+        if not session_id:
+            return "gone"
+        state = await self.manager.get_state(session_id)
+        if state is None:
+            self._replace_soon(project_id, "its session could not be loaded")
+            return "gone"
+        if state.pending is not None:
+            return "waiting"
+        if state.running and not (state.engine is not None and state.engine.is_terminal):
+            return "running"
+        return "idle"
+
+    def _replace_soon(self, project_id: str, reason: str) -> None:
+        if project_id in self._replacing:
+            return
+        self._replacing.add(project_id)
+
+        async def go() -> None:
+            try:
+                await self.replace(project_id, reason, by="system")
+            except Exception:  # noqa: BLE001
+                logger.exception("could not replace the orchestrator of %s", project_id)
+            finally:
+                self._replacing.discard(project_id)
+
+        task = asyncio.create_task(go(), name=f"orchestrator-replace:{project_id}")
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def deliver(self, project_id: str, text: str, *, steer: bool) -> None:
+        """Hand a batch to the orchestrator: a new turn when it is idle, a steer while it runs.
+
+        A routine batch that finds a run started meanwhile waits for the end of that turn rather than
+        interrupting it. A refusal (no model, a budget, the host still starting) is raised, and the
+        queue keeps the events and tries again later.
+        """
+        project = await self.project(project_id)
+        session_id = self.session_of(project)
+        if not session_id:
+            raise RuntimeError("the project has no orchestrator session")
+        await self.manager.submit(session_id, text, origin="events", as_answer=False, steer=steer, follow_up=not steer)
+
+    async def _capped(self, project_id: str, wait_seconds: float) -> None:
+        notifications = self.app.notifications
+        project = await self.manager.projects.get(project_id)
+        if notifications is None or project is None:
+            return
+        limit = self.manager.config.orchestrator.max_wakes_per_hour
+        await notifications.post(Draft(
+            "orchestrator_report",
+            f"{project.name}: the orchestrator reached {limit} wake-ups this hour",
+            f"Routine events wait about {max(1, round(wait_seconds / 60))} min; questions, permissions and errors still wake it.",
+            kind="orchestrator_capped",
+            project_id=project_id,
+            session_id=self.session_of(project) or None,
+            dedupe_key=f"orchestrator-capped:{project_id}",
+            source="orchestrator",
+        ))
+
+    # -- following the sessions ----------------------------------------------------------------------
+
+    async def on_run_finished(self, session_id: str, run_id: str, status: str) -> None:
+        state = self.manager.live_state(session_id)
+        project_id = str(state.metadata.get("orchestrator_of") or "") if state is not None else ""
+        queue = self.queues.get(project_id) if project_id else None
+        if queue is not None:
+            queue.poke()
+
+    async def on_session_deleted(self, session_id: str) -> None:
+        """The operator deleted the orchestrator's chat: the orchestrator is off, and the journal says so."""
+        row = await self.manager.db.fetchone("SELECT id FROM projects WHERE json_extract(settings, '$.orchestrator.session_id') = ?", (session_id,))
+        if row is None:
+            return
+        project_id = str(row["id"])
+        async with self.lock(project_id):
+            await self.manager.projects.update_orchestrator(project_id, enabled=False)
+            await self.manager.projects.set_orchestrator(project_id, expect=session_id, value="")
+            await self._left_office(project_id)
+        await self._hand_requests_to_operator(project_id, why="the orchestrator's session was deleted")
+        await self.manager.projects.record(project_id, "system", "orchestrator", f"The orchestrator's session {session_id} was deleted; the orchestrator is off.", {"session_id": session_id})
+        await self._changed(project_id, "orchestrator.disabled", "operator")
+
+    async def notification_policy(self, project_id: str) -> ProjectNotifyPolicy:
+        """What the notification router holds for this project: a staff member's request waits for the
+        orchestrator a little before the operator hears of it — not at all when the operator decides."""
+        project = await self.manager.projects.get(project_id)
+        if project is None or not project.settings.orchestrator.enabled:
+            return ProjectNotifyPolicy()
+        orchestrator = project.settings.orchestrator
+        hold = 0 if orchestrator.autonomy == "ask" else self.manager.config.notifications.orchestrator_hold_seconds
+        return ProjectNotifyPolicy(orchestrated=True, hold_seconds=hold, orchestrator_session_id=orchestrator.session_id or None)
+
+    # -- its own requests -----------------------------------------------------------------------------
+
+    async def open_request(self, project: Project, session_id: str, *, kind: str, text: str, options: list[str], detail: dict[str, Any], task_id: str | None = None) -> Ask:
+        """A request of the orchestrator's own to the operator: a row, and the event the router and the app show."""
+        ask = await self.manager.asks.open(project.id, origin="orchestrator", kind=kind, text=text, routed_to="operator", task_id=task_id, detail={**detail, "options": options})
+        ref = f"orchestrator:{project.id}:{ask.id}"
+        await self.manager.db.execute("UPDATE asks SET detail_json = json_set(detail_json, '$.event_ref', ?) WHERE id = ?", (ref, ask.id))
+        ask = (await self.manager.asks.get(ask.id)) or ask
+        run_id = ""
+        state = self.manager.live_state(session_id)
+        if state is not None:
+            run_id = state.run_id or ""
+        await self.manager.bus.publish(
+            "ask.pending",
+            {
+                "request_id": ask.id,
+                "request_ref": ref,
+                "run_id": run_id,
+                "title": f"{project.name} · orchestrator",
+                "questions": [{"question": text[:QUESTION_MAX], "options": [{"label": o, "description": ""} for o in options], "multi": False, "custom": kind == "question"}],
+                "operator_facing": True,
+                "telegram": False,
+                "short_id": ask.short_id,
+                "routed_to": "operator",
+                "kind": kind,
+            },
+            project_id=project.id,
+            session_id=session_id,
+        )
+        return ask
+
+    async def deliver_own(self, ask: Ask, *, allow: bool | None, text: str | None, selected: list[str] | None) -> tuple[bool, str]:
+        """The operator answered one of the orchestrator's own requests. A question needs nothing
+        delivered — its answer wakes the orchestrator as an event — and an approved folder is added."""
+        if ask.kind != "folder":
+            return True, ""
+        options = list(ask.detail.get("options") or [])
+        approved = bool(allow) or bool(selected and options and selected[0] == options[0])
+        if not approved:
+            await self.manager.projects.record(ask.project_id, "system", "folder", f"The operator declined the folder {ask.detail.get('path')}.", {"ask_id": ask.id})
+            return True, ""
+        try:
+            await self.manager.projects.add_folder(ask.project_id, str(ask.detail.get("path") or ""), label=str(ask.detail.get("label") or ""), env=str(ask.detail.get("env") or "") or None, readonly=bool(ask.detail.get("readonly")))
+        except (ProjectError, KeyError) as exc:
+            await self.manager.projects.record(ask.project_id, "system", "folder", f"The folder {ask.detail.get('path')} was approved but could not be added: {exc}", {"ask_id": ask.id})
+            return False, str(exc)
+        await self.manager.projects.record(ask.project_id, "system", "folder", f"The operator approved the folder {ask.detail.get('path')}; it was added.", {"ask_id": ask.id})
+        await self.manager.reload_project(await self.manager.projects.get(ask.project_id), ask.project_id)
+        await self._changed(ask.project_id, "folders", "operator")
+        return True, ""
+
+    # -- the tools' hook ------------------------------------------------------------------------------
+
+    async def service(self, operation: str, /, **kwargs: Any) -> Any:
+        """The tools' hook: every operation first checks that the calling session holds the office.
+        The operation is positional because several tools have an argument called ``op`` of their own."""
+        return await orchestrator_ops.dispatch(self, operation, OPERATIONS, **kwargs)
+
+    def folder_access(self, project: Project, folder: ProjectFolder, session_id: str) -> FolderAccess:
+        """How ``Peek`` reads a folder: directly when it is this process's, otherwise with the reason it cannot."""
+        if not folder.local(self.manager.projects.local_env):
+            return UnreachableFolder(
+                f"{folder.path} is a {folder.env} folder, which this process cannot read; staff that run in a host terminal can, "
+                "so ask one to look, or ask the operator"
+            )
+        services = self.manager.locator_services(session_id)
+        if services is None:
+            return UnreachableFolder("this session's services are not loaded; try again in its next turn")
+        return LocalFolderAccess(Path(folder.path), services)
+
+    def attach(self) -> None:
+        manager = self.manager
+        manager.service_hooks["orchestrator"] = self.service
+        manager.turn_notes_hooks.append(self.turn_notes)
+        manager.preset_hooks.append(self.preset_for)
+        manager.on_finished(self.on_run_finished)
+        manager.delete_hooks.append(self.on_session_deleted)
+        notifications = self.app.notifications
+        if notifications is not None and hasattr(notifications, "set_project_policy"):
+            notifications.set_project_policy(self.notification_policy)
+            if self.team is not None:
+                # The operator answers the orchestrator's own questions from a notification the same
+                # way as a staff member's: the request row is the same kind of row.
+                notifications.register_resolver("orchestrator", self.team.resolve_action)
+        if self.team is not None:
+            self.team.own_requests = self
+
+    async def resume(self) -> None:
+        """Start the wake queues of every project that has an orchestrator, each from its cursor."""
+        for project in await self.manager.projects.list():
+            orchestrator = project.settings.orchestrator
+            if orchestrator.enabled and orchestrator.session_id:
+                self._models[project.id] = orchestrator.model
+                try:
+                    await self.start_queue(project.id)
+                except Exception:  # noqa: BLE001 — one project's queue must not keep the others from starting
+                    logger.exception("could not start the wake-ups of project %s", project.id)
+
+
+
+async def install(app: Application) -> list[asyncio.Task[None]]:
+    orchestrators = Orchestrators(app)
+    app.extensions["orchestrator"] = orchestrators
+    orchestrators.attach()
+    await orchestrators.resume()
+    return []
+
+
+__all__ = ["CURSOR_KEY", "NotCurrent", "Orchestrators", "fit", "install", "who"]

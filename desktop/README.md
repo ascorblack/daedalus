@@ -329,13 +329,23 @@ A link handed to a launcher that is already running goes to that one; it never s
 
 ### Notifications
 
-The launcher watches the stack and tells the desktop when the inbox gains an entry or an agent has
-stopped and is waiting for an answer — `osascript` on macOS, a toast through PowerShell on Windows,
-`notify-send` on Linux. Nothing is bundled for it; a machine without `notify-send` says so once in
-the launcher's log and is not asked again. It is a poll of the app's own status endpoint every 20
-seconds, using the token the app minted for itself, which the launcher reads out of the state
-database through the container and keeps in memory only. An installation where that token cannot be
-read gets no notifications and says so; nothing else changes.
+The launcher listens to the app's event stream (`/api/events`, as a `launcher` client) and raises a
+desktop notification for each one the app's router marks for the desktop — `osascript` on macOS, a
+toast through PowerShell on Windows, `notify-send` on Linux. The router decides, not the launcher: it
+knows whether the app is in front of the operator, their quiet hours and what already reached their
+phone. Nothing is bundled for it; a machine without `notify-send` says so once in the launcher's log
+and is not asked again.
+
+A click opens what the notification is about where the platform tells anyone about it: on Windows
+the toast follows its `daedalus://open/<session>` link, and on Linux the launcher waits for the click
+(at most ten minutes, at most eight notifications at once) and shows the address. On macOS a
+notification raised by `osascript` carries no link, so a click brings nothing forward.
+
+After a reconnect the app replays what the launcher missed; anything more than two minutes old is
+folded into one line ("3 notifications while the launcher was away"). The stream is authorised with
+the token the app minted for itself, which the launcher reads out of the state database and keeps in
+memory only. An installation where that token cannot be read gets no notifications and says so;
+nothing else changes.
 
 ## Commands
 

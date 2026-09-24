@@ -82,28 +82,58 @@ class JournalNote(BaseModel):
     text: str = Field(max_length=JOURNAL_NOTE_MAX_CHARS)
 
 
-def host_bridge(settings: Any) -> bool:
+class OrchestratorBody(BaseModel):
+    """Switching a project's orchestrator on. Each field left out keeps what the project has, and a
+    project that never had one starts from the installation's defaults (Settings)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str | None = Field(default=None, max_length=200)
+    """A model preset id; empty is the Settings default for project orchestrators."""
+    autonomy: Literal["ask", "normal", "full"] | None = None
+    concurrency_cap: int | None = Field(default=None, ge=1)
+
+
+class OrchestratorPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str | None = Field(default=None, max_length=200)
+    autonomy: Literal["ask", "normal", "full"] | None = None
+    concurrency: int | None = Field(default=None, ge=1)
+    concurrency_cap: int | None = Field(default=None, ge=1)
+
+
+class ReplaceBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=300)
+
+
+def host_bridge(settings: Any, terminals: Any = None) -> bool:
     """Whether a terminal daemon answers on the host, so a host folder can be worked in by anything.
 
-    The daemon writes its ``endpoint`` into the run directory the host is told about; an empty or
-    missing directory is a bridge that is not installed. Read at the moment of asking, because the
-    bridge is installed and removed while this process runs, and the directory is mounted either way.
-    The setting belongs to the terminals, which may not be configured on this installation at all.
+    With the terminals service running, its live connection is the answer: a daemon that was killed
+    leaves its ``endpoint`` behind, and a folder accepted on the strength of that file would be a row
+    nothing could open. Without the service (the doctor, a test) the directory is read at the moment
+    of asking, because the bridge is installed and removed while this process runs, and the directory
+    is mounted either way; an empty or missing one is a bridge that is not installed.
     """
+    if terminals is not None and terminals.configured("host"):
+        return bool(terminals.available("host"))
     directory = getattr(settings, "terminals_host_dir", None)
     if not directory:
         return False
     return (Path(directory) / "endpoint").is_file()
 
 
-def environments(settings: Any, local_env: str) -> dict[str, Any]:
+def environments(settings: Any, local_env: str, terminals: Any = None) -> dict[str, Any]:
     """Which environments a folder of this installation may live in.
 
     Natively the process is on the host and there is no container. In Docker the container is where
     the process is, and the host is reachable only through its terminal bridge, and only by what runs
     in a terminal: a folder there without a bridge would be a row nothing could ever open.
     """
-    bridge = host_bridge(settings)
+    bridge = host_bridge(settings, terminals)
     available = [local_env] + (["host"] if local_env == "container" and bridge else [])
     return {"local": local_env, "available": available, "host_bridge": bridge, "docker": local_env == "container"}
 
@@ -125,7 +155,7 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
     settings = app.settings
 
     def view(project: Project, sessions: list[dict[str, Any]]) -> dict[str, Any]:
-        bridge = host_bridge(settings)
+        bridge = host_bridge(settings, app.extensions.get("terminals"))
         body = project.view()
         for folder_view, folder in zip(body["folders"], project.folders, strict=True):
             folder_view["reach"] = reach(folder, manager.projects.local_env, bridge)
@@ -148,7 +178,7 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         """A folder or a default in an environment this installation cannot reach is refused at the door."""
         if env is None:
             return
-        offered = environments(settings, manager.projects.local_env)
+        offered = environments(settings, manager.projects.local_env, app.extensions.get("terminals"))
         if env in offered["available"]:
             return
         if env == "host":
@@ -179,7 +209,7 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
     @api.get("/api/project-environments")
     async def project_environments(_: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         """Where a folder may live, for the environment choice when a folder is added."""
-        return environments(settings, manager.projects.local_env)
+        return environments(settings, manager.projects.local_env, app.extensions.get("terminals"))
 
     @api.post("/api/projects")
     async def create_project(body: ProjectBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -330,6 +360,62 @@ def register(api: FastAPI, app: Application, auth: Callable[..., Any]) -> None:
         entry = await manager.projects.record(project_id, "operator", "note", text)
         await manager.bus.publish("project.changed", {"change": "journal", "actor": "operator"}, project_id=project_id)
         return entry.view()
+
+    # -- the orchestrator ----------------------------------------------------------------
+
+    def orchestrators() -> Any:
+        found = app.extensions.get("orchestrator")
+        if found is None:
+            raise HTTPException(503, "orchestrators are not available on this installation")
+        return found
+
+    def office(project: Project) -> dict[str, Any]:
+        orchestrator = project.settings.orchestrator
+        return {**orchestrator.dump(), "effective_model": orchestrators().model_of(project), "project_id": project.id}
+
+    @api.post("/api/projects/{project_id}/orchestrator")
+    async def enable_orchestrator(project_id: str, body: OrchestratorBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Switch the orchestrator on; a project that has one already only changes what is sent."""
+        await existing(project_id)
+        try:
+            project = await orchestrators().enable(project_id, model=body.model, autonomy=body.autonomy, concurrency_cap=body.concurrency_cap)
+        except ProjectError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return office(project)
+
+    @api.patch("/api/projects/{project_id}/orchestrator")
+    async def patch_orchestrator(project_id: str, body: OrchestratorPatch, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        await existing(project_id)
+        try:
+            project = await orchestrators().update(project_id, model=body.model, autonomy=body.autonomy, concurrency=body.concurrency, concurrency_cap=body.concurrency_cap)
+        except ProjectError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return office(project)
+
+    @api.delete("/api/projects/{project_id}/orchestrator")
+    async def disable_orchestrator(project_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """Switch it off. Its chat stays, with its history; what it was asked goes to the operator."""
+        await existing(project_id)
+        return office(await orchestrators().disable(project_id))
+
+    @api.post("/api/projects/{project_id}/orchestrator/replace")
+    async def replace_orchestrator(project_id: str, body: ReplaceBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """A new orchestrator session in place of the current one, linked to it and journaled."""
+        await existing(project_id)
+        try:
+            project = await orchestrators().replace(project_id, body.reason or "replaced by the operator")
+        except ProjectError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return office(project)
+
+    @api.get("/api/projects/{project_id}/state")
+    async def project_state(project_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The state block the orchestrator reads at the start of each turn: what it sees, as it sees it."""
+        project = await existing(project_id)
+        orchestrator = project.settings.orchestrator
+        session_id = orchestrator.session_id if orchestrator.enabled else ""
+        text = await orchestrators().project_state(project, session_id=session_id or None)
+        return {"project_id": project_id, "session_id": session_id or None, "text": text, "chars": len(text), "max_chars": manager.config.orchestrator.state_max_chars}
 
 
 __all__ = ["environments", "host_bridge", "reach", "register"]

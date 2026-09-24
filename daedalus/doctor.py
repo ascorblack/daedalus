@@ -27,6 +27,7 @@ from daedalus.providers.pricing import pricing_table
 from daedalus.providers.registry import _is_vendor_host
 from daedalus.security.redact import redact as redact_text
 from daedalus.terminals.client import PtydClient, Unavailable
+from daedalus.terminals.update import BY_HAND
 from daedalus.terminals.wire import RpcError
 from daedalus.tools.shell import bwrap_status, native_sandbox_note
 
@@ -552,10 +553,19 @@ async def _native(ctx: DoctorContext) -> list[Check]:
 
 TERMINAL_FIXES = {
     "not_installed": "bash deploy/setup.sh offers to install it",
-    "not_running": "start the terminal service: docker compose up -d terminals, or the host bridge's systemd unit",
+    # An empty run directory in a compose install: the stack predates the terminals service, which a
+    # restart of the agent's container does not create, and its image may predate the daemon.
+    "not_installed_container": "create the terminals service: docker compose -f deploy/compose.yaml --env-file .env up -d --build",
+    # The host bridge is a systemd user unit of the operator's, so every fix for it is a command on
+    # the server, run as the operator rather than with sudo.
+    "not_installed_host": "on the server, as yourself: bash deploy/setup.sh, and answer yes to \"Host terminal\"",
+    "not_running": "start the terminal service: docker compose up -d terminals",
+    "not_running_host": "on the server, as yourself: systemctl --user restart daedalus-ptyd (its log: journalctl --user -u daedalus-ptyd); if it stops when you log out, sudo loginctl enable-linger $USER",
     "refused": "the token changed under the connection; it retries on its own — if it persists, restart the terminal service",
     "unreachable": "read the terminal service's log; the host keeps retrying",
+    "permission_denied": "the host terminal needs Docker running as root: with rootless Docker or userns-remap, root in this container is an ordinary user on the host and cannot open your 0700 directory",
     "protocol_mismatch": "recreate the terminals service from this build's image (docker compose up -d terminals), which ends its terminals",
+    "protocol_mismatch_host": "on the server, as yourself: bash deploy/setup.sh copies this build's daemon to the host and restarts it, which ends the host terminals",
 }
 
 
@@ -571,9 +581,11 @@ async def _terminals(ctx: DoctorContext) -> list[Check]:
         if run_dir is None:
             continue
         name = f"terminals ({env})"
+        update_to = ""
         if service is not None:
             status = next(e for e in service.environments(await service.running_by_env()) if e.env == env)
             available, reason, detail, info, running = status.available, status.reason, status.detail, service.links[env].info, status.running
+            update_to = status.image_version if status.update_available else ""
         else:
             client = PtydClient(env, run_dir)
             try:
@@ -587,12 +599,23 @@ async def _terminals(ctx: DoctorContext) -> list[Check]:
             finally:
                 await client.close()
         if not available:
-            label = {"not_installed": "not installed", "not_running": "not running", "protocol_mismatch": "protocol mismatch"}.get(reason, reason or "unreachable")
+            label = {"not_installed": "not installed", "not_running": "not running", "permission_denied": "permission denied", "protocol_mismatch": "protocol mismatch"}.get(reason, reason or "unreachable")
             severity = "info" if reason == "not_installed" and env == "host" else "warn"
-            out.append(Check(name, False, f"{label}: {detail}", severity, TERMINAL_FIXES.get(reason, "")))
+            fix = TERMINAL_FIXES.get(f"{reason}_{env}") or TERMINAL_FIXES.get(reason, "")
+            out.append(Check(name, False, f"{label}: {detail}", severity, fix))
             continue
         sandbox = (info.get("capabilities") or {}).get("sandbox")
         out.append(Check(name, True, f"ptyd {info.get('version')} (protocol {info.get('protocol')}), {running} running", "ok"))
+        if update_to:
+            out.append(
+                Check(
+                    f"terminals update ({env})",
+                    False,
+                    f"the image holds ptyd {update_to}; the service still runs {info.get('version')}",
+                    "info",
+                    f"update it from the Terminals screen, or run {BY_HAND} — either ends the {running} running terminal(s)",
+                )
+            )
         out.append(Check(f"terminal sandbox ({env})", sandbox == "ok", "available" if sandbox == "ok" else f"not available: {sandbox}", "ok" if sandbox == "ok" else "info", "terminals open unsandboxed until it is"))
     if ctx.settings.telegram_bot_token and not ctx.settings.miniapp_public_url.strip():
         # A terminal's socket is refused unless it comes from the app's own origin, and Telegram's

@@ -6,8 +6,8 @@ a file; every check names what it must print. Ask the operator only for what the
 
 ## 0. What you are installing
 
-Daedalus is a personal, self-developing agent: a Docker Compose stack of two containers from one image
-(the agent, and a key proxy that holds provider keys), plus three optional ones behind profiles —
+Daedalus is a personal, self-developing agent: a Docker Compose stack of three containers from one image
+(the agent, a key proxy that holds provider keys, and the terminals the app opens), plus three optional ones behind profiles —
 `search` (a self-hosted SearXNG), `selfdev` (the rebuilder, which a server that develops itself needs)
 and `telegram` (a local Bot API server). The operator talks to it in a web app (a PWA, installable on a
 phone) and, optionally, in Telegram. Read `README.md` once; it is short.
@@ -66,6 +66,13 @@ Fill `.env` (secrets do NOT go here; it is mounted into the agent container):
 Fill `../daedalus-secrets/keyproxy.env` with the provider keys (`DEEPSEEK_API_KEY=…`, `OPENROUTER_API_KEY=…`,
 `OPENCODE_API_KEY=…`; a self-hosted endpoint is `VLLM_BASE_URL`/`VLLM_API_KEY` in `.env`).
 
+Before starting, create the host terminal's directory as the operator — compose mounts it whether or not
+the host terminal is installed, and Docker would create a missing one as root:
+
+```bash
+bash deploy/host-terminal.sh prepare-dir        # ../daedalus-host-terminals, 0700, the operator's
+```
+
 Start:
 
 ```bash
@@ -75,8 +82,9 @@ docker compose -f deploy/compose.yaml --env-file .env up -d --build
 docker compose -f deploy/compose.yaml --env-file .env --profile telegram up -d --build
 ```
 
-That is **one image and two containers from it**: the agent, and the key proxy that holds the
-provider keys. Everything else is a profile, and none of them is on unless you name it. Add only the
+That is **one image and three containers from it**: the agent, the key proxy that holds the
+provider keys, and `terminals`, the daemon behind the app's container terminals. Everything else is
+a profile, and none of them is on unless you name it. Add only the
 ones the operator's answers in section 1 asked for:
 
 | `--profile` | What it starts | Cost | Add it when |
@@ -160,16 +168,18 @@ offered as an undo in the app, which says once that the older ones were removed.
 
 In this Compose install the container sees only what is mounted into it, so a folder outside the stack
 needs a bind mount before an agent can work in it. The app says which projects are not reachable; add
-the mount to the agent service and restart:
+the mount to the agent service and to the terminals service, and restart:
 
 ```yaml
-# deploy/compose.yaml → services.daedalus.volumes
+# deploy/compose.yaml → services.daedalus.volumes, and the same line under services.terminals.volumes
       - /home/<operator>/work/<folder>:/home/<operator>/work/<folder>
 ```
 
-Mount it at **the same path inside the container as outside**: the project stores the path the operator
-gave, and the same string has to name the folder on both sides. Then
-`docker compose up -d daedalus` and the project reports itself reachable.
+Mount it at **the same path inside the container as outside**, in both services: the project stores the
+path the operator gave, and the same string has to name the folder to the agent and in a terminal. Then
+`docker compose up -d daedalus terminals` and the project reports itself reachable. Recreating
+`terminals` ends every container terminal, so tell the operator before you run it if any are open
+(`GET /api/terminals` counts them).
 
 This is the operator's decision too: do not add folders they did not ask for, and never mount their
 whole home directory — the point of a project is that the boundary is a real one.
@@ -260,7 +270,15 @@ container; it is re-synced only when `uv.lock` or `pyproject.toml` changed.
 
 In `server` mode the agent updates itself through pull requests the operator approves; the supervisor
 pulls `main`, preflights and restarts (rolling back on failure). To update by hand: `git -C
-~/daedalus pull`, `git -C ~/protocore-exp pull`, then `docker compose … up -d --build`. In `server`
+~/daedalus pull`, `git -C ~/protocore-exp pull`, then `docker compose … up -d --build`.
+
+That last command also recreates the `terminals` service whenever the image changed, which ends every
+container terminal. To update the agent and leave the terminals running, name the agent's service:
+`docker compose … up -d --build daedalus`. The terminals' daemon is then updated separately and only
+when the operator chooses: the app offers it (with the count of terminals it ends), or `docker compose
+… up -d terminals`. An installation that predates the `terminals` service needs one `docker compose … up
+-d --build` to create it — restarting the agent's container does not, and the image has to be rebuilt
+because an older one carries no daemon. In `server`
 mode never edit files inside the `daedalus` checkout on the server: the supervisor resets it to
 `origin/main` on every rebuild.
 
@@ -287,6 +305,8 @@ whether this installation is finished. The lines worth reading back to the opera
 | `self-development` | the resolved mode and the reason for it; a mode set by hand that is missing a prerequisite is a warning naming what to provide |
 | `browser tools` | whether this image carries a headless Chromium. "not installed in this image" is correct for `:latest` |
 | `isolation` | on a server, nothing: the agent is in a container. It appears only on a native desktop installation, where it says there is no container boundary |
+| `terminals (container)` | the terminal daemon answers, its version and how many terminals run. "not installed" on a stack started before the service existed: run `docker compose … up -d --build`. `terminals update (container)` means the image holds a newer daemon than the one running |
+| `terminals (host)` | the host terminal (optional). "not installed" is information, not a fault: install it only if the operator asked for a shell on the server, with `bash deploy/host-terminal.sh install` run **as the operator, not with sudo**, after the stack is built. "permission denied" means Docker is rootless or uses userns-remap, where it cannot work |
 | `container image`, `image rebuild channel`, `published ports` | the container-only checks. On a native installation each says "not applicable (native)" rather than being left out |
 
 ## 8. What to report back

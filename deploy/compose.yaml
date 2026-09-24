@@ -26,8 +26,35 @@
 #     runs afterwards only when the checkout declares something the environment was not built for — which
 #     covers a change that landed here, and a hand update the volume would otherwise outlive silently.
 #   telegram-bot-api-data -> /var/lib/telegram-bot-api  files the local Bot API server stores
+#   terminal-run          -> /run/daedalus-terminals    the terminal daemon's socket and token, shared
+#                                                       by the agent and the terminals service
+#   terminals-home        -> /root (terminals only)     the terminals' home: CLI installs, their logins,
+#                                                       shell history. Never mounted into the agent.
+#   terminals-state       -> /var/lib/ptyd (terminals only)  the daemon's journal, launches, logs
+#   ../../daedalus-host-terminals -> /run/daedalus-host-terminals  the host terminal's socket and
+#                                                       token (DAEDALUS_HOST_TERMINALS_DIR overrides it)
 #
-# Networks: "telegram" (bot ⇄ local Bot API), "keys" (bot ⇄ key proxy), "search" (bot ⇄ SearXNG).
+# Host terminal (optional). `bash deploy/setup.sh` can install `ptyd` on the server itself as a
+# systemd user unit of the operator's (deploy/ptyd/daedalus-ptyd.service): a shell on the server as
+# the operator, opened from the app. Its run directory is a sibling of this checkout, and it is
+# mounted into the agent whether or not the unit is installed: an empty directory reads as "not
+# installed", and installing or removing the unit later needs no change here and no recreate,
+# because the socket appears in a directory that is already mounted. setup.sh creates the directory
+# as the operator; left to Docker, it would be created as root and the unit could not write to it.
+#
+# Networks: "telegram" (bot ⇄ local Bot API), "keys" (bot ⇄ key proxy), "search" (bot ⇄ SearXNG),
+# "terminals" (the terminals service's own way out, with no route to the key proxy or SearXNG).
+#
+# Terminals. The `terminals` service is the same image started as `ptyd`, the daemon that owns the
+# container terminals of the app. It is a service of its own so that the terminals outlive the agent:
+# `docker restart deploy-daedalus-1`, and the rebuilder's `up -d --no-deps daedalus`, never touch it.
+# Recreating it — `docker compose up -d terminals` after the image changed, or the update button the
+# app shows when the image holds a newer daemon — ends every container terminal, and the app says how
+# many before it does. The first deploy that has this service needs `docker compose ... up -d --build`
+# (not a restart of the agent's container): the service is new, the agent gains a volume, and an image
+# built before this service existed has no daemon in it to start.
+# A project folder mounted into the agent is mounted into `terminals` as well, at the same absolute
+# path, so a path means the same thing in a terminal as it does to the agent.
 #
 # One image: the agent's. The key proxy is a second container from it with another command, and the
 # services that are not the agent are behind profiles, so an install pulls one image and runs two
@@ -72,6 +99,11 @@ services:
       API_PORT: ${API_PORT:-8765}
       SERVICES_PORT_RANGE: ${SERVICES_PORT_RANGE:-8100-8119}
       SERVICES_PUBLIC_HOST: ${SERVICES_PUBLIC_HOST:-}
+      # The terminals service's run directory (the terminal-run volume) and the ports it publishes.
+      TERMINALS_CONTAINER_DIR: /run/daedalus-terminals
+      # The host terminal's run directory: empty until the systemd user unit is installed on the host.
+      TERMINALS_HOST_DIR: /run/daedalus-host-terminals
+      TERMINALS_PORT_RANGE: ${TERMINALS_PORT_RANGE:-8120-8139}
       GITHUB_DAEDALUS_TOKEN: ${GITHUB_DAEDALUS_TOKEN:-}
       DAEDALUS_GITHUB_ORG: ${DAEDALUS_GITHUB_ORG:-}
       # Provider keys live in the key proxy, not here (see the note at the top of this file).
@@ -97,6 +129,12 @@ services:
       - ${DAEDALUS_SSH_DIR:-../../daedalus-secrets/ssh}:/srv/ssh:ro
       - telegram-bot-api-data:/var/lib/telegram-bot-api
       - rebuild-trigger:/run/daedalus-rebuild
+      # The terminal daemon's socket and token. The directory is sealed from the agent's commands;
+      # only the app's own process opens it.
+      - terminal-run:/run/daedalus-terminals
+      # The host terminal's socket and token, from the server itself. Sealed the same way: its token
+      # opens a shell on the server as the operator.
+      - ${DAEDALUS_HOST_TERMINALS_DIR:-../../daedalus-host-terminals}:/run/daedalus-host-terminals
     ports:
       - "127.0.0.1:${API_PORT:-8765}:${API_PORT:-8765}"
       # Services the agent hosts (ServiceStart) listen in this range; published on every interface so the
@@ -110,6 +148,50 @@ services:
       searxng:
         condition: service_started
         required: false
+
+  # The container terminals: `ptyd` from the agent's own image, owning every shell and CLI the app
+  # opens in the container environment. Why it is a service apart, and what recreating it costs, is
+  # in the header of this file.
+  terminals:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: daedalus:local
+    restart: unless-stopped
+    # Reaps what the terminals leave behind: a shell's orphaned background job is reparented to
+    # pid 1, and ptyd is not an init.
+    init: true
+    entrypoint: ["/usr/local/bin/ptyd"]
+    command: ["serve", "--env", "container", "--run-dir", "/run/daedalus-terminals",
+              "--state-dir", "/var/lib/ptyd", "--home", "/root"]
+    # ptyd hangs up every terminal on SIGTERM and kills what is left two seconds later.
+    stop_grace_period: 10s
+    # Root, like the agent: the workspaces are the agent's files, written as root, and a terminal
+    # that could not edit them would need a chown regime of its own.
+    environment:
+      HOME: /root
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/daedalus-terminals/ptyd.sock"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+    volumes:
+      # The same path as in the agent's container, so a workspace path means one folder on both sides.
+      - daedalus-workspaces:/srv/workspaces
+      # CLI installs, their logins and transcripts, shell history. Docker seeds it from the image's
+      # /root on first use. Never mounted into the agent: a login made in a terminal is not the
+      # agent's to read.
+      - terminals-home:/root
+      - terminals-state:/var/lib/ptyd
+      - terminal-run:/run/daedalus-terminals
+    ports:
+      # A server started in a container terminal (a dev server, a preview) listens in this range and
+      # is published on every interface, like the agent's own range, so it is reached from the LAN at
+      # SERVICES_PUBLIC_HOST:<port>. Apart from the agent's range: both are published, and one port
+      # can be published by one container only.
+      - "${TERMINALS_PORT_RANGE:-8120-8139}:${TERMINALS_PORT_RANGE:-8120-8139}"
+    # Its own network, for the way out: a terminal has no business with the key proxy or SearXNG.
+    networks: [terminals]
 
   # A metasearch over Bing, Brave, DuckDuckGo, Google (CSE), Mojeek and Wikipedia with a JSON API,
   # reachable only from the agent container. Settings in deploy/searxng/settings.yml. Behind the
@@ -224,6 +306,7 @@ networks:
   telegram:
   keys:
   search:
+  terminals:
 
 volumes:
   daedalus-state:
@@ -233,3 +316,6 @@ volumes:
   telegram-bot-api-data:
   rebuild-trigger:
   searxng-cache:
+  terminal-run:
+  terminals-home:
+  terminals-state:

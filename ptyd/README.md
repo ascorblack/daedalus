@@ -27,8 +27,9 @@ The protocol, the run directory, the events and the guarantees about the output 
 | `cmd/ptyd` | flags, signals, shutdown |
 | `internal/server` | the run directory, the token handshake, channels, the JSON-RPC dispatcher; `clienttest` is a client for tests |
 | `internal/rpc` | the methods |
-| `internal/term` | one terminal (reader, emulator goroutine, input arbitration, keys, environment), its attachments (flow control, size ownership, the keyboard), and the registry |
+| `internal/term` | one terminal (reader, emulator goroutine, input arbitration, keys, environment, the commands its shell reports), its attachments (flow control, size ownership, the keyboard), and the registry |
 | `internal/scan` | the clamps and the marks, over the raw output |
+| `internal/shellint` | shell integration: the scripts for bash, zsh, fish and PowerShell, compiled in and written to `<state>/shell` at start, and the launch of an integrated shell |
 | `internal/ring` | the output ring, by absolute offset |
 | `internal/emulator` | the emulator interface; `ghostty` (the screen emulator), `basic` (modes only, for builds without cgo), `fake` (for tests), `production` (which of them a build runs), `conformance` (the behaviour every one must have) |
 | `internal/answer` | the answers to terminal queries, as xterm.js gives them; `testdata/xterm-replies.json` is recorded from xterm.js |
@@ -79,7 +80,8 @@ docker run --rm --memory 6g --memory-swap 6g --user "$(id -u):$(id -g)" -v "$PWD
     go vet ./... && go test -race ./... && GOOS=darwin go vet ./...'
 ```
 
-The tests start real PTYs. Fuzzers (`FuzzScan`, `FuzzFrame`) and `TestProbeCorpus` (a directory of
+The tests start real PTYs, and real shells: the image carries zsh and fish beside bash, so the
+shell-integration tests run for each (a shell that is missing is skipped, and says so). Fuzzers (`FuzzScan`, `FuzzFrame`) and `TestProbeCorpus` (a directory of
 hostile output named by `PTYD_PROBES_DIR`) are for runs under a memory cap. `BenchmarkThroughput`
 (program → PTY → daemon) is measured against `BenchmarkPTYAlone` (the same program and PTY, output
 thrown away); `PTYD_BENCH_SHORT_LINES=1` runs both on `yes`, the worst case per byte.

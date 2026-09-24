@@ -322,8 +322,9 @@ release signing and uninstalling.
 
 ### 2. A server
 
-The same stack with Compose in front of it: one published image, two containers from it, and every
-other piece behind a profile that is off unless you ask for it.
+The same stack with Compose in front of it: one published image, three containers from it (the agent,
+the key proxy and the terminals), and every other piece behind a profile that is off unless you ask
+for it.
 
 Requirements: Docker with Compose, and at least one model API key **or** a ChatGPT / Claude Code /
 SuperGrok login on the host. **Telegram is optional**: with a bot token you get the chat as a front;
@@ -353,6 +354,65 @@ The browser skills — driving a page with Playwright, drawing with Pillow — a
 image either: they are two thirds of one and most sessions never open a page. Run the `:browser` tag
 instead (`ghcr.io/ascorblack/daedalus:browser`, 368 MB to pull) where they are wanted; without it the
 skills say so instead of writing scripts that cannot run, and `daedalus doctor` says it too.
+
+### Terminals
+
+The shells the app opens in the container run in a third container, the `terminals` service: the same
+image started as `ptyd`, the terminal daemon. It is a service of its own so the terminals outlive the
+agent. What survives what:
+
+| | Container terminals |
+|---|---|
+| `docker restart deploy-daedalus-1`, a self-development rebuild (`up -d --no-deps daedalus`), the agent's own restart | keep running; the app reattaches |
+| `docker compose up -d terminals` after the image changed, or **Update** in the app | end — every one of them |
+| `docker compose down`, a reboot | end |
+
+- **The first deploy that has it needs `docker compose -f deploy/compose.yaml --env-file .env up -d --build`**,
+  not a restart of the agent's container: the service is new, the agent gains a volume, and an image
+  built before the service existed has no daemon in it. Until then `daedalus doctor` reports the
+  container terminals as not installed and names that command.
+- **Updating the daemon.** A deploy never recreates the service, so after a rebuild the image can hold a
+  newer `ptyd` than the one running. The app and the doctor say so, and the update — recreating the
+  service, which ends every container terminal — is the operator's, with the count of what it ends
+  shown first. The app's button asks the `selfdev` rebuilder to do it; without that profile, run
+  `docker compose -f deploy/compose.yaml --env-file .env up -d terminals` on the server.
+- **Ports.** A server started in a terminal (a dev server, a preview) listens in `TERMINALS_PORT_RANGE`,
+  `8120–8139` by default, published on every interface like the agent's own `8100–8119`, and reached
+  at `SERVICES_PUBLIC_HOST:<port>`. The two ranges must not overlap.
+- **Its home.** `/root` in the service is the `terminals-home` volume: CLIs installed there, their
+  logins, shell history. It is never mounted into the agent's container.
+- **Project folders.** A folder mounted into the agent's container is mounted into `terminals` too, at
+  the same absolute path, so a path means the same thing in a terminal as it does to the agent. The
+  desktop launcher writes both entries itself.
+
+### The host terminal (optional)
+
+A shell on the server itself, as you, opened from the app like any other terminal. It is `ptyd` again,
+the same binary as the container's, installed as a **systemd user unit of yours**:
+`bash deploy/setup.sh` asks at its last step, and `bash deploy/host-terminal.sh install` does it on its
+own. It copies the daemon out of the image the stack was built from into `~/.local/lib/daedalus/`,
+writes `~/.config/systemd/user/daedalus-ptyd.service`, turns on lingering (so it survives your logout;
+where that needs polkit, it prints the one `sudo loginctl enable-linger` to run) and starts it.
+
+- **What it can do.** Everything you can do on the server: it is your shell, in your home, with your
+  own logins — the `terminals-home` logins of the container terminals do not apply there. CLI staff and
+  project folders on the host go through it as well (Docker installs only), and so do the git
+  operations of staff worktrees in those folders.
+- **What is recorded.** Every attach and detach, with how the browser signed in and how many bytes it
+  typed, and every write an agent makes. **What you type is never recorded**: it would hold every
+  password typed at a `sudo` prompt.
+- **How the container reaches it.** Its socket and token live in `../daedalus-host-terminals`, beside the
+  checkout (`DAEDALUS_HOST_TERMINALS_DIR` moves it), which compose mounts into the agent's container
+  whether or not the unit is installed. An empty directory reads as "not installed", so installing or
+  removing it needs no recreate. The directory is sealed from the agent's own commands. It needs
+  Docker running as root: with rootless Docker or userns-remap, root in the container cannot open your
+  `0700` directory, and the app says "permission denied".
+- **What survives what.** `docker restart`, a rebuild and recreating the containers leave it running.
+  `systemctl --user restart daedalus-ptyd`, a reboot, and re-running the installer (which updates the
+  daemon to the image's) end every host terminal; setup asks before it does.
+- **Removing it:** `systemctl --user disable --now daedalus-ptyd`, or `bash deploy/host-terminal.sh
+  remove`, which also deletes the unit and the binary. `bash deploy/host-terminal.sh status` says where
+  it stands, and `daedalus doctor` names the fix for each way it can be down.
 
 ### The install ends in the app: add a model
 
@@ -579,6 +639,34 @@ session. What staff ask — a question, or a call the policy refused — is a re
 `POST /api/asks/{id}/answer` (`{"allow"}`, `{"selected": [...]}` or `{"text"}`, the id or its
 six-character short form) answers one; the first answer wins, and a second gets 409 naming who was
 first. A request the orchestrator leaves unanswered for ten minutes comes to you.
+
+**A project's orchestrator.** `POST /api/projects/{id}/orchestrator` (`{"model", "autonomy",
+"concurrency_cap"}`, each optional) switches it on: a chat of its own that runs the team and does none
+of the work — its tools are the brief, the folders, the journal, the team, the board, a read-only
+`Peek` into the files, `AskOperator` and `ProjectReport`, and nothing that writes a file or runs a
+command. It runs the team with the same limits as your own routes: it hires (`Hire`, only on an
+executor that can start here), changes and dismisses staff, hands out tasks (`Assign` refuses a brief
+without all four parts), talks to them (`Tell`), reads what they did in bounded pages (`ReadStaff`),
+and interrupts, pauses or releases them. It answers their requests within the project's autonomy:
+under `ask` its answer to a question is only a suggestion to you and permissions are yours; under
+`normal` it grants only by quoting a line of the brief's "allowed without the operator"; under `full`
+it grants with a stated reason, and a command-line agent still starts in its usual permission mode.
+It can always deny, or pass a request to you with its suggestion. `PATCH` the same address changes its model, autonomy or concurrency, `DELETE` switches it off
+(its chat stays), and `POST …/orchestrator/replace` (`{"reason"}`) gives it a fresh chat that names
+the one it replaces. It sleeps between turns and is woken by its project's events, gathered for twenty
+seconds (at once for a question, a permission, an error or a stuck report); every turn begins with the
+project as it is now, which `GET /api/projects/{id}/state` shows as it sees it. Its questions never
+pause it: they are requests you answer like a staff member's, and the answer wakes it. Its model is
+the project's own choice, else the default for project orchestrators in Settings → Models, else the
+strongest preset; the model chip in its chat changes the project's choice.
+
+A command-line member runs its CLI in a terminal of its own, which you can open like any other. The
+launch answers the CLI's folder-trust question on screen before the task is given, and a CLI that
+cannot get ready — signed out, or stuck on a screen it does not recognise within `ready_timeout_s` —
+shows as an error with that screen, its terminal left open for you. A working CLI that goes quiet has
+its screen read: an idle prompt seen twice ends the turn, anything less shows as silence, never as
+a failure. Its team tools post to the terminal service's hook listener and are answered there. The
+CLIs keep running when the host restarts, and the host takes them up again where they were.
 
 Push reaches a phone or a browser with the app closed once the app is served from a public https
 address (`MINIAPP_PUBLIC_URL`). Turn it on per device in Settings → Notifications; inside Telegram the
