@@ -2969,3 +2969,28 @@ Object.assign(DICT, {
   "term.phone.key.pgdn": { en: "Page down", ru: "Страница вниз" },
 });
 
+// A project on a phone: its four tabs, its header and the request that waits for the operator.
+Object.assign(DICT, {
+  "phone.tabs": { en: "Project", ru: "Проект" },
+  "phone.tab.orchestrator": { en: "Orchestrator", ru: "Оркестратор" },
+  "phone.tab.team": { en: "Team", ru: "Команда" },
+  "phone.tab.board": { en: "Board", ru: "Доска" },
+  "phone.tab.terminals": { en: "Terminals", ru: "Терминалы" },
+  "phone.pages": { en: "Project pages", ru: "Страницы проекта" },
+  "phone.working": { en: "{n} working|{n} working", ru: "{n} работает|{n} работают|{n} работают" },
+  "phone.review": { en: "{n} in review|{n} in review", ru: "{n} на проверке|{n} на проверке|{n} на проверке" },
+  "phone.needs": { en: "Needs you", ru: "Нужны вы" },
+  "phone.needs.more": { en: "+{n} more", ru: "ещё {n}" },
+  "phone.ask.question": { en: "{name} asks:", ru: "{name} спрашивает:" },
+  "phone.ask.permission": { en: "{name} asks for permission:", ru: "{name} просит разрешения:" },
+  "phone.ask.folder": { en: "{name} asks for a folder:", ru: "{name} просит папку:" },
+  "phone.ask.orchestrator": { en: "The orchestrator asks:", ru: "Оркестратор спрашивает:" },
+  "phone.ask.orchestrator.permission": { en: "Permission asked:", ru: "Запрошено разрешение:" },
+  "phone.ask.allow": { en: "Allow", ru: "Разрешить" },
+  "phone.ask.deny": { en: "Deny", ru: "Запретить" },
+  "phone.ask.denyWhy": { en: "No, because…", ru: "Нет, потому что…" },
+  "phone.ask.why": { en: "Why not, in a word or two", ru: "Почему нет, в двух словах" },
+  "phone.ask.write": { en: "Answer…", ru: "Ответить…" },
+  "phone.term.spoke": { en: "output {when}", ru: "вывод {when}" },
+  "phone.told": { en: "Sent to {name}", ru: "Отправлено: {name}" },
+});

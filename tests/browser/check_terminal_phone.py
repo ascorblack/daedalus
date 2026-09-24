@@ -5,7 +5,8 @@ for; Ctrl is sticky for one key and locks on a double tap; the compose line send
 paste when the program turned it on and presses Enter after it when asked; a keyboard's doubled word
 is sent once; the soft keyboard (a shorter visible area) takes rows and never columns, with one RESIZE;
 a pinch changes the font once, with one RESIZE after the gesture; a long press opens the text with the
-phone's own selection and copies it. Nothing scrolls
+phone's own selection and copies it; a staff member's terminal answers its request from buttons above
+the keys and sends what is written to the member rather than into the program. Nothing scrolls
 sideways at 390 or 360 px, and the Russian page has Russian words.
 
     cd miniapp && npm run build
@@ -17,14 +18,16 @@ Exit 0 when every step holds.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Page, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from api_stub import DEFAULT_APP, expect_app  # noqa: E402
+from api_stub import DEFAULT_APP, FOCUS_WORDS, FocusStub, expect_app  # noqa: E402
 from screenshots import S1, UNHANDLED, stub  # noqa: E402
 from terminal_stub import DEBUG, TerminalStub, open_session, wait_live  # noqa: E402
 
@@ -322,6 +325,57 @@ def shell(browser, lang: str, check: Check) -> None:  # type: ignore[no-untyped-
     context.close()
 
 
+def staff(browser, lang: str, check: Check) -> None:  # type: ignore[no-untyped-def]
+    """Ira's terminal: her request answered above the keys, a message to her through the team."""
+    words, invented = WORDS[lang], FOCUS_WORDS[lang]
+    focus = FocusStub.bakery(lang)
+    focus.ask_from_ira(lang)
+    term = TerminalStub(S1)
+    term.add("tm-ira", title="claude · Ira", owner_kind="staff", owner_id="st-ira", project_id=focus.projects[0]["id"], owner_label="Ira")
+    term.emit("tm-ira", "⏺ Update(src/lib/cart.ts)\r\n  ⎿  Updated with 6 additions\r\n")
+    context = browser.new_context(viewport=PHONE, color_scheme="dark", is_mobile=True, has_touch=True)
+    context.add_init_script(DEBUG)
+    page = context.new_page()
+
+    def handle(route) -> None:  # type: ignore[no-untyped-def]
+        request = route.request
+        url = urlsplit(request.url)
+        path = url.path[url.path.index("/api/"):]
+        body = request.post_data_json if request.method in ("POST", "PUT", "PATCH") and request.post_data else None
+        answered = focus.answer(request.method, path, url.query, body)
+        if answered is not None:
+            status, payload = answered
+            return route.fulfill(status=status, content_type="application/json", body=json.dumps(payload))
+        return stub(route)
+
+    page.route("**/api/**", handle)
+    term.install(page)
+    page.goto(f"{BASE}/terminals/tm-ira?token=t&scheme=dark&lang={lang}")
+    page.wait_for_selector(".term-phone .term-view[data-terminal-view='tm-ira']", timeout=15000)
+    wait_live(page, "tm-ira")
+    page.wait_for_selector(".term-phone-actions .ask-answers-row .btn", timeout=5000)
+    options = [b.strip() for b in page.locator(".term-phone-actions .ask-answers-row .btn").all_inner_texts()]
+    print(lang, "Ira's request above the keys:", options)
+    check.that(options[:2] == [invented["ask.before"], invented["ask.after"]], f"the actions slot shows {options}")
+    actions = page.locator(".term-phone-actions").bounding_box()
+    keys_box = page.locator(".term-keys").bounding_box()
+    check.that(bool(actions and keys_box and actions["y"] + actions["height"] <= keys_box["y"] + 0.5), "the request's answers are not above the keys")
+    field = page.locator(".term-compose-field")
+    check.that(field.get_attribute("placeholder") == words["staff"], f"Ira's compose line says {field.get_attribute('placeholder')!r}")
+    typed = len(term.inputs("tm-ira"))
+    field.fill("use the owner's sheet")
+    page.locator(".term-compose-send").tap()
+    page.wait_for_timeout(500)
+    check.that(focus.told == [("st-ira", {"text": "use the owner's sheet", "mode": "queue"})], f"the message to Ira went as {focus.told}")
+    check.that(len(term.inputs("tm-ira")) == typed, "the message to Ira was typed into her program")
+    page.locator(".term-phone-actions .ask-answers-row .btn").first.tap()
+    page.wait_for_timeout(800)
+    check.that(focus.answers[-1:] == [("ask-ira", {"selected": [invented["ask.before"]]})], f"the answer went as {focus.answers}")
+    check.that(not page.locator(".term-phone-actions").count(), "the answered request stayed above the keys")
+    check.that(sideways(page) <= 0, "Ira's terminal scrolls sideways")
+    context.close()
+
+
 def main() -> int:
     expect_app(BASE)
     check = Check()
@@ -329,6 +383,7 @@ def main() -> int:
         browser = p.chromium.launch(executable_path=CHROMIUM)
         for lang in ("en", "ru"):
             shell(browser, lang, check)
+            staff(browser, lang, check)
         browser.close()
     for problem in check.problems:
         print("PROBLEM:", problem)

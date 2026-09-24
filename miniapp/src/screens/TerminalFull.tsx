@@ -22,6 +22,7 @@ import { gridIds, ownerPath } from "../terminal/preview";
 import { instanceFor, setTerminalEnvs, terminals } from "../terminal/terminals";
 import { CopyOutputButton, TerminalView } from "../terminal/view";
 import { PhoneTerminal } from "../terminal/mobile";
+import { StaffPhoneTerminal } from "../project/phone";
 
 const LIST_POLL_MS = 5000;
 
@@ -116,7 +117,9 @@ export function TerminalFullScreen({ id, beside, toast }: { id: string; beside: 
       onState,
       menu: [...others, ...(ids.length > 1 ? [{ label: t("term.grid.close"), icon: "close" as const, onSelect: () => replaceGrid(ids.filter((x) => x !== current)) }] : [])],
     };
-    return <PhoneTerminal key={current} {...phone} />;
+    // A staff member's terminal: what is written goes to the member as a message, and its open
+    // request is answered above the keys (the harness plan's M3).
+    return row?.owner.kind === "staff" && row.owner.id ? <StaffPhoneTerminal key={current} staffId={row.owner.id} projectId={row.project_id} {...phone} /> : <PhoneTerminal key={current} {...phone} />;
   }
 
   return (

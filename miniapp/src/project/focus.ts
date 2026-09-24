@@ -166,3 +166,37 @@ export function askIdOf(result: string | undefined): string | null {
 
 export const AUTONOMIES = ["ask", "normal", "full"] as const;
 export type Autonomy = (typeof AUTONOMIES)[number];
+
+// ── the phone ────────────────────────────────────────────────────────────────────────────────
+
+/** A project's four tabs on a phone, in the order the bar shows them: they take the place of the
+ *  app's own tabs while a project is open, and the header's back leads back to those. */
+export const PHONE_TABS = ["orchestrator", "team", "board", "terminals"] as const;
+export type PhoneTab = (typeof PHONE_TABS)[number];
+
+/**
+ * Which tab a route lights on a phone, and whether the bar is there at all. The project's other pages
+ * (the brief, the journal…) keep the bar with no tab lit, so every tab is a thumb away from them. A
+ * session inside the project is a detail with a back of its own, the way a conversation is in the
+ * agents list, and gives the whole height to the conversation.
+ */
+export function phoneTab(view: FocusView): { tab: PhoneTab | null; bar: boolean } {
+  if (view.kind === "session") return { tab: null, bar: false };
+  if (view.kind === "orchestrator") return { tab: "orchestrator", bar: true };
+  const page = view.page as string;
+  return { tab: (PHONE_TABS as readonly string[]).includes(page) ? (page as PhoneTab) : null, bar: true };
+}
+
+/** The request the phone's banner shows: the operator's oldest open one — the one waiting longest. */
+export function oldestOpen<T extends { routed_to: string; resolved_at: string | null; created_at: string }>(asks: T[]): { ask: T | null; waiting: number } {
+  const open = asks.filter((a) => a.routed_to === "operator" && !a.resolved_at).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  return { ask: open[0] ?? null, waiting: open.length };
+}
+
+/** "2 working · 1 in review" under the project's name: members at work, and tasks waiting for a look. */
+export function teamCounts(staff: Pick<Staff, "status" | "queued" | "archived_at">[], tasks: { status: string }[]): { working: number; review: number } {
+  return {
+    working: staff.filter((m) => !m.archived_at && staffTone(m) === "working").length,
+    review: tasks.filter((task) => task.status === "review").length,
+  };
+}
