@@ -720,6 +720,7 @@ class LivePtyd(FakePtyd):
         return {
             "exit_code": code, "signal": signal_name, "stdout": out[:cap].decode("utf-8", "replace"), "stderr": err[:cap].decode("utf-8", "replace"),
             "truncated": len(out) > cap or len(err) > cap, "timed_out": timed_out, "duration_ms": int((time.monotonic() - started) * 1000),
+            "path": program,
         }
 
     # -- files -------------------------------------------------------------------------------------------

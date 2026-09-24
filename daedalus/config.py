@@ -1198,7 +1198,15 @@ class HarnessConfig(BaseModel):
     stop_grace_s: float = Field(default=10.0, ge=0, le=120)
     """Between asking a CLI to exit and killing its terminal."""
     catalog_ttl_s: int = Field(default=21_600, ge=300)
+    """How often each environment is looked at again for what is installed, signed in, and which
+    agents and models each CLI offers. Never an update: a version changes only when the operator asks."""
     latest_ttl_s: int = Field(default=21_600, ge=300)
+    """How long a known latest version is trusted before the release feeds are asked again."""
+    update_timeout_s: int = Field(default=600, ge=60, le=3600)
+    """A CLI's own updater, or npm installing a newer version, is given this long."""
+    install_timeout_s: int = Field(default=900, ge=60, le=3600)
+    """An install runs in a terminal the operator can watch; past this it is reported as failed and
+    the terminal is left for the operator to read."""
     allow_untested: bool = True
     """Launch a CLI whose version is outside the adapter's tested range, when its self-check passed."""
     self_check_model_turn: bool = True

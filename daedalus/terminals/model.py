@@ -141,6 +141,8 @@ class ExecResult:
     truncated: bool
     timed_out: bool
     duration_ms: int
+    path: str = ""
+    """What ``PATH`` resolved the program to, as the daemon found it."""
 
 
 @dataclass(frozen=True, slots=True)
