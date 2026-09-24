@@ -1,0 +1,1428 @@
+{
+ "source": "@xterm/headless (replies), @xterm/xterm 6.1.0-beta.304 (version string)",
+ "cases": [
+  {
+   "name": "DA1",
+   "setup": "",
+   "query": "\u001b[c",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1;2c"
+  },
+  {
+   "name": "DA1 zero",
+   "setup": "",
+   "query": "\u001b[0c",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1;2c"
+  },
+  {
+   "name": "DA1 with a parameter is ignored",
+   "setup": "",
+   "query": "\u001b[1c",
+   "cols": 80,
+   "rows": 24,
+   "reply": ""
+  },
+  {
+   "name": "DA2",
+   "setup": "",
+   "query": "\u001b[>c",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[>0;276;0c"
+  },
+  {
+   "name": "XTVERSION",
+   "setup": "",
+   "query": "\u001b[>q",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001bP>|xterm.js(6.1.0-beta.304)\u001b\\"
+  },
+  {
+   "name": "DSR status",
+   "setup": "",
+   "query": "\u001b[5n",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[0n"
+  },
+  {
+   "name": "CPR",
+   "setup": "\u001b[3;5H",
+   "query": "\u001b[6n",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[3;5R"
+  },
+  {
+   "name": "DEC CPR",
+   "setup": "\u001b[3;5H",
+   "query": "\u001b[?6n",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?3;5R"
+  },
+  {
+   "name": "CPR after text",
+   "setup": "hello\r\nab",
+   "query": "\u001b[6n",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[2;3R"
+  },
+  {
+   "name": "CPR ignores origin mode",
+   "setup": "\u001b[5;10r\u001b[?6h\u001b[2;3H",
+   "query": "\u001b[6n",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[6;3R"
+  },
+  {
+   "name": "CPR with a wrap pending",
+   "setup": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "query": "\u001b[6n",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[1;81R",
+   "ptyd": "\u001b[1;80R",
+   "why": "xterm.js reports a column past the margin while a wrap is pending; xterm and Ghostty report the last column"
+  },
+  {
+   "name": "CPR on a wide screen",
+   "setup": "\u001b[200;300H",
+   "query": "\u001b[6n",
+   "cols": 300,
+   "rows": 200,
+   "reply": "\u001b[200;300R"
+  },
+  {
+   "name": "DSR 15 is ignored",
+   "setup": "",
+   "query": "\u001b[?15n",
+   "cols": 80,
+   "rows": 24,
+   "reply": ""
+  },
+  {
+   "name": "DSR 7 is ignored",
+   "setup": "",
+   "query": "\u001b[7n",
+   "cols": 80,
+   "rows": 24,
+   "reply": ""
+  },
+  {
+   "name": "kitty flags, none",
+   "setup": "",
+   "query": "\u001b[?u",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?0u"
+  },
+  {
+   "name": "kitty flags, pushed",
+   "setup": "\u001b[>5u",
+   "query": "\u001b[?u",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?5u"
+  },
+  {
+   "name": "kitty flags, pushed and popped",
+   "setup": "\u001b[>5u\u001b[>1u\u001b[<u",
+   "query": "\u001b[?u",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?5u"
+  },
+  {
+   "name": "kitty flags, set",
+   "setup": "\u001b[=3;1u",
+   "query": "\u001b[?u",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?3u"
+  },
+  {
+   "name": "DECRQSS margins",
+   "setup": "\u001b[3;7r",
+   "query": "\u001bP$qr\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001bP1$r3;7r\u001b\\"
+  },
+  {
+   "name": "DECRQSS margins, default",
+   "setup": "",
+   "query": "\u001bP$qr\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001bP1$r1;24r\u001b\\"
+  },
+  {
+   "name": "DECRQSS cursor shape",
+   "setup": "\u001b[5 q",
+   "query": "\u001bP$q q\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001bP1$r2 q\u001b\\",
+   "ptyd": "\u001bP1$r5 q\u001b\\",
+   "why": "xterm.js reports its cursorStyle option, not the shape the program set"
+  },
+  {
+   "name": "DECRQSS cursor shape, default",
+   "setup": "",
+   "query": "\u001bP$q q\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001bP1$r2 q\u001b\\"
+  },
+  {
+   "name": "DECRQSS protection",
+   "setup": "",
+   "query": "\u001bP$q\"q\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001bP1$r0\"q\u001b\\"
+  },
+  {
+   "name": "DECRQSS conformance",
+   "setup": "",
+   "query": "\u001bP$q\"p\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001bP1$r61;1\"p\u001b\\"
+  },
+  {
+   "name": "DECRQSS unknown",
+   "setup": "",
+   "query": "\u001bP$qx\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001bP0$r\u001b\\"
+  },
+  {
+   "name": "DECRQSS pen",
+   "setup": "\u001b[1;31m",
+   "query": "\u001bP$qm\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001bP1$r0m\u001b\\",
+   "ptyd": "\u001bP1$r0;1;31m\u001b\\",
+   "why": "xterm.js always reports 0m (its own FIXME); the daemon reports the pen"
+  },
+  {
+   "name": "XTWINOPS 18",
+   "setup": "",
+   "query": "\u001b[18t",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[8;24;80t"
+  },
+  {
+   "name": "DECRQM ?1, default",
+   "setup": "",
+   "query": "\u001b[?1$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1;2$y"
+  },
+  {
+   "name": "DECRQM ?3, default",
+   "setup": "",
+   "query": "\u001b[?3$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?3;0$y"
+  },
+  {
+   "name": "DECRQM ?5, default",
+   "setup": "",
+   "query": "\u001b[?5$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?5;0$y"
+  },
+  {
+   "name": "DECRQM ?6, default",
+   "setup": "",
+   "query": "\u001b[?6$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?6;2$y"
+  },
+  {
+   "name": "DECRQM ?7, default",
+   "setup": "",
+   "query": "\u001b[?7$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?7;1$y"
+  },
+  {
+   "name": "DECRQM ?8, default",
+   "setup": "",
+   "query": "\u001b[?8$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?8;3$y"
+  },
+  {
+   "name": "DECRQM ?9, default",
+   "setup": "",
+   "query": "\u001b[?9$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?9;2$y"
+  },
+  {
+   "name": "DECRQM ?12, default",
+   "setup": "",
+   "query": "\u001b[?12$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?12;2$y"
+  },
+  {
+   "name": "DECRQM ?25, default",
+   "setup": "",
+   "query": "\u001b[?25$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?25;1$y"
+  },
+  {
+   "name": "DECRQM ?45, default",
+   "setup": "",
+   "query": "\u001b[?45$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?45;2$y"
+  },
+  {
+   "name": "DECRQM ?66, default",
+   "setup": "",
+   "query": "\u001b[?66$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?66;2$y"
+  },
+  {
+   "name": "DECRQM ?67, default",
+   "setup": "",
+   "query": "\u001b[?67$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?67;4$y"
+  },
+  {
+   "name": "DECRQM ?1000, default",
+   "setup": "",
+   "query": "\u001b[?1000$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1000;2$y"
+  },
+  {
+   "name": "DECRQM ?1002, default",
+   "setup": "",
+   "query": "\u001b[?1002$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1002;2$y"
+  },
+  {
+   "name": "DECRQM ?1003, default",
+   "setup": "",
+   "query": "\u001b[?1003$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1003;2$y"
+  },
+  {
+   "name": "DECRQM ?1004, default",
+   "setup": "",
+   "query": "\u001b[?1004$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1004;2$y"
+  },
+  {
+   "name": "DECRQM ?1005, default",
+   "setup": "",
+   "query": "\u001b[?1005$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1005;4$y"
+  },
+  {
+   "name": "DECRQM ?1006, default",
+   "setup": "",
+   "query": "\u001b[?1006$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1006;2$y"
+  },
+  {
+   "name": "DECRQM ?1007, default",
+   "setup": "",
+   "query": "\u001b[?1007$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1007;0$y"
+  },
+  {
+   "name": "DECRQM ?1015, default",
+   "setup": "",
+   "query": "\u001b[?1015$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1015;4$y"
+  },
+  {
+   "name": "DECRQM ?1016, default",
+   "setup": "",
+   "query": "\u001b[?1016$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1016;2$y"
+  },
+  {
+   "name": "DECRQM ?1048, default",
+   "setup": "",
+   "query": "\u001b[?1048$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1048;1$y"
+  },
+  {
+   "name": "DECRQM ?47, default",
+   "setup": "",
+   "query": "\u001b[?47$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?47;2$y"
+  },
+  {
+   "name": "DECRQM ?1047, default",
+   "setup": "",
+   "query": "\u001b[?1047$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1047;2$y"
+  },
+  {
+   "name": "DECRQM ?1049, default",
+   "setup": "",
+   "query": "\u001b[?1049$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1049;2$y"
+  },
+  {
+   "name": "DECRQM ?2004, default",
+   "setup": "",
+   "query": "\u001b[?2004$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?2004;2$y"
+  },
+  {
+   "name": "DECRQM ?2026, default",
+   "setup": "",
+   "query": "\u001b[?2026$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?2026;2$y"
+  },
+  {
+   "name": "DECRQM ?2027, default",
+   "setup": "",
+   "query": "\u001b[?2027$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?2027;0$y",
+   "ptyd": "\u001b[?2027;1$y",
+   "why": "grapheme clustering is on, and the browser clusters too"
+  },
+  {
+   "name": "DECRQM ?9001, default",
+   "setup": "",
+   "query": "\u001b[?9001$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?9001;0$y"
+  },
+  {
+   "name": "DECRQM 2, default",
+   "setup": "",
+   "query": "\u001b[2$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[2;4$y"
+  },
+  {
+   "name": "DECRQM 3, default",
+   "setup": "",
+   "query": "\u001b[3$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[3;0$y"
+  },
+  {
+   "name": "DECRQM 4, default",
+   "setup": "",
+   "query": "\u001b[4$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[4;2$y"
+  },
+  {
+   "name": "DECRQM 12, default",
+   "setup": "",
+   "query": "\u001b[12$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[12;3$y"
+  },
+  {
+   "name": "DECRQM 20, default",
+   "setup": "",
+   "query": "\u001b[20$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[20;2$y"
+  },
+  {
+   "name": "DECRQM ?1, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1;1$y"
+  },
+  {
+   "name": "DECRQM ?3, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?3$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?3;0$y"
+  },
+  {
+   "name": "DECRQM ?5, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?5$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?5;0$y"
+  },
+  {
+   "name": "DECRQM ?6, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?6$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?6;1$y"
+  },
+  {
+   "name": "DECRQM ?7, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?7$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?7;2$y"
+  },
+  {
+   "name": "DECRQM ?8, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?8$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?8;3$y"
+  },
+  {
+   "name": "DECRQM ?9, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?9$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?9;2$y"
+  },
+  {
+   "name": "DECRQM ?12, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?12$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?12;2$y",
+   "ptyd": "\u001b[?12;1$y",
+   "why": "xterm.js reports its cursorBlink option, not the mode the program set"
+  },
+  {
+   "name": "DECRQM ?25, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?25$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?25;2$y"
+  },
+  {
+   "name": "DECRQM ?45, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?45$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?45;1$y"
+  },
+  {
+   "name": "DECRQM ?66, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?66$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?66;1$y"
+  },
+  {
+   "name": "DECRQM ?67, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?67$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?67;4$y"
+  },
+  {
+   "name": "DECRQM ?1000, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1000$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1000;2$y"
+  },
+  {
+   "name": "DECRQM ?1002, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1002$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1002;1$y"
+  },
+  {
+   "name": "DECRQM ?1003, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1003$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1003;2$y"
+  },
+  {
+   "name": "DECRQM ?1004, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1004$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1004;1$y"
+  },
+  {
+   "name": "DECRQM ?1005, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1005$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1005;4$y"
+  },
+  {
+   "name": "DECRQM ?1006, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1006$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1006;1$y"
+  },
+  {
+   "name": "DECRQM ?1007, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1007$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1007;0$y"
+  },
+  {
+   "name": "DECRQM ?1015, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1015$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1015;4$y"
+  },
+  {
+   "name": "DECRQM ?1016, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1016$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1016;2$y"
+  },
+  {
+   "name": "DECRQM ?1048, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1048$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1048;1$y"
+  },
+  {
+   "name": "DECRQM ?47, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?47$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?47;1$y"
+  },
+  {
+   "name": "DECRQM ?1047, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1047$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1047;1$y"
+  },
+  {
+   "name": "DECRQM ?1049, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?1049$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1049;1$y"
+  },
+  {
+   "name": "DECRQM ?2004, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?2004$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?2004;1$y"
+  },
+  {
+   "name": "DECRQM ?2026, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?2026$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?2026;1$y"
+  },
+  {
+   "name": "DECRQM ?2027, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?2027$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?2027;0$y",
+   "ptyd": "\u001b[?2027;1$y",
+   "why": "grapheme clustering is on, and the browser clusters too"
+  },
+  {
+   "name": "DECRQM ?9001, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[?9001$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?9001;0$y"
+  },
+  {
+   "name": "DECRQM 2, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[2$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[2;4$y"
+  },
+  {
+   "name": "DECRQM 3, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[3$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[3;0$y"
+  },
+  {
+   "name": "DECRQM 4, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[4$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[4;1$y"
+  },
+  {
+   "name": "DECRQM 12, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[12$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[12;3$y"
+  },
+  {
+   "name": "DECRQM 20, set",
+   "setup": "\u001b[?1h\u001b[?6h\u001b[?7l\u001b[?12h\u001b[?25l\u001b[?45h\u001b[?66h\u001b[?1002h\u001b[?1004h\u001b[?1006h\u001b[?2004h\u001b[?2026h\u001b[?1049h\u001b[4h",
+   "query": "\u001b[20$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[20;2$y"
+  },
+  {
+   "name": "DECRQM ?1, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1;2$y"
+  },
+  {
+   "name": "DECRQM ?3, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?3$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?3;0$y"
+  },
+  {
+   "name": "DECRQM ?5, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?5$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?5;0$y"
+  },
+  {
+   "name": "DECRQM ?6, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?6$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?6;2$y"
+  },
+  {
+   "name": "DECRQM ?7, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?7$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?7;1$y"
+  },
+  {
+   "name": "DECRQM ?8, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?8$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?8;3$y"
+  },
+  {
+   "name": "DECRQM ?9, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?9$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?9;2$y"
+  },
+  {
+   "name": "DECRQM ?12, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?12$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?12;2$y"
+  },
+  {
+   "name": "DECRQM ?25, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?25$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?25;1$y"
+  },
+  {
+   "name": "DECRQM ?45, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?45$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?45;2$y"
+  },
+  {
+   "name": "DECRQM ?66, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?66$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?66;2$y"
+  },
+  {
+   "name": "DECRQM ?67, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?67$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?67;4$y"
+  },
+  {
+   "name": "DECRQM ?1000, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1000$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1000;2$y"
+  },
+  {
+   "name": "DECRQM ?1002, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1002$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1002;2$y"
+  },
+  {
+   "name": "DECRQM ?1003, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1003$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1003;2$y"
+  },
+  {
+   "name": "DECRQM ?1004, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1004$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1004;2$y"
+  },
+  {
+   "name": "DECRQM ?1005, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1005$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1005;4$y"
+  },
+  {
+   "name": "DECRQM ?1006, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1006$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1006;2$y"
+  },
+  {
+   "name": "DECRQM ?1007, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1007$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1007;0$y"
+  },
+  {
+   "name": "DECRQM ?1015, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1015$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1015;4$y"
+  },
+  {
+   "name": "DECRQM ?1016, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1016$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1016;2$y"
+  },
+  {
+   "name": "DECRQM ?1048, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1048$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1048;1$y"
+  },
+  {
+   "name": "DECRQM ?47, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?47$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?47;2$y"
+  },
+  {
+   "name": "DECRQM ?1047, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1047$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1047;2$y"
+  },
+  {
+   "name": "DECRQM ?1049, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?1049$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1049;2$y"
+  },
+  {
+   "name": "DECRQM ?2004, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?2004$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?2004;2$y"
+  },
+  {
+   "name": "DECRQM ?2026, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?2026$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?2026;2$y"
+  },
+  {
+   "name": "DECRQM ?2027, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?2027$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?2027;0$y",
+   "ptyd": "\u001b[?2027;1$y",
+   "why": "grapheme clustering is on, and the browser clusters too"
+  },
+  {
+   "name": "DECRQM ?9001, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[?9001$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?9001;0$y"
+  },
+  {
+   "name": "DECRQM 2, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[2$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[2;4$y"
+  },
+  {
+   "name": "DECRQM 3, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[3$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[3;0$y"
+  },
+  {
+   "name": "DECRQM 4, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[4$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[4;2$y"
+  },
+  {
+   "name": "DECRQM 12, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[12$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[12;3$y"
+  },
+  {
+   "name": "DECRQM 20, mouse any then off",
+   "setup": "\u001b[?1000h\u001b[?1003h\u001b[?1003l",
+   "query": "\u001b[20$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[20;2$y"
+  },
+  {
+   "name": "DECRQM ?1, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1;2$y"
+  },
+  {
+   "name": "DECRQM ?3, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?3$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?3;0$y"
+  },
+  {
+   "name": "DECRQM ?5, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?5$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?5;0$y"
+  },
+  {
+   "name": "DECRQM ?6, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?6$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?6;2$y"
+  },
+  {
+   "name": "DECRQM ?7, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?7$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?7;1$y"
+  },
+  {
+   "name": "DECRQM ?8, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?8$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?8;3$y"
+  },
+  {
+   "name": "DECRQM ?9, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?9$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?9;1$y"
+  },
+  {
+   "name": "DECRQM ?12, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?12$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?12;2$y"
+  },
+  {
+   "name": "DECRQM ?25, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?25$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?25;1$y"
+  },
+  {
+   "name": "DECRQM ?45, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?45$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?45;2$y"
+  },
+  {
+   "name": "DECRQM ?66, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?66$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?66;2$y"
+  },
+  {
+   "name": "DECRQM ?67, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?67$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?67;4$y"
+  },
+  {
+   "name": "DECRQM ?1000, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1000$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1000;2$y"
+  },
+  {
+   "name": "DECRQM ?1002, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1002$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1002;2$y"
+  },
+  {
+   "name": "DECRQM ?1003, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1003$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1003;2$y"
+  },
+  {
+   "name": "DECRQM ?1004, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1004$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1004;2$y"
+  },
+  {
+   "name": "DECRQM ?1005, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1005$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1005;4$y"
+  },
+  {
+   "name": "DECRQM ?1006, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1006$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1006;2$y"
+  },
+  {
+   "name": "DECRQM ?1007, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1007$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1007;0$y"
+  },
+  {
+   "name": "DECRQM ?1015, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1015$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1015;4$y"
+  },
+  {
+   "name": "DECRQM ?1016, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1016$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1016;1$y"
+  },
+  {
+   "name": "DECRQM ?1048, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1048$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1048;1$y"
+  },
+  {
+   "name": "DECRQM ?47, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?47$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?47;2$y"
+  },
+  {
+   "name": "DECRQM ?1047, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1047$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1047;2$y"
+  },
+  {
+   "name": "DECRQM ?1049, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?1049$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?1049;2$y"
+  },
+  {
+   "name": "DECRQM ?2004, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?2004$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?2004;2$y"
+  },
+  {
+   "name": "DECRQM ?2026, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?2026$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?2026;2$y"
+  },
+  {
+   "name": "DECRQM ?2027, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?2027$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?2027;0$y",
+   "ptyd": "\u001b[?2027;1$y",
+   "why": "grapheme clustering is on, and the browser clusters too"
+  },
+  {
+   "name": "DECRQM ?9001, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[?9001$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?9001;0$y"
+  },
+  {
+   "name": "DECRQM 2, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[2$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[2;4$y"
+  },
+  {
+   "name": "DECRQM 3, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[3$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[3;0$y"
+  },
+  {
+   "name": "DECRQM 4, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[4$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[4;2$y"
+  },
+  {
+   "name": "DECRQM 12, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[12$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[12;3$y"
+  },
+  {
+   "name": "DECRQM 20, mouse x10 sgr-pixels",
+   "setup": "\u001b[?9h\u001b[?1016h",
+   "query": "\u001b[20$p",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[20;2$y"
+  },
+  {
+   "name": "OSC 10 query",
+   "setup": "",
+   "query": "\u001b]10;?\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b]10;rgb:eded/eded/efef\u001b\\",
+   "source": "xterm.js browser source, theme = the app's dark fallback"
+  },
+  {
+   "name": "OSC 11 query",
+   "setup": "",
+   "query": "\u001b]11;?\u0007",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b]11;rgb:0909/0909/0b0b\u001b\\",
+   "source": "xterm.js browser source, theme = the app's dark fallback"
+  },
+  {
+   "name": "OSC 12 query",
+   "setup": "",
+   "query": "\u001b]12;?\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b]12;rgb:2d2d/d4d4/bfbf\u001b\\",
+   "source": "xterm.js browser source, theme = the app's dark fallback"
+  },
+  {
+   "name": "OSC 10 stacked query",
+   "setup": "",
+   "query": "\u001b]10;?;?\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b]10;rgb:eded/eded/efef\u001b\\\u001b]11;rgb:0909/0909/0b0b\u001b\\",
+   "source": "xterm.js browser source, theme = the app's dark fallback"
+  },
+  {
+   "name": "OSC 4 query",
+   "setup": "",
+   "query": "\u001b]4;1;?;200;?\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b]4;1;rgb:f0f0/6262/5d5d\u001b\\\u001b]4;200;rgb:ffff/0000/d7d7\u001b\\",
+   "source": "xterm.js browser source, theme = the app's dark fallback"
+  },
+  {
+   "name": "OSC 11 after the program set it",
+   "setup": "\u001b]11;#102030\u001b\\",
+   "query": "\u001b]11;?\u001b\\",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b]11;rgb:1010/2020/3030\u001b\\",
+   "source": "xterm.js browser source, theme = the app's dark fallback"
+  },
+  {
+   "name": "colour scheme",
+   "setup": "",
+   "query": "\u001b[?996n",
+   "cols": 80,
+   "rows": 24,
+   "reply": "\u001b[?997;1n",
+   "source": "xterm.js browser source, theme = the app's dark fallback"
+  },
+  {
+   "name": "XTWINOPS 14 with a measured window",
+   "setup": "",
+   "query": "\u001b[14t",
+   "cols": 80,
+   "rows": 24,
+   "px_w": 640,
+   "px_h": 384,
+   "reply": "",
+   "ptyd": "\u001b[4;384;640t",
+   "why": "xterm.js answers only with windowOptions.getWinSizePixels; the daemon answers the sizes"
+  },
+  {
+   "name": "XTWINOPS 16 with a measured window",
+   "setup": "",
+   "query": "\u001b[16t",
+   "cols": 80,
+   "rows": 24,
+   "px_w": 640,
+   "px_h": 384,
+   "reply": "",
+   "ptyd": "\u001b[6;16;8t",
+   "why": "as above"
+  },
+  {
+   "name": "XTWINOPS 14 without a measured window",
+   "setup": "",
+   "query": "\u001b[14t",
+   "cols": 80,
+   "rows": 24,
+   "reply": ""
+  },
+  {
+   "name": "XTWINOPS 21 (title report) is never answered",
+   "setup": "\u001b]2;x\u0007",
+   "query": "\u001b[21t",
+   "cols": 80,
+   "rows": 24,
+   "reply": ""
+  }
+ ]
+}

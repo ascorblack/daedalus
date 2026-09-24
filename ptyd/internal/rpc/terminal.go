@@ -205,7 +205,13 @@ func (d *Daemon) list(ctx context.Context, c *server.Conn, params json.RawMessag
 		if len(want) > 0 && !want[t.ID] {
 			continue
 		}
-		out = append(out, t.Info())
+		info := t.Info()
+		if p.PreviewRows > 0 {
+			if rows := t.Preview(p.PreviewRows); rows != nil {
+				info.Preview = rows
+			}
+		}
+		out = append(out, info)
 	}
 	return map[string]any{"terminals": out}, nil
 }

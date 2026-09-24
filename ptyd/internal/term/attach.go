@@ -113,8 +113,8 @@ type attachments struct {
 	clients    []*Client // in order of attachment
 	owner      *Client   // the client that owns the size, nil when the host does or nobody does
 	lastDetach time.Time
-	answers    []answer // recent answers to queries, by output offset
-	closed     bool     // the terminal was forgotten
+	answers    []recentAnswer // recent answers to queries, by output offset
+	closed     bool           // the terminal was forgotten
 
 	count atomic.Int32 // len(clients), read without the lock on the output path
 

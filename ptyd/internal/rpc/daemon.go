@@ -58,6 +58,9 @@ func (d *Daemon) Register(srv *server.Server) {
 	srv.Handle("terminal.kill", d.kill)
 	srv.Handle("terminal.forget", d.forget)
 	srv.Handle("terminal.read_output", d.readOutput)
+	srv.Handle("terminal.snapshot", d.snapshot)
+	srv.Handle("terminal.read_screen", d.readScreen)
+	srv.Handle("terminal.wait_for", d.waitFor)
 	srv.Handle("terminal.stats", d.stats)
 }
 

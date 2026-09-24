@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
+	"github.com/ascorblack/daedalus/ptyd/internal/emulator/conformance"
 )
 
 func TestModesFollowTheStream(t *testing.T) {
@@ -41,3 +42,5 @@ func TestModesFollowTheStream(t *testing.T) {
 		t.Fatalf("hard reset: %+v", m)
 	}
 }
+
+func TestContract(t *testing.T) { conformance.RunContract(t, Factory) }

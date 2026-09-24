@@ -1,0 +1,312 @@
+[
+ {
+  "name": "wrapping",
+  "cols": 10,
+  "rows": 5,
+  "vt": "abcdefghijKLM\r\n\r\n\r\n\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[2;4H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "abcdefghijKLM"
+  ]
+ },
+ {
+  "name": "pending wrap stays on the last column",
+  "cols": 10,
+  "rows": 5,
+  "vt": "0123456789\r\n\r\n\r\n\r\n\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[1;10H9\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "0123456789"
+  ]
+ },
+ {
+  "name": "pending wrap then a character",
+  "cols": 10,
+  "rows": 5,
+  "vt": "0123456789A\r\n\r\n\r\n\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[2;2H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "0123456789A"
+  ]
+ },
+ {
+  "name": "carriage return and line feed",
+  "cols": 20,
+  "rows": 5,
+  "vt": "a\r\nc\r\n\r\n\r\n\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[H\u001b[3;2H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "a",
+   "c"
+  ]
+ },
+ {
+  "name": "cursor movement",
+  "cols": 20,
+  "rows": 6,
+  "vt": "\r\n\r\n        z y\r\ne        w\r\n         x\r\n\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[H\u001b[4;2H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "",
+   "",
+   "        z y",
+   "e        w",
+   "         x"
+  ]
+ },
+ {
+  "name": "graphic rendition",
+  "cols": 20,
+  "rows": 3,
+  "vt": "\u001b[0m\u001b[1m\u001b[38;5;1mR\u001b[0m\u001b[4m\u001b[38;2;1;2;3mU\u001b[0m\u001b[7m\u001b[4m\u001b[38;2;1;2;3m \u001b[0m\r\n\r\n\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[H\u001b[1;4H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "RU"
+  ]
+ },
+ {
+  "name": "256 colours and background erase",
+  "cols": 6,
+  "rows": 2,
+  "vt": "\u001b[0m\u001b[38;5;200m\u001b[48;5;17mab\u001b[0m\u001b[48;5;17m    \u001b[0m\r\n\u001b[3g\u001b[H\u001b[1;3H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "ab"
+  ]
+ },
+ {
+  "name": "alternate screen, inside",
+  "cols": 20,
+  "rows": 5,
+  "vt": "main\r\n\r\n\r\n\r\n\u001b[1;5H\u001b[?1049h\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[H    alt\u001b[1;8H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "    alt"
+  ]
+ },
+ {
+  "name": "alternate screen, left again",
+  "cols": 20,
+  "rows": 5,
+  "vt": "main\r\n\r\n\r\n\r\n\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[H\u001b[1;5H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "main"
+  ]
+ },
+ {
+  "name": "scroll region",
+  "cols": 10,
+  "rows": 5,
+  "vt": "1\r\n3\r\n4\r\n\r\n5\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[2;4r\u001b[4;1H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "1",
+   "3",
+   "4",
+   "",
+   "5"
+  ]
+ },
+ {
+  "name": "scroll region at the top feeds the history",
+  "cols": 10,
+  "rows": 4,
+  "vt": "a\r\nb\r\nc\r\n\r\n\r\nd\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[1;3r\u001b[3;1H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "a",
+   "b",
+   "c",
+   "",
+   "",
+   "d"
+  ]
+ },
+ {
+  "name": "insert and delete characters",
+  "cols": 20,
+  "rows": 3,
+  "vt": "bXYcdef\r\n\r\n\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[H\u001b[1;1H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "bXYcdef"
+  ]
+ },
+ {
+  "name": "insert and delete lines",
+  "cols": 10,
+  "rows": 5,
+  "vt": "1\r\n\r\n2\r\n\r\n\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[4;1H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "1",
+   "",
+   "2"
+  ]
+ },
+ {
+  "name": "erase in line",
+  "cols": 20,
+  "rows": 3,
+  "vt": "abc\r\n\r\n\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[H\u001b[2;4H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "abc"
+  ]
+ },
+ {
+  "name": "erase in display",
+  "cols": 20,
+  "rows": 4,
+  "vt": "a\r\n\r\n\r\n\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[H\u001b[2;1H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "a"
+  ]
+ },
+ {
+  "name": "tab stops",
+  "cols": 20,
+  "rows": 3,
+  "vt": "a   c   X\r\n\r\n\u001b[3g\u001b[5G\u001bH\u001b[9G\u001bH\u001b[17G\u001bH\u001b[H\u001b[1;10H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "a   c   X"
+  ]
+ },
+ {
+  "name": "saved cursor",
+  "cols": 10,
+  "rows": 4,
+  "vt": "x\r\n\r\n  y\r\n\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[3;4H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "x",
+   "",
+   "  y"
+  ]
+ },
+ {
+  "name": "origin mode",
+  "cols": 10,
+  "rows": 5,
+  "vt": "\r\nx\r\n\r\n\r\n\u001b[?6h\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[2;4r\u001b[1;2H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "",
+   "x"
+  ]
+ },
+ {
+  "name": "line drawing character set",
+  "cols": 10,
+  "rows": 2,
+  "vt": "─│q\r\n\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[1;4H\u001b[0m\u001b(B\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "─│q"
+  ]
+ },
+ {
+  "name": "grapheme clusters",
+  "cols": 20,
+  "rows": 2,
+  "vt": "👍🏻|🇺🇸|é|👩‍💻|\r\n\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[H\u001b[1;12H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "👍🏻|🇺🇸|é|👩‍💻|"
+  ]
+ },
+ {
+  "name": "grapheme cluster split across writes",
+  "cols": 20,
+  "rows": 2,
+  "vt": "👍🏻|\r\n\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[H\u001b[1;4H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "👍🏻|"
+  ]
+ },
+ {
+  "name": "wide character at the margin",
+  "cols": 5,
+  "rows": 3,
+  "vt": "abcd中\r\n\u001b[3g\u001b[H\u001b[2;3H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "abcd中"
+  ]
+ },
+ {
+  "name": "history",
+  "cols": 10,
+  "rows": 3,
+  "vt": "1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10\r\n\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[3;1H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "1",
+   "2",
+   "3",
+   "4",
+   "5",
+   "6",
+   "7",
+   "8",
+   "9",
+   "10"
+  ]
+ },
+ {
+  "name": "cursor-key mode",
+  "cols": 10,
+  "rows": 2,
+  "vt": "\r\n\u001b[?1h\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[1;1H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": []
+ },
+ {
+  "name": "bracketed paste and focus events",
+  "cols": 10,
+  "rows": 2,
+  "vt": "\r\n\u001b[?1004h\u001b[?2004h\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[1;1H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": []
+ },
+ {
+  "name": "mouse tracking with SGR reports",
+  "cols": 10,
+  "rows": 2,
+  "vt": "\r\n\u001b[?1002h\u001b[?1006h\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[1;1H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l\u001b[?1002h\u001b[?1006h",
+  "text": []
+ },
+ {
+  "name": "mouse tracking turned off keeps nothing on",
+  "cols": 10,
+  "rows": 2,
+  "vt": "\r\n\u001b[?1000h\u001b[?1006h\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[1;1H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": []
+ },
+ {
+  "name": "kitty keyboard push and pop",
+  "cols": 10,
+  "rows": 2,
+  "vt": "\r\n\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[1;1H\u001b[0m\u001b[=1;1u\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": []
+ },
+ {
+  "name": "cursor shape and visibility",
+  "cols": 10,
+  "rows": 2,
+  "vt": "\r\n\u001b[?12h\u001b[?25l\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[1;1H\u001b[0m\u001b[5 q\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": []
+ },
+ {
+  "name": "autowrap and insert mode",
+  "cols": 10,
+  "rows": 2,
+  "vt": "\r\n\u001b[4h\u001b[?7l\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[1;1H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": []
+ },
+ {
+  "name": "reflow when widened",
+  "cols": 20,
+  "rows": 5,
+  "vt": "abcdefghijklmno\r\n\r\n\r\n\r\n\u001b[3g\u001b[9G\u001bH\u001b[17G\u001bH\u001b[H\u001b[1;16H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "abcdefghijklmno"
+  ]
+ },
+ {
+  "name": "reflow when narrowed",
+  "cols": 5,
+  "rows": 5,
+  "vt": "abcdefghijklmno\r\n$ \r\n\u001b[3g\u001b[H\u001b[4;3H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": [
+   "abcdefghijklmno",
+   "$"
+  ]
+ },
+ {
+  "name": "full reset",
+  "cols": 10,
+  "rows": 3,
+  "vt": "\r\n\r\n\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[1;1H\u001b[0m\u001b[?9l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l\u001b[?1016l",
+  "text": []
+ }
+]

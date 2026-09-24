@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator"
 	"github.com/ascorblack/daedalus/ptyd/internal/emulator/fake"
@@ -63,6 +64,11 @@ func startWith(t *testing.T, emu emulator.Factory) *fixture {
 	}
 	evlog := events.NewLog(1000)
 	var last *fake.Emulator
+	// A real emulator comes with the real answerer; the fake answers nothing.
+	var answerer term.Answerer
+	if emu != nil {
+		answerer = answer.Reply
+	}
 	if emu == nil {
 		emu = fake.Factory(func(e *fake.Emulator) {
 			f.mu.Lock()
@@ -71,7 +77,8 @@ func startWith(t *testing.T, emu emulator.Factory) *fixture {
 		})
 	}
 	registry := term.NewRegistry(term.Deps{
-		Emulator: emu, Events: events.NewDebouncer(evlog, events.Policies), Journal: logx.NewJournal(journal),
+		Emulator: emu, Answer: answerer,
+		Events: events.NewDebouncer(evlog, events.Policies), Journal: logx.NewJournal(journal),
 		Clock: term.RealClock{}, Log: log, KillGrace: 200 * time.Millisecond,
 	}, 4)
 	ep, err := server.Prepare(cfg.RunDir, "unix")

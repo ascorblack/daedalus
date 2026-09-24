@@ -38,9 +38,14 @@ const (
 	DefaultCols = 80
 	DefaultRows = 24
 
-	// ScrollbackLines is the history each terminal's emulator keeps. Lines, not bytes: the emulator's
-	// memory per terminal is bounded by this times the width, whatever the output.
+	// ScrollbackLines is the history each terminal's emulator keeps: about 10 000 lines at any
+	// width. The emulator holds it as the memory those lines take (about 10 bytes a cell), so a
+	// narrow terminal of short lines costs little and a wide one more.
 	ScrollbackLines = 10000
+	// ScrollbackBytes is the most a terminal's history may take: the per-terminal memory budget. At
+	// about 10 bytes a cell it is 10 000 lines of 500 columns with room to spare, and it also bounds
+	// output whose cells cost more (many distinct styles, long grapheme clusters, links).
+	ScrollbackBytes = 64 << 20
 
 	// DefaultInputIdle is how long an agent's write waits after the last human keystroke.
 	DefaultInputIdle = 10 * time.Second
@@ -65,6 +70,14 @@ const (
 
 	// MaxReadOutputBytes bounds one read_output reply, which travels as one frame.
 	MaxReadOutputBytes = 1 << 20
+
+	// MaxSnapshotBytes is the largest snapshot sent in one frame (a mebibyte, less room for the
+	// frame's own header and, in a reply, base64). A larger one is cut down by dropping history.
+	MaxSnapshotBytes = 700 << 10
+	// MaxRunsRows bounds read_screen in runs: every cell is read one by one.
+	MaxRunsRows = 1000
+	// MaxWaitTimeout bounds terminal.wait_for.
+	MaxWaitTimeout = 30 * time.Minute
 
 	// MaxWriteTimeout bounds how long an agent write may wait for the keyboard.
 	MaxWriteTimeout = 10 * time.Minute

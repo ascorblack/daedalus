@@ -13,8 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ascorblack/daedalus/ptyd/internal/answer"
 	"github.com/ascorblack/daedalus/ptyd/internal/config"
-	"github.com/ascorblack/daedalus/ptyd/internal/emulator/basic"
+	"github.com/ascorblack/daedalus/ptyd/internal/emulator/production"
 	"github.com/ascorblack/daedalus/ptyd/internal/events"
 	"github.com/ascorblack/daedalus/ptyd/internal/logx"
 	"github.com/ascorblack/daedalus/ptyd/internal/rpc"
@@ -97,7 +98,8 @@ func serve(args []string) error {
 	evlog := events.NewLog(config.EventRingSize)
 	deb := events.NewDebouncer(evlog, events.Policies)
 	registry := term.NewRegistry(term.Deps{
-		Emulator:  basic.Factory,
+		Emulator:  production.Factory,
+		Answer:    answer.Reply,
 		Events:    deb,
 		Journal:   logx.NewJournal(journalFile),
 		Clock:     term.RealClock{},
@@ -106,7 +108,7 @@ func serve(args []string) error {
 	}, cfg.Limits.MaxTerminals)
 	daemon := &rpc.Daemon{
 		Config: cfg, Instance: hex.EncodeToString(instance), StartedAt: time.Now().UTC(), Registry: registry,
-		Events: evlog, Log: log, EmulatorName: basic.Name, Environ: environ,
+		Events: evlog, Log: log, EmulatorName: production.Name, Environ: environ,
 	}
 	srv := server.New(ep.Token, log, daemon.Hello)
 	daemon.Register(srv)
@@ -120,7 +122,7 @@ func serve(args []string) error {
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ep.Listener) }()
 	log.Info("ptyd serving", "env", cfg.Env, "version", version.Version, "protocol", version.Protocol,
-		"instance", daemon.Instance, "run_dir", cfg.RunDir, "emulator", basic.Name)
+		"instance", daemon.Instance, "run_dir", cfg.RunDir, "emulator", production.Name)
 
 	var serveErr error
 	select {
