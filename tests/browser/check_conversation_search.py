@@ -6,7 +6,7 @@ import os
 import sys
 from urllib.parse import parse_qs, urlsplit
 
-from api_stub import DEFAULT_APP, expect_app
+from api_stub import DEFAULT_APP, expect_app, folders
 from playwright.sync_api import expect, sync_playwright
 from screenshots import S1, UNHANDLED, stub
 
@@ -21,7 +21,7 @@ def run() -> int:
         dict(id='empty', name='Empty', total=0, members=0, last_message_at=''),
     ]
     for p in projects:
-        p.update(root='/projects/' + p['id'], created_at='2026-01-01T00:00:00Z', settings={'snapshots': False}, reachable=True, writable=True, active=0, loops=0)
+        p.update(folders=folders('/projects/' + p['id']), created_at='2026-01-01T00:00:00Z', settings={'snapshots': False}, active=0, loops=0)
     agents = [dict(id=S1, title='Planting plan', project_id='garden', project='Garden', model='Local model', status='waiting', created_at='2026-01-01T00:00:00Z', last_message_at=projects[0]['last_message_at'], run_id=None, metadata={}),
               dict(id='spoken', title='A spoken question', project_id='voice', project='Voice', model='Local model', status='idle', created_at='2026-01-01T00:00:00Z', last_message_at=projects[1]['last_message_at'], run_id=None, metadata={})]
     requests = []

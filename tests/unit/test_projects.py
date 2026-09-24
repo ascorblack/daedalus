@@ -43,8 +43,8 @@ async def test_a_project_round_trips_and_the_link_to_sessions_is_the_column(db: 
     store = ProjectStore(db)
     root = tmp_path / "site"
     root.mkdir()
-    project = await store.create("Bakery site", str(root), settings=ProjectSettings(snapshots=True))
-    assert project.root == root and project.settings.snapshots is True and project.reachable is True
+    project = await store.create("Bakery site", [str(root)], settings=ProjectSettings(snapshots=True))
+    assert project.primary.path == root and project.settings.snapshots is True and project.primary.reachable is True
 
     await db.execute("INSERT INTO sessions(id, tenant_id, title, created_at, last_message_at, project_id) VALUES ('s1', 't', 'one', '', '', ?)", (project.id,))
     assert (await store.for_session("s1")).id == project.id
@@ -52,7 +52,7 @@ async def test_a_project_round_trips_and_the_link_to_sessions_is_the_column(db: 
     assert await store.by_session() == {"s1": project.id}
 
     moved = await store.update(project.id, name="Bakery")
-    assert moved.name == "Bakery" and moved.root == root and moved.settings.snapshots is True
+    assert moved.name == "Bakery" and moved.primary.path == root and moved.settings.snapshots is True
 
     with pytest.raises(ProjectError, match="still has sessions"):
         await store.delete(project.id)
@@ -64,23 +64,23 @@ async def test_a_project_round_trips_and_the_link_to_sessions_is_the_column(db: 
 async def test_a_folder_that_is_not_one_and_a_folder_already_spoken_for_are_refused(db: Database, tmp_path: Path) -> None:
     store = ProjectStore(db)
     with pytest.raises(ProjectError, match="absolute"):
-        await store.create("rel", "some/where")
+        await store.create("rel", ["some/where"])
     with pytest.raises(ProjectError, match="needs a name"):
-        await store.create("  ", str(tmp_path))
+        await store.create("  ", [str(tmp_path)])
     (tmp_path / "a-file").write_text("x")
     with pytest.raises(ProjectError, match="a file"):
-        await store.create("file", str(tmp_path / "a-file"))
+        await store.create("file", [str(tmp_path / "a-file")])
 
     outer = tmp_path / "outer"
     (outer / "inner").mkdir(parents=True)
-    await store.create("Outer", str(outer))
+    await store.create("Outer", [str(outer)])
     # Nesting is refused in both directions: a boundary that holds one way is not a boundary.
     with pytest.raises(ProjectError, match="inside the project"):
-        await store.create("Inner", str(outer / "inner"))
+        await store.create("Inner", [str(outer / "inner")])
     with pytest.raises(ProjectError, match="contains the project"):
-        await store.create("Parent", str(tmp_path))
+        await store.create("Parent", [str(tmp_path)])
     with pytest.raises(ProjectError, match="already that folder"):
-        await store.create("Again", str(outer))
+        await store.create("Again", [str(outer)])
 
 
 def test_a_root_is_normalised_without_touching_the_filesystem() -> None:
@@ -211,7 +211,10 @@ async def test_project_crud_and_a_session_that_works_in_one(settings: Settings, 
             created = await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery", "root": str(root)})
             assert created.status_code == 200
             project = created.json()
-            assert project["root"] == str(root) and project["reachable"] is True and project["settings"] == {"snapshots": False, "system": ""}
+            assert [(f["path"], f["reachable"], f["env"], f["position"]) for f in project["folders"]] == [(str(root), True, "container", 0)]
+            assert "root" not in project
+            assert project["settings"]["snapshots"] is False and project["settings"]["system"] == "" and project["settings"]["ephemeral"] is False
+            assert project["settings"]["orchestrator"]["enabled"] is False and project["settings"]["orchestrator"]["concurrency"] == 6
 
             listing = (await client.get("/api/projects", headers=HEADERS)).json()
             assert [p["id"] for p in listing] == [project["id"]] and listing[0]["sessions"] == []
@@ -292,7 +295,7 @@ async def test_an_unreachable_folder_is_reported_and_no_agent_is_started_in_it(s
     try:
         async with await _client(settings, config, db, manager) as client:
             created = await client.post("/api/projects", headers=HEADERS, json={"name": "Not mounted", "root": str(tmp_path / "not-here")})
-            assert created.status_code == 200 and created.json()["reachable"] is False
+            assert created.status_code == 200 and created.json()["folders"][0]["reachable"] is False
             refused = await client.post("/api/sessions", headers=HEADERS, json={"title": "x", "project_id": created.json()["id"]})
             assert refused.status_code == 409 and "not reachable from here yet" in refused.json()["detail"]
     finally:
@@ -321,19 +324,19 @@ async def test_a_folder_of_ours_is_made_on_demand_and_one_of_theirs_is_not(setti
     manager._start_run = _no_engine(manager)  # type: ignore[method-assign]
     try:
         ours = await manager.projects.create("Voice")
-        assert ours.managed is True and ours.root.parent == settings.workspaces_dir
-        assert ours.root.is_dir() and (ours.root / "inbox").is_dir()
+        assert ours.primary.managed is True and ours.primary.path.parent == settings.workspaces_dir
+        assert ours.primary.path.is_dir() and (ours.primary.path / "inbox").is_dir()
 
         state = await manager.create_session("Errand", project_id=ours.id)
-        shutil.rmtree(ours.root)
-        assert (await manager.projects.get(ours.id)).reachable is False
+        shutil.rmtree(ours.primary.path)
+        assert (await manager.projects.get(ours.id)).primary.reachable is False
         assert await manager.submit(state.session.id, "go") == "run-1"
-        assert ours.root.is_dir() and (ours.root / "inbox").is_dir()
+        assert ours.primary.path.is_dir() and (ours.primary.path / "inbox").is_dir()
 
         chosen = tmp_path / "chosen"
         chosen.mkdir()
-        theirs = await manager.projects.create("Elsewhere", str(chosen))
-        assert theirs.managed is False
+        theirs = await manager.projects.create("Elsewhere", [str(chosen)])
+        assert theirs.primary.managed is False
         gone = await manager.create_session("Theirs", project_id=theirs.id)
         shutil.rmtree(chosen)
         with pytest.raises(RuntimeError, match=str(chosen)):
@@ -350,13 +353,14 @@ async def test_a_system_project_whose_folder_an_upgrade_never_made_gets_one(sett
     settings.workspaces_dir.mkdir(parents=True, exist_ok=True)
     store = ProjectStore(db, managed_root=settings.workspaces_dir)
     root = settings.workspaces_dir / "abc123def456"
+    await db.execute("INSERT INTO projects(id, name, created_at, settings, system) VALUES ('p1', 'Voice', '2020-01-01T00:00:00+00:00', '{\"system\":\"voice\"}', 'voice')")
     await db.execute(
-        "INSERT INTO projects(id, name, root, created_at, settings, system) VALUES ('p1', 'Voice', ?, '2020-01-01T00:00:00+00:00', '{\"system\":\"voice\"}', 'voice')",
+        "INSERT INTO project_folders(id, project_id, path, env, created_at) VALUES ('f-p1', 'p1', ?, 'container', '2020-01-01T00:00:00+00:00')",
         (str(root),),
     )
     assert not root.exists()
     project = await store.ensure_system("voice", name="Voice", root=settings.workspaces_dir / "unused")
-    assert project.id == "p1" and project.root == root
+    assert project.id == "p1" and project.primary.path == root
     assert root.is_dir() and (root / "inbox").is_dir()
 
 
@@ -366,16 +370,16 @@ async def test_the_folders_of_ours_are_put_back_when_the_manager_starts(settings
     try:
         ours = await manager.projects.create("Ours")
         (tmp_path / "theirs").mkdir()
-        theirs = await manager.projects.create("Theirs", str(tmp_path / "theirs"))
-        shutil.rmtree(ours.root)
+        theirs = await manager.projects.create("Theirs", [str(tmp_path / "theirs")])
+        shutil.rmtree(ours.primary.path)
         (tmp_path / "theirs").rmdir()
     finally:
         await manager.close()
     again = SessionManager(settings, config, db=db)
     await again.start()
     try:
-        assert (await again.projects.get(ours.id)).reachable is True
-        assert (await again.projects.get(theirs.id)).reachable is False
+        assert (await again.projects.get(ours.id)).primary.reachable is True
+        assert (await again.projects.get(theirs.id)).primary.reachable is False
     finally:
         await again.close()
 
@@ -405,12 +409,12 @@ async def test_a_project_is_not_snapshotted_unless_the_operator_asked(settings: 
     root.mkdir()
     (root / "README.md").write_text("hello", encoding="utf-8")
     try:
-        project = await manager.projects.create("Repo", str(root))
+        project = await manager.projects.create("Repo", [str(root)])
         state = await manager.create_session("in the project", project_id=project.id)
         assert await manager.checkpoint(state, kind="before") is None
         assert not (root / ".checkpoints").exists()
 
-        updated = await manager.projects.update(project.id, settings=ProjectSettings(snapshots=True))
+        updated = await manager.projects.update(project.id, snapshots=True)
         await manager.reload_project(updated, project.id)
         sha = await manager.checkpoint(state, kind="before")
         assert sha and (root / ".checkpoints" / "HEAD").exists()
@@ -443,7 +447,7 @@ async def test_a_subagent_of_a_project_session_is_in_the_project(settings: Setti
             return "run-x"
 
         manager.submit = fake_submit  # type: ignore[method-assign]
-        project = await manager.projects.create("Repo", str(root))
+        project = await manager.projects.create("Repo", [str(root)])
         leader = await manager.create_session("lead", project_id=project.id)
         result = await Subagents(app).spawn(leader_id=leader.session.id, task="count the files", name="counter")
 
@@ -576,7 +580,7 @@ async def test_a_spawned_agent_of_a_project_session_stays_in_the_project(setting
 
         front.create_session_topic = create_session_topic  # type: ignore[method-assign]
 
-        project = await manager.projects.create("Repo", str(root))
+        project = await manager.projects.create("Repo", [str(root)])
         parent = await manager.create_session("parent", project_id=project.id)
         child_id = await front._service_spawn_agent(
             parent.session.id, title="Helper", brief="help", files=[str(root / "howto.md")],
@@ -615,7 +619,7 @@ async def test_a_scheduled_task_of_a_project_session_fires_in_the_project(settin
 
         manager.submit = fake_submit  # type: ignore[method-assign]
         scheduler = Scheduler(app)  # type: ignore[arg-type]
-        project = await manager.projects.create("Repo", str(root))
+        project = await manager.projects.create("Repo", [str(root)])
         owner = await manager.create_session("owner", project_id=project.id)
 
         created = await scheduler.create(
@@ -649,7 +653,7 @@ async def test_an_unmounted_root_is_never_created_and_keeps_saying_it_is_not_mou
     root = tmp_path / "mounted"
     root.mkdir()
     try:
-        project = await manager.projects.create("Mounted", str(root))
+        project = await manager.projects.create("Mounted", [str(root)])
         state = await manager.create_session("worker", project_id=project.id)
         sid = state.session.id
         assert (root / "inbox").is_dir()
@@ -657,11 +661,11 @@ async def test_an_unmounted_root_is_never_created_and_keeps_saying_it_is_not_mou
         # The mount goes away and the process is restarted: the state is loaded from the database again.
         shutil.rmtree(root)
         manager._states.pop(sid)
-        assert (await manager.projects.get(project.id)).reachable is False
+        assert (await manager.projects.get(project.id)).primary.reachable is False
         reloaded = await manager.get_state(sid)
         assert reloaded is not None
         assert not root.exists(), "the folder the operator added is theirs to create"
-        assert (await manager.projects.get(project.id)).reachable is False
+        assert (await manager.projects.get(project.id)).primary.reachable is False
     finally:
         await manager.close()
 
@@ -677,15 +681,15 @@ async def test_a_project_may_not_be_the_installation_or_the_whole_home_folder(db
     store = ProjectStore(db, reserved=[state_dir, workspaces], home=home)
 
     with pytest.raises(ProjectError, match="belongs to the installation"):
-        await store.create("State", str(state_dir))
+        await store.create("State", [str(state_dir)])
     with pytest.raises(ProjectError, match="is inside"):
-        await store.create("Inside", str(state_dir / "blobs"))
+        await store.create("Inside", [str(state_dir / "blobs")])
     with pytest.raises(ProjectError, match="contains"):
-        await store.create("Above", str(tmp_path / "own"))
+        await store.create("Above", [str(tmp_path / "own")])
     with pytest.raises(ProjectError, match="your home folder"):
-        await store.create("Home", str(home))
+        await store.create("Home", [str(home)])
     # A folder inside the home folder is the ordinary case and stays allowed.
-    assert (await store.create("Work", str(home / "work"))).root == home / "work"
+    assert (await store.create("Work", [str(home / "work")])).primary.path == home / "work"
 
 
 async def test_a_project_root_is_immutable_and_a_nonempty_project_cannot_be_removed(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
@@ -737,7 +741,7 @@ async def test_the_agent_directories_are_excluded_from_the_operators_checkout(se
     root = tmp_path / "repo"
     (root / ".git").mkdir(parents=True)
     try:
-        project = await manager.projects.create("Repo", str(root))
+        project = await manager.projects.create("Repo", [str(root)])
         await manager.create_session("worker", project_id=project.id)
         written = (root / ".git" / "info" / "exclude").read_text(encoding="utf-8")
         for name in ("inbox/", ".exec/", ".jobs/", ".services/", ".checkpoints/"):
@@ -749,7 +753,7 @@ async def test_the_agent_directories_are_excluded_from_the_operators_checkout(se
         # A root that is not a git repository has nothing to write and nothing to worry about.
         plain = tmp_path / "docs"
         plain.mkdir()
-        other = await manager.projects.create("Docs", str(plain))
+        other = await manager.projects.create("Docs", [str(plain)])
         await manager.create_session("third", project_id=other.id)
         assert not (plain / ".git").exists()
     finally:
@@ -772,12 +776,219 @@ async def test_a_service_started_in_a_project_cannot_choose_a_directory_outside_
     app.notifications = RecordingNotifications()
     try:
         services = Services(app)  # type: ignore[arg-type]
-        project = await manager.projects.create("Repo", str(root))
+        project = await manager.projects.create("Repo", [str(root)])
         state = await manager.create_session("host", project_id=project.id)
         with pytest.raises(PathOutsideProject):
             await services.start(state.session.id, name="escape", command="sleep 30", cwd="/", port=None)
         started = await services.start(state.session.id, name="inside", command="sleep 30", cwd="site", port=None)
         assert started["cwd"] == str(root / "site")
         await services.stop(state.session.id, "inside")
+    finally:
+        await manager.close()
+
+
+# -- folders, the brief, the journal and the orchestrator's compare-and-set -------------------
+
+
+async def test_no_two_folders_anywhere_nest_or_repeat(db: Database, tmp_path: Path) -> None:
+    """The overlap rule is over every folder of every project, the same project's included."""
+    store = ProjectStore(db, reserved=[tmp_path / "state"])
+    (tmp_path / "site" / "assets").mkdir(parents=True)
+    (tmp_path / "docs").mkdir()
+    site = await store.create("Site", [str(tmp_path / "site")])
+    other = await store.create("Other", [str(tmp_path / "docs")])
+    with pytest.raises(ProjectError, match="inside the project Site"):
+        await store.add_folder(site.id, str(tmp_path / "site" / "assets"))
+    with pytest.raises(ProjectError, match="inside the project Site"):
+        await store.add_folder(other.id, str(tmp_path / "site" / "assets"))
+    with pytest.raises(ProjectError, match="Other is already that folder"):
+        await store.add_folder(site.id, str(tmp_path / "docs"))
+    grouped = await store.create("Grouped", [str(tmp_path / "group" / "inner")])
+    with pytest.raises(ProjectError, match="contains the project Grouped"):
+        await store.add_folder(other.id, str(tmp_path / "group"))
+    with pytest.raises(ProjectError, match="belongs to the installation"):
+        await store.add_folder(site.id, str(tmp_path / "state" / "blobs"))
+    with pytest.raises(ProjectError, match="nest"):
+        await store.create("Both", [str(tmp_path / "a"), str(tmp_path / "a" / "b")])
+    with pytest.raises(TypeError):
+        await store.create("One path", str(tmp_path / "c"))  # type: ignore[arg-type]
+    # Nothing half-made was left behind by the refusals.
+    assert sorted(f.path for p in await store.list() for f in p.folders) == [tmp_path / "docs", tmp_path / "group" / "inner", tmp_path / "site"]
+    assert grouped.primary.reachable is False, "a folder that is not there yet is kept, and says so"
+
+
+async def test_folders_are_added_ordered_and_removed_but_never_the_last(db: Database, tmp_path: Path) -> None:
+    store = ProjectStore(db)
+    for name in ("site", "docs", "data"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "docs" / ".git").mkdir()
+    project = await store.create("Site", [str(tmp_path / "site")])
+    docs = await store.add_folder(project.id, str(tmp_path / "docs"), label="Docs")
+    data = await store.add_folder(project.id, str(tmp_path / "data"), readonly=True)
+    assert docs.is_git and not data.is_git and data.readonly and not data.writable and data.reachable
+    loaded = await store.get(project.id)
+    assert [f.path.name for f in loaded.folders] == ["site", "docs", "data"] and loaded.primary.path.name == "site"
+
+    moved = await store.update_folder(project.id, data.id, position=0, readonly=False, label="Data")
+    assert moved.position == 0 and moved.label == "Data" and moved.writable
+    loaded = await store.get(project.id)
+    assert [f.path.name for f in loaded.folders] == ["data", "site", "docs"] and [f.position for f in loaded.folders] == [0, 1, 2]
+
+    await store.remove_folder(project.id, loaded.folders[1].id)
+    loaded = await store.get(project.id)
+    assert [(f.path.name, f.position) for f in loaded.folders] == [("data", 0), ("docs", 1)]
+    await store.remove_folder(project.id, docs.id)
+    with pytest.raises(ProjectError, match="only folder"):
+        await store.remove_folder(project.id, data.id)
+    assert (tmp_path / "site").is_dir() and (tmp_path / "docs").is_dir(), "forgetting a folder touches nothing on disk"
+    kinds = [(e.author, e.kind) for e in await store.journal(project.id)]
+    assert kinds and set(kinds) == {("system", "folder")}, "every folder change is in the journal without anybody writing it"
+
+
+async def test_a_host_folder_is_kept_but_is_not_this_process_s_to_reach(db: Database, tmp_path: Path) -> None:
+    store = ProjectStore(db, local_env="container")
+    (tmp_path / "site").mkdir()
+    (tmp_path / "tools").mkdir()
+    project = await store.create("Site", [str(tmp_path / "site")])
+    host = await store.add_folder(project.id, str(tmp_path / "tools"), env="host")
+    assert host.env == "host" and not host.is_git
+    assert await store.ensure_reachable(host) is False, "a path that happens to exist here is not the host's folder"
+    assert store.roots == (tmp_path / "site",)
+    loaded = await store.get(project.id)
+    assert loaded.local_folders("container") == (loaded.primary,)
+    with pytest.raises(ProjectError, match="container or on the host"):
+        await store.add_folder(project.id, str(tmp_path / "elsewhere"), env="cloud")
+
+
+async def test_is_git_is_looked_at_again_on_the_way_up(db: Database, tmp_path: Path) -> None:
+    store = ProjectStore(db)
+    (tmp_path / "site").mkdir()
+    project = await store.create("Site", [str(tmp_path / "site")])
+    assert not project.primary.is_git
+    (tmp_path / "site" / ".git").mkdir()
+    refreshed = {p.id: p for p in await store.ensure_roots()}
+    assert refreshed[project.id].primary.is_git
+
+
+async def test_the_orchestrator_is_set_by_compare_and_set_and_one_racer_wins(db: Database, tmp_path: Path) -> None:
+    import asyncio
+
+    store = ProjectStore(db)
+    (tmp_path / "site").mkdir()
+    project = await store.create("Site", [str(tmp_path / "site")])
+    assert project.settings.orchestrator.session_id == ""
+    results = await asyncio.gather(*[store.set_orchestrator(project.id, expect="", value=f"orch-{n}") for n in range(6)])
+    assert results.count(True) == 1
+    winner = (await store.get(project.id)).settings.orchestrator.session_id
+    assert winner == f"orch-{results.index(True)}"
+    assert await store.set_orchestrator(project.id, expect="", value="late") is False, "a stale expectation loses"
+    assert await store.set_orchestrator(project.id, expect=winner, value="replacement") is True
+    assert (await store.get(project.id)).settings.orchestrator.session_id == "replacement"
+
+
+async def test_the_orchestrator_settings_stay_within_their_rules(db: Database, settings: Settings, tmp_path: Path) -> None:
+    store = ProjectStore(db, managed_root=settings.workspaces_dir)
+    (tmp_path / "site").mkdir()
+    project = await store.create("Site", [str(tmp_path / "site")])
+    orchestrator = project.settings.orchestrator
+    assert (orchestrator.enabled, orchestrator.autonomy, orchestrator.concurrency, orchestrator.concurrency_cap) == (False, "normal", 6, 10)
+    changed = await store.update_orchestrator(project.id, enabled=True, model="strong", autonomy="full", concurrency=8)
+    assert changed.settings.orchestrator.enabled and changed.settings.orchestrator.concurrency == 8
+    with pytest.raises(ProjectError, match="between 1 and the cap of 10"):
+        await store.update_orchestrator(project.id, concurrency=11)
+    lowered = await store.update_orchestrator(project.id, concurrency_cap=4)
+    assert (lowered.settings.orchestrator.concurrency, lowered.settings.orchestrator.concurrency_cap) == (4, 4), "a lowered cap takes the limit down with it"
+    with pytest.raises(ProjectError, match="autonomy"):
+        await store.update_orchestrator(project.id, autonomy="reckless")
+    # A rename or a snapshot switch does not write the orchestrator block back from a stale copy.
+    await store.set_orchestrator(project.id, expect="", value="orch")
+    renamed = await store.update(project.id, name="Renamed", snapshots=True)
+    assert renamed.settings.orchestrator.session_id == "orch" and renamed.settings.orchestrator.model == "strong"
+
+    scratch = await store.create("A chat", settings=ProjectSettings(snapshots=True, ephemeral=True))
+    with pytest.raises(ProjectError, match="keep it as a project first"):
+        await store.update_orchestrator(scratch.id, enabled=True)
+    kept = await store.update(scratch.id, ephemeral=False)
+    assert (await store.update_orchestrator(kept.id, enabled=True)).settings.orchestrator.enabled
+
+
+async def test_only_the_operator_writes_what_may_be_granted_without_them(db: Database, tmp_path: Path) -> None:
+    store = ProjectStore(db)
+    (tmp_path / "site").mkdir()
+    project = await store.create("Site", [str(tmp_path / "site")])
+    brief = await store.brief(project.id)
+    assert list(brief) == ["goals", "constraints", "preferences", "done_when", "allowed_without_operator", "notes"]
+    assert all(section.body == "" for section in brief.values())
+    await store.set_brief(project.id, "goals", "a menu page", "orchestrator")
+    with pytest.raises(ProjectError, match="only the operator"):
+        await store.set_brief(project.id, "allowed_without_operator", "anything at all", "orchestrator")
+    with pytest.raises(ProjectError, match="only the operator"):
+        await store.set_brief(project.id, "allowed_without_operator", "anything at all", "system")
+    await store.set_brief(project.id, "allowed_without_operator", "run the test suite", "operator")
+    with pytest.raises(ProjectError, match="sections"):
+        await store.set_brief(project.id, "wishes", "x", "operator")
+    brief = await store.brief(project.id)
+    assert (brief["goals"].body, brief["goals"].updated_by) == ("a menu page", "orchestrator")
+    assert (brief["allowed_without_operator"].body, brief["allowed_without_operator"].updated_by) == ("run the test suite", "operator")
+
+
+async def test_the_journal_pages_newest_first(db: Database, tmp_path: Path) -> None:
+    store = ProjectStore(db)
+    (tmp_path / "site").mkdir()
+    project = await store.create("Site", [str(tmp_path / "site")])
+    written = [await store.record(project.id, "orchestrator", "decision", f"step {n}", {"n": n}) for n in range(5)]
+    first = await store.journal(project.id, limit=2)
+    assert [e.text for e in first] == ["step 4", "step 3"]
+    second = await store.journal(project.id, before=first[-1].id, limit=2)
+    assert [e.text for e in second] == ["step 2", "step 1"]
+    last = await store.journal(project.id, before=second[-1].id, limit=2)
+    assert [e.text for e in last] == ["step 0"] and last[0].refs == {"n": 0} and last[0].id == written[0].id
+    with pytest.raises(ProjectError, match="journal entry"):
+        await store.record(project.id, "staff", "note", "x")
+
+
+async def test_a_session_works_in_the_folder_it_is_given(settings: Settings, config: RuntimeConfig, db: Database, tmp_path: Path) -> None:
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    try:
+        (tmp_path / "site").mkdir()
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "tools").mkdir()
+        project = await manager.projects.create("Site", [str(tmp_path / "site")])
+        docs = await manager.projects.add_folder(project.id, str(tmp_path / "docs"))
+        host = await manager.projects.add_folder(project.id, str(tmp_path / "tools"), env="host")
+        project = await manager.projects.get(project.id)
+        assert project is not None
+
+        plain = await manager.create_session("plain", project_id=project.id)
+        assert plain.workspace == tmp_path / "site"
+        in_docs = await manager.create_session("docs", project_id=project.id, folder_id=docs.id, own_directory=True)
+        assert in_docs.workspace == tmp_path / "docs" / ".agents" / in_docs.session.id
+        assert in_docs.services is not None and in_docs.services.project_root == in_docs.workspace
+        with pytest.raises(ValueError, match="host folder"):
+            await manager.create_session("host", project_id=project.id, folder_id=host.id)
+        with pytest.raises(ValueError, match="not a folder of"):
+            await manager.create_session("nowhere", project_id=project.id, folder_id="f-nothing")
+
+        # Loaded afresh the folder comes from the metadata, and a child keeps it.
+        manager._states.clear()
+        again = await manager.get_state(in_docs.session.id)
+        assert again is not None and again.workspace == in_docs.workspace
+        moved = await manager.attach_project(in_docs.session.id, project)
+        assert moved.workspace == tmp_path / "site", "a session moved into a project starts in its primary folder"
+    finally:
+        await manager.close()
+
+
+async def test_a_chat_s_own_project_is_ephemeral_and_goes_with_it(settings: Settings, config: RuntimeConfig, db: Database) -> None:
+    manager = SessionManager(settings, config, db=db)
+    await manager.start()
+    try:
+        state = await manager.create_session("a chat")
+        assert state.project is not None and state.project.settings.ephemeral and state.project.primary.managed
+        pid = state.project.id
+        await manager.delete_session(state.session.id)
+        assert await manager.projects.get(pid) is None
+        assert not await db.fetchall("SELECT id FROM project_folders WHERE project_id = ?", (pid,))
     finally:
         await manager.close()

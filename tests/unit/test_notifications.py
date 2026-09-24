@@ -262,3 +262,12 @@ def test_nothing_reaches_for_the_old_inbox() -> None:
         if pattern.search(line)
     ]
     assert offenders == []
+
+
+def test_the_old_retention_setting_moves_to_the_notifications_section(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("[scheduler]\ninbox_keep_days = 12\ncatch_up_missed = false\n", encoding="utf-8")
+    config = RuntimeConfig.load(path)
+    assert config.notifications.keep_days == 12 and config.scheduler.catch_up_missed is False
+    text = path.read_text(encoding="utf-8")
+    assert "inbox_keep_days" not in text and "keep_days = 12" in text

@@ -36,16 +36,16 @@ async def test_a_name_creates_the_project_folder_and_every_session_has_a_project
             response = await client.post("/api/projects", headers=HEADERS, json={"name": "Bakery"})
             assert response.status_code == 200
             project = response.json()
-            assert Path(project["root"]).parent == settings.workspaces_dir
-            assert Path(project["root"]).is_dir()
+            assert Path(project["folders"][0]["path"]).parent == settings.workspaces_dir
+            assert Path(project["folders"][0]["path"]).is_dir()
             assert project["settings"]["snapshots"] is True
 
             shared = (await client.post("/api/sessions", headers=HEADERS, json={"title": "Menu", "project_id": project["id"]})).json()
             private = (await client.post("/api/sessions", headers=HEADERS, json={"title": "Prices", "project_id": project["id"], "own_directory": True})).json()
             shared_state = manager.live_state(shared["id"])
             private_state = manager.live_state(private["id"])
-            assert shared_state is not None and shared_state.workspace == Path(project["root"])
-            assert private_state is not None and private_state.workspace.parent.parent == Path(project["root"])
+            assert shared_state is not None and shared_state.workspace == Path(project["folders"][0]["path"])
+            assert private_state is not None and private_state.workspace.parent.parent == Path(project["folders"][0]["path"])
             assert private_state.project is not None and private_state.project.id == project["id"]
             assert private_state.services is not None and private_state.services.project_root == private_state.workspace
 
@@ -56,9 +56,9 @@ async def test_a_name_creates_the_project_folder_and_every_session_has_a_project
             # The folder is under the workspaces tree, so it is the installation's to keep: moved
             # away, it is simply made again rather than refused. A folder the operator pointed at is
             # the opposite case and still refuses — tests/unit/test_projects.py has both sides.
-            root = Path(project["root"])
+            root = Path(project["folders"][0]["path"])
             root.rename(root.with_name(root.name + "-away"))
-            assert await manager.projects.ensure_reachable(await manager.projects.get(project["id"])) is True
+            assert await manager.projects.ensure_reachable((await manager.projects.get(project["id"])).primary) is True
             assert root.is_dir() and (root / "inbox").is_dir()
     finally:
         await manager.close()
@@ -123,18 +123,16 @@ async def test_the_directory_browser_is_authenticated_sealed_contained_and_bound
 @pytest.mark.parametrize("creator_first", [False, True])
 @pytest.mark.parametrize("delete_workspace", [False, True])
 async def test_last_member_removes_automatic_project_but_keeps_files(settings: Settings, config: RuntimeConfig, db: Database, creator_first: bool, delete_workspace: bool, legacy: bool) -> None:
-    from daedalus.stores.projects import ProjectSettings
-
     manager = SessionManager(settings, config, db=db)
     await manager.start()
     try:
         creator = await manager.create_session("automatic")
         pid = creator.project.id
         if legacy:
-            await db.execute("UPDATE projects SET settings = json_remove(settings, '$.auto_created') WHERE id = ?", (pid,))
+            await db.execute("UPDATE projects SET settings = json_remove(settings, '$.ephemeral') WHERE id = ?", (pid,))
         sibling = await manager.create_session("sibling", project_id=pid)
         (creator.workspace / "keep.txt").write_text("keep")
-        await manager.projects.update(pid, name="renamed", settings=ProjectSettings(snapshots=False))
+        await manager.projects.update(pid, name="renamed", snapshots=False)
         first, last = (creator, sibling) if creator_first else (sibling, creator)
         await manager.delete_session(first.session.id, delete_workspace=delete_workspace)
         assert await manager.projects.get(pid) is not None
@@ -159,6 +157,6 @@ async def test_empty_explicit_and_system_projects_remain(settings: Settings, con
             state = await manager.create_session("member", project_id=project.id)
             await manager.delete_session(state.session.id)
             assert await manager.projects.get(project.id) is not None
-            assert project.root.exists()
+            assert project.primary.path.exists()
     finally:
         await manager.close()

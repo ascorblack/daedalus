@@ -29,6 +29,15 @@ import urllib.request
 DEFAULT_PORT = 8163
 DEFAULT_APP = f"http://127.0.0.1:{DEFAULT_PORT}/app"
 
+
+def folders(path: str, *, reachable: bool = True, writable: bool | None = None) -> list[dict[str, object]]:
+    """A project's folders as the host reports them, for a project whose one folder is ``path``."""
+    return [{
+        "id": "f-" + path.rstrip("/").rsplit("/", 1)[-1],
+        "path": path, "label": "", "env": "container", "is_git": False, "readonly": False, "position": 0, "managed": False,
+        "reachable": reachable, "writable": reachable if writable is None else writable,
+    }]
+
 GATES: dict[str, object] = {
     "/api/maintenance": {"notice": None},
     "/api/conversation-search/settings": {"mode": "off", "paused": False, "reason": "off", "busy": False, "indexed": 0, "pending": 0, "label": "Multilingual E5 Small", "size_bytes": 135429554, "licence": "MIT", "installed": False},
@@ -60,6 +69,15 @@ GATES: dict[str, object] = {
     "/api/projects": [],
     # The composer offers the voice page only where the installation has one; a harness has none.
     "/api/voice": {"enabled": False},
+    # Terminal environments and the terminals in them: a container environment that works, a host
+    # one that is not installed, and no terminals yet.
+    "/api/terminals": {
+        "envs": [
+            {"env": "container", "available": True, "reason": "", "version": "0.1.0", "sandbox": True, "shell": "/bin/bash", "home": "/root", "port_range": "8120-8139", "public_host": "", "preview_poll_ms": 3000},
+            {"env": "host", "available": False, "reason": "not_installed", "version": "", "sandbox": False, "shell": "", "home": "", "port_range": "", "public_host": "", "preview_poll_ms": 3000},
+        ],
+        "terminals": [],
+    },
 }
 
 

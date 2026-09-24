@@ -1,4 +1,4 @@
-"""Projects: the folder and grouping every session belongs to."""
+"""Projects: the folders and grouping every session belongs to, and what the operator writes about them."""
 
 from __future__ import annotations
 
@@ -7,17 +7,85 @@ import json
 import os
 import sqlite3
 import uuid
-from collections.abc import Iterable
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from daedalus.stores.database import Database
 
+ENVIRONMENTS = ("container", "host")
+"""Where a folder lives: inside the container the agent runs in, or on the machine around it. In
+native mode the two are the same machine and this process's folders are all ``host``."""
+
+AUTONOMY = ("ask", "normal", "full")
+CONCURRENCY_DEFAULT = 6
+"""How many staff of one project may work at once unless the orchestrator or the operator says otherwise."""
+CONCURRENCY_CAP_DEFAULT = 10
+"""The most the orchestrator may raise that to by itself; the operator can move the cap."""
+
+BRIEF_SECTIONS = ("goals", "constraints", "preferences", "done_when", "allowed_without_operator", "notes")
+OPERATOR_ONLY_SECTIONS = frozenset({"allowed_without_operator"})
+"""Sections nobody but the operator may write. What the orchestrator may grant without asking is
+bounded by this section, so an orchestrator able to edit it could grant itself anything."""
+BRIEF_AUTHORS = ("operator", "orchestrator", "system")
+JOURNAL_AUTHORS = ("orchestrator", "operator", "system")
+JOURNAL_PAGE_MAX = 200
+
 
 class ProjectError(ValueError):
-    """A project the store will not keep: a relative root, a file, or a root tangled with another's."""
+    """A project the store will not keep: a relative folder, a file, or a folder tangled with another's."""
+
+
+@dataclass(frozen=True, slots=True)
+class OrchestratorSettings:
+    """The per-project orchestrator. Off until the operator switches it on.
+
+    ``session_id`` is written only through :meth:`ProjectStore.set_orchestrator`, a compare-and-set,
+    so two starts racing for one project cannot both believe they are its orchestrator.
+    """
+
+    enabled: bool = False
+    session_id: str = ""
+    model: str = ""
+    autonomy: str = "normal"
+    concurrency: int = CONCURRENCY_DEFAULT
+    concurrency_cap: int = CONCURRENCY_CAP_DEFAULT
+    telegram_topic_id: int = 0
+
+    @classmethod
+    def load(cls, raw: Any) -> OrchestratorSettings:
+        data = raw if isinstance(raw, dict) else {}
+        cap = max(1, _int(data.get("concurrency_cap"), CONCURRENCY_CAP_DEFAULT))
+        autonomy = str(data.get("autonomy") or "normal")
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            session_id=str(data.get("session_id") or ""),
+            model=str(data.get("model") or ""),
+            autonomy=autonomy if autonomy in AUTONOMY else "normal",
+            concurrency=min(cap, max(1, _int(data.get("concurrency"), CONCURRENCY_DEFAULT))),
+            concurrency_cap=cap,
+            telegram_topic_id=_int(data.get("telegram_topic_id"), 0),
+        )
+
+    def dump(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "session_id": self.session_id,
+            "model": self.model,
+            "autonomy": self.autonomy,
+            "concurrency": self.concurrency,
+            "concurrency_cap": self.concurrency_cap,
+            "telegram_topic_id": self.telegram_topic_id,
+        }
+
+
+def _int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +95,9 @@ class ProjectSettings:
     ``snapshots`` is off by default for a folder the operator points at: it may be a large existing
     repository, and committing a hundred thousand files into ``.checkpoints`` twice a turn costs
     more than the undo is worth. Automatically created projects opt in because they begin empty.
+
+    Only the known keys are loaded and dumped. A key nothing reads is a key nothing keeps honest,
+    and the settings column is the one place several later features write into.
     """
 
     snapshots: bool = False
@@ -34,25 +105,60 @@ class ProjectSettings:
     """Non-empty on a project the installation made for itself rather than the operator: ``"voice"``
     is the folder the concierge and the agents it delegates to work in. A system project keeps its
     name and snapshot switch editable but cannot be removed."""
+    ephemeral: bool = False
+    """Made implicitly by a new chat, with a scratch folder of the installation's own, and removed
+    with its last session. "Keep as a project" clears it."""
+    default_env: str = ""
+    """Where a new agent of this project runs when nothing names a folder; empty until the store
+    fills it with the environment this process runs in."""
+    orchestrator: OrchestratorSettings = field(default_factory=OrchestratorSettings)
 
     @classmethod
-    def load(cls, raw: Any) -> ProjectSettings:
+    def load(cls, raw: Any, *, default_env: str = "") -> ProjectSettings:
         data = raw if isinstance(raw, dict) else {}
-        return cls(snapshots=bool(data.get("snapshots", False)), system=str(data.get("system") or ""))
+        env = str(data.get("default_env") or "")
+        return cls(
+            snapshots=bool(data.get("snapshots", False)),
+            system=str(data.get("system") or ""),
+            ephemeral=bool(data.get("ephemeral", False)),
+            default_env=env if env in ENVIRONMENTS else default_env,
+            orchestrator=OrchestratorSettings.load(data.get("orchestrator")),
+        )
 
     def dump(self) -> dict[str, Any]:
-        return {"snapshots": self.snapshots, "system": self.system}
+        return {
+            "snapshots": self.snapshots,
+            "system": self.system,
+            "ephemeral": self.ephemeral,
+            "default_env": self.default_env,
+            "orchestrator": self.orchestrator.dump(),
+        }
 
 
 @dataclass(frozen=True, slots=True)
-class Project:
+class FolderSpec:
+    """A folder asked for: the path as the operator gave it, and what they said about it."""
+
+    path: str
+    label: str = ""
+    env: str | None = None
+    """``None`` is the environment this process runs in."""
+    readonly: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectFolder:
     id: str
-    name: str
-    root: Path
+    project_id: str
+    path: Path
+    label: str
+    env: str
+    is_git: bool
+    readonly: bool
+    position: int
     created_at: datetime
-    settings: ProjectSettings = field(default_factory=ProjectSettings)
     managed: bool = False
-    """Whether the folder is one the installation chose for itself — a root under the managed
+    """Whether the folder is one the installation chose for itself — a folder under the managed
     projects tree, made when the project was made — rather than a folder the operator pointed at.
 
     The two are missing for opposite reasons, so they cannot share one answer. A managed folder that
@@ -64,45 +170,103 @@ class Project:
 
     @property
     def reachable(self) -> bool:
-        """Whether this process can actually reach the folder — false in a container until it is mounted."""
-        return self.root.is_dir() and os.access(self.root, os.R_OK)
+        """Whether this process can actually reach the folder — false in a container until it is mounted.
+
+        A folder of the other environment answers from this process's filesystem too, which is the
+        truth for this process: the path may exist here and mean something else there. Whoever asks
+        on behalf of an agent asks :meth:`local` first.
+        """
+        return self.path.is_dir() and os.access(self.path, os.R_OK)
+
+    @property
+    def writable(self) -> bool:
+        return not self.readonly and self.reachable and os.access(self.path, os.W_OK)
+
+    def local(self, local_env: str) -> bool:
+        """Whether this process's own tools can work in the folder at all."""
+        return self.env == local_env
+
+    def view(self) -> dict[str, Any]:
+        reachable = self.reachable
+        return {
+            "id": self.id,
+            "path": str(self.path),
+            "label": self.label,
+            "env": self.env,
+            "is_git": self.is_git,
+            "readonly": self.readonly,
+            "position": self.position,
+            "managed": self.managed,
+            "reachable": reachable,
+            "writable": not self.readonly and reachable and os.access(self.path, os.W_OK),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Project:
+    """A project and its folders, the first of which is the primary: where a session works when it
+    names no other folder, and where an ephemeral project's scratch lives."""
+
+    id: str
+    name: str
+    created_at: datetime
+    settings: ProjectSettings = field(default_factory=ProjectSettings)
+    folders: tuple[ProjectFolder, ...] = ()
+
+    @property
+    def primary(self) -> ProjectFolder:
+        if not self.folders:
+            # The store never keeps a project without one; a row that has none is a database edited
+            # by hand, and the message says which project so it can be mended.
+            raise ProjectError(f"the project {self.name} ({self.id}) has no folder")
+        return self.folders[0]
+
+    def folder(self, folder_id: str) -> ProjectFolder | None:
+        return next((f for f in self.folders if f.id == folder_id), None)
+
+    def local_folders(self, env: str) -> tuple[ProjectFolder, ...]:
+        return tuple(f for f in self.folders if f.local(env))
 
     def view(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "name": self.name,
-            "root": str(self.root),
             "created_at": self.created_at.isoformat(),
             "settings": self.settings.dump(),
             "system": self.settings.system,
-            "reachable": self.reachable,
-            "writable": self.reachable and os.access(self.root, os.W_OK),
+            "folders": [f.view() for f in self.folders],
         }
 
 
-def _row(row: Any, managed_root: Path | None = None) -> Project:
-    try:
-        settings = json.loads(row["settings"] or "{}")
-    except (TypeError, ValueError):
-        settings = {}
-    root = Path(row["root"])
-    return Project(
-        id=row["id"],
-        name=row["name"],
-        root=root,
-        created_at=datetime.fromisoformat(row["created_at"]),
-        settings=ProjectSettings.load(settings),
-        managed=_is_managed(root, managed_root),
-    )
+@dataclass(frozen=True, slots=True)
+class BriefSection:
+    section: str
+    body: str = ""
+    updated_at: str = ""
+    updated_by: str = ""
 
 
-def _is_managed(root: Path, managed_root: Path | None) -> bool:
-    """Whether this root is one of ours: a folder *inside* the managed projects tree.
+@dataclass(frozen=True, slots=True)
+class JournalEntry:
+    id: int
+    project_id: str
+    at: str
+    author: str
+    kind: str
+    text: str
+    refs: dict[str, Any]
 
-    The tree itself is not a project and never a root, so containment is the whole test — a path
-    equal to the tree is as foreign here as one outside it.
+    def view(self) -> dict[str, Any]:
+        return {"id": self.id, "at": self.at, "author": self.author, "kind": self.kind, "text": self.text, "refs": self.refs}
+
+
+def _is_managed(path: Path, managed_root: Path | None) -> bool:
+    """Whether this folder is one of ours: a folder *inside* the managed projects tree.
+
+    The tree itself is not a project and never a folder of one, so containment is the whole test — a
+    path equal to the tree is as foreign here as one outside it.
     """
-    return managed_root is not None and managed_root in root.parents
+    return managed_root is not None and managed_root in path.parents
 
 
 def _nested_under(session_id: str, metadata: dict[str, Any], known: set[str]) -> bool:
@@ -120,16 +284,24 @@ def _nested_under(session_id: str, metadata: dict[str, Any], known: set[str]) ->
     return isinstance(origin, str) and origin != session_id and origin in known
 
 
+def _detect_git(path: Path) -> bool:
+    """A work tree has ``.git`` as a directory, a linked worktree or a submodule has it as a file."""
+    try:
+        return (path / ".git").exists()
+    except OSError:
+        return False
+
+
 PSEUDO_FILESYSTEMS = (Path("/proc"), Path("/sys"), Path("/dev"), Path("/run"))
-"""Kernel interfaces the operating system mounts, not folders with work in them. A project rooted on
+"""Kernel interfaces the operating system mounts, not folders with work in them. A project folder on
 one of them would list a running machine's processes and devices as if they were files to edit."""
 
 
 def normalise_root(raw: str) -> Path:
-    """The path a project is anchored at: absolute, ``~`` expanded, no trailing slash, no ``..``.
+    """The path a project folder is anchored at: absolute, ``~`` expanded, no trailing slash, no ``..``.
 
-    Not resolved against the filesystem — a root that is not mounted yet has nothing to resolve
-    against, and a root that IS mounted is realpath'd by the containment check every time it is
+    Not resolved against the filesystem — a folder that is not mounted yet has nothing to resolve
+    against, and a folder that IS mounted is realpath'd by the containment check every time it is
     used, which is where a symlink swapped later would have to be caught anyway.
     """
     text = (raw or "").strip()
@@ -149,118 +321,197 @@ def normalise_root(raw: str) -> Path:
     return path
 
 
-class ProjectStore:
-    """The projects table, and the one column on ``sessions`` that points into it."""
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
 
-    def __init__(self, db: Database, *, managed_root: Path | None = None, reserved: Iterable[Path] = (), home: Path | None = None) -> None:
+
+class ProjectStore:
+    """The projects and their folders, briefs and journals, and the one column on ``sessions`` that points into them."""
+
+    def __init__(
+        self,
+        db: Database,
+        *,
+        managed_root: Path | None = None,
+        reserved: Iterable[Path] = (),
+        home: Path | None = None,
+        local_env: str | None = None,
+    ) -> None:
         self._db = db
         self._write = asyncio.Lock()
-        """Held across the whole of a read-check-insert. Both ways of making a project look the table
-        up and then write to it, with awaits in between; nothing else serialised them, so two callers
+        """Held across the whole of a read-check-insert. Every way of adding a folder looks the table
+        up and then writes to it, with awaits in between; nothing else serialised them, so two callers
         that asked at the same moment each saw a table without the row the other was about to add."""
         self._roots: tuple[Path, ...] = ()
         self._reserved = tuple(dict.fromkeys(Path(os.path.normpath(Path(p).expanduser())) for p in reserved))
-        """This installation's own directories. A project may not be one, contain one or sit inside one."""
+        """This installation's own directories. A project folder may not be one, contain one or sit inside one."""
         self._home = Path(os.path.normpath(Path(home).expanduser())) if home is not None else None
         """The operator's home folder, refused as a whole and allowed one folder in: every project
         lives inside it, and taking the whole of it is what switches off the rule that asks before a
         path in the home folder is touched."""
         self._managed_root = Path(os.path.normpath(managed_root.expanduser())) if managed_root is not None else None
+        self.local_env = local_env or db.local_env
+        """The environment this process runs in; its folders are the ones its own tools can reach."""
 
     @property
     def roots(self) -> tuple[Path, ...]:
-        """The folders that are projects, as the last read of the table saw them.
+        """Every folder of this environment that belongs to a project, as the last read of the table saw them.
 
         The tool policy is built while a call is being judged, which is not a place to wait on a
         query. Every write below refreshes this, and the manager reads the table on the way up, so
-        the list is current whenever a project has ever existed in this process.
+        the list is current whenever a project has ever existed in this process. A folder of the
+        other environment is not here: its path names nothing this process's tools can touch.
         """
         return self._roots
 
+    # -- reading -------------------------------------------------------------------
+
+    def _folder(self, row: Any) -> ProjectFolder:
+        path = Path(row["path"])
+        return ProjectFolder(
+            id=row["id"],
+            project_id=row["project_id"],
+            path=path,
+            label=row["label"],
+            env=row["env"],
+            is_git=bool(row["is_git"]),
+            readonly=bool(row["readonly"]),
+            position=int(row["position"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            managed=_is_managed(path, self._managed_root),
+        )
+
+    def _project(self, row: Any, folders: Sequence[ProjectFolder]) -> Project:
+        try:
+            settings = json.loads(row["settings"] or "{}")
+        except (TypeError, ValueError):
+            settings = {}
+        return Project(
+            id=row["id"],
+            name=row["name"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            settings=ProjectSettings.load(settings, default_env=self.local_env),
+            folders=tuple(folders),
+        )
+
     async def list(self) -> list[Project]:
         rows = await self._db.fetchall("SELECT * FROM projects ORDER BY name COLLATE NOCASE")
-        projects = [_row(r, self._managed_root) for r in rows]
-        self._roots = tuple(p.root for p in projects)
+        folder_rows = await self._db.fetchall("SELECT * FROM project_folders ORDER BY project_id, position, created_at")
+        by_project: dict[str, list[ProjectFolder]] = {}
+        for folder_row in folder_rows:
+            by_project.setdefault(folder_row["project_id"], []).append(self._folder(folder_row))
+        projects = [self._project(r, by_project.get(r["id"], [])) for r in rows]
+        self._roots = tuple(f.path for p in projects for f in p.folders if f.local(self.local_env))
         return projects
 
     async def get(self, project_id: str) -> Project | None:
         row = await self._db.fetchone("SELECT * FROM projects WHERE id = ?", (project_id,))
-        return _row(row, self._managed_root) if row is not None else None
+        if row is None:
+            return None
+        folders = await self._db.fetchall("SELECT * FROM project_folders WHERE project_id = ? ORDER BY position, created_at", (project_id,))
+        return self._project(row, [self._folder(f) for f in folders])
 
-    async def create(self, name: str, root: str | None = None, *, settings: ProjectSettings | None = None, project_id: str | None = None) -> Project:
+    async def for_path(self, path: Path) -> Project | None:
+        """The project one of whose folders is exactly this path."""
+        target = Path(os.path.normpath(path.expanduser()))
+        row = await self._db.fetchone("SELECT project_id FROM project_folders WHERE path = ?", (str(target),))
+        return await self.get(row["project_id"]) if row is not None else None
+
+    # -- making projects -------------------------------------------------------------
+
+    async def create(
+        self,
+        name: str,
+        folders: Sequence[FolderSpec | str] | None = None,
+        *,
+        settings: ProjectSettings | None = None,
+        project_id: str | None = None,
+    ) -> Project:
+        """A project with the folders asked for, in that order; with none, a managed scratch folder of its own."""
         label = (name or "").strip()
         if not label:
             raise ProjectError("a project needs a name")
+        if isinstance(folders, str):
+            # A string is a sequence too, of one-character "folders"; it is a caller's slip, not a request.
+            raise TypeError("folders is a list of folders, not one path")
         project_id = project_id or uuid.uuid4().hex[:12]
-        if root is None:
+        specs = [FolderSpec(f) if isinstance(f, str) else f for f in folders or ()]
+        planned: list[tuple[Path, FolderSpec, bool]] = []
+        if not specs:
             if self._managed_root is None:
                 raise ProjectError("automatic project folders are not configured")
-            path = self._managed_root / project_id
-        else:
-            path = normalise_root(root)
+            planned.append((self._managed_root / project_id, FolderSpec(str(self._managed_root / project_id)), True))
+        for spec in specs:
+            path = normalise_root(spec.path)
             self._refuse_reserved(path)
+            planned.append((path, spec, False))
+        self._refuse_among(p for p, _, _ in planned)
         async with self._write:
-            await self._refuse_overlap(path)
-            if root is None:
-                self._make_root(path)
-            project = Project(
-                id=project_id,
-                name=label,
-                root=path,
-                created_at=datetime.now(UTC),
-                settings=settings or ProjectSettings(),
-                managed=_is_managed(path, self._managed_root),
-            )
-            await self._insert(project)
+            for path, _, _ in planned:
+                await self._refuse_overlap(path)
+            for path, _, ours in planned:
+                if ours:
+                    self._make_root(path)
+            project = await self._insert(project_id, label, settings or ProjectSettings(), [(path, spec) for path, spec, _ in planned])
             await self.list()
         return project
 
-    async def for_root(self, root: Path) -> Project | None:
-        target = Path(os.path.normpath(root.expanduser()))
-        return next((project for project in await self.list() if project.root == target), None)
-
     async def adopt_directory(self, name: str, root: Path) -> Project:
         """Make an internal working directory a project, or return the project already owning it."""
-        existing = await self.for_root(root)
+        existing = await self.for_path(root)
         if existing is not None:
             return existing
         label = (name or "").strip() or root.name or "Project"
         path = Path(os.path.normpath(root.expanduser()))
         async with self._write:
-            existing = await self.for_root(path)
+            existing = await self.for_path(path)
             if existing is not None:
                 return existing
             await self._refuse_overlap(path)
-            project = Project(
-                id=uuid.uuid4().hex[:12],
-                name=label,
-                root=path,
-                created_at=datetime.now(UTC),
-                settings=ProjectSettings(snapshots=True),
-                managed=_is_managed(path, self._managed_root),
-            )
-            await self._insert(project)
+            project = await self._insert(uuid.uuid4().hex[:12], label, ProjectSettings(snapshots=True), [(path, FolderSpec(str(path)))])
             await self.list()
             return project
 
-    async def _insert(self, project: Project) -> None:
-        """One row, with the system flag written to its own column as well as into the settings blob.
+    async def _insert(self, project_id: str, name: str, settings: ProjectSettings, folders: Sequence[tuple[Path, FolderSpec]]) -> Project:
+        """One project row and its folders, in one transaction.
 
-        The column exists for the partial unique index over it: the flag is what makes a project the
-        installation's own, and an invariant a query enforces holds even when the code that was
-        meant to check it lost a race.
+        The system flag is written to its own column as well as into the settings blob: the column
+        exists for the partial unique index over it, and an invariant a query enforces holds even
+        when the code that was meant to check it lost a race.
         """
-        await self._db.execute(
-            "INSERT INTO projects(id, name, root, created_at, settings, system) VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                project.id,
-                project.name,
-                str(project.root),
-                project.created_at.isoformat(),
-                json.dumps(project.settings.dump()),
-                project.settings.system,
-            ),
-        )
+        if not settings.default_env:
+            settings = replace(settings, default_env=self.local_env)
+        created = datetime.now(UTC)
+        made: list[ProjectFolder] = []
+        for position, (path, spec) in enumerate(folders):
+            env = spec.env or self.local_env
+            if env not in ENVIRONMENTS:
+                raise ProjectError(f"a folder lives in the container or on the host, not {env!r}")
+            made.append(
+                ProjectFolder(
+                    id=f"f-{uuid.uuid4().hex[:12]}",
+                    project_id=project_id,
+                    path=path,
+                    label=spec.label.strip(),
+                    env=env,
+                    is_git=env == self.local_env and _detect_git(path),
+                    readonly=spec.readonly,
+                    position=position,
+                    created_at=created,
+                    managed=_is_managed(path, self._managed_root),
+                )
+            )
+        async with self._db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO projects(id, name, created_at, settings, system) VALUES (?, ?, ?, ?, ?)",
+                (project_id, name, created.isoformat(), json.dumps(settings.dump()), settings.system),
+            )
+            for folder in made:
+                await conn.execute(
+                    "INSERT INTO project_folders(id, project_id, path, label, env, is_git, readonly, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (folder.id, project_id, str(folder.path), folder.label, folder.env, int(folder.is_git), int(folder.readonly), folder.position, created.isoformat()),
+                )
+        return Project(id=project_id, name=name, created_at=created, settings=settings, folders=tuple(made))
 
     async def ensure_system(self, kind: str, *, name: str, root: Path) -> Project:
         """The installation's own project of this kind, made the first time something needs it.
@@ -279,21 +530,13 @@ class ProjectStore:
                 # found, a sweep, a restore of the database without the tree beside it. This is the
                 # one call every user of a system project already makes, so it is where the folder is
                 # put back rather than at each of them.
-                await self.ensure_reachable(existing)
+                await self.ensure_reachable(existing.primary)
                 return existing
             path = Path(os.path.normpath(Path(root).expanduser()))
             await self._refuse_overlap(path)
             self._make_root(path)
-            project = Project(
-                id=uuid.uuid4().hex[:12],
-                name=name,
-                root=path,
-                created_at=datetime.now(UTC),
-                settings=ProjectSettings(system=kind),
-                managed=_is_managed(path, self._managed_root),
-            )
             try:
-                await self._insert(project)
+                project = await self._insert(uuid.uuid4().hex[:12], name, ProjectSettings(system=kind), [(path, FolderSpec(str(path)))])
             except sqlite3.IntegrityError:
                 # The unique index refused a second project of this kind. Somebody else made it —
                 # from another process against the same file, which is the one race the lock above
@@ -305,30 +548,44 @@ class ProjectStore:
             await self.list()
         return project
 
-    async def ensure_reachable(self, project: Project) -> bool:
+    async def ensure_reachable(self, folder: ProjectFolder) -> bool:
         """Whether the folder can be worked in — making it first when it is one of ours.
 
         Every guard that refuses to start something in a project asks this instead of reading
         ``reachable`` directly. For a folder under the managed tree the answer is a folder: nothing
         outside this installation was ever going to create it, and a row whose directory is missing
         is a gap in our own bookkeeping, not news for the operator. For a folder they pointed at the
-        answer is the plain truth, and the caller raises with the path in it.
+        answer is the plain truth, and the caller raises with the path in it. A folder of the other
+        environment is never reachable to this process, whatever its path happens to name here.
         """
-        if project.managed and not project.root.is_dir():
-            await asyncio.to_thread(self._make_root, project.root)
-        return project.reachable
+        if not folder.local(self.local_env):
+            return False
+        if folder.managed and not folder.path.is_dir():
+            await asyncio.to_thread(self._make_root, folder.path)
+        return folder.reachable
 
     async def ensure_roots(self) -> list[Project]:
-        """Read the table and put back any of our own folders that are not on disk.
+        """Read the table, put back any of our own folders that are not on disk, and look again at
+        which folders are git repositories.
 
         Called on the way up, so a run started straight after a start does not have to be the thing
-        that discovers the gap.
+        that discovers the gap. ``is_git`` is refreshed here because a folder becomes a repository
+        (or stops being one) without telling anybody, and a worktree for a staff member is only
+        offered on a repository.
         """
         projects = await self.list()
+        changed = False
         for project in projects:
-            if project.managed and not project.root.is_dir():
-                await asyncio.to_thread(self._make_root, project.root)
-        return projects
+            for folder in project.local_folders(self.local_env):
+                if folder.managed and not folder.path.is_dir():
+                    await asyncio.to_thread(self._make_root, folder.path)
+                if not folder.reachable:
+                    continue
+                is_git = await asyncio.to_thread(_detect_git, folder.path)
+                if is_git != folder.is_git:
+                    await self._db.execute("UPDATE project_folders SET is_git = ? WHERE id = ?", (int(is_git), folder.id))
+                    changed = True
+        return await self.list() if changed else projects
 
     def _make_root(self, path: Path) -> None:
         """Create one of our own project folders the way the ones beside it were created.
@@ -375,7 +632,8 @@ class ProjectStore:
 
     async def system(self, kind: str) -> Project | None:
         """The installation's project of this kind if it has been made; ``None`` before it is needed."""
-        return next((p for p in await self.list() if p.settings.system == kind), None)
+        row = await self._db.fetchone("SELECT id FROM projects WHERE system = ?", (kind,))
+        return await self.get(row["id"]) if row is not None else None
 
     async def summary(self, active: Iterable[str] = ()) -> dict[str, dict[str, Any]]:
         """Per project — and under ``""`` the sessions with no project — how many, how busy, how recently.
@@ -416,27 +674,111 @@ class ProjectStore:
                 bucket["loops"] += 1
         return out
 
-    async def update(self, project_id: str, *, name: str | None = None, settings: ProjectSettings | None = None) -> Project:
+    # -- changing projects -----------------------------------------------------------
+
+    async def update(
+        self,
+        project_id: str,
+        *,
+        name: str | None = None,
+        snapshots: bool | None = None,
+        ephemeral: bool | None = None,
+        default_env: str | None = None,
+    ) -> Project:
+        """Change what the operator edits directly. Each field is its own argument so a change to
+        one never writes the others back from a stale copy — the orchestrator block in particular
+        has its own writers, and a rename must not reset it."""
         project = await self.get(project_id)
         if project is None:
             raise KeyError(project_id)
         label = project.name if name is None else (name or "").strip()
         if not label:
             raise ProjectError("a project needs a name")
-        path = project.root
-        merged = project.settings if settings is None else settings
-        if merged.system != project.settings.system:
-            # The flag is what makes the two refusals above stick; nothing outside this module sets it.
-            merged = ProjectSettings(snapshots=merged.snapshots, system=project.settings.system)
+        patch: dict[str, Any] = {}
+        if snapshots is not None:
+            patch["snapshots"] = bool(snapshots)
+        if ephemeral is not None:
+            patch["ephemeral"] = bool(ephemeral)
+        if default_env is not None:
+            if default_env not in ENVIRONMENTS:
+                raise ProjectError(f"a project runs its agents in the container or on the host, not {default_env!r}")
+            patch["default_env"] = default_env
         await self._db.execute(
-            "UPDATE projects SET name = ?, root = ?, settings = json_patch(CASE WHEN json_valid(settings) THEN settings ELSE '{}' END, ?), system = ? WHERE id = ?",
-            (label, str(path), json.dumps(merged.dump()), merged.system, project_id),
+            "UPDATE projects SET name = ?, settings = json_patch(CASE WHEN json_valid(settings) THEN settings ELSE '{}' END, ?) WHERE id = ?",
+            (label, json.dumps(patch), project_id),
         )
         await self.list()
-        return Project(id=project.id, name=label, root=path, created_at=project.created_at, settings=merged)
+        updated = await self.get(project_id)
+        assert updated is not None
+        return updated
+
+    async def update_orchestrator(
+        self,
+        project_id: str,
+        *,
+        enabled: bool | None = None,
+        model: str | None = None,
+        autonomy: str | None = None,
+        concurrency: int | None = None,
+        concurrency_cap: int | None = None,
+        telegram_topic_id: int | None = None,
+    ) -> Project:
+        """Change the orchestrator block, except its session, which only :meth:`set_orchestrator` writes.
+
+        An ephemeral or system project cannot have an orchestrator: the one is removed with its last
+        chat and the other is the installation's own. The concurrency stays within the cap.
+        """
+        project = await self.get(project_id)
+        if project is None:
+            raise KeyError(project_id)
+        current = project.settings.orchestrator
+        if enabled and (project.settings.ephemeral or project.settings.system):
+            kind = "the installation's own project" if project.settings.system else "a chat's own scratch project"
+            raise ProjectError(f"{project.name} is {kind} and cannot have an orchestrator; keep it as a project first")
+        if autonomy is not None and autonomy not in AUTONOMY:
+            raise ProjectError(f"autonomy is one of {', '.join(AUTONOMY)}, not {autonomy!r}")
+        cap = current.concurrency_cap if concurrency_cap is None else int(concurrency_cap)
+        if cap < 1:
+            raise ProjectError("the concurrency cap is at least one")
+        wanted = current.concurrency if concurrency is None else int(concurrency)
+        if concurrency is not None and not 1 <= wanted <= cap:
+            raise ProjectError(f"concurrency is between 1 and the cap of {cap}, not {wanted}")
+        patch: dict[str, Any] = {"concurrency_cap": cap, "concurrency": min(wanted, cap)}
+        if enabled is not None:
+            patch["enabled"] = bool(enabled)
+        if model is not None:
+            patch["model"] = model.strip()
+        if autonomy is not None:
+            patch["autonomy"] = autonomy
+        if telegram_topic_id is not None:
+            patch["telegram_topic_id"] = int(telegram_topic_id)
+        await self._db.execute(
+            "UPDATE projects SET settings = json_patch(settings, ?) WHERE id = ?",
+            (json.dumps({"orchestrator": patch}), project_id),
+        )
+        updated = await self.get(project_id)
+        assert updated is not None
+        return updated
+
+    async def set_orchestrator(self, project_id: str, *, expect: str, value: str) -> bool:
+        """Point the project at a new orchestrator session if it still points at ``expect``; whether this call won.
+
+        A compare-and-set in one statement: two starts, or a start and a replacement, that both read
+        the old value cannot both write, and the loser learns it lost instead of running a second
+        orchestrator nobody can see.
+        """
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "UPDATE projects SET settings = json_set(settings, '$.orchestrator.session_id', ?) "
+                "WHERE id = ? AND COALESCE(json_extract(settings, '$.orchestrator.session_id'), '') = ?",
+                (value, project_id, expect),
+            )
+            won = cursor.rowcount == 1
+            await cursor.close()
+        return won
 
     async def delete(self, project_id: str) -> None:
-        """Forget an empty project. Nothing on disk is touched."""
+        """Forget an empty project, with its folders, brief and journal. Nothing on disk is touched."""
         project = await self.get(project_id)
         if project is not None and project.settings.system:
             raise ProjectError(f"{project.name} is the installation's own project and cannot be removed")
@@ -445,13 +787,100 @@ class ProjectStore:
         await self._db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         await self.list()
 
+    # -- folders ---------------------------------------------------------------------
+
+    async def add_folder(self, project_id: str, path: str, *, label: str = "", env: str | None = None, readonly: bool = False) -> ProjectFolder:
+        """Another folder for a project, last in its order. The same rules as the first one: absolute,
+        none of the installation's own, and nesting with no other folder anywhere — this project's
+        included, since two folders of one project that nest would make "read-only" mean one thing
+        through one path and another through the other."""
+        target = normalise_root(path)
+        self._refuse_reserved(target)
+        folder_env = env or self.local_env
+        if folder_env not in ENVIRONMENTS:
+            raise ProjectError(f"a folder lives in the container or on the host, not {folder_env!r}")
+        async with self._write:
+            project = await self.get(project_id)
+            if project is None:
+                raise KeyError(project_id)
+            await self._refuse_overlap(target)
+            folder = ProjectFolder(
+                id=f"f-{uuid.uuid4().hex[:12]}",
+                project_id=project_id,
+                path=target,
+                label=label.strip(),
+                env=folder_env,
+                is_git=folder_env == self.local_env and _detect_git(target),
+                readonly=readonly,
+                position=len(project.folders),
+                created_at=datetime.now(UTC),
+                managed=_is_managed(target, self._managed_root),
+            )
+            await self._db.execute(
+                "INSERT INTO project_folders(id, project_id, path, label, env, is_git, readonly, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (folder.id, project_id, str(target), folder.label, folder.env, int(folder.is_git), int(folder.readonly), folder.position, folder.created_at.isoformat()),
+            )
+            await self.list()
+        await self.record(project_id, "system", "folder", f"added the folder {target} ({folder_env}{', read-only' if readonly else ''})", {"folder_id": folder.id})
+        return folder
+
+    async def update_folder(self, project_id: str, folder_id: str, *, label: str | None = None, readonly: bool | None = None, position: int | None = None) -> ProjectFolder:
+        """Rename, lock or move a folder. Moving one to position 0 makes it the primary."""
+        async with self._write:
+            project = await self.get(project_id)
+            folder = project.folder(folder_id) if project is not None else None
+            if project is None or folder is None:
+                raise KeyError(folder_id)
+            async with self._db.transaction() as conn:
+                if label is not None or readonly is not None:
+                    await conn.execute(
+                        "UPDATE project_folders SET label = ?, readonly = ? WHERE id = ?",
+                        (folder.label if label is None else label.strip(), int(folder.readonly if readonly is None else readonly), folder_id),
+                    )
+                if position is not None:
+                    order = [f for f in project.folders if f.id != folder_id]
+                    order.insert(max(0, min(int(position), len(order))), folder)
+                    for index, each in enumerate(order):
+                        await conn.execute("UPDATE project_folders SET position = ? WHERE id = ?", (index, each.id))
+            await self.list()
+            updated = (await self.get(project_id)).folder(folder_id)  # type: ignore[union-attr]
+        assert updated is not None
+        changes = [
+            *([f"label {updated.label!r}"] if label is not None and updated.label != folder.label else []),
+            *(["read-only" if updated.readonly else "writable"] if readonly is not None and updated.readonly != folder.readonly else []),
+            *([f"position {updated.position}"] if position is not None and updated.position != folder.position else []),
+        ]
+        if changes:
+            await self.record(project_id, "system", "folder", f"changed the folder {updated.path}: {', '.join(changes)}", {"folder_id": folder_id})
+        return updated
+
+    async def remove_folder(self, project_id: str, folder_id: str) -> None:
+        """Forget a folder. Nothing on disk is touched. The last folder stays: a project is somewhere.
+
+        Whether a session still works in the folder is the caller's to refuse, because only the
+        caller knows which sessions are loaded and where they are.
+        """
+        async with self._write:
+            project = await self.get(project_id)
+            folder = project.folder(folder_id) if project is not None else None
+            if project is None or folder is None:
+                raise KeyError(folder_id)
+            if len(project.folders) == 1:
+                raise ProjectError(f"{folder.path} is the only folder of {project.name}; a project needs at least one")
+            async with self._db.transaction() as conn:
+                await conn.execute("DELETE FROM project_folders WHERE id = ?", (folder_id,))
+                for index, each in enumerate(f for f in project.folders if f.id != folder_id):
+                    await conn.execute("UPDATE project_folders SET position = ? WHERE id = ?", (index, each.id))
+            await self.list()
+        await self.record(project_id, "system", "folder", f"removed the folder {folder.path}", {"folder_id": folder_id})
+
     def _refuse_reserved(self, path: Path) -> None:
         """The folders that are the installation's, or are the whole of the operator's home.
 
-        A project root is inside the wall as well as outside it: every path under it is reachable to
-        the agents of that project, and it is in the policy's open roots, which is what makes the
+        A project folder is inside the wall as well as outside it: every path under it is reachable
+        to the agents of that project, and it is in the policy's open roots, which is what makes the
         home-folder question stop being asked for anything under it. So the state directory, the
-        secrets and the two checkouts are refused in both directions — as the root, above it and
+        secrets and the two checkouts are refused in both directions — as the folder, above it and
         below it. The managed projects root is refused as a whole but its children are exactly where
         automatic and adopted projects belong. The home folder is refused as a whole while any
         folder inside it stays the ordinary case.
@@ -470,21 +899,93 @@ class ProjectStore:
             if path in reserved.parents:
                 raise ProjectError(f"{path} contains {reserved}, which belongs to the installation itself")
 
-    async def _refuse_overlap(self, path: Path, *, ignore: str = "") -> None:
-        """Two projects may not nest, because containment would then mean two different things at once.
+    @staticmethod
+    def _refuse_among(paths: Iterable[Path]) -> None:
+        """The folders asked for in one request may not nest among themselves either."""
+        seen: list[Path] = []
+        for path in paths:
+            for other in seen:
+                if other == path:
+                    raise ProjectError(f"{path} is named twice")
+                if other in path.parents or path in other.parents:
+                    raise ProjectError(f"{path} and {other} nest; a project's folders are side by side")
+            seen.append(path)
 
-        A session in the outer project may write anywhere in the inner one while the inner project's
-        own sessions may not see out — a boundary that holds in one direction is not a boundary.
+    async def _refuse_overlap(self, path: Path) -> None:
+        """No two folders anywhere may be equal or nest, because containment would then mean two
+        different things at once.
+
+        A session in the outer folder may write anywhere in the inner one while the inner folder's
+        own sessions may not see out — a boundary that holds in one direction is not a boundary. The
+        rule holds across environments too: a path is compared as written, and the same absolute
+        path is how both environments name a folder mounted into the container.
         """
-        for other in await self.list():
-            if other.id == ignore:
-                continue
-            if other.root == path:
-                raise ProjectError(f"{other.name} is already that folder")
-            if path in other.root.parents:
-                raise ProjectError(f"that folder contains the project {other.name} ({other.root})")
-            if other.root in path.parents:
-                raise ProjectError(f"that folder is inside the project {other.name} ({other.root})")
+        rows = await self._db.fetchall("SELECT f.path, p.name FROM project_folders f JOIN projects p ON p.id = f.project_id")
+        for row in rows:
+            other = Path(row["path"])
+            if other == path:
+                raise ProjectError(f"{row['name']} is already that folder")
+            if path in other.parents:
+                raise ProjectError(f"that folder contains the project {row['name']} ({other})")
+            if other in path.parents:
+                raise ProjectError(f"that folder is inside the project {row['name']} ({other})")
+
+    # -- the brief and the journal ---------------------------------------------------
+
+    async def brief(self, project_id: str) -> dict[str, BriefSection]:
+        """Every section of the brief, in order; one never written is there, empty."""
+        rows = await self._db.fetchall("SELECT section, body, updated_at, updated_by FROM project_briefs WHERE project_id = ?", (project_id,))
+        written = {r["section"]: BriefSection(r["section"], r["body"], r["updated_at"], r["updated_by"]) for r in rows}
+        return {section: written.get(section, BriefSection(section)) for section in BRIEF_SECTIONS}
+
+    async def set_brief(self, project_id: str, section: str, body: str, by: str) -> BriefSection:
+        if section not in BRIEF_SECTIONS:
+            raise ProjectError(f"the brief has the sections {', '.join(BRIEF_SECTIONS)}, not {section!r}")
+        if by not in BRIEF_AUTHORS:
+            raise ProjectError(f"a brief is written by the operator, the orchestrator or the system, not {by!r}")
+        if section in OPERATOR_ONLY_SECTIONS and by != "operator":
+            raise ProjectError(f"only the operator writes {section}: it bounds what may be granted without asking them")
+        if await self.get(project_id) is None:
+            raise KeyError(project_id)
+        at = _now()
+        await self._db.execute(
+            "INSERT INTO project_briefs(project_id, section, body, updated_at, updated_by) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(project_id, section) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+            (project_id, section, body, at, by),
+        )
+        return BriefSection(section, body, at, by)
+
+    async def record(self, project_id: str, author: str, kind: str, text: str, refs: dict[str, Any] | None = None) -> JournalEntry:
+        """Write one journal entry. The host writes the system ones itself — every grant, hire,
+        folder change and merge — so the record does not depend on a model remembering to."""
+        if author not in JOURNAL_AUTHORS:
+            raise ProjectError(f"a journal entry is by the orchestrator, the operator or the system, not {author!r}")
+        at = _now()
+        refs = dict(refs or {})
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "INSERT INTO project_journal(project_id, at, author, kind, text, refs_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (project_id, at, author, kind, text, json.dumps(refs)),
+            )
+            entry_id = int(cursor.lastrowid or 0)
+            await cursor.close()
+        return JournalEntry(entry_id, project_id, at, author, kind, text, refs)
+
+    async def journal(self, project_id: str, *, before: int | None = None, limit: int = 50) -> list[JournalEntry]:
+        """Newest first, one page; ``before`` is the id of the oldest entry already shown."""
+        limit = max(1, min(int(limit), JOURNAL_PAGE_MAX))
+        if before is None:
+            rows = await self._db.fetchall("SELECT * FROM project_journal WHERE project_id = ? ORDER BY id DESC LIMIT ?", (project_id, limit))
+        else:
+            rows = await self._db.fetchall("SELECT * FROM project_journal WHERE project_id = ? AND id < ? ORDER BY id DESC LIMIT ?", (project_id, int(before), limit))
+        out = []
+        for r in rows:
+            try:
+                refs = json.loads(r["refs_json"] or "{}")
+            except (TypeError, ValueError):
+                refs = {}
+            out.append(JournalEntry(int(r["id"]), r["project_id"], r["at"], r["author"], r["kind"], r["text"], refs if isinstance(refs, dict) else {}))
+        return out
 
     # -- the link to sessions ------------------------------------------------------
 
@@ -506,4 +1007,16 @@ class ProjectStore:
         return {r["id"]: r["project_id"] for r in rows}
 
 
-__all__ = ["Project", "ProjectError", "ProjectSettings", "ProjectStore", "normalise_root"]
+__all__ = [
+    "BRIEF_SECTIONS",
+    "BriefSection",
+    "FolderSpec",
+    "JournalEntry",
+    "OrchestratorSettings",
+    "Project",
+    "ProjectError",
+    "ProjectFolder",
+    "ProjectSettings",
+    "ProjectStore",
+    "normalise_root",
+]

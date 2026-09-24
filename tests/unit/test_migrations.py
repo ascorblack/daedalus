@@ -94,7 +94,7 @@ async def test_the_event_ring_is_created_and_a_second_open_leaves_it_alone(tmp_p
 
 
 def _index_of(fragment: str) -> int:
-    return next(i for i, script in enumerate(database_module.MIGRATIONS) if fragment in script)
+    return next(i for i, script in enumerate(database_module.MIGRATIONS) if isinstance(script, str) and fragment in script)
 
 
 async def test_the_inbox_becomes_notifications_with_its_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

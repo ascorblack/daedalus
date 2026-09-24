@@ -23,6 +23,14 @@
   --font: -apple-system, "SF Pro Text", Inter, Roboto, "Segoe UI", sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--line-strong);
+  /* The terminal: its own background, a step darker than the page so the pane reads as a surface,
+     and the sixteen ANSI colours programs choose from, tuned to the status colours above. Plain hex
+     only: theme.ts hands these to xterm.js, which cannot read var() or color-mix(). */
+  --term-bg: #09090b;
+  --ansi-0: #1c1c1f; --ansi-1: #f0625d; --ansi-2: #5fd68a; --ansi-3: #e8b44c;
+  --ansi-4: #7db4ff; --ansi-5: #c792ea; --ansi-6: #2dd4bf; --ansi-7: #c8c9ce;
+  --ansi-8: #5c5d66; --ansi-9: #ff8a85; --ansi-10: #8be9a8; --ansi-11: #f5cf7a;
+  --ansi-12: #a6ccff; --ansi-13: #ddb3f5; --ansi-14: #7ee8d9; --ansi-15: #ededef;
 
   /* ── the scale everything is drawn on ────────────────────────────────────────────────────
      Type: the UI is 13/14, prose is 15 on a desktop and 16 on a phone; code is 12.5. A rule that
@@ -108,7 +116,17 @@
   --code: #7c3f00;
   --code-block: #3b2a12;
   --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.14), 0 0 0 1px var(--line);
+  /* On a light page "white" (7) and "bright white" (15) are greys, or text in them would vanish. */
+  --term-bg: #fbfbfc;
+  --ansi-0: #141416; --ansi-1: #d93b36; --ansi-2: #1e9e56; --ansi-3: #b7791f;
+  --ansi-4: #2f6fe0; --ansi-5: #9b4dca; --ansi-6: #0e9f8e; --ansi-7: #8e9098;
+  --ansi-8: #5b5d66; --ansi-9: #e0524d; --ansi-10: #25b865; --ansi-11: #c98a26;
+  --ansi-12: #4a84f0; --ansi-13: #b066dd; --ansi-14: #13b3a0; --ansi-15: #b4b5bb;
 }
+/* The terminal's typeface, bundled so box drawing and powerline glyphs line up on every machine.
+   The file is fetched only when a terminal asks for it (terminal/load.ts), never by the page. */
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("./terminal/fonts/JetBrainsMono-Regular.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 700; font-display: swap; src: url("./terminal/fonts/JetBrainsMono-Bold.woff2") format("woff2"); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 * { box-sizing: border-box; }
