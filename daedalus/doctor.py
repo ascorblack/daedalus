@@ -594,6 +594,10 @@ async def _terminals(ctx: DoctorContext) -> list[Check]:
         sandbox = (info.get("capabilities") or {}).get("sandbox")
         out.append(Check(name, True, f"ptyd {info.get('version')} (protocol {info.get('protocol')}), {running} running", "ok"))
         out.append(Check(f"terminal sandbox ({env})", sandbox == "ok", "available" if sandbox == "ok" else f"not available: {sandbox}", "ok" if sandbox == "ok" else "info", "terminals open unsandboxed until it is"))
+    if ctx.settings.telegram_bot_token and not ctx.settings.miniapp_public_url.strip():
+        # A terminal's socket is refused unless it comes from the app's own origin, and Telegram's
+        # webview connects from the Mini App's address, which nothing but this setting names.
+        out.append(Check("terminals in Telegram", False, "MINIAPP_PUBLIC_URL is empty, so a terminal opened inside Telegram is refused", "warn", "set MINIAPP_PUBLIC_URL to the address the bot's menu button opens"))
     return out
 
 

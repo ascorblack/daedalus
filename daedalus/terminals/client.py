@@ -50,6 +50,9 @@ class Channel:
         """What the channel may hold unread; a byte stream sets its own, smaller one."""
         self.closed = False
         self.reason = ""
+        self.claimed = False
+        """Whether the caller that asked for this channel has taken it. Until then a close must leave
+        it in the table, or the caller would find no channel and make a fresh one that never ends."""
 
     def _deliver(self, payload: bytes) -> None:
         if self.closed:
@@ -193,6 +196,9 @@ class PtydClient:
         existing = self._channels.get(channel_id)
         if existing is None:
             existing = self._channels[channel_id] = Channel(self, channel_id)
+        existing.claimed = True
+        if existing.closed:
+            self._channels.pop(channel_id, None)  # closed before it was claimed: it is the caller's now
         return existing
 
     async def wait_closed(self) -> None:
@@ -236,10 +242,11 @@ class PtydClient:
                 if target is None:
                     if not payload:
                         continue  # the answer to a close this side already sent
-                    target = self.channel(channel)
+                    target = self._channels[channel] = Channel(self, channel)  # kept for whoever asked for it
                 target._deliver(payload)
                 if not payload:
-                    self._channels.pop(channel, None)
+                    if target.claimed:
+                        self._channels.pop(channel, None)
                     self._send_nowait(channel, b"")  # the close is answered with a close
         except asyncio.CancelledError:
             reason = "closed by the host"

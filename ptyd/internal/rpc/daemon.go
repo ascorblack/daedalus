@@ -46,6 +46,7 @@ func (d *Daemon) Hello() any {
 // Register installs every method on srv.
 func (d *Daemon) Register(srv *server.Server) {
 	d.sampler = procstat.NewSampler()
+	d.registerAttach(srv)
 	srv.Handle("daemon.info", d.info)
 	srv.Handle("events.subscribe", d.subscribe)
 	srv.Handle("events.unsubscribe", d.unsubscribe)
@@ -140,6 +141,11 @@ func (d *Daemon) info(ctx context.Context, c *server.Conn, params json.RawMessag
 			"input_idle_ms":   d.Config.Limits.InputIdle.Milliseconds(),
 			"kill_grace_ms":   d.Config.Limits.KillGrace.Milliseconds(),
 			"max_write_bytes": config.MaxWriteBytes,
+			// Attachments.
+			"resync_backlog_bytes":    config.ResyncBacklogBytes,
+			"snapshot_scrollback":     config.DefaultSnapshotScrollback,
+			"max_snapshot_scrollback": config.MaxSnapshotScrollback,
+			"max_clients":             config.MaxClients,
 		},
 		"counts":  map[string]any{"running": running, "exited": exited},
 		"machine": sample.Machine,

@@ -1376,6 +1376,9 @@ body.resizing iframe { pointer-events: none; }
 .erow-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .erow-title { flex: 1; min-width: 0; font-weight: 500; font-size: var(--fs-14); line-height: 1.35; overflow-wrap: anywhere; }
 .erow-time { color: var(--fg-3); font-size: var(--fs-11); flex: none; font-variant-numeric: tabular-nums; }
+/* A result the operator has not seen: a dot beside the time and a heavier name, in the list and in the sidebar. */
+.unread-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); align-self: center; }
+.erow.unread .erow-title, .sidebar .erow.unread .erow-title { font-weight: 650; }
 .erow-meta { display: flex; align-items: center; gap: 6px; color: var(--fg-2); font-size: var(--fs-13); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .erow-meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .erow-meta .sep { color: var(--fg-3); flex: none; }

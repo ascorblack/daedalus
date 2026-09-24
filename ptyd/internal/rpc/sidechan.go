@@ -326,7 +326,8 @@ func (s *dialStream) read() {
 	for {
 		n, err := s.nc.Read(buf)
 		if n > 0 {
-			if s.peer.Load() || s.c.Send(s.id, buf[:n]) != nil {
+			// SendChannel fails once either side closed the channel, so no byte follows a close.
+			if s.c.SendChannel(s.id, buf[:n]) != nil {
 				break
 			}
 		}
@@ -337,7 +338,6 @@ func (s *dialStream) read() {
 	s.end()
 	s.release()
 	if !s.peer.Load() {
-		// Closed from this side only once the reader is done, so no data frame can follow the close.
 		s.c.CloseChannel(s.id)
 	}
 }

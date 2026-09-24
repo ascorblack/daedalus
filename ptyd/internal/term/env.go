@@ -5,6 +5,10 @@ import (
 	"strings"
 )
 
+// TagName is the variable every process of a terminal inherits, set to the terminal's id. It finds
+// a process that left both the terminal's tree and its session, to end it and to count what it costs.
+const TagName = "DAEDALUS_TERMINAL_ID"
+
 // strippedEnv are removed from every spawned process's environment, whatever the caller asks. Each
 // either belongs to the daemon (its own settings, or the ids of a terminal it runs inside when it is
 // being developed from one), or tells a program that it runs inside some other terminal or

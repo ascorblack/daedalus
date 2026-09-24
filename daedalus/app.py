@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from daedalus.config import RuntimeConfig, Settings
-from daedalus.extensions.notifications import Draft, NotificationService, Tone
+from daedalus.extensions.notifications import Category, Draft, NotificationService, Tone
 from daedalus.host.boot_guard import BootGuard
 from daedalus.host.component_install import Installer
 from daedalus.host.config_validation import ConfigConflict, config_revision
@@ -157,8 +157,8 @@ class Application:
             *(probe(provider_id, provider) for provider_id, provider in self.config.providers.items() if provider.kind == "llamacpp")
         )
 
-    async def notice(self, text: str, *, kind: str, tone: Tone = "info", quiet: bool = False) -> None:
-        """Record a line about the installation itself and send it to the General topic, as it always was.
+    async def notice(self, text: str, *, kind: str, tone: Tone = "info", quiet: bool = False, category: Category = "system") -> None:
+        """Record a line about the installation itself; the notification preferences decide who else hears it.
 
         The first line is the title and the rest the body. Before the extensions are installed there
         is nowhere to record it, so it goes to the chat alone, or to the log when there is no chat.
@@ -171,8 +171,8 @@ class Application:
             return
         headline, _, body = text.partition("\n")
         await self.notifications.post(Draft(
-            "system", headline.strip().strip("*_ ") or kind, body.strip(), kind=kind, tone=tone,
-            level="quiet" if quiet else None, telegram_general=True,
+            category, headline.strip().strip("*_ ") or kind, body.strip(), kind=kind, tone=tone,
+            level="quiet" if quiet else None,
         ))
 
     async def create_session(self, title: str, *, metadata: dict[str, Any] | None = None, workspace: Path | None = None, project_id: str | None = None, own_directory: bool = False) -> SessionState:
@@ -203,7 +203,7 @@ class Application:
             await self.notice(f"⚠️ The bot started without {len(self.extension_failures)} subsystem(s): {broken}. The inbox has the error for each.", kind="extension", tone="error")
         exceeded = self.manager.budget_exceeded() if self.manager else None
         if exceeded:
-            await self.notice(f"💸 Daily budget exceeded ({exceeded}). New runs are refused until tomorrow or /budget reset.", kind="budget", tone="warning")
+            await self.notice(f"💸 Daily budget exceeded ({exceeded}). New runs are refused until tomorrow or /budget reset.", kind="budget", tone="warning", category="spend")
 
     async def _install_extensions(self) -> None:
         """Scheduler, balance monitor, self-development, API — each attaches here."""

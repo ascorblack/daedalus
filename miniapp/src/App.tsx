@@ -20,6 +20,7 @@ import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
 import { t, useLang } from "./i18n";
 import { startPresence } from "./presence";
+import { startEvents, useStreamUp } from "./events";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -126,6 +127,9 @@ export function App() {
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   // What this window shows goes to the host from the moment it may ask anything at all.
   useEffect(() => (authed ? startPresence() : undefined), [authed]);
+  // The host's events drive the badge and the lists from here on; the polls below are the net under it.
+  useEffect(() => (authed ? startEvents() : undefined), [authed]);
+  const live = useStreamUp();
   useEffect(() => {
     if (!authed) return;
     api
@@ -133,7 +137,7 @@ export function App() {
       .then(setOnboarding)
       .catch(() => setOnboarding({ has_model: true } as OnboardingState)); // an older bot has no such route: let the app through
   }, [authed]);
-  const notifications = useQuery<NotificationSummary>(authed ? "/api/notifications/summary" : null, { pollMs: 20000, staleMs: 5000 });
+  const notifications = useQuery<NotificationSummary>(authed ? "/api/notifications/summary" : null, { pollMs: live ? 0 : 20000, staleMs: 5000 });
   const projects = useProjects();
   const projectList = projects.data ?? [];
   // A project removed elsewhere must not leave the shell filtering by something that is gone.

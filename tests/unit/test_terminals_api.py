@@ -214,7 +214,8 @@ async def test_the_doctor_reports_each_environment(terminal_settings: Settings, 
     from daedalus.doctor import DoctorContext, _terminals  # noqa: PLC0415 — the probe alone, not the whole doctor
 
     live = await _terminals(DoctorContext(settings=terminal_settings, config=app.config, extensions=app.extensions))
-    assert [(c.name, c.ok) for c in live] == [("terminals (container)", True), ("terminal sandbox (container)", False)]
+    # The fixture has a bot and no public address, which is what the last check warns about.
+    assert [(c.name, c.ok) for c in live] == [("terminals (container)", True), ("terminal sandbox (container)", False), ("terminals in Telegram", False)]
     assert live[0].message == "ptyd fake (protocol 1), 0 running"
     # Without a running application the doctor connects on its own; an empty host directory is
     # "not installed", which on the host is information rather than a warning.

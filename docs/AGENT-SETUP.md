@@ -177,8 +177,11 @@ whole home directory — the point of a project is that the boundary is a real o
 ## 4. HTTPS (when there is a domain)
 
 Put any reverse proxy with TLS in front of port 8765 and set `MINIAPP_PUBLIC_URL=https://<domain>` (that is
-what marks the session cookie secure). The proxy must keep long connections open (the app streams events).
-Caddy needs one line:
+what marks the session cookie secure). The proxy must keep long connections open (the app streams events)
+and pass WebSocket upgrades on `/ws/` (terminals). A terminal's socket is accepted only from the app's
+own origin: the `Host` the proxy forwards, or exactly the origin of `MINIAPP_PUBLIC_URL` — which is also
+what Telegram's webview sends, so with Telegram the setting is required. Caddy needs one line, and
+forwards upgrades by itself:
 
 ```
 <domain> {
@@ -186,7 +189,26 @@ Caddy needs one line:
 }
 ```
 
-nginx: `proxy_pass http://127.0.0.1:8765; proxy_http_version 1.1; proxy_buffering off; proxy_read_timeout 3600s;`.
+nginx:
+
+```
+location / {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+}
+location /ws/ {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;
+}
+```
+
 Restart the stack after changing `.env`
 (`docker compose … up -d`). With Telegram, register `https://<domain>/app` as the bot's menu button in
 @BotFather.

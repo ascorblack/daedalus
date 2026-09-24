@@ -47,7 +47,7 @@ type Conn struct {
 
 	mu          sync.Mutex
 	nextChannel uint32
-	channels    map[uint32]ChannelHandler
+	channels    map[uint32]*channel
 	values      map[any]any
 }
 
@@ -76,27 +76,6 @@ func (c *Conn) Notify(method string, params any) error {
 		return err
 	}
 	return c.Send(wire.ControlChannel, b)
-}
-
-// OpenChannel allocates a channel id and routes its frames to h. Ids are never reused within a
-// connection, so a late frame for a closed channel can never reach a new one.
-func (c *Conn) OpenChannel(h ChannelHandler) uint32 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.nextChannel++
-	c.channels[c.nextChannel] = h
-	return c.nextChannel
-}
-
-// CloseChannel forgets a channel and tells the other side, with an empty frame.
-func (c *Conn) CloseChannel(id uint32) {
-	c.mu.Lock()
-	_, ok := c.channels[id]
-	delete(c.channels, id)
-	c.mu.Unlock()
-	if ok {
-		_ = c.Send(id, nil)
-	}
 }
 
 // Value and SetValue keep per-connection state for handlers, such as the event subscription.
@@ -133,7 +112,7 @@ func (s *Server) serveConn(nc net.Conn) {
 
 	ctx, cancel := context.WithCancel(s.ctx)
 	c := &Conn{srv: s, nc: nc, log: s.log, ctx: ctx, cancel: cancel, out: make(chan []byte, outQueue),
-		inflight: make(chan struct{}, maxInflight), channels: map[uint32]ChannelHandler{}, values: map[any]any{}}
+		inflight: make(chan struct{}, maxInflight), channels: map[uint32]*channel{}, values: map[any]any{}}
 	s.track(c, true)
 	defer s.track(c, false)
 
@@ -173,31 +152,21 @@ func (s *Server) serveConn(nc net.Conn) {
 			c.dispatch(f.Payload)
 			continue
 		}
-		c.mu.Lock()
-		h := c.channels[f.Channel]
-		if h != nil && len(f.Payload) == 0 {
-			delete(c.channels, f.Channel)
-		}
-		c.mu.Unlock()
-		if h == nil {
-			continue // a channel already closed from this side, or never opened
-		}
 		if len(f.Payload) == 0 {
-			h.Closed()
-			_ = c.Send(f.Channel, nil)
+			c.peerClosed(f.Channel)
 			continue
 		}
-		h.Frame(f.Payload)
+		c.mu.Lock()
+		ch := c.channels[f.Channel]
+		c.mu.Unlock()
+		if ch == nil {
+			continue // a channel already closed from this side, or never opened
+		}
+		ch.h.Frame(f.Payload)
 	}
 	cancel()
 	<-writerDone
-	c.mu.Lock()
-	chans := c.channels
-	c.channels = map[uint32]ChannelHandler{}
-	c.mu.Unlock()
-	for _, h := range chans {
-		h.Closed()
-	}
+	c.closeAll()
 }
 
 func isEOF(err error) bool {
