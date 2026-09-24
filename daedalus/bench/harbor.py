@@ -131,6 +131,9 @@ class DaedalusAgent(BaseAgent):  # type: ignore[misc]
             assert services is not None
             services.exec_backend = backend
             services.workspace_dir = Path(CONTAINER_WORKSPACE)
+            # The walls name folders of this machine; the tools now work in the task's container,
+            # where those paths mean nothing and the container itself is the boundary.
+            services.walls = None
             await manager.submit(sid, instruction, origin="bench")
             try:
                 await asyncio.wait_for(_shared.done[sid].wait(), timeout=TRIAL_TIMEOUT_SECONDS)

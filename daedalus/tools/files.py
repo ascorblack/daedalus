@@ -31,7 +31,9 @@ def _resolve_path(context: ToolContext, services: Any, path: str | None, action:
     if refusal := refuse_protected(context, services, candidate, action):
         return None, refusal
     try:
-        return services.resolve(path), None
+        # A writer is held to the folders the session may write, so a folder marked read-only is
+        # refused to Write and Edit while Read, Find and Search still see it.
+        return services.resolve(path, write=action in ("written", "edited")), None
     except PathOutsideProject as exc:
         return None, error(context, str(exc))
 

@@ -2045,6 +2045,9 @@ input.field[type="range"] {
 .split > .panel-viewer { min-width:0; overflow:auto; }
 .panel-files .pane-handle { left:auto; right:-3px; }
 .explorer { display:flex; flex-direction:column; min-height:0; height:100%; font-size:var(--fs-13); }
+.explorer-folders { display:flex; align-items:center; gap:4px; padding:8px 8px 0; flex:none; min-width:0; }
+.explorer-folders select { flex:1; min-width:0; margin:0; height:var(--ctl-h); font-size:var(--fs-12); padding:0 4px; }
+.explorer-folders .chip { flex:none; }
 .explorer-search { display:flex; gap:4px; padding:8px; flex:none; }
 .explorer-search input { flex:1; min-width:0; }
 .explorer-search .field { margin:0; font-size:var(--fs-12); height:var(--ctl-h); }
@@ -2136,7 +2139,7 @@ input.field[type="range"] {
 /* Rows enter quietly without changing their measured height or delaying hover feedback. */
 .tree-row { animation:row-enter 180ms var(--ease-out); }
 @keyframes row-enter { from { opacity:0; } to { opacity:1; } }
-@media (hover: none) { .explorer-search .field, .source-tools .field { font-size:16px; } }
+@media (hover: none) { .explorer-search .field, .explorer-folders .field, .source-tools .field { font-size:16px; } }
 
 /* Closing keeps only the panel surface for the short fade; the conversation measures its final
    width once. Expanding reveals the larger surface without animating the transcript's layout. */
