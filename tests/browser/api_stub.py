@@ -67,8 +67,10 @@ GATES: dict[str, object] = {
     "/api/auth/me": {"user": "operator"},
     "/api/auth/config": {"passkeys": 1},
     "/api/status": {"ok": True},
-    # The badge on the Inbox entry of the navigation.
+    # The badge on the Inbox entry of the navigation and on the bell.
     "/api/notifications/summary": {"unseen": 0, "needs_you": 0},
+    # The centre itself, whichever view the bell's popover or the Inbox asks for: nothing yet.
+    "/api/notifications": {"entries": [], "next_before": None, "summary": {"unseen": 0, "needs_you": 0}},
     "/api/modes": {},
     "/api/commands": [],
     "/api/asr": {"configured": False, "reason": "", "provider": "", "model": "", "max_seconds": 120, "autosend": False},
@@ -97,6 +99,8 @@ SHARED_WRITES: dict[tuple[str, str], tuple[int, str, str]] = {
     # Every signed-in window reports what it shows, whatever screen a harness drives; the host
     # answers with no content.
     ("POST", "/api/presence"): (204, "application/json", ""),
+    # "Mark all read" in the bell's popover and on the Inbox.
+    ("POST", "/api/notifications/seen"): (200, "application/json", json.dumps({"marked": 0, "summary": {"unseen": 0, "needs_you": 0}})),
 }
 
 
@@ -132,6 +136,10 @@ def answer_shared(method: str, path: str) -> tuple[int, str, str] | None:
     write = SHARED_WRITES.get((method.upper(), path))
     if write is not None:
         return write
+    if method.upper() == "POST" and path.startswith("/api/notifications/") and path.endswith("/act"):
+        # The shared centre is empty, so every entry a harness might answer is one the host no
+        # longer has; a harness that invents entries answers this route itself.
+        return 404, "application/json", json.dumps({"detail": "no such notification"})
     if path in GATES:
         return 200, "application/json", json.dumps(GATES[path])
     return None

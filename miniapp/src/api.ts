@@ -504,6 +504,8 @@ export type Notification = {
   terminal_id: string | null;
   source: string;
   dedupe_key: string | null;
+  /** What answers it (`ask:…`, `policy:…`); an entry with one is open until it is resolved. */
+  request_ref: string | null;
   count: number;
   actions: NotificationAction[];
   seen: boolean;

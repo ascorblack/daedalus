@@ -1,5 +1,5 @@
 import { Component, Suspense, lazy, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, NotificationSummary, SessionList, SessionSummary, telegram } from "./api";
+import { api, SessionList, SessionSummary, telegram } from "./api";
 import { StatusLabel } from "./components";
 import { ConfirmHost, Sheet, ToastHost, toast as showToast } from "./dialogs";
 import type { AuthConfig } from "./screens/Login";
@@ -20,7 +20,9 @@ import { SCREENS } from "./router";
 import { peek, useOffline, useQuery } from "./store";
 import { t, useLang } from "./i18n";
 import { startPresence } from "./presence";
-import { startEvents, useStreamUp } from "./events";
+import { startEvents } from "./events";
+import { useSummary } from "./notifications";
+import { NotificationToasts } from "./toasts";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -130,7 +132,6 @@ export function App() {
   useEffect(() => (authed ? startPresence() : undefined), [authed]);
   // The host's events drive the badge and the lists from here on; the polls below are the net under it.
   useEffect(() => (authed ? startEvents() : undefined), [authed]);
-  const live = useStreamUp();
   useEffect(() => {
     if (!authed) return;
     api
@@ -138,7 +139,8 @@ export function App() {
       .then(setOnboarding)
       .catch(() => setOnboarding({ has_model: true } as OnboardingState)); // an older bot has no such route: let the app through
   }, [authed]);
-  const notifications = useQuery<NotificationSummary>(authed ? "/api/notifications/summary" : null, { pollMs: live ? 0 : 20000, staleMs: 5000 });
+  const notifications = useSummary(!!authed);
+  useAppBadge(notifications.unseen);
   const projects = useProjects();
   const projectList = projects.data ?? [];
   // A project removed elsewhere must not leave the shell filtering by something that is gone.
@@ -154,7 +156,7 @@ export function App() {
   // this app does not recognise, must not take the whole shell down over a nav label.
   const selfdev: SelfDevMode = caps.data?.selfdev?.mode ?? "server";
   const proposals = useQuery<{ status: string }[]>(authed && selfdev !== "off" ? "/api/proposals" : null, { pollMs: 60000, staleMs: 30000 });
-  const counts: Counts = { inbox: notifications.data?.unseen ?? 0, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
+  const counts: Counts = { inbox: notifications.unseen, changes: (proposals.data ?? []).filter((p) => p.status === "pending").length };
   useShortcuts(openPalette, selfdev);
   // Two more on a desktop: the menu and the sidebar, both with a modifier so a text field never eats them.
   useEffect(() => {
@@ -439,10 +441,21 @@ export function App() {
       {!wide && !sessionId && <TabBar screen={route.screen} counts={counts} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} />}
       {more && <MoreSheet screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMore(false)} />}
       {picking && sessionId && <SessionPicker exclude={sessionId} onPick={(id) => { navigate(sessionPath(sessionId, id)); setPicking(false); }} onClose={() => setPicking(false)} />}
+      <NotificationToasts />
       <ToastHost />
       <ConfirmHost />
     </div>
   );
+}
+
+/** The unseen count on the installed app's icon, where the platform draws one. */
+function useAppBadge(unseen: number): void {
+  useEffect(() => {
+    const nav = navigator as Navigator & { setAppBadge?: (n?: number) => Promise<void>; clearAppBadge?: () => Promise<void> };
+    // Refused outside an installed app on some platforms; a badge is a courtesy, never an error.
+    const done = unseen > 0 ? nav.setAppBadge?.(unseen) : nav.clearAppBadge?.();
+    done?.catch(() => undefined);
+  }, [unseen]);
 }
 
 /** After a pairing link, the browser is signed in but holds nothing of its own: offer it a passkey, once. */
