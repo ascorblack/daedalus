@@ -1,8 +1,8 @@
 """Terminals: the terminal daemons of this installation, reached through ``daedalus.terminals``.
 
 Installs the service, ties terminals to the lives of their owners — a session or a project that is
-deleted ends its terminals — retells what the daemons report on the event bus, and hands a session's
-agent read access to its own ones.
+deleted ends its terminals — retells what the daemons report on the event bus, hands a session's
+agent read access to its own ones, and offers the host bridge (``app.extensions["host_bridge"]``).
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from daedalus.terminals.bridge import HostBridge
 from daedalus.terminals.bus import BusBridge
 from daedalus.terminals.owners import ManagerOwners
 from daedalus.terminals.service import Terminals
@@ -43,6 +44,8 @@ async def install(app: Application) -> list[asyncio.Task[None]]:
     assert manager is not None
     terminals = build(app)
     app.extensions["terminals"] = terminals
+    # The host as a Docker installation reaches it: a folder checked or made there, git run there.
+    app.extensions["host_bridge"] = HostBridge(lambda: terminals)
 
     async def session_deleted(session_id: str) -> None:
         await terminals.close_owned("session", session_id)

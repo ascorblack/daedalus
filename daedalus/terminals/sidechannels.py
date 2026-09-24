@@ -206,9 +206,30 @@ class SideChannels:
 
     # -- files ------------------------------------------------------------------------------
 
-    async def fs_stat(self, env: str, path: str) -> dict[str, Any]:
-        """``{exists, type, size, mtime, mode, file_id}``; a missing file under a root is ``{exists: false}``."""
-        result: dict[str, Any] = await self._side_call(env, "fs.stat", {"path": path}, what=f"looking at {path}")
+    async def fs_stat(self, env: str, path: str, *, as_root: bool = False) -> dict[str, Any]:
+        """``{exists, type, size, mtime, mode, file_id}``; a missing file under a root is ``{exists: false}``.
+
+        ``as_root`` asks about a folder that is about to become a root — one being added to a project —
+        and so is under none yet. The daemon then holds the path to the rules a root is held to (not
+        the filesystem's root, not a folder that holds the home directory, nothing on the deny list)
+        and adds ``writable``.
+        """
+        params: dict[str, Any] = {"path": path}
+        if as_root:
+            params["as_root"] = True
+        result: dict[str, Any] = await self._side_call(env, "fs.stat", params, what=f"looking at {path}")
+        return result
+
+    async def fs_mkdir(self, env: str, path: str, *, actor: str = "system") -> dict[str, Any]:
+        """Make a folder that is about to become a root, with its missing parents; the answer is
+        ``fs_stat(as_root=True)``'s plus ``created``. An existing folder is left as it is. This is the
+        one write the side channels make, so it is audited like a program run."""
+        try:
+            result: dict[str, Any] = await self._side_call(env, "fs.mkdir", {"path": path}, what=f"making {path}")
+        except TerminalError as exc:
+            await self.audit("", env, actor, "mkdir", {"path": path, "error": exc.message})
+            raise
+        await self.audit("", env, actor, "mkdir", {"path": path, "created": bool(result.get("created"))})
         return result
 
     async def fs_list(self, env: str, path: str, *, glob: str | None = None, sort: str = "name", limit: int = 1000) -> dict[str, Any]:

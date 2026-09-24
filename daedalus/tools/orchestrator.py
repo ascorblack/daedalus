@@ -1,5 +1,6 @@
 """A project orchestrator's own tools: the brief, the folders, the journal, the team, the board, a
-read-only look into the files, and its two ways of speaking to the operator.
+read-only look into the files, its two ways of speaking to the operator, and the team tools that hire,
+assign, talk to, read, answer and control staff.
 
 They exist for orchestrator sessions alone (``ORCHESTRATOR_ONLY_TOOLS``). Each goes through the
 orchestrator extension, which first checks that the calling session still holds its project's
@@ -161,6 +162,7 @@ class AskOperator(Tool):
                     "context": {"type": "string", "description": "What the operator needs to decide without reading the whole conversation."},
                     "task_id": {"type": "string", "description": "The task it is about, if any."},
                     "urgent": {"type": "boolean", "description": "Whether work is blocked until it is answered."},
+                    "dispatch_id": {"type": "string", "description": "The main orchestrator's dispatch this question belongs to, if any."},
                 },
                 required=["question"],
             ),
@@ -178,6 +180,7 @@ class AskOperator(Tool):
             context=str(arguments.get("context") or ""),
             task_id=str(arguments["task_id"]) if arguments.get("task_id") else None,
             urgent=bool(arguments.get("urgent")),
+            dispatch_id=str(arguments["dispatch_id"]) if arguments.get("dispatch_id") else None,
         )
 
 
@@ -186,13 +189,200 @@ class AskOperator(Tool):
     description=(
         "Tell the operator something that matters — a task done, a decision, a blocker — as a notification on their "
         "phone and an entry in the journal. kind: progress, done, blocked or decision. Not a running commentary: "
-        "routine progress goes in the journal."
+        "routine progress goes in the journal. dispatch_id: the main orchestrator's dispatch it answers, if any."
     ),
 )
-async def project_report(context: ToolContext, text: str, title: str = "", kind: str = "progress", task_id: str | None = None) -> ToolResult:
-    return await _call(context, "project_report", text=text, title=title, kind=kind, task_id=task_id)
+async def project_report(context: ToolContext, text: str, title: str = "", kind: str = "progress", task_id: str | None = None, dispatch_id: str | None = None) -> ToolResult:
+    return await _call(context, "project_report", text=text, title=title, kind=kind, task_id=task_id, dispatch_id=dispatch_id)
 
 
-TOOLS = [brief, folders, journal, team, tasks, peek, AskOperator, project_report]
+@tool(
+    name="Hire",
+    description=(
+        "Add a member to the team. name (unique, it names their branch), role (their lasting area of work), harness "
+        "(daedalus, or a command-line agent: claude, codex, grok, opencode, pi — Harnesses shows what is installed and "
+        "what each offers), agent (a persona for daedalus, the CLI's agent otherwise), model (a preset for daedalus, "
+        "the CLI's model otherwise), effort, permission_mode (CLI only), env (container or host), folder (their "
+        "default folder), isolation (worktree: their own branch, the default in a git folder; shared; readonly), "
+        "instructions (standing guidance), one_off=true for a helper dismissed when their task is done. Hire for a "
+        "lasting need; a team of a few well-briefed members beats a crowd."
+    ),
+)
+async def hire(
+    context: ToolContext,
+    name: str,
+    role: str,
+    harness: str = "daedalus",
+    agent: str = "",
+    model: str = "",
+    effort: str = "",
+    permission_mode: str = "",
+    env: str = "",
+    folder: str | None = None,
+    isolation: str | None = None,
+    instructions: str = "",
+    one_off: bool = False,
+) -> ToolResult:
+    return await _call(
+        context, "hire", name=name, role=role, harness=harness, agent=agent, model=model, effort=effort, permission_mode=permission_mode,
+        env=env, folder=folder, isolation=isolation, instructions=instructions, one_off=one_off,
+    )
+
+
+@tool(
+    name="StaffEdit",
+    description=(
+        "Change a member (staff: name or id): role, agent, model, effort, permission_mode, env, folder, isolation, "
+        "instructions, notes (what they carry between sessions; this replaces it). Name and harness cannot change — "
+        "hire someone else for that. It takes effect from their next session."
+    ),
+)
+async def staff_edit(
+    context: ToolContext,
+    staff: str,
+    role: str | None = None,
+    agent: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    permission_mode: str | None = None,
+    env: str | None = None,
+    folder: str | None = None,
+    isolation: str | None = None,
+    instructions: str | None = None,
+    notes: str | None = None,
+) -> ToolResult:
+    return await _call(
+        context, "staff_edit", staff=staff, role=role, agent=agent, model=model, effort=effort, permission_mode=permission_mode,
+        env=env, folder=folder, isolation=isolation, instructions=instructions, notes=notes,
+    )
+
+
+@tool(
+    name="Dismiss",
+    description=(
+        "Take a member off the team. Refused while they have a live session unless release=true, which ends it first "
+        "(their unfinished task goes back to todo). keep_worktree=false removes a clean worktree; an unmerged branch "
+        "is always kept."
+    ),
+)
+async def dismiss(context: ToolContext, staff: str, release: bool = False, keep_worktree: bool = True) -> ToolResult:
+    return await _call(context, "dismiss", staff=staff, release=release, keep_worktree=keep_worktree)
+
+
+@tool(
+    name="Assign",
+    description=(
+        "Hand a member a task: task_id of a task on the board, or title plus the brief for a new one. The brief has "
+        "four parts, each a real sentence, on the task or given here: objective (what and why), deliverable (what "
+        "exists when done), boundaries (where to work, what not to touch), done_when (a check anyone can run). "
+        "folder, priority (1 first … 5) and depends_on are optional. It starts now or waits in the project's queue; "
+        "the answer says which and why."
+    ),
+)
+async def assign(
+    context: ToolContext,
+    staff: str,
+    task_id: str | None = None,
+    title: str | None = None,
+    objective: str | None = None,
+    deliverable: str | None = None,
+    boundaries: str | None = None,
+    done_when: str | None = None,
+    folder: str | None = None,
+    priority: int | None = None,
+    depends_on: list[str] | None = None,
+) -> ToolResult:
+    return await _call(
+        context, "assign", staff=staff, task_id=task_id, title=title, objective=objective, deliverable=deliverable, boundaries=boundaries,
+        done_when=done_when, folder=folder, priority=priority, depends_on=depends_on,
+    )
+
+
+@tool(
+    name="Tell",
+    description=(
+        "Say something to a member's live session. mode: queue (default; read when the current turn ends), steer "
+        "(joins the turn now), interrupt (stops the turn and sends it). Returns the delivery receipt: queued, written, "
+        "submitted, acknowledged or failed."
+    ),
+)
+async def tell(context: ToolContext, staff: str, text: str, mode: str = "queue") -> ToolResult:
+    return await _call(context, "tell", staff=staff, text=text, mode=mode)
+
+
+@tool(
+    name="ReadStaff",
+    description=(
+        "Read what a member did, in a bounded page. what: last (their last reply, the default), turns (the last "
+        "turns, one line per tool call), screen (a command-line agent's terminal), diff (their changes against the "
+        "base). cursor from an earlier read shows only what came after it; max_chars widens the page up to a limit. "
+        "Reading a finished turn marks it seen."
+    ),
+)
+async def read_staff(context: ToolContext, staff: str, what: str = "last", turns: int = 1, cursor: str | None = None, max_chars: int | None = None) -> ToolResult:
+    return await _call(context, "read_staff", staff=staff, what=what, turns=turns, cursor=cursor, max_chars=max_chars)
+
+
+@tool(
+    name="Answer",
+    description=(
+        "Answer a staff request by its id ([q…] in the events and the state block). A question: text, or selected "
+        "options. A permission: allow=true or false; a grant needs basis — under normal autonomy the exact line of "
+        "the brief's 'allowed without the operator' that covers it, under full your reason. Denying is always "
+        "allowed. escalate=true hands it to the operator instead (text becomes your suggestion, basis the reason)."
+    ),
+)
+async def answer(
+    context: ToolContext,
+    request_id: str,
+    allow: bool | None = None,
+    text: str | None = None,
+    selected: list[str] | None = None,
+    basis: str = "",
+    escalate: bool = False,
+) -> ToolResult:
+    return await _call(context, "answer", request_id=request_id, allow=allow, text=text, selected=selected, basis=basis, escalate=escalate)
+
+
+@tool(name="Interrupt", description="Stop a member's current turn (Esc for a command-line agent). The session stays; Tell says what next.")
+async def interrupt(context: ToolContext, staff: str) -> ToolResult:
+    return await _call(context, "interrupt", staff=staff)
+
+
+@tool(
+    name="Pause",
+    description="Let a member finish the current turn, commit their work in progress on their branch, and start nothing new until Tell or Assign.",
+)
+async def pause(context: ToolContext, staff: str) -> ToolResult:
+    return await _call(context, "pause", staff=staff)
+
+
+@tool(
+    name="Release",
+    description=(
+        "End a member's live session. Their unfinished task goes back to todo, unassigned; their branch stays. "
+        "keep_worktree=false also removes a clean worktree. Look (ReadStaff) before releasing someone who went silent."
+    ),
+)
+async def release(context: ToolContext, staff: str, keep_worktree: bool = True) -> ToolResult:
+    return await _call(context, "release", staff=staff, keep_worktree=keep_worktree)
+
+
+@tool(
+    name="Harnesses",
+    description=(
+        "The executors staff can run on. No arguments: each one per environment — installed, version, signed in, "
+        "whether it can run staff here. harness: what it offers (models, agents, permission modes, efforts); folder "
+        "adds the agents that folder defines; env narrows to container or host. Check here before Hire."
+    ),
+)
+async def harnesses(context: ToolContext, harness: str | None = None, env: str | None = None, folder: str | None = None) -> ToolResult:
+    return await _call(context, "harnesses", harness=harness, env=env, folder=folder)
+
+
+TOOLS = [
+    brief, folders, journal, team, tasks, peek, AskOperator, project_report,
+    hire, staff_edit, dismiss, assign, tell, read_staff, answer, interrupt, pause, release, harnesses,
+]
 
 __all__ = ["TOOLS"]

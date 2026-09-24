@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -47,5 +48,25 @@ func TestTheGivenDataFolderIsUsedAsGiven(t *testing.T) {
 	}
 	if paths.Data != dir {
 		t.Fatalf("the data folder is %s, want %s", paths.Data, dir)
+	}
+}
+
+// The compose file mounts the host terminal's directory whatever the mode, and Docker creates a
+// missing bind source as root; made here first, it is the operator's.
+func TestTheHostTerminalDirectoryIsMadeBesideTheCheckouts(t *testing.T) {
+	dir := t.TempDir()
+	paths, err := NewPaths(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	fromCompose := filepath.Join(filepath.Dir(paths.Compose), "..", "..", "daedalus-host-terminals")
+	if filepath.Clean(fromCompose) != paths.HostTerminals {
+		t.Fatalf("compose would mount %s, the launcher makes %s", filepath.Clean(fromCompose), paths.HostTerminals)
+	}
+	if st, err := os.Stat(paths.HostTerminals); err != nil || !st.IsDir() {
+		t.Fatalf("%v %v", st, err)
 	}
 }

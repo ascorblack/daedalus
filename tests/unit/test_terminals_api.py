@@ -184,9 +184,11 @@ async def test_the_load_route_projects_a_cap(client: httpx.AsyncClient) -> None:
     await client.post("/api/terminals", json={"env": "container", "owner_kind": "free", "cwd": "/tmp"}, headers=H)
     load = (await client.get("/api/terminals/load", params={"cap": 10}, headers=H)).json()
     assert load["running"] == 1 and load["cap"] == 20 and load["queued"] == []
-    assert load["used"]["rss_bytes"] == 50 << 20 and load["used"]["mem_total_bytes"] == 16 << 30
+    # The terminal's process and the daemon that holds its emulator are both what it costs now.
+    assert load["used"]["rss_bytes"] == (50 << 20) + (30 << 20) and load["used"]["daemon_rss_bytes"] == 30 << 20
+    assert load["used"]["mem_total_bytes"] == 16 << 30 and load["used"]["cpus"] == 8
     assert load["likely"]["basis"] == "default" and load["projection"]["cap"] == 10
-    assert load["projection"]["terminals_rss_bytes"] == (50 << 20) + 9 * load["likely"]["rss_bytes"]
+    assert load["projection"]["terminals_rss_bytes"] == (80 << 20) + 9 * load["likely"]["rss_bytes"]
     assert load["thresholds"] == {"warn": 70.0, "bad": 90.0}
     assert (await client.get("/api/terminals/load", params={"cap": 0}, headers=H)).status_code == 422
 

@@ -2553,3 +2553,60 @@ button.staff-row:hover { background: var(--surface-2); }
 .push-test-result { margin: 8px 0 0; padding-left: 18px; color: var(--fg-2); font-size: var(--fs-13); display: grid; gap: 2px; }
 .push-nudge { display: block; margin: 0 0 12px; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); color: var(--fg); font-size: var(--fs-13); line-height: var(--lh-ui); text-decoration: none; box-shadow: inset 0 0 0 1px var(--line); }
 .push-nudge:hover { box-shadow: inset 0 0 0 1px var(--line-strong); }
+
+/* Settings → Notifications. The matrix is a table on a desktop; on a phone each kind is a row that
+   opens into one line per channel, because four columns of three-state cells do not fit 390 px. */
+.nmatrix { width: 100%; margin-top: 10px; border-collapse: collapse; font-size: var(--fs-13); }
+.nmatrix th, .nmatrix td { padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.nmatrix thead th { color: var(--fg-2); font-size: var(--fs-12); font-weight: 600; text-align: center; }
+.nmatrix thead th:first-child, .nmatrix tbody th { text-align: left; padding-left: 0; }
+.nmatrix tbody th { font-weight: 500; color: var(--fg); }
+.nmatrix td { text-align: center; }
+.ncell { min-height: var(--ctl-h-sm); min-width: 72px; padding: 0 10px; border-radius: var(--radius-pill); border: 1px solid var(--line); background: transparent; color: var(--fg-3); font: inherit; font-size: var(--fs-12); cursor: pointer; }
+.ncell:hover { border-color: var(--line-strong); }
+.ncell[data-cell="on"] { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.ncell[data-cell="urgent"] { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.ncell.static { display: inline-block; min-height: 0; min-width: 0; padding: 1px 8px; cursor: default; }
+.nmatrix-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; }
+.nrows { margin-top: 8px; border-top: 1px solid var(--line); }
+.nrow { border-bottom: 1px solid var(--line); }
+.nrow-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--row-h); padding: 6px 0; border: 0; background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.nrow-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.nrow-text b { font-weight: 600; font-size: var(--fs-14); }
+.nrow-head .chev { color: var(--fg-3); transition: transform .15s; }
+.nrow.open .nrow-head .chev { transform: rotate(90deg); }
+.nrow-line { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 8px; min-height: var(--row-h); padding: 2px 0 2px 12px; font-size: var(--fs-13); color: var(--fg-2); }
+.nrow-line .segmented.inline button { min-height: var(--ctl-h-sm); padding: 0 10px; }
+.nrow:last-child .nrow-line:last-child { padding-bottom: 8px; }
+.quiet-hours { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+.quiet-hours label { display: flex; flex-direction: column; gap: 4px; }
+.quiet-hours .field { width: 140px; margin: 0; }
+.ndevice .mtitle .chip { margin-left: 8px; vertical-align: middle; }
+@media (max-width: 1023px) {
+  .nmute .mline.noradio, .ndevice .mline.noradio { grid-template-columns: minmax(0, 1fr); grid-template-areas: "main" "actions"; }
+  .nmute .mactions, .ndevice .mactions { padding-bottom: 6px; flex-wrap: wrap; }
+  .nmute .segmented.inline button { min-height: var(--ctl-h-sm); }
+}
+
+/* The cap on running terminals and the load bar under it. The track is the machine's memory: what
+   everything else holds, what the terminals hold now, and — lighter — what the cap would add. */
+.terminal-cap-row { display: flex; align-items: center; gap: 10px; }
+.terminal-cap-row .terminal-cap-input { flex: none; width: 120px; margin: 0; }
+.terminal-cap-row .sub { white-space: nowrap; }
+.loadbar { margin-top: 14px; display: grid; gap: 4px; }
+.loadbar-track { display: flex; height: 10px; border-radius: var(--radius-pill); background: var(--surface-3); overflow: hidden; }
+.loadbar-track i { display: block; height: 100%; transition: width .3s; }
+.loadbar-other { background: color-mix(in srgb, var(--fg-3) 45%, transparent); }
+.loadbar-now { background: var(--ok); }
+.loadbar-extra { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ok) 55%, transparent) 0 4px, color-mix(in srgb, var(--ok) 30%, transparent) 4px 8px); }
+.loadbar[data-level="warn"] .loadbar-now { background: var(--warn); }
+.loadbar[data-level="warn"] .loadbar-extra { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--warn) 55%, transparent) 0 4px, color-mix(in srgb, var(--warn) 30%, transparent) 4px 8px); }
+.loadbar[data-level="bad"] .loadbar-now { background: var(--bad); }
+.loadbar[data-level="bad"] .loadbar-extra { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--bad) 55%, transparent) 0 4px, color-mix(in srgb, var(--bad) 30%, transparent) 4px 8px); }
+.loadbar-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 2px 12px; margin-top: 4px; font-size: var(--fs-14); }
+.loadbar-percent { color: var(--fg-2); font-size: var(--fs-13); font-variant-numeric: tabular-nums; }
+.loadbar[data-level="warn"] .loadbar-percent { color: var(--warn); }
+.loadbar[data-level="bad"] .loadbar-percent { color: var(--bad); }
+.loadbar-cpu[data-level="warn"] { color: var(--warn); }
+.loadbar-cpu[data-level="bad"] { color: var(--bad); }
+.loadbar-warning { margin-top: 4px; padding: 8px 10px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--bad) 10%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 35%, transparent); color: var(--fg); font-size: var(--fs-13); line-height: var(--lh-ui); }

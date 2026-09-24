@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from daedalus.extensions import orchestrator_ops
+from daedalus.extensions import orchestrator_ops, orchestrator_team
 from daedalus.extensions.notifications import Draft, ProjectNotifyPolicy
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.host.peek import FolderAccess, LocalFolderAccess, UnreachableFolder
@@ -136,6 +136,9 @@ def who(member: Staff | None) -> str:
 
 Section = tuple[list[str], str]
 """Lines of the state block, and where the orchestrator finds what a cut left out."""
+
+OPERATIONS = {**orchestrator_ops.OPS, **orchestrator_team.OPS}
+"""Everything the orchestrator's tools can ask of this extension: the project tools and the team tools."""
 
 CUT_NOTE = "\n[… the state is cut here; the tools show the rest]"
 
@@ -1039,7 +1042,7 @@ class Orchestrators:
     async def service(self, operation: str, /, **kwargs: Any) -> Any:
         """The tools' hook: every operation first checks that the calling session holds the office.
         The operation is positional because several tools have an argument called ``op`` of their own."""
-        return await orchestrator_ops.dispatch(self, operation, **kwargs)
+        return await orchestrator_ops.dispatch(self, operation, OPERATIONS, **kwargs)
 
     def folder_access(self, project: Project, folder: ProjectFolder, session_id: str) -> FolderAccess:
         """How ``Peek`` reads a folder: directly when it is this process's, otherwise with the reason it cannot."""

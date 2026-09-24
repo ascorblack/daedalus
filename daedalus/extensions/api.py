@@ -640,6 +640,8 @@ class SettingsBody(BaseModel):
     compaction: dict[str, Any] | None = None
     orchestrator: dict[str, Any] | None = None
     """The project orchestrator's defaults: its model preset, its wake-up batching and its limits."""
+    terminals: dict[str, Any] | None = None
+    """``running_cap`` from Settings; the terminals service reads the configuration on every admission."""
     answer_language: str | None = None
 
 

@@ -324,3 +324,76 @@ func TestDenyPatterns(t *testing.T) {
 		}
 	}
 }
+
+func TestAFolderCheckHoldsAPathToTheRulesOfARoot(t *testing.T) {
+	tr := newTree(t)
+	// Outside every root, which is the point: a folder being added is not a root yet.
+	st, err := tr.fs.StatRoot(tr.outside)
+	if err != nil || !st.Exists || st.Type != "dir" || st.Writable == nil || !*st.Writable {
+		t.Fatalf("%+v %v", st, err)
+	}
+	if st, err := tr.fs.StatRoot(filepath.Join(tr.outside, "later")); err != nil || st.Exists {
+		t.Fatalf("a missing folder: %+v %v", st, err)
+	}
+	for _, p := range []string{"/", tr.home, filepath.Dir(tr.home), filepath.Join(tr.home, ".ssh"), filepath.Join(tr.home, ".ssh", "keys"), tr.state} {
+		if _, err := tr.fs.StatRoot(p); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("%s: %v", p, err)
+		}
+		if _, _, err := tr.fs.MkdirRoot(p); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+	}
+	if _, err := tr.fs.StatRoot("relative"); !errors.Is(err, ErrInvalid) {
+		t.Fatal(err)
+	}
+	// A link that leads into the home is judged by where it leads.
+	link := filepath.Join(tr.outside, "to-home")
+	if err := os.Symlink(tr.home, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.fs.StatRoot(link); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("a link to the home: %v", err)
+	}
+	if _, _, err := tr.fs.MkdirRoot(filepath.Join(link, ".ssh", "nested")); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("a folder below a link into a denied place: %v", err)
+	}
+	// Inside the home is where most project folders are.
+	if st, err := tr.fs.StatRoot(filepath.Join(tr.home, "work")); err != nil || !st.Exists {
+		t.Fatalf("%+v %v", st, err)
+	}
+}
+
+func TestMkdirRootMakesAFolderWithItsParentsOnce(t *testing.T) {
+	tr := newTree(t)
+	target := filepath.Join(tr.home, "code", "new", "site")
+	st, created, err := tr.fs.MkdirRoot(target)
+	if err != nil || !created || !st.Exists || st.Type != "dir" {
+		t.Fatalf("%+v %v %v", st, created, err)
+	}
+	if info, err := os.Stat(target); err != nil || !info.IsDir() {
+		t.Fatal(err)
+	}
+	if _, created, err := tr.fs.MkdirRoot(target); err != nil || created {
+		t.Fatalf("again: %v %v", created, err)
+	}
+	if _, _, err := tr.fs.MkdirRoot(filepath.Join(tr.project, "README.md")); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a file: %v", err)
+	}
+	// Nothing about it widened the reads: the new folder is not a root until the host says so.
+	write(t, filepath.Join(target, "a.txt"), "x")
+	if _, err := tr.fs.Read(filepath.Join(target, "a.txt"), 0, 0); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("read: %v", err)
+	}
+	if st.Writable == nil || !*st.Writable {
+		t.Fatalf("%+v", st)
+	}
+	if err := os.Chmod(target, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(target, 0o700) })
+	if os.Geteuid() != 0 {
+		if st, err := tr.fs.StatRoot(target); err != nil || st.Writable == nil || *st.Writable {
+			t.Fatalf("a read-only folder: %+v %v", st, err)
+		}
+	}
+}
