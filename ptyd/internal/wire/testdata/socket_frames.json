@@ -1,0 +1,20 @@
+[
+  {
+    "name": "control frame",
+    "hex": "00000033000000007b226a736f6e727063223a22322e30222c226964223a312c226d6574686f64223a226461656d6f6e2e696e666f227d",
+    "channel": 0,
+    "payload_hex": "7b226a736f6e727063223a22322e30222c226964223a312c226d6574686f64223a226461656d6f6e2e696e666f227d"
+  },
+  {
+    "name": "close of channel 7",
+    "hex": "0000000400000007",
+    "channel": 7,
+    "payload_hex": ""
+  },
+  {
+    "name": "attachment frame carrying an OUTPUT",
+    "hex": "0000000f010203040100000000000000106869",
+    "channel": 16909060,
+    "payload_hex": "0100000000000000106869"
+  }
+]

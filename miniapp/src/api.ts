@@ -32,6 +32,8 @@ declare global {
     daedalus?: {
       /** Open the platform's folder chooser; resolves to the path, or null when the operator cancelled. */
       pickFolder?: () => Promise<string | null>;
+      /** Set by the desktop launcher's own window, so the page can say which kind of window it is in. */
+      window?: boolean;
     };
   }
 }

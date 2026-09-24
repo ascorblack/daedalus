@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from daedalus.extensions.api import build_app
 from daedalus.host.events import EventBus, EventFilter, event_stream, streamed_types
+from daedalus.host.presence import Presence
 from daedalus.stores.database import Database
 from tests.unit.test_components import HEAD, FakeApp
 
@@ -217,6 +218,7 @@ async def test_the_route_streams_uncached_and_unbuffered(tmp_path: Path, db: Dat
     await bus.publish("terminal.bell", {})
     await bus.close()
     app.manager.bus = bus  # type: ignore[attr-defined]
+    app.manager.presence = Presence(bus, db)  # type: ignore[attr-defined]
     with TestClient(build_app(app, "tok")) as client:  # type: ignore[arg-type]
         response = client.get("/api/events?client=tab-1&kind=browser", headers=HEAD)
     assert response.status_code == 200
