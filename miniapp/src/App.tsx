@@ -200,9 +200,25 @@ export function App() {
   // the composer is pushed out of sight until the reader drags the whole page back.
   useEffect(() => {
     const vv = window.visualViewport;
+    const root = document.documentElement;
+    // The tallest visible height seen at this width: a soft keyboard is what takes a large part of
+    // it away. A collapsing address bar takes 60 px at most, a keyboard 250 and more.
+    let width = 0;
+    let tallest = 0;
     const apply = () => {
       const height = vv ? vv.height : window.innerHeight;
-      if (height > 0) document.documentElement.style.setProperty("--vh", `${Math.round(height)}px`);
+      if (height > 0) root.style.setProperty("--vh", `${Math.round(height)}px`);
+      // iOS pans the visual viewport over the page when the keyboard opens; a layer fixed to the top
+      // of the page follows it down, or its header is above the screen.
+      root.style.setProperty("--vv-top", `${Math.round(vv?.offsetTop ?? 0)}px`);
+      if (window.innerWidth !== width) {
+        width = window.innerWidth;
+        tallest = 0;
+      }
+      tallest = Math.max(tallest, height);
+      // With the keyboard up there is no home indicator to keep clear of, and a phone's bottom
+      // tabs give their room to what is being typed (styles.css reads this).
+      root.dataset.keyboard = height > 0 && tallest - height > 150 ? "open" : "closed";
       // The keyboard on iOS scrolls the page instead of resizing it; put it back.
       if (window.scrollY !== 0) window.scrollTo(0, 0);
     };

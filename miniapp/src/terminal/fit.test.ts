@@ -49,6 +49,12 @@ describe("nextSize", () => {
     expect(nextSize({ cols: 80, rows: 24 }, { cols: 81, rows: 24 }, shown)).toEqual({ send: true, cols: 81, rows: 24, delay: 100 });
     expect(nextSize({ cols: 80, rows: 24 }, { cols: 80, rows: 30 }, shown)).toEqual({ send: true, cols: 80, rows: 30, delay: 0 });
   });
+
+  it("lets a phone hold a change of rows until its keyboard has settled, and leaves columns alone", () => {
+    const phone = { ...shown, rowsDelay: 150 };
+    expect(nextSize({ cols: 44, rows: 40 }, { cols: 44, rows: 22 }, phone)).toEqual({ send: true, cols: 44, rows: 22, delay: 150 });
+    expect(nextSize({ cols: 44, rows: 40 }, { cols: 50, rows: 40 }, phone)).toEqual({ send: true, cols: 50, rows: 40, delay: 100 });
+  });
 });
 
 function fakeTimers() {
@@ -89,6 +95,21 @@ describe("ResizeScheduler", () => {
     expect(sent).toEqual([]);
     advance(100);
     expect(sent).toEqual([{ cols: 89, rows: 24 }]);
+  });
+
+  it("sends one size for a keyboard that slides in over many frames", () => {
+    const { deps, advance } = fakeTimers();
+    const sent: Size[] = [];
+    const scheduler = new ResizeScheduler((s) => (sent.push(s), true), deps);
+    const phone = { ...shown, rowsDelay: 150 };
+    scheduler.propose({ cols: 44, rows: 40 }, phone);
+    advance(200);
+    for (let rows = 39; rows >= 22; rows--) {
+      scheduler.propose({ cols: 44, rows }, phone);
+      advance(16);
+    }
+    advance(200);
+    expect(sent).toEqual([{ cols: 44, rows: 40 }, { cols: 44, rows: 22 }]);
   });
 
   it("drops a pending size when the terminal is hidden before it goes out", () => {

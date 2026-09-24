@@ -26,6 +26,12 @@ export type FitContext = {
   focused: boolean;
   /** The person typed into, clicked or resized this terminal just now. */
   interacted: boolean;
+  /**
+   * How long a change in rows alone waits, in ms (0 when not given). A phone sets it: its soft keyboard
+   * animates the visible height over a few hundred ms, iOS Safari reports every step of it, and the
+   * program should redraw once for the keyboard, not once per frame of its slide.
+   */
+  rowsDelay?: number;
 };
 
 export type FitDecision = { send: false } | { send: true; cols: number; rows: number; delay: number };
@@ -40,7 +46,7 @@ export function nextSize(prev: Size | null, proposed: Partial<Size> | undefined 
   const cols = clamp(proposed.cols!, MIN_COLS, MAX_COLS);
   const rows = clamp(proposed.rows!, MIN_ROWS, MAX_ROWS);
   if (prev && prev.cols === cols && prev.rows === rows) return { send: false };
-  const delay = prev && prev.cols === cols ? 0 : COLS_DEBOUNCE_MS;
+  const delay = prev && prev.cols === cols ? context.rowsDelay ?? 0 : COLS_DEBOUNCE_MS;
   return { send: true, cols, rows, delay };
 }
 

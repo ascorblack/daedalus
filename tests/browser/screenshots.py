@@ -1442,6 +1442,51 @@ def run_focus() -> int:
     return UNHANDLED.report()
 
 
+def phone_terminal_shots(context) -> None:  # type: ignore[no-untyped-def]
+    """The phone's terminal (M3б): a shell with the soft keyboard up and Ctrl armed."""
+    from terminal_stub import TerminalStub
+
+    term = TerminalStub(S1)
+    term.add("d1tests00000", title="bash · bakery-api", cwd="/home/operator/work/bakery-api")
+    term.emit("d1tests00000", "".join(
+        f"{line}\r\n" for line in [
+            f"{ESC}32mbakery-api{ESC}0m $ docker compose ps", "NAME        STATUS          PORTS", f"api         {ESC}32mUp 2 hours{ESC}0m      8000/tcp",
+            f"worker      {ESC}32mUp 2 hours{ESC}0m", f"db          {ESC}32mUp 2 hours{ESC}0m      5432/tcp", f"{ESC}32mbakery-api{ESC}0m $ tail -f logs/orders.log",
+            f"{ESC}2m14:23:58{ESC}0m order {ESC}1m#1042{ESC}0m created", f"{ESC}2m14:23:58{ESC}0m notify → baker {ESC}32mok{ESC}0m",
+            f"{ESC}2m14:24:05{ESC}0m order {ESC}1m#1043{ESC}0m created", f"{ESC}2m14:24:05{ESC}0m notify → baker {ESC}32mok{ESC}0m",
+        ]))
+    page = context.new_page()
+    page.route("**/api/**", stub)
+    term.install(page)
+    page.add_init_script("try { localStorage.setItem('daedalus.term.renderer', 'dom'); } catch (e) {}")
+    page.goto(f"{BASE}/agents/{S1}?token=t&scheme=dark&lang={LANG}")
+    page.wait_for_selector(".chat-scroll .timeline", timeout=15000)
+    page.locator(".chat-head .term-button").click()
+    page.locator(".term-sheet .term-sheet-row").first.click()
+    page.wait_for_selector(".term-phone .term-view[data-state='live']", timeout=15000)
+    # The soft keyboard takes the lower 336 px: the picture is what stays visible above it.
+    page.locator(".term-phone .term-screen").tap()
+    page.set_viewport_size({"width": PHONE["width"], "height": PHONE["height"] - 336})
+    page.locator(".term-keys .term-key[data-key='ctrl']").tap()
+    page.wait_for_timeout(1000)
+    page.screenshot(path=str(OUT / "phone-terminal-keyboard.png"))
+    print("wrote phone-terminal-keyboard")
+    page.set_viewport_size(PHONE)
+    page.close()
+
+
+def run_phone() -> int:
+    """The phone's terminal (``ONLY=phone``)."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM)
+        phone = browser.new_context(viewport=PHONE, device_scale_factor=3, color_scheme="dark", is_mobile=True, has_touch=True)
+        phone_terminal_shots(phone)
+        phone.close()
+        browser.close()
+    return UNHANDLED.report()
+
+
 def run() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
@@ -1517,11 +1562,12 @@ def run() -> int:
     # The notification centre needs a stream of its own for the toasts, and focus mode an installation
     # with an orchestrated project; each reports what went unanswered.
     notifications = run_notifications()
-    return run_focus() or notifications
+    phone = run_phone()
+    return run_focus() or notifications or phone
 
 
 if __name__ == "__main__":
     # Before anything is driven: is the address the built app, or whatever else holds the port?
     expect_app(BASE)
     only = os.environ.get("ONLY")
-    sys.exit(run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())
+    sys.exit(run_terminals() if only == "terminals" else run_focus() if only == "focus" else run_phone() if only == "phone" else run_notifications() if only == "notifications" else run_composer() if only == "composer" else run_voice() if only == "voice" else agents_shots() if only == "agents" else run_workspace() if only == "workspace" else run())

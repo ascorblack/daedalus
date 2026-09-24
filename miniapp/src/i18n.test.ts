@@ -218,6 +218,10 @@ describe("the keys the code asks for", () => {
       ["nset.cell.", listed("./notifyprefs.ts", "CELLS").map((c) => `${c}.long`)],
       ["nset.mute.", listed("./notifyprefs.ts", "MUTE_ENDS")],
       ["load.basis.", ["running", "measured", "default"]],
+      // A phone names each key of its terminal's row for a screen reader, and the short environment on
+      // a terminal's header.
+      ["term.phone.key.", [...SOURCES["./terminal/phonekeys.ts"].matchAll(/\{ id: "([^"]+)", cap:/g)].map((m) => m[1])],
+      ["term.env.short.", ["container", "host"]],
     ];
     const missing = families.flatMap(([prefix, names]) => names.map((n) => prefix + n)).filter((key) => !(key in DICT));
     // The section hints sit beside the section names, and a hint nobody wrote is a blank line.

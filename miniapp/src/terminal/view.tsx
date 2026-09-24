@@ -31,6 +31,11 @@ export type TerminalViewProps = {
   onState?: (id: string, state: TerminalState) => void;
   onRestart?: () => void;
   onRemove?: () => void;
+  /** How long a change of rows alone waits before it is sent (the phone's keyboard; see fit.ts). */
+  rowsDelay?: number;
+  /** A long press or a right click: when given, it replaces the terminal's own menu (the phone's
+   *  selection layer, where native handles do what the menu's Copy would). */
+  onLongPress?: () => void;
 };
 
 function useInstanceState(instance: TerminalInstance | null): TerminalState | null {
@@ -38,7 +43,7 @@ function useInstanceState(instance: TerminalInstance | null): TerminalState | nu
   return useSyncExternalStore(subscribe, () => instance?.state ?? null);
 }
 
-export function TerminalView({ id, visible, readOnly, env, fileOpener, workspace, focusToken, onState, onRestart, onRemove }: TerminalViewProps) {
+export function TerminalView({ id, visible, readOnly, env, fileOpener, workspace, focusToken, onState, onRestart, onRemove, rowsDelay, onLongPress }: TerminalViewProps) {
   const screen = useRef<HTMLDivElement>(null);
   const [instance, setInstance] = useState<TerminalInstance | null>(null);
   const [searching, setSearching] = useState(false);
@@ -50,7 +55,9 @@ export function TerminalView({ id, visible, readOnly, env, fileOpener, workspace
   const binding = useRef<TerminalBinding>({});
   binding.current.fileOpener = fileOpener;
   binding.current.workspace = workspace;
-  binding.current.context = () => ({ visible: visibleRef.current && !!screen.current?.offsetParent, focused: document.hasFocus() });
+  const delayRef = useRef(rowsDelay);
+  delayRef.current = rowsDelay;
+  binding.current.context = () => ({ visible: visibleRef.current && !!screen.current?.offsetParent, focused: document.hasFocus(), rowsDelay: delayRef.current });
 
   // Borrow the instance for the life of this view; the registry keeps it when the view goes.
   useLayoutEffect(() => {
@@ -157,7 +164,7 @@ export function TerminalView({ id, visible, readOnly, env, fileOpener, workspace
       </div>
       {/* The terminal's own menu, on a right click or a long press: the browser's would offer to paste
           into a hidden text field, and nothing a terminal can do with its commands. */}
-      <div className="term-screen" ref={screen} onContextMenu={(e) => { if (!instance?.terminal) return; e.preventDefault(); setMenuAt({ x: e.clientX, y: e.clientY }); }} />
+      <div className="term-screen" ref={screen} onContextMenu={(e) => { if (!instance?.terminal) return; e.preventDefault(); if (onLongPress) onLongPress(); else setMenuAt({ x: e.clientX, y: e.clientY }); }} />
       {menuAt && instance && state && (
         <>
           <span ref={setMenuAnchor} className="term-menu-anchor" style={{ left: menuAt.x, top: menuAt.y }} />

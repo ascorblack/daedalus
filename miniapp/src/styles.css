@@ -2873,3 +2873,44 @@ button.staff-row:hover { background: var(--surface-2); }
 .loadbar-cpu[data-level="warn"] { color: var(--warn); }
 .loadbar-cpu[data-level="bad"] { color: var(--bad); }
 .loadbar-warning { margin-top: 4px; padding: 8px 10px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--bad) 10%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 35%, transparent); color: var(--fg); font-size: var(--fs-13); line-height: var(--lh-ui); }
+
+/* ── a terminal on a phone (terminal/mobile.tsx) ─────────────────────────────────────────────
+   Exactly as tall as what the phone shows (--vh and --vv-top come from visualViewport in App.tsx),
+   so the soft keyboard takes rows from the terminal and never covers its keys. */
+.term-phone { top: var(--vv-top, 0px); bottom: auto; height: var(--vh, 100dvh); }
+:root[data-keyboard="open"] .term-phone { padding-bottom: 0; }
+.term-phone-head { gap: 4px; padding: 0 4px; }
+.term-phone-head .iconbtn { background: transparent; }
+.term-phone-head .term-env { margin-right: 0; flex: none; }
+.term-phone-titles { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.term-phone-title { display: flex; align-items: center; gap: 4px; min-width: 0; font-family: var(--mono); font-size: var(--fs-13); font-weight: 600; }
+.term-phone-title .ic { flex: none; color: var(--accent); }
+.term-phone-cwd { font-family: var(--mono); font-size: var(--fs-11); color: var(--fg-3); }
+/* The page never zooms here: two fingers set the terminal's font instead. */
+.term-phone-screen { flex: 1; min-height: 0; display: flex; overflow: hidden; touch-action: pan-y; }
+.term-phone-zoom { flex: 1; min-width: 0; min-height: 0; display: flex; }
+.term-phone-actions { flex: none; padding: 8px 8px 6px; background: var(--surface-1); border-top: 1px solid var(--line); }
+.term-phone-ask-text { margin-bottom: 6px; font-size: var(--fs-12); color: var(--fg-2); }
+.term-keys { flex: none; display: flex; gap: 4px; padding: 4px 6px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; touch-action: pan-x; background: var(--surface-1); border-top: 1px solid var(--line); }
+.term-keys::-webkit-scrollbar { display: none; }
+.term-key { flex: 1 0 auto; min-width: 34px; height: var(--ctl-h); padding: 0 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--fg); font-family: var(--mono); font-size: var(--fs-13); cursor: pointer; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.term-key:active { background: var(--surface-4); }
+.term-key.combo { color: var(--fg-2); }
+.term-key.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.term-key.locked { box-shadow: inset 0 -3px 0 var(--accent-ink); }
+.term-compose { flex: none; display: flex; align-items: flex-end; gap: 6px; padding: 4px 8px 8px; background: var(--surface-1); }
+.term-compose-field { flex: 1; min-width: 0; min-height: var(--ctl-h); resize: none; padding: 9px 14px; border: 1px solid var(--line-strong); border-radius: var(--radius-lg); background: var(--bg); color: var(--fg); font: inherit; font-size: var(--fs-14); line-height: 1.35; }
+.term-compose-field:focus { outline: none; border-color: var(--accent); }
+.term-compose-enter { background: transparent; color: var(--fg-3); font-size: var(--fs-14); }
+.term-compose-enter.on { background: transparent; color: var(--accent); }
+.term-compose-send { border-radius: 50%; background: var(--primary); color: var(--primary-ink); }
+.term-compose-send:disabled { opacity: .4; cursor: default; }
+.term-select { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; background: var(--term-bg); }
+.term-select-head { flex: none; display: flex; align-items: center; gap: 6px; min-height: var(--head-h); padding: env(safe-area-inset-top) 6px 0 12px; background: var(--surface-1); border-bottom: 1px solid var(--line); }
+.term-select-head .sub { min-width: 0; font-size: var(--fs-12); }
+.term-select-head .iconbtn { background: transparent; }
+.term-select-text { flex: 1; min-height: 0; margin: 0; padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); overflow: auto; color: var(--fg); font-family: var(--mono); font-size: var(--fs-13); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; }
+@media (hover: none) {
+  .term-compose-field { font-size: 16px; }
+}
+

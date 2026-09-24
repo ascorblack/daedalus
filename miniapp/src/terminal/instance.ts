@@ -22,6 +22,7 @@ import { findFileLinks, resolveFileLink, rewriteLoopbackUrl } from "./links";
 import { Kit, loadTerminalKit } from "./load";
 import { CommandMarks, MarksSummary } from "./marks";
 import type { EventMessage, KeyboardOwner, SizeOwner } from "./protocol";
+import { selectableText } from "./phonekeys";
 import { attachTheme, documentTokens, terminalTheme } from "./theme";
 
 /** Lines of history each terminal keeps, and asks a snapshot for. */
@@ -172,6 +173,11 @@ export class TerminalInstance {
   };
   private marks: CommandMarks | null = null;
   private refillTimer: ReturnType<typeof setTimeout> | null = null;
+  /** What the phone layer does to typed input before it leaves: the doubled-input filter and the
+   *  armed modifiers. Null on a desktop, where the keyboard is a keyboard. */
+  private inputHook: ((data: string) => string | null) | null = null;
+  /** A key of the phone's row is on its way through xterm.js: it is already what it should be. */
+  private keyInFlight = false;
 
   constructor(readonly id: string, private readonly shared: InstanceShared, private readonly readOnly = false) {
     this.host = document.createElement("div");
@@ -294,6 +300,51 @@ export class TerminalInstance {
     this.term.paste(text);
   }
 
+  /**
+   * Let a view filter what is typed before it is sent (the phone's doubled-input filter and sticky
+   * modifiers). Returns the way to take it off again; only the hook that is on can take itself off,
+   * so a view that goes after another has come cannot remove the newer one's.
+   */
+  setInputHook(hook: (data: string) => string | null): () => void {
+    this.inputHook = hook;
+    return () => {
+      if (this.inputHook === hook) this.inputHook = null;
+    };
+  }
+
+  /**
+   * Send bytes as if typed: a key of the phone's row, or its compose line. They go through xterm.js
+   * as user input, so the view scrolls to the bottom and the selection clears as it would for a key,
+   * but past the input hook — they are already exactly what should be sent.
+   */
+  sendKeys(data: string): void {
+    if (this.readOnly || !data) return;
+    this.interact();
+    if (!this.term) {
+      this.connection?.input(data);
+      return;
+    }
+    this.keyInFlight = true;
+    try {
+      this.term.input(data, true);
+    } finally {
+      this.keyInFlight = false;
+    }
+  }
+
+  /** The two modes the phone's keys follow: which arrows to send, and whether text goes as a paste. */
+  get modes(): { appCursor: boolean; bracketedPaste: boolean } {
+    const modes = this.term?.modes;
+    return { appCursor: !!modes?.applicationCursorKeysMode, bracketedPaste: !!modes?.bracketedPasteMode };
+  }
+
+  /** The screen's text and `history` rows above it, wrapped lines joined: the phone's selection layer. */
+  screenText(history = 200): string {
+    const term = this.term;
+    if (!term) return "";
+    return selectableText(term.buffer.active, term.rows, history);
+  }
+
   /** Copies the selection; false when there is none. */
   async copySelection(): Promise<boolean> {
     const text = this.term?.getSelection() ?? "";
@@ -337,8 +388,16 @@ export class TerminalInstance {
   }
 
   applyTheme(): void {
-    if (this.term) this.term.options.theme = terminalTheme(documentTokens());
+    if (!this.term) return;
+    // The page's style attribute also carries the visible height, which changes on every frame of a
+    // phone's keyboard sliding in; a theme set again, even an equal one, repaints the whole screen.
+    const theme = terminalTheme(documentTokens());
+    const signature = JSON.stringify(theme);
+    if (signature === this.themeSignature) return;
+    this.themeSignature = signature;
+    this.term.options.theme = theme;
   }
+  private themeSignature = "";
 
   /** Give the terminal a WebGL renderer or take it away; the DOM renderer draws when it has none. */
   setWebgl(on: boolean): void {
@@ -441,7 +500,12 @@ export class TerminalInstance {
     this.disposables.push(progress.onChange((p) => this.patch({ progress: p.state === 0 ? null : { state: p.state, value: p.value } })));
     this.disposables.push(term.registerLinkProvider({ provideLinks: (y, callback) => callback(this.fileLinks(y)) }));
     term.attachCustomKeyEventHandler((e) => this.onKey(e));
-    this.disposables.push(term.onData((data) => this.connection?.input(data)));
+    this.disposables.push(
+      term.onData((data) => {
+        const sent = this.inputHook && !this.keyInFlight ? this.inputHook(data) : data;
+        if (sent) this.connection?.input(sent);
+      }),
+    );
     this.disposables.push(term.onBinary((data) => this.connection?.input(Uint8Array.from(data, (c) => c.charCodeAt(0) & 0xff))));
     this.disposables.push(term.onTitleChange((title) => this.patch({ title })));
     this.disposables.push(term.onBell(() => this.patch({ bell: !this.visible || this.stateValue.bell })));
@@ -762,6 +826,19 @@ export function storedFontSize(): number {
 export function fontSizeStep(action: "font-bigger" | "font-smaller" | "font-reset"): number {
   const current = storedFontSize();
   const next = action === "font-reset" ? FONT_DEFAULT : Math.max(FONT_MIN, Math.min(FONT_MAX, current + (action === "font-bigger" ? 1 : -1)));
+  try {
+    localStorage.setItem(FONT_KEY, String(next));
+  } catch {
+    /* kept for this page only */
+  }
+  fontListeners.forEach((l) => l());
+  return next;
+}
+
+/** Set the device's font size outright (a pinch ends on one), within the bounds the steps keep to. */
+export function setFontSize(size: number): number {
+  const next = Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(size)));
+  if (next === storedFontSize()) return next;
   try {
     localStorage.setItem(FONT_KEY, String(next));
   } catch {
