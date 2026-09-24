@@ -124,6 +124,8 @@ GATES: dict[str, object] = {
     "/api/asr": {"configured": False, "reason": "", "provider": "", "model": "", "max_seconds": 120, "autosend": False},
     "/api/proposals": [],
     "/api/schedules": [],
+    # A project's requests: none waits, so a phone's project draws no banner.
+    "/api/asks": {"asks": []},
     "/api/sessions": {"sessions": [], "projects": []},
     # The shell asks which projects there are before it draws the rail.
     "/api/projects": [],
@@ -542,6 +544,7 @@ class FocusStub:
         self.notes: list[str] = []
         self.briefed: list[dict] = []
         self.controls: list[tuple[str, str]] = []
+        self.told: list[tuple[str, dict]] = []
 
     def project(self, pid: str) -> dict | None:
         return next((p for p in self.projects if p["id"] == pid), None)
@@ -561,6 +564,8 @@ class FocusStub:
             rows = [a for a in self.asks if a["project_id"] == params.get("project")]
             if params.get("open") != "0":
                 rows = [a for a in rows if not a["resolved_at"]]
+            if params.get("routed_to"):
+                rows = [a for a in rows if a["routed_to"] == params["routed_to"]]
             return 200, {"asks": rows}
         if path.startswith("/api/asks/") and path.endswith("/answer") and method == "POST":
             ref = path.split("/")[3]
@@ -657,6 +662,9 @@ class FocusStub:
             parts = path.split("/")
             if len(parts) == 5 and parts[4] == "messages" and method == "GET":
                 return 200, self.messages.get(parts[3], [])
+            if len(parts) == 5 and parts[4] == "tell" and method == "POST":
+                self.told.append((parts[3], dict(body or {})))
+                return 200, {"state": "queued", "message_id": f"m{len(self.told) + 10}"}
             if len(parts) == 5 and parts[4] in ("interrupt", "pause", "release") and method == "POST":
                 self.controls.append((parts[3], parts[4]))
                 member = next((m for m in self.team.staff if m["id"] == parts[3]), None)
@@ -668,6 +676,26 @@ class FocusStub:
             if answered is not None:
                 return answered
         return None
+
+    def ask_from_ira(self, lang: str = "en") -> dict:
+        """Ira's own question, escalated to the operator and older than the orchestrator's: the one a
+        phone's banner shows first (M8). She works in a terminal of her own, which the phone opens."""
+        words = FOCUS_WORDS[lang]
+        pid = self.projects[0]["id"]
+        ask = {
+            "id": "ask-ira", "short_id": "q9w2e1", "project_id": pid, "origin": "staff", "kind": "question", "staff_id": "st-ira", "staff_session_id": "ss-ira",
+            "task_id": "t-checkout", "request_ref": "", "text": words["ask.spring"], "detail": {"options": [words["ask.before"], words["ask.after"]]},
+            "routed_to": "operator", "suggestion": "", "created_at": "2026-09-24T09:54:00Z", "routed_at": "2026-09-24T09:54:00Z", "resolved_at": None, "resolved_by": None, "resolution": {},
+        }
+        self.asks.insert(0, ask)
+        ira = next(m for m in self.team.staff if m["id"] == "st-ira")
+        ira["live"]["terminal_id"] = "tm-ira"
+        self.terminals.insert(0, {
+            "id": "tm-ira", "env": "container", "title": "claude · Ira", "owner": {"kind": "staff", "id": "st-ira", "label": "Ira"}, "project_id": pid, "profile": "harness:claude",
+            "sandbox": False, "cwd": "/home/operator/work/bakery-site", "status": "running", "exit_code": None, "exit_signal": None, "created_at": "2026-09-24T09:00:00Z",
+            "exited_at": None, "last_output_at": "2026-09-24T09:54:00Z", "last_input_at": None, "cols": 80, "rows": 24,
+        })
+        return ask
 
     @staticmethod
     def session_detail(sid: str, title: str, project: dict, messages: list[dict], *, orchestrator_of: str | None = None, staff: dict | None = None, status: str = "idle") -> dict:

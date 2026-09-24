@@ -9,7 +9,7 @@ import { PANEL_TABS, PROJECT_TABS, defaultPanelTab, readPanelQuery, readPanelTab
 import { parse, projectHome, projectPagePath, projectSessionPath } from "../router";
 import { eventTone, parseEvents, systemNote } from "../turns";
 import type { Staff } from "../team/team";
-import { askIdOf, canFocus, firstWait, focusView, isChat, splitTeam, staffTone, stepDetail, stepKey, STEP_KEYS, waitKey } from "./focus";
+import { askIdOf, canFocus, firstWait, focusView, isChat, oldestOpen, PHONE_TABS, phoneTab, splitTeam, staffTone, stepDetail, stepKey, STEP_KEYS, teamCounts, waitKey } from "./focus";
 
 function member(over: Partial<Staff> = {}): Pick<Staff, "status" | "queued" | "one_off" | "archived_at"> {
   return { status: "off", queued: [], one_off: false, archived_at: null, ...over };
@@ -200,5 +200,41 @@ describe("the agents list", () => {
     const projects = [folder("bakery", { orchestrator: { enabled: true, session_id: "orch", staff: 1, working: 0, needs_you: 0 } })];
     const { folders } = arrange([agent("ira", "bakery")], projects, { results: true });
     expect(folders[0].rows.map((r) => r.s.id)).toEqual(["ira"]);
+  });
+});
+
+describe("a project on a phone", () => {
+  it("lights the tab of the route, keeps the bar on the other pages, and gives a session the whole height", () => {
+    expect(phoneTab(focusView(null, null))).toEqual({ tab: "orchestrator", bar: true });
+    expect(phoneTab(focusView("team", null))).toEqual({ tab: "team", bar: true });
+    expect(phoneTab(focusView("board", null))).toEqual({ tab: "board", bar: true });
+    expect(phoneTab(focusView("terminals", null))).toEqual({ tab: "terminals", bar: true });
+    expect(phoneTab(focusView("journal", null))).toEqual({ tab: null, bar: true });
+    expect(phoneTab(focusView("brief", null))).toEqual({ tab: null, bar: true });
+    expect(phoneTab(focusView("s", "sess-lev"))).toEqual({ tab: null, bar: false });
+    expect(PHONE_TABS).toEqual(["orchestrator", "team", "board", "terminals"]);
+  });
+
+  it("puts the operator's longest-waiting open request in the banner, and counts the rest", () => {
+    const ask = (id: string, created_at: string, over: Partial<{ routed_to: string; resolved_at: string | null }> = {}) => ({ id, created_at, routed_to: "operator", resolved_at: null, ...over });
+    const asks = [
+      ask("newer", "2026-09-24T09:55:00Z"),
+      ask("oldest", "2026-09-24T09:54:00Z"),
+      ask("answered", "2026-09-24T09:00:00Z", { resolved_at: "2026-09-24T09:01:00Z" }),
+      ask("orchestrator's", "2026-09-24T08:00:00Z", { routed_to: "orchestrator" }),
+    ];
+    expect(oldestOpen(asks)).toEqual({ ask: asks[1], waiting: 2 });
+    expect(oldestOpen([])).toEqual({ ask: null, waiting: 0 });
+  });
+
+  it("counts members at work and tasks waiting for a look", () => {
+    const staff = [
+      { status: "working" as const, archived_at: null },
+      { status: "starting" as const, archived_at: null },
+      { status: "working" as const, archived_at: "2026-09-20T00:00:00Z" },
+      { status: "idle" as const, archived_at: null },
+      { status: "off" as const, archived_at: null, queued: [{ staff_id: "a", task_id: "t", priority: 1, position: 1, reason: "machine", detail: "", since: 0, by: "operator" }] },
+    ];
+    expect(teamCounts(staff, [{ status: "review" }, { status: "doing" }, { status: "review" }])).toEqual({ working: 2, review: 2 });
   });
 });

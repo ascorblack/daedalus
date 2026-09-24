@@ -11,6 +11,7 @@ import { MenuItem, OverflowMenu } from "../dialogs";
 import { t } from "../i18n";
 import { Icon } from "../icons";
 import { back, navigate, pathFor, projectPagePath, sessionPath } from "../router";
+import { useMedia } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { errorText } from "../ui";
 import { endTerminal } from "../terminal/actions";
@@ -20,6 +21,8 @@ import { fontSizeStep } from "../terminal/instance";
 import { gridIds, ownerPath } from "../terminal/preview";
 import { instanceFor, setTerminalEnvs, terminals } from "../terminal/terminals";
 import { CopyOutputButton, TerminalView } from "../terminal/view";
+import { PhoneTerminal } from "../terminal/mobile";
+import { StaffPhoneTerminal } from "../project/phone";
 
 const LIST_POLL_MS = 5000;
 
@@ -30,6 +33,7 @@ export function gridPath(ids: string[]): string {
 
 export function TerminalFullScreen({ id, beside, toast }: { id: string; beside: string | null; toast: (text: string) => void }) {
   const ids = useMemo(() => gridIds(id, beside), [id, beside]);
+  const wide = useMedia("(min-width: 1024px)");
   const list = useQuery<TerminalList>("/api/terminals", { pollMs: LIST_POLL_MS, staleMs: 1000 });
   const rows = useMemo(() => new Map((list.data?.terminals ?? []).map((r) => [r.id, r])), [list.data]);
   useEffect(() => {
@@ -97,6 +101,26 @@ export function TerminalFullScreen({ id, beside, toast }: { id: string; beside: 
   };
 
   const exited = row ? row.status !== "running" : !!states[current]?.exit;
+
+  // A phone shows one pane at a time, with the keys row and the compose line; the others of a grid
+  // are one menu item away, and the first Back leaves the grid as a whole.
+  if (!wide) {
+    const others: MenuItem[] = ids.filter((tid) => tid !== current).map((tid) => ({ label: t("term.phone.show", { title: title(tid) }), icon: rows.get(tid)?.env === "host" ? "lock" : "terminal", onSelect: () => choose(tid) }));
+    const phone = {
+      id: current,
+      row,
+      onBack: leave,
+      onEnd: () => void end(),
+      onRestart: () => void restart(current),
+      onRemove: () => void remove(current),
+      focusToken,
+      onState,
+      menu: [...others, ...(ids.length > 1 ? [{ label: t("term.grid.close"), icon: "close" as const, onSelect: () => replaceGrid(ids.filter((x) => x !== current)) }] : [])],
+    };
+    // A staff member's terminal: what is written goes to the member as a message, and its open
+    // request is answered above the keys (the harness plan's M3).
+    return row?.owner.kind === "staff" && row.owner.id ? <StaffPhoneTerminal key={current} staffId={row.owner.id} projectId={row.project_id} {...phone} /> : <PhoneTerminal key={current} {...phone} />;
+  }
 
   return (
     <div className="term-page" data-count={ids.length}>

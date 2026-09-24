@@ -2885,3 +2885,86 @@ button.staff-row:hover { background: var(--surface-2); }
 .loadbar-cpu[data-level="warn"] { color: var(--warn); }
 .loadbar-cpu[data-level="bad"] { color: var(--bad); }
 .loadbar-warning { margin-top: 4px; padding: 8px 10px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--bad) 10%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 35%, transparent); color: var(--fg); font-size: var(--fs-13); line-height: var(--lh-ui); }
+
+/* ── a terminal on a phone (terminal/mobile.tsx) ─────────────────────────────────────────────
+   Exactly as tall as what the phone shows (--vh and --vv-top come from visualViewport in App.tsx),
+   so the soft keyboard takes rows from the terminal and never covers its keys. */
+.term-phone { top: var(--vv-top, 0px); bottom: auto; height: var(--vh, 100dvh); }
+:root[data-keyboard="open"] .term-phone { padding-bottom: 0; }
+.term-phone-head { gap: 4px; padding: 0 4px; }
+.term-phone-head .iconbtn { background: transparent; }
+.term-phone-head .term-env { margin-right: 0; flex: none; }
+.term-phone-titles { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.term-phone-title { display: flex; align-items: center; gap: 4px; min-width: 0; font-family: var(--mono); font-size: var(--fs-13); font-weight: 600; }
+.term-phone-title .ic { flex: none; color: var(--accent); }
+.term-phone-cwd { font-family: var(--mono); font-size: var(--fs-11); color: var(--fg-3); }
+/* The page never zooms here: two fingers set the terminal's font instead. */
+.term-phone-screen { flex: 1; min-height: 0; display: flex; overflow: hidden; touch-action: pan-y; }
+.term-phone-zoom { flex: 1; min-width: 0; min-height: 0; display: flex; }
+.term-phone-actions { flex: none; padding: 8px 8px 6px; background: var(--surface-1); border-top: 1px solid var(--line); }
+.term-phone-ask-text { margin-bottom: 6px; font-size: var(--fs-12); color: var(--fg-2); }
+.term-keys { flex: none; display: flex; gap: 4px; padding: 4px 6px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; touch-action: pan-x; background: var(--surface-1); border-top: 1px solid var(--line); }
+.term-keys::-webkit-scrollbar { display: none; }
+.term-key { flex: 1 0 auto; min-width: 34px; height: var(--ctl-h); padding: 0 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--fg); font-family: var(--mono); font-size: var(--fs-13); cursor: pointer; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.term-key:active { background: var(--surface-4); }
+.term-key.combo { color: var(--fg-2); }
+.term-key.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.term-key.locked { box-shadow: inset 0 -3px 0 var(--accent-ink); }
+.term-compose { flex: none; display: flex; align-items: flex-end; gap: 6px; padding: 4px 8px 8px; background: var(--surface-1); }
+.term-compose-field { flex: 1; min-width: 0; min-height: var(--ctl-h); resize: none; padding: 9px 14px; border: 1px solid var(--line-strong); border-radius: var(--radius-lg); background: var(--bg); color: var(--fg); font: inherit; font-size: var(--fs-14); line-height: 1.35; }
+.term-compose-field:focus { outline: none; border-color: var(--accent); }
+.term-compose-enter { background: transparent; color: var(--fg-3); font-size: var(--fs-14); }
+.term-compose-enter.on { background: transparent; color: var(--accent); }
+.term-compose-send { border-radius: 50%; background: var(--primary); color: var(--primary-ink); }
+.term-compose-send:disabled { opacity: .4; cursor: default; }
+.term-select { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; background: var(--term-bg); }
+.term-select-head { flex: none; display: flex; align-items: center; gap: 6px; min-height: var(--head-h); padding: env(safe-area-inset-top) 6px 0 12px; background: var(--surface-1); border-bottom: 1px solid var(--line); }
+.term-select-head .sub { min-width: 0; font-size: var(--fs-12); }
+.term-select-head .iconbtn { background: transparent; }
+.term-select-text { flex: 1; min-height: 0; margin: 0; padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); overflow: auto; color: var(--fg); font-family: var(--mono); font-size: var(--fs-13); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; }
+@media (hover: none) {
+  .term-compose-field { font-size: 16px; }
+}
+
+/* ── a project on a phone (project/phone.tsx) ────────────────────────────────────────────────
+   The project's tabs stand in the column rather than over it, so the conversation's composer and a
+   list's last row end above them without a fixed allowance; with the keyboard up they step aside. */
+.tabbar.project-tabs { position: static; flex: none; }
+:root[data-keyboard="open"] .tabbar.project-tabs { display: none; }
+.app.project-phone .screen { padding-bottom: var(--space-4); }
+.app.project-phone .main.chat-open .composer { padding-bottom: 10px; }
+:root[data-keyboard="open"] .app.project-phone .composer { padding-bottom: 6px; }
+.pagehead .env-chip { margin-right: 2px; }
+.needs-banner { display: grid; gap: var(--space-2); margin: var(--space-2) 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); border-radius: var(--radius-md); background: color-mix(in srgb, var(--warn) 7%, transparent); }
+.chat > .needs-banner { flex: none; margin: var(--space-2) 10px 0; }
+.phone-board > .needs-banner { margin: var(--space-2) 12px 0; }
+.needs-banner-head { display: flex; align-items: center; gap: 6px; color: var(--warn); font-size: var(--fs-12); font-weight: 600; }
+.needs-banner-more, .needs-banner-when { color: var(--fg-3); font-weight: 400; }
+.needs-banner-text { font-size: var(--fs-14); line-height: var(--lh-ui); overflow-wrap: anywhere; }
+.ask-answers-row { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.ask-answers-row .btn { flex: 1 1 auto; justify-content: center; min-height: var(--row-h-touch); }
+.ask-answers-own { display: flex; align-items: center; gap: var(--space-2); }
+.ask-answers-own .field { flex: 1; min-width: 0; min-height: var(--row-h-touch); margin: 0; }
+.ask-answers-own .btn { min-height: var(--row-h-touch); }
+.phone-staff { display: grid; }
+.phone-staff-item { display: flex; align-items: center; gap: 2px; min-width: 0; border-bottom: 1px solid var(--line); }
+.phone-staff-row { flex: 1; display: flex; align-items: center; gap: var(--space-3); min-width: 0; min-height: calc(var(--row-h-touch) + var(--space-3)); padding: 6px 4px; border: 0; background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.phone-staff-edit { background: transparent; color: var(--fg-3); }
+.phone-staff-row:active { background: var(--surface-1); }
+.phone-staff-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.phone-staff-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-14); font-weight: 600; }
+.phone-staff-name > .truncate { flex: 0 1 auto; min-width: 0; }
+.phone-staff-role { color: var(--fg-3); font-size: var(--fs-12); font-weight: 400; }
+.phone-staff-name .harness-badge, .phone-staff-name .focus-host { flex: none; }
+.phone-staff-line { color: var(--fg-2); font-size: var(--fs-12); }
+.phone-staff-line.waits { color: var(--warn); }
+.phone-terms { display: grid; gap: var(--space-2); margin-top: var(--space-2); }
+.phone-term { display: flex; align-items: center; gap: var(--space-3); min-width: 0; min-height: calc(var(--row-h-touch) + var(--space-2)); padding: 6px 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-1); color: var(--fg); }
+.phone-term > .ic { flex: none; color: var(--accent); }
+.phone-term.host { box-shadow: inset 3px 0 0 var(--warn); }
+.phone-term.host > .ic { color: var(--warn); }
+.phone-term.ended { opacity: .66; }
+.phone-term-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.phone-term-title { font-family: var(--mono); font-size: var(--fs-13); font-weight: 600; }
+.phone-term-line { color: var(--fg-2); font-size: var(--fs-12); }
+.phone-term .term-env { margin-right: 0; }

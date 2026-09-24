@@ -26,7 +26,7 @@ import { useSummary } from "./notifications";
 import { NotificationToasts } from "./toasts";
 import { listenForOpen, syncPush } from "./push";
 import { Icon } from "./icons";
-import { focusView } from "./project/focus";
+import { focusView, phoneTab } from "./project/focus";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -71,6 +71,7 @@ const ServicesScreen = lazy(screen(() => import("./screens/Services").then((m) =
 const LoginScreen = lazy(screen(() => import("./screens/Login").then((m) => ({ default: m.LoginScreen }))));
 const ProjectScreen = lazy(screen(() => import("./project/ProjectScreen").then((m) => ({ default: m.ProjectScreen }))));
 const ProjectSidebar = lazy(screen(() => import("./project/ProjectSidebar").then((m) => ({ default: m.ProjectSidebar }))));
+const ProjectTabs = lazy(screen(() => import("./project/phone").then((m) => ({ default: m.ProjectTabs }))));
 const OnboardingScreen = lazy(screen(() => import("./screens/AddModel").then((m) => ({ default: m.OnboardingScreen }))));
 
 /** The conversation is what the operator opens next, whatever screen they landed on: fetch it while the browser is idle. */
@@ -200,9 +201,25 @@ export function App() {
   // the composer is pushed out of sight until the reader drags the whole page back.
   useEffect(() => {
     const vv = window.visualViewport;
+    const root = document.documentElement;
+    // The tallest visible height seen at this width: a soft keyboard is what takes a large part of
+    // it away. A collapsing address bar takes 60 px at most, a keyboard 250 and more.
+    let width = 0;
+    let tallest = 0;
     const apply = () => {
       const height = vv ? vv.height : window.innerHeight;
-      if (height > 0) document.documentElement.style.setProperty("--vh", `${Math.round(height)}px`);
+      if (height > 0) root.style.setProperty("--vh", `${Math.round(height)}px`);
+      // iOS pans the visual viewport over the page when the keyboard opens; a layer fixed to the top
+      // of the page follows it down, or its header is above the screen.
+      root.style.setProperty("--vv-top", `${Math.round(vv?.offsetTop ?? 0)}px`);
+      if (window.innerWidth !== width) {
+        width = window.innerWidth;
+        tallest = 0;
+      }
+      tallest = Math.max(tallest, height);
+      // With the keyboard up there is no home indicator to keep clear of, and a phone's bottom
+      // tabs give their room to what is being typed (styles.css reads this).
+      root.dataset.keyboard = height > 0 && tallest - height > 150 ? "open" : "closed";
       // The keyboard on iOS scrolls the page instead of resizing it; put it back.
       if (window.scrollY !== 0) window.scrollTo(0, 0);
     };
@@ -447,6 +464,9 @@ export function App() {
   // A terminal full screen takes the column the way a conversation does: no scrolling page around it
   // and, on a phone, no tab bar under it.
   const terminalOpen = route.screen === "terminals" && !!route.detail;
+  // A project on a phone has its own four tabs in the place of the app's (project/phone.tsx); a
+  // session inside it is a detail with a back of its own and no bar under it.
+  const projectBar = !wide && focusProject ? phoneTab(focusView(route.page, route.inner)) : null;
   const menuButtonEl = (
     <button ref={menuButton} className={`sidebar-menu ${strip ? "iconbtn quiet" : ""}`} onClick={() => setMenu((m) => !m)} title={t("nav.menu.title")} aria-label={t("nav.menu")} aria-haspopup="menu" aria-expanded={menu}>
       <Icon name="more" size={18} />
@@ -456,7 +476,7 @@ export function App() {
     </button>
   );
   return (
-    <div className="app" style={wide ? { ["--sidebar-w" as string]: `${strip ? 48 : sidebarWidth}px` } : undefined}>
+    <div className={`app ${projectBar ? "project-phone" : ""}`} style={wide ? { ["--sidebar-w" as string]: `${strip ? 48 : sidebarWidth}px` } : undefined}>
       {wide && focusProject && (
         <ErrorBoundary key={focusProject}>
         <Suspense fallback={<nav className="sidebar project-sidebar" />}>
@@ -505,7 +525,14 @@ export function App() {
       </div>
       {palette && <Palette items={paletteItems()} onClose={() => setPalette(false)} />}
       {switching && <ProjectSwitcher projects={projectList} current={project} onPick={pickProject} onClose={() => setSwitching(false)} toast={showToast} />}
-      {!wide && !sessionId && !focusChat && !terminalOpen && <TabBar screen={route.screen} counts={counts} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} />}
+      {!wide && !sessionId && !focusProject && !terminalOpen && <TabBar screen={route.screen} counts={counts} selfdev={selfdev} onMore={() => setMore((m) => !m)} moreOpen={more} />}
+      {projectBar?.bar && focusProject && (
+        <ErrorBoundary key={`tabs-${focusProject}`}>
+          <Suspense fallback={<nav className="tabbar project-tabs" aria-hidden />}>
+            <ProjectTabs projectId={focusProject} current={projectBar.tab} />
+          </Suspense>
+        </ErrorBoundary>
+      )}
       {more && <MoreSheet screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMore(false)} />}
       {picking && sessionId && <SessionPicker exclude={sessionId} onPick={(id) => { navigate(sessionPath(sessionId, id)); setPicking(false); }} onClose={() => setPicking(false)} />}
       <NotificationToasts />

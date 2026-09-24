@@ -66,9 +66,11 @@ export type SessionScreenProps = {
   /** Inside a project's focus mode: the project, and whether this is its orchestrator's chat or a
    *  session of the project (a staff member's, or anyone else's working there). */
   focus?: { projectId: string; kind: "orchestrator" | "member" };
+  /** Under the header, above the conversation: a project's waiting request on a phone. */
+  banner?: ReactNode;
 };
 
-export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus }: SessionScreenProps) {
+export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus, banner }: SessionScreenProps) {
   // Each pane says which session it shows, so a split view reports both and the voice screen's
   // embedded session reports itself, without anybody reading the address.
   usePresenceScope({ session: id || undefined });
@@ -1054,6 +1056,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus 
         {(busy || saving || compacting) && <HeadProgress status={status} compacting={compacting} />}
       </div>
       {staffId && <StaffHeader projectId={focus!.projectId} staffId={staffId} toast={toast} />}
+      {banner}
 
       <div ref={body} className={`chat-body ${panel.state.tab && !phone ? "with-panel" : ""} ${panel.state.expanded && !phone ? "panel-full" : ""}`} style={{ ["--panel-w" as string]: `${panelPct}%` }}>
         <div className="chat-main">
