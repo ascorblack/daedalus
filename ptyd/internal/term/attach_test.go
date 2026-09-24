@@ -546,8 +546,11 @@ func TestAReplyEchoedByAClientIsDropped(t *testing.T) {
 	h := newAttachHarness(t, clock, reply)
 	// The program asks, then reads its own input back as output: each answer that reaches it shows
 	// up once more in the stream.
-	term, _ := h.start(t, "echo", 1<<20, "sh", "-c", `stty -echo; printf 'ready\033[c'; exec cat -v`)
+	// It asks only once the client is attached and says so: asked earlier, the query would reach
+	// the client inside its first snapshot rather than as output it was shown.
+	term, _ := h.start(t, "echo", 1<<20, "sh", "-c", `stty -echo; read go; printf 'ready\033[c'; exec cat -v`)
 	c, s := attachClient(t, term, ClientOptions{}, wire.Attach{})
+	c.Frame(wire.EncodeInput([]byte("go\n")))
 	s.until(t, "the query", func(f []wire.BrowserFrame) bool {
 		_, data, _ := stream(t, f)
 		return bytes.Contains(data, []byte("ready\x1b[c"))
