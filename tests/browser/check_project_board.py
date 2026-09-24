@@ -27,12 +27,12 @@ PID = "9f3c2a1b7d40"
 WORDS = {
     "en": {
         "title": "Board · Bakery", "needs": "Needs you", "doing": "In progress", "review": "Review", "queue": "Queue", "done": "Done",
-        "answer": "Answer", "accept": "Accept", "new": "New task", "create": "Create", "save": "Save", "working": "working",
+        "answer": "Answer", "accept": "Accept", "merge": "Merge", "new": "New task", "create": "Create", "save": "Save", "working": "working",
         "after": "after “Checkout”", "accepted": "is done", "queued": "number 1 in the queue", "missing": "Missing", "started": "Assigned and started",
     },
     "ru": {
         "title": "Доска · Bakery", "needs": "Нужны вы", "doing": "В работе", "review": "Проверка", "queue": "Очередь", "done": "Готово",
-        "answer": "Ответить", "accept": "Принять", "new": "Новая задача", "create": "Создать", "save": "Сохранить", "working": "работает",
+        "answer": "Ответить", "accept": "Принять", "merge": "Слить", "new": "Новая задача", "create": "Создать", "save": "Сохранить", "working": "работает",
         "after": "после «Checkout»", "accepted": "готово", "queued": "1-я в очереди", "missing": "Не заполнено", "started": "Назначено и запущено",
     },
 }
@@ -130,9 +130,9 @@ def desktop(page: Page, lang: str, unhandled: Unhandled) -> None:
     cols.locator(".pboard-col.done .pboard-fold").click()
     expect(cols.locator(".pboard-col.done .pcard", has_text="Old price list")).to_be_visible()
 
-    # Accept from the review card.
+    # Accept from the review card; on a staff branch, Accept is Merge.
     review = cols.locator(".pboard-col.review .pcard", has_text="Notify endpoint")
-    review.get_by_role("button", name=words["accept"]).click()
+    review.get_by_role("button", name=words["merge"]).click()
     expect(page.locator(".toast")).to_contain_text(words["accepted"])
     assert stub.accepted == ["t-endpoint"], stub.accepted
     expect(cols.locator(".pboard-col.review .pcard")).to_have_count(0)
@@ -207,7 +207,7 @@ def phone(page: Page, lang: str, unhandled: Unhandled) -> None:
     page.locator(".pboard-chips .chip", has_text=words["review"]).click()
     expect(sections).to_have_count(1)
     card = sections.first.locator(".pcard", has_text="Notify endpoint")
-    button = card.get_by_role("button", name=words["accept"])
+    button = card.get_by_role("button", name=words["merge"])
     box = button.bounding_box()
     assert box is not None and box["height"] >= 28, box
     button.click()

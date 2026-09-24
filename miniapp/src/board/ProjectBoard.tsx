@@ -15,6 +15,7 @@ import { navigate, pathFor, projectHome, projectPagePath, projectSessionPath } f
 import { PageHeader, useMedia } from "../shell";
 import { invalidate, useQuery } from "../store";
 import { HarnessBadge, StaffAvatar } from "../team/parts";
+import { ReviewPanel } from "./ReviewPanel";
 import { Harness, statusTone } from "../team/team";
 import { confirmAsync, errorText } from "../ui";
 import {
@@ -32,6 +33,7 @@ import {
   chips,
   columnCount,
   emptyBrief,
+  mergesOnAccept,
   missingBrief,
   sections,
   statusLine,
@@ -283,7 +285,12 @@ function TaskCard({ task, titles, onOpen, onAccept }: { task: ProjectTask; title
           <span className="num sub">{done}/{task.checklist.length}</span>
         </div>
       )}
-      {task.status === "review" && task.branch && <code className="pcard-branch truncate">{task.branch}</code>}
+      {task.status === "review" && task.branch && (
+        <div className="pcard-review">
+          <code className="pcard-branch truncate">{task.branch}</code>
+          {task.merge_state === "conflict" && <span className="chip tiny bad">{t("pboard.review.state.conflict")}</span>}
+        </div>
+      )}
       <div className="pcard-meta">
         {task.assignee && <Who name={task.assignee.name} color={task.assignee.color} harness={task.assignee.harness} />}
         <StatusText task={task} titles={titles} />
@@ -292,7 +299,7 @@ function TaskCard({ task, titles, onOpen, onAccept }: { task: ProjectTask; title
           <span className="faint" title={absTime(task.updated_at)}>{task.status === "dropped" ? t("board.col.dropped") : relTime(task.updated_at)}</span>
         ) : null}
         {task.status === "review" && (
-          <button className="btn small primary" onClick={(e) => { e.stopPropagation(); onAccept(); }}>{t("pboard.accept")}</button>
+          <button className="btn small primary" onClick={(e) => { e.stopPropagation(); onAccept(); }}>{mergesOnAccept(task) ? t("pboard.review.merge") : t("pboard.accept")}</button>
         )}
       </div>
     </div>
@@ -403,9 +410,12 @@ function TaskSheet({ projectId, data, task, onClose, onDone, onAccept, toast }: 
           <span title={absTime(task.updated_at)}>{t("board.updated", { t: relTime(task.updated_at) })}</span>
         </div>
       )}
+      {task && task.status === "review" && task.branch && (
+        <ReviewPanel taskId={task.id} toast={toast} onMerged={() => { onDone(); onClose(); }} onRejected={onDone} />
+      )}
       {task && (NEXT[task.status].length > 0 || task.status === "review") && (
         <div className="btnrow pboard-moves" role="group" aria-label={t("board.moveto")}>
-          {task.status === "review" && onAccept && <button className="btn small primary" onClick={onAccept}><Icon name="check" size={14} /> {t("pboard.accept")}</button>}
+          {task.status === "review" && onAccept && !mergesOnAccept(task) && <button className="btn small primary" onClick={onAccept}><Icon name="check" size={14} /> {t("pboard.accept")}</button>}
           {NEXT[task.status].length > 0 && <span className="sub">{t("board.moveto")}</span>}
           {NEXT[task.status].map((status) => (
             <button key={status} className="btn small" onClick={() => move(status)}>{t(`board.col.${status}`)}</button>
