@@ -137,7 +137,9 @@ export const api = {
   /** Ends the process (hang-up, then kill, the whole group). The row stays, as an exited terminal. */
   killTerminal: (id: string) => call<TerminalView>("POST", `/api/terminals/${encodeURIComponent(id)}/kill`, {}),
   /** The same command in the same place under a new id; the old row stays as it ended. */
-  restartTerminal: (id: string) => call<TerminalView>("POST", `/api/terminals/${encodeURIComponent(id)}/restart`, {}),
+  /** Starts the same program for the same owner as a new terminal; ``sandbox`` switches the sandbox
+   * on or off, and leaving it out keeps what the terminal had. */
+  restartTerminal: (id: string, sandbox?: boolean) => call<TerminalView>("POST", `/api/terminals/${encodeURIComponent(id)}/restart`, sandbox === undefined ? {} : { sandbox }),
   /** The commands the terminal's shell reported, oldest first; with `output`, the text each one printed. 501 when its program reports none. */
   terminalCommands: (id: string, last: number, output: boolean) =>
     call<{ commands: TerminalCommand[] }>("GET", `/api/terminals/${encodeURIComponent(id)}/commands?last=${last}&output=${output ? 1 : 0}`),
@@ -184,7 +186,8 @@ export type TerminalEnv = {
   /** Why it is unavailable, as a code (e.g. "not_installed"); empty when available. */
   reason: string;
   version: string;
-  sandbox: boolean;
+  /** "ok" when a terminal here can run in the sandbox; otherwise why not, in the daemon's words. */
+  sandbox: string;
   shell: string;
   home: string;
   /** The ports a server started in this environment is reachable on, as "lo-hi". */
@@ -205,6 +208,8 @@ export type TerminalView = {
   project_id: string | null;
   profile: string;
   sandbox: boolean;
+  /** On the answer to a sandboxed create: the writable folders the sandbox left read-only, and why. */
+  sandbox_skipped?: { path: string; reason: string }[];
   cwd: string;
   status: "running" | "exited" | "lost";
   exit_code: number | null;
@@ -224,9 +229,16 @@ export type TerminalView = {
   } | null;
   last_command?: { command: string; exit_code: number | null; at: string } | null;
   preview?: TerminalRun[][];
+  /** Who made it: "operator", or "agent:<actor>" for one an agent opened. */
+  created_by?: string;
   /** Filled by other parts of the app (a staff member's status, a pending permission); null otherwise. */
-  activity?: unknown;
+  activity?: TerminalActivity | null;
 };
+
+/** What another part of the app says a terminal is doing: a line for its card and, when something
+ *  waits on the operator, the button that answers it ("Answer" on a permission). Both are optional:
+ *  the Terminals screen falls back to its own status line and to Open. */
+export type TerminalActivity = { label?: string; level?: "ok" | "warn" | "bad"; action?: { label: string; path: string } };
 
 export type TerminalList = { envs: TerminalEnv[]; terminals: TerminalView[]; capacity?: { running: number; cap: number; queued: number } };
 
@@ -457,6 +469,10 @@ export type SessionDetail = {
   services?: ServiceView[];
   subagent_of?: string | null;
   subagent_name?: string | null;
+  /** The project this session is the orchestrator of (current or retired). */
+  orchestrator_of?: string | null;
+  /** The staff member this session is the work of. */
+  staff?: { id: string; session_id: string | null } | null;
   leader_title?: string | null;
   subagents?: SubagentView[];
   /** Whether this session currently sends to and receives from its own Telegram topic. */
@@ -564,7 +580,37 @@ export type ProjectRef = Omit<Project, "sessions">;
 
 /** A project in the agents listing: the project, and how many agents are in it — counted over the
  *  whole table, not over the page of rows beside it. */
-export type ProjectFolder = ProjectRef & { members?: number; total: number; active: number; loops: number; last_message_at: string };
+export type ProjectFolder = ProjectRef & { members?: number; total: number; active: number; loops: number; last_message_at: string; orchestrator?: Orchestration | null };
+
+/** What the agents list says about a project whose orchestrator is on: it is drawn as one entry. */
+export type Orchestration = { enabled: boolean; session_id: string; staff: number; working: number; needs_you: number };
+
+/** A pending decision of a project: a staff member's question or permission, or one of the orchestrator's own. */
+export type Ask = {
+  id: string;
+  short_id: string;
+  project_id: string;
+  origin: "staff" | "orchestrator";
+  kind: "question" | "permission" | "folder";
+  staff_id: string | null;
+  task_id: string | null;
+  text: string;
+  detail: { options?: string[]; urgent?: boolean; [k: string]: unknown };
+  routed_to: "orchestrator" | "operator";
+  suggestion: string;
+  created_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  resolution: { allow?: boolean | null; text?: string; selected?: string[]; via?: string };
+};
+
+/** One entry of a project's journal: who wrote it, what kind, and what it refers to. */
+export type JournalEntry = { id: number; at: string; author: "operator" | "orchestrator" | "staff" | "system"; kind: string; text: string; refs: Record<string, string> };
+
+export type BriefSection = { section: string; body: string; updated_at: string | null; updated_by: string | null };
+
+/** A message sent to a staff member, and how far it got. */
+export type StaffMessage = { id: string; staff_id: string; origin: "orchestrator" | "operator"; text: string; mode: string; state: "queued" | "written" | "submitted" | "acknowledged" | "failed"; attempts: number; created_at: string; updated_at: string; error: string };
 
 /** What GET /api/sessions answers: a page of agents and the project folders they are in. */
 export type SessionList = {
@@ -646,6 +692,64 @@ export type Proposal = {
   created_at: string;
 };
 
+/** What a watch waits for: ``event`` and the fields that kind of event has (the host adds the ids and
+ *  the names it resolved, such as ``staff_id`` and ``terminal_title``). */
+export type WatchWhen = {
+  event: string;
+  staff?: string;
+  staff_id?: string;
+  minutes?: number;
+  task?: string;
+  task_id?: string;
+  to?: string;
+  terminal?: string;
+  terminal_title?: string;
+  regex?: string;
+  folder?: string;
+  folder_label?: string;
+  branch?: string;
+  provider?: string;
+  repo?: string;
+  conclusion?: string;
+};
+
+export type WatchThen = { action: "wake" | "tell" | "notify"; note?: string; staff?: string; text?: string; mode?: string; title?: string; level?: string };
+
+/** A project's watch (``/api/projects/{id}/watches``): "when X, do Y", bounded by a cooldown. */
+export type ProjectWatch = {
+  id: string;
+  project_id: string;
+  when: WatchWhen;
+  then: WatchThen;
+  cooldown_minutes: number;
+  once: boolean;
+  note: string;
+  created_by: "orchestrator" | "operator";
+  created_at: string;
+  last_fired_at: string | null;
+  fire_count: number;
+  enabled: boolean;
+  /** Why it switched itself off: "once", or the hourly limit, or a pattern the terminal refused. */
+  stopped: string;
+  last_error: string;
+  describe: string;
+};
+
+export type WatchList = { watches: ProjectWatch[]; max: number; min_cooldown_minutes: number; providers: string[] };
+
+/** A project orchestrator's wake-up (``/api/projects/{id}/wakeups``): a schedule that wakes it with a note. */
+export type Wakeup = {
+  id: string;
+  note: string;
+  cron: string | null;
+  at: string | null;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  enabled: boolean;
+  set_by: "orchestrator" | "operator";
+  created_at: string;
+};
+
 export type Schedule = {
   id: string;
   name: string;
@@ -657,7 +761,7 @@ export type Schedule = {
   next_run_at: string | null;
   last_run_at: string | null;
   last_summary: string | null;
-  kind: "agent" | "message" | "lazy";
+  kind: "agent" | "message" | "lazy" | "wake";
   target_session: string | null;
   created_by_session?: string | null;
   active_session_id?: string | null;

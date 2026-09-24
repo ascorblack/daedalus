@@ -384,6 +384,13 @@ agent. What survives what:
 - **Project folders.** A folder mounted into the agent's container is mounted into `terminals` too, at
   the same absolute path, so a path means the same thing in a terminal as it does to the agent. The
   desktop launcher writes both entries itself.
+- **The sandbox toggle.** A terminal is an ordinary shell by default. With **Sandbox** ticked in the
+  terminal menu it runs in bubblewrap instead: the filesystem read-only, the project's writable folders
+  writable (what the session's own `Exec` may write), a private `/tmp`, and the daemon's token hidden.
+  It is a wall against writing, not reading. For it the `terminals` service carries `cap_add:
+  [SYS_ADMIN]` with unconfined seccomp and AppArmor — the same widening the agent's container accepts
+  for `Exec`'s sandbox. Without them the toggle shows as unavailable, with the reason, and terminals
+  open unsandboxed.
 
 ### The host terminal (optional)
 
@@ -632,7 +639,8 @@ command-line member, which is a terminal session — while the machine already r
 sessions as its cap allows or the terminals service is not there. Each member in
 `GET /api/projects/{id}/staff` carries what it waits for under `queued`, and the listing the whole
 queue under `queue`. `POST /api/staff/{id}/tell` (`{"text", "mode": "queue" | "steer" |
-"interrupt"}`) answers with the message's receipt; `…/interrupt`, `…/pause` (finish the turn, commit
+"interrupt"}`) answers with the message's receipt, and `GET /api/staff/{id}/messages` lists what was
+sent, newest first, each with its delivery state; `…/interrupt`, `…/pause` (finish the turn, commit
 what is uncommitted, start nothing new) and `…/release` (`{"keep_worktree"}`) control the live
 session. What staff ask — a question, or a call the policy refused — is a request:
 `GET /api/asks?project=<id>&routed_to=operator` lists the ones waiting for you, and
@@ -658,7 +666,28 @@ seconds (at once for a question, a permission, an error or a stuck report); ever
 project as it is now, which `GET /api/projects/{id}/state` shows as it sees it. Its questions never
 pause it: they are requests you answer like a staff member's, and the answer wakes it. Its model is
 the project's own choice, else the default for project orchestrators in Settings → Models, else the
-strongest preset; the model chip in its chat changes the project's choice.
+strongest preset; the model chip in its chat changes the project's choice. In `GET /api/sessions`
+such a project carries `orchestrator: {"enabled", "session_id", "staff", "working", "needs_you"}`
+(null for a project without one), and `GET /api/sessions/{id}` names what a session is to its
+project: `orchestrator_of` (the project's id) or `staff` (`{"id", "session_id"}`).
+
+It sets its own alarms with `WakeMe` (in some minutes, at a moment, or on a cron at most every ten
+minutes) and is woken with the note, even mid-turn; you can leave it one too. `GET|POST
+/api/projects/{id}/wakeups` (`{"note", "in_minutes" | "at" | "cron"}`) and `DELETE …/wakeups/{id}` are
+the Wake-ups panel of the project. A wake-up belongs to the project: a replaced orchestrator, or one
+switched off and on again, gets the ones set before.
+
+A watch is "when this happens, do that", set by the orchestrator (`Watch`) or by you from the same
+panel. It waits for a member to finish a turn, ask, need a permission, crash or go silent; a task to
+move; a terminal to print a pattern (matched by the terminal daemon, so it never polls); a new commit
+on a branch; or a webhook — a pull request, a CI result, or any payload matching a pattern. Then it
+wakes the orchestrator, tells a member something, or notifies you. Every watch has a cooldown (at
+least a minute), may be set to fire once, and switches itself off, with a journal entry, after twelve
+fires in an hour; nothing the orchestrator does itself fires one. `GET|POST
+/api/projects/{id}/watches` (`{"when", "then", "cooldown_minutes", "once", "note"}`), `PATCH …/{id}`
+(`{"enabled", "note", "cooldown_minutes"}`) and `DELETE …/{id}`. Every accepted webhook is published
+as `webhook.received`; a provider with `deliver = "events"` in its `[webhooks.<name>]` section starts no
+run of its own and is there only for the watches.
 
 A command-line member runs its CLI in a terminal of its own, which you can open like any other. The
 launch answers the CLI's folder-trust question on screen before the task is given, and a CLI that

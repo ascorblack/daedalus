@@ -9,13 +9,14 @@
 
 import { CSSProperties, PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { api, ApiError, TerminalCreate, TerminalEnv, TerminalEnvName, TerminalList, TerminalView as TerminalRow } from "../api";
+import { api, TerminalCreate, TerminalEnv, TerminalEnvName, TerminalList, TerminalView as TerminalRow } from "../api";
 import { confirmDialog, MenuItem, OverflowMenu, Sheet } from "../dialogs";
 import { plural, t } from "../i18n";
 import { Icon } from "../icons";
 import { useQuery } from "../store";
 import { errorText } from "../ui";
-import { clampHeight, closeTab, DockState, loadDock, openTab, prune, replaceTab, saveDock, setSplit, splitCandidate, toggleDock } from "./dockstate";
+import { createTerminalConfirmed, endTerminal } from "./actions";
+import { clampHeight, closeTab, DockState, loadDock, loadSandboxChoice, openTab, prune, replaceTab, sandboxOffer, sandboxToggle, saveDock, saveSandboxChoice, setSplit, splitCandidate, toggleDock } from "./dockstate";
 import type { TerminalState } from "./instance";
 import { instanceFor, setTerminalEnvs, terminals } from "./terminals";
 import { CopyOutputButton, TerminalView } from "./view";
@@ -70,6 +71,14 @@ export function useTerminalDock(sessionId: string, terms: SessionTerminals, opti
   const [sheet, setSheet] = useState(false);
   const [focusToken, setFocusToken] = useState(0);
   const [states, setStates] = useState<Record<string, TerminalState>>({});
+  // New terminals in the sandbox: the menu's checkbox, remembered for the device.
+  const [boxed, setBoxed] = useState(loadSandboxChoice);
+  const toggleSandbox = useCallback(() => {
+    setBoxed((on) => {
+      saveSandboxChoice(!on);
+      return !on;
+    });
+  }, []);
   // Terminals made here that the next listing may not have caught up with yet: a poll answered a
   // moment before the create must not close the tab that was just opened.
   const fresh = useRef(new Set<string>());
@@ -105,36 +114,35 @@ export function useTerminalDock(sessionId: string, terms: SessionTerminals, opti
         return;
       }
       const body: TerminalCreate = { env: chosen, owner_kind: "session", owner_id: sessionId };
-      let row: TerminalRow;
-      try {
-        row = await api.createTerminal(body);
-      } catch (error) {
-        // The machine-wide cap is a question for the operator, not a refusal: a human choice is
-        // never blocked, it is only confirmed.
-        if (!(error instanceof ApiError && error.status === 409 && error.data.code === "over_cap")) {
-          toast(errorText(error));
+      // Where no environment can sandbox, the checkbox shows as unavailable and does not apply: a
+      // stale tick from a visit when it could must not leave the operator with no terminal at all.
+      if (boxed && sandboxToggle(terms.envs).ok) {
+        // Asked for and not available in this environment is a wall that is missing, not a detail:
+        // the terminal is not opened without it, and the operator can untick the box.
+        const offer = sandboxOffer(terms.envs.find((e) => e.env === chosen));
+        if (!offer.ok) {
+          toast(t("term.sandbox.unavailable", { reason: offer.reason || t("term.unavailable.none") }));
           return;
         }
-        const ok = await confirmDialog({
-          title: t("term.cap.title"),
-          body: t("term.cap.body", { running: Number(error.data.running ?? 0), cap: Number(error.data.cap ?? 0) }),
-          action: t("term.cap.action"),
-        });
-        if (!ok) return;
-        try {
-          row = await api.createTerminal({ ...body, confirm: true });
-        } catch (again) {
-          toast(errorText(again));
-          return;
-        }
+        body.sandbox = true;
       }
+      let row: TerminalRow | null;
+      try {
+        // The machine-wide cap is a question for the operator, not a refusal (`actions.ts`).
+        row = await createTerminalConfirmed(body);
+      } catch (error) {
+        toast(errorText(error));
+        return;
+      }
+      if (!row) return;
       fresh.current.add(row.id);
+      if (row.sandbox_skipped?.length) toast(skippedText(row.sandbox_skipped));
       setState((s) => (place === "split" && s.active ? setSplit({ ...s, open: true }, row.id) : openTab(s, row.id)));
       if (phone) setFull(row.id);
       focus();
       void terms.refresh();
     },
-    [terms, preferredEnv, sessionId, phone, toast, focus],
+    [terms, preferredEnv, sessionId, phone, toast, focus, boxed],
   );
 
   const toggle = useCallback(() => {
@@ -175,36 +183,35 @@ export function useTerminalDock(sessionId: string, terms: SessionTerminals, opti
 
   const end = useCallback(
     async (id: string) => {
-      let row: TerminalRow | null = null;
-      try {
-        row = await api.terminal(id);
-      } catch (error) {
-        toast(errorText(error));
-        return;
-      }
-      if (row.status !== "running") return;
-      const title = states[id]?.title || row.title || t("term.untitled");
-      if (row.live?.busy && !(await confirmDialog({ title: t("term.end.title"), body: t("term.end.confirm", { command: title }), action: t("term.end"), danger: true }))) return;
-      try {
-        await api.killTerminal(id);
-      } catch (error) {
-        toast(errorText(error));
-      }
+      await endTerminal(id, states[id]?.title, toast);
       void terms.refresh();
     },
     [states, terms, toast],
   );
 
   const restart = useCallback(
-    async (id: string) => {
+    async (id: string, sandbox?: boolean) => {
+      if (sandbox !== undefined) {
+        // Switching the sandbox restarts the program: what runs in it ends, so a busy one asks first.
+        let current: TerminalRow;
+        try {
+          current = await api.terminal(id);
+        } catch (error) {
+          toast(errorText(error));
+          return;
+        }
+        const title = states[id]?.title || current.title || t("term.untitled");
+        if (current.status === "running" && current.live?.busy && !(await confirmDialog({ title: t(sandbox ? "term.sandbox.restartOn" : "term.sandbox.restartOff"), body: t("term.end.confirm", { command: title }), action: t("term.restart"), danger: true }))) return;
+      }
       let row: TerminalRow;
       try {
-        row = await api.restartTerminal(id);
+        row = await api.restartTerminal(id, sandbox);
       } catch (error) {
         toast(errorText(error));
         return;
       }
       fresh.current.add(row.id);
+      if (row.sandbox_skipped?.length) toast(skippedText(row.sandbox_skipped));
       setState((s) => replaceTab(s, id, row.id));
       setFull((f) => (f === id ? row.id : f));
       // The old instance showed a finished process; once its view has gone, nothing needs it.
@@ -212,7 +219,7 @@ export function useTerminalDock(sessionId: string, terms: SessionTerminals, opti
       focus();
       void terms.refresh();
     },
-    [terms, toast, focus],
+    [terms, toast, focus, states],
   );
 
   const remove = useCallback(
@@ -281,6 +288,8 @@ export function useTerminalDock(sessionId: string, terms: SessionTerminals, opti
     split,
     maximise,
     restore,
+    boxed,
+    toggleSandbox,
     reason: unavailableReason(terms.envs, terms.loaded),
   };
 }
@@ -295,6 +304,21 @@ export function EnvPill({ env }: { env: TerminalEnvName }) {
       {t(`term.env.${env}`)}
     </span>
   );
+}
+
+/** The shield of a sandboxed terminal. */
+function Shield({ row }: { row: TerminalRow | null }) {
+  if (!row?.sandbox) return null;
+  return (
+    <span className="term-shield" title={t("term.sandbox.on")} aria-label={t("term.sandbox.on")} role="img">
+      <Icon name="shield" size={12} />
+    </span>
+  );
+}
+
+/** What a sandboxed start left read-only, for a toast. */
+function skippedText(skipped: { path: string; reason: string }[]): string {
+  return t("term.sandbox.skipped", { paths: skipped.map((s) => `${s.path} (${s.reason})`).join(", ") });
 }
 
 function tabTitle(row: TerminalRow | null, state: TerminalState | undefined): string {
@@ -341,9 +365,26 @@ function dockMenu(dock: DockController, active: string | null): MenuItem[] {
   const env = (name: TerminalEnvName) => envs.find((e) => e.env === name);
   const container = env("container");
   const host = env("host");
+  const toggle = sandboxToggle(envs);
+  // With the sandbox chosen, an environment that cannot give it offers no terminal: the item says why.
+  const blocked = (e: TerminalEnv | undefined) => {
+    const offer = sandboxOffer(e);
+    return dock.boxed && !!e?.available && !offer.ok ? t("term.sandbox.unavailable", { reason: offer.reason }) : "";
+  };
+  const containerWhy = !container?.available ? t("term.unavailable.container") : blocked(container);
+  const hostWhy = !host?.available ? t("term.unavailable.host") : blocked(host);
   const items: MenuItem[] = [
-    { label: t("term.new.container"), icon: "terminal", disabled: !container?.available, hint: container?.available ? undefined : t("term.unavailable.container"), onSelect: () => void dock.create("container") },
-    { label: t("term.new.host"), icon: "lock", warn: true, disabled: !host?.available, hint: host?.available ? undefined : t("term.unavailable.host"), onSelect: () => void dock.create("host") },
+    {
+      label: t("term.sandbox.toggle"),
+      icon: "shield",
+      checked: dock.boxed && toggle.ok,
+      disabled: !toggle.ok,
+      hint: toggle.ok ? t("term.sandbox.hint") : t("term.sandbox.unavailable", { reason: toggle.reason || t("term.unavailable.none") }),
+      onSelect: dock.toggleSandbox,
+    },
+    "-",
+    { label: t("term.new.container"), icon: "terminal", disabled: !!containerWhy, hint: containerWhy || undefined, onSelect: () => void dock.create("container") },
+    { label: t("term.new.host"), icon: "lock", warn: true, disabled: !!hostWhy, hint: hostWhy || undefined, onSelect: () => void dock.create("host") },
   ];
   const untabbed = dock.terms.running.filter((r) => !dock.state.tabs.includes(r.id));
   if (untabbed.length) {
@@ -353,6 +394,11 @@ function dockMenu(dock: DockController, active: string | null): MenuItem[] {
   const activeRow = dock.rowOf(active);
   if (active && activeRow?.status === "running") {
     items.push("-");
+    if (activeRow.sandbox) items.push({ label: t("term.sandbox.restartOff"), icon: "reload", onSelect: () => void dock.restart(active, false) });
+    else {
+      const offer = sandboxOffer(env(activeRow.env));
+      items.push({ label: t("term.sandbox.restartOn"), icon: "shield", disabled: !offer.ok, hint: offer.ok ? undefined : t("term.sandbox.unavailable", { reason: offer.reason }), onSelect: () => void dock.restart(active, true) });
+    }
     items.push({ label: t("term.end"), icon: "stop", danger: true, onSelect: () => void dock.end(active) });
   }
   return items;
@@ -438,6 +484,7 @@ export function TerminalDock({ dock, workspace, fileOpener }: { dock: DockContro
             return (
               <div key={id} role="tab" tabIndex={0} aria-selected={on} className={`term-tab ${on ? "on" : ""} ${row?.env === "host" ? "host" : ""}`} data-tab={id} onClick={() => dock.activate(id)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); dock.activate(id); } }} title={row?.cwd || undefined}>
                 <span className={`term-dot ${dot}`} aria-hidden="true" title={dotTitle(st)} data-result={st?.commands.last?.result} />
+                <Shield row={row} />
                 <span className="term-tab-title truncate">{tabTitle(row, st)}</span>
                 {dot === "exited" && exitCode(row, st) && <span className="term-tab-code num">{exitCode(row, st)}</span>}
                 <button className="term-tab-x" aria-label={t("term.detach")} title={t("term.detach")} onClick={(e) => { e.stopPropagation(); dock.detach(id); }}>
@@ -502,6 +549,7 @@ export function TerminalFull({ dock, phone, workspace, fileOpener }: { dock: Doc
         <button className="iconbtn small flat" onClick={dock.restore} aria-label={phone ? t("shell.back") : t("term.restore")} title={phone ? t("shell.back") : t("term.restore")}>
           <Icon name={phone ? "back" : "columns"} size={16} />
         </button>
+        <Shield row={row} />
         <span className="term-full-title truncate">{tabTitle(row, st)}</span>
         {row && <EnvPill env={row.env} />}
         <div className="grow" />
@@ -539,6 +587,7 @@ export function TerminalSheet({ dock }: { dock: DockController }) {
       {rows.map((row) => (
         <button key={row.id} className="term-sheet-row" onClick={() => { close(); dock.show(row.id); }}>
           <span className={`term-dot ${tabDot(row, dock.states[row.id])}`} aria-hidden="true" />
+          <Shield row={row} />
           <span className="term-sheet-title truncate">{tabTitle(row, dock.states[row.id])}</span>
           <EnvPill env={row.env} />
           <span className="sub num">{row.status === "running" ? t("term.running") : t("term.exited", { code: row.exit_code ?? "?" })}</span>

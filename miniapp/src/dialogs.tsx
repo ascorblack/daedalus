@@ -157,8 +157,9 @@ function ConfirmDialog({ pending, onDone }: { pending: Pending; onDone: (ok: boo
 
 // ── overflow menu ────────────────────────────────────────────────────────────────────────
 
-/** `warn` marks an item that reaches outside the sandbox (a terminal on the machine itself): amber, not red. */
-export type MenuItem = { label: string; icon?: IconName; danger?: boolean; warn?: boolean; disabled?: boolean; hint?: string; onSelect: () => void } | "-";
+/** `warn` marks an item that reaches outside the sandbox (a terminal on the machine itself): amber, not red.
+ * `checked` makes the item a checkbox, which keeps the menu open: it sets how the items below it act. */
+export type MenuItem = { label: string; icon?: IconName; danger?: boolean; warn?: boolean; disabled?: boolean; hint?: string; checked?: boolean; onSelect: () => void } | "-";
 
 /** With `trigger`, the button is that content (a title with a chevron) rather than an icon. */
 export function OverflowMenu({ items, label, icon = "more", small, className, trigger: customTrigger }: { items: MenuItem[]; label?: string; icon?: IconName; small?: boolean; className?: string; trigger?: ReactNode }) {
@@ -251,9 +252,10 @@ export function OverflowMenu({ items, label, icon = "more", small, className, tr
             it === "-" ? (
               <div key={i} className="menu-sep" />
             ) : (
-              <button key={i} role="menuitem" className={it.danger ? "danger" : it.warn ? "warn" : ""} disabled={it.disabled} title={it.hint} onClick={() => { setOpen(false); it.onSelect(); }}>
+              <button key={i} role={it.checked === undefined ? "menuitem" : "menuitemcheckbox"} aria-checked={it.checked} className={it.danger ? "danger" : it.warn ? "warn" : ""} disabled={it.disabled} title={it.hint} onClick={() => { if (it.checked === undefined) setOpen(false); it.onSelect(); }}>
                 {it.icon && <Icon name={it.icon} size={16} />}
                 {it.label}
+                {it.checked !== undefined && <span className={`menu-check ${it.checked ? "on" : ""}`} aria-hidden="true">{it.checked && <Icon name="check" size={14} />}</span>}
               </button>
             ),
           )}

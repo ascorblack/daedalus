@@ -25,6 +25,10 @@ export type Env = "container" | "host";
 
 export type StaffSession = {
   id: string;
+  /** The Daedalus session a Daedalus member works in; a command-line member has none. */
+  session_id?: string | null;
+  terminal_id?: string | null;
+  pause_requested?: boolean;
   status: Exclude<StaffStatus, "off">;
   waiting_for: string;
   task_id: string | null;
@@ -33,6 +37,10 @@ export type StaffSession = {
   branch: string | null;
   worktree_path: string | null;
 };
+
+/** A launch waiting in the project's queue, with the reason the host gives (daedalus/host/launch_queue.py):
+ *  a code the app has words for, and a sentence of the host's own with the numbers in it. */
+export type Queued = { staff_id: string; task_id: string; priority: number; position: number; reason: string | null; detail: string; since: number; by: string };
 
 export type Staff = {
   id: string;
@@ -57,6 +65,8 @@ export type Staff = {
   live: StaffSession | null;
   status: StaffStatus;
   sessions: number;
+  /** What the member waits to start, each with why. */
+  queued?: Queued[];
 };
 
 export type TeamFolder = { id: string; path: string; label: string; env: Env; is_git: boolean; readonly: boolean };
@@ -75,6 +85,8 @@ export type Team = {
     folders: TeamFolder[];
   };
   staff: Staff[];
+  /** The project's whole launch queue, in the order it would start. */
+  queue?: Queued[];
   counts: { staff: number; working: number };
   choices: { harnesses: Harness[]; personas: string[]; presets: { id: string; label: string }[]; default_preset: string };
 };

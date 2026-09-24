@@ -3,9 +3,28 @@
 // should reproduce (`?panel=preview&path=reports/menu.md`), the browser remembers the width and the
 // last open tab, and the component in panel.tsx is the only thing that turns either into pixels.
 
-export type PanelTab = "details" | "files" | "preview" | "jobs";
+export type PanelTab = "details" | "files" | "preview" | "jobs" | "board" | "brief" | "wakeups" | "folders";
 
+/** A session's own tabs: what the agent is, the files it works on, one of them open, its jobs. */
 export const PANEL_TABS: PanelTab[] = ["details", "files", "preview", "jobs"];
+
+/** A project's tabs, beside a session in the project's focus mode. */
+export const PROJECT_TABS: PanelTab[] = ["board", "brief", "wakeups", "folders"];
+
+/** What a panel is beside: an ordinary session, a project's orchestrator, or a session inside a
+ *  project's focus mode (a staff member, or anyone else working in the project). */
+export type PanelContext = "session" | "orchestrator" | "member";
+
+/**
+ * The tabs a panel offers, in order. The orchestrator writes no file and runs no job, so its panel
+ * is the project's alone; a session inside a project keeps its own tabs and gains the project's,
+ * so the board is one click away from whoever is working on it.
+ */
+export function tabsFor(context: PanelContext): PanelTab[] {
+  if (context === "orchestrator") return PROJECT_TABS;
+  if (context === "member") return [...PANEL_TABS, ...PROJECT_TABS];
+  return PANEL_TABS;
+}
 
 /** One file the Preview tab showed: where the bytes come from, and the lines an answer cited, if any. */
 export type PanelEntry = { base: string; path: string; lines?: string };
@@ -22,8 +41,8 @@ export type PanelState = {
 
 export const PANEL_CLOSED: PanelState = { tab: null, stack: [], at: -1, expanded: false };
 
-export function isPanelTab(v: string | null | undefined): v is PanelTab {
-  return !!v && (PANEL_TABS as string[]).includes(v);
+export function isPanelTab(v: string | null | undefined, tabs: readonly PanelTab[] = [...PANEL_TABS, ...PROJECT_TABS]): v is PanelTab {
+  return !!v && (tabs as readonly string[]).includes(v);
 }
 
 export function openTab(s: PanelState, tab: PanelTab): PanelState {
@@ -35,8 +54,8 @@ export function closePanel(s: PanelState): PanelState {
 }
 
 /** The toggle the shortcut and the header button share: closed → the last tab (Details by default), open → closed. */
-export function togglePanel(s: PanelState, last: PanelTab | null = null): PanelState {
-  return s.tab === null ? openTab(s, last ?? "details") : closePanel(s);
+export function togglePanel(s: PanelState, last: PanelTab | null = null, first: PanelTab = "details"): PanelState {
+  return s.tab === null ? openTab(s, last ?? first) : closePanel(s);
 }
 
 export function toggleExpanded(s: PanelState): PanelState {
@@ -79,10 +98,10 @@ function sameEntry(a: PanelEntry, b: PanelEntry): boolean {
 
 /** What a link carries: the open tab and the previewed file. `tab=` is read as the tab too, so a
  *  link written as `?panel=files&tab=preview&path=…` opens Preview on that path. */
-export function readPanelQuery(query: URLSearchParams): { tab: PanelTab; path: string | null; lines?: string } | null {
+export function readPanelQuery(query: URLSearchParams, tabs: readonly PanelTab[] = PANEL_TABS): { tab: PanelTab; path: string | null; lines?: string } | null {
   const tab = query.get("tab");
   const panel = query.get("panel");
-  const which = isPanelTab(tab) ? tab : isPanelTab(panel) ? panel : null;
+  const which = isPanelTab(tab, tabs) ? tab : isPanelTab(panel, tabs) ? panel : null;
   if (!which) return null;
   const path = query.get("path");
   const lines = query.get("lines") ?? "";
@@ -151,25 +170,32 @@ export const PANEL_OPEN_MIN = 1280;
 
 /** Which tab a session opens on with nothing in the route: what was open last time, or Details on
  *  a window wide enough for both; "0" is the operator having closed it. */
-export function defaultPanelTab(stored: string | null, viewportWidth: number): PanelTab | null {
+export function defaultPanelTab(stored: string | null, viewportWidth: number, tabs: readonly PanelTab[] = PANEL_TABS): PanelTab | null {
   if (stored === "0") return null;
-  if (isPanelTab(stored)) return viewportWidth >= PANEL_OPEN_MIN ? stored : null;
-  return viewportWidth >= PANEL_OPEN_MIN ? "details" : null;
+  if (isPanelTab(stored, tabs)) return viewportWidth >= PANEL_OPEN_MIN ? stored : null;
+  return viewportWidth >= PANEL_OPEN_MIN ? tabs[0] : null;
 }
 
-export function readPanelTab(viewportWidth: number, storage: Pick<Storage, "getItem"> | null = safeStorage()): PanelTab | null {
+/** Where the last open tab is kept. A project's focus mode keeps its own: the board it left open
+ *  beside the orchestrator is not a tab an ordinary session has, and Details is not the
+ *  orchestrator's. */
+export function panelTabKey(context: PanelContext): string {
+  return context === "session" ? TAB_KEY : `${TAB_KEY}.project`;
+}
+
+export function readPanelTab(viewportWidth: number, storage: Pick<Storage, "getItem"> | null = safeStorage(), context: PanelContext = "session"): PanelTab | null {
   let stored: string | null = null;
   try {
-    stored = storage?.getItem(TAB_KEY) ?? null;
+    stored = storage?.getItem(panelTabKey(context)) ?? null;
   } catch {
     /* private mode */
   }
-  return defaultPanelTab(stored, viewportWidth);
+  return defaultPanelTab(stored, viewportWidth, tabsFor(context));
 }
 
-export function rememberPanelTab(tab: PanelTab | null, storage: Pick<Storage, "setItem"> | null = safeStorage()): void {
+export function rememberPanelTab(tab: PanelTab | null, storage: Pick<Storage, "setItem"> | null = safeStorage(), context: PanelContext = "session"): void {
   try {
-    storage?.setItem(TAB_KEY, tab ?? "0");
+    storage?.setItem(panelTabKey(context), tab ?? "0");
   } catch {
     /* private mode */
   }

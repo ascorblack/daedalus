@@ -4,7 +4,7 @@
 // column. Folded, it is a 48 px strip: the same controls as icons, and a dot for every agent that is
 // working or waiting.
 
-import { Suspense, lazy, useCallback, useEffect, useState, type RefObject } from "react";
+import { Suspense, lazy, useCallback, useEffect, useState, type ReactNode, type RefObject } from "react";
 import { SessionList, Project } from "./api";
 import { Dot } from "./components";
 import { Icon } from "./icons";
@@ -40,6 +40,9 @@ export type SidebarProps = {
   menuOpen: boolean;
   onMenu: () => void;
   menuButton: RefObject<HTMLButtonElement | null>;
+  /** Room above the list for an entry pinned first, above every project; nothing is pinned there yet.
+   *  The project's focus column keeps the same slot, so the entry stays put when a project is entered. */
+  pinned?: ReactNode;
 };
 
 export function Sidebar(p: SidebarProps) {
@@ -85,6 +88,7 @@ export function Sidebar(p: SidebarProps) {
         <Bell />
         {toggle}
       </div>
+      {p.pinned && <div className="sidebar-pinned" aria-label={t("focus.pinned")}>{p.pinned}</div>}
       <div className="sidebar-body">
         <Suspense fallback={null}>
           <SessionsScreen onOpen={p.onOpen} toast={p.toast} current={p.session ?? undefined} compact project={p.project} projects={p.projects} onProjects={p.onProjects} />

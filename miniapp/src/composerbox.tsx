@@ -60,6 +60,9 @@ export type ComposerProps = {
   reasoningEffort?: string;
   onChooseEffort?: (effort: string) => void;
   place?: ComposerPlace;
+  /** What the empty field says while nothing runs, when the conversation is with someone in particular:
+   *  "Write to the orchestrator…". Running and waiting keep their own words. */
+  idlePlaceholder?: string;
   context?: { tokens: number; window: number; messages: number } | null;
   onContext?: () => void;
   asr?: AsrStatus | null;
@@ -420,11 +423,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ref={textarea}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          placeholder={t(placeholderKey(status, asking))}
+          placeholder={props.idlePlaceholder && placeholderKey(status, asking) === "session.composer.idle" ? props.idlePlaceholder : t(placeholderKey(status, asking))}
           rows={1}
           onPaste={onPaste}
           onKeyDown={onKeyDown}
-          aria-label={t(placeholderKey(status, asking))}
+          aria-label={props.idlePlaceholder && placeholderKey(status, asking) === "session.composer.idle" ? props.idlePlaceholder : t(placeholderKey(status, asking))}
         />
         <div className="composer-row">
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => { addFiles(e.target.files ?? []); e.target.value = ""; }} />

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
-import { clampHeight, closeTab, DOCK_DEFAULT, DOCK_MIN, DockState, EMPTY, loadDock, openTab, prune, replaceTab, saveDock, setSplit, splitCandidate, toggleDock } from "./dockstate";
+import { clampHeight, closeTab, DOCK_DEFAULT, DOCK_MIN, DockState, EMPTY, loadDock, loadSandboxChoice, openTab, prune, replaceTab, sandboxOffer, sandboxToggle, saveDock, saveSandboxChoice, setSplit, splitCandidate, toggleDock } from "./dockstate";
 
 const state = (over: Partial<DockState> = {}): DockState => ({ ...EMPTY, open: true, tabs: ["a", "b", "c"], active: "a", ...over });
 
@@ -87,5 +87,28 @@ describe("the height", () => {
     expect(clampHeight(900, 800)).toBe(640);
     expect(clampHeight(300, 800)).toBe(300);
     expect(clampHeight(300, 100)).toBe(DOCK_MIN);
+  });
+});
+
+describe("the sandbox choice", () => {
+  it("is remembered for the device and off until chosen", () => {
+    expect(loadSandboxChoice()).toBe(false);
+    saveSandboxChoice(true);
+    expect(loadSandboxChoice()).toBe(true);
+    saveSandboxChoice(false);
+    expect(loadSandboxChoice()).toBe(false);
+  });
+
+  it("is offered where an environment can sandbox, and otherwise says why", () => {
+    const up = { available: true, sandbox: "ok" };
+    const refused = { available: true, sandbox: "bwrap cannot create namespaces here: no" };
+    const down = { available: false, sandbox: "" };
+    expect(sandboxOffer(up)).toEqual({ ok: true, reason: "" });
+    expect(sandboxOffer(refused)).toEqual({ ok: false, reason: refused.sandbox });
+    expect(sandboxOffer(down)).toEqual({ ok: false, reason: "" });
+    expect(sandboxOffer(undefined)).toEqual({ ok: false, reason: "" });
+    expect(sandboxToggle([refused, up])).toEqual({ ok: true, reason: "" });
+    expect(sandboxToggle([down, refused])).toEqual({ ok: false, reason: refused.sandbox });
+    expect(sandboxToggle([])).toEqual({ ok: false, reason: "" });
   });
 });

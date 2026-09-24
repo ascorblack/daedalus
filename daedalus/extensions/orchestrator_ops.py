@@ -12,7 +12,9 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from daedalus.extensions import wakeups
 from daedalus.extensions.notifications import Draft
+from daedalus.extensions.watches import WatchRefused
 from daedalus.host.peek import PeekRefused
 from daedalus.stores.projects import BRIEF_SECTIONS, OPERATOR_ONLY_SECTIONS, Project, ProjectError, ProjectFolder
 from daedalus.stores.staff import HARNESS_NAMES, StaffError
@@ -379,11 +381,52 @@ async def project_report(orch: Orchestrators, project: Project, session_id: str,
             tone="warning" if kind == "blocked" else "ok" if kind == "done" else "info",
             project_id=project.id,
             session_id=session_id,
-            link=f"/app/agents/{session_id}",
+            link=f"/app/project/{project.id}",
             source="project_report",
         ))
     await orch._changed(project.id, "journal", "orchestrator")
     return f"reported (journal #{entry.id})"
+
+
+# -- its own alarms -------------------------------------------------------------------------------
+
+
+async def wake_me(orch: Orchestrators, project: Project, session_id: str, *, note: str, at: str | None = None, in_minutes: int | None = None, cron: str | None = None) -> str:
+    try:
+        wakeup = await wakeups.set_wakeup(orch.app, project, note=note, at=at, in_minutes=in_minutes, cron=cron, by_session=session_id)
+    except wakeups.WakeupRefused as exc:
+        raise Refused(str(exc)) from exc
+    await orch._changed(project.id, "wakeups", "orchestrator")
+    return f"wake-up set: {wakeups.describe(wakeup)}. When it fires you are woken with the note; Unwatch(\"{wakeup['id']}\") cancels it."
+
+
+def _watches(orch: Orchestrators) -> Any:
+    found = orch.app.extensions.get("watches")
+    if found is None:
+        raise Refused("watches are not running on this installation")
+    return found
+
+
+async def watch(orch: Orchestrators, project: Project, session_id: str, *, when: Any, then: Any, cooldown_minutes: Any = 10, once: bool = False, note: str = "") -> str:
+    try:
+        made = await _watches(orch).create(project, when=when, then=then, cooldown_minutes=cooldown_minutes, once=once, note=note, by="orchestrator")
+    except WatchRefused as exc:
+        raise Refused(str(exc)) from exc
+    view = made.view()
+    return f"watch {made.id} set: {view['describe']} (cooldown {view['cooldown_minutes']} min{', once' if made.once else ''}). Unwatch(\"{made.id}\") removes it."
+
+
+async def unwatch(orch: Orchestrators, project: Project, session_id: str, *, id: str) -> str:
+    ref = (id or "").strip()
+    if not ref:
+        raise Refused("give the id of a wake-up or a watch; the state block lists them")
+    watches: Any = orch.app.extensions.get("watches")
+    if watches is not None and await watches.remove(project.id, ref, by="orchestrator"):
+        return f"watch {ref} removed"
+    if await wakeups.cancel(orch.app, project.id, ref):
+        await orch._changed(project.id, "wakeups", "orchestrator")
+        return f"wake-up {ref} cancelled"
+    raise Refused(f"{project.name} has no wake-up or watch {ref!r}; the state block lists them with their ids")
 
 
 _COLUMNS: dict[tuple[int, str, str], bool] = {}
@@ -407,6 +450,9 @@ OPS: dict[str, Callable[..., Awaitable[str]]] = {
     "peek": peek,
     "ask_operator": ask_operator,
     "project_report": project_report,
+    "wake_me": wake_me,
+    "watch": watch,
+    "unwatch": unwatch,
 }
 
 __all__ = ["OPS", "Refused", "dispatch"]
