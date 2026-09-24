@@ -15,7 +15,7 @@ import { ComponentsTab } from "./Components";
 import { DependenciesTab } from "./Dependencies";
 import { PromptChange } from "./PromptChange";
 import { AddModel } from "./AddModel";
-import { REASONING_EFFORTS } from "../models";
+import { REASONING_EFFORTS, orchestratorPreset } from "../models";
 import { Sheet } from "../dialogs";
 import { t } from "../i18n";
 import { LangPicker } from "../components";
@@ -1103,6 +1103,26 @@ export function SettingsScreen({ toast, section }: { toast: (t: string) => void;
               </div>
               <div className="sub" style={{ marginTop: 10 }}>{t("settings.models.chain", { chain: (s.model.chain ?? []).length ? s.model.chain.join(" → ") : t("settings.models.chain.none") })}</div>
             </div>
+            {Object.keys(s.presets ?? {}).length > 0 && (
+              <div className="card">
+                <div className="section-title" style={{ marginTop: 0 }}>{t("settings.orchestrator.title")}</div>
+                <div className="sub">{t("settings.orchestrator.sub")}</div>
+                <label className="field" htmlFor="orchestrator-preset">{t("settings.orchestrator.model")}</label>
+                <select
+                  id="orchestrator-preset"
+                  className="field"
+                  value={orchestratorPreset(s.presets, s.orchestrator?.preset, s.orchestrator?.strongest)}
+                  onChange={(e) => save({ orchestrator: { preset: e.target.value } })}
+                >
+                  {Object.entries(s.presets).map(([id, p]) => (
+                    <option key={id} value={id}>
+                      {(p.label || `${p.provider}/${p.model}`) + (id === s.orchestrator?.strongest ? ` · ${t("settings.orchestrator.strongest")}` : "")}
+                    </option>
+                  ))}
+                </select>
+                <div className="sub faint">{t("settings.orchestrator.hint")}</div>
+              </div>
+            )}
             <div className="card">
               <div className="section-title" style={{ marginTop: 0 }}>{t("settings.providers.title")}</div>
               <div className="sub">{t("settings.providers.sub")}</div>

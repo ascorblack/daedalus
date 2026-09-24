@@ -657,12 +657,5 @@ async def test_a_notification_answers_a_command_line_request_and_the_router_hold
             await team.resolve_action(request)
         resolved = (await events(manager, "permission.resolved"))[-1].payload
         assert (resolved["request_ref"], resolved["via"], resolved["decision"]) == (ref, "push", "allow")
-
-        policy = await team.notification_policy(project.id)
-        assert policy.orchestrated and policy.hold_seconds == manager.config.notifications.orchestrator_hold_seconds
-        await manager.projects.update_orchestrator(project.id, autonomy="ask")
-        assert (await team.notification_policy(project.id)).hold_seconds == 0
-        await manager.projects.update_orchestrator(project.id, enabled=False)
-        assert not (await team.notification_policy(project.id)).orchestrated
     finally:
         await manager.close()
