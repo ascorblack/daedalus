@@ -229,7 +229,9 @@ def test_the_answer_names_every_channel_that_carried_it_and_why_others_did_not()
         "count": 1,
         "delivered": {"in_app": "toast", "push": {"sent": 2}, "desktop": "sent", "telegram": "skipped: quiet hours"},
     }
-    assert notify_outcome(view) == "Sent: in the app, to 2 devices and on the desktop. Not to Telegram: quiet hours."
+    assert notify_outcome(view) == "Sent: in the app, pushed to 2 devices and on the desktop. Not to Telegram: quiet hours."
+    view = {"count": 1, "delivered": {"in_app": "toast", "push": {"queued": 1}}}
+    assert notify_outcome(view) == "Sent: in the app and pushed to 1 device."
     view = {"count": 3, "delivered": {"in_app": "seen: off", "push": "skipped: off", "desktop": "skipped: rate limit", "telegram": "session"}}
     assert notify_outcome(view) == "Updated: to Telegram. Not on the desktop: the push limit."
     view = {"count": 1, "delivered": {"in_app": "seen: off", "push": "skipped: no device", "desktop": "skipped: no launcher", "telegram": "skipped: no bot"}}

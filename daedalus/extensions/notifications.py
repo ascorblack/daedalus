@@ -1176,9 +1176,11 @@ def notify_outcome(view: NotificationView | None) -> str:
     if in_app == "toast":
         reached.append("in the app")
     push = delivered.get("push")
-    if isinstance(push, Mapping) and int(push.get("sent") or 0) > 0:
-        count = int(push["sent"])
-        reached.append(f"to {count} device{'s' if count != 1 else ''}")
+    # The push channel answers ``{"queued": n}`` at once and settles later: a slow push service must
+    # not hold the router, so "pushed to n devices" is as much as is known when the tool returns.
+    count = int(push.get("sent") or push.get("queued") or 0) if isinstance(push, Mapping) else 0
+    if count > 0:
+        reached.append(f"pushed to {count} device{'s' if count != 1 else ''}")
     if delivered.get("desktop") == "sent":
         reached.append("on the desktop")
     if delivered.get("telegram") in ("session", "general"):
