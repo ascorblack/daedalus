@@ -185,7 +185,7 @@ class Board:
             merged[key] = str(value or "").strip()[:BRIEF_MAX_CHARS]
         return merged
 
-    async def _publish(self, event_type: str, task: dict[str, Any], actor: Actor, **extra: str) -> None:
+    async def _publish(self, event_type: str, task: dict[str, Any], actor: Actor, **extra: Any) -> None:
         """Tell the bus. A board change is the operator's or an agent's work and stands whether or not the
         event could be written, so a bus that fails is logged and nothing else."""
         manager = self.app.manager
@@ -406,14 +406,20 @@ class Board:
     async def accept(self, task_id: str, *, by: str = "operator") -> dict[str, Any]:
         """The operator accepts a task in review: it is done.
 
-        A task with a staff branch that is not merged yet is refused rather than closed, because what
-        the operator accepted would not be in the folder.
+        A task with a staff branch that is not merged yet is merged: accepting work that is not in the
+        folder would call finished what is not there, so on a branch task Accept *is* Merge, with its
+        preconditions and its refusals. Without the staff extension there is nothing to merge with,
+        and the task is refused rather than closed.
         """
         task = await self.get(task_id)
         if task["status"] != "review":
             raise ValueError(f"only a task in review can be accepted; this one is {task['status']}")
         if task.get("branch") and task.get("merge_state") != "merged":
-            raise ValueError(f"task {task_id} has unmerged work on branch {task['branch']}; it is merged before it is accepted")
+            team = self.app.extensions.get("staff")
+            review = getattr(team, "review", None)
+            if review is None:
+                raise ValueError(f"task {task_id} has unmerged work on branch {task['branch']}; it is merged before it is accepted")
+            return await review.merge(task_id, by=by)  # type: ignore[no-any-return]
         done = await self.update(task_id, status="done", note=f"accepted by the {by}")
         await self._publish("task.accepted", done, OPERATOR if by == "operator" else Actor(by))
         return done

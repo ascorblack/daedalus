@@ -1,42 +1,59 @@
 """A fake Claude Code: the interactive TUI, its hooks, its transcript and its small commands.
 
-What it imitates, and why each matters to the harness:
+What it imitates, and why each matters to the harness. The shapes marked (measured) were recorded
+from the real Claude Code 2.1.282 in a throwaway configuration; the recordings are in
+``recorded/claude/`` beside this module.
 
 - **Arguments** as the real ``claude`` takes them for an interactive session: ``--session-id``
   (a UUID, refused when already used), ``--resume``, ``--settings`` (a file or inline JSON),
-  ``--mcp-config``, ``--add-dir``, ``-n/--name``, ``--agent``, ``--model``, ``--effort``,
-  ``--permission-mode`` (``manual``, not ``default``: the flag's name for what hooks report as
-  ``default``), ``--append-system-prompt``, ``--dangerously-skip-permissions``, and the first prompt
-  as the last positional argument. Anything else is an error.
-- **Folder trust first.** A folder not yet trusted shows "Do you trust the files in this folder?";
-  the answer is kept in ``~/.claude.json`` (or under ``CLAUDE_CONFIG_DIR``), so it is asked once
-  per folder. No settings-file hook fires before trust is accepted, so ``SessionStart`` arriving is
-  the proof that the gate passed. ``bypassPermissions`` adds its own warning, whose default row is
-  "No, exit", unless ``skipDangerousModePermissionPrompt`` is set. Signed out
-  (``FAKE_CLAUDE_LOGGED_IN=0``), a sign-in screen appears and the session never gets ready.
+  ``--mcp-config`` and ``--add-dir`` (both variadic: every following word that is not a flag is
+  taken, so a prompt after them must follow ``--``), ``-n/--name``, ``--agent``, ``--model``,
+  ``--effort``, ``--permission-mode`` (``manual``, not ``default``: the flag's name for what hooks
+  report as ``default``), ``--append-system-prompt`` and ``--append-system-prompt-file`` (measured: a missing file is an error), ``--dangerously-skip-permissions``, and the
+  first prompt as the last positional argument. Anything else is an error.
+- **Before the composer** (measured). A configuration that never finished its first run shows the
+  theme picker and then "Select login method" even when signed in (``FAKE_CLAUDE_FIRST_RUN=1``);
+  signed out (``FAKE_CLAUDE_LOGGED_IN=0``) it shows the sign-in choice. A folder not yet trusted
+  shows "Accessing workspace:" … "Quick safety check: Is this a project you created or one you
+  trust?" with the rows ``❯ No, exit`` (highlighted) and ``Yes, I trust this folder``, unnumbered:
+  Down then Enter accepts. The answer is kept in ``~/.claude.json`` (or under
+  ``CLAUDE_CONFIG_DIR``), so it is asked once per folder. No settings-file hook fires before these
+  screens are passed, so ``SessionStart`` arriving is the proof that the gate passed.
+  ``bypassPermissions`` adds its own warning with ``❯ No, exit`` highlighted, unless
+  ``skipDangerousModePermissionPrompt`` is set in the settings (measured: the overlay's is honoured).
 - **Hooks** from ``--settings`` merged with the user's own ``settings.json`` (lists merge), both
   ``http`` (headers expanded from ``allowedEnvVars`` only) and ``command``, with matchers on tool
-  names: ``SessionStart``, ``UserPromptSubmit`` (``prompt``; a ``block`` decision stops the turn),
-  ``PreToolUse`` (``permissionDecision`` allow/deny/ask, ``updatedInput``, which can answer
-  ``AskUserQuestion``), ``PermissionRequest`` (``decision.behavior`` allow/deny — the other shape,
-  ``permissionDecision``, is honoured as well, since the documentation shows both), ``PostToolUse``,
-  ``Stop``, ``StopFailure`` (``error``), ``Notification`` (``permission_prompt`` about six seconds
-  after a dialog opens; ``idle_prompt`` sixty seconds after a turn ends — both scaled — and never
-  anything a harness may take for a question), ``SessionEnd``.
-- **While a ``PermissionRequest`` hook is held** the dialog is not drawn (``FAKE_CLAUDE_HOLD_HIDES_DIALOG=0``
-  draws it at once): the conservative reading until the real CLI is measured.
-- **Enter while busy** queues the message; it is injected at the next tool boundary, when
-  ``UserPromptSubmit`` fires for it. **Esc** interrupts: the transcript gets "[Request interrupted
-  by user]" and no ``Stop`` fires. Two Esc on an idle composer open the rewind dialog — the reason a
-  harness sends Esc once.
+  names: ``SessionStart`` (``source`` startup or resume), ``UserPromptSubmit`` (``prompt``,
+  ``prompt_id``; a ``block`` decision stops the turn), ``PreToolUse`` (``permissionDecision``
+  allow/deny/ask and ``updatedInput``; measured: an ``allow`` with ``updatedInput.answers`` answers
+  ``AskUserQuestion`` with no dialog), ``PermissionRequest`` (measured: no ``tool_use_id`` in it;
+  ``decision.behavior`` allow/deny, and the other shape, ``permissionDecision``, is honoured too),
+  ``PostToolUse``, ``Stop`` (``last_assistant_message``), ``StopFailure`` (``error``),
+  ``Notification`` (``permission_prompt`` about six seconds after a dialog opens, "Claude needs your
+  permission"; ``idle_prompt`` sixty seconds after a turn ends — both scaled — and never anything a
+  harness may take for a question), ``SessionEnd``.
+- **The permission dialog is drawn at once, while the ``PermissionRequest`` hook runs** (measured):
+  a held hook that answers closes it and the tool runs ("Allowed by PermissionRequest hook"); an
+  answer typed into the dialog first lets the tool run while the hook is left to finish on its own.
+- **Enter while busy** queues the message, and ``UserPromptSubmit`` fires for it at once (measured),
+  not when it is injected at the next tool boundary; the transcript records a ``queue-operation``.
+  **Esc** interrupts: the transcript gets "[Request interrupted by user for tool use]" (during a
+  tool) or "[Request interrupted by user]", the screen "Interrupted · What should Claude do
+  instead?", and no ``Stop`` fires (measured). Two Esc on an idle composer open the rewind dialog —
+  the reason a harness sends Esc once.
+- **Pastes** collapse to ``[Pasted text #N]`` over 800 characters, and to ``[Pasted text #N +K
+  lines]`` from four lines on, K counting the line breaks (measured); an Enter right after a paste
+  is taken (measured), and ``FAKE_CLAUDE_BURST_MS`` makes a window that swallows one for tests.
 - **The transcript** is JSON lines in Claude's record shape under
   ``~/.claude/projects/<cwd with every non-alphanumeric as ->/<session>.jsonl``.
 - **Team tools**: the ``--mcp-config`` servers are started as the real CLI starts them, and the
   script's ``report:``/``askorch:`` steps call ``mcp__daedalus_team__Report`` /
   ``…__AskOrchestrator``, which, like every tool, need an allow rule not to prompt. ``MCP_TOOL_TIMEOUT``
-  (milliseconds) bounds a call.
+  (milliseconds) bounds a call. Skills under ``<--add-dir>/.claude/skills/<name>/SKILL.md`` are
+  found (measured) and logged as ``skills``; ``--append-system-prompt`` is logged as ``system_prompt``.
 - **Commands**: ``--version``, ``agents --json`` (every live fake session: ``pid, cwd, kind,
-  sessionId, name, status, waitingFor``), ``auth status --json``, ``update``.
+  sessionId, name, status, waitingFor``), ``auth status --json`` (the real one's keys, no
+  address), ``update``.
 """
 
 from __future__ import annotations
@@ -78,8 +95,8 @@ DEFAULT_VERSION = "2.1.281"
 PERMISSION_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 FLAGS = {
-    "--session-id": 1, "--resume": 1, "--settings": 1, "--mcp-config": 1, "--add-dir": 1, "--name": 1,
-    "--agent": 1, "--model": 1, "--effort": 1, "--permission-mode": 1, "--append-system-prompt": 1,
+    "--session-id": 1, "--resume": 1, "--settings": 1, "--mcp-config": -1, "--add-dir": -1, "--name": 1,
+    "--agent": 1, "--model": 1, "--effort": 1, "--permission-mode": 1, "--append-system-prompt": 1, "--append-system-prompt-file": 1,
     "--dangerously-skip-permissions": 0, "--strict-mcp-config": 0, "--version": 0,
 }
 ALIASES = {"-n": "--name", "-r": "--resume", "-v": "--version"}
@@ -134,9 +151,11 @@ def merge_settings(user: dict[str, Any], launch: dict[str, Any]) -> dict[str, An
 class FakeClaude(FakeAgent):
     cli = "claude"
     look = Look(
-        "claude", "✻ Welcome to Claude Code (fake)", prompt="> ", idle_hint="? for shortcuts", busy_hint="esc to interrupt",
-        busy_word="Working…", alt_screen=False, collapse_chars=800, collapse_lines=2, burst_guard_ms=int(os.environ.get("FAKE_CLAUDE_BURST_MS") or 0),
+        "claude", "✻ Welcome to Claude Code (fake)", prompt="❯ ", idle_hint="⏸ manual mode on · ? for shortcuts", busy_hint="⏸ manual mode on · esc to interrupt",
+        busy_word="Working…", alt_screen=False, collapse_chars=800, collapse_lines=3, burst_guard_ms=int(os.environ.get("FAKE_CLAUDE_BURST_MS") or 0),
+        marker_style="claude",
     )
+    interrupted_line = "  ⎿  Interrupted · What should Claude do instead?"
 
     def __init__(self, args: Args) -> None:
         super().__init__(os.getcwd())
@@ -175,34 +194,45 @@ class FakeClaude(FakeAgent):
         self.last_esc = 0.0
         self.idle_timer: asyncio.Task[None] | None = None
         self.permission_notice: asyncio.Task[None] | None = None
-        self.hold_hides_dialog = os.environ.get("FAKE_CLAUDE_HOLD_HIDES_DIALOG", "1") != "0"
         self.last_text = ""
+        self.prompt_id = ""
 
     # -- start -------------------------------------------------------------------------------
 
     async def before_ready(self) -> bool:
+        state = self._global_state()
+        if os.environ.get("FAKE_CLAUDE_FIRST_RUN") == "1" and not state.get("hasCompletedOnboarding"):
+            # The first run's own screens come before anything else, signed in or not (measured).
+            await self._ask("theme", "Choose the text style that looks best with your terminal", ["To change this later, run /theme"], ["Auto (match terminal)", "Dark mode ✔", "Light mode"], selected=1, numbered=True)
+            self.tui.open_dialog(Dialog("login", "Select login method:", ["Claude Code can be used with your Claude subscription or billed based on API usage through your Console account."], ["Claude account with subscription · Pro, Max, Team, or Enterprise", "Anthropic Console account · API usage billing", "3rd-party platform · Amazon Bedrock, Microsoft Foundry, or Vertex AI"], on_choose=lambda i: None))
+            self.log("login_required", first_run=True)
+            return False
         if not logged_in("claude"):
-            self.tui.open_dialog(Dialog("login", "Select login method:", [], ["Claude account with subscription", "Anthropic Console account", "3rd-party platform"], on_choose=lambda i: None))
+            self.tui.open_dialog(Dialog("login", "Select login method:", [], ["Claude account with subscription · Pro, Max, Team, or Enterprise", "Anthropic Console account · API usage billing", "3rd-party platform · Amazon Bedrock, Microsoft Foundry, or Vertex AI"], on_choose=lambda i: None))
             self.log("login_required")
             return False
-        state = self._global_state()
         project = (state.get("projects") or {}).get(self.cwd) or {}
         if not project.get("hasTrustDialogAccepted"):
-            if not await self._ask("trust", "Do you trust the files in this folder?", [self.cwd, "", "Claude Code may read, write or execute files in this folder."], ["Yes, proceed", "No, exit"]) == 0:
+            body = [" Accessing workspace:", "", f" {self.cwd}", "", " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source",
+                    " project, or work from your team). If not, take a moment to review what's in this folder first.", "", " Claude Code'll be able to read, edit, and execute files here.", "", " Security guide"]
+            if await self._ask("trust", "", body, ["No, exit", "Yes, I trust this folder"], numbered=False) != 1:
                 await self.quit(1)
                 return False
+            state = self._global_state()
             state.setdefault("projects", {}).setdefault(self.cwd, {})["hasTrustDialogAccepted"] = True
             self._save_global_state(state)
         if self.mode == "bypassPermissions" and not self.settings.get("skipDangerousModePermissionPrompt"):
-            choice = await self._ask("bypass", "WARNING: Claude Code running in Bypass Permissions mode", ["In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands."], ["No, exit", "Yes, I accept"])
-            if choice != 1:
+            body = ["  In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous", "  commands."]
+            if await self._ask("bypass", "  WARNING: Claude Code running in Bypass Permissions mode", body, ["No, exit", "Yes, I accept"], numbered=False) != 1:
                 await self.quit(1)
                 return False
         return True
 
-    async def _ask(self, kind: str, title: str, body: list[str], options: list[str]) -> int:
+    async def _ask(self, kind: str, title: str, body: list[str], options: list[str], *, selected: int = 0, numbered: bool = True) -> int:
         future: asyncio.Future[int] = asyncio.get_running_loop().create_future()
-        self.tui.open_dialog(Dialog(kind, title, body, options, on_choose=lambda i: settle(future, i), on_escape=lambda: settle(future, len(options) - 1)))
+        # Esc means the refusing row: "No, exit" is the first of the unnumbered questions.
+        refuse = 0 if not numbered else len(options) - 1
+        self.tui.open_dialog(Dialog(kind, title, body, options, selected=selected, numbered=numbered, digits=numbered, on_choose=lambda i: settle(future, i), on_escape=lambda: settle(future, refuse)))
         return await future
 
     def _global_state(self) -> dict[str, Any]:
@@ -221,6 +251,13 @@ class FakeClaude(FakeAgent):
         self.transcript.parent.mkdir(parents=True, exist_ok=True)
         self.transcript.touch()
         self._register()
+        skills = sorted(p.parent.name for d in self.args.all("--add-dir") for p in Path(d).glob(".claude/skills/*/SKILL.md"))
+        self.log("skills", names=skills)
+        appended = self.args.get("--append-system-prompt")
+        if self.args.has("--append-system-prompt-file"):
+            appended = Path(self.args.get("--append-system-prompt-file")).read_text(encoding="utf-8")
+        if appended:
+            self.log("system_prompt", text=appended)
         await self._start_mcp()
         await self.hook("SessionStart", {"source": "resume" if self.resuming else "startup", "model": self.model})
 
@@ -253,10 +290,13 @@ class FakeClaude(FakeAgent):
     async def hook(self, event: str, fields: dict[str, Any], *, tool: str = "") -> list[Any]:
         """Run every hook of ``event`` whose matcher fits ``tool``; the parsed answers, in order."""
         entries = (self.settings.get("hooks") or {}).get(event) or []
-        payload = {
-            "session_id": self.session_id, "transcript_path": str(self.transcript), "cwd": self.cwd,
-            "permission_mode": "default" if self.mode == "manual" else self.mode, "hook_event_name": event, **fields,
-        }
+        payload: dict[str, Any] = {"session_id": self.session_id, "transcript_path": str(self.transcript), "cwd": self.cwd}
+        if self.prompt_id and event not in ("SessionStart", "SessionEnd"):
+            payload["prompt_id"] = self.prompt_id
+        if event not in ("SessionStart", "SessionEnd", "Notification"):
+            # The real payloads of these three carry no mode (measured).
+            payload["permission_mode"] = "default" if self.mode == "manual" else self.mode
+        payload.update({"hook_event_name": event, **fields})
         answers: list[Any] = []
         for entry in entries:
             matcher = str(entry.get("matcher") or "")
@@ -301,13 +341,30 @@ class FakeClaude(FakeAgent):
 
     async def on_prompt(self, text: str, *, queued: bool) -> None:
         self._cancel_idle()
+        if queued:
+            # Its UserPromptSubmit fired when it was queued (measured); now it is only taken in.
+            self.record_plain({"type": "queue-operation", "operation": "dequeue", "timestamp": now_iso(), "sessionId": self.session_id})
+        else:
+            await self._submit_hook(text)
+        self.record("user", {"role": "user", "content": text})
+        self._register()
+
+    async def _submit_hook(self, text: str) -> None:
+        self.prompt_id = new_id()
         answers = await self.hook("UserPromptSubmit", {"prompt": text})
         for answer in answers:
             if isinstance(answer, dict) and answer.get("decision") == "block":
                 self.tui.say(f"⎿ UserPromptSubmit operation blocked by hook: {answer.get('reason', '')}")
                 raise asyncio.CancelledError
-        self.record("user", {"role": "user", "content": text})
-        self._register()
+
+    async def busy_enter(self, text: str) -> None:
+        await self._submit_hook(text)
+        self.record_plain({"type": "queue-operation", "operation": "enqueue", "timestamp": now_iso(), "sessionId": self.session_id, "content": text})
+        await super().busy_enter(text)
+
+    def record_plain(self, entry: dict[str, Any]) -> None:
+        with self.transcript.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     async def on_assistant(self, text: str) -> None:
         self.last_text = text
@@ -328,7 +385,7 @@ class FakeClaude(FakeAgent):
         if self.faults.no_stop_hook:
             self.log("stop_hook_suppressed")
         else:
-            await self.hook("Stop", {"stop_hook_active": False, "last_assistant_message": self.last_text})
+            await self.hook("Stop", {"stop_hook_active": False, "last_assistant_message": self.last_text, "background_tasks": [], "session_crons": []})
         self.idle_timer = asyncio.ensure_future(self._idle_notification())
 
     async def on_turn_failed(self, kind: str) -> None:
@@ -337,7 +394,8 @@ class FakeClaude(FakeAgent):
 
     async def on_turn_cancelled(self) -> None:
         self._register()
-        self.record("user", {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]})
+        words = "[Request interrupted by user for tool use]" if self.interrupted_in_tool else "[Request interrupted by user]"
+        self.record("user", {"role": "user", "content": [{"type": "text", "text": words}]})
 
     async def on_session_end(self) -> None:
         self._cancel_idle()
@@ -388,39 +446,40 @@ class FakeClaude(FakeAgent):
             return "allow_once" if decided == "allow" else "deny"
         if decided != "ask" and self._allowed(tool, tool_input):
             return "allow_once"
-        request = {"tool_name": tool, "tool_input": tool_input, "permission_suggestions": [{"type": "addRules", "rules": [{"toolName": tool, "ruleContent": summary}], "behavior": "allow", "destination": "localSettings"}]}
-        if not self.faults.late_permission_notification and self.hold_hides_dialog:
-            verdict = self._verdict(await self.hook("PermissionRequest", request, tool=tool))
-            if verdict:
-                return verdict
-            return await self._dialog(tool, summary, request, hook_after=False)
-        return await self._dialog(tool, summary, request, hook_after=True)
+        # The real request names no tool_use_id (measured): the tool and its input say which it is.
+        request = {"tool_name": tool, "tool_input": tool_input, "permission_suggestions": [{"type": "addDirectories", "directories": [self.cwd], "destination": "session"}, {"type": "setMode", "mode": "acceptEdits", "destination": "session"}]}
+        return await self._dialog(tool, tool_input, summary, request)
 
-    async def _dialog(self, tool: str, summary: str, request: dict[str, Any], *, hook_after: bool) -> str:
-        """The permission dialog; with ``hook_after`` the hook runs while it is open (drawn at once, or
-        the late-notification fault), and a decision from the hook closes it."""
-        options = ["Yes", f"Yes, and don't ask again for {summary.split()[0] if summary else tool} commands in {self.cwd}", "No, and tell Claude what to do differently (esc)"]
-        dialog_task = asyncio.ensure_future(self.permission_dialog(tool, summary, options, ["allow_once", "allow_always", "deny"], title=f"{tool} command"))
+    async def _dialog(self, tool: str, tool_input: dict[str, Any], summary: str, request: dict[str, Any]) -> str:
+        """The permission dialog, drawn at once while the ``PermissionRequest`` hook runs (measured):
+        whichever answers first decides; a hook still running after an answer on screen is left to
+        finish, and what it says then changes nothing."""
+        options = ["Yes", f"Yes, and don't ask again for {summary.split()[0] if summary else tool} commands in {self.cwd}", "No"]
+        body = [f"   {summary}", f"   {tool_input.get('description') or ''}".rstrip(), " Do you want to proceed?"]
+        hook_task = asyncio.ensure_future(self._late_hook(tool, request))
+        # The hook is posted before the dialog is drawn (measured: about a quarter of a second), so
+        # keys typed the moment the hook arrives land in the composer, not in the dialog.
+        await asyncio.sleep(float(os.environ.get("FAKE_CLAUDE_DIALOG_DELAY_MS") or 250) / 1000)
+        if hook_task.done() and hook_task.result():
+            self.tui.say("  ⎿  Allowed by PermissionRequest hook" if hook_task.result() == "allow_once" else "  ⎿  Denied by PermissionRequest hook")
+            return str(hook_task.result())
+        dialog_task = asyncio.ensure_future(self.permission_dialog(tool, summary, options, ["allow_once", "allow_always", "deny"], title=f" {tool} command", body=body, footer=" Esc to cancel · Tab to amend"))
         await asyncio.sleep(0)  # let the dialog open before the session says it waits
         self._register()
         self.permission_notice = asyncio.ensure_future(self._permission_notification(tool))
-        hook_task: asyncio.Future[Any] | None = None
-        if hook_after:
-            hook_task = asyncio.ensure_future(self._late_hook(tool, request))
         try:
-            waiting: set[asyncio.Future[Any]] = {dialog_task} | ({hook_task} if hook_task else set())
+            waiting: set[asyncio.Future[Any]] = {dialog_task, hook_task}
             while waiting:
                 done, waiting = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
                 if dialog_task in done:
                     return dialog_task.result()
-                if hook_task is not None and hook_task in done and hook_task.result():
+                if hook_task in done and hook_task.result():
                     dialog_task.cancel()
                     self.tui.close_dialog()
+                    self.tui.say("  ⎿  Allowed by PermissionRequest hook" if hook_task.result() == "allow_once" else "  ⎿  Denied by PermissionRequest hook")
                     return str(hook_task.result())
             return "deny"
         finally:
-            if hook_task is not None:
-                hook_task.cancel()
             await self._cancel_permission_notice()
             self._register()
 
@@ -431,7 +490,7 @@ class FakeClaude(FakeAgent):
 
     async def _permission_notification(self, tool: str) -> None:
         await pause(12 if self.faults.late_permission_notification else 6)
-        await self.hook("Notification", {"message": f"Claude needs your permission to use {tool}", "notification_type": "permission_prompt"})
+        await self.hook("Notification", {"message": "Claude needs your permission", "notification_type": "permission_prompt"})
 
     async def _cancel_permission_notice(self) -> None:
         if self.permission_notice is not None:

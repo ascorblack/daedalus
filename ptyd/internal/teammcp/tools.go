@@ -20,10 +20,12 @@ const (
 var reportKinds = []string{"checkpoint", "needs_input", "stuck", "done"}
 
 // Fallback results for a post the host did not answer in time. A report was published the moment
-// it was posted, so it was heard; a question with no answer yet leaves the worker to decide.
+// it was posted, so it was heard. A question stays open with the host after the call gives up: its
+// answer is delivered as the worker's next message, so the worker is told to expect it rather than
+// to ask again.
 const (
 	reportRecorded = "recorded"
-	askExpired     = "No answer yet. Continue with what the brief allows, or call Report with kind needs_input and stop."
+	askExpired     = "Pending: nobody has answered yet. The answer will arrive as a message; carry on with what the brief allows meanwhile, or end your turn and wait for it. Do not ask the same question again."
 )
 
 // tool is one tool as tools/list describes it.

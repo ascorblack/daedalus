@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -230,6 +232,38 @@ func (c *client) result(id any) (string, bool) {
 	return content["text"].(string), r["isError"].(bool)
 }
 
+// asMap is a hook event's body as a map, whether the recorder kept it raw or decoded.
+func asMap(body any) map[string]any {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	_ = json.Unmarshal(raw, &m)
+	return m
+}
+
+var callIDShape = regexp.MustCompile(`^(L1|nolaunch):[0-9a-f]{8}:[0-9]+$`)
+
+// withoutCallID is a posted body as JSON without its call id, which is checked for its shape: the
+// launch, this process, the call's number.
+func withoutCallID(t *testing.T, body any) string {
+	t.Helper()
+	m := asMap(body)
+	id, _ := m["call_id"].(string)
+	if !callIDShape.MatchString(id) {
+		t.Fatalf("call id %q in %v", id, body)
+	}
+	rest := map[string]any{}
+	for k, v := range m {
+		if k != "call_id" {
+			rest[k] = v
+		}
+	}
+	b, _ := json.Marshal(rest)
+	return string(b)
+}
+
 func errorCode(m map[string]any) float64 {
 	e, _ := m["error"].(map[string]any)
 	code, _ := e["code"].(float64)
@@ -302,8 +336,22 @@ func TestInitializeListAndProtocol(t *testing.T) {
 	if fmt.Sprint(codes) != fmt.Sprint([]float64{codeParse, codeInvalidRequest}) {
 		t.Fatalf("errors for unreadable lines: %v", codes)
 	}
-	if len(f.rec.hooks()) != 0 {
-		t.Fatal("listing tools posted something")
+	// Loading the tools is announced — twice initialized, once listed — and nothing else is posted.
+	var stages []string
+	for i := 1; i <= 3; i++ {
+		ev := f.rec.hookN(t, i)
+		body := asMap(ev["body"])
+		if ev["name"] != "team" || body["tool"] != "hello" || ev["reply_id"] != nil {
+			t.Fatalf("an announcement: %v", ev)
+		}
+		stages = append(stages, body["stage"].(string))
+		if body["stage"] == "initialize" && body["client"].(map[string]any)["name"] == "claude-code" && body["client"].(map[string]any)["version"] != "2.1.281" {
+			t.Fatalf("the client is not named: %v", body)
+		}
+	}
+	sort.Strings(stages)
+	if fmt.Sprint(stages) != "[initialize initialize tools/list]" || len(f.rec.hooks()) != 3 {
+		t.Fatalf("announcements %v, hooks %v", stages, f.rec.hooks())
 	}
 
 	c.in.Close()
@@ -326,9 +374,10 @@ func TestReportRoundTrip(t *testing.T) {
 		t.Fatalf("%v", ev)
 	}
 	want := `{"artifacts":["README.md"],"kind":"done","note":"the task is finished","remember":"tests live in tests/","tool":"report"}`
-	if got, _ := json.Marshal(ev["body"]); string(got) != want {
+	if got := withoutCallID(t, ev["body"]); got != want {
 		t.Fatalf("body %s", got)
 	}
+	first := asMap(ev["body"])["call_id"]
 	// The host refuses "done" with a dirty worktree: the worker reads why.
 	f.reply(t, ev, `{"text":"the worktree has uncommitted changes; commit them and report again","error":true}`)
 	if text, isErr := c.result(1); !isErr || !strings.Contains(text, "commit them") {
@@ -336,8 +385,11 @@ func TestReportRoundTrip(t *testing.T) {
 	}
 	c.call(2, "Report", map[string]any{"kind": "checkpoint", "note": "halfway"})
 	ev = f.rec.hookN(t, 2)
-	if got, _ := json.Marshal(ev["body"]); string(got) != `{"artifacts":[],"kind":"checkpoint","note":"halfway","tool":"report"}` {
+	if got := withoutCallID(t, ev["body"]); got != `{"artifacts":[],"kind":"checkpoint","note":"halfway","tool":"report"}` {
 		t.Fatalf("optional fields: %s", got)
+	}
+	if asMap(ev["body"])["call_id"] == first {
+		t.Fatal("two calls share an id")
 	}
 	f.reply(t, ev, `{"text":"recorded"}`)
 	if text, isErr := c.result(2); isErr || text != "recorded" {
@@ -365,7 +417,7 @@ func TestAskHeldAnsweredAndExpired(t *testing.T) {
 	if ev["hold_ms"] != int64(20000) {
 		t.Fatalf("%v", ev)
 	}
-	if got, _ := json.Marshal(ev["body"]); string(got) != `{"context":"both build","options":["main","dev"],"question":"Which branch?","tool":"ask"}` {
+	if got := withoutCallID(t, ev["body"]); got != `{"context":"both build","options":["main","dev"],"question":"Which branch?","tool":"ask"}` {
 		t.Fatalf("body %s", got)
 	}
 	// While the question waits, the server still answers: a ping, and a second call.
@@ -532,7 +584,9 @@ func TestTheHostsOwnTeamRoute(t *testing.T) {
 	mu.Lock()
 	first := seen[0]
 	mu.Unlock()
-	if first != `/api/team/s1/report tok {"artifacts":[],"kind":"checkpoint","note":"halfway"}` {
+	path, body, _ := strings.Cut(strings.TrimPrefix(first, "/api/team/s1/report tok "), "{")
+	var posted map[string]any
+	if path != "" || json.Unmarshal([]byte("{"+body), &posted) != nil || withoutCallID(t, posted) != `{"artifacts":[],"kind":"checkpoint","note":"halfway"}` {
 		t.Fatalf("%s", first)
 	}
 

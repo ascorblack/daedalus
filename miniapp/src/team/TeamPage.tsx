@@ -8,6 +8,8 @@ import { Icon } from "../icons";
 import { navigate, pathFor, projectPagePath } from "../router";
 import { PageHeader } from "../shell";
 import { invalidate, useQuery } from "../store";
+import { useUsage } from "../project/data";
+import { spendLine, staffUsage } from "../project/usage";
 import { plural, t } from "../i18n";
 import { HarnessBadge, StaffAvatar } from "./parts";
 import { StaffSheet } from "./StaffSheet";
@@ -18,6 +20,7 @@ export function TeamPage({ projectId, toast, back }: { projectId: string; toast:
   const [showArchived, setShowArchived] = useState(false);
   const key = `/api/projects/${encodeURIComponent(projectId)}/staff?archived=${showArchived ? 1 : 0}`;
   const { data: team, error, loading, refresh } = useQuery<Team>(key, { pollMs: 15000, staleMs: 5000 });
+  const usage = useUsage(projectId);
   const [hiring, setHiring] = useState(false);
   const [editing, setEditing] = useState<Staff | null>(null);
   const reload = () => {
@@ -78,14 +81,14 @@ export function TeamPage({ projectId, toast, back }: { projectId: string; toast:
         )}
         {team && !closed && active.length > 0 && (
           <div className="staff-list">
-            {active.map((m) => <StaffRow key={m.id} member={m} team={team} onOpen={() => setEditing(m)} />)}
+            {active.map((m) => <StaffRow key={m.id} member={m} team={team} spend={spendLine(staffUsage(usage, m.id))} onOpen={() => setEditing(m)} />)}
           </div>
         )}
         {team && !closed && showArchived && archived.length > 0 && (
           <>
             <div className="section-title">{t("team.dismissed.section")}</div>
             <div className="staff-list archived">
-              {archived.map((m) => <StaffRow key={m.id} member={m} team={team} />)}
+              {archived.map((m) => <StaffRow key={m.id} member={m} team={team} spend={spendLine(staffUsage(usage, m.id))} />)}
             </div>
           </>
         )}
@@ -96,7 +99,7 @@ export function TeamPage({ projectId, toast, back }: { projectId: string; toast:
   );
 }
 
-function StaffRow({ member, team, onOpen }: { member: Staff; team: Team; onOpen?: () => void }) {
+function StaffRow({ member, team, spend, onOpen }: { member: Staff; team: Team; spend: string | null; onOpen?: () => void }) {
   const folder = team.project.folders.find((f) => f.id === member.default_folder_id);
   const env = member.env || (member.harness === "daedalus" ? team.project.local_env : team.project.default_env);
   const model = member.model ? team.choices.presets.find((p) => p.id === member.model)?.label ?? member.model : t("team.model.default.short");
@@ -130,6 +133,7 @@ function StaffRow({ member, team, onOpen }: { member: Staff; team: Team; onOpen?
         <div className="staff-meta">
           <span>{runs}</span>
           <span>{where}</span>
+          {spend && <span className="staff-spend">{spend}</span>}
         </div>
         {/* On a phone the status moves under the name, so a long one never squeezes the name to nothing. */}
         <div className="staff-status-inline">{status}</div>

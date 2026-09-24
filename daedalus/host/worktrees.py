@@ -99,6 +99,52 @@ class WorktreeStatus:
     """Commits on the base since the branch was cut (or last caught up)."""
 
 
+@dataclass(frozen=True, slots=True)
+class BranchCommit:
+    sha: str
+    author: str
+    at: str
+    subject: str
+
+
+@dataclass(frozen=True, slots=True)
+class BranchFile:
+    path: str
+    added: int | None
+    """Lines added; ``None`` for a binary file, which git counts as ``-``."""
+    removed: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class BranchComparison:
+    """What merging a staff branch into a folder's current branch would bring, read without changing anything."""
+
+    branch: str
+    exists: bool
+    current: str
+    """The folder's branch now (a commit id when detached)."""
+    merged: bool
+    """Every commit of the branch is already in the folder's branch."""
+    clean: bool
+    """No uncommitted change to a tracked file in the folder: a merge would not refuse."""
+    commits: list[BranchCommit]
+    more_commits: bool
+    files: list[BranchFile]
+    patch: str
+    patch_complete: bool
+    """False when the patch was cut: some files left out, or the text clipped at its limit."""
+    conflicts: list[str] | None
+    """The files a merge would conflict in (``[]`` for none); ``None`` when git could not tell."""
+
+    @property
+    def added(self) -> int:
+        return sum(f.added or 0 for f in self.files)
+
+    @property
+    def removed(self) -> int:
+        return sum(f.removed or 0 for f in self.files)
+
+
 _CYRILLIC = dict(zip(
     "абвгдеёжзийклмнопрстуфхцчшщъыьэюяіїєґ",
     ["a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p", "r", "s", "t", "u", "f", "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya", "i", "yi", "ye", "g"],
@@ -259,6 +305,22 @@ class RemoteGit:
                 f"{folder} does not exclude /{prefix}.agents/ from git, and the host bridge cannot write it; "
                 f"add the line /{prefix}.agents/ to the repository's .git/info/exclude on the host, then assign again"
             ) from None
+
+
+def _literal(paths: Sequence[str]) -> list[str]:
+    """Paths as literal pathspecs: a file a staff member named ``:(glob)*`` is still one file."""
+    return [f":(literal){p}" for p in paths]
+
+
+_OID = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
+
+
+def _conflicted_names(message: str) -> list[str]:
+    """The conflicted files from a failed ``merge-tree --name-only``: the lines of its output after the
+    tree id. The error keeps only the tail of the output, so a very long list may lose its start."""
+    _, _, detail = message.partition("\n")
+    names = [line.strip() for line in detail.splitlines() if line.strip() and not _OID.match(line.strip())]
+    return list(dict.fromkeys(names))
 
 
 def _text(value: Any) -> str:
@@ -438,13 +500,75 @@ class StaffWorktrees:
         out = await git.run(["for-each-ref", "--format=%(refname:short)", "--no-merged", "HEAD", f"refs/heads/{BRANCH_PREFIX}"], cwd=folder.path)
         return [line.strip() for line in out.splitlines() if line.strip()]
 
-    async def merge(self, folder: ProjectFolder, branch: str) -> str:
+    async def current_branch(self, folder: ProjectFolder) -> str:
+        """The folder's branch, or its commit id when HEAD is detached."""
+        git = self._git(folder.env)
+        try:
+            return (await git.run(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=folder.path)).strip()
+        except GitError:
+            return (await git.run(["rev-parse", "HEAD"], cwd=folder.path)).strip()
+
+    async def compare(self, folder: ProjectFolder, branch: str, *, max_commits: int = 50, max_files: int = 100, max_lines: int = 8000, max_chars: int = 200_000) -> BranchComparison:
+        """What merging ``branch`` into the folder's current branch would bring, and whether it would conflict.
+
+        Everything is measured against the folder's ``HEAD``, not against the base the branch was cut
+        from: the merge brings what the branch has and the folder lacks, and that is what the operator
+        is asked to accept. The patch is bounded twice — a lock file or a generated bundle committed by a
+        staff member must not become a response of tens of megabytes — first by leaving out the files
+        past ``max_files`` or ``max_lines`` changed lines (asking git only for the ones kept), then by
+        clipping the text. The conflict check is ``git merge-tree --write-tree``, which computes the
+        merge in the object store and never touches the folder or its index.
+        """
+        git = self._git(folder.env)
+        where = folder.path
+        ref = f"refs/heads/{branch}"
+        current = await self.current_branch(folder)
+        clean = not await self._is_dirty(git, where, untracked=False)
+        if not await self._branch_exists(git, where, branch):
+            return BranchComparison(branch, False, current, False, clean, [], False, [], "", True, None)
+        merged = await self.merged(folder, branch)
+        log = await git.run(["log", "--no-color", f"--max-count={max_commits + 1}", "--format=%H%x1f%an%x1f%aI%x1f%s", f"HEAD..{ref}"], cwd=where)
+        commits = [BranchCommit(*(line.split("\x1f") + ["", "", "", ""])[:4]) for line in log.splitlines() if line.strip()]
+        numstat = await git.run(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--numstat", f"HEAD...{ref}"], cwd=where)
+        files: list[BranchFile] = []
+        for line in numstat.splitlines():
+            parts = line.split("\t", 2)
+            if len(parts) == 3:
+                files.append(BranchFile(parts[2], None if parts[0] == "-" else int(parts[0]), None if parts[1] == "-" else int(parts[1])))
+        kept: list[str] = []
+        lines = 0
+        for f in files:
+            size = (f.added or 0) + (f.removed or 0)
+            if len(kept) >= max_files or (kept and lines + size > max_lines):
+                break
+            kept.append(f.path)
+            lines += size
+        patch = ""
+        if kept:
+            patch = await git.run(["diff", "--no-color", "--no-ext-diff", "--no-textconv", f"HEAD...{ref}", "--", *_literal(kept)], cwd=where)
+        complete = len(kept) == len(files) and len(patch) <= max_chars
+        conflicts: list[str] | None = []
+        if not merged and commits:
+            try:
+                await git.run(["merge-tree", "--write-tree", "--name-only", "--no-messages", "HEAD", ref], cwd=where)
+            except GitError as exc:
+                # Exit 1 is git's "the merge has conflicts"; its output is the tree and then the names.
+                # Anything else is a git that could not answer, and the merge is not called safe.
+                conflicts = _conflicted_names(str(exc)) if exc.returncode == 1 else None
+        return BranchComparison(branch, True, current, merged, clean, commits[:max_commits], len(commits) > max_commits, files, patch[:max_chars], complete, conflicts)
+
+    async def merge(self, folder: ProjectFolder, branch: str, *, message: str = "") -> str:
         """Merge ``branch`` into the folder's current branch as a merge commit; the merge commit's id.
 
         Always ``--no-ff``, even when a fast-forward would do: the merge commit is the record that a
         staff task landed, and reverting it takes the whole task back in one step. A folder with
         uncommitted changes to tracked files is refused before anything runs; a merge that stops on a
-        conflict is aborted, so the folder is left exactly as it was, and refused with git's account.
+        conflict (or on the operator's own ``pre-merge-commit`` hook) is aborted, so the folder is left
+        exactly as it was, and refused with git's account.
+
+        The merge commit is the operator's commit in the operator's repository, so it carries their
+        identity; only a repository with none at all (a fresh container) gets the agent's, because git
+        would otherwise refuse the merge with "tell me who you are".
         """
         if folder.readonly:
             raise WorktreeRefused(f"{folder.path} is read-only; nothing can be merged into it")
@@ -452,8 +576,14 @@ class StaffWorktrees:
         async with await self._lock(git, folder.path):
             if await self._is_dirty(git, folder.path, untracked=False):
                 raise WorktreeRefused(f"{folder.path} has uncommitted changes; commit or stash them before merging {branch}")
+            identity: dict[str, str] = {}
             try:
-                await git.run(["merge", "--no-ff", "--no-edit", branch], cwd=folder.path)
+                await git.run(["var", "GIT_COMMITTER_IDENT"], cwd=folder.path)
+            except GitError:
+                identity = {"GIT_AUTHOR_NAME": IDENTITY[0], "GIT_AUTHOR_EMAIL": IDENTITY[1], "GIT_COMMITTER_NAME": IDENTITY[0], "GIT_COMMITTER_EMAIL": IDENTITY[1]}
+            args = ["merge", "--no-ff", "--no-edit"] + (["-m", message] if message else []) + [branch]
+            try:
+                await git.run(args, cwd=folder.path, env=identity)
             except GitError as exc:
                 try:
                     await git.run(["merge", "--abort"], cwd=folder.path)
@@ -461,6 +591,16 @@ class StaffWorktrees:
                     pass  # nothing to abort: the merge refused before it started
                 raise WorktreeRefused(f"merging {branch} into {folder.path} did not go through and was undone: {exc}") from exc
             return (await git.run(["rev-parse", "HEAD"], cwd=folder.path)).strip()
+
+    async def delete_branch(self, folder: ProjectFolder, branch: str) -> bool:
+        """Delete a merged branch with ``-d``; False when git keeps it (unmerged, or checked out in a worktree)."""
+        git = self._git(folder.env)
+        async with await self._lock(git, folder.path):
+            try:
+                await git.run(["branch", "-d", branch], cwd=folder.path)
+            except GitError:
+                return False
+            return True
 
     async def remove(self, worktree: Worktree, *, delete_branch_if_merged: bool) -> bool:
         """Remove the worktree; with ``delete_branch_if_merged``, also its branch once the folder's current

@@ -50,6 +50,7 @@ class FakeAgent:
 
     cli = "fake"
     look = Look("fake", "fake agent")
+    interrupted_line = "⎿ Interrupted by user"
 
     def __init__(self, cwd: str) -> None:
         self.cwd = cwd
@@ -66,6 +67,9 @@ class FakeAgent:
         self.done = asyncio.Event()
         self.exit_code = 0
         self.first_prompt: str | None = None
+        self.interrupted_in_tool = False
+        self.in_tool = False
+        """A tool is running: an interrupt now is an interrupt of the tool, which some CLIs record apart."""
 
     # -- life ----------------------------------------------------------------------------------
 
@@ -154,6 +158,7 @@ class FakeAgent:
         if self.busy:
             assert self.turn_task is not None
             self.log("interrupt", key="esc")
+            self.interrupted_in_tool = self.in_tool
             self.turn_task.cancel()
 
     async def turn(self, prompt: str) -> None:
@@ -182,7 +187,7 @@ class FakeAgent:
             self.tui.status = ""
             self.tui.render()
         if outcome == "cancelled":
-            self.tui.say("⎿ Interrupted by user")
+            self.tui.say(self.interrupted_line)
             await self.on_turn_cancelled()
         elif outcome == "completed" and not silent:
             await self.on_turn_completed()
@@ -244,7 +249,11 @@ class FakeAgent:
     async def tool(self, name: str, tool_input: dict[str, Any], tool_id: str, *, output: str, duration: float = 0.2) -> None:
         self.tui.say(f"● {name}({summary_of(tool_input)})")
         await self.on_tool_start(name, tool_input, tool_id)
-        await pause(duration)
+        self.in_tool = True
+        try:
+            await pause(duration)
+        finally:
+            self.in_tool = False
         self.tui.say(f"  ⎿ {output}")
         await self.on_tool_end(name, tool_input, tool_id, output, True)
 
@@ -283,7 +292,7 @@ class FakeAgent:
         """Ask on screen; ``allow_once``, ``allow_always`` or ``deny``."""
         return await self.permission_dialog(tool, summary, ["Yes", f"Yes, and don't ask again for {summary.split()[0] if summary else tool} commands", "No, and tell me what to do differently (esc)"], ["allow_once", "allow_always", "deny"])
 
-    async def permission_dialog(self, tool: str, summary: str, options: list[str], meanings: list[str], *, selected: int = 0, title: str = "") -> str:
+    async def permission_dialog(self, tool: str, summary: str, options: list[str], meanings: list[str], *, selected: int = 0, title: str = "", body: list[str] | None = None, footer: str = "") -> str:
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
         def choose(index: int) -> None:
@@ -294,7 +303,10 @@ class FakeAgent:
             if not future.done():
                 future.set_result("deny")
 
-        self.tui.open_dialog(Dialog("permission", title or f"{tool} command", [f"  {summary}", "Do you want to proceed?"], options, selected=selected, on_choose=choose, on_escape=escape, data={"tool": tool, "summary": summary}))
+        dialog = Dialog("permission", title or f"{tool} command", body if body is not None else [f"  {summary}", "Do you want to proceed?"], options, selected=selected, on_choose=choose, on_escape=escape, data={"tool": tool, "summary": summary})
+        if footer:
+            dialog.footer = footer
+        self.tui.open_dialog(dialog)
         try:
             return await future
         finally:

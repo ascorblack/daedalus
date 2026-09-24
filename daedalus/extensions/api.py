@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import fnmatch
 import hashlib
 import hmac
@@ -53,12 +54,13 @@ from daedalus.config import (
     keyproxy_upstream,
 )
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
-from daedalus.extensions import api_harnesses, api_projects
+from daedalus.extensions import api_harnesses, api_projects, api_staff
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature, webhook_facts
 from daedalus.extensions.notifications import ActionConflict, ActionRefused, Draft, NotificationService
 from daedalus.extensions.push import PushRefused, PushService
+from daedalus.extensions.review import ReviewRefused
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import model_options, tts_configured
 from daedalus.harness.capabilities import CAPABILITIES
@@ -89,6 +91,7 @@ from daedalus.speech.tts_engine import MAX_SPEED, MIN_SPEED, TtsError
 from daedalus.speech.tts_service import MEDIA_TYPE_HEADER, SEQUENCE_TYPE
 from daedalus.speech.tts_service import frame as speech_frame
 from daedalus.stores import pairing, passkeys
+from daedalus.stores.harness import HarnessStore
 from daedalus.stores.media import MEDIA_TENANT
 from daedalus.stores.projects import Project
 from daedalus.stores.sqlite import ReceiptConflict
@@ -575,6 +578,11 @@ class BoardUpdateBody(BaseModel):
     """A staff member of the task's project; ``""`` takes the task off whoever had it."""
     brief: TaskBrief | None = None
     depends_on: list[str] | None = Field(default=None, max_length=50)
+
+
+class RejectBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    note: str = Field(min_length=1, max_length=2000)
 
 
 class ProjectTaskBody(BaseModel):
@@ -1406,6 +1414,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     api_projects.register(api, app, auth)
     # The command-line agents: the Harnesses screen and the hiring form's catalog.
     api_harnesses.register(api, app, auth)
+    # One staff member's session as its runtime sees it: the staff view's reads.
+    api_staff.register(api, app, auth)
 
     # -- staff: the named members of a project's team ------------------------------------------
 
@@ -1560,10 +1570,25 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         return [s.view() for s in await manager.staff.sessions(staff_id, limit=limit)]
 
     @api.get("/api/staff/{staff_id}/messages")
-    async def staff_messages(staff_id: str, limit: int = Query(default=20, ge=1, le=200), _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
-        """What was sent to a member, newest first, with each message's delivery state."""
+    async def staff_messages(staff_id: str, limit: int = Query(default=20, ge=1, le=200), before: str | None = None, _: dict[str, Any] = Depends(auth)) -> list[dict[str, Any]]:
+        """What was sent to a member, newest first, with each message's delivery state and, for a
+        command-line member, how it was delivered (``delivery``: paste or pointer, Enters sent, when
+        each state was reached). ``before`` is a message id: the page continues below it."""
         await staff_member(staff_id)
-        return [m.view() for m in await manager.staff.messages(staff_id, limit=limit)]
+        messages = list(await manager.staff.messages(staff_id, limit=500 if before else limit))
+        if before:
+            ids = [m.id for m in messages]
+            messages = messages[ids.index(before) + 1 :] if before in ids else []
+        page = messages[:limit]
+        deliveries = await HarnessStore(manager.db).deliveries([m.id for m in page])
+        rows = []
+        for message in page:
+            row = message.view()
+            delivery = deliveries.get(message.id)
+            if delivery is not None:
+                row["delivery"] = dataclasses.asdict(delivery)
+            rows.append(row)
+        return rows
 
     @api.post("/api/staff/{staff_id}/assign")
     async def assign_staff(staff_id: str, body: AssignBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
@@ -3836,6 +3861,43 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         except KeyError:
             raise HTTPException(404, "no such task") from None
         except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    def _review():  # type: ignore[no-untyped-def]
+        review = getattr(app.extensions.get("staff"), "review", None)
+        if review is None:
+            raise HTTPException(503, "review and merge need the staff runtime")
+        return review
+
+    @api.get("/api/board/{task_id}/review")
+    async def board_review(task_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """What merging a task's staff branch would bring and what stands in its way; read-only."""
+        try:
+            return await _review().review(task_id)  # type: ignore[no-any-return]
+        except KeyError:
+            raise HTTPException(404, "no such task") from None
+        except ReviewRefused as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/api/board/{task_id}/merge")
+    async def board_merge(task_id: str, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The operator merges a task's staff branch as a merge commit; the task is done. 409 with the
+        reason when the folder is not clean, not on the base, or the merge would conflict."""
+        try:
+            return await _review().merge(task_id, by="operator")  # type: ignore[no-any-return]
+        except KeyError:
+            raise HTTPException(404, "no such task") from None
+        except (ReviewRefused, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @api.post("/api/board/{task_id}/reject")
+    async def board_reject(task_id: str, body: RejectBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
+        """The operator sends a task's work back from review with a note for its staff member."""
+        try:
+            return await _review().reject(task_id, body.note, by="operator")  # type: ignore[no-any-return]
+        except KeyError:
+            raise HTTPException(404, "no such task") from None
+        except (ReviewRefused, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @api.delete("/api/board/{task_id}")

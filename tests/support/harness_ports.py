@@ -48,8 +48,8 @@ class PtydTerminalPort:
     def env(self) -> Environment:
         return self._env
 
-    async def write(self, *, text: str | None = None, paste: str | None = None, keys: list[str] | None = None) -> None:
-        params: dict[str, Any] = {"id": self._id, "origin": {"kind": "agent", "actor": self.actor, "launch_id": self.launch_id}}
+    async def write(self, *, text: str | None = None, paste: str | None = None, keys: list[str] | None = None, note: str = "", wait_keyboard: bool = True) -> None:
+        params: dict[str, Any] = {"id": self._id, "origin": {"kind": "agent", "actor": self.actor, "launch_id": self.launch_id}, "wait": "keyboard" if wait_keyboard else "none"}
         if text is not None:
             params["text"] = text
         elif paste is not None:
@@ -94,6 +94,11 @@ class PtydTerminalPort:
         except Exception:  # noqa: BLE001 — the daemon's refusal is "nothing waits any more"
             return False
         return True
+
+
+    async def put_file(self, name: str, data: bytes) -> str:
+        result = await self.client.call("hooks.put_file", {"launch_id": self.launch_id, "name": name, "data": base64.b64encode(data).decode()})
+        return str(result["path"])
 
 
 class PtydEnvironmentPort:

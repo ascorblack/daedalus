@@ -17,7 +17,8 @@ import { HarnessBadge, StaffAvatar } from "../team/parts";
 import { StaffSheet } from "../team/StaffSheet";
 import type { Staff } from "../team/team";
 import { invalidate } from "../store";
-import { useFocus, useProject, staffKey } from "./data";
+import { useFocus, useProject, useUsage, staffKey } from "./data";
+import { chipText, totalsLine } from "./usage";
 import { FocusView, firstWait, splitTeam, staffTone, waitKey } from "./focus";
 
 export type ProjectSidebarProps = {
@@ -38,6 +39,8 @@ export type ProjectSidebarProps = {
 export function ProjectSidebar(p: ProjectSidebarProps) {
   const { project } = useProject(p.projectId);
   const { team, board, terminals, sessions, wakeups: alarms, watches } = useFocus(p.projectId);
+  const usage = useUsage(p.projectId);
+  const spent = chipText(usage);
   const [hiring, setHiring] = useState(false);
   const orchestrator = project?.settings.orchestrator;
   const orchestratorId = orchestrator?.enabled ? orchestrator.session_id : "";
@@ -107,6 +110,7 @@ export function ProjectSidebar(p: ProjectSidebarProps) {
               {[plural("focus.count.folders", project.folders.length), team ? plural("team.count.staff", team.counts.staff) : "", orchestrator?.enabled ? t("focus.autonomy", { level: t(`focus.autonomy.${orchestrator.autonomy}`) }) : ""].filter(Boolean).join(" · ")}
             </div>
           )}
+          {spent && <span className="chip tiny focus-spend" title={usage ? totalsLine(usage) : undefined}>{spent}</span>}
         </div>
 
         <FocusRow
