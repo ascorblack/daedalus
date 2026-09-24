@@ -197,6 +197,14 @@ stale_hours = 6            # a 'doing' task whose session went quiet this long i
 # audit_retention_days = 90
 # shell = ""                   # empty = the environment's login shell
 
+[harness]
+# no_signal_after_s = 300          # a working CLI staff member silent this long has its screen checked
+# ask_hold_s = 300                 # how long a staff member's question waits for the orchestrator's answer
+# pointer_threshold_bytes = 16384  # longer messages go as a file with a one-line pointer
+# allow_untested = true            # launch a CLI version outside the tested range once its self-check passed
+# self_check_model_turn = true     # the check after an update sends one tiny prompt on the cheapest model
+# opencode_port_range = "18300-18399"
+
 [ops]
 # provider_retry_max_attempts = 6      # runs driven again after the model provider failed one in a row; 0 = none
 # provider_retry_base_seconds = 30.0   # the first wait; it doubles each time up to provider_retry_max_seconds
