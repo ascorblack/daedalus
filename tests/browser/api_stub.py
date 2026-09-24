@@ -48,6 +48,48 @@ def folders(path: str, *, reachable: bool = True, writable: bool | None = None) 
 ENVIRONMENTS = {"local": "container", "available": ["container"], "host_bridge": False, "docker": True}
 """Where a folder may live: a Docker installation without the host terminal bridge."""
 
+NOTIFICATION_CATEGORIES = ["run_finished", "question", "permission", "run_failed", "staff_turn", "staff_review", "orchestrator_report", "agent_notify", "reminder", "spend", "system"]
+
+
+def notification_preferences(**over: object) -> dict[str, object]:
+    """``GET /api/notifications/preferences`` with the host's defaults, and whatever a harness changes."""
+    def cells(push: str = "on", desktop: str = "on", telegram: str = "off") -> dict[str, str]:
+        return {"in_app": "on", "push": push, "desktop": desktop, "telegram": telegram}
+    matrix = {c: cells() for c in NOTIFICATION_CATEGORIES}
+    for c in ("question", "permission", "run_failed", "orchestrator_report", "reminder", "spend"):
+        matrix[c] = cells(telegram="on")
+    matrix["staff_turn"] = cells(push="off", desktop="off")
+    matrix["agent_notify"] = cells(telegram="urgent")
+    preferences: dict[str, object] = {
+        "matrix": matrix, "finished_min_seconds": 30, "quiet_hours": "", "muted_projects": {}, "quick_actions": True, "telegram_covers_push": True,
+        "keep_days": 30, "push_per_session": 6, "push_window_minutes": 10, "push_per_hour": 60, "notify_tool_per_session": 5,
+        "notify_tool_window_minutes": 10, "notify_tool_urgent_per_hour": 2, "orchestrator_hold_seconds": 60,
+    }
+    preferences.update(over)
+    return {"preferences": preferences, "revision": "r1", "categories": NOTIFICATION_CATEGORIES, "zone": "Europe/Amsterdam"}
+
+
+GIB = 1 << 30
+MIB = 1 << 20
+
+
+def terminal_load(*, running: int = 3, cap: int = 20, total: int = 62 * GIB, available: int = 38 * GIB, each: int = 700 * MIB, cpu: float = 14.0) -> dict[str, object]:
+    """``GET /api/terminals/load`` for a 62 GB, 16-CPU machine: three sessions running, each about 700 MB."""
+    daemon = 45 * MIB
+    used = running * each + daemon
+    extra = max(0, cap - running)
+    machine_used = total - available + extra * each
+    return {
+        "cap": cap, "running": running, "queued": [],
+        "used": {"rss_bytes": used, "daemon_rss_bytes": daemon, "cpu_percent": 9.0, "cpus": 16, "mem_total_bytes": total, "mem_available_bytes": available, "machine_cpu_percent": cpu},
+        "profiles": {"harness:claude": {"rss_bytes": each, "cpu_percent": 3.0, "samples": 60}},
+        "likely": {"rss_bytes": each, "cpu_percent": 3.0, "samples": 60, "basis": "running"},
+        "projection": {"cap": cap, "sessions": max(cap, running), "terminals_rss_bytes": used + extra * each, "machine_used_bytes": machine_used, "mem_total_bytes": total,
+                       "mem_percent": round(100 * machine_used / total, 1), "cpu_percent": round(cpu + extra * 3.0 / 16, 1), "level": "ok", "cpu_level": "ok"},
+        "envs": [{"env": "container", "supported": True, "terminals": running, "rss_bytes": running * each, "cpu_percent": 9.0, "daemon_rss_bytes": daemon, "mem_total_bytes": total, "mem_available_bytes": available, "cpus": 16}],
+        "thresholds": {"warn": 70.0, "bad": 90.0},
+    }
+
 GATES: dict[str, object] = {
     "/api/maintenance": {"notice": None},
     "/api/conversation-search/settings": {"mode": "off", "paused": False, "reason": "off", "busy": False, "indexed": 0, "pending": 0, "label": "Multilingual E5 Small", "size_bytes": 135429554, "licence": "MIT", "installed": False},
@@ -74,6 +116,9 @@ GATES: dict[str, object] = {
     # Web Push on this device: a harness serves plain http, and its host has no public https address.
     "/api/push/config": {"available": False, "reason": "no_https_url", "public_key": ""},
     "/api/push/subscriptions": {"subscriptions": []},
+    # Settings → Notifications: the host's defaults, and a machine to draw the terminal load bar for.
+    "/api/notifications/preferences": notification_preferences(),
+    "/api/terminals/load": terminal_load(),
     "/api/modes": {},
     "/api/commands": [],
     "/api/asr": {"configured": False, "reason": "", "provider": "", "model": "", "max_seconds": 120, "autosend": False},
@@ -219,7 +264,7 @@ def expect_app(base: str) -> None:
         raise SystemExit(1)
 
 
-__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "EVENTS", "GATES", "BoardStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "folder", "folders", "fulfil_shared", "serve_shared_post"]
+__all__ = ["CATALOG", "DEFAULT_APP", "DEFAULT_PORT", "ENVIRONMENTS", "EVENTS", "GATES", "NOTIFICATION_CATEGORIES", "BoardStub", "TeamStub", "Unhandled", "answer_shared", "event_stream_hello", "expect_app", "folder", "folders", "fulfil_shared", "notification_preferences", "serve_shared_post", "terminal_load"]
 
 # What the harness manager reports for the container: Claude Code installed and signed in, Codex
 # installed but signed out, the rest absent. Enough for the hiring form to show one command-line agent

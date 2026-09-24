@@ -637,6 +637,8 @@ class SettingsBody(BaseModel):
     webhooks: dict[str, Any] | None = None
     ops: dict[str, Any] | None = None
     compaction: dict[str, Any] | None = None
+    terminals: dict[str, Any] | None = None
+    """``running_cap`` from Settings; the terminals service reads the configuration on every admission."""
     answer_language: str | None = None
 
 

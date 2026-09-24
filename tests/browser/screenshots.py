@@ -42,6 +42,7 @@ from api_stub import (  # noqa: E402
     file_search,
     folders,
     fulfil_shared,
+    notification_preferences,
 )
 
 BASE = os.environ.get("APP_URL", DEFAULT_APP)
@@ -407,7 +408,15 @@ SETTINGS = {
     "scheduler": {"topic_mode": "per_task", "catch_up_missed": True},
     "compaction": {"auto_ratio": 0.7, "keep_recent_messages": 6, "max_words": 900, "chunk_tokens": 30000, "min_messages": 12, "core_trigger_ratio": 0.85},
     "telegram": {"verbosity": 1, "reactions": True, "topic_status_emoji": True, "stale_after_seconds": 600, "max_inbound_file_mb": 200, "forward_unknown_commands": True, "slow_tool_seconds": 30},
+    "terminals": {"running_cap": 20},
 }
+
+# Two phones and a laptop that receive push; the phone that has been off for two days keeps failing.
+PUSH_DEVICES = [
+    {"id": 1, "endpoint": "https://push.example.com/send/laptop", "device": "Chrome · macOS", "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36", "created_at": ago(days=12), "last_ok_at": ago(minutes=8), "failures": 0, "last_error": None, "apple": False},
+    {"id": 2, "endpoint": "https://push.example.com/send/pixel", "device": "Chrome · Android", "user_agent": "Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36", "created_at": ago(days=30), "last_ok_at": ago(days=2), "failures": 3, "last_error": "503 Service Unavailable", "apple": False},
+    {"id": 3, "endpoint": "https://web.push.apple.com/send/iphone", "device": "Safari · iPhone", "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1", "created_at": ago(days=5), "last_ok_at": ago(hours=1), "failures": 0, "last_error": None, "apple": True},
+]
 
 
 def png(width: int, height: int) -> bytes:
@@ -769,6 +778,13 @@ def stub(route) -> None:  # type: ignore[no-untyped-def]
         return respond(route, CAPABILITIES)
     if rel == "/api/status":
         return respond(route, {"ok": True})
+    if rel == "/api/push/subscriptions":
+        return respond(route, {"subscriptions": PUSH_DEVICES})
+    if rel == "/api/notifications/preferences":
+        # Quiet at night, pushes for finished work only when urgent, and one project muted until the morning.
+        view = notification_preferences(quiet_hours="23:00-07:30", muted_projects={P2: ahead(hours=10)})
+        view["preferences"]["matrix"]["run_finished"]["push"] = "urgent"  # type: ignore[index]
+        return respond(route, view)
     if fulfil_shared(route):
         return None
     # A route nobody taught this stub about is answered with nothing and reported at the end: the
@@ -942,7 +958,8 @@ def open_projects(page: Page) -> None:
 
 
 def open_hire(page: Page) -> None:
-    page.locator(".pagehead-actions .iconbtn").click()
+    # The team's header also links to the board; hiring is its primary action.
+    page.locator(".pagehead-actions .iconbtn.primary").click()
     page.wait_for_selector(".staff-sheet .executor")
     page.locator("#staff-name").fill("Mira")
     page.locator("#staff-role").fill(word("role"))
@@ -1194,6 +1211,12 @@ def run_composer() -> int:
     return result or UNHANDLED.report()
 
 
+def open_first_kind(page: Page) -> None:
+    """A phone's matrix row, opened into its four channels."""
+    page.locator(".nrows .nrow-head").first.click()
+    page.wait_for_selector(".nrow.open .nrow-line", timeout=5000)
+
+
 def open_bell(page: Page) -> None:
     """The bell's popover over the agents: what needs you, with its buttons, and the day's feed."""
     page.locator(".sidebar .bell").click()
@@ -1270,6 +1293,8 @@ def run() -> int:
         # The settings index, because the language switch is its first row.
         shot(page, "settings", "settings")
         shot(page, "components", "settings/components", wait=".comp-grid .comp-card", settle=500)
+        shot(page, "settings-notifications", "settings/notifications", wait=".nmatrix", settle=600)
+        shot(page, "settings-terminals", "settings/terminals", wait=".loadbar-track", settle=600)
         # And the same install where the owner met its absence: under the two lines on the voice card
         # that say the browser is doing the listening and the speaking.
         stub.nospeech = True  # type: ignore[attr-defined]
@@ -1294,6 +1319,7 @@ def run() -> int:
         shot(page, "phone-memory", "memory")
         shot(page, "phone-more", "agents", before=open_more)
         shot(page, "phone-team", f"project/{P1}/team", wait=".staff-row")
+        shot(page, "phone-settings-notifications", "settings/notifications", wait=".nrows .nrow", before=open_first_kind, settle=500)
         stub.fresh = True  # type: ignore[attr-defined]
         shot(page, "phone-add-model", "agents", wait=".addmodel", before=pick_a_model, settle=600)
         stub.fresh = False  # type: ignore[attr-defined]
