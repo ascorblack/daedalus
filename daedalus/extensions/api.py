@@ -1561,8 +1561,7 @@ def build_app(app: Application, api_token: str) -> FastAPI:
         """Give a member a task: it starts now, or waits in the project's queue with the reason."""
         team = team_or_503()
         member = await staff_member(staff_id)
-        assigned = await team_call(team.assign(member, body.task_id, by="operator"))
-        return assigned.view()  # type: ignore[no-any-return]
+        return await team_call(team.assign(member, body.task_id, by="operator"))  # type: ignore[no-any-return]
 
     @api.post("/api/staff/{staff_id}/tell")
     async def tell_staff(staff_id: str, body: TellBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:

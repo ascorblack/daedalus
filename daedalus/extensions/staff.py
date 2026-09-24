@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 from protocore.runtime.events.envelope import TurnEvent
 from protocore.runtime.events.types import EventType
 
-from daedalus.extensions.notifications import Draft
+from daedalus.extensions.notifications import ActionConflict, ActionOutcome, ActionRefused, Draft, ProjectNotifyPolicy
 from daedalus.host import prompts
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.host.launch_queue import Admission, Entry, LaunchQueue, MachineCapacity, TerminalsCapacity
@@ -312,8 +312,13 @@ class Team:
 
     # -- assigning and starting ---------------------------------------------------------------------
 
-    async def assign(self, member: Staff, task_id: str, *, by: str = "operator") -> Assigned:
-        """Give a member a task: it starts now, or waits in the project's launch queue with the reason."""
+    async def assign(self, member: Staff, task: str | dict[str, Any], *, by: str = "operator") -> dict[str, Any]:
+        """Give a member a task (its id, or the board's view of it): it starts now, or waits in the
+        project's launch queue. Returns ``{state: started|queued, position, reason, detail, task_id}``;
+        a refusal is a :class:`StaffError`, which is a ``ValueError``."""
+        return (await self._assign(member, str(task["id"]) if isinstance(task, dict) else task, by=by)).view()
+
+    async def _assign(self, member: Staff, task_id: str, *, by: str) -> Assigned:
         if not member.active:
             raise StaffError(f"{member.name} has been dismissed")
         task = await self.task(task_id)
@@ -564,7 +569,8 @@ class Team:
         if ended is not None:
             await self.publish("staff.status", {"status": "exited", "previous": live.session.status, "detail": reason[:500]}, member=live.staff, session_id=live.session_id)
             for ask in await self._open_asks(live.id):
-                await self.manager.asks.resolve(ask.id, "system", {"closed": f"the session ended: {reason}"})
+                if await self.manager.asks.resolve(ask.id, "system", {"closed": f"the session ended: {reason}"}):
+                    await self._withdrawn(ask)
 
     async def _open_asks(self, staff_session_id: str) -> list[Ask]:
         rows = await self.manager.db.fetchall("SELECT id FROM asks WHERE staff_session_id = ? AND resolved_at IS NULL ORDER BY created_at", (staff_session_id,))
@@ -673,7 +679,8 @@ class Team:
 
     async def _announce_resolved(self, ask: Ask, *, allow: bool | None, by: str, via: str) -> None:
         """The pending events of a command-line member's request are this module's, so their answers are too.
-        A Daedalus member's are the session's own, published when the session is answered or granted."""
+        A Daedalus member's are the session's own, published when the session is answered or granted.
+        The notification router closes the operator's copy from these events."""
         ref = str(ask.detail.get("event_ref") or "")
         if ref.startswith("staff:"):
             member = await self.manager.staff.get(ask.staff_id) if ask.staff_id else None
@@ -681,13 +688,54 @@ class Team:
                 await self.publish("permission.resolved", {"request_id": ask.id, "request_ref": ref, "decision": "allow" if allow else "deny", "via": via, "by": by}, member=member, project_id=ask.project_id)
             else:
                 await self.publish("ask.answered", {"request_id": ask.id, "request_ref": ref, "via": via}, member=member, project_id=ask.project_id)
-        notifications = self.app.notifications
-        resolve = getattr(notifications, "resolve", None)
+
+    async def _withdrawn(self, ask: Ask) -> None:
+        """A request nobody will answer any more, because its session ended: the operator's copy closes."""
+        ref = str(ask.detail.get("event_ref") or "")
+        resolve = getattr(self.app.notifications, "resolve", None)
         if resolve is not None and ref:
             try:
-                await resolve(ref, "allow" if allow else ("deny" if ask.kind == "permission" else "answered"), via=via)
+                await resolve(ref, "withdrawn", via="system")
             except Exception:  # noqa: BLE001
                 logger.warning("could not close the notification of %s", ask.short_id, exc_info=True)
+
+    async def notification_policy(self, project_id: str) -> ProjectNotifyPolicy:
+        """What the notification router holds for this project: a staff member's request waits for the
+        orchestrator a little before the operator hears of it — not at all when the operator decides."""
+        project = await self.manager.projects.get(project_id)
+        if project is None or not project.settings.orchestrator.enabled:
+            return ProjectNotifyPolicy()
+        orchestrator = project.settings.orchestrator
+        hold = 0 if orchestrator.autonomy == "ask" else self.manager.config.notifications.orchestrator_hold_seconds
+        return ProjectNotifyPolicy(orchestrated=True, hold_seconds=hold, orchestrator_session_id=orchestrator.session_id or None)
+
+    async def resolve_action(self, req: Any) -> ActionOutcome:
+        """An answer to a command-line member's request taken from a notification (``staff:<session>:<ask>``)."""
+        ask = await self.manager.asks.get(req.target)
+        if ask is None:
+            raise ActionConflict("withdrawn")
+        allow: bool | None = None
+        text: str | None = None
+        selected: list[str] = []
+        if ask.kind == "permission":
+            if req.action not in ("allow", "deny"):
+                raise ActionRefused(f"a permission is not answered with {req.action!r}")
+            allow = req.action == "allow"
+        elif req.action.startswith("answer:"):
+            options = list(ask.detail.get("options") or [])
+            try:
+                selected = [str(options[int(req.action.split(":", 1)[1])])]
+            except (ValueError, IndexError) as exc:
+                raise ActionRefused(f"no option {req.action!r}") from exc
+        elif req.action == "answer" and (req.value or "").strip():
+            text = req.value.strip()
+        else:
+            raise ActionRefused(f"a question is not answered with {req.action!r}")
+        try:
+            await self.answer(ask.id, allow=allow, text=text, selected=selected, by="operator", via=req.via)
+        except AlreadyAnswered as exc:
+            raise ActionConflict("answered") from exc
+        return ActionOutcome("allow" if allow else "deny" if ask.kind == "permission" else "answered")
 
     async def _release_hold(self, ask: Ask) -> None:
         """The operator hears of a request now: the router's hold ends early, or, without a router, an
@@ -920,6 +968,10 @@ class Team:
         manager.on_finished(self.on_run_finished)
         manager.delete_hooks.append(self.on_session_deleted)
         manager.answer_claims.append(self.claim_answer)
+        notifications = self.app.notifications
+        if notifications is not None and hasattr(notifications, "register_resolver"):
+            notifications.register_resolver("staff", self.resolve_action)
+            notifications.set_project_policy(self.notification_policy)
         return manager.bus.on(
             EventFilter(types=("permission.pending", "permission.resolved", "presence", "task.moved", "staff.status", "terminal.exited")),
             self.on_bus,
@@ -985,7 +1037,7 @@ class Ingress:
         if event_ref is None:
             # A command-line member's request has no session to announce it, so the ingress does,
             # under a reference of its own that answering it resolves.
-            ref = f"staff:{ask.id}"
+            ref = f"staff:{live.id}:{ask.id}"
             await self.manager.db.execute("UPDATE asks SET detail_json = json_set(detail_json, '$.event_ref', ?) WHERE id = ?", (ref, ask.id))
             ask = (await self.manager.asks.get(ask.id)) or ask
             common = {"request_id": ask.id, "request_ref": ref, "title": live.staff.name, "telegram": False, "routed_to": routed, "short_id": ask.short_id}

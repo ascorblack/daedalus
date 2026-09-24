@@ -15,6 +15,7 @@ import pytest
 
 from daedalus.config import Settings
 from daedalus.extensions.api import build_app
+from daedalus.extensions.notifications import ActionConflict, ActionRequest
 from daedalus.extensions.staff import AlreadyAnswered, Team
 from daedalus.host.events import AppEvent, EventFilter
 from daedalus.host.launch_queue import Entry, LaunchQueue
@@ -136,7 +137,7 @@ async def test_an_assigned_task_runs_end_to_end_in_its_worktree(settings: Settin
         task_id = await board_task(manager, project, "Menu page")
 
         assigned = await team.assign(ada, task_id, by="operator")
-        assert assigned.admission.state == "started"
+        assert assigned["state"] == "started"
         live = await manager.staff.live(ada.id)
         assert live is not None and live.session_id and live.branch and live.branch.startswith("agent/ada/")
         state = await manager.get_state(live.session_id)
@@ -357,7 +358,7 @@ async def test_silence_goes_grey_and_a_request_left_too_long_goes_to_the_operato
         ask = await manager.asks.get(ask_id)
         assert ask is not None and ask.routed_to == "orchestrator" and await status_of(manager, ada) == "question"
         pending = await events(manager, "ask.pending")
-        assert pending[-1].payload["request_ref"] == f"staff:{ask_id}" and pending[-1].staff_id == ada.id
+        assert pending[-1].payload["request_ref"] == f"staff:{live.id}:{ask_id}" and pending[-1].staff_id == ada.id
         await team.tick(datetime.now(UTC) + timedelta(minutes=manager.config.staff.ask_escalate_minutes + 1))
         escalated = await manager.asks.get(ask_id)
         assert escalated is not None and escalated.routed_to == "operator"
@@ -456,14 +457,15 @@ async def test_the_seventh_waits_for_a_slot_and_the_most_urgent_goes_first(setti
         members = [await manager.staff.hire(project.id, name=f"Worker {n}", isolation="shared") for n in range(8)]
         for n, member in enumerate(members[:6]):
             assigned = await team.assign(member, await board_task(manager, project, f"Task {n}"))
-            assert assigned.admission.state == "started"
+            assert assigned["state"] == "started"
             live = await team.live_of(member)
             assert live is not None
             await team.ingress.status(live, "working")
         late = await team.assign(members[6], await board_task(manager, project, "Later", priority=4))
-        urgent = await team.assign(members[7], await board_task(manager, project, "Urgent", priority=1))
-        assert (late.admission.state, late.admission.reason) == ("queued", "project")
-        assert "6 of the project's 6" in late.admission.detail
+        # The board hands its own view of the task; an id does as well.
+        urgent = await team.assign(members[7], {"id": await board_task(manager, project, "Urgent", priority=1)})
+        assert (late["state"], late["reason"]) == ("queued", "project")
+        assert "6 of the project's 6" in late["detail"]
         assert [q["staff_id"] for q in team.queue.queue(project.id)] == [members[7].id, members[6].id]
         assert team.queue.waiting_for(members[6].id)[0]["position"] == 2
 
@@ -474,7 +476,7 @@ async def test_the_seventh_waits_for_a_slot_and_the_most_urgent_goes_first(setti
         assert await status_of(manager, members[7]) == "starting"
         assert await status_of(manager, members[6]) == "off"
         assert [q["staff_id"] for q in team.queue.queue(project.id)] == [members[6].id]
-        assert urgent.admission.position == 1
+        assert urgent["position"] == 1
     finally:
         await manager.close()
 
@@ -488,10 +490,10 @@ async def test_command_line_staff_wait_for_the_machine_and_daedalus_staff_do_not
         cleo = await manager.staff.hire(project.id, name="Cleo", harness="claude", isolation="shared")
         ada = await manager.staff.hire(project.id, name="Ada", isolation="shared")
         waits = await team.assign(cleo, await board_task(manager, project, "Terminal work"))
-        assert (waits.admission.state, waits.admission.reason) == ("queued", "machine")
-        assert "20 of the machine's 20 terminal sessions" in waits.admission.detail
+        assert (waits["state"], waits["reason"]) == ("queued", "machine")
+        assert "20 of the machine's 20 terminal sessions" in waits["detail"]
         goes = await team.assign(ada, await board_task(manager, project, "Daedalus work"))
-        assert goes.admission.state == "started" and cli.started == []
+        assert goes["state"] == "started" and cli.started == []
 
         capacity.waiting_now, capacity.running_now = 1, 19
         await team.queue.pump(project.id)
@@ -514,8 +516,8 @@ async def test_without_the_terminals_service_command_line_staff_wait_with_the_re
         assert team.capacity() is None
         max_ = await manager.staff.hire(project.id, name="Max", harness="codex", isolation="shared")
         waits = await team.assign(max_, await board_task(manager, project, "Terminal work"))
-        assert (waits.admission.state, waits.admission.reason) == ("queued", "terminals")
-        assert "terminals service is not running" in waits.admission.detail
+        assert (waits["state"], waits["reason"]) == ("queued", "terminals")
+        assert "terminals service is not running" in waits["detail"]
         listed = team.queue.waiting_for(max_.id)
         assert listed and listed[0]["reason"] == "terminals"
     finally:
@@ -604,7 +606,7 @@ async def test_a_restart_offers_assigned_tasks_to_the_queue_again(settings: Sett
         assert live is not None
         await team.ingress.status(live, "working")
         waiting = await board_task(manager, project, "Second")
-        assert (await team.assign(bo, waiting)).admission.reason == "project"
+        assert (await team.assign(bo, waiting))["reason"] == "project"
 
         fresh = await team_for(settings, manager)
         fresh.runtimes["daedalus"] = runtime
@@ -632,5 +634,35 @@ async def test_live_sessions_answer_for_a_member(settings: Settings, db: Databas
         runtime.receipt = runtime.receipt.__class__("failed", "the terminal is gone")
         failed = await team.tell(ada, "again")
         assert (failed["state"], failed["error"]) == ("failed", "the terminal is gone")
+    finally:
+        await manager.close()
+
+
+async def test_a_notification_answers_a_command_line_request_and_the_router_holds_for_the_orchestrator(settings: Settings, db: Database, tmp_path: Path) -> None:
+    manager, team, runtime, project = await fake_team(settings, db, tmp_path, capacity=Capacity())
+    try:
+        cli = FakeStaffRuntime(kind="claude")
+        team.runtimes["claude"] = cli
+        cleo = await manager.staff.hire(project.id, name="Cleo", harness="claude", isolation="shared")
+        await team.assign(cleo, await board_task(manager, project, "Menu"))
+        live = await team.live_of(cleo)
+        assert live is not None
+        permission = await team.ingress.permission(live, "hook-42", "Bash", "npm install")
+        ref = f"staff:{live.id}:{permission}"
+        assert (await events(manager, "permission.pending"))[-1].payload["request_ref"] == ref
+        request = ActionRequest(ref, "staff", live.id, permission, "allow", None, "push", None)  # type: ignore[arg-type]
+        assert (await team.resolve_action(request)).resolution == "allow"
+        assert cli.answered[-1][1].request_ref == "hook-42" and cli.answered[-1][2].allow is True
+        with pytest.raises(ActionConflict):
+            await team.resolve_action(request)
+        resolved = (await events(manager, "permission.resolved"))[-1].payload
+        assert (resolved["request_ref"], resolved["via"], resolved["decision"]) == (ref, "push", "allow")
+
+        policy = await team.notification_policy(project.id)
+        assert policy.orchestrated and policy.hold_seconds == manager.config.notifications.orchestrator_hold_seconds
+        await manager.projects.update_orchestrator(project.id, autonomy="ask")
+        assert (await team.notification_policy(project.id)).hold_seconds == 0
+        await manager.projects.update_orchestrator(project.id, enabled=False)
+        assert not (await team.notification_policy(project.id)).orchestrated
     finally:
         await manager.close()

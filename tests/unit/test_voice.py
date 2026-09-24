@@ -13,7 +13,15 @@ from protocore.contracts.types import Message, MessageRole, TextBlock
 from protocore.runtime.events.types import EventType
 from starlette.middleware.gzip import GZipMiddleware
 
-from daedalus.config import VOICE_ONLY_TOOLS, VOICE_TOOLS, RuntimeConfig, Settings, TtsConfig, VoiceConfig
+from daedalus.config import (
+    STAFF_ONLY_TOOLS,
+    VOICE_ONLY_TOOLS,
+    VOICE_TOOLS,
+    RuntimeConfig,
+    Settings,
+    TtsConfig,
+    VoiceConfig,
+)
 from daedalus.extensions import voice as voice_module
 from daedalus.extensions.api import VOICE_SAY_MAX_CHARS, VOICE_TTS_MAX_CHARS, build_app
 from daedalus.extensions.voice import (
@@ -95,9 +103,9 @@ async def test_the_concierge_gets_its_four_tools_and_nothing_else(app: Any) -> N
         assert name in blocked
     for name in VOICE_TOOLS:
         assert name not in blocked
-    # And the delegation tools are the concierge's alone: a working session cannot reach them.
+    # And the delegation tools are the concierge's alone, as the reporting tools are staff's: a working session reaches neither.
     worker = await manager.create_session("work")
-    assert manager.blocked_tools_for(worker) == set(VOICE_ONLY_TOOLS)
+    assert manager.blocked_tools_for(worker) == set(VOICE_ONLY_TOOLS) | set(STAFF_ONLY_TOOLS)
 
 
 async def test_a_mode_cannot_give_a_voice_session_a_shell(app: Any) -> None:
