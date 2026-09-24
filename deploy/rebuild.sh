@@ -56,6 +56,26 @@ while true; do
         printf '%s\n' "$result" > "$trigger/dependencies-$job.pending"
         mv "$trigger/dependencies-$job.pending" "$trigger/dependencies-$job.result"
         rm -f "$trigger/dependencies-running"
+    elif [ -f "$trigger/terminals-request" ]; then
+        # The operator's update of the terminal daemon: the terminals service is recreated from the
+        # image the agent already runs, which ends every container terminal. The app asked the
+        # operator, with the count, before it wrote the request; nothing here builds anything.
+        job=$(cat "$trigger/terminals-request")
+        rm -f "$trigger/terminals-request"
+        case "$job" in
+            ''|*[!a-f0-9]*) continue ;;
+        esac
+        if [ "${#job}" -ne 32 ]; then
+            continue
+        fi
+        if docker compose -f "$COMPOSE_FILE" --env-file .env up -d --no-build --no-deps terminals > "$trigger/terminals-$job.log" 2>&1; then
+            result=completed
+        else
+            result='the terminals service was not recreated; inspect rebuilder logs'
+        fi
+        cat "$trigger/terminals-$job.log"
+        printf '%s\n' "$result" > "$trigger/terminals-$job.pending"
+        mv "$trigger/terminals-$job.pending" "$trigger/terminals-$job.result"
     elif [ -f "$trigger/rebuild" ]; then
         rm -f "$trigger/rebuild"
         docker compose -f "$COMPOSE_FILE" --env-file .env up -d --build --no-deps daedalus || echo 'rebuild failed'
