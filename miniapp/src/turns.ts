@@ -278,20 +278,21 @@ export type EventLine = { time: string; text: string; tone: EventTone; ask: stri
  *  line per event, written by the host for the orchestrator (daedalus/extensions/orchestrator.py). */
 export type EventBatch = { project: string; count: number; since: string; lines: EventLine[]; more: number };
 
-const EVENTS_HEAD_RE = /^\[events · (.*) · (\d+) since ([^\]]*)\]\s*$/;
+// The main orchestrator is woken the same way, with its projects' reports: `[reports · <n> since <HH:MM>]`.
+const EVENTS_HEAD_RE = /^\[(?:events · (.*) · |reports · )(\d+) since ([^\]]*)\]\s*$/;
 const EVENT_LINE_RE = /^- (\d{1,2}:\d{2}) (.*)$/;
 const MORE_RE = /^- … and (\d+) more\b/;
 // What the host adds for the orchestrator's sake — the tool that reads the whole reply, whose move
 // the request is — is advice to the model, not news for the operator.
-const FOR_THE_MODEL_RE = / — (?:ReadStaff\("[^"]*"\) for the whole reply|yours to answer or escalate|the operator decides; you are told)$/;
+const FOR_THE_MODEL_RE = / — (?:ReadStaff\("[^"]*"\) for the whole reply|yours to answer or escalate|the operator decides; you are told|tell the operator; do not prod the project yourself)$/;
 const ASK_RE = /\[(q[0-9a-z]{4,8})\]/i;
 
 /** The tone of one line, read from the host's own wording. The host writes these sentences in one
  *  place and in English; a line this does not recognise is plain news, never a false alarm. */
 export function eventTone(text: string): EventTone {
-  if (/ stopped with an error| error\b|merge failed|crashed/.test(text)) return "bad";
-  if (/ needs permission| asks\b|reported (?:stuck|needs_input)| has gone silent/.test(text)) return "warn";
-  if (/ finished a turn| reported done|answered your request| accepted\b/.test(text)) return "ok";
+  if (/ stopped with an error| error\b|merge failed|crashed| as blocked:/.test(text)) return "bad";
+  if (/ needs permission| asks\b|reported (?:stuck|needs_input)| has gone silent| has been quiet for/.test(text)) return "warn";
+  if (/ finished a turn| reported done|answered your request| accepted\b| as done:| finished its setup/.test(text)) return "ok";
   return "info";
 }
 
@@ -319,7 +320,7 @@ export function parseEvents(text: string): EventBatch | null {
       lines[lines.length - 1].text += `\n${row}`;
     }
   }
-  return { project: m[1], count: Number(m[2]), since: m[3], lines, more };
+  return { project: m[1] ?? "", count: Number(m[2]), since: m[3], lines, more };
 }
 
 /** The families a run's steps fall into, most frequent first, as the folded line names them. */

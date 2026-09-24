@@ -27,6 +27,7 @@ import { NotificationToasts } from "./toasts";
 import { listenForOpen, syncPush } from "./push";
 import { Icon } from "./icons";
 import { focusView } from "./project/focus";
+import { MainEntry } from "./main/MainEntry";
 
 // One screen per chunk: opening the app downloads the shell and the screen it lands on, not the
 // settings, the usage charts and the conversation view as well. The service worker keeps each
@@ -71,6 +72,7 @@ const ServicesScreen = lazy(screen(() => import("./screens/Services").then((m) =
 const LoginScreen = lazy(screen(() => import("./screens/Login").then((m) => ({ default: m.LoginScreen }))));
 const ProjectScreen = lazy(screen(() => import("./project/ProjectScreen").then((m) => ({ default: m.ProjectScreen }))));
 const ProjectSidebar = lazy(screen(() => import("./project/ProjectSidebar").then((m) => ({ default: m.ProjectSidebar }))));
+const MainScreen = lazy(screen(() => import("./main/MainScreen").then((m) => ({ default: m.MainScreen }))));
 const OnboardingScreen = lazy(screen(() => import("./screens/AddModel").then((m) => ({ default: m.OnboardingScreen }))));
 
 /** The conversation is what the operator opens next, whatever screen they landed on: fetch it while the browser is idle. */
@@ -283,9 +285,11 @@ export function App() {
   // and puts the project in the centre. The decision is made here and nowhere else, so every other
   // screen keeps the shell it always had.
   const focusProject = route.screen === "project" ? route.project : null;
-  const focusChat = !!focusProject && (route.page === null || route.page === "s");
+  // The main orchestrator's chat is a conversation like any other: on a phone it takes the screen.
+  const mainChat = route.screen === "main";
+  const focusChat = (!!focusProject && (route.page === null || route.page === "s")) || mainChat;
   // Telegram's own back button leaves a detail; the vertical swipe must not close the app mid-chat.
-  const inDetail = !!route.session || !!route.detail || !!focusProject;
+  const inDetail = !!route.session || !!route.detail || !!focusProject || mainChat;
   useEffect(() => {
     const tg = telegram();
     if (!tg?.initData || !tg.BackButton) return;
@@ -294,12 +298,12 @@ export function App() {
       tg.enableVerticalSwipes?.();
       return;
     }
-    const onBack = () => back(focusProject ? pathFor("agents") : pathFor(route.screen));
+    const onBack = () => back(focusProject || mainChat ? pathFor("agents") : pathFor(route.screen));
     tg.BackButton.onClick(onBack);
     tg.BackButton.show();
     tg.disableVerticalSwipes?.();
     return () => tg.BackButton?.offClick(onBack);
-  }, [inDetail, route.screen, focusProject]);
+  }, [inDetail, route.screen, focusProject, mainChat]);
 
   // The list screens come back where the reader left them.
   const main = useRef<HTMLDivElement>(null);
@@ -433,6 +437,7 @@ export function App() {
         {route.screen === "usage" && <UsageScreen onOpen={open} />}
         {route.screen === "health" && <HealthScreen toast={showToast} />}
         {route.screen === "settings" && <SettingsScreen toast={showToast} section={route.detail} />}
+        {route.screen === "main" && <MainScreen toast={showToast} />}
         {route.screen === "project" &&
           (!route.project ? (
             <div className="empty"><b>{t("team.noproject")}</b></div>
@@ -444,6 +449,8 @@ export function App() {
   }
 
   const strip = sidebarCollapsed;
+  // The main orchestrator is pinned above every project, in both columns, folded or not.
+  const pinned = <MainEntry current={mainChat} strip={strip} />;
   // A terminal full screen takes the column the way a conversation does: no scrolling page around it
   // and, on a phone, no tab bar under it.
   const terminalOpen = route.screen === "terminals" && !!route.detail;
@@ -470,6 +477,7 @@ export function App() {
             onWidth={setSidebarWidth}
             menu={menuButtonEl}
             toast={showToast}
+            pinned={pinned}
           />
         </Suspense>
         </ErrorBoundary>
@@ -493,6 +501,7 @@ export function App() {
           menuOpen={menu}
           onMenu={() => setMenu((m) => !m)}
           menuButton={menuButton}
+          pinned={pinned}
         />
       )}
       {wide && menu && <NavMenu screen={route.screen} counts={counts} selfdev={selfdev} onClose={() => setMenu(false)} opener={menuButton.current} />}

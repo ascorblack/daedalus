@@ -9,6 +9,7 @@ import { navigate, pathFor, projectHome, useRoute } from "../router";
 import { useProject } from "./data";
 import { focusView } from "./focus";
 import { BriefPage, EnableOrchestrator, FoldersPage, JournalPage, TerminalsPage, WakeupsPage } from "./pages";
+import { SetupLine } from "../main/cards";
 
 const SessionScreen = lazy(() => import("../screens/Session").then((m) => ({ default: m.SessionScreen })));
 const TeamPage = lazy(() => import("../team/TeamPage").then((m) => ({ default: m.TeamPage })));
@@ -27,7 +28,14 @@ export function ProjectScreen({ projectId, page, inner, toast, wide }: { project
   if (view.kind === "orchestrator") {
     const orchestrator = project.settings.orchestrator;
     body = orchestrator?.enabled && orchestrator.session_id ? (
-      <SessionScreen key={orchestrator.session_id} id={orchestrator.session_id} focus={{ projectId, kind: "orchestrator" }} onBack={() => navigate(pathFor("agents"))} toast={toast} />
+      <SessionScreen
+        key={orchestrator.session_id}
+        id={orchestrator.session_id}
+        focus={{ projectId, kind: "orchestrator" }}
+        onBack={() => navigate(pathFor("agents"))}
+        toast={toast}
+        banner={project.setup_by === "dispatcher" ? <SetupLine projectId={projectId} name={project.name} toast={toast} /> : undefined}
+      />
     ) : (
       <EnableOrchestrator project={project} toast={toast} />
     );

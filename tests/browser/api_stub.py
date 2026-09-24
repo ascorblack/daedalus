@@ -125,6 +125,9 @@ GATES: dict[str, object] = {
     "/api/proposals": [],
     "/api/schedules": [],
     "/api/sessions": {"sessions": [], "projects": []},
+    # The main orchestrator's entry is pinned in every sidebar and reads its chat's summary: no session
+    # yet, nothing handed out, no questions.
+    "/api/main": {"session_id": "", "dispatches": [], "asks": [], "questions": 0, "setup": []},
     # The shell asks which projects there are before it draws the rail.
     "/api/projects": [],
     # The folder form asks where a folder may live before it offers the environment choice.

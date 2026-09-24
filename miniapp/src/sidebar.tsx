@@ -40,8 +40,9 @@ export type SidebarProps = {
   menuOpen: boolean;
   onMenu: () => void;
   menuButton: RefObject<HTMLButtonElement | null>;
-  /** Room above the list for an entry pinned first, above every project; nothing is pinned there yet.
-   *  The project's focus column keeps the same slot, so the entry stays put when a project is entered. */
+  /** Room above the list for an entry pinned first, above every project: the main orchestrator's.
+   *  The project's focus column keeps the same slot, so the entry stays put when a project is entered.
+   *  Folded, the same entry sits in the strip, drawn as an icon by whoever passes it. */
   pinned?: ReactNode;
 };
 
@@ -69,6 +70,7 @@ export function Sidebar(p: SidebarProps) {
           </a>
           {toggle}
           <Bell />
+          {p.pinned}
           <ProjectChip projects={p.projects} current={p.project} onOpen={p.onProjects} collapsed />
           <button className="iconbtn quiet" onClick={p.onPalette} title={t("shell.search.title")} aria-label={t("shell.search.label")}><Icon name="search" size={18} /></button>
           <button className="iconbtn quiet" onClick={() => navigate(pathFor("agents", null, { new: "1" }))} title={t("agents.new")} aria-label={t("agents.new")}><Icon name="plus" size={18} /></button>

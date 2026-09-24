@@ -66,9 +66,13 @@ export type SessionScreenProps = {
   /** Inside a project's focus mode: the project, and whether this is its orchestrator's chat or a
    *  session of the project (a staff member's, or anyone else's working there). */
   focus?: { projectId: string; kind: "orchestrator" | "member" };
+  /** What a chat of its own kind shows above its conversation: the main chat's questions and dispatches. */
+  banner?: ReactNode;
+  /** The composer's words while nothing runs, when the chat is not an ordinary agent's. */
+  placeholder?: string;
 };
 
-export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus }: SessionScreenProps) {
+export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus, banner, placeholder }: SessionScreenProps) {
   // Each pane says which session it shows, so a split view reports both and the voice screen's
   // embedded session reports itself, without anybody reading the address.
   usePresenceScope({ session: id || undefined });
@@ -975,7 +979,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus 
   }, [id, detail?.workspace, toast, openPreview]);
   const staffId = focus && detail?.staff ? detail.staff.id : null;
   const hasDetails = panelTabs.includes("details");
-  const focusPlaceholder = orchestrating ? t("focus.composer") : staffName ? t("focus.composer.staff", { name: staffName }) : undefined;
+  const focusPlaceholder = placeholder ?? (orchestrating ? t("focus.composer") : staffName ? t("focus.composer.staff", { name: staffName }) : undefined);
   return (
     <FocusChatContext.Provider value={focusChat}>
     <div className={`chat ${pane ? `pane pane-${pane}` : ""} ${focus ? `in-project ${focus.kind}` : ""}`} onDragEnter={(e) => { if (e.dataTransfer?.types.includes("Files")) setDragging((d) => d + 1); }} onDragLeave={() => setDragging((d) => Math.max(0, d - 1))} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
@@ -1054,6 +1058,7 @@ export function SessionScreen({ id, onBack, onOpen, toast, pane, onSplit, focus 
         {(busy || saving || compacting) && <HeadProgress status={status} compacting={compacting} />}
       </div>
       {staffId && <StaffHeader projectId={focus!.projectId} staffId={staffId} toast={toast} />}
+      {banner}
 
       <div ref={body} className={`chat-body ${panel.state.tab && !phone ? "with-panel" : ""} ${panel.state.expanded && !phone ? "panel-full" : ""}`} style={{ ["--panel-w" as string]: `${panelPct}%` }}>
         <div className="chat-main">
