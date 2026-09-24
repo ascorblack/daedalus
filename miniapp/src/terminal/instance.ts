@@ -13,13 +13,14 @@ import type { ILink, IDisposable, Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import type { SearchAddon } from "@xterm/addon-search";
 import type { WebglAddon } from "@xterm/addon-webgl";
-import type { TerminalEnv } from "../api";
-import { ConnectionState, TerminalConnection, TerminalSink, xtermSink } from "./connection";
+import { api, TerminalEnv } from "../api";
+import { ConnectionState, guarded, TerminalConnection, TerminalSink, xtermSink } from "./connection";
 import { FitContext, ResizeScheduler, Size } from "./fit";
 import { keepScrolledHistory } from "./history";
 import { isMac, reservedKey, TerminalAction } from "./keys";
 import { findFileLinks, resolveFileLink, rewriteLoopbackUrl } from "./links";
 import { Kit, loadTerminalKit } from "./load";
+import { CommandMarks, MarksSummary } from "./marks";
 import type { EventMessage, KeyboardOwner, SizeOwner } from "./protocol";
 import { attachTheme, documentTokens, terminalTheme } from "./theme";
 
@@ -47,7 +48,15 @@ export type TerminalState = {
   bell: boolean;
   exit: { code: number | null; signal: string | null } | null;
   progress: { state: number; value: number } | null;
+  /** The shell's commands as its marks report them: the last one's result, and prompts to jump to. */
+  commands: MarksSummary;
 };
+
+/** What "copy last command output" came to. */
+export type CopyOutcome = "copied" | "none" | "failed";
+
+/** After a reattach that brought no snapshot (and so no marks), how long to wait before asking the host what was missed. */
+const REFILL_MS = 600;
 
 /** What the view is asked to do on the terminal's behalf: things that need a dialog or a bar. */
 export type TerminalRequest =
@@ -159,7 +168,10 @@ export class TerminalInstance {
     bell: false,
     exit: null,
     progress: null,
+    commands: { last: null, ended: false, prompts: 0, active: false },
   };
+  private marks: CommandMarks | null = null;
+  private refillTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(readonly id: string, private readonly shared: InstanceShared, private readonly readOnly = false) {
     this.host = document.createElement("div");
@@ -201,6 +213,11 @@ export class TerminalInstance {
   /** The xterm.js terminal once it is open (the browser checks read its buffer through the debug hook). */
   get terminal(): Terminal | null {
     return this.term;
+  }
+
+  /** The shell's command marks, once xterm.js has loaded (the checks read them through the debug hook). */
+  get commandMarks(): CommandMarks | null {
+    return this.marks;
   }
 
   get rendererKind(): "webgl" | "dom" {
@@ -284,6 +301,32 @@ export class TerminalInstance {
     return copyText(text);
   }
 
+  /** Scroll to the previous or next command's prompt; false when the shell marks none that way. */
+  jumpToCommand(direction: -1 | 1): boolean {
+    this.interact();
+    return !!this.marks?.jump(direction);
+  }
+
+  /**
+   * Copies what the last finished command printed. The buffer has it while the rows are still in its
+   * history; after that the host is asked, which keeps the text of rows the browser has let go.
+   */
+  async copyLastOutput(): Promise<CopyOutcome> {
+    const local = this.marks?.lastOutput();
+    if (local === null && !this.stateValue.commands.active) return "none";
+    if (local) return (await copyText(local.text)) ? "copied" : "failed";
+    let text: string | null = null;
+    try {
+      const { commands } = await api.terminalCommands(this.id, 5, true);
+      const ended = commands.filter((c) => c.end_row !== null && typeof c.output === "string");
+      text = ended.length ? ended[ended.length - 1].output ?? "" : null;
+    } catch {
+      return "failed";
+    }
+    if (text === null) return "none";
+    return (await copyText(text)) ? "copied" : "failed";
+  }
+
   applyFontSize(): void {
     if (!this.term) return;
     const size = this.shared.fontSize();
@@ -324,6 +367,8 @@ export class TerminalInstance {
     this.scheduler.cancel();
     this.connection?.close();
     this.connection = null;
+    if (this.refillTimer) clearTimeout(this.refillTimer);
+    this.marks?.dispose();
     this.disposables.forEach((d) => d.dispose());
     this.webgl?.dispose();
     this.term?.dispose();
@@ -372,6 +417,7 @@ export class TerminalInstance {
       linkHandler: { activate: (_event, uri) => this.openUri(uri), allowNonHttpProtocols: true },
     });
     this.term = term;
+    this.marks = new CommandMarks(term, () => this.patch({ commands: this.marks!.summary }));
     term.loadAddon(new kit.GhosttyUnicodeAddon());
     this.disposables.push(kit.swallowQueries(term.parser));
     this.disposables.push(keepScrolledHistory(term));
@@ -446,11 +492,16 @@ export class TerminalInstance {
     const base = xtermSink(term);
     const sink: TerminalSink = {
       write: (data, parsed) => {
-        base.write(data, parsed);
+        base.write(data, () => {
+          // The marks are an extra; nothing they do may keep the stream from being acknowledged.
+          if (data.length) guarded(() => this.marks?.parsed())();
+          parsed();
+        });
         if (!this.visible && !this.stateValue.unseen && data.length) this.patch({ unseen: true });
       },
       reset: (cols, rows) => {
         base.reset(cols, rows);
+        guarded(() => this.marks?.reset())();
         // A snapshot is at the PTY's size, which is what the terminal now shows; whether this screen
         // wants another one is decided again from scratch — unless this socket already carried its
         // size, which the daemon applies after the snapshot and confirms with a `size` event.
@@ -493,6 +544,18 @@ export class TerminalInstance {
         if (this.sizedThisSocket) this.patch({ size: { cols: event.size.cols, rows: event.size.rows, owner: event.size.owner } });
         else this.applySize(event.size);
         this.fit();
+        this.scheduleRefill();
+        break;
+      case "resync":
+        this.cancelRefill();
+        this.marks?.resync(event.first_abs_row);
+        break;
+      case "marks":
+        this.cancelRefill();
+        this.marks?.apply(event);
+        break;
+      case "command":
+        this.marks?.apply(event);
         break;
       case "size":
         this.applySize(event);
@@ -518,6 +581,28 @@ export class TerminalInstance {
       default:
         break;
     }
+  }
+
+  /**
+   * A reattach that continues from the bytes this terminal holds brings no snapshot and so no `marks`:
+   * commands that ran while it was away would have no mark. When no snapshot follows the `hello`, the
+   * host is asked for the recent ones. A shell that never marked anything is not asked about.
+   */
+  private scheduleRefill(): void {
+    this.cancelRefill();
+    if (!this.marks?.active) return;
+    this.refillTimer = setTimeout(() => {
+      this.refillTimer = null;
+      api.terminalCommands(this.id, 50, false).then(
+        ({ commands }) => this.marks?.fill(commands),
+        () => undefined,
+      );
+    }, REFILL_MS);
+  }
+
+  private cancelRefill(): void {
+    if (this.refillTimer) clearTimeout(this.refillTimer);
+    this.refillTimer = null;
   }
 
   /** The PTY's size, as the daemon announced it: this terminal draws at it whoever chose it. */
@@ -553,8 +638,10 @@ export class TerminalInstance {
 
   private onKey(e: KeyboardEvent): boolean {
     const action = reservedKey(e, { mac: isMac(), altScreen: this.stateValue.altScreen || this.term?.buffer.active.type === "alternate" });
-    // Command marks do not exist yet: until they do, Ctrl+↑/↓ belong to the program.
-    if (action === null || action === "previous-mark" || action === "next-mark") return true;
+    if (action === null) return true;
+    // Ctrl+↑/↓ move between commands only where the shell marks them; anywhere else they belong to
+    // the program, as they always did.
+    if ((action === "previous-mark" || action === "next-mark") && !this.marks?.active) return true;
     if (e.type === "keydown") this.act(action, e);
     return false;
   }
@@ -578,6 +665,11 @@ export class TerminalInstance {
       case "font-reset":
         e.preventDefault();
         fontSizeStep(action);
+        break;
+      case "previous-mark":
+      case "next-mark":
+        e.preventDefault();
+        this.jumpToCommand(action === "previous-mark" ? -1 : 1);
         break;
       case "toggle-dock":
         // The dock's own listener on the document hears the same key; the terminal only stays out.

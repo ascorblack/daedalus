@@ -14,6 +14,16 @@ from daedalus.harness.capabilities import CAPABILITIES, Capabilities, capabiliti
 from daedalus.stores.harness import CatalogRow, HarnessStore
 
 
+def never_checked(env: str, harness: str) -> dict[str, Any]:
+    """The row of a harness no check has recorded in ``env`` yet, with every key a checked row has,
+    so a reader never has to ask which kind of row it holds."""
+    return {
+        "env": env, "harness": harness, "installed": False, "installed_version": "", "latest_version": "", "install_method": "", "binary_path": "",
+        "logged_in": "unknown", "login_detail": "", "agents": [], "models": [], "modes": [], "efforts": [], "profiles": [], "self_check": {},
+        "checked_at": None, "latest_checked_at": None, "error": "",
+    }
+
+
 class HarnessCatalog:
     def __init__(self, store: HarnessStore) -> None:
         self.store = store
@@ -31,7 +41,7 @@ class HarnessCatalog:
         return [self._entry(env, caps, rows.get(name)) for name, caps in CAPABILITIES.items()]
 
     def _entry(self, env: str, caps: Capabilities, row: CatalogRow | None) -> dict[str, Any]:
-        view: dict[str, Any] = row.view() if row is not None else {"env": env, "harness": caps.harness, "installed": False, "installed_version": "", "logged_in": "unknown", "agents": [], "models": [], "checked_at": None, "error": ""}
+        view: dict[str, Any] = row.view() if row is not None else never_checked(env, caps.harness)
         version = view["installed_version"]
         view.update(
             label=caps.label,

@@ -53,7 +53,7 @@ from daedalus.config import (
     keyproxy_upstream,
 )
 from daedalus.doctor import DoctorContext, render_text, run_checks, summarize
-from daedalus.extensions import api_projects
+from daedalus.extensions import api_harnesses, api_projects
 from daedalus.extensions import commands as slash
 from daedalus.extensions.heartbeat import TEMPLATE as HEARTBEAT_TEMPLATE
 from daedalus.extensions.inbound import PAYLOAD_MAX_CHARS, flatten_payload, verify_signature
@@ -61,6 +61,7 @@ from daedalus.extensions.notifications import ActionConflict, ActionRefused, Dra
 from daedalus.extensions.push import PushRefused, PushService
 from daedalus.extensions.services import SHARE_COOKIE_PREFIX, SHARE_MODES, pid_alive
 from daedalus.extensions.voice import model_options, tts_configured
+from daedalus.harness.capabilities import CAPABILITIES
 from daedalus.host import capabilities, component_install, launcher_bridge
 from daedalus.host import components as component_list
 from daedalus.host.config_validation import ConfigConflict, config_revision, validate_candidate
@@ -1403,6 +1404,8 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     # The projects, their folders, brief and journal: their own module, which the features built
     # on projects extend rather than this file.
     api_projects.register(api, app, auth)
+    # The command-line agents: the Harnesses screen and the hiring form's catalog.
+    api_harnesses.register(api, app, auth)
 
     # -- staff: the named members of a project's team ------------------------------------------
 
@@ -1488,6 +1491,13 @@ def build_app(app: Application, api_token: str) -> FastAPI:
     @api.post("/api/projects/{project_id}/staff", status_code=201)
     async def hire_staff(project_id: str, body: HireBody, _: dict[str, Any] = Depends(auth)) -> dict[str, Any]:
         project = await staff_project(project_id)
+        harness_manager = app.extensions.get("harness")
+        if body.harness != "daedalus" and harness_manager is not None and body.harness in CAPABILITIES:
+            # A CLI the last check found missing (or of a major Daedalus cannot run) is refused here
+            # rather than at the first launch, where the orchestrator would be the one to find out.
+            problem = await harness_manager.hire_problem(body.env or project.settings.default_env or manager.projects.local_env, body.harness)
+            if problem:
+                raise HTTPException(400, problem)
         isolation = body.isolation
         if isolation is None:
             folder = project.folder(body.folder_id) if body.folder_id else (project.folders[0] if project.folders else None)

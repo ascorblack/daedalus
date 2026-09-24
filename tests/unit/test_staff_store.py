@@ -368,3 +368,24 @@ async def test_two_names_that_share_a_worktree_slug_are_refused(db: Database, tm
     # Dismissal frees the slug as it frees the name.
     await store.archive(anna.id)
     assert (await store.hire(pid, name="Анна")).name == "Анна"
+
+
+async def test_who_is_working_on_a_cli_across_projects_and_where(db: Database, tmp_path: Path) -> None:
+    _, bakery = await _project(db, tmp_path)
+    _, forge = await _project(db, tmp_path, name="Forge")
+    store = _store(db)
+    ada = await store.hire(bakery, name="Ada", harness="claude")
+    bo = await store.hire(forge, name="Bo", harness="claude")
+    cy = await store.hire(bakery, name="Cy", harness="codex")
+    await store.hire(forge, name="Di", harness="claude")
+    live = await store.claim_session(ada.id, kind="cli")
+    ended = await store.claim_session(bo.id, kind="cli")
+    await store.end_session(ended.id, "done")
+    await store.claim_session(cy.id, kind="cli")
+    # Only a live session counts, only of that CLI; the environment is the project's default when the
+    # member names none.
+    assert await store.live_by_harness("claude") == [
+        {"staff_id": ada.id, "name": "Ada", "project_id": bakery, "project": "Bakery", "env": "container", "staff_session_id": live.id, "status": "starting"},
+    ]
+    assert [s["name"] for s in await store.live_by_harness("codex")] == ["Cy"]
+    assert await store.live_by_harness("grok") == []

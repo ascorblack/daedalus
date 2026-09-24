@@ -93,6 +93,8 @@ type DebugHook = {
   size(id: string): { cols: number; rows: number } | null;
   renderer(id: string): string | null;
   baseY(id: string): number;
+  viewportY(id: string): number;
+  marks(id: string): { n: number; line: number; result: string }[];
   webglContexts(): number;
 };
 
@@ -113,6 +115,8 @@ try {
       },
       renderer: (id) => instanceFor(id)?.rendererKind ?? null,
       baseY: (id) => instanceFor(id)?.terminal?.buffer.active.baseY ?? 0,
+      viewportY: (id) => instanceFor(id)?.terminal?.buffer.active.viewportY ?? 0,
+      marks: (id) => instanceFor(id)?.commandMarks?.describe() ?? [],
       webglContexts: () => [...live].filter((i) => i.rendererKind === "webgl").length,
     };
     (window as unknown as { __terminals: DebugHook }).__terminals = hook;
